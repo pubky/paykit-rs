@@ -359,8 +359,47 @@ impl StateStore for Recording {
         &self,
         batch: pubky_switch_client::store::WriteBatch,
     ) -> Result<(), pubky_switch_client::error::StoreError> {
+        self.commit_with(batch, |batch| {
+            self.inner
+                .commit(batch)
+                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+        })
+        .map(|_| ())
+    }
+
+    fn acquire(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.inner.acquire(ns, owner)
+    }
+
+    fn commit_if(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
+    }
+}
+impl Recording {
+    fn commit_with(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+        apply: impl FnOnce(
+            pubky_switch_client::store::WriteBatch,
+        ) -> Result<
+            pubky_switch_client::store::CommitOutcome,
+            pubky_switch_client::error::StoreError,
+        >,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
         let mut keys = self.keys.lock().unwrap();
-        for write in &batch.writes {
+        for write in batch.writes() {
             let key = match write {
                 pubky_switch_client::store::Write::Put { key, .. }
                 | pubky_switch_client::store::Write::Delete { key, .. } => key,
@@ -369,7 +408,7 @@ impl StateStore for Recording {
             keys.push(String::from_utf8_lossy(key).into_owned());
         }
         drop(keys);
-        self.inner.commit(batch)
+        apply(batch)
     }
 }
 
@@ -1371,16 +1410,24 @@ async fn test_certificate_renewal_reading_more_listing_lost_before_its_note_list
     let base = store();
     let (mut wallet, _wider) = renewed_to_read_more_on(&w, Arc::clone(&base)).await;
     let me = wallet.app_id();
-    let held = wallet.app().protocol_get(b"lc").await.unwrap().unwrap();
+    let held = wallet
+        .app()
+        .protocol_get("paykit", b"lc")
+        .await
+        .unwrap()
+        .unwrap();
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
     wallet
         .app_mut()
-        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
-            key: b"lc".to_vec(),
-            value: held,
-        }])
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put {
+                key: b"lc".to_vec(),
+                value: held,
+            }],
+        )
         .await
         .unwrap();
     drop(wallet);
@@ -1404,21 +1451,34 @@ async fn test_certificate_store_without_a_listed_certificate_lists_once_then_kee
     let me = wallet.app_id();
     wallet
         .app_mut()
-        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Delete {
-            key: b"lc".to_vec(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Delete {
+                key: b"lc".to_vec(),
+            }],
+        )
         .await
         .unwrap();
     drop(wallet);
     let mut wallet = w
         .load_on_clock(&w.alice, Arc::clone(&base), me, Arc::clone(&w.clock))
         .await;
-    assert!(wallet.app().protocol_get(b"lc").await.unwrap().is_none());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"lc")
+        .await
+        .unwrap()
+        .is_none());
     let refused = wallet.payee_activity().await.unwrap_err();
     assert!(is_not_now(&refused), "{refused:?}");
     wallet.receive(None).await.unwrap();
     assert!(wallet.payee_activity().await.unwrap().is_empty());
-    assert!(wallet.app().protocol_get(b"lc").await.unwrap().is_some());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"lc")
+        .await
+        .unwrap()
+        .is_some());
 }
 
 #[tokio::test]
@@ -1438,16 +1498,24 @@ async fn test_certificate_passing_after_a_refused_load_unlisted_across_a_restart
     assert_eq!(wallet.app().cert().hash(), refused.hash());
     wallet
         .app_mut()
-        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Delete {
-            key: b"lc".to_vec(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Delete {
+                key: b"lc".to_vec(),
+            }],
+        )
         .await
         .unwrap();
     drop(wallet);
     let mut wallet = w
         .load_on_clock(&w.alice, Arc::clone(&base), me, Arc::clone(&w.clock))
         .await;
-    assert!(wallet.app().protocol_get(b"lc").await.unwrap().is_none());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"lc")
+        .await
+        .unwrap()
+        .is_none());
     let fixed = renew(&w, me, &AppScopes::new().pay().build().unwrap(), 2_000);
     let _ = wallet.receive(None).await;
     list(&w, me, &refused, &fixed);
@@ -1463,11 +1531,21 @@ async fn test_certificate_passing_after_a_refused_load_unlisted_across_a_restart
     let mut wallet = w
         .load_on_clock(&w.alice, Arc::clone(&base), me, Arc::clone(&w.clock))
         .await;
-    assert!(wallet.app().protocol_get(b"lc").await.unwrap().is_none());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"lc")
+        .await
+        .unwrap()
+        .is_none());
     let refused = wallet.payee_activity().await.unwrap_err();
     assert!(is_not_now(&refused), "{refused:?}");
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().protocol_get(b"lc").await.unwrap().is_some());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"lc")
+        .await
+        .unwrap()
+        .is_some());
 }
 
 #[tokio::test]
@@ -1516,11 +1594,21 @@ async fn test_certificate_restore_keeps_none_listed_under_until_a_listing() {
     )
     .await
     .unwrap();
-    assert!(restored.app().protocol_get(b"lc").await.unwrap().is_none());
+    assert!(restored
+        .app()
+        .protocol_get("paykit", b"lc")
+        .await
+        .unwrap()
+        .is_none());
     let refused = restored.requests().await.unwrap_err();
     assert!(is_not_now(&refused), "{refused:?}");
     restored.receive(None).await.unwrap();
-    assert!(restored.app().protocol_get(b"lc").await.unwrap().is_some());
+    assert!(restored
+        .app()
+        .protocol_get("paykit", b"lc")
+        .await
+        .unwrap()
+        .is_some());
     assert!(restored.requests().await.unwrap().is_empty());
 }
 
@@ -1572,7 +1660,12 @@ async fn test_certificate_join_reads_nothing_from_its_copy_before_a_listing() {
     // app's copy lacks it: a read is refused, and an action lists first and finds it.
     let w = World::new();
     let (mut wallet, request) = joined_after_a_record_was_written(&w, store()).await;
-    assert!(wallet.app().protocol_get(b"lc").await.unwrap().is_none());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"lc")
+        .await
+        .unwrap()
+        .is_none());
     reads_and_acts_on_what_was_written(&mut wallet, &request).await;
 }
 
@@ -1587,7 +1680,12 @@ async fn test_certificate_join_reloaded_before_a_listing_reads_nothing_from_its_
     let mut wallet = w
         .load_on_clock(&w.alice, Arc::clone(&base), me, Arc::clone(&w.clock))
         .await;
-    assert!(wallet.app().protocol_get(b"lc").await.unwrap().is_none());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"lc")
+        .await
+        .unwrap()
+        .is_none());
     reads_and_acts_on_what_was_written(&mut wallet, &request).await;
 }
 
@@ -1633,7 +1731,12 @@ async fn test_certificate_join_first_receive_lists_before_taking_its_entries() {
     // there when its entry comes: taken at that read, once, and the listing kept.
     let summary = wallet.receive(None).await.unwrap();
     assert!(received(&summary, "paykit.payment_receipt"), "{summary:?}");
-    assert!(wallet.app().protocol_get(b"lc").await.unwrap().is_some());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"lc")
+        .await
+        .unwrap()
+        .is_some());
     for _ in 0..2 {
         let summary = wallet.receive(None).await.unwrap();
         assert!(!received(&summary, "paykit.payment_receipt"), "{summary:?}");
@@ -2032,7 +2135,7 @@ async fn narrowed_then_renewed_back(narrowed: Narrowed) {
         wallet.receive(None).await.unwrap();
         assert!(wallet.certificate_refused().is_some());
     } else {
-        fault.refuse_puts_as_too_large_once(b"p/lc");
+        fault.refuse_puts_as_too_large_once(b"p/paykit/lc");
         assert!(wallet.receive(None).await.is_err());
     }
     assert_eq!(wallet.app().cert().hash(), narrow.hash());
@@ -2057,7 +2160,7 @@ async fn narrowed_then_renewed_back(narrowed: Narrowed) {
     );
     let acceptance = "paykit.payment_request_acceptance";
     if narrowed == Narrowed::Stopped {
-        fault.refuse_puts_as_too_large_once(b"p/lc");
+        fault.refuse_puts_as_too_large_once(b"p/paykit/lc");
         let read = wallet.receive(None).await;
         assert!(
             read.as_ref()
@@ -2208,16 +2311,24 @@ async fn test_certificate_none_listed_under_a_refused_one_lists_once_one_passes(
     assert!(wallet.certificate_refused().is_some());
     wallet
         .app_mut()
-        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Delete {
-            key: b"lc".to_vec(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Delete {
+                key: b"lc".to_vec(),
+            }],
+        )
         .await
         .unwrap();
     drop(wallet);
     let mut wallet = w
         .load_on_clock(&w.alice, Arc::clone(&base), me, Arc::clone(&w.clock))
         .await;
-    assert!(wallet.app().protocol_get(b"lc").await.unwrap().is_none());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"lc")
+        .await
+        .unwrap()
+        .is_none());
     let fixed = renew(&w, me, &AppScopes::new().pay().build().unwrap(), 2_000);
     wallet.receive(None).await.unwrap();
     list(&w, me, &refused, &fixed);
@@ -2231,7 +2342,12 @@ async fn test_certificate_none_listed_under_a_refused_one_lists_once_one_passes(
         "{:?}",
         &w.router.log()[before..]
     );
-    let listed = wallet.app().protocol_get(b"lc").await.unwrap().unwrap();
+    let listed = wallet
+        .app()
+        .protocol_get("paykit", b"lc")
+        .await
+        .unwrap()
+        .unwrap();
     assert!(!listed.is_empty());
 }
 
@@ -2413,7 +2529,7 @@ async fn test_certificate_restore_unlisted_with_payee_keys_awaited_resumes_nothi
     );
     assert_eq!(restored.app().cert().hash(), wider.hash());
     let before = w.router.log().len();
-    let journal = restored.app().protocol_scan(b"j/").await.unwrap();
+    let journal = restored.app().protocol_scan("paykit", b"j/").await.unwrap();
     assert_eq!(journal.len(), 1);
     let error = restored.resume_payments().await.unwrap_err();
     assert!(matches!(
@@ -2421,7 +2537,10 @@ async fn test_certificate_restore_unlisted_with_payee_keys_awaited_resumes_nothi
         PaykitError::Client(AppError::Refused(ClientRefusal::NotNow(_)))
     ));
     assert_eq!(restored.app().restore_held_cursor(), None);
-    assert_eq!(restored.app().protocol_scan(b"j/").await.unwrap(), journal);
+    assert_eq!(
+        restored.app().protocol_scan("paykit", b"j/").await.unwrap(),
+        journal
+    );
     let writes: Vec<String> = w.router.log()[before..]
         .iter()
         .filter(|line| line.contains("/ops"))
@@ -2887,7 +3006,12 @@ async fn test_certificate_restore_taking_a_wider_one_without_keys_stays_unlisted
     .unwrap();
     let before = restored.receive(None).await.unwrap().report.cursor;
     assert_eq!(restored.app().cert().hash(), wider.hash());
-    assert!(restored.app().protocol_get(b"nl").await.unwrap().is_some());
+    assert!(restored
+        .app()
+        .protocol_get("paykit", b"nl")
+        .await
+        .unwrap()
+        .is_some());
     // Bob's wallet reads alice's directory again, which lists the wallet under its new
     // certificate, so the proof goes to it too.
     w.clock.advance_ms(11 * 60_000);
@@ -2903,14 +3027,24 @@ async fn test_certificate_restore_taking_a_wider_one_without_keys_stays_unlisted
     let summary = restored.receive(None).await.unwrap();
     assert!(!received(&summary, "paykit.payment_proof"), "{summary:?}");
     assert_eq!(summary.report.cursor, before);
-    assert!(restored.app().protocol_get(b"nl").await.unwrap().is_some());
+    assert!(restored
+        .app()
+        .protocol_get("paykit", b"nl")
+        .await
+        .unwrap()
+        .is_some());
     store_bundle(&w, me, &wider);
     let mut proofs = 0;
     for _ in 0..3 {
         let summary = restored.receive(None).await.unwrap();
         proofs += usize::from(received(&summary, "paykit.payment_proof"));
     }
-    assert!(restored.app().protocol_get(b"nl").await.unwrap().is_none());
+    assert!(restored
+        .app()
+        .protocol_get("paykit", b"nl")
+        .await
+        .unwrap()
+        .is_none());
     assert_eq!(proofs, 1);
     let sales = restored.payee_activity().await.unwrap();
     assert_eq!(sales.len(), 1);
@@ -2949,14 +3083,24 @@ async fn test_certificate_restore_taking_allowance_without_its_key_lists_once_it
     .unwrap();
     restored.receive(None).await.unwrap();
     assert_eq!(restored.app().cert().hash(), wider.hash());
-    assert!(restored.app().protocol_get(b"nl").await.unwrap().is_some());
+    assert!(restored
+        .app()
+        .protocol_get("paykit", b"nl")
+        .await
+        .unwrap()
+        .is_some());
     let unlisted = restored.allowances().await.unwrap_err();
     assert!(is_not_now(&unlisted), "{unlisted:?}");
     store_bundle(&w, me, &wider);
     for _ in 0..3 {
         restored.receive(None).await.unwrap();
     }
-    assert!(restored.app().protocol_get(b"nl").await.unwrap().is_none());
+    assert!(restored
+        .app()
+        .protocol_get("paykit", b"nl")
+        .await
+        .unwrap()
+        .is_none());
     assert!(restored.requests().await.unwrap().is_empty());
     assert!(restored.allowances().await.unwrap().is_empty());
 }
@@ -2997,11 +3141,21 @@ async fn test_certificate_restore_taking_a_labelled_one_without_keys_keeps_the_m
     .unwrap();
     restored.receive(None).await.unwrap();
     assert_eq!(restored.app().cert().hash(), wider.hash());
-    assert!(restored.app().protocol_get(b"nl").await.unwrap().is_some());
+    assert!(restored
+        .app()
+        .protocol_get("paykit", b"nl")
+        .await
+        .unwrap()
+        .is_some());
     store_bundle(&w, me, &wider);
     restored.receive(None).await.unwrap();
     restored.receive(None).await.unwrap();
-    assert!(restored.app().protocol_get(b"nl").await.unwrap().is_none());
+    assert!(restored
+        .app()
+        .protocol_get("paykit", b"nl")
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]
@@ -3110,7 +3264,12 @@ async fn test_certificate_refused_before_any_listing_of_paykit_reads_nothing() {
     let _ = wallet.receive(None).await;
     let _ = wallet.receive(None).await;
     assert_eq!(wallet.app().cert().hash(), refused.hash());
-    assert!(wallet.app().protocol_get(b"lc").await.unwrap().is_none());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"lc")
+        .await
+        .unwrap()
+        .is_none());
     let error = wallet.requests().await.unwrap_err();
     assert!(is_not_now(&error), "{error:?}");
 }
@@ -3186,7 +3345,11 @@ async fn restored_queued_reply_before_wider_keys(keys_present: bool) {
             error,
             PaykitError::Client(AppError::Refused(ClientRefusal::NotNow(_)))
         ));
-        let marks = restored.app().protocol_scan(b"bk/").await.unwrap();
+        let marks = restored
+            .app()
+            .protocol_scan("paykit", b"bk/")
+            .await
+            .unwrap();
         assert_eq!(marks.len(), 1);
         let mark: serde_json::Value = serde_json::from_slice(&marks[0].1).unwrap();
         assert_eq!(mark["d"]["blocked"], true);

@@ -384,15 +384,35 @@ impl AllowanceTerms {
     ///
     /// [`Error::Invalid`] for a period outside the times the grammar writes.
     pub fn longest_period(&self, now: u64) -> Result<u64> {
+        Ok(self.longest_period_span(now)?.0)
+    }
+
+    /// The longest period at `t` ([`AllowanceTerms::longest_period`]) and the first time
+    /// after `t` at which it may be another: the end of `t`'s period of every anchored limit
+    /// in months or years, the only periods whose length varies; `None` when the terms have
+    /// no such limit, so the longest period is the same at every time.
+    ///
+    /// # Errors
+    ///
+    /// As [`AllowanceTerms::longest_period`].
+    fn longest_period_span(&self, t: u64) -> Result<(u64, Option<u64>)> {
         let mut longest = 0u64;
+        let mut changes: Option<u64> = None;
         for limit in &self.period_limits {
             let len = match &limit.period {
-                LimitPeriod::Anchored(limit) => limit.rule().containing(now)?.len_ms(),
+                LimitPeriod::Anchored(limit) => {
+                    let rule = limit.rule();
+                    let period = rule.containing(t)?;
+                    if rule.unit().fixed_ms().is_none() {
+                        changes = Some(changes.map_or(period.ends_at, |c| c.min(period.ends_at)));
+                    }
+                    period.len_ms()
+                }
                 LimitPeriod::Rolling { every, unit } => LimitPeriod::rolling_len(*every, *unit)?,
             };
             longest = longest.max(len);
         }
-        Ok(longest)
+        Ok((longest, changes))
     }
 
     /// The `end` of an executor batch's `server_time_in(at, end)` condition (Paykit spec 8.3,
@@ -715,8 +735,12 @@ struct FailedOut {
 }
 
 impl Ledger {
-    /// An empty ledger, as an executor writes it right after an Allowance's first grant
-    /// (Paykit wire 5.5 "A grant implies a ledger").
+    /// A ledger with no entries and no totals, of the Allowee `counterparty`'s Allowance
+    /// `allowance_id`: the value of Paykit wire 5.5 that counts nothing. It is no initial
+    /// ledger: an Allowance's ledger is initialized only together with its acceptance, in
+    /// one atomic batch, under the canonical value and evidence of Paykit wire 5.9, and an
+    /// empty value written later by an ordinary put never establishes zero usage (Paykit
+    /// spec 8.3.1). Its [`Ledger::to_json`] isn't that canonical value either.
     pub fn empty(counterparty: [u8; 32], allowance_id: AllowanceId) -> Self {
         Self {
             counterparty,
@@ -826,7 +850,8 @@ impl Ledger {
     /// spelling of a computed amount (Paykit wire 1.2), and `failed` left out when empty;
     /// and the members it doesn't know as it read them (Paykit wire 5). The value is read
     /// back by [`Ledger::from_json`] before it is handed out, so the writer never writes a
-    /// ledger its readers refuse.
+    /// ledger its readers refuse. It always holds `entries` and `totals`, so it is never the
+    /// canonical initial ledger of Paykit wire 5.9, which holds neither.
     ///
     /// # Errors
     ///
@@ -1325,22 +1350,33 @@ pub fn compact(terms: &AllowanceTerms, ledger: &Ledger, now: u64) -> Result<Opti
 }
 
 /// "From one version to the next" (Paykit spec 8.3, Paykit wire 5.5): a reader that holds
-/// `held` accepts `newer`, written at service time `newer_time`, only if it counts no less.
+/// `held`, written at service time `held_time`, accepts `newer`, written at service time
+/// `newer_time`, only if it counts no less.
 ///
 /// Every held entry is still there with the same obligation, attempt, value, asset and time,
 /// its outcome unchanged or gone from none to `done` or `failed`, or from `failed` to
-/// `done`; or it was compacted, old enough at `newer_time`: a `done` one into the totals, and
-/// one without an outcome or `failed` into `totals.failed` with the same obligation and
-/// value, or into the totals. Every held `totals.failed` item is still there unchanged or left
-/// into the totals, and `spent` and `count` grew by at least what left into them. New
-/// entries are allowed.
+/// `done`; or it was compacted, old enough at some service time from `held_time` to
+/// `newer_time` by the longest period at that time (writes the reader didn't see may have
+/// compacted it then): a `done` one into the totals, and one without an outcome or `failed`
+/// into `totals.failed` with the same obligation and value, or into the totals. Every held
+/// `totals.failed` item is still there unchanged or left into the totals, and `spent` and
+/// `count` grew by at least what left into them. New entries are allowed.
+///
+/// So a monthly limit's entry that a write at the end of February compacted is accepted in
+/// a version written in March, though March's longer period would keep it at that time.
+/// A `held_time` later than `newer_time` (on the service's clock a newer version is never
+/// written before the one it follows; a time the reader took itself may be later) leaves no
+/// time between the two: the entries are judged at `newer_time` alone.
 ///
 /// # Errors
 ///
-/// [`Error::Invalid`] naming the rule broken: the reader ignores and flags that version.
+/// [`Error::Invalid`] naming the rule broken: the reader ignores and flags that version; also
+/// for a longest period at a time judged that can't be represented, which makes the check
+/// ineligible (`specs/allowances.md`).
 pub fn check_successor(
     terms: &AllowanceTerms,
     held: &Ledger,
+    held_time: u64,
     newer: &Ledger,
     newer_time: u64,
 ) -> Result<()> {
@@ -1351,7 +1387,10 @@ pub fn check_successor(
     if newer.counterparty != held.counterparty || newer.allowance_id != held.allowance_id {
         return refuse("is another Allowance's ledger");
     }
-    let longest = terms.longest_period(newer_time)?;
+    // Terms whose longest period can't be represented at the newer write's time make the
+    // check ineligible, whatever the two versions hold (`specs/allowances.md`).
+    terms.longest_period(newer_time)?;
+    let from = held_time.min(newer_time);
     let (mut into_spent, mut into_count) = (0u128, 0u64);
     for entry in &held.entries {
         if let Some(n) = newer
@@ -1374,7 +1413,7 @@ pub fn check_successor(
             }
             continue;
         }
-        if !old_enough(entry.at, longest, newer_time)? {
+        if !compactable_between(terms, entry.at, from, newer_time)? {
             return refuse("drops an entry before it could be compacted");
         }
         match (
@@ -1423,6 +1462,40 @@ pub fn check_successor(
         return refuse("doesn't grow spent and count by what left into them");
     }
     Ok(())
+}
+
+/// Whether an entry at `at` was old enough to compact ([`compact`]) at some service time from
+/// `from` to `to`, both included, by the longest period at that time (Paykit spec 8.3, Paykit
+/// wire 5.5 "From one version to the next").
+///
+/// Between two ends of periods of the anchored limits in months or years the longest period
+/// is the same, and an entry old enough at a time is old enough at every later time of that
+/// span, so the span's last millisecond decides it. No time up to `at + 60 s` is late enough,
+/// whatever the period, and every time past `at + 60 s` plus the terms' longest possible
+/// period is: the spans walked are those between, from `from`, up to the first that decides
+/// it, so their number depends on the terms alone, never on how far apart `from` and `to`
+/// are.
+///
+/// # Errors
+///
+/// As [`AllowanceTerms::longest_period`] at a time judged, and as [`old_enough`].
+fn compactable_between(terms: &AllowanceTerms, at: u64, from: u64, to: u64) -> Result<bool> {
+    // Saturating is safe: a valid ledger's entry is at most MAX_TIME_MS, far from u64::MAX,
+    // and a saturated start would only leave no time to judge.
+    let mut t = from.max(at.saturating_add(ENTRY_WINDOW_MS).saturating_add(1));
+    while t <= to {
+        let (longest, changes) = terms.longest_period_span(t)?;
+        // `changes` is after `t`, so the span is not empty.
+        let last = changes.map_or(to, |c| to.min(c - 1));
+        if old_enough(at, longest, last)? {
+            return Ok(true);
+        }
+        match last.checked_add(1) {
+            Some(next) => t = next,
+            None => break,
+        }
+    }
+    Ok(false)
 }
 
 /// Whether `ledger` lists `attempt` among its entries or in `totals.failed`.
@@ -2287,7 +2360,7 @@ mod tests {
             ..ledger(Vec::new())
         };
         let now = t("2026-03-10T00:00:00.000Z");
-        check_successor(&terms, &held, &moved, now).unwrap();
+        check_successor(&terms, &held, now, &moved, now).unwrap();
         // The same attempt also back as an entry would count twice.
         let twice = Ledger {
             entries: vec![LedgerEntry {
@@ -2296,7 +2369,7 @@ mod tests {
             }],
             ..moved
         };
-        let error = check_successor(&terms, &held, &twice, now).unwrap_err();
+        let error = check_successor(&terms, &held, now, &twice, now).unwrap_err();
         assert!(
             error.to_string().contains("keeps it as an entry"),
             "{error}"
@@ -2319,7 +2392,7 @@ mod tests {
         assert!(twice.check_valid(&terms).is_err());
         assert!(usage(&terms, &twice, &HashMap::new(), now).is_err());
         assert!(compact(&terms, &twice, now).is_err());
-        let error = check_successor(&terms, &held, &twice, now).unwrap_err();
+        let error = check_successor(&terms, &held, now, &twice, now).unwrap_err();
         assert!(error.to_string().contains("listed twice"), "{error}");
     }
 
@@ -2328,7 +2401,7 @@ mod tests {
         let terms = AllowanceTerms::from_json(&terms()).unwrap();
         let now = t("2026-03-10T00:00:00.000Z");
         let empty = ledger(Vec::new());
-        check_successor(&terms, &empty, &empty, now).unwrap();
+        check_successor(&terms, &empty, now, &empty, now).unwrap();
         let other_counterparty = Ledger {
             counterparty: [6; 32],
             ..empty.clone()
@@ -2338,7 +2411,7 @@ mod tests {
             ..empty.clone()
         };
         for newer in [other_counterparty, other_allowance] {
-            let error = check_successor(&terms, &empty, &newer, now).unwrap_err();
+            let error = check_successor(&terms, &empty, now, &newer, now).unwrap_err();
             assert!(error.to_string().contains("another Allowance"), "{error}");
         }
         // Non-empty too.
@@ -2347,7 +2420,7 @@ mod tests {
             counterparty: [6; 32],
             ..held.clone()
         };
-        assert!(check_successor(&terms, &held, &moved, now).is_err());
+        assert!(check_successor(&terms, &held, now, &moved, now).is_err());
     }
 
     #[test]
@@ -2378,7 +2451,7 @@ mod tests {
                 ),
             ])
         };
-        check_successor(&terms, &held, &held, now).unwrap();
+        check_successor(&terms, &held, now, &held, now).unwrap();
         let mut changed = held.clone();
         changed.entries[0].value = Decimal::parse("0.001").unwrap();
         let mut done_failed = held.clone();
@@ -2422,7 +2495,7 @@ mod tests {
                 "doesn't grow spent and count",
             ),
         ] {
-            let error = check_successor(&terms, &held, &newer, now).unwrap_err();
+            let error = check_successor(&terms, &held, now, &newer, now).unwrap_err();
             assert!(error.to_string().contains(rule), "{name}: {error}");
         }
         // Sums that overflow fail closed, in a newer version and in compaction.
@@ -2432,7 +2505,7 @@ mod tests {
         };
         let mut over = full.clone();
         over.entries.remove(0);
-        assert!(check_successor(&terms, &full, &over, now).is_err());
+        assert!(check_successor(&terms, &full, now, &over, now).is_err());
         assert!(compact(&terms, &full, now).is_err());
     }
 
@@ -2460,14 +2533,120 @@ mod tests {
         assert_eq!(after.spent.as_ref().map(Decimal::as_str), Some("0.01"));
         assert_eq!(after.failed.len(), 1);
         assert!(compact(&terms, &after, now).unwrap().is_none());
-        check_successor(&terms, &before, &after, now).unwrap();
-        assert!(check_successor(&terms, &before, &after, t("2026-01-10T00:00:00.000Z")).is_err());
+        check_successor(&terms, &before, now, &after, now).unwrap();
+        let early = t("2026-01-10T00:00:00.000Z");
+        assert!(check_successor(&terms, &before, early, &after, early).is_err());
         let mut flat = after.clone();
         flat.spent = None;
-        assert!(check_successor(&terms, &before, &flat, now).is_err());
+        assert!(check_successor(&terms, &before, now, &flat, now).is_err());
         let mut back = before.clone();
         back.entries[0].outcome = Some(EntryOutcome::Failed);
-        assert!(check_successor(&terms, &before, &back, now).is_err());
+        assert!(check_successor(&terms, &before, now, &back, now).is_err());
+    }
+
+    /// Terms with one anchored limit in `unit` from 2026-01-01, a held ledger with one `done`
+    /// entry at `at`, and the version a compaction at `compacted_at` writes from it.
+    fn compacted_between(
+        unit: &str,
+        at: &str,
+        compacted_at: &str,
+    ) -> (AllowanceTerms, Ledger, Ledger) {
+        let terms = AllowanceTerms::from_json(&with_limits(json!([{ "amount_limit": "0.03",
+            "payment_count_limit": 3, "period": { "anchor": "2026-01-01T00:00:00.000Z",
+                "every": 1, "kind": "anchored", "unit": unit } }])))
+        .unwrap();
+        let held = ledger(vec![entry(1, "0.01", at, Some(EntryOutcome::Done))]);
+        let newer = compact(&terms, &held, t(compacted_at)).unwrap().unwrap();
+        assert!(newer.entries.is_empty());
+        (terms, held, newer)
+    }
+
+    #[test]
+    fn test_successor_month_boundary_accepts_a_compaction_in_the_shorter_month() {
+        // February's 28-day period lets a write at its end compact the entry; March's 31 days
+        // would keep it at the newer write's time.
+        let (terms, held, newer) = compacted_between(
+            "month",
+            "2026-01-31T12:00:00.000Z",
+            "2026-02-28T23:59:00.000Z",
+        );
+        let held_time = t("2026-01-31T13:00:00.000Z");
+        let newer_time = t("2026-03-01T00:00:30.000Z");
+        check_successor(&terms, &held, held_time, &newer, newer_time).unwrap();
+        // Judged at the newer write's time alone, the same step is refused.
+        let error = check_successor(&terms, &held, newer_time, &newer, newer_time).unwrap_err();
+        assert!(
+            error.to_string().contains("before it could be compacted"),
+            "{error}"
+        );
+        // The last millisecond of February is still in the range; the first of March alone
+        // isn't enough.
+        let feb_end = t("2026-02-28T23:59:59.999Z");
+        check_successor(&terms, &held, feb_end, &newer, newer_time).unwrap();
+        assert!(check_successor(&terms, &held, feb_end + 1, &newer, newer_time).is_err());
+    }
+
+    #[test]
+    fn test_successor_leap_year_accepts_a_compaction_in_the_shorter_year() {
+        // 2027 has 365 days, leap year 2028 has 366.
+        let (terms, held, newer) = compacted_between(
+            "year",
+            "2026-12-31T12:00:00.000Z",
+            "2027-12-31T23:00:00.000Z",
+        );
+        let held_time = t("2026-12-31T13:00:00.000Z");
+        let newer_time = t("2028-01-01T00:00:30.000Z");
+        check_successor(&terms, &held, held_time, &newer, newer_time).unwrap();
+        assert!(check_successor(&terms, &held, newer_time, &newer, newer_time).is_err());
+    }
+
+    #[test]
+    fn test_successor_refuses_an_entry_no_time_between_could_compact() {
+        // At every time from February 2 to March 1 01:00 the entry is younger than the
+        // period then: 28 days in February, 31 in March. Only a later write may compact it.
+        let (terms, held, newer) = compacted_between(
+            "month",
+            "2026-02-01T00:30:00.000Z",
+            "2026-04-15T00:00:00.000Z",
+        );
+        let held_time = t("2026-02-02T00:00:00.000Z");
+        let error = check_successor(
+            &terms,
+            &held,
+            held_time,
+            &newer,
+            t("2026-03-01T01:00:00.000Z"),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("before it could be compacted"),
+            "{error}"
+        );
+        check_successor(
+            &terms,
+            &held,
+            held_time,
+            &newer,
+            t("2026-03-04T00:31:00.001Z"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_successor_held_time_after_newer_time_judges_at_newer_time() {
+        let (terms, held, newer) = compacted_between(
+            "month",
+            "2026-01-31T12:00:00.000Z",
+            "2026-02-28T23:59:00.000Z",
+        );
+        // Nothing from March 1 to March 5 is judged: at March 5 the entry would be old
+        // enough, at the newer write's time it isn't.
+        let newer_time = t("2026-03-01T00:00:30.000Z");
+        let held_time = t("2026-03-05T00:00:00.000Z");
+        assert!(check_successor(&terms, &held, held_time, &newer, newer_time).is_err());
+        let newer_time = t("2026-03-03T12:01:00.001Z");
+        check_successor(&terms, &held, held_time, &newer, newer_time).unwrap();
+        assert!(check_successor(&terms, &held, held_time, &newer, newer_time - 1).is_err());
     }
 
     #[test]
@@ -2529,7 +2708,7 @@ mod tests {
         assert!(usage(&terms, &ledger(Vec::new()), &HashMap::new(), now).is_err());
         assert!(terms.longest_period(now).is_err());
         assert!(compact(&terms, &l, now).is_err());
-        assert!(check_successor(&terms, &l, &l, now).is_err());
+        assert!(check_successor(&terms, &l, now, &l, now).is_err());
         // A rolling month stays invalid.
         let month = with_limits(json!([{ "amount_limit": "1", "payment_count_limit": null,
             "period": { "every": 1, "kind": "rolling", "unit": "month" } }]));
@@ -2584,7 +2763,7 @@ mod tests {
             count: 1,
             ..ledger(Vec::new())
         };
-        assert!(check_successor(&terms, &held, &compacted, now).is_err());
+        assert!(check_successor(&terms, &held, now, &compacted, now).is_err());
     }
 
     #[test]
@@ -2918,7 +3097,7 @@ mod tests {
         ];
         assert_counts_no_less(&terms, &merged, &inputs, &times, &repair_claims());
         for at in times {
-            check_successor(&terms, &kept, &merged, t(at)).unwrap();
+            check_successor(&terms, &kept, t(at), &merged, t(at)).unwrap();
         }
     }
 
@@ -3084,7 +3263,7 @@ mod tests {
         assert_eq!(twelve.at, t("2026-03-05T00:00:20.000Z"));
         assert_eq!(twelve.outcome, Some(EntryOutcome::Done));
         assert_eq!(merged.entries.len(), 4);
-        check_successor(&terms, &kept, &merged, now).unwrap();
+        check_successor(&terms, &kept, now, &merged, now).unwrap();
         let inputs = [
             kept.clone(),
             shown.clone(),

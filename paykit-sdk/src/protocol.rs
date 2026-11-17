@@ -8,7 +8,7 @@
 //!   table (Paykit spec 3.3), and narrows a payer's replies by label (Paykit spec 3.4).
 //! - **Check 10** ([`Protocol::check_body`]): the kind and its body, with no effect, the one
 //!   place these rules run, so a push peek and the receive step agree.
-//! - **Receiving** ([`Protocol::receive_with`]): the effect of a message that passed check 10,
+//! - **Receiving** ([`Protocol::receive`]): the effect of a message that passed check 10,
 //!   built through the client's receive context so the record write it causes, any claim entry and
 //!   local write go in the batch that moves the cursor (Switch spec 8.2; `crate::receive`).
 //!   After `409 conflict` the client reads the records again and calls it once more, and the
@@ -759,7 +759,11 @@ pub(crate) fn check_restored_loss(backup: &AppBackup) -> crate::error::Result<()
         identity: [u8; 32],
         generation: u64,
     }
-    let Some(layer) = backup.protocol_layer()? else {
+    let Some(layer) = backup
+        .layers()?
+        .into_iter()
+        .find(|layer| layer.protocol == BACKUP_NAME)
+    else {
         return Ok(());
     };
     let Some(state) = decode_local_state(&layer.data) else {
@@ -794,8 +798,8 @@ pub(crate) fn check_restored_loss(backup: &AppBackup) -> crate::error::Result<()
 }
 
 impl Protocol for PaykitProtocol {
-    fn backup_name(&self) -> Option<String> {
-        Some(BACKUP_NAME.to_owned())
+    fn name(&self) -> String {
+        BACKUP_NAME.to_owned()
     }
 
     /// Paykit's layer is its whole local state, as the client's default writes it; a
@@ -814,6 +818,21 @@ impl Protocol for PaykitProtocol {
         restore_paykit_layer(layer, restoring.identity(), restoring.cert(), |input| {
             restoring.blind(input)
         })
+    }
+
+    /// The delivery gate, asked before every try of every Paykit message's delivery, a
+    /// first one or a re-send, whichever call makes it: a send, a flush, a restore's re-send
+    /// from a record, the answer to a counterparty's re-send request, or a message the
+    /// outbox already holds. An Allowance acceptance never goes out: it is recorded only
+    /// together with the Allowance's initialized ledger, in one atomic batch on a protected
+    /// record, which this version doesn't build, so this app sends no acceptance in either
+    /// role (Paykit spec 8.3.1). One the outbox holds stays there, held, until its replay
+    /// deadline gives it up. Every other kind goes, as the Switch's own holds allow.
+    fn may_send(
+        &self,
+        delivery: &pubky_switch_client::app::DeliveryView<'_>,
+    ) -> Result<bool, StoreFailure> {
+        Ok(delivery.message().kind != Kind::AllowanceAcceptance.as_str())
     }
 
     fn opaque_members(&self) -> Vec<OpaqueRule> {
@@ -885,18 +904,7 @@ impl Protocol for PaykitProtocol {
     /// cancellation and proof about a labelled request go only to apps holding `paykit_request` or
     /// that label, and about an unlabelled request only to apps holding `paykit_request`; a payee's
     /// cancellation, without a label, only to apps holding `paykit_pay`.
-    fn sends_to(&self, message: &Message, recipient: &AppRecord) -> bool {
-        self.narrows(message, recipient, None)
-    }
-
-    /// [`Protocol::sends_to`], with the side a cancellation was sent from as the batch that
-    /// queued it kept it.
-    fn sends_to_with(
-        &self,
-        message: &Message,
-        recipient: &AppRecord,
-        view: &LocalView<'_>,
-    ) -> bool {
+    fn sends_to(&self, message: &Message, recipient: &AppRecord, view: &LocalView<'_>) -> bool {
         // A kept side that can't be read sends to no one rather than guess (Paykit spec 3.4):
         // the message isn't sealed to this recipient. So does one that names another message
         // than its key, which doesn't bind (`state::Stored`).
@@ -926,7 +934,7 @@ impl Protocol for PaykitProtocol {
     /// The effect of a message that passed check 10, added to the batch that moves the
     /// cursor (Switch spec 8.2; `crate::receive`). Called again after `409 conflict`, with
     /// the records read again: the effect is built anew from them.
-    fn receive_with(&self, message: &ReceivedMessage, cx: &mut ReceiveContext<'_>) -> Outcome {
+    fn receive(&self, message: &ReceivedMessage, cx: &mut ReceiveContext<'_>) -> Outcome {
         // A released entry whose effect the app wrote since, by a write of its own, is
         // declined: its effect isn't applied twice (Switch spec 8.2; `stored.rs`).
         if message.released {
@@ -1052,21 +1060,10 @@ impl Protocol for PaykitProtocol {
         ])
     }
 
-    /// A provider loss, without the protocol's state at hand: only the re-sends are queued.
-    fn provider_lost(&self, loss: &ProviderLoss) -> Result<LossActions, StoreFailure> {
-        Ok(LossActions {
-            conversations: Vec::new(),
-            local: vec![local_write(
-                &key::missed(loss.accepted_from_ms),
-                &loss.accepted_from_ms,
-            )?],
-        })
-    }
-
     /// A provider loss (Switch spec 12.6 steps 2 and 4): ask every counterparty with Paykit
     /// activity to send again from the old cursor's time, and add their conversation entries
     /// back.
-    fn provider_lost_with(
+    fn provider_lost(
         &self,
         loss: &ProviderLoss,
         view: &LocalView<'_>,
@@ -1080,8 +1077,13 @@ impl Protocol for PaykitProtocol {
                 .map_err(|_| StoreFailure::of_entry(StoreError::Corrupt))?;
             conversations.push(peer);
         }
-        let mut actions = self.provider_lost(loss)?;
-        actions.conversations = conversations;
+        let mut actions = LossActions {
+            conversations,
+            local: vec![local_write(
+                &key::missed(loss.accepted_from_ms),
+                &loss.accepted_from_ms,
+            )?],
+        };
         actions.local.extend(crate::loss::loss_writes(loss, view)?);
         Ok(actions)
     }
@@ -1132,19 +1134,7 @@ impl Protocol for PaykitProtocol {
     /// replaces a message in a role seen, or changes the Allowance seen; for a
     /// `payment_lists` record, holds an older list or drops a single-use endpoint marked
     /// used; for the `block_floor` record, lowers the floor. A value that doesn't read is
-    /// refused too. A delete isn't such a write. Judged
-    /// as a reader that doesn't hold the version the write builds on
-    /// ([`Protocol::record_regression_on`] is told).
-    fn record_regression(
-        &self,
-        collection: &str,
-        seen: &[u8],
-        value: Option<&[u8]>,
-    ) -> Option<String> {
-        self.regression(collection, seen, value, false)
-    }
-
-    /// [`Protocol::record_regression`], told what the write builds on: a write built on the
+    /// refused too. A delete isn't such a write. A write built on the
     /// version this app holds is judged as by a reader holding it, which also refuses a
     /// reassociation at or before a period it attempted (Paykit wire 5.3 "Seen Allowance").
     /// The version is judged by the mark of what the app saw, the value it took last that
@@ -1152,7 +1142,7 @@ impl Protocol for PaykitProtocol {
     /// holds, so such a write is judged against the mark from before the delete: stricter
     /// than the wire format's reader holding the version built on, which a delete leaves with
     /// no attempted period.
-    fn record_regression_on(
+    fn record_regression(
         &self,
         collection: &str,
         seen: &[u8],
@@ -1409,7 +1399,7 @@ mod tests {
         let p = protocol();
         assert_eq!(p.record_seen("payer_activity", None, Some(b"{}")), None);
         assert_eq!(
-            p.record_regression("payer_activity", b"{}", Some(b"{}")),
+            p.regression("payer_activity", b"{}", Some(b"{}"), false),
             None
         );
     }
@@ -1432,6 +1422,13 @@ mod receive_tests {
 
     fn received(stored: &StoredMessage) -> ReceivedMessage {
         ReceivedMessage {
+            // Supplied callback metadata, not a fixture proving feed acceptance.
+            receipt: pubky_switch_client::app::EntryReceipt {
+                entry_id: [1; 16],
+                service_key: [2; 32],
+                read_at_ms: NOW,
+            },
+            generation: 1,
             seq: 3,
             sender: stored.sender(),
             accepted_at_ms: NOW,
@@ -1615,17 +1612,17 @@ mod receive_tests {
             vec![[1; 32]],
             object(json!({ "label": "shop1" })),
         );
-        assert!(p.sends_to(labelled.message(), &shop1.record(&accepts)));
-        assert!(p.sends_to(labelled.message(), &bob.record(&accepts)));
-        assert!(!p.sends_to(labelled.message(), &shop2.record(&accepts)));
+        assert!(p.narrows(labelled.message(), &shop1.record(&accepts), None));
+        assert!(p.narrows(labelled.message(), &bob.record(&accepts), None));
+        assert!(!p.narrows(labelled.message(), &shop2.record(&accepts), None));
         let plain = alice.message(
             &bob,
             "paykit.payment_request_acceptance",
             vec![[1; 32]],
             object(json!({})),
         );
-        assert!(p.sends_to(plain.message(), &bob.record(&accepts)));
-        assert!(!p.sends_to(plain.message(), &shop1.record(&accepts)));
+        assert!(p.narrows(plain.message(), &bob.record(&accepts), None));
+        assert!(!p.narrows(plain.message(), &shop1.record(&accepts), None));
     }
 
     #[test]
@@ -1826,7 +1823,7 @@ mod receive_tests {
         };
         let (seen, moved) = (seen.to_json().unwrap(), moved.to_json().unwrap());
         assert_eq!(
-            p.record_regression("payer_activity", &seen, Some(&moved)),
+            p.regression("payer_activity", &seen, Some(&moved), false),
             None
         );
         // Built on the version the app holds, the one that attempted the period, the same
@@ -1840,7 +1837,7 @@ mod receive_tests {
         );
         // Dropping the entry again is a regression.
         assert!(p
-            .record_regression("payer_activity", &moved, Some(&seen))
+            .regression("payer_activity", &moved, Some(&seen), false)
             .is_some());
     }
 
@@ -2011,17 +2008,17 @@ mod receive_tests {
         };
         let seen = open(None);
         let ended = open(Some(end));
-        assert_eq!(p.record_regression("allowances", &seen, Some(&ended)), None);
+        assert_eq!(p.regression("allowances", &seen, Some(&ended), false), None);
         assert_eq!(
             p.record_seen("allowances", Some(&seen), Some(&ended)),
             Some(ended.clone())
         );
         // A later write that drops the end seen is refused, as is one that doesn't read.
         assert!(p
-            .record_regression("allowances", &ended, Some(&seen))
+            .regression("allowances", &ended, Some(&seen), false)
             .is_some());
         assert!(p
-            .record_regression("allowances", &seen, Some(b"{}"))
+            .regression("allowances", &seen, Some(b"{}"), false)
             .is_some());
     }
 
@@ -2165,11 +2162,12 @@ mod receive_tests {
         seen: &AllowanceRecord,
         later: &AllowanceRecord,
     ) -> Option<String> {
-        // Pass serialized records through the client callback and its parsing.
-        protocol_of(own).record_regression(
+        // Pass serialized records through the shared regression rule and its parsing.
+        protocol_of(own).regression(
             "allowances",
             &seen.to_json().unwrap(),
             Some(&later.to_json().unwrap()),
+            false,
         )
     }
 
@@ -2948,7 +2946,7 @@ mod receive_tests {
         let seen = seen.to_json().unwrap();
         // The same record and one with more are fine.
         assert_eq!(
-            p.record_regression("payer_activity", &seen, Some(&seen)),
+            p.regression("payer_activity", &seen, Some(&seen), false),
             None
         );
         let cancel = bob.message(
@@ -2961,7 +2959,7 @@ mod receive_tests {
         activity::place(&mut more, activity::Role::Cancellation, cancel);
         let more = more.to_json().unwrap();
         assert_eq!(
-            p.record_regression("payer_activity", &seen, Some(&more)),
+            p.regression("payer_activity", &seen, Some(&more), false),
             None
         );
         // Dropping the request is a regression; so is a value that doesn't read.
@@ -2969,13 +2967,13 @@ mod receive_tests {
             .to_json()
             .unwrap();
         assert!(p
-            .record_regression("payer_activity", &more, Some(&dropped))
+            .regression("payer_activity", &more, Some(&dropped), false)
             .is_some());
         assert!(p
-            .record_regression("payer_activity", &seen, Some(b"{}"))
+            .regression("payer_activity", &seen, Some(b"{}"), false)
             .is_some());
         // A delete isn't one.
-        assert_eq!(p.record_regression("payer_activity", &seen, None), None);
+        assert_eq!(p.regression("payer_activity", &seen, None, false), None);
         // The mark follows the newest value that reads.
         assert_eq!(
             p.record_seen("payer_activity", Some(&seen), Some(&more)),

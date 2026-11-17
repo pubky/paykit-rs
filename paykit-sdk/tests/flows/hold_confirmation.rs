@@ -65,7 +65,12 @@ async fn test_hold_confirmation_payment_rejects_a_second_missed_item_at_the_same
         wallet.request(&request).await.unwrap().status,
         RequestStatus::Held
     );
-    assert!(wallet.app().protocol_scan(b"hc/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"hc/")
+        .await
+        .unwrap()
+        .is_empty());
     assert!(wallet.payments().await.unwrap().is_empty());
 }
 
@@ -90,7 +95,12 @@ async fn test_hold_confirmation_explicit_rejects_a_second_missed_item_at_the_sam
         RequestStatus::Held
     );
     assert!(w.rail.all_executions().is_empty());
-    assert!(wallet.app().protocol_scan(b"hc/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"hc/")
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -122,7 +132,12 @@ async fn test_hold_confirmation_subscription_rejects_a_second_missed_item_at_the
         RequestStatus::Held
     );
     assert!(w.rail.all_executions().is_empty());
-    assert!(wallet.app().protocol_scan(b"hc/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"hc/")
+        .await
+        .unwrap()
+        .is_empty());
     shop.receive(None).await.unwrap();
     let activity = shop.payee_activity().await.unwrap();
     assert_eq!(activity.len(), 1);
@@ -153,7 +168,12 @@ async fn test_hold_confirmation_rejects_another_restore_of_the_same_backup() {
         RequestStatus::Held
     );
     assert!(w.rail.all_executions().is_empty());
-    assert!(second.app().protocol_scan(b"hc/").await.unwrap().is_empty());
+    assert!(second
+        .app()
+        .protocol_scan("paykit", b"hc/")
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -287,7 +307,12 @@ async fn test_hold_confirmation_reload_preserves_the_current_token() {
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().protocol_get(b"he").await.unwrap().is_none());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"he")
+        .await
+        .unwrap()
+        .is_none());
     assert!(wallet.request(&request).await.unwrap().held.is_none());
     missed(&w, &mut wallet).await;
     let confirmed = shown(&wallet, &request).await;
@@ -312,7 +337,12 @@ async fn unread_epoch(missing: bool) {
     wallet.receive(None).await.unwrap();
     missed(&w, &mut wallet).await;
     let confirmed = shown(&wallet, &request).await;
-    let original = wallet.app().protocol_get(b"he").await.unwrap().unwrap();
+    let original = wallet
+        .app()
+        .protocol_get("paykit", b"he")
+        .await
+        .unwrap()
+        .unwrap();
     let write = if missing {
         LocalWrite::Delete {
             key: b"he".to_vec(),
@@ -323,7 +353,11 @@ async fn unread_epoch(missing: bool) {
             value: br#"{"v":1,"d":false}"#.to_vec(),
         }
     };
-    wallet.app_mut().protocol_commit(&[write]).await.unwrap();
+    wallet
+        .app_mut()
+        .protocol_commit("paykit", &[write])
+        .await
+        .unwrap();
     wallet
         .request(&request)
         .await
@@ -340,13 +374,21 @@ async fn unread_epoch(missing: bool) {
         .await
         .expect_err("an unread hold identity cannot be confirmed");
     assert!(w.rail.all_executions().is_empty());
-    assert!(wallet.app().protocol_scan(b"hc/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"hc/")
+        .await
+        .unwrap()
+        .is_empty());
     wallet
         .app_mut()
-        .protocol_commit(&[LocalWrite::Put {
-            key: b"he".to_vec(),
-            value: original,
-        }])
+        .protocol_commit(
+            "paykit",
+            &[LocalWrite::Put {
+                key: b"he".to_vec(),
+                value: original,
+            }],
+        )
         .await
         .unwrap();
     assert_eq!(shown(&wallet, &request).await, confirmed);
@@ -418,9 +460,48 @@ impl pubky_switch_client::store::StateStore for HoldCommitStore {
         &self,
         batch: pubky_switch_client::store::WriteBatch,
     ) -> Result<(), pubky_switch_client::error::StoreError> {
+        self.commit_with(batch, |batch| {
+            self.inner
+                .commit(batch)
+                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+        })
+        .map(|_| ())
+    }
+
+    fn acquire(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.inner.acquire(ns, owner)
+    }
+
+    fn commit_if(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
+    }
+}
+impl HoldCommitStore {
+    fn commit_with(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+        apply: impl FnOnce(
+            pubky_switch_client::store::WriteBatch,
+        ) -> Result<
+            pubky_switch_client::store::CommitOutcome,
+            pubky_switch_client::error::StoreError,
+        >,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
         use pubky_switch_client::{error::StoreError, store::Write};
         use std::sync::atomic::Ordering;
-        let hold = batch.writes.iter().any(|write| matches!(write, Write::Put { key, .. } if key == b"p/rh" || key == b"p/mh" || key == b"p/mu"));
+        let hold = batch.writes().iter().any(|write| matches!(write, Write::Put { key, .. } if key == b"p/paykit/rh" || key == b"p/paykit/mh" || key == b"p/paykit/mu"));
         let fault = if hold {
             self.fault.swap(0, Ordering::SeqCst)
         } else {
@@ -432,11 +513,14 @@ impl pubky_switch_client::store::StateStore for HoldCommitStore {
         if fault == 1 {
             return Err(StoreError::Unavailable);
         }
-        self.inner.commit(batch)?;
+        let applied = apply(batch)?;
+        if applied != pubky_switch_client::store::CommitOutcome::Applied {
+            return Ok(applied);
+        }
         if fault == 2 {
             return Err(StoreError::Unknown);
         }
-        Ok(())
+        Ok(pubky_switch_client::store::CommitOutcome::Applied)
     }
 }
 
@@ -465,8 +549,11 @@ async fn missed_commit(after: bool) {
         .await
         .unwrap();
     let ns = client_namespace(&wallet.app_id());
-    let epoch = storage.get(&ns, b"p/he").unwrap().unwrap();
-    assert_eq!(storage.scan(&ns, b"p/hc/", None, 10).unwrap().len(), 1);
+    let epoch = storage.get(&ns, b"p/paykit/he").unwrap().unwrap();
+    assert_eq!(
+        storage.scan(&ns, b"p/paykit/hc/", None, 10).unwrap().len(),
+        1
+    );
     storage
         .fault
         .store(if after { 2 } else { 1 }, Ordering::SeqCst);
@@ -477,14 +564,14 @@ async fn missed_commit(after: bool) {
         .await
         .expect_err("the injected commit failure is reported");
     assert!(storage.hit.load(Ordering::SeqCst));
-    let actual = storage.get(&ns, b"p/he").unwrap().unwrap();
+    let actual = storage.get(&ns, b"p/paykit/he").unwrap().unwrap();
     if after {
         assert_ne!(actual, epoch);
     } else {
         assert_eq!(actual, epoch);
     }
     assert_eq!(
-        storage.scan(&ns, b"p/hc/", None, 10).unwrap().len(),
+        storage.scan(&ns, b"p/paykit/hc/", None, 10).unwrap().len(),
         usize::from(!after)
     );
     let mut wallet = reload(&w, wallet, Arc::clone(&storage) as Arc<dyn StateStore>).await;
@@ -547,8 +634,8 @@ async fn restore_commit(after: bool) {
     );
     assert!(storage.hit.load(Ordering::SeqCst));
     let ns = client_namespace(&id);
-    assert_eq!(storage.get(&ns, b"p/rh").unwrap().is_some(), after);
-    assert_eq!(storage.get(&ns, b"p/he").unwrap().is_some(), after);
+    assert_eq!(storage.get(&ns, b"p/paykit/rh").unwrap().is_some(), after);
+    assert_eq!(storage.get(&ns, b"p/paykit/he").unwrap().is_some(), after);
     let mut loaded = if after {
         Paykit::load(
             w.env(&w.alice, Arc::clone(&storage) as Arc<dyn StateStore>),

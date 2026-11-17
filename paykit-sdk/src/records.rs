@@ -322,7 +322,9 @@ impl Paykit {
         let write = self
             .placed_write(target, signed.to(), role, stored, conditions)
             .await?;
-        let mut batch = OpBatch::new().queue(signed.clone()).locals(local.clone());
+        let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
+            .queue(signed.clone())
+            .locals(local.clone());
         match write {
             Some(entry) => batch = batch.entry(entry),
             // The record reflects it already: the message is queued alone, with the local
@@ -330,7 +332,9 @@ impl Paykit {
             None => {
                 self.app.queue_signed(signed).await?;
                 if !local.is_empty() {
-                    self.app.protocol_commit(&local).await?;
+                    self.app
+                        .protocol_commit(crate::protocol::BACKUP_NAME, &local)
+                        .await?;
                 }
                 return Ok(msg_id);
             }
@@ -383,10 +387,19 @@ impl Paykit {
             .await?;
         let Some(entry) = write else {
             // The record reflects it already: the held answer alone, with the local writes.
-            self.app.protocol_commit(&local).await?;
+            self.app
+                .protocol_commit(crate::protocol::BACKUP_NAME, &local)
+                .await?;
             return Ok(msg_id);
         };
-        match self.submit(OpBatch::new().locals(local).entry(entry)).await {
+        match self
+            .submit(
+                OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
+                    .locals(local)
+                    .entry(entry),
+            )
+            .await
+        {
             Ok(_) => Ok(msg_id),
             Err(error) => {
                 if error.code() == Some(ErrorCode::Conflict) {
@@ -600,7 +613,9 @@ mod own_message_tests {
         let held = body(text("records.rs"), "record_held");
         assert!(held.contains("self.own_copy(&signed)"));
         assert!(held.contains("key::held_answer(&payee, &msg_id)"));
-        assert!(held.contains("OpBatch::new().locals(local).entry(entry)"));
+        assert!(held.split_whitespace().collect::<String>().contains(
+            "OpBatch::for_protocol(crate::protocol::BACKUP_NAME).locals(local).entry(entry)"
+        ));
         assert!(!held.contains(".queue("));
         assert!(!held.contains("queue_signed"));
         let request = body(text("requests.rs"), "send_request_inner");

@@ -704,7 +704,7 @@ impl Paykit {
             .await?;
         let mut tx = Tx::default();
         self.note_peer(&mut tx, &to)?;
-        let batch = OpBatch::new()
+        let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
             .entry(write)
             .queue(signed)
             .locals(tx.into_writes());
@@ -1413,7 +1413,9 @@ impl Paykit {
             .await?;
         match write {
             Some(entry) => {
-                let batch = OpBatch::new().entry(entry).locals(tx.into_writes());
+                let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
+                    .entry(entry)
+                    .locals(tx.into_writes());
                 if let Err(error) = self.submit(batch).await {
                     if error.code() == Some(ErrorCode::Conflict) {
                         self.app.read_record(&target.record_target()).await?;
