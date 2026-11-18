@@ -1067,6 +1067,13 @@ async fn restore_before_original_completion(answered: bool, priced: bool) {
         "{interrupted:?}"
     );
     let backup = wallet.backup().await.unwrap();
+    // A second installation can finish its first restore read before the original
+    // payer publishes its outcome. Its own outbox has never held that proof.
+    let early = if answered {
+        None
+    } else {
+        Some(restored(&w, &backup).await)
+    };
 
     let first = wallet.resume_payments().await.unwrap();
     let [PayOutcome::Paid {
@@ -1093,6 +1100,10 @@ async fn restore_before_original_completion(answered: bool, priced: bool) {
         );
         assert_eq!(w.rail.paid_amount(&attempt), Some(btc("0.00012346")));
     }
+    assert!(matches!(
+        wallet.app().delivery(original_id).await.unwrap(),
+        Some(pubky_switch_client::app::Delivery::Accepted { .. })
+    ));
     shop.receive(None).await.unwrap();
     if answered {
         let sale = shop.payee_activity().await.unwrap();
@@ -1126,9 +1137,17 @@ async fn restore_before_original_completion(answered: bool, priced: bool) {
         .count();
     drop(wallet);
 
-    let mut wallet = restored(&w, &backup).await;
+    let mut wallet = match early {
+        Some(mut early) => {
+            early.receive(None).await.unwrap();
+            early
+        }
+        None => restored(&w, &backup).await,
+    };
+    assert!(wallet.app().delivery(original_id).await.unwrap().is_none());
     let report = wallet.reconcile().await.unwrap();
     assert_eq!(report.resolved, first);
+    assert!(wallet.app().delivery(original_id).await.unwrap().is_none());
     assert_eq!(
         wallet.payments().await.unwrap()[0].stage,
         paykit_sdk::Stage::Finished
