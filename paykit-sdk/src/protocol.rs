@@ -199,6 +199,19 @@ impl PaykitProtocol {
         }
     }
 
+    pub(crate) fn rail(&self) -> Option<&Arc<dyn Rail>> {
+        self.rail.as_ref()
+    }
+
+    pub(crate) fn bind_for_attachment(&self, identity: [u8; 32], cert: AppCert) -> bool {
+        let mut own = self.own.write().unwrap_or_else(PoisonError::into_inner);
+        if own.is_some() {
+            return false;
+        }
+        *own = Some(Own { identity, cert });
+        true
+    }
+
     /// The settlement ID of a proof's `proof` object: the rail's, or else the one
     /// `paykit-lib` knows.
     fn settlement_id(&self, proof: &Map<String, Value>) -> Option<Vec<u8>> {

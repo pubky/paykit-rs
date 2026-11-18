@@ -177,7 +177,7 @@ impl Paykit {
         if !self.holds("paykit_request") && !removes_only {
             return Err(Refusal::ScopeMissing("paykit_request".into()).into());
         }
-        if !removes_only && !self.config.app.publishes_record {
+        if !removes_only && !self.app.publishes_record() {
             return Err(Refusal::Usage(
                 "Paykit spec 4: an app that doesn't publish its record has no public endpoints"
                     .into(),
@@ -286,7 +286,7 @@ impl Paykit {
         &self,
         endpoints: BTreeMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
     ) -> Result<PaykitMember> {
-        let publishes = holds_public_endpoints(self.app.cert(), self.config.app.publishes_record);
+        let publishes = holds_public_endpoints(self.app.cert(), self.app.publishes_record());
         Ok(PaykitMember {
             endpoint_identifiers: self.capabilities()?,
             public_endpoints: if publishes {
