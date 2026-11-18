@@ -449,12 +449,12 @@ async fn test_pubky_profile_publish_merges_and_rejects_stale_revisions() {
         .await
         .unwrap();
 
-    // pubky.app adds a status and a key Paykit does not know.
+    // A new identity's first profile is social v1; pubky.app adds a status and a key Paykit does not know.
     user.access
         .session
         .storage()
         .put(
-            paykit_sdk::PUBKY_PROFILE_PATH,
+            paykit_sdk::SOCIAL_V1_PROFILE_PATH,
             r#"{"name":"Alice","status":"away","theme":"dark"}"#,
         )
         .await
@@ -481,7 +481,7 @@ async fn test_pubky_profile_publish_merges_and_rejects_stale_revisions() {
         .access
         .session
         .storage()
-        .get(paykit_sdk::PUBKY_PROFILE_PATH)
+        .get(paykit_sdk::SOCIAL_V1_PROFILE_PATH)
         .await
         .unwrap()
         .text()
@@ -634,6 +634,14 @@ async fn test_pubky_profile_follows_and_avatar_use_social_v1_once_migrated() {
         r#"{"name":"Alice","status":"away"}"#.into(),
     )
     .await;
+    // From the social v1 profile on, Nexus reads the user as v1, so the flag is not waited for.
+    let snapshot = bitkit
+        .sdk
+        .fetch_pubky_profile_with_revision(alice.public_key.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.profile.name, "Alice");
     // The flag lists every migrated path, so an account with many follows writes well over 4 KiB.
     let migrated: Vec<String> = (0..200)
         .map(|i| format!("/pub/social/v1/follows/{i:052}.json"))
@@ -741,4 +749,87 @@ async fn test_pubky_profile_follows_and_avatar_use_social_v1_once_migrated() {
         .unwrap();
     assert!(read(paykit_sdk::SOCIAL_V1_PROFILE_PATH).await.is_none());
     assert!(read(paykit_sdk::PUBKY_PROFILE_PATH).await.is_none());
+}
+
+#[tokio::test]
+async fn test_new_identity_creates_its_profile_on_social_v1_without_the_flag() {
+    let testnet = crate::harness::build_testnet().await;
+    let capabilities = format!(
+        "{},{},/pub/pubky.app/follows/:rw",
+        paykit_sdk::PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
+        paykit_sdk::PUBKY_APP_PROFILE_SESSION_CAPABILITIES
+    );
+    let sign_up = || {
+        crate::harness::TestUser::sign_up_with_capabilities(
+            &testnet,
+            crate::harness::app_id("bitkit"),
+            &capabilities,
+        )
+    };
+    let update = paykit_sdk::PubkyProfileUpdate {
+        name: Some("Alice".into()),
+        ..Default::default()
+    };
+
+    let alice = sign_up().await;
+    let storage = alice.access.session.storage();
+    let created = alice
+        .sdk
+        .publish_pubky_profile(update.clone(), None)
+        .await
+        .unwrap();
+    assert!(storage
+        .exists(paykit_sdk::SOCIAL_V1_PROFILE_PATH)
+        .await
+        .unwrap());
+    assert!(!storage
+        .exists(paykit_sdk::PUBKY_PROFILE_PATH)
+        .await
+        .unwrap());
+    assert!(!storage
+        .exists(paykit_sdk::SOCIAL_V1_MIGRATION_FLAG_PATH)
+        .await
+        .unwrap());
+    // The avatar comes after the profile, so it is a social v1 file too.
+    let uri = alice
+        .sdk
+        .upload_pubky_app_avatar(vec![0xff, 0xd8, 0xff, 0xe0, 1], "image/jpeg")
+        .await
+        .unwrap();
+    assert!(
+        uri.contains(paykit_sdk::SOCIAL_V1_FILE_PATH_PREFIX),
+        "{uri}"
+    );
+    let read = alice
+        .sdk
+        .fetch_pubky_profile_with_revision(alice.public_key.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read.revision, created.revision);
+
+    // Any pubky.app (v0) data, a follow alone included, keeps the first profile on v0.
+    let bob = sign_up().await;
+    let storage = bob.access.session.storage();
+    storage
+        .put(
+            format!(
+                "{}{}",
+                paykit_sdk::PUBKY_FOLLOWS_PATH_PREFIX,
+                alice.public_key
+            )
+            .as_str(),
+            r#"{"created_at":1}"#,
+        )
+        .await
+        .unwrap();
+    bob.sdk.publish_pubky_profile(update, None).await.unwrap();
+    assert!(storage
+        .exists(paykit_sdk::PUBKY_PROFILE_PATH)
+        .await
+        .unwrap());
+    assert!(!storage
+        .exists(paykit_sdk::SOCIAL_V1_PROFILE_PATH)
+        .await
+        .unwrap());
 }

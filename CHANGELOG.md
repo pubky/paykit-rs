@@ -53,6 +53,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Changed
 
+- A first Pubky app profile for an identity with nothing under `/pub/pubky.app/` is created on Pubky social v1, without pubky.app's migration flag. The identity's own profile, follows and avatar also follow social v1 when it has a social v1 profile but no flag, and a profile delete removes the pubky.app (v0) copy before the social v1 profile.
 - Before a send run first encrypts on an Encrypted Link, the SDK moves the
   link past write slots that already hold packets and stores the advance, so
   it never prepares a ciphertext for a used slot. That first send is published
