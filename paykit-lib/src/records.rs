@@ -2104,6 +2104,38 @@ impl ActivityRecord {
         )
     }
 
+    /// Check the signed roles and opaque members a publication of an issued one-time
+    /// payee receipt must preserve from this record (Paykit wire 5). The caller checks
+    /// the record key, the receipt's occurrence, and the deletion restrictions.
+    ///
+    /// # Errors
+    ///
+    /// The publication is for a different record, lacks the signed payment or drops
+    /// or changes a retained member, including a member of a nested object.
+    pub fn check_receipt_publication(&self, later: &Self) -> Result<()> {
+        self.check_later_write(later)?;
+        ensure(
+            self.side == ActivitySide::Payee
+                && matches!(later.request.as_ref().map(StoredMessage::body),
+                    Some(Body::PaymentRequest(request)) if request.recurrence.is_none())
+                && later.receipt.is_some() && later.proof.is_some(),
+            "Paykit wire 5: the publication must carry the one-time payee request, proof and receipt",
+        )?;
+        ensure(
+            self.unknown.held.iter().all(|prior| {
+                later.unknown.held.iter().any(|current| {
+                    current.anchor == prior.anchor
+                        && current.path == prior.path
+                        && prior
+                            .members
+                            .iter()
+                            .all(|(name, value)| current.members.get(name) == Some(value))
+                })
+            }),
+            "Paykit wire 5: the publication drops or changes a retained opaque member",
+        )
+    }
+
     /// "Attempted periods" (Paykit wire 5.3): a reader that holds the version a write was
     /// built on (`self`) checks every listed period `later` drops: the write's `conditions`
     /// carry a `claim_step` condition on that period's claim, the obligation of (payee,

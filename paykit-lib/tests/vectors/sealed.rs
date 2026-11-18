@@ -3878,6 +3878,50 @@ fn test_record_transitions_compare_versions_of_one_record() {
 }
 
 #[test]
+fn test_issued_receipt_publication_keeps_members_of_each_record_and_nested_object() {
+    let keys = Keys::from_seeds();
+    let paid = ActivityRecord {
+        request: Some(stored_message(&keys, "payment_request")),
+        proof: Some(stored_message(&keys, "payment_proof")),
+        receipt: Some(stored_message(&keys, "payment_receipt")),
+        ..activity(ActivitySide::Payee, pubky(ALICE))
+    };
+    let read = |json: &Value| {
+        ActivityRecord::read(
+            &serde_json::to_vec(json).unwrap(),
+            &pubky(BOB),
+            ActivitySide::Payee,
+        )
+        .unwrap()
+    };
+    let mut prior = written(&paid);
+    prior["merchant_reference"] = "order 5".into();
+    prior["proof"]["cert"]["merchant_note"] = "collected".into();
+    let mut eager = written(&paid);
+    eager["shipping_reference"] = "item 8".into();
+    eager["proof"]["cert"]["shipping_note"] = "delivered".into();
+    let mut union = prior.clone();
+    union["shipping_reference"] = eager["shipping_reference"].clone();
+    union["proof"]["cert"]["shipping_note"] = eager["proof"]["cert"]["shipping_note"].clone();
+    assert!(read(&prior)
+        .check_receipt_publication(&read(&union))
+        .is_ok());
+    assert!(read(&eager)
+        .check_receipt_publication(&read(&union))
+        .is_ok());
+    assert!(read(&prior)
+        .check_receipt_publication(&read(&eager))
+        .is_err());
+    union["proof"]["cert"]["shipping_note"] = "returned".into();
+    assert!(read(&prior)
+        .check_receipt_publication(&read(&union))
+        .is_ok());
+    assert!(read(&eager)
+        .check_receipt_publication(&read(&union))
+        .is_err());
+}
+
+#[test]
 fn test_activity_record_receipt_is_of_its_proofs_billing_period() {
     // A period record with the February period's proof, and a receipt of that proof's attempt
     // that names another Billing Period: refused for the receipt's period.
