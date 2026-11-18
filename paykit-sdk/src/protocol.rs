@@ -41,7 +41,7 @@ use pubky_switch_client::app::{
 };
 use pubky_switch_client::error::StoreError;
 use pubky_switch_core::enc::{serde_b64, unb64_array};
-use pubky_switch_core::message::Message;
+use pubky_switch_core::message::{Message, MessagePlaintext};
 use pubky_switch_core::receive::KindRules;
 use pubky_switch_core::records::{AppCert, AppRecord};
 use pubky_switch_core::scopes as switch_scopes;
@@ -1237,6 +1237,13 @@ impl Protocol for PaykitProtocol {
         kind != Kind::ResendRequest.as_str()
     }
 
+    fn message_adds_conversation(&self, message: &Message, _: &MessagePlaintext) -> bool {
+        // A withdrawal never admits its recipient to the publisher's inbox (Paykit wire 4.13).
+        message.kind != Kind::PrivatePaymentList.as_str()
+            || paykit_lib::bodies::PrivatePaymentList::from_body(&message.body)
+                .is_ok_and(|list| !list.payment_endpoints.is_empty())
+    }
+
     /// Paykit's collections with their fixed policies (Paykit spec 6, Paykit wire 5.1):
     /// `payee_activity` with one policy per label, so an app holding `paykit_request` lists and
     /// takes every label's records, and one holding `paykit_request:<label>` its label's.
@@ -1258,9 +1265,8 @@ impl Protocol for PaykitProtocol {
         let own = self.own()?;
         if collection == crate::publish::COLLECTION {
             return value
-                .filter(|bytes| paykit_lib::records::ListPublicationRecord::read(bytes).is_ok())
-                .or(seen)
-                .map(<[u8]>::to_vec);
+                .and_then(|bytes| crate::publish::PublicationFloor::mark(own.cert.app_id(), bytes))
+                .or_else(|| seen.map(<[u8]>::to_vec));
         }
         let reads = match (Collection::from_name(collection)?, value) {
             (Collection::PayerActivity, Some(v)) => {
@@ -1310,16 +1316,11 @@ impl Protocol for PaykitProtocol {
         base: WriteBase,
     ) -> Option<String> {
         if collection == crate::publish::COLLECTION {
-            use paykit_lib::records::ListPublicationRecord;
-            let current = match ListPublicationRecord::read(value?) {
-                Ok(current) => current,
-                Err(error) => return Some(error.to_string()),
-            };
-            let held = ListPublicationRecord::read(seen?).ok()?;
-            return held
-                .check_later_write(&current)
-                .err()
-                .map(|e| e.to_string());
+            return crate::publish::foreign_publication(
+                self.own().map(|own| own.cert.app_id()),
+                seen,
+                value,
+            );
         }
         // Nothing seen of the record yet, as at its first read: nothing to go back on.
         self.regression(collection, seen?, value, base.held)
@@ -1521,6 +1522,33 @@ mod tests {
         let p = protocol();
         assert!(!p.adds_conversation("paykit.resend_request"));
         assert!(p.adds_conversation("paykit.payment_request"));
+    }
+
+    #[test]
+    fn test_protocol_only_a_readable_nonempty_private_list_can_add_a_conversation() {
+        let shop = Party::new("shop", "shop", &["paykit_request", "paykit_settlements"]);
+        let p = protocol_of(&shop);
+        for (endpoints, expected) in [
+            (json!({"btc-bitcoin-p2wpkh": {"payload": "bc1q"}}), true),
+            (json!({}), false),
+            (json!(null), false),
+        ] {
+            let message = Message::new(
+                Kind::PrivatePaymentList.as_str(),
+                pubky_switch_core::message::Sender::of_app(shop.id(), &shop.keys),
+                [4; 32],
+                NOW,
+                vec![],
+                object(json!({
+                    "version": {"generation": 1, "counter": 1},
+                    "expires_at": pubky_switch_core::time::rfc3339(NOW + 3_600_000),
+                    "payment_endpoints": endpoints
+                })),
+            )
+            .unwrap();
+            let plaintext = message.sign(&shop.keys).unwrap();
+            assert_eq!(p.message_adds_conversation(&message, &plaintext), expected);
+        }
     }
 
     #[test]

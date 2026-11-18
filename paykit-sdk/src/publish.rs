@@ -47,6 +47,69 @@ fn counter_unavailable() -> Refusal {
     )
 }
 
+/// Only a publication signed by this app supplies its retained floor (Paykit wire 5.8).
+/// The client checks every verified write from another app before calling `record_seen`.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PublicationFloor {
+    #[serde(with = "pubky_switch_core::enc::serde_b64")]
+    writer: [u8; 16],
+    #[serde(with = "pubky_switch_core::enc::serde_b64")]
+    recipient: [u8; 32],
+    generation: u64,
+    counter: u64,
+}
+
+impl PublicationFloor {
+    pub(crate) fn mark(writer: [u8; 16], value: &[u8]) -> Option<Vec<u8>> {
+        let publication = ListPublicationRecord::read(value).ok()?;
+        if publication.publisher != writer {
+            return None;
+        }
+        serde_json::to_vec(&Self {
+            writer,
+            recipient: publication.recipient,
+            generation: publication.generation,
+            counter: publication.counter,
+        })
+        .ok()
+    }
+
+    fn for_target(
+        bytes: &[u8],
+        publisher: [u8; 16],
+        recipient: [u8; 32],
+        generation: u64,
+    ) -> Result<u64> {
+        let floor: Self = serde_json::from_slice(bytes).map_err(|_| counter_unavailable())?;
+        if floor.writer != publisher
+            || floor.recipient != recipient
+            || floor.generation != generation
+        {
+            return Err(counter_unavailable().into());
+        }
+        Ok(ListVersion::new(generation, floor.counter)?.counter())
+    }
+}
+
+/// The client calls this only for a verified write by a different app. The publishing
+/// app's own value can therefore never be taken from such a write, even on its first read.
+pub(crate) fn foreign_publication(
+    own: Option<[u8; 16]>,
+    seen: Option<&[u8]>,
+    value: Option<&[u8]>,
+) -> Option<String> {
+    let current = match ListPublicationRecord::read(value?) {
+        Ok(current) => current,
+        Err(error) => return Some(error.to_string()),
+    };
+    let retained = seen.and_then(|bytes| serde_json::from_slice::<PublicationFloor>(bytes).ok());
+    if own == Some(current.publisher) || retained.is_some() {
+        return Some("Paykit wire 5.8: the write is not by the publisher of this counter".into());
+    }
+    None
+}
+
 fn unresolved() -> Refusal {
     Refusal::NotNow("Paykit spec 8.4.1: the recipient's previous publication is unresolved".into())
 }
@@ -138,6 +201,7 @@ impl ListReservation {
 pub(crate) struct RestoredPublications {
     batches: BTreeMap<PublicationKey, PublicationIds>,
     applied: BTreeSet<PublicationKey>,
+    floors: BTreeMap<[u8; 32], ListReservation>,
     recipients: BTreeSet<[u8; 32]>,
 }
 
@@ -163,6 +227,17 @@ impl RestoredPublications {
         let issue = state::restored::<ListReservation>(key, value, binder)?;
         self.recipients.insert(issue.recipient);
         self.applied.insert(issue.original());
+        if let Some(held) = self.floors.get(&issue.recipient) {
+            let prior = (held.generation, held.counter);
+            let next = (issue.generation, issue.counter);
+            if prior == next && (held.id != issue.id || held.hash != issue.hash) {
+                return Err(counter_unavailable().into());
+            }
+            if next <= prior {
+                return Ok(());
+            }
+        }
+        self.floors.insert(issue.recipient, issue);
         Ok(())
     }
 
@@ -172,6 +247,12 @@ impl RestoredPublications {
             if !self.applied.contains(&original) {
                 writes.push(original.write(&ids)?);
             }
+        }
+        for (recipient, issue) in self.floors {
+            writes.push(state::local_put(
+                &key::list_reservation(&recipient),
+                &issue,
+            )?);
         }
         for recipient in self.recipients {
             writes.push(state::local_put(
@@ -248,17 +329,37 @@ pub(crate) fn may_send(view: &DeliveryView<'_>) -> std::result::Result<bool, Sto
     allowed(view).map_err(crate::protocol::view_failure)
 }
 
+fn current_publication(record: &SharedRecord) -> Result<ListPublicationRecord> {
+    if !record.authenticated
+        || record.flagged
+        || record.not_taken
+        || record.different_write_at_held_version
+        || record.divergent
+        || record.doubtful
+    {
+        return Err(counter_unavailable().into());
+    }
+    let bytes = record.content.value().ok_or_else(counter_unavailable)?;
+    let publication = ListPublicationRecord::read(bytes)?;
+    if record.writer != publication.publisher {
+        return Err(Refusal::NotNow(format!(
+            "Paykit wire 5.8: app {} wrote another publisher's counter",
+            pubky_switch_core::enc::zbase32_encode(&record.writer),
+        ))
+        .into());
+    }
+    Ok(publication)
+}
+
 impl Paykit {
     fn bound_publication(&self, record: &SharedRecord) -> Result<ListPublicationRecord> {
-        let bytes = record.content.value().ok_or_else(counter_unavailable)?;
-        let publication = ListPublicationRecord::read(bytes)?;
+        let publication = current_publication(record)?;
         let expected = target(
             &publication.publisher,
             &publication.recipient,
             publication.generation,
         );
-        if !record.authenticated
-            || record.collection != COLLECTION
+        if record.collection != COLLECTION
             || record.policy != expected.collection.policy
             || self.app.record_key(&expected)? != record.key
         {
@@ -494,37 +595,29 @@ impl Paykit {
         let publisher = self.app_id();
         let target = target(&publisher, &recipient, generation);
         let key = self.app.record_key(&target)?;
-        let seen = self
-            .app
-            .record_seen(&key)
+        let seen = self.app.record_seen(&key).await?;
+        let applied = self
+            .local_get::<ListReservation>(&key::list_reservation(&recipient))
             .await?
-            .as_deref()
-            .map(ListPublicationRecord::read)
-            .transpose()?;
+            .filter(|issue| issue.generation == generation);
         let (counter, unknown) = match self.app.read_record_fresh(&target).await? {
-            RecordRead::Fresh(held)
-                if !held.flagged
-                    && !held.different_write_at_held_version
-                    && !held.divergent
-                    && !held.doubtful =>
-            {
+            RecordRead::Fresh(held) => {
                 let current = self.bound_publication(&held)?;
                 (current.counter, current.unknown)
             }
             RecordRead::Kept {
                 record: None,
                 reason: KeptReason::NotFound,
-            } if seen.is_none() => (0, UnknownMembers::default()),
+            } if seen.is_none() && applied.is_none() => (0, UnknownMembers::default()),
             _ => return Err(counter_unavailable().into()),
         };
-        if seen.as_ref().is_some_and(|floor| {
-            floor.publisher != publisher
-                || floor.recipient != recipient
-                || floor.generation != generation
-        }) {
-            return Err(counter_unavailable().into());
-        }
-        let counter = counter.max(seen.map_or(0, |floor| floor.counter));
+        let floor = seen
+            .as_deref()
+            .map(|bytes| PublicationFloor::for_target(bytes, publisher, recipient, generation))
+            .transpose()?;
+        let counter = counter
+            .max(floor.unwrap_or(0))
+            .max(applied.map_or(0, |issue| issue.counter));
         let version = ListVersion::new(generation, counter + 1)?;
         let list = PrivatePaymentList {
             version,
@@ -598,5 +691,174 @@ impl Paykit {
             return Err(error.into());
         }
         Ok(publication)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pubky_switch_core::ops::RecordVersion;
+
+    fn publication() -> ListPublicationRecord {
+        ListPublicationRecord {
+            publisher: [1; 16],
+            recipient: [2; 32],
+            generation: 1,
+            counter: 5,
+            msg_id: "37463d05-59a1-4267-bdd5-f152b03476dc".into(),
+            message_hash: [3; 32],
+            unknown: UnknownMembers::default(),
+        }
+    }
+
+    fn record(publication: &ListPublicationRecord, writer: [u8; 16]) -> SharedRecord {
+        SharedRecord {
+            key: [4; 32],
+            collection: COLLECTION.into(),
+            policy: target(
+                &publication.publisher,
+                &publication.recipient,
+                publication.generation,
+            )
+            .collection
+            .policy,
+            version: RecordVersion::new(1, 2),
+            authenticated: true,
+            writer,
+            written_at_ms: Some(10),
+            content: RecordContent::Value(publication.to_json().unwrap()),
+            doubtful: false,
+            flagged: false,
+            not_taken: false,
+            different_write_at_held_version: false,
+            divergent: false,
+        }
+    }
+
+    #[test]
+    fn test_publication_only_its_publisher_supplies_the_counter_and_floor() {
+        let issued = publication();
+        let own = issued.publisher;
+        let sibling = [9; 16];
+        let issued_bytes = issued.to_json().unwrap();
+        let floor = PublicationFloor::mark(own, &issued_bytes).unwrap();
+        assert!(PublicationFloor::mark(sibling, &issued_bytes).is_none());
+        assert!(PublicationFloor::for_target(&issued_bytes, own, issued.recipient, 1).is_err());
+        for seen in [None, Some(floor.as_slice())] {
+            for counter in [2, 6, 9_007_199_254_740_991] {
+                let mut observed = issued.clone();
+                observed.counter = counter;
+                let bytes = observed.to_json().unwrap();
+                assert!(foreign_publication(Some(own), seen, Some(&bytes)).is_some());
+                let refused = current_publication(&record(&observed, sibling)).unwrap_err();
+                assert!(refused
+                    .to_string()
+                    .contains(&pubky_switch_core::enc::zbase32_encode(&sibling)));
+            }
+            let mut recovered = issued.clone();
+            recovered.counter += 1;
+            assert_eq!(
+                current_publication(&record(&recovered, own)).unwrap(),
+                recovered
+            );
+            if let Some(seen) = seen {
+                assert_eq!(
+                    PublicationFloor::for_target(seen, own, issued.recipient, 1).unwrap(),
+                    5
+                );
+                assert!(PublicationFloor::for_target(seen, own, [8; 32], 1).is_err());
+                assert!(PublicationFloor::for_target(seen, own, issued.recipient, 2).is_err());
+                assert!(PublicationFloor::for_target(seen, sibling, issued.recipient, 1).is_err());
+            }
+        }
+        let mut other = issued;
+        other.publisher = sibling;
+        let bytes = other.to_json().unwrap();
+        assert!(foreign_publication(Some(own), None, Some(&bytes)).is_none());
+        assert!(foreign_publication(Some(own), Some(&bytes), Some(&bytes)).is_none());
+        assert!(foreign_publication(Some(own), Some(&floor), Some(&bytes)).is_some());
+    }
+
+    #[test]
+    fn test_publication_discovery_and_allocation_require_a_current_trusted_write() {
+        let issued = publication();
+        let held = record(&issued, issued.publisher);
+        for invalidate in [
+            |r: &mut SharedRecord| r.authenticated = false,
+            |r: &mut SharedRecord| r.flagged = true,
+            |r: &mut SharedRecord| r.not_taken = true,
+            |r: &mut SharedRecord| r.different_write_at_held_version = true,
+            |r: &mut SharedRecord| r.divergent = true,
+            |r: &mut SharedRecord| r.doubtful = true,
+        ] {
+            let mut uncertain = held.clone();
+            invalidate(&mut uncertain);
+            assert!(current_publication(&uncertain).is_err());
+        }
+        assert_eq!(current_publication(&held).unwrap(), issued);
+    }
+
+    #[test]
+    fn test_publication_restore_keeps_the_greatest_applied_floor_without_renewing_consent() {
+        let issued = publication();
+        let at = key::list_reservation(&issued.recipient);
+        let binder = state::Binder::unblinded([8; 32]);
+        let issue = |counter, hash| ListReservation {
+            recipient: issued.recipient,
+            choice: [7; 16],
+            revision: Some([6; 16]),
+            generation: issued.generation,
+            counter,
+            id: issued.msg_id.clone(),
+            hash: [hash; 32],
+        };
+        for pair in [[(3, 4), (6, 5)], [(6, 5), (3, 4)]] {
+            let mut restored = RestoredPublications::default();
+            for (counter, hash) in pair {
+                restored
+                    .applied(
+                        at.as_bytes(),
+                        &state::encode(&issue(counter, hash)).unwrap(),
+                        &binder,
+                    )
+                    .unwrap();
+            }
+            let mut floor = None;
+            let mut choice = None;
+            for write in restored.writes().unwrap() {
+                if let LocalWrite::Put { key: k, value } = write {
+                    if k == at.as_bytes() {
+                        floor =
+                            Some(state::restored::<ListReservation>(&k, &value, &binder).unwrap());
+                    } else if k == key::list_recipient(&issued.recipient).as_bytes() {
+                        choice =
+                            Some(state::restored::<ListRecipient>(&k, &value, &binder).unwrap());
+                    }
+                }
+            }
+            let floor = floor.unwrap();
+            let choice = choice.unwrap();
+            assert_eq!(
+                (floor.generation, floor.counter, floor.hash),
+                (1, 6, [5; 32])
+            );
+            assert!(!choice.chosen && choice.withdraw);
+            assert_ne!(choice.choice, floor.choice);
+        }
+        let mut restored = RestoredPublications::default();
+        restored
+            .applied(
+                at.as_bytes(),
+                &state::encode(&issue(5, 4)).unwrap(),
+                &binder,
+            )
+            .unwrap();
+        assert!(restored
+            .applied(
+                at.as_bytes(),
+                &state::encode(&issue(5, 5)).unwrap(),
+                &binder
+            )
+            .is_err());
     }
 }

@@ -76,6 +76,88 @@ async fn test_publication_updates_one_contacts_payable_list() {
 }
 
 #[tokio::test]
+async fn test_publication_restored_withdrawal_never_admits_its_recipient() {
+    use crate::common::store;
+    use paykit_sdk::PaykitConfig;
+    use pubky_switch_client::app::Delivery;
+
+    let w = World::new();
+    let mut shop = w
+        .join(
+            &w.bob,
+            "shop",
+            paykit_sdk::AppScopes::new()
+                .request()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+        )
+        .await;
+    let mut wallet = w.wallet("wallet").await;
+    let recipient = w.alice_id();
+    let backup = shop.backup().await.unwrap();
+    shop.set_list_endpoints(offered("lno1first")).await.unwrap();
+    shop.publish_list_to(recipient).await.unwrap();
+    let target = target(&shop, &recipient, 1);
+    let key = shop.app().record_key(&target).unwrap();
+    let held = shop.app().shared_record(&key).await.unwrap().unwrap();
+    let first = ListPublicationRecord::read(held.content.value().unwrap()).unwrap();
+    assert!(matches!(
+        shop.app().delivery(&first.msg_id).await.unwrap(),
+        Some(Delivery::Queued { .. })
+    ));
+    let admitted = shop.app_mut().allow_list().await.unwrap().conversations;
+    assert!(admitted.iter().any(|entry| entry.pubky == recipient));
+    shop.app_mut()
+        .remove_conversation(&recipient)
+        .await
+        .unwrap();
+    drop(shop);
+
+    let mut shop = Paykit::restore(
+        w.env(&w.bob, store()),
+        PaykitConfig::default(),
+        &backup,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    shop.receive(None).await.unwrap();
+    let held = shop.app().shared_record(&key).await.unwrap().unwrap();
+    let withdrawal = ListPublicationRecord::read(held.content.value().unwrap()).unwrap();
+    assert_eq!(withdrawal.counter, first.counter + 1);
+    assert!(matches!(
+        shop.app().delivery(&withdrawal.msg_id).await.unwrap(),
+        Some(Delivery::Queued { .. })
+    ));
+    assert!(shop
+        .app_mut()
+        .allow_list()
+        .await
+        .unwrap()
+        .conversations
+        .is_empty());
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let retry = shop
+        .app_mut()
+        .flush_message(&withdrawal.msg_id)
+        .await
+        .unwrap();
+    assert!(
+        matches!(retry, Some(Delivery::Accepted { .. })),
+        "{retry:?}"
+    );
+    assert!(shop
+        .app_mut()
+        .allow_list()
+        .await
+        .unwrap()
+        .conversations
+        .is_empty());
+}
+
+#[tokio::test]
 async fn test_publication_restore_lists_former_and_current_recipients() {
     use crate::common::{store, BOB_ORIGIN};
     use paykit_sdk::PaykitConfig;
