@@ -75,9 +75,9 @@ async fn join(
 
 async fn paid_request(
     shop: &mut Paykit,
-    buyer: &mut Paykit,
+    mut buyer: Paykit,
     invoice: &str,
-) -> TestResult<(RequestRef, [u8; 32])> {
+) -> TestResult<(Paykit, RequestRef, [u8; 32])> {
     let endpoints = BTreeMap::from([(
         PaymentEndpointIdentifier::new("btc-lightning-bolt11")?,
         PaymentEndpointPayload::new(invoice)?,
@@ -95,13 +95,18 @@ async fn paid_request(
         .await?
         .request
         .ok_or("request was not sent")?;
-    buyer.receive(None).await?;
-    assert!(matches!(
-        Box::pin(buyer.pay_request(&request, PayOptions::default()))
+    // The payer drives its own wallet task, just as each independent till does.
+    // The shop's orchestration frame need not stay on the payer's native stack.
+    let buyer = tokio::spawn(Box::pin(async move {
+        buyer.receive(None).await?;
+        let payment = buyer
+            .pay_request(&request, PayOptions::default())
             .await
-            .outcome?,
-        PayOutcome::Paid { .. }
-    ));
+            .outcome?;
+        assert!(matches!(payment, PayOutcome::Paid { .. }));
+        Ok::<_, paykit_sdk::PaykitError>(buyer)
+    }))
+    .await??;
     shop.receive(None).await?;
     let sale = shop
         .payee_activity()
@@ -110,7 +115,7 @@ async fn paid_request(
         .find(|a| a.request_hash == Some(request.request_hash))
         .ok_or("request missing")?;
     assert_eq!(sale.status, PayeeStatus::ProofReceived);
-    Ok((request, sale.record))
+    Ok((buyer, request, sale.record))
 }
 
 #[tokio::test]
@@ -204,8 +209,8 @@ async fn enrolled_tills(world: &World) -> TestResult<Tills> {
 
 async fn competing_tills(world: &World) -> TestResult {
     let Tills {
-        mut buyer,
-        mut other,
+        buyer,
+        other,
         mut till,
         mut labelled,
         rail,
@@ -214,8 +219,8 @@ async fn competing_tills(world: &World) -> TestResult {
     } = Box::pin(enrolled_tills(world)).await?;
     let before_credit = till.backup().await?;
     // Both authorized tills see the same legitimate purchase in the shop's labelled activity.
-    let (winner, first_record) =
-        Box::pin(paid_request(&mut labelled, &mut buyer, "ln-one-invoice")).await?;
+    let (mut buyer, winner, first_record) =
+        Box::pin(paid_request(&mut labelled, buyer, "ln-one-invoice")).await?;
     till.receive(None).await?;
     assert_eq!(rail.all_executions().values().sum::<u64>(), 1);
     assert!(till.verify_payment(&first_record).await?.is_some());
@@ -302,12 +307,8 @@ async fn competing_tills(world: &World) -> TestResult {
     }
     assert_eq!(rail.all_executions().values().sum::<u64>(), 1);
 
-    let (second, second_record) = Box::pin(paid_request(
-        &mut reopened,
-        &mut other,
-        "ln-independent-paid",
-    ))
-    .await?;
+    let (mut other, second, second_record) =
+        Box::pin(paid_request(&mut reopened, other, "ln-independent-paid")).await?;
     let second_receipt = reopened
         .confirm_payment(&second_record)
         .await?
@@ -319,9 +320,9 @@ async fn competing_tills(world: &World) -> TestResult {
     assert_ne!(receipts[0].msg_id, receipt);
     assert_eq!(rail.all_executions().values().sum::<u64>(), 2);
 
-    let (independent, third_record) = Box::pin(paid_request(
+    let (mut other, independent, third_record) = Box::pin(paid_request(
         &mut other_till,
-        &mut other,
+        other,
         "ln-independent-invoice",
     ))
     .await?;
@@ -428,19 +429,21 @@ async fn two_transactions(world: &World) -> TestResult {
     let mut credited = Vec::new();
     for (txid, tag) in [first, second] {
         wallets.rail.next(Behaviour::InTransaction(txid));
-        let (plain, plain_key) = Box::pin(paid_request(
+        let (buyer, plain, plain_key) = Box::pin(paid_request(
             &mut wallets.till,
-            &mut wallets.buyer,
+            wallets.buyer,
             "ln-batch-plain",
         ))
         .await?;
         wallets.rail.next(Behaviour::InTransaction(txid));
-        let (label, label_key) = Box::pin(paid_request(
+        wallets.buyer = buyer;
+        let (other, label, label_key) = Box::pin(paid_request(
             &mut wallets.labelled,
-            &mut wallets.other,
+            wallets.other,
             "ln-batch-label",
         ))
         .await?;
+        wallets.other = other;
         assert_ne!(plain_key, label_key);
         let (a, b) = tokio::join!(
             Box::pin(wallets.till.confirm_payment(&plain_key)),
@@ -498,12 +501,13 @@ async fn test_full_bucket_warns_once_and_a_confirmed_stored_receipt_stays_unsent
         return Err("missing scripted switch".into());
     };
     let mut tills = Box::pin(enrolled_tills(&world)).await?;
-    let (request, record) = Box::pin(paid_request(
+    let (buyer, request, record) = Box::pin(paid_request(
         &mut tills.till,
-        &mut tills.buyer,
+        tills.buyer,
         "ln-needs-confirmation",
     ))
     .await?;
+    tills.buyer = buyer;
     let proof = tills
         .till
         .app()
