@@ -573,7 +573,7 @@ By request and Billing Period (`messages.json` `resend_request_period`):
 
 ### 4.13 `private_payment_list`
 
-The latest list of one publishing app for one recipient identity (spec 8.4).
+The latest list of one publishing app for one recipient identity (spec 8.4). An empty `payment_endpoints` object identifies a withdrawal. Every delivery of that signed message omits the publisher's conversation-entry write (spec 8.4.1). Nonempty lists follow the ordinary first-message rule.
 
 | Field | Type | Req | Constraints | Notes |
 |---|---|---|---|---|
@@ -1199,9 +1199,9 @@ Derive the record key as in Section 1.5 with the permanent policy above. The ser
 | `msg_id` | uuid | yes | that list message's `msg_id` |
 | `message_hash` | `b64(32)` | yes | the message hash (1.5) of that list |
 
-**Binding** (Switch spec 8.2): the reader recomputes the record key with its own naming key and the policy above, and acts on the record only if the key is the one derived from `publisher`, `recipient` and `generation`. Unknown members follow Switch wire 1.1.
+**Binding** (Switch spec 8.2). The reader verifies the signed `record.put` and requires its authenticated writer App ID to equal `publisher`. It recomputes the record key with its naming key, the policy above and the value's `publisher`, `recipient` and `generation`. Both checks must pass before the value supplies a counter, a retained floor or a recipient for a restored withdrawal. A wrong writer keeps publication at that key on hold and is reported to the host, including on a restore without a prior observation (spec 8.4.1). Unknown members follow Switch wire 1.1.
 
-**Seen counters:** a reader that holds a write of the record ignores, and shows with its writer, a later write whose `counter` is lower than the one it holds, or equal with another `msg_id` or `message_hash` (spec 8.4.1).
+**Seen counters:** retain only counters bound to the authenticated publisher above. A later bound write whose `counter` is lower than the held counter, or equal with another `msg_id` or `message_hash`, is reported and leaves the held floor intact (spec 8.4.1).
 
 Vectors for this record come with the code that writes it.
 
