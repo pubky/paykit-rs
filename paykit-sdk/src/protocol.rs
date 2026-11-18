@@ -1152,11 +1152,12 @@ impl Protocol for PaykitProtocol {
     fn record_regression(
         &self,
         collection: &str,
-        seen: &[u8],
+        seen: Option<&[u8]>,
         value: Option<&[u8]>,
         base: WriteBase,
     ) -> Option<String> {
-        self.regression(collection, seen, value, base.held)
+        // Nothing seen of the record yet, as at its first read: nothing to go back on.
+        self.regression(collection, seen?, value, base.held)
     }
 }
 
