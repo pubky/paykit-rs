@@ -93,7 +93,13 @@ async fn test_publication_restored_withdrawal_never_admits_its_recipient() {
                 .unwrap(),
         )
         .await;
-    let mut wallet = w.wallet("wallet").await;
+    let mut wallet = w
+        .join(
+            &w.alice,
+            "wallet",
+            paykit_sdk::AppScopes::new().pay().build().unwrap(),
+        )
+        .await;
     let recipient = w.alice_id();
     let backup = shop.backup().await.unwrap();
     shop.set_list_endpoints(offered("lno1first")).await.unwrap();
