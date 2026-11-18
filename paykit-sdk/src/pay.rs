@@ -2306,14 +2306,18 @@ impl Paykit {
     /// within the bound the attempt was journaled with, so a fee estimate that grew, or an
     /// amount that changed, since the attempt was planned is never paid. A transfer that is
     /// what the user asked for, within the cap at planning, passes; a confirmed one passes
-    /// also when it is the one confirmed; a payment made only by hand (`by_hand`,
-    /// [`Paykit::amount_holds`]) passes only when it is the one confirmed. `Err` inside holds
-    /// the refusal, with what the method would transfer now.
+    /// also when it is the one confirmed. For a payment permitted only by hand,
+    /// [`Paykit::amount_holds`] requires the original selection and the transfer must
+    /// match its confirmation. `Err` inside holds the refusal.
     fn transfer_holds(
         &self,
         entry: &JournalEntry,
-        by_hand: bool,
+        automatic_first: bool,
     ) -> Result<std::result::Result<(), Refusal>> {
+        let by_hand = match self.amount_holds(entry, automatic_first)? {
+            Ok(by_hand) => by_hand,
+            Err(refusal) => return Ok(Err(refusal)),
+        };
         let endpoint_id = entry.destination.endpoint_id()?;
         let payload = entry.destination.payload()?;
         let amount = entry.call_amount()?;
@@ -4395,11 +4399,7 @@ impl Paykit {
             return Ok(FinalCheck::Hold);
         }
         let automatic_first = by == Initiator::Automatic && matches!(kind, Dispatch::First { .. });
-        let by_hand = match self.amount_holds(entry, automatic_first)? {
-            Ok(by_hand) => by_hand,
-            Err(refusal) => return Ok(FinalCheck::Refused(refusal)),
-        };
-        if let Err(refusal) = self.transfer_holds(entry, by_hand)? {
+        if let Err(refusal) = self.transfer_holds(entry, automatic_first)? {
             return Ok(FinalCheck::Refused(refusal));
         }
         let may_attempt = self.app.may_attempt(by == Initiator::Automatic).is_ok();
