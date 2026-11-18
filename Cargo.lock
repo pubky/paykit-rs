@@ -1671,7 +1671,7 @@ dependencies = [
 [[package]]
 name = "pubky-switch"
 version = "0.1.0"
-source = "git+https://github.com/pubky/pubky-switch?rev=24371d328354cdfd5502bfd825c8042c394f0818#24371d328354cdfd5502bfd825c8042c394f0818"
+source = "git+https://github.com/pubky/pubky-switch?rev=22f0af54ea5903f03a1f760e7851badcb1424fa1#22f0af54ea5903f03a1f760e7851badcb1424fa1"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1745,7 +1745,7 @@ dependencies = [
 [[package]]
 name = "pubky-switch-harness"
 version = "0.1.0"
-source = "git+https://github.com/pubky/pubky-switch?rev=24371d328354cdfd5502bfd825c8042c394f0818#24371d328354cdfd5502bfd825c8042c394f0818"
+source = "git+https://github.com/pubky/pubky-switch?rev=22f0af54ea5903f03a1f760e7851badcb1424fa1#22f0af54ea5903f03a1f760e7851badcb1424fa1"
 dependencies = [
  "axum",
  "futures-util",
