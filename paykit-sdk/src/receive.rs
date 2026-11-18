@@ -1208,7 +1208,7 @@ pub(crate) fn make_room_for_stop(
         *times = (times.0.min(at), times.1.max(at));
     }
     for (from, times) in dropped {
-        mark_dropped(cx, from, times, true)?;
+        mark_dropped(cx, from, times)?;
     }
     Ok(())
 }
@@ -2113,9 +2113,9 @@ pub(crate) fn kept_reply_evicted(
 /// Make room for a new reply from `sender`, accepted at `new`, among the kept replies, in
 /// the step: the one the bounds drop ([`kept_reply_evicted`]) goes, and counts in its sender's mark
 /// (`pd/<sender>`, `marks.rs`) with its acceptance time, so the sender is asked to send it
-/// again once the record of a request, of either side, naming it as counterparty reads. It
-/// is dropped as one never processed (Paykit spec 8.1, "Replies before their record"): the
-/// client marked it processed when it was kept, so the step forgets its pair
+/// again as soon as sends to it are permitted. The reply is dropped as one never processed
+/// (Paykit spec 8.1, "Replies before their record"). The client marked it processed when
+/// it was kept, so the step forgets its pair
 /// ([`ReceiveContext::forget_processed`]), in the commit that drops it and writes the mark,
 /// and a re-sent copy is taken as a new message. This is the one pair a Paykit App forgets
 /// (Switch spec 11); a reply a later copy brings again is never applied twice, since a
@@ -2190,23 +2190,17 @@ pub(crate) fn make_room_for_reply(
             key: names.swap_remove(index),
         },
     );
-    mark_dropped(cx, from, (at, at), false)
+    mark_dropped(cx, from, (at, at))
 }
 
 /// Count messages from `from` dropped for the bounds, accepted between `times` (the
 /// earliest and the latest), in the sender's mark of dropped replies (`pd/<sender>`,
 /// `marks.rs`), in the step: the sender is asked to send them again, from the mark's
-/// earliest time. A mark is due at once when `due`, as for a stop dropped for the bounds,
-/// whose request may come at any time; otherwise, as for a reply, once the app holds the
-/// record of a request, of either side, that reads and names the sender as its
-/// counterparty: a payee's request record for a payer's reply, a payer's for a receipt or
-/// period details (`Paykit::ask_on_marks`). A record of a Billing Period or of a payment
-/// without a request makes no mark due.
+/// earliest time as soon as sending to it is permitted ([`Paykit::ask_on_marks`]).
 fn mark_dropped(
     cx: &mut ReceiveContext<'_>,
     from: [u8; 32],
     times: (u64, u64),
-    due: bool,
 ) -> Result<(), Fail> {
     let (earliest, latest) = times;
     let family = MarkFamily::Replies;
@@ -2218,7 +2212,7 @@ fn mark_dropped(
             others.push((mark.sender, mark.latest_ms));
         }
     }
-    let counted = count_dropped(held, &others, from, earliest, due);
+    let counted = count_dropped(held, &others, from, earliest, true);
     if let Some(gone) = counted.evicted {
         keep_local(
             cx,
@@ -2229,7 +2223,6 @@ fn mark_dropped(
     }
     if let Some(mut mark) = counted.put {
         mark.latest_ms = mark.latest_ms.max(latest);
-        mark.due |= due;
         keep_local(cx, local(&mark_key, &mark)?);
     }
     Ok(())

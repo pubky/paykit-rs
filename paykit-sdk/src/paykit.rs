@@ -1058,10 +1058,9 @@ impl Paykit {
         if !Box::pin(self.payer_waits(keys)).await? {
             Box::pin(self.place_kept_cancellations()).await?;
         }
-        // The senders of messages dropped before they were taken: of replies dropped for the
-        // bounds once the app holds the record of a request, of either side, naming them, of
-        // entries dropped unverified at once, then again at most once a day while the mark
-        // lives. The pairs a block's marks counted are forgotten first, so their asks may go
+        // Ask for replies dropped for a bound and entries dropped unverified as soon as
+        // the sender's holds and mark cadence allow. Forget the pairs a block's marks
+        // counted first, so their asks may go
         // (`marks.rs`). Before them, the notices of lost messages owed on block marks the
         // receive steps dropped for the bound are settled from the outbox's answer, which
         // only this side of the read can make (`marks::LostOwed`).
