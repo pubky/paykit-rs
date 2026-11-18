@@ -13,12 +13,14 @@ use pubky_switch_core::ops::{Condition, RecordVersion};
 
 use crate::activity::{family, ActivityTarget};
 use crate::error::{Refusal, Result};
+use crate::notices::SettlementSubject;
 use crate::paykit::Paykit;
 
 /// A bucket write, or the checked current write for an explicitly confirmed unmarked
 /// credit. The condition belongs to the read that supplied the decision.
 pub(crate) struct SettlementWrite {
     number: u16,
+    payer: [u8; 32],
     target: RecordTarget,
     conditions: Vec<Condition>,
     bucket: Option<SettlementBucket>,
@@ -44,6 +46,7 @@ impl Paykit {
         &mut self,
         id: &[u8],
         activity: &ActivityTarget,
+        payer: [u8; 32],
         binding: RecordBinding,
         confirmed: bool,
         unmarked_confirmed: bool,
@@ -91,9 +94,8 @@ impl Paykit {
                 record: None,
                 reason: KeptReason::NotFound,
             } => CurrentBucket::Absent,
-            // A cached write after a failed read cannot supply an application-time
-            // comparison for a receipt, even one the user explicitly confirmed.
-            _ => return Err(Refusal::MaybeCredited.into()),
+            // Retained marks still apply when the service cannot supply the current write.
+            _ => CurrentBucket::Unopened,
         };
         let kind = match binding {
             RecordBinding::Request { .. } => OccurrenceKind::OneTimeRequest,
@@ -115,19 +117,28 @@ impl Paykit {
             }
             CreditDecision::Marked(_) => return Ok(SettlementCredit::AlreadyCredited),
             CreditDecision::Credit { bucket, .. } => Some(bucket),
-            CreditDecision::Full if unmarked_confirmed => None,
             CreditDecision::Full => {
-                return Err(Refusal::SettlementBucketFull { bucket: number }.into())
+                self.raise_settlement_notice(SettlementSubject::Bucket(number), payer)
+                    .await?;
+                if !unmarked_confirmed {
+                    return Err(Refusal::SettlementBucketFull { bucket: number }.into());
+                }
+                None
             }
-            CreditDecision::NeedsUser if confirmed => None,
             CreditDecision::NeedsUser | CreditDecision::Lost => {
-                return Err(Refusal::MaybeCredited.into())
+                self.raise_settlement_notice(SettlementSubject::Tag(tag), payer)
+                    .await?;
+                if !confirmed || version.is_none() || decision == CreditDecision::Lost {
+                    return Err(Refusal::MaybeCredited.into());
+                }
+                None
             }
         };
         let current = self.app.record_condition(&key).await?;
         let conditions = bucket_conditions(key, version.unwrap_or(RecordVersion::NONE), current)?;
         Ok(SettlementCredit::Write(SettlementWrite {
             number,
+            payer,
             conditions,
             target,
             bucket,
@@ -163,6 +174,8 @@ impl Paykit {
                     Some(ErrorCode::QuotaExceeded | ErrorCode::TooLarge)
                 )
         }) {
+            self.raise_settlement_notice(SettlementSubject::Bucket(write.number), write.payer)
+                .await?;
             if unmarked_confirmed {
                 return Ok(self.submit(receipt_only(batch)).await?);
             }

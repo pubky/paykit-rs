@@ -1110,6 +1110,7 @@ impl Paykit {
         if known_method && paykit_lib::derive::settlement_id(&proof.proof).is_none() {
             return Ok(None);
         }
+        let mut other_uncertain = false;
         if let Some(settlement) = settlement_id.as_ref().filter(|_| bound.receipt.is_none()) {
             if self
                 .retained_credit(bound.receipt.as_ref().map(|r| r.hash()), settlement)
@@ -1122,9 +1123,7 @@ impl Paykit {
                 .await?
             {
                 OtherCredit::Credited => return Ok(None),
-                OtherCredit::CantTell if !maybe_credited_confirmed => {
-                    return Err(Refusal::MaybeCredited.into());
-                }
+                OtherCredit::CantTell => other_uncertain = true,
                 _ => {}
             }
         }
@@ -1150,13 +1149,14 @@ impl Paykit {
         let settlement = if bound.receipt.is_some() {
             None
         } else {
-            if !maybe_credited_confirmed && self.settlement_uncertain_after_loss(paid_at).await? {
-                return Err(Refusal::MaybeCredited.into());
+            if settlement_id.is_none() && binding == RecordBinding::Unrequested {
+                return Ok(None);
             }
-            if let Some(id) = settlement_id {
+            let decision = if let Some(id) = &settlement_id {
                 match Box::pin(self.settlement_credit(
-                    &id,
+                    id,
                     &target,
+                    bound.counterparty,
                     binding,
                     maybe_credited_confirmed,
                     unmarked_credit_confirmed,
@@ -1183,13 +1183,30 @@ impl Paykit {
                     SettlementCredit::AlreadyCredited => return Ok(None),
                     SettlementCredit::Write(write) => Some(write),
                 }
-            } else if binding == RecordBinding::Unrequested {
-                return Ok(None);
-            } else if maybe_credited_confirmed {
-                None
             } else {
-                return Err(Refusal::MaybeCredited.into());
+                None
+            };
+            if other_uncertain
+                || self.settlement_uncertain_after_loss(paid_at).await?
+                || settlement_id.is_none()
+            {
+                let subject = match &settlement_id {
+                    Some(id) => crate::SettlementSubject::Tag(paykit_lib::derive::settlement_tag(
+                        self.app.naming_key(),
+                        id,
+                    )),
+                    None => crate::SettlementSubject::RequestedProof {
+                        record: *record,
+                        proof: proof_stored.hash(),
+                    },
+                };
+                self.raise_settlement_notice(subject, bound.counterparty)
+                    .await?;
+                if !maybe_credited_confirmed {
+                    return Err(Refusal::MaybeCredited.into());
+                }
             }
+            decision
         };
         Ok(Some(Box::new(VerifiedCredit {
             paid_at,

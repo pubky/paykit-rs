@@ -99,6 +99,7 @@ use crate::journal::JournalEntry;
 use crate::loss::LossBoundary;
 use crate::marks::{DropMark, KeyWaitMark};
 use crate::notices::KeptNotice;
+use crate::notices::SettlementSubject;
 use crate::pay::ListAsk;
 use crate::paykit::Paykit;
 use crate::protocol::{MissedItemMark, QueuedAsk};
@@ -1206,6 +1207,7 @@ pub(crate) mod key {
 
     pub(crate) const RETAINED_RECEIPTS: &str = "rc/";
     pub(crate) const CREDIT_HOLDS: &str = "ch/";
+    pub(crate) const SETTLEMENT_NOTICES: &str = "nt/settlement/";
     pub(crate) const SETTLEMENT_MARKS: &str = "sm/";
     pub(crate) fn retained_receipt(hash: &[u8; 32]) -> String {
         format!("{RETAINED_RECEIPTS}{}", b64(hash))
@@ -1511,6 +1513,8 @@ pub(crate) mod key {
 /// every builder's key parses to its own family, so the two can't drift.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StateKey {
+    /// A warning once per bucket or settlement.
+    SettlementNotice(SettlementSubject),
     /// A complete mark observed at the permanently bound settlement bucket key.
     SettlementMark {
         record: [u8; 32],
@@ -1870,6 +1874,10 @@ impl StateKey {
                         }
                     }
                     "nt" => {
+                        if let Some(subject) = rest.strip_prefix("settlement/") {
+                            return crate::notices::SettlementSubject::parse(subject)
+                                .map(Self::SettlementNotice);
+                        }
                         let (attempt, tag) = rest.split_once('/')?;
                         if let (Some(counterparty), Some(from)) =
                             (b64_32(attempt), tag.strip_prefix("lost-"))

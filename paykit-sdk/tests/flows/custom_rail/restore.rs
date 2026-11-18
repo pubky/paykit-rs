@@ -51,6 +51,7 @@ async fn issue() -> Payment {
     let rail = Arc::new(LedgerRail {
         fake: w.rail.clone(),
         last: Mutex::new(None),
+        supplies_id: true,
         fee: None,
     });
     let mut wallet = joined(

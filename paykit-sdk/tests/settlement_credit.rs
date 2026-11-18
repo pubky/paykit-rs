@@ -488,3 +488,131 @@ async fn two_transactions(world: &World) -> TestResult {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn test_full_bucket_warns_once_and_a_confirmed_stored_receipt_stays_unsent() -> TestResult {
+    use pubky_switch_client::app::{
+        Collection as SwitchCollection, OpBatch, RecordTarget, UserConfirmed,
+    };
+    let Some(world) = World::start(Backend::Scripted)? else {
+        return Err("missing scripted switch".into());
+    };
+    let mut tills = Box::pin(enrolled_tills(&world)).await?;
+    let (request, record) = Box::pin(paid_request(
+        &mut tills.till,
+        &mut tills.buyer,
+        "ln-needs-confirmation",
+    ))
+    .await?;
+    let proof = tills
+        .till
+        .app()
+        .shared_record(&record)
+        .await?
+        .ok_or("missing paid request")?;
+    let paid = paykit_lib::records::ActivityRecord::read(
+        proof.content.value().ok_or("missing paid value")?,
+        &tills.till.identity(),
+        paykit_lib::records::ActivitySide::Payee,
+    )?;
+    let signed = paid.proof.as_ref().ok_or("missing signed proof")?;
+    let paykit_lib::Body::PaymentProof(body) = signed.body() else {
+        return Err("wrong signed role".into());
+    };
+    let id = tills
+        .rail
+        .settlement_id(&body.proof)
+        .ok_or("missing settlement")?;
+    let tag = settlement_tag(tills.till.app().naming_key(), &id);
+    let number = settlement_bucket(&tag);
+    let mut bytes = Vec::new();
+    let mut n = 0u64;
+    while bytes.len() < 9000 * paykit_lib::records::SETTLEMENT_MARK_LEN {
+        let mut settlement = [0; 12];
+        settlement[4..].copy_from_slice(&n.to_be_bytes());
+        n += 1;
+        if settlement == paykit_lib::derive::mark_settlement_tag(&tag) {
+            continue;
+        }
+        let mark = SettlementMark {
+            settlement,
+            kind: OccurrenceKind::OneTimeRequest,
+            occurrence: [0; 8],
+        };
+        bytes.extend_from_slice(&mark.to_bytes());
+    }
+    let collection = Collection::Settlements;
+    let target = RecordTarget::new(
+        SwitchCollection::new(collection.name(), collection.fixed_policy()),
+        &natural_key::settlement_bucket(number),
+    );
+    let value = serde_json::to_vec(
+        &serde_json::json!({"v":1, "marks":pubky_switch_core::enc::b64(&bytes)}),
+    )?;
+    let put = tills
+        .till
+        .app_mut()
+        .record_op(&target, Some(&value), Vec::new())
+        .await?;
+    tills
+        .till
+        .app_mut()
+        .submit_batch(OpBatch::for_protocol("paykit").entry(put))
+        .await?;
+    let before = tills.till.backup().await?;
+    for _ in 0..2 {
+        let error = tills.till.confirm_payment(&record).await.unwrap_err();
+        assert_eq!(
+            error.refusal(),
+            Some(&paykit_sdk::Refusal::SettlementBucketFull { bucket: number })
+        );
+    }
+    let warnings = tills.till.notices().await?;
+    let [warning] = warnings.as_slice() else {
+        return Err("expected one bucket warning".into());
+    };
+    assert_eq!(warning.kind, paykit_sdk::NoticeKind::SettlementBucketFull);
+    assert_eq!(
+        warning.settlement,
+        Some(paykit_sdk::SettlementSubject::Bucket(number))
+    );
+    let notice_id = warning.id.clone();
+    tills.till.acknowledge_notice(&notice_id).await?;
+    let stored = tills
+        .till
+        .confirm_payment_with(
+            &record,
+            ReceiptDetails::new()
+                .with_unmarked_credit_confirmed(UserConfirmed::new())
+                .store_only(),
+        )
+        .await?
+        .ok_or("missing stored receipt")?;
+    assert!(tills.till.app().delivery(&stored).await?.is_none());
+    assert!(tills.till.notices().await?.is_empty());
+    drop(tills.till);
+    let mut restored = Paykit::restore(
+        world.app_env(tills.till_store),
+        Default::default(),
+        &before,
+        tills.rail.clone(),
+        Arc::new(TestTimer),
+    )
+    .await?;
+    restored.receive(None).await?;
+    assert!(restored.notices().await?.is_empty());
+    assert_eq!(
+        restored.confirm_payment(&record).await?,
+        Some(stored.clone())
+    );
+    assert!(restored.app().delivery(&stored).await?.is_none());
+    tills.buyer.receive(None).await?;
+    assert!(tills
+        .buyer
+        .receipts(ReceiptsOf::Request(request))
+        .await?
+        .is_empty());
+    assert_eq!(tills.rail.all_executions().values().sum::<u64>(), 1);
+    world.close().await?;
+    Ok(())
+}

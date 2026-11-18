@@ -439,6 +439,15 @@ pub(crate) fn restore_paykit_layer(
             .map_err(|_| "invalid retained settlement mark")?;
         settlement_marks.insert(key, value);
     }
+    let mut settlement_notices = std::collections::BTreeMap::new();
+    for (key, value) in restoring
+        .previous_local_scan(key::SETTLEMENT_NOTICES.as_bytes())
+        .map_err(|_| "the installation's settlement notices cannot be read")?
+    {
+        let notice = state::restored::<KeptNotice>(&key, &value, &binder)
+            .map_err(|_| "invalid retained settlement notice")?;
+        settlement_notices.insert(key, notice);
+    }
     let mut history = crate::deletions::RestoredReceipts::default();
     for prefix in [
         key::PAYEE_DELETIONS,
@@ -669,6 +678,21 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
+            StateKey::SettlementNotice(_) => {
+                let restored = state::restored::<KeptNotice>(&key, &value, &binder)
+                    .map_err(|_| "invalid restored settlement notice")?;
+                settlement_notices
+                    .entry(key)
+                    .and_modify(|current| {
+                        let acknowledged = current.acknowledged || restored.acknowledged;
+                        if restored.raised_at_ms < current.raised_at_ms {
+                            *current = restored.clone();
+                        }
+                        current.acknowledged = acknowledged;
+                    })
+                    .or_insert(restored);
+                continue;
+            }
             StateKey::SettlementMark { .. } => {
                 state::restored::<crate::settlement_marks::ObservedMark>(&key, &value, &binder)
                     .map_err(|_| "invalid restored settlement mark")?;
@@ -825,6 +849,10 @@ pub(crate) fn restore_paykit_layer(
     )
     .map_err(|_| String::from("the restore's block widening can't be written"))?;
     writes.push(widening);
+    for (key, notice) in settlement_notices {
+        let value = state::encode(&notice).map_err(|_| "invalid saved settlement notice")?;
+        writes.push(LocalWrite::Put { key, value });
+    }
     writes.extend(
         settlement_marks
             .into_iter()
