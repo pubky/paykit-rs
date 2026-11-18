@@ -166,14 +166,13 @@ where
 
     /// Upload avatar bytes and return the file URI to set as the profile `image`.
     ///
-    /// A migrated identity's avatar is one Pubky social v1 file, the raw bytes
+    /// A social v1 identity's avatar is one Pubky social v1 file, the raw bytes
     /// named by their content hash and extension. Otherwise it is a pubky.app
     /// (v0) blob and file: the blob id is the content hash and the file id the
-    /// upload time, as `pubky-app-specs` defines them. A new identity publishes
-    /// its profile first and uploads the avatar after it: Nexus ignores a social
-    /// v1 file written before the user's first social v1 profile, and an avatar
-    /// uploaded before that profile is written to pubky.app (v0), which keeps
-    /// the profile on v0. The session must hold
+    /// upload time, as `pubky-app-specs` defines them. An identity with no
+    /// profile on either layout gets [`PaykitSdkError::Protocol`]: it publishes
+    /// its profile first, since Nexus ignores a social v1 file written before
+    /// the user's first social v1 profile. The session must hold
     /// [`PUBKY_APP_PROFILE_SESSION_CAPABILITIES`].
     pub async fn upload_pubky_app_avatar(
         &self,
@@ -196,7 +195,14 @@ where
         })?;
         let public_key = session_access.public_key()?;
         let storage = session_access.session.storage();
-        if own_social_version(&session_access).await? == SocialVersion::V1 {
+        let version = own_social_version(&session_access).await?;
+        if version == SocialVersion::V0 && !has_pubky_app_data(&session_access).await? {
+            return Err(PaykitSdkError::Protocol {
+                context: "publish the Pubky app profile before its avatar".into(),
+                source: None,
+            });
+        }
+        if version == SocialVersion::V1 {
             let path = format!(
                 "{SOCIAL_V1_FILE_PATH_PREFIX}{}",
                 social_v1_file_name(&bytes, content_type)

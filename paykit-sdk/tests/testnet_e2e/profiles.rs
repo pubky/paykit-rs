@@ -517,6 +517,13 @@ async fn test_pubky_app_avatar_upload_writes_blob_and_file() {
         &capabilities,
     )
     .await;
+    // A pubky.app (v0) identity: its avatar is a pubky.app blob and file.
+    user.access
+        .session
+        .storage()
+        .put(paykit_sdk::PUBKY_PROFILE_PATH, r#"{"name":"Alice"}"#)
+        .await
+        .unwrap();
     let bytes = vec![0xff, 0xd8, 0xff, 0xe0, 1, 2, 3];
     let file_uri = user
         .sdk
@@ -773,6 +780,16 @@ async fn test_new_identity_creates_its_profile_on_social_v1_without_the_flag() {
 
     let alice = sign_up().await;
     let storage = alice.access.session.storage();
+    // The profile comes first: Nexus ignores a social v1 file written before it.
+    let error = alice
+        .sdk
+        .upload_pubky_app_avatar(vec![0xff, 0xd8, 0xff, 0xe0, 1], "image/jpeg")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, paykit_sdk::PaykitSdkError::Protocol { .. }),
+        "{error:?}"
+    );
     let created = alice
         .sdk
         .publish_pubky_profile(update.clone(), None)
@@ -823,11 +840,37 @@ async fn test_new_identity_creates_its_profile_on_social_v1_without_the_flag() {
         )
         .await
         .unwrap();
-    bob.sdk.publish_pubky_profile(update, None).await.unwrap();
+    bob.sdk
+        .publish_pubky_profile(update.clone(), None)
+        .await
+        .unwrap();
     assert!(storage
         .exists(paykit_sdk::PUBKY_PROFILE_PATH)
         .await
         .unwrap());
+    assert!(!storage
+        .exists(paykit_sdk::SOCIAL_V1_PROFILE_PATH)
+        .await
+        .unwrap());
+
+    // So does a pubky.app (v0) profile: an edit of it stays on v0.
+    let carol = sign_up().await;
+    let storage = carol.access.session.storage();
+    storage
+        .put(paykit_sdk::PUBKY_PROFILE_PATH, r#"{"name":"Carol"}"#)
+        .await
+        .unwrap();
+    let current = carol
+        .sdk
+        .fetch_pubky_profile_with_revision(carol.public_key.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    carol
+        .sdk
+        .publish_pubky_profile(update, Some(current.revision))
+        .await
+        .unwrap();
     assert!(!storage
         .exists(paykit_sdk::SOCIAL_V1_PROFILE_PATH)
         .await
