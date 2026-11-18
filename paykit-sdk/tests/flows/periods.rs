@@ -5425,3 +5425,402 @@ async fn test_periods_named_endpoints_keep_the_required_app_constraint() {
         }
     }
 }
+
+#[tokio::test]
+async fn test_payee_deletion_rejects_a_signed_receipt_for_a_different_period_end() {
+    Box::pin(credit_after_wrong_period(false)).await;
+}
+
+#[tokio::test]
+async fn test_payee_deletion_a_missing_signed_request_leaves_prior_credit_unresolved() {
+    Box::pin(credit_after_wrong_period(true)).await;
+}
+
+async fn credit_after_wrong_period(missing_request: bool) {
+    use paykit_lib::records::{ActivityRecord, ActivitySide, StoredMessage};
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let mut till = w
+        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        .await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    let mut off = january();
+    off.ends_at += 1;
+    let proof = period_proof(&w, shop.app_id(), off).await;
+    let mut elsewhere = proof.clone();
+    let plaintext = w.sign_as(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        "paykit.payment_proof",
+        vec![request.request_hash],
+        proof,
+    );
+    let proof = StoredMessage::new(
+        w.alice_id(),
+        wallet.app().cert().signed(),
+        plaintext,
+        Some(w.clock.now_ms()),
+        &w.bob_id(),
+    )
+    .unwrap();
+    let receipt = paykit_lib::bodies::PaymentReceipt {
+        attempt_id: AttemptId::from_bytes([9; 16]),
+        billing_period: Some(off),
+        metadata: None,
+        payment_reference: None,
+    }
+    .to_body(2)
+    .unwrap();
+    let plaintext = w.sign_as(
+        &w.bob,
+        "shop",
+        &w.alice,
+        "paykit.payment_receipt",
+        vec![proof.hash(), request.request_hash],
+        receipt,
+    );
+    let receipt = StoredMessage::new(
+        w.bob_id(),
+        shop.app().cert().signed(),
+        plaintext,
+        Some(w.clock.now_ms()),
+        &w.alice_id(),
+    )
+    .unwrap();
+    let mut record = ActivityRecord::new(ActivitySide::Payee, w.alice_id());
+    record.proof = Some(proof);
+    record.receipt = Some(receipt);
+    record.lost_to_delete = Some([7; 32]);
+    let target = payee_period_at(&request, january());
+    let key = shop.app().record_key(&target).unwrap();
+    writes_value(&mut shop, &target, &record.to_json().unwrap()).await;
+    assert!(matches!(
+        shop.confirm_payment_with(
+            &key,
+            paykit_sdk::ReceiptDetails::new()
+                .with_maybe_credited_confirmed(pubky_switch_client::app::UserConfirmed::new())
+        )
+        .await
+        .unwrap_err()
+        .refusal(),
+        Some(Refusal::CreditHistoryLost)
+    ));
+    till.receive(None).await.unwrap();
+    let parent_target = payee_request_at(&request);
+    let parent_key = shop.app().record_key(&parent_target).unwrap();
+    let parent = till
+        .app()
+        .shared_record(&parent_key)
+        .await
+        .unwrap()
+        .unwrap()
+        .content;
+    if missing_request {
+        till.app_mut()
+            .delete_record(&parent_target, Vec::new())
+            .await
+            .unwrap();
+        shop.app_mut()
+            .read_record_fresh(&parent_target)
+            .await
+            .unwrap();
+    }
+    till.app_mut()
+        .delete_record(&target, Vec::new())
+        .await
+        .unwrap();
+    let before = w.record_writes(&w.bob, &key);
+    shop.receive(None).await.unwrap();
+    assert!(shop.retained_payee_receipts().await.unwrap().is_empty());
+    assert_eq!(w.record_writes(&w.bob, &key), before);
+    let req = shop
+        .send_request(w.alice_id(), draft("1", w.clock.now_ms()))
+        .await
+        .unwrap()
+        .request
+        .unwrap();
+    elsewhere.remove("billing_period");
+    w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        vec![req.request_hash],
+        elsewhere,
+    );
+    shop.receive(None).await.unwrap();
+    let other = shop.app().record_key(&payee_request_at(&req)).unwrap();
+    let confirmed = || {
+        paykit_sdk::ReceiptDetails::new()
+            .with_maybe_credited_confirmed(pubky_switch_client::app::UserConfirmed::new())
+    };
+    if missing_request {
+        let count = w.record_writes(&w.bob, &other);
+        assert!(matches!(
+            shop.confirm_payment_with(&other, confirmed())
+                .await
+                .unwrap_err()
+                .refusal(),
+            Some(Refusal::NotNow(_))
+        ));
+        assert_eq!(w.record_writes(&w.bob, &other), count);
+        till.app_mut()
+            .put_record(&parent_target, parent.value().unwrap(), Vec::new())
+            .await
+            .unwrap();
+        shop.receive(None).await.unwrap();
+    }
+    assert!(shop
+        .confirm_payment_with(&other, confirmed())
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn test_payee_deletion_a_retained_receipt_blocks_the_same_settlement_for_any_payer() {
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let mut till = w
+        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        .await;
+    let mut carol_wallet = w
+        .join(&w.carol, "wallet", AppScopes::new().pay().build().unwrap())
+        .await;
+    carol_wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    let proof = period_proof(&w, shop.app_id(), january()).await;
+    w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        vec![request.request_hash],
+        proof.clone(),
+    );
+    shop.receive(None).await.unwrap();
+    let target = payee_period_at(&request, january());
+    let key = shop.app().record_key(&target).unwrap();
+    let receipt = shop.confirm_payment(&key).await.unwrap().unwrap();
+    till.receive(None).await.unwrap();
+    till.app_mut()
+        .delete_record(&target, Vec::new())
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        shop.retained_payee_receipts().await.unwrap()[0]
+            .receipt
+            .message()
+            .msg_id,
+        receipt
+    );
+
+    let mut unrequested = proof;
+    unrequested.remove("billing_period");
+    unrequested.insert("amount".into(), json!({"asset":"btc","value":"1"}));
+    w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        Vec::new(),
+        unrequested.clone(),
+    );
+    let carols = shop
+        .send_request(w.carol_id(), draft("1", w.clock.now_ms()))
+        .await
+        .unwrap()
+        .request
+        .unwrap();
+    unrequested.remove("amount");
+    w.inject(
+        &w.carol,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        vec![carols.request_hash],
+        unrequested,
+    );
+    shop.receive(None).await.unwrap();
+    let sales = shop.payee_activity().await.unwrap();
+    let alice = sales
+        .iter()
+        .find(|s| s.payer == w.alice_id() && s.request_hash.is_none())
+        .unwrap()
+        .record;
+    let carol = sales
+        .iter()
+        .find(|s| s.payer == w.carol_id())
+        .unwrap()
+        .record;
+    let before = w.record_writes(&w.bob, &alice);
+    let confirmed = paykit_sdk::ReceiptDetails::new()
+        .with_maybe_credited_confirmed(pubky_switch_client::app::UserConfirmed::new());
+    assert_eq!(
+        shop.confirm_payment_with(&alice, confirmed).await.unwrap(),
+        None
+    );
+    assert_eq!(w.record_writes(&w.bob, &alice), before);
+    let confirmed = paykit_sdk::ReceiptDetails::new()
+        .with_maybe_credited_confirmed(pubky_switch_client::app::UserConfirmed::new());
+    let before = w.record_writes(&w.bob, &carol);
+    assert_eq!(
+        shop.confirm_payment_with(&carol, confirmed).await.unwrap(),
+        None
+    );
+    assert_eq!(w.record_writes(&w.bob, &carol), before);
+    let independent = shop
+        .send_request(w.carol_id(), draft("0.0005", w.clock.now_ms()))
+        .await
+        .unwrap()
+        .request
+        .unwrap();
+    carol_wallet.receive(None).await.unwrap();
+    carol_wallet
+        .pay_request(&independent, paykit_sdk::PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    let key = shop
+        .app()
+        .record_key(&payee_request_at(&independent))
+        .unwrap();
+    assert!(shop.confirm_payment(&key).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn test_payee_deletion_an_offline_period_receipt_keeps_its_original_signed_request() {
+    let w = World::new();
+    let device = store();
+    let scopes = || AppScopes::new().request().build().unwrap();
+    let mut shop = w
+        .join_with(&w.bob, "shop", scopes(), Default::default(), device.clone())
+        .await;
+    let backup = shop.backup().await.unwrap();
+    let mut wallet = w.wallet("wallet").await;
+    let mut till = w.join(&w.bob, "till", scopes()).await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    let proof = period_proof(&w, shop.app_id(), january()).await;
+    w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        vec![request.request_hash],
+        proof,
+    );
+    shop.receive(None).await.unwrap();
+    let target = payee_period_at(&request, january());
+    let key = shop.app().record_key(&target).unwrap();
+    let original = shop.confirm_payment(&key).await.unwrap().unwrap();
+    till.receive(None).await.unwrap();
+    till.app_mut()
+        .delete_record(&target, Vec::new())
+        .await
+        .unwrap();
+    till.app_mut()
+        .delete_record(&payee_request_at(&request), Vec::new())
+        .await
+        .unwrap();
+    let before = w.record_writes(&w.bob, &key);
+    drop(shop);
+    let shop = Paykit::restore(
+        w.env(&w.bob, device),
+        Default::default(),
+        &backup,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    let kept = shop.retained_payee_receipts().await.unwrap();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].receipt.message().msg_id, original);
+    assert!(kept[0].deletions.is_empty());
+    assert!(shop.payee_deletion_notices().await.unwrap().is_empty());
+    assert_eq!(w.record_writes(&w.bob, &key), before);
+}
+
+#[tokio::test]
+async fn test_payee_deletion_a_period_confirmation_rereads_its_changed_request() {
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let mut till = w
+        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        .await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    let proof = period_proof(&w, shop.app_id(), january()).await;
+    w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        vec![request.request_hash],
+        proof,
+    );
+    shop.receive(None).await.unwrap();
+    till.receive(None).await.unwrap();
+    let target = payee_period_at(&request, january());
+    let period = shop.app().record_key(&target).unwrap();
+    let parent = payee_request_at(&request);
+    let key = till.app().record_key(&parent).unwrap();
+    let value = till
+        .app()
+        .shared_record(&key)
+        .await
+        .unwrap()
+        .unwrap()
+        .content;
+    let mut marked = paykit_lib::records::ActivityRecord::read(
+        value.value().unwrap(),
+        &w.bob_id(),
+        paykit_lib::records::ActivitySide::Payee,
+    )
+    .unwrap();
+    marked.lost_to_delete = Some([79; 32]);
+    till.app_mut()
+        .put_record(&parent, &marked.to_json().unwrap(), Vec::new())
+        .await
+        .unwrap();
+    let checks = w.rail.proof_checks().len();
+    let writes = w.record_writes(&w.bob, &period);
+    assert!(matches!(
+        shop.confirm_payment(&period).await.unwrap_err().refusal(),
+        Some(Refusal::CreditHistoryLost)
+    ));
+    assert_eq!(w.rail.proof_checks().len(), checks + 1);
+    assert_eq!(w.record_writes(&w.bob, &period), writes);
+    let held = shop
+        .app()
+        .shared_record(&period)
+        .await
+        .unwrap()
+        .unwrap()
+        .content;
+    assert!(paykit_lib::records::ActivityRecord::read(
+        held.value().unwrap(),
+        &w.bob_id(),
+        paykit_lib::records::ActivitySide::Payee
+    )
+    .unwrap()
+    .receipt
+    .is_none());
+    wallet.receive(None).await.unwrap();
+    assert!(wallet
+        .receipts(paykit_sdk::ReceiptsOf::All)
+        .await
+        .unwrap()
+        .is_empty());
+}

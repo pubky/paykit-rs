@@ -36,8 +36,8 @@ use paykit_lib::{Label, PaykitKindRules};
 use pubky_switch_client::app::{
     decode_local_state, AppBackup, AppError, Collection as SwitchCollection, Effect, LocalView,
     LocalWrite, LossActions, MissedEntries, OpaqueRule, Outcome, Protocol, ProtocolLayer,
-    ProviderLoss, ReceiveContext, ReceivedMessage, RecordExpiry, ResendNeeded, RestoreContext,
-    StoreFailure, WriteBase,
+    ProviderLoss, PutBack, ReceiveContext, ReceivedMessage, RecordDeletion, RecordExpiry,
+    ResendNeeded, RestoreContext, StoreFailure, WriteBase,
 };
 use pubky_switch_client::error::StoreError;
 use pubky_switch_core::enc::{serde_b64, unb64_array};
@@ -314,7 +314,7 @@ fn local_write<T: serde::Serialize>(key: &str, value: &T) -> Result<LocalWrite, 
 }
 
 /// A failure of the client's store as a protocol call's failure.
-fn store_failure(error: pubky_switch_client::app::AppError) -> StoreFailure {
+pub(crate) fn store_failure(error: pubky_switch_client::app::AppError) -> StoreFailure {
     match error {
         pubky_switch_client::app::AppError::Store(error) => StoreFailure::from(error),
         _ => StoreFailure::unavailable(StoreError::Unavailable),
@@ -421,14 +421,34 @@ pub const BACKUP_NAME: &str = "paykit";
 /// checks the bound only as it adds one, so a restored layer over it would stay over it.
 pub(crate) fn restore_paykit_layer(
     layer: Option<&ProtocolLayer>,
-    own: [u8; 32],
-    own_cert: &AppCert,
-    blind: impl Fn(&[u8]) -> [u8; 32],
+    restoring: &RestoreContext<'_>,
+    settlement: crate::receive::Settlement<'_>,
 ) -> Result<Vec<LocalWrite>, String> {
     // Every value is bound to its key by the function every runtime read binds it with
     // (`state::Stored`), with the backup's naming key.
-    let blinding = |input: &[u8]| blind(input);
-    let binder = state::Binder::new(own, own_cert, &blinding);
+    let own = restoring.identity();
+    let own_cert = restoring.cert();
+    let blind = |input: &[u8]| restoring.blind(input);
+    let binder = state::Binder::new(own, own_cert, &blind);
+    let mut history = crate::deletions::RestoredReceipts::default();
+    for prefix in [
+        key::PAYEE_DELETIONS,
+        key::RETAINED_RECEIPTS,
+        key::CREDIT_HOLDS,
+    ] {
+        let previous = restoring
+            .previous_local_scan(prefix.as_bytes())
+            .map_err(|_| "the installation's payee history cannot be read")?;
+        for (key, value) in previous {
+            let family = StateKey::parse(&key).ok_or("invalid retained payee history key")?;
+            history
+                .local(&key, &value, &family, &binder, settlement, true)
+                .map_err(|_| "invalid retained payee history")?;
+        }
+    }
+    history
+        .previous_activity(restoring, &binder, settlement)
+        .map_err(|_| "the installation's payee activity cannot be retained")?;
     let Some(layer) = layer else {
         return Err("a Paykit App's backup carries Paykit's layer, with its journal".into());
     };
@@ -640,6 +660,14 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
+            family @ (StateKey::PayeeDeletion { .. }
+            | StateKey::RetainedReceipt(..)
+            | StateKey::CreditHold(_)) => {
+                history
+                    .local(&key, &value, &family, &binder, settlement, false)
+                    .map_err(|_| unread())?;
+                continue;
+            }
             StateKey::SeenRecords { .. } => {
                 // They are the payee's, not the app's own: one that doesn't verify would fail
                 // every later public-endpoint read of that payee.
@@ -780,6 +808,11 @@ pub(crate) fn restore_paykit_layer(
     )
     .map_err(|_| String::from("the restore's block widening can't be written"))?;
     writes.push(widening);
+    writes.extend(
+        history
+            .writes()
+            .map_err(|_| "the retained payee evidence cannot be stored")?,
+    );
     Ok(writes)
 }
 
@@ -870,9 +903,7 @@ impl Protocol for PaykitProtocol {
         // certificate the Switch takes and Paykit refuses writes nothing.
         check_certificate(restoring.cert())
             .map_err(|error| format!("the backup's certificate: {error}"))?;
-        restore_paykit_layer(layer, restoring.identity(), restoring.cert(), |input| {
-            restoring.blind(input)
-        })
+        restore_paykit_layer(layer, restoring, &|proof| self.settlement_id(proof))
     }
 
     /// Hold every attempt to deliver an Allowance acceptance, including a re-send or an
@@ -1193,6 +1224,14 @@ impl Protocol for PaykitProtocol {
         }
     }
 
+    fn record_put_back(
+        &self,
+        deletion: &RecordDeletion<'_>,
+        cx: &ReceiveContext<'_>,
+    ) -> Result<Option<PutBack>, StoreFailure> {
+        crate::deletions::observe_payee_deletion(deletion, cx, &|proof| self.settlement_id(proof))
+    }
+
     /// Whether a newer write goes back on what the app saw (Paykit wire 5.3, 5.4): drops or
     /// replaces a message in a role seen, or changes the Allowance seen; for a
     /// `payment_lists` record, holds an older list or drops a single-use endpoint marked
@@ -1240,6 +1279,14 @@ impl PaykitProtocol {
                 let Some(later) = activity::read(Some(value), &own.identity, side) else {
                     return Some("Paykit wire 5.3: an activity record that doesn't read".into());
                 };
+                if side == ActivitySide::Payee
+                    && held.lost_to_delete.is_some()
+                    && later.lost_to_delete != held.lost_to_delete
+                {
+                    return Some(
+                        "Paykit wire 5: a later write drops the deletion restriction".into(),
+                    );
+                }
                 // The mark is the value the app saw. A write built on the version the app
                 // holds is checked as by a reader holding it, the reassociation rule of that
                 // version included; one built on a version it never took, such as one it

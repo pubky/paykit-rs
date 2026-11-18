@@ -563,6 +563,7 @@ static ACTIVITY_SHAPE: Shape = Shape {
         ("attempted_periods", Member::Leaf),
         ("reassociations", Member::Array(&REASSOCIATION)),
         ("manual_only", Member::Leaf),
+        ("lost_to_delete", Member::Leaf),
     ],
 };
 
@@ -995,6 +996,8 @@ pub struct ActivityRecord {
     /// request and no app pays one of its Billing Periods automatically (Paykit spec 8.2,
     /// 8.3). Never lifted once set.
     pub manual_only: bool,
+    /// The signed item hash of the delete answered with an older copy (Paykit wire 5).
+    pub lost_to_delete: Option<[u8; 32]>,
     /// The members the writer doesn't know, kept as read (Paykit wire 5).
     pub unknown: UnknownMembers,
 }
@@ -1068,6 +1071,8 @@ struct ActivityOut<'a> {
     reassociations: Vec<ReassociationOut<'a>>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     manual_only: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lost_to_delete: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1306,6 +1311,7 @@ impl ActivityRecord {
             earlier_details: Vec::new(),
             reassociations: Vec::new(),
             manual_only: false,
+            lost_to_delete: None,
             unknown: UnknownMembers::default(),
         }
     }
@@ -1447,6 +1453,10 @@ impl ActivityRecord {
             earlier_details,
             reassociations: read_reassociations(&obj)?,
             manual_only,
+            lost_to_delete: obj
+                .has("lost_to_delete")
+                .then(|| obj.req_b64("lost_to_delete"))
+                .transpose()?,
             unknown: UnknownMembers::read(&map, &ACTIVITY_SHAPE).0,
         };
         let mut record = record;
@@ -2203,6 +2213,7 @@ impl ActivityRecord {
                 })
                 .collect(),
             manual_only: self.manual_only,
+            lost_to_delete: self.lost_to_delete.as_ref().map(|hash| b64(hash)),
         };
         let json = serde_json::to_vec(&out)
             .map_err(|_| Error::Invalid(format!("{ACTIVITY}: can't be written")))?;

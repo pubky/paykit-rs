@@ -281,12 +281,16 @@ impl<'a> Binder<'a> {
         }
     }
 
+    pub(crate) fn identity(&self) -> &[u8; 32] {
+        &self.own
+    }
+
     fn blind(&self) -> Result<Blind<'a>> {
         self.blind.ok_or_else(PaykitError::corrupt)
     }
 
     /// The record key of `target`, as the client derives it (Switch spec 13.3).
-    fn record_key(&self, target: &RecordTarget) -> Result<[u8; 32]> {
+    pub(crate) fn record_key(&self, target: &RecordTarget) -> Result<[u8; 32]> {
         let policy = target
             .collection
             .policy
@@ -1050,6 +1054,41 @@ impl Stored for KeyWaitMark {
     }
 }
 
+impl sealed::Sealed for crate::deletions::PayeeDeletion {}
+
+impl Stored for crate::deletions::PayeeDeletion {
+    fn bind(&self, key: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        if matches!(family, StateKey::PayeeDeletion{record,..} if self.matches(record))
+            && key == self.key()
+        {
+            Ok(())
+        } else {
+            corrupt()
+        }
+    }
+}
+
+impl sealed::Sealed for crate::deletions::ReceiptEvidence {}
+impl Stored for crate::deletions::ReceiptEvidence {
+    fn bind(&self, key: &str, _: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        if key != self.key() {
+            return corrupt();
+        }
+        self.check(&binder.own, |target| binder.record_key(target))
+    }
+}
+
+impl sealed::Sealed for crate::deletions::CreditHold {}
+impl Stored for crate::deletions::CreditHold {
+    fn bind(&self, key: &str, _: &StateKey, _: &Binder<'_>) -> Result<()> {
+        if key == self.key() {
+            Ok(())
+        } else {
+            corrupt()
+        }
+    }
+}
+
 impl sealed::Sealed for crate::divergent::DivergentMark {}
 
 /// A divergent record's pause mark: of the record its key names, of one of Paykit's
@@ -1146,6 +1185,20 @@ pub(crate) mod key {
     use pubky_switch_core::enc::b64;
 
     use super::num;
+
+    pub(crate) const RETAINED_RECEIPTS: &str = "rc/";
+    pub(crate) const CREDIT_HOLDS: &str = "ch/";
+    pub(crate) fn retained_receipt(hash: &[u8; 32]) -> String {
+        format!("{RETAINED_RECEIPTS}{}", b64(hash))
+    }
+    pub(crate) fn credit_hold(record: &[u8; 32]) -> String {
+        format!("{CREDIT_HOLDS}{}", b64(record))
+    }
+    pub(crate) const PAYEE_DELETIONS: &str = "del/";
+
+    pub(crate) fn payee_deletions_at(record: &[u8; 32]) -> String {
+        format!("{PAYEE_DELETIONS}{}/", b64(record))
+    }
 
     pub(crate) const ASKS: &str = "ask/";
     pub(crate) const ANSWERS: &str = "ans/";
@@ -1439,6 +1492,17 @@ pub(crate) mod key {
 /// every builder's key parses to its own family, so the two can't drift.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StateKey {
+    /// A signed receipt, bound to its record and signed receipt hash.
+    RetainedReceipt([u8; 32]),
+    /// A credit restriction on a record from the previous installation.
+    CreditHold([u8; 32]),
+    /// One observed deletion and the state of its warning.
+    PayeeDeletion {
+        record: [u8; 32],
+        generation: u64,
+        version: u64,
+        delete: [u8; 32],
+    },
     /// `j/<attempt ID>`: a journal entry.
     Journal(AttemptId),
     /// `ask/<sender>/<from>`: a `resend_request` to send.
@@ -1621,6 +1685,19 @@ impl StateKey {
             _ => {
                 let (family, rest) = text.split_once('/')?;
                 match family {
+                    "rc" => Self::RetainedReceipt(b64_32(rest)?),
+                    "ch" => Self::CreditHold(b64_32(rest)?),
+                    "del" => {
+                        let (record, rest) = rest.split_once('/')?;
+                        let (generation, rest) = rest.split_once('/')?;
+                        let (version, hash) = rest.split_once('/')?;
+                        Self::PayeeDeletion {
+                            record: b64_32(record)?,
+                            generation: number(generation)?,
+                            version: number(version)?,
+                            delete: b64_32(hash)?,
+                        }
+                    }
                     "j" => {
                         let attempt = AttemptId::parse(rest).ok()?;
                         (attempt.to_text() == rest).then_some(Self::Journal(attempt))?
