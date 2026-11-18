@@ -25,6 +25,10 @@ impl Paykit {
             self.first_read_summary = Some(Box::new(summary));
         }
         self.require_first_read()?;
+        // A host can read through the App, or reload between its commit and Paykit's.
+        if self.certificate_refused().is_none() && Box::pin(self.take_restore_verdict()).await? {
+            Box::pin(self.refresh_lists_when_due()).await?;
+        }
         Ok(())
     }
 

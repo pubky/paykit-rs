@@ -2125,7 +2125,7 @@ async fn test_stored_given_up_and_acknowledged_message_sent_again_after_a_restor
 #[tokio::test]
 async fn test_stored_forgotten_entry_sent_again_after_a_restore_writes_nothing_twice() {
     // A request stored for good, written later and its entry forgotten. After a restore the
-    // payee re-sends it, as the restore asks: the record holds it already, so nothing is
+    // payee sends it again: the record holds it already, so nothing is
     // written again and nothing is stored again.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -2141,8 +2141,7 @@ async fn test_stored_forgotten_entry_sent_again_after_a_restore_writes_nothing_t
         .unwrap();
     let mut app = restored(&w, wallet).await;
     let writes = w.record_writes(&w.alice, &record);
-    let answered = shop.receive(None).await.unwrap();
-    assert!(answered.resends >= 1, "no re-send request reached bob");
+    crate::common::send_request_again(&w, &mut shop, &request).await;
     app.receive(None).await.unwrap();
     assert_eq!(w.record_writes(&w.alice, &record), writes);
     assert_eq!(app.requests().await.unwrap().len(), 1);

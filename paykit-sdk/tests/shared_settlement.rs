@@ -1,4 +1,6 @@
 //! Two independently enrolled payee apps read the receipt for a manually paid Billing Period.
+#![recursion_limit = "256"]
+
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::sync::Arc;
@@ -164,9 +166,7 @@ async fn manual_period(world: &World, priced: bool) -> TestResult {
     buyer.receive(None).await?;
     Box::pin(buyer.accept_subscription(&request)).await?;
     shop.receive(None).await?;
-    let mut options = PayOptions::default();
-    let mut rate_source = None;
-    if priced {
+    let rate_source = if priced {
         let sale = shop
             .payee_activity()
             .await?
@@ -184,27 +184,40 @@ async fn manual_period(world: &World, priced: bool) -> TestResult {
             .await?
             .msg_id;
         buyer.receive(None).await?;
-        let quote = Box::pin(buyer.pay_period(&request, &period, PayOptions::default())).await;
-        let refusal = quote.outcome.unwrap_err();
-        let Some(paykit_sdk::Refusal::PricedByRate { payment }) = refusal.refusal() else {
-            return Err("expected confirmation of the signed period price".into());
-        };
-        assert_eq!(
-            payment.source,
-            paykit_sdk::RateSource::PeriodDetails { msg_id: id.clone() }
-        );
-        assert_eq!(
-            payment.amount,
+        Some((
+            id,
             PaymentAmount {
                 asset: Asset::new("btc")?,
-                value: Decimal::new("0.00012346")?
-            }
-        );
-        assert!(rail.all_executions().is_empty());
-        rate_source = Some(id);
-        options = options.with_rate_confirmed((**payment).clone());
-    }
-    let payment = Box::pin(buyer.pay_period(&request, &period, options)).await;
+                value: Decimal::new("0.00012346")?,
+            },
+        ))
+    } else {
+        None
+    };
+    let payer_rail = Arc::clone(&rail);
+    let (mut buyer, payment, rate_source) = tokio::spawn(Box::pin(async move {
+        let mut options = PayOptions::default();
+        if let Some((id, expected)) = &rate_source {
+            let quote = buyer
+                .pay_period(&request, &period, PayOptions::default())
+                .await;
+            assert!(quote.public_failures.is_empty());
+            let refusal = quote.outcome.unwrap_err();
+            let Some(paykit_sdk::Refusal::PricedByRate { payment }) = refusal.refusal() else {
+                panic!("expected confirmation of the signed period price: {refusal:?}");
+            };
+            assert_eq!(
+                payment.source,
+                paykit_sdk::RateSource::PeriodDetails { msg_id: id.clone() }
+            );
+            assert_eq!(&payment.amount, expected);
+            assert!(payer_rail.all_executions().is_empty());
+            options = options.with_rate_confirmed((**payment).clone());
+        }
+        let payment = buyer.pay_period(&request, &period, options).await;
+        (buyer, payment, rate_source)
+    }))
+    .await?;
     assert!(payment.public_failures.is_empty());
     let PayOutcome::Paid { attempt_id, .. } = payment.outcome? else {
         return Err("manual payment did not settle".into());
@@ -232,7 +245,7 @@ async fn manual_period(world: &World, priced: bool) -> TestResult {
         .shared_record(&period_record.record)
         .await?
         .ok_or("missing shared credit")?;
-    if let Some(id) = rate_source {
+    if let Some((id, expected)) = rate_source {
         let record = paykit_lib::records::ActivityRecord::read(
             issued
                 .content
@@ -250,13 +263,7 @@ async fn manual_period(world: &World, priced: bool) -> TestResult {
         assert_eq!(details.message().msg_id, id);
         assert_eq!(proof.message().refs, [request.request_hash, details.hash()]);
         assert_eq!(credit.message().refs, [proof.hash(), request.request_hash]);
-        assert_eq!(
-            rail.paid_amount(&attempt_id),
-            Some(PaymentAmount {
-                asset: Asset::new("btc")?,
-                value: Decimal::new("0.00012346")?
-            })
-        );
+        assert_eq!(rail.paid_amount(&attempt_id), Some(expected));
     }
 
     buyer.receive(None).await?;

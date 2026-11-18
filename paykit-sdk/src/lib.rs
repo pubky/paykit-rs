@@ -98,8 +98,16 @@ pub use paykit::{
     orphan_floor_s, Paykit, PaykitBackup, PaykitConfig, ReceiveSummary, DEFAULT_RESEND_BUDGET,
     PRE_DISPATCH_BUDGET_MS,
 };
+pub use paykit_lib::bodies::RequestDestination;
+pub use paykit_lib::{
+    Asset, AttemptId, Decimal, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
+    PaymentReference,
+};
 pub use periods::{PeriodDetailsView, PeriodView};
 pub use protocol::{PaykitProtocol, HANDLED_KINDS};
+pub use pubky_switch_client::app::{
+    App, AppConfig, AppEnv, JoinRequest, ProtocolSet, UserConfirmed,
+};
 pub use rail::{
     CandidateError, CandidateId, EndpointSelection, PaymentEndpointCandidate, Rail,
     RailDeclaration, RailError, RailOutcome, RailPaid, RailPayment, Transfer,
@@ -115,6 +123,10 @@ pub use requests::{
 };
 pub use resend::{ResendSelection, RESEND_COOLDOWN_MS};
 pub use timer::Timer;
+
+#[cfg(doctest)]
+#[doc = include_str!("../../docs/paykit-host-guide.md")]
+mod host_guide {}
 
 #[cfg(test)]
 mod tests {
