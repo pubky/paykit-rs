@@ -388,6 +388,8 @@ impl Paykit {
             natural_key::request_record(&self.identity(), &request_hash),
             target.label().as_ref(),
         );
+        self.require_activity_base(&self.activity_key(&request)?)
+            .await?;
         self.held_activity(&request).await
     }
 
@@ -483,6 +485,7 @@ impl Paykit {
             // ago can show a period's deadline not passed yet.
             let (target, _) = self.payee_record(record).await?;
             self.app.read_record(&target.record_target()).await?;
+            self.require_activity_base(record).await?;
             let (target, bound) = self.payee_record(record).await?;
             let (stored, request) = request_of(&bound).ok_or(Refusal::NotFound)?;
             if !request.is_recurring() {
@@ -514,16 +517,7 @@ impl Paykit {
             // Nor while the switch shows another write at the version held, as recovery
             // uploads can leave: the client builds the next write on that one, which this
             // app hasn't read, and may hold a receipt (Switch spec 12.6 step 3).
-            let held_version = self
-                .app
-                .shared_record(&self.activity_key(&into)?)
-                .await?
-                .map(|held| held.version);
             match self.app.read_record_fresh(&into.record_target()).await? {
-                RecordRead::Kept {
-                    reason: KeptReason::Older(write),
-                    ..
-                } if Some(write.version) == held_version => return Err(period_record_unread()),
                 RecordRead::Fresh(_)
                 | RecordRead::Kept {
                     reason:
@@ -536,12 +530,11 @@ impl Paykit {
                 } => return Err(Refusal::SwitchUnavailable(why).into()),
                 _ => return Err(period_record_unread()),
             }
-            let held = match self
-                .app
-                .shared_record(&self.activity_key(&into)?)
-                .await?
-                .map(|held| held.content)
-            {
+            let held = self.app.shared_record(&self.activity_key(&into)?).await?;
+            if crate::records::activity_base_changed(held.as_ref()) {
+                return Err(period_record_unread());
+            }
+            let held = match held.map(|held| held.content) {
                 None | Some(RecordContent::Deleted) => None,
                 Some(content) if crate::hold::awaits_key(&content) => {
                     return Err(crate::hold::value_awaits_key());

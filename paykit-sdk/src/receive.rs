@@ -825,6 +825,9 @@ fn place_with(
     // yet"). Only an app holding no seen state of it opens it again.
     let record_target = target.record_target();
     let held = cx.record(&record_target)?;
+    if let Some(disputed) = held.as_ref().filter(|r| r.different_write_at_held_version) {
+        return crate::divergent::step_keep(cx, disputed, stored, seq, settlement, false);
+    }
     if held
         .as_ref()
         .is_some_and(|held| held.content == RecordContent::Deleted)
@@ -1206,6 +1209,9 @@ fn period_details_effect(
         return Ok(());
     };
     let request_target = ActivityTarget::payer(natural_key::request_record(&sender, &request_hash));
+    if crate::records::activity_base_changed(cx.record(&request_target.record_target())?.as_ref()) {
+        return keep_until_placed(cx, stored, seq, scopes, &request_target);
+    }
     let Some(value) = held_or_unlisted(cx, &request_target, RecordSide::Payer)? else {
         return keep_until_placed(cx, stored, seq, scopes, &request_target);
     };
@@ -1228,6 +1234,9 @@ fn period_details_effect(
     // The period record's paid state decides too; one absent shows nothing paid. One whose
     // value waits for its key holds the entry; one held that doesn't open, read or bind
     // decides nothing and is never written over here: the details are kept until placed.
+    if crate::records::activity_base_changed(cx.record(&target.record_target())?.as_ref()) {
+        return keep_until_placed(cx, stored, seq, scopes, &request_target);
+    }
     wait_for_key(cx, &target)?;
     let period = match held_value(cx, &target)? {
         None if held_request(cx, &target)? => {
@@ -1345,6 +1354,10 @@ fn payer_reply(
             // the sender is its counterparty can't be told: the reply is kept as a reply before
             // its record, under the spam rule, never written over the value, and placed once
             // the record reads naming its sender (Paykit spec 8.1).
+            if crate::records::activity_base_changed(cx.record(&target.record_target())?.as_ref()) {
+                keep_before_record(cx, stored, seq, scopes, &target)?;
+                return Ok(true);
+            }
             let bound = match held_or_unlisted(cx, &target, RecordSide::Payee)? {
                 Some(_) => held_bound(cx, &target, settlement)?,
                 None => None,
@@ -1379,6 +1392,12 @@ fn payer_reply(
                 }
                 // From the counterparty, a proof the period record can't take now updates
                 // activity the app holds: kept outside the spam rule ([`keep_reply`]).
+                if crate::records::activity_base_changed(
+                    cx.record(&target.record_target())?.as_ref(),
+                ) {
+                    keep_reply(cx, &request_target, stored, seq)?;
+                    return Ok(true);
+                }
                 let held = match held_or_unlisted(cx, &target, RecordSide::Payee)? {
                     None if held_request(cx, &target)? => {
                         keep_reply(cx, &request_target, stored, seq)?;
@@ -1418,6 +1437,10 @@ fn payer_reply(
                 natural_key::payee_payment_record(&proof.payment_endpoint_identifier, &settled),
                 None,
             );
+            if crate::records::activity_base_changed(cx.record(&target.record_target())?.as_ref()) {
+                keep_before_record(cx, stored, seq, scopes, &target)?;
+                return Ok(true);
+            }
             // A proof no held record matches is new state, which the spam rule gates.
             let held = held_or_unlisted(cx, &target, RecordSide::Payee)?;
             // A record held whose value doesn't open, read or bind can't show its
@@ -1495,6 +1518,9 @@ fn receipt_effect(
     let own = cx.identity();
     let target = receipt_target(stored, &own, &attempt_id);
     let held = cx.record(&target.record_target())?;
+    if crate::records::activity_base_changed(held.as_ref()) {
+        return receipt_over_unread_record(cx, &target, stored, seq);
+    }
     let content = held.as_ref().map(|held| held.content.clone());
     held_or_unlisted(cx, &target, RecordSide::Payer)?;
     let record = held_bound(cx, &target, settlement)?;
@@ -2450,11 +2476,11 @@ impl Paykit {
                 _ => return Err(crate::error::PaykitError::corrupt()),
             };
             let record_key = self.activity_key(&target)?;
-            let content = self
-                .app
-                .shared_record(&record_key)
-                .await?
-                .map(|held| held.content);
+            let held = self.app.shared_record(&record_key).await?;
+            if crate::records::activity_base_changed(held.as_ref()) {
+                continue;
+            }
+            let content = held.map(|record| record.content);
             // No record yet: the message waits for it within its window, and past it is
             // dropped with no notice, its sender keeping it no longer either, but never while
             // the copy of its side may lack records.

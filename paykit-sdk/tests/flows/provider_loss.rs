@@ -77,6 +77,352 @@ async fn follow_loss(app: &mut Paykit) -> u64 {
     info.loss.uncertain_until_ms
 }
 
+/// The payer's activity for this request, as both of Alice's apps address it.
+fn request_target(request: &RequestRef) -> pubky_switch_client::app::RecordTarget {
+    use paykit_lib::{collections::Collection, derive::natural_key};
+    use pubky_switch_client::app::{Collection as SwitchCollection, RecordTarget};
+    let family = Collection::PayerActivity;
+    RecordTarget::new(
+        SwitchCollection::new(family.name(), family.fixed_policy()),
+        &natural_key::request_record(&request.payee, &request.request_hash),
+    )
+}
+
+/// The phone's signed write was in flight when the provider was lost. The wallet's
+/// write on the same base was applied there. The phone's copy reaches recovery first.
+async fn recover_activity_with_phone_write(
+    w: &World,
+    wallet: &mut Paykit,
+    phone: &mut Paykit,
+    target: &pubky_switch_client::app::RecordTarget,
+) -> Arc<ScriptedSwitch> {
+    use pubky_switch_client::client::answers::{RecoveryUpload, UploadedOp};
+    use pubky_switch_client::client::{Credentials, SwitchClient};
+    use pubky_switch_client::testing::Fault;
+    use pubky_switch_core::ops::{Entry, OpsRequest};
+    let key = wallet.app().record_key(target).unwrap();
+    let current = wallet.app_mut().read_record(target).await.unwrap().unwrap();
+    let value = current.content.value().unwrap();
+    let base = wallet
+        .app_mut()
+        .put_record(target, value, vec![])
+        .await
+        .unwrap();
+    phone.app_mut().read_record(target).await.unwrap().unwrap();
+    let mut manual: serde_json::Value = serde_json::from_slice(value).unwrap();
+    manual["manual_only"] = true.into();
+    w.alice.switch().fail_next(Fault::Unreachable {
+        path: "/ops".into(),
+        after: 0,
+    });
+    assert!(phone
+        .app_mut()
+        .put_record(target, &serde_json::to_vec(&manual).unwrap(), vec![])
+        .await
+        .is_err());
+    let missed = w.alice.switch().unreached_bodies().pop().unwrap();
+    let mut entries = OpsRequest::parse(&missed).unwrap().entries;
+    assert_eq!(entries.len(), 1);
+    let Entry::Signed(op) = entries.remove(0) else {
+        panic!("a signed record write")
+    };
+    let applied = wallet
+        .app_mut()
+        .put_record(target, value, vec![])
+        .await
+        .unwrap();
+    assert_eq!(applied.version.version, base.version.version + 1);
+    let lost = wallet.app().own_identity().signed().clone();
+    let next = declare_loss_of(w, ALICE_ORIGIN, NEXT_SECRET);
+    phone.app_mut().refresh_identity().await.unwrap();
+    phone.app_mut().follow_provider().await.unwrap();
+    let client = SwitchClient::new(
+        SWITCH_ORIGIN,
+        w.alice_id(),
+        Credentials::App {
+            identity: w.alice_id(),
+            keys: w.alice.identity().app_keys("phone"),
+            cert: phone.app().cert().clone(),
+        },
+        Some(next.service_key()),
+        w.router.clone(),
+        w.clock.clone(),
+    )
+    .unwrap();
+    client
+        .recovery_upload(
+            &RecoveryUpload {
+                lost_identity: Some(lost),
+                records: vec![UploadedOp {
+                    op,
+                    cert: phone.app().cert().signed().clone(),
+                    proof: None,
+                }],
+                ..Default::default()
+            },
+            true,
+        )
+        .await
+        .unwrap();
+    wallet.app_mut().refresh_identity().await.unwrap();
+    wallet.app_mut().follow_provider().await.unwrap();
+    let held = wallet.app_mut().read_record(target).await.unwrap().unwrap();
+    assert_eq!(held.version, applied.version);
+    assert!(held.different_write_at_held_version);
+    assert_eq!(next.record(&key).unwrap().state.version, held.version);
+    next
+}
+
+#[tokio::test]
+async fn test_provider_loss_activity_with_another_write_at_its_version_survives_reload() {
+    let w = World::new();
+    let disk = store();
+    let mut wallet = w.wallet_on("wallet", disk.clone()).await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    // The receive step has opened the one-time request and queued its floor check.
+    // The host has not yet run the SDK pass that acts on that obligation.
+    wallet.app_mut().receive(None).await.unwrap();
+    let owed_floor = wallet.app().protocol_scan("paykit", b"fo/").await.unwrap();
+    assert_eq!(owed_floor.len(), 1);
+    let target = request_target(&request);
+    let next = recover_activity_with_phone_write(&w, &mut wallet, &mut phone, &target).await;
+    let key = wallet.app().record_key(&target).unwrap();
+    let id = wallet.app_id();
+    drop(wallet);
+    let mut wallet = w.load_on_clock(&w.alice, disk, id, w.clock.clone()).await;
+    let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    assert!(held.different_write_at_held_version);
+    assert_eq!(next.record(&key).unwrap().state.version, held.version);
+    follow_loss(&mut wallet).await;
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotNow(reason)) if reason.contains("another write at the held activity")),
+        "{refused:?}"
+    );
+    assert_eq!(executions(&w), 0);
+    assert_eq!(
+        wallet.app().protocol_scan("paykit", b"fo/").await.unwrap(),
+        owed_floor
+    );
+    accept_activity_successor(&mut wallet, &mut phone, &target).await;
+    wallet.receive(None).await.unwrap();
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"fo/")
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn test_provider_loss_receipt_waits_for_an_accepted_activity_successor() {
+    let w = World::new();
+    let disk = store();
+    let mut wallet = w.wallet_on("wallet", disk.clone()).await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }));
+    shop.receive(None).await.unwrap();
+    let sale = shop
+        .payee_activity()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.request_hash == Some(request.request_hash))
+        .unwrap()
+        .record;
+    let target = request_target(&request);
+    let next = recover_activity_with_phone_write(&w, &mut wallet, &mut phone, &target).await;
+    let key = wallet.app().record_key(&target).unwrap();
+    follow_loss(&mut wallet).await;
+    if let Some(shown) = wallet
+        .divergent_records()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.record == key)
+    {
+        wallet
+            .confirm_divergent(&shown, UserConfirmed::new())
+            .await
+            .unwrap();
+    }
+    assert!(
+        wallet
+            .app()
+            .shared_record(&key)
+            .await
+            .unwrap()
+            .unwrap()
+            .different_write_at_held_version
+    );
+    w.clock.advance_ms(11 * 60_000);
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let before = next.record(&key).unwrap().revision;
+    let receipt = shop.confirm_payment(&sale).await.unwrap().unwrap();
+    let delivery = shop.app_mut().flush_message(&receipt).await;
+    let read = wallet.receive(None).await.unwrap();
+    let kept = wallet.app().protocol_scan("paykit", b"pr/").await.unwrap();
+    assert_eq!(
+        kept.len(),
+        1,
+        "keep the original receipt: {delivery:?} {read:?}"
+    );
+    assert!(kept[0].0.ends_with(receipt.as_bytes()));
+    assert_eq!(next.record(&key).unwrap().revision, before);
+    let id = wallet.app_id();
+    drop(wallet);
+    let mut wallet = w.load_on_clock(&w.alice, disk, id, w.clock.clone()).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.app().protocol_scan("paykit", b"pr/").await.unwrap(),
+        kept
+    );
+    let other = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.request(&other).await.unwrap().request, other);
+    assert_eq!(
+        wallet.app().protocol_scan("paykit", b"pr/").await.unwrap(),
+        kept
+    );
+
+    accept_activity_successor(&mut wallet, &mut phone, &target).await;
+    wallet.receive(None).await.unwrap();
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"pr/")
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(wallet.request(&request).await.unwrap().receipt.is_some());
+    assert_eq!(executions(&w), 1);
+}
+
+/// The phone writes a successor preserving the accepted activity and its restriction.
+async fn accept_activity_successor(
+    wallet: &mut Paykit,
+    phone: &mut Paykit,
+    target: &pubky_switch_client::app::RecordTarget,
+) {
+    let current = phone.app_mut().read_record(target).await.unwrap().unwrap();
+    assert!(!current.different_write_at_held_version);
+    let content = current.content.value().unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(content).unwrap()["manual_only"],
+        true
+    );
+    phone
+        .app_mut()
+        .put_record(target, content, vec![])
+        .await
+        .unwrap();
+    let successor = wallet.app_mut().read_record(target).await.unwrap().unwrap();
+    assert!(!successor.different_write_at_held_version);
+}
+
+#[tokio::test]
+async fn test_provider_loss_completed_rail_waits_for_an_accepted_activity_successor() {
+    let w = World::new();
+    let disk = store();
+    let mut wallet = w.wallet_on("wallet", disk.clone()).await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let paid = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    let PayOutcome::Pending { attempt_id, .. } = paid else {
+        panic!("pending: {paid:?}")
+    };
+    let target = request_target(&request);
+    let next = recover_activity_with_phone_write(&w, &mut wallet, &mut phone, &target).await;
+    let key = wallet.app().record_key(&target).unwrap();
+    follow_loss(&mut wallet).await;
+    if let Some(shown) = wallet
+        .divergent_records()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.record == key)
+    {
+        wallet
+            .confirm_divergent(&shown, UserConfirmed::new())
+            .await
+            .unwrap();
+    }
+    let before = next.record(&key).unwrap().revision;
+    w.rail.settle(&attempt_id, true);
+    w.rail.set_declaration(
+        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true)
+            .with_history(true),
+    );
+    let held = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(held.as_slice(), [PayOutcome::RecordHeld { .. }]),
+        "{held:?}"
+    );
+    assert_eq!(next.record(&key).unwrap().revision, before);
+    let id = wallet.app_id();
+    drop(wallet);
+    let mut wallet = w.load_on_clock(&w.alice, disk, id, w.clock.clone()).await;
+    let held = wallet.repair_activity_record(&attempt_id).await.unwrap();
+    assert!(matches!(held, PayOutcome::RecordHeld { .. }), "{held:?}");
+    assert_eq!(next.record(&key).unwrap().revision, before);
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+    accept_activity_successor(&mut wallet, &mut phone, &target).await;
+    let finished = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(finished.as_slice(), [PayOutcome::Paid { .. }]),
+        "{finished:?}"
+    );
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_provider_loss_restore_first_reads_the_current_activity() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    let target = request_target(&request);
+    let key = wallet.app().record_key(&target).unwrap();
+    recover_activity_with_phone_write(&w, &mut wallet, &mut phone, &target).await;
+    drop(wallet);
+    let mut wallet = restored(&w, &backup).await;
+    assert!(wallet.app().shared_record(&key).await.unwrap().is_none());
+    wallet.app_mut().refresh_identity().await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let first = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    assert!(!first.different_write_at_held_version);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(first.content.value().unwrap()).unwrap()
+            ["manual_only"],
+        true
+    );
+    assert_eq!(executions(&w), 0);
+}
+
 /// The doubt a payment was refused with, as [`Refusal::MayBePaid`] shows it.
 fn doubt_of(paid: &paykit_sdk::Result<PayOutcome>) -> PaymentDoubt {
     match paid.as_ref().err().and_then(PaykitError::refusal) {

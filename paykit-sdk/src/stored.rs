@@ -680,6 +680,12 @@ impl Paykit {
         let periodic = matches!(stored.body(), Body::PaymentPeriodDetails(_))
             || stored.body().billing_period().is_some();
         let role = Role::of(stored.body()).unwrap_or(Role::Response);
+        if self
+            .activity_base_changed(&self.activity_key(&target)?)
+            .await?
+        {
+            return Ok(Some(Place::Undecided));
+        }
         let Some(record) = self.held_activity(&target).await? else {
             return Ok(Some(if periodic {
                 Place::AwaitsRequest(record_side(&target))
@@ -735,6 +741,12 @@ impl Paykit {
         else {
             return Ok(PeriodPlace::Invalid);
         };
+        if self
+            .activity_base_changed(&self.activity_key(&into)?)
+            .await?
+        {
+            return Ok(PeriodPlace::Undecided);
+        }
         if matches!(stored.body(), Body::PaymentPeriodDetails(_)) {
             let stopped = self.kept_stop(target).await?;
             let period = self.held_activity(&into).await?;
@@ -970,7 +982,11 @@ impl Paykit {
         locals: Tx,
     ) -> Result<Placed> {
         let key = self.activity_key(target)?;
-        let content = self.app.shared_record(&key).await?.map(|held| held.content);
+        let held = self.app.shared_record(&key).await?;
+        if crate::records::activity_base_changed(held.as_ref()) {
+            return Ok(Placed::Waits);
+        }
+        let content = held.map(|record| record.content);
         // Absent or deleted while the copy of its side may lack records: the copy decides
         // nothing yet (Paykit spec 8.1, "Records not listed yet"), whatever key the record's
         // scope waits for, nor whatever waits over the record: the message is neither written

@@ -393,6 +393,9 @@ impl Paykit {
             let record_key = pubky_switch_core::enc::unb64_array::<32>(&rest)
                 .map_err(|_| crate::error::PaykitError::corrupt())?;
             let held = self.app.shared_record(&record_key).await?;
+            if crate::records::activity_base_changed(held.as_ref()) {
+                continue;
+            }
             let record = held.as_ref().and_then(|held| {
                 crate::records::bind_activity(
                     held.content.value()?,

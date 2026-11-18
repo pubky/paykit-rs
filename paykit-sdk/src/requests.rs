@@ -683,6 +683,8 @@ impl Paykit {
         let own = self.identity();
         let target =
             ActivityTarget::payee(natural_key::request_record(&own, &hash), label.as_ref());
+        self.require_activity_base(&self.activity_key(&target)?)
+            .await?;
         let mut record = activity::empty(ActivitySide::Payee, to);
         activity::place(&mut record, Role::Request, self.own_copy(&signed)?);
         let value = record.to_json()?;
@@ -888,6 +890,7 @@ impl Paykit {
         record: &[u8; 32],
         maybe_credited_confirmed: bool,
     ) -> Result<Option<u64>> {
+        self.require_activity_base(record).await?;
         let (target, bound) = self.payee_record(record).await?;
         let proof_stored = bound.proof.as_ref().ok_or(Refusal::NotFound)?;
         let Body::PaymentProof(proof) = proof_stored.body() else {
@@ -1098,7 +1101,7 @@ impl Paykit {
             // A value of a Paykit policy that doesn't read or bind can't be told; a failure
             // to read it is the call's error, never "no other credit".
             let other = match held.content {
-                RecordContent::Deleted => continue,
+                RecordContent::Deleted if !held.different_write_at_held_version => continue,
                 RecordContent::Value(_) => match self.payee_record(&held.key).await {
                     Ok(bound) => Some(bound),
                     Err(PaykitError::Refused(Refusal::NotFound) | PaykitError::Lib(_)) => None,
@@ -1106,6 +1109,23 @@ impl Paykit {
                 },
                 _ => None,
             };
+            if held.different_write_at_held_version {
+                if let Some((target, other)) = &other {
+                    // The signed request fixes its recipient, also for its period keys.
+                    if let Some(request) = self.payee_request_record(target, other).await? {
+                        if request.counterparty != *payer {
+                            continue;
+                        }
+                    } else if matches!(other.binding()?, RecordBinding::Unrequested) {
+                        // A payment without a request is keyed by endpoint and settlement.
+                        if other.proof.as_ref().is_some_and(|stored| matches!(stored.body(),
+                            Body::PaymentProof(proof) if self.rail.settlement_id(&proof.proof).as_deref() != Some(settlement))) {
+                            continue;
+                        }
+                    }
+                }
+                return Err(crate::records::activity_base_refusal());
+            }
             let Some((_, other)) = other else {
                 cant_tell = true;
                 continue;
@@ -1185,6 +1205,7 @@ impl Paykit {
         }
         let mut tries = 0;
         let msg_id = loop {
+            self.require_activity_base(record).await?;
             let (target, bound) = self.payee_record(record).await?;
             if let Some(receipt) = &bound.receipt {
                 return Ok(Some(receipt.message().msg_id.clone()));
@@ -1259,6 +1280,7 @@ impl Paykit {
         self.require_payee()?;
         let mut tries = 0;
         let msg_id = loop {
+            self.require_activity_base(record).await?;
             let (target, bound) = self.payee_record(record).await?;
             let (request, _) = request_of(&bound).ok_or(Refusal::NotFound)?;
             if bound.cancellation.is_some() {

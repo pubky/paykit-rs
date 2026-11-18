@@ -1597,6 +1597,9 @@ impl Paykit {
             // The record's mark is judged by the one check below (`Paykit::pause_at`): one
             // that doesn't point to its record is paused.
             let held = self.app.shared_record(&record).await?;
+            if role != WriteRole::List && crate::records::activity_base_changed(held.as_ref()) {
+                continue;
+            }
             let view = held.as_ref().and_then(View::of);
             let kept = match kept {
                 Some(kept) => {

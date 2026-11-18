@@ -404,11 +404,11 @@ pub enum PayOutcome {
         /// The attempt.
         attempt_id: AttemptId,
     },
-    /// Paid by the method, but the outcome waits: the payer's activity record holds a value
-    /// that doesn't read, and `done` never goes without its update (Paykit spec 7.2 step
-    /// 3). Nothing was written; the attempt stays open, so nothing pays again, and the
-    /// journal keeps the proof ([`PaymentView::record_held`]). It settles at a resume once
-    /// the record reads again, or with [`Paykit::repair_activity_record`].
+    /// Paid by the method. The journal keeps the proof and the attempt stays open while
+    /// its activity update waits (Paykit spec 7.2 step 3). For an unreadable value, resume
+    /// once it reads or use [`Paykit::repair_activity_record`]. When recovery shows another
+    /// signed write at the held version, resume once the client accepts a matching write or
+    /// a successor.
     #[non_exhaustive]
     RecordHeld {
         /// The attempt.
@@ -1359,7 +1359,9 @@ impl Paykit {
     /// the version the app holds, in the batch that writes `done` and queues the proof. A
     /// record that changed since is read again and refused with
     /// [`PaykitError::Conflict`]: the user looks again. A record that reads by then is
-    /// updated as at any outcome, not replaced.
+    /// updated as at any outcome. When recovery shows a different signed write at the held
+    /// version, the payment stays [`PayOutcome::RecordHeld`] until the client accepts the
+    /// matching write or a successor.
     ///
     /// Replacing it drops whatever the unreadable value held: a reader that saw a role the
     /// rebuilt record lacks ignores and flags the write (Paykit wire 5.3, "Seen roles").
@@ -2422,6 +2424,9 @@ impl Paykit {
         {
             return Err(refusal.into());
         }
+        if self.payment_base_changed(&entry).await? {
+            return Err(crate::records::activity_base_refusal());
+        }
         let op = ClaimOp::attempt(
             entry.obligation,
             step,
@@ -2769,7 +2774,7 @@ impl Paykit {
         entry: &mut JournalEntry,
         mut signed: Option<SignedMessage>,
     ) -> Result<()> {
-        if !entry.acceptance_owed {
+        if !entry.acceptance_owed || self.payment_base_changed(entry).await? {
             return Ok(());
         }
         if entry.acceptance_released {
@@ -2831,7 +2836,9 @@ impl Paykit {
         // placed, while the request record is paused, by the one gate of the outcome
         // (Paykit spec 6); the entry stays owed, for a resume after the user's confirmation,
         // which sends it also over a view still divergent.
-        if Box::pin(self.dispatched_write_waits(&key)).await? {
+        if self.payment_base_changed(entry).await?
+            || Box::pin(self.dispatched_write_waits(&key)).await?
+        {
             return Ok(());
         }
         self.release_acceptance(entry, None).await?;
@@ -3132,7 +3139,7 @@ impl Paykit {
         paid: bool,
         overwrite: bool,
     ) -> Result<Written> {
-        if paid {
+        if paid && !self.payment_base_changed(entry).await? {
             // A payment made waits for the user's confirmation of a paused payer record,
             // before its acceptance is released: nothing of it goes over that record until
             // then, and then also over a view still divergent (Paykit spec 6).
@@ -3292,6 +3299,13 @@ impl Paykit {
         let own = self.identity();
         let key = self.activity_key(target)?;
         let held = self.app.shared_record(&key).await?;
+        if self.payment_base_changed(entry).await? {
+            return Ok(if paid {
+                OutcomeRecord::Held
+            } else {
+                OutcomeRecord::Unchanged
+            });
+        }
         // A value only waiting for its scope key opens once the key comes: the outcome waits
         // for it, never offered as a repair over a value that only isn't open yet.
         if held
@@ -4002,6 +4016,9 @@ impl Paykit {
         by: Initiator,
         kind: Dispatch,
     ) -> Result<bool> {
+        if self.payment_base_changed(entry).await? {
+            return Ok(true);
+        }
         if by == Initiator::Automatic {
             return self.automatic_dispatch_held(entry).await;
         }
@@ -4016,6 +4033,23 @@ impl Paykit {
                     ..
                 }
             ))
+    }
+
+    /// The payment and, for a billing period, its parent request must each still build
+    /// on the activity whose contents the app used.
+    async fn payment_base_changed(&self, entry: &JournalEntry) -> Result<bool> {
+        let key = self.activity_key(&ActivityTarget::payer(entry.natural_key.clone()))?;
+        if self.activity_base_changed(&key).await? {
+            return Ok(true);
+        }
+        if let Some(hash) = entry.request_hash()? {
+            let request = ActivityTarget::payer(natural_key::request_record(&entry.payee, &hash));
+            let request_key = self.activity_key(&request)?;
+            if request_key != key {
+                return self.activity_base_changed(&request_key).await;
+            }
+        }
+        Ok(false)
     }
 
     /// Whether `entry` is held from an automatic dispatch, a first dispatch or a repeat, as
