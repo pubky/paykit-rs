@@ -213,12 +213,7 @@ impl Paykit {
         if entry.restored || claim.is_some() || self.app.reconcile_mode() {
             return Ok(false);
         }
-        if let Some(bytes) = self
-            .app
-            .protocol_get(crate::protocol::BACKUP_NAME, marker.as_bytes())
-            .await?
-        {
-            let id: [u8; 16] = bytes.try_into().map_err(|_| PaykitError::corrupt())?;
+        if let Some(id) = self.local_get::<[u8; 16]>(&marker).await? {
             let original = ClaimAttempt {
                 claim_key: entry.obligation,
                 attempt_id: attempt.to_bytes(),

@@ -316,6 +316,11 @@ mod sealed {
 /// binds what it decodes; the type is sealed, and [`decode`] private, so no value of
 /// Paykit's state is read anywhere without its binding.
 pub(crate) trait Stored: sealed::Sealed + DeserializeOwned {
+    /// Decode the bytes written by the owner of this state family.
+    fn read_bytes(bytes: &[u8]) -> Result<Self> {
+        decode(bytes)
+    }
+
     /// Bind the value read at `key`, of family `family`, to it: a corrupt store for a value
     /// of another family, or one naming anything other than what its key names.
     fn bind(&self, key: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()>;
@@ -325,7 +330,7 @@ pub(crate) trait Stored: sealed::Sealed + DeserializeOwned {
 fn bound<T: Stored>(key: &[u8], bytes: &[u8], binder: &Binder<'_>) -> Result<T> {
     let text = std::str::from_utf8(key).map_err(|_| PaykitError::corrupt())?;
     let family = StateKey::parse(key).ok_or_else(PaykitError::corrupt)?;
-    let value = decode::<T>(bytes)?;
+    let value = T::read_bytes(bytes)?;
     value.bind(text, &family, binder)?;
     Ok(value)
 }
@@ -394,6 +399,22 @@ pub(crate) fn restored<T: Stored>(key: &[u8], value: &[u8], binder: &Binder<'_>)
 
 fn corrupt() -> Result<()> {
     Err(PaykitError::corrupt())
+}
+
+impl sealed::Sealed for [u8; 16] {}
+
+/// The original batch ID is written by the Switch client as exactly sixteen bytes.
+impl Stored for [u8; 16] {
+    fn read_bytes(bytes: &[u8]) -> Result<Self> {
+        bytes.try_into().map_err(|_| PaykitError::corrupt())
+    }
+
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::OfflineBatch(_) => Ok(()),
+            _ => corrupt(),
+        }
+    }
 }
 
 impl sealed::Sealed for u64 {}
@@ -1979,6 +2000,17 @@ mod tests {
         assert_eq!(found, ["key::journal(&a).as_bytes()"]);
         assert_eq!(calls(code, "local_scan"), ["b\"peer/\""]);
         assert!(calls("self.local_get::<u64>(key::CURSOR_TIME)", "local_get").is_empty());
+    }
+
+    #[test]
+    fn test_offline_batch_id_requires_its_key_and_native_width() {
+        let attempt = AttemptId::from_bytes([5; 16]);
+        let marker = key::offline_batch(&attempt);
+        let binder = Binder::unblinded([1; 32]);
+        let read = |key: &str, bytes: &[u8]| restored::<[u8; 16]>(key.as_bytes(), bytes, &binder);
+        assert_eq!(read(&marker, &[7; 16]).unwrap(), [7; 16]);
+        assert!(read(&marker, &[7; 15]).is_err());
+        assert!(read(&key::journal(&attempt), &[7; 16]).is_err());
     }
 
     /// `value` read at `key` as a `T`, through a reader without the naming key.

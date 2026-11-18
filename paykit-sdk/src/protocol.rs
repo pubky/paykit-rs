@@ -546,7 +546,7 @@ pub(crate) fn restore_paykit_layer(
                 continue;
             }
             StateKey::OfflineBatch(attempt) => {
-                let _: [u8; 16] = value.as_slice().try_into().map_err(|_| unread())?;
+                state::restored::<[u8; 16]>(&key, &value, &binder).map_err(|_| unread())?;
                 recordings.insert(attempt);
                 writes.push(LocalWrite::Put { key, value });
                 continue;
