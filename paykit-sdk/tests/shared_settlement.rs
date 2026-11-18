@@ -140,7 +140,13 @@ async fn manual_period(world: &World) -> TestResult {
     buyer.receive(None).await?;
     Box::pin(buyer.accept_subscription(&request)).await?;
     shop.receive(None).await?;
-    let payment = Box::pin(buyer.pay_period(&request, &period, PayOptions::default())).await;
+    let (mut buyer, payment) = tokio::spawn(Box::pin(async move {
+        let payment = buyer
+            .pay_period(&request, &period, PayOptions::default())
+            .await;
+        (buyer, payment)
+    }))
+    .await?;
     assert!(payment.public_failures.is_empty());
     let PayOutcome::Paid { attempt_id, .. } = payment.outcome? else {
         return Err("manual payment did not settle".into());
