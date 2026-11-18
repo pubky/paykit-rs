@@ -162,6 +162,14 @@ pub(crate) fn activity_base_refusal() -> PaykitError {
         .into()
 }
 
+/// The contents an activity effect may use, taken from the same read as the chosen base.
+fn usable_activity(held: Option<SharedRecord>) -> Result<Option<SharedRecord>> {
+    if activity_base_changed(held.as_ref()) {
+        return Err(activity_base_refusal());
+    }
+    Ok(held)
+}
+
 impl Paykit {
     /// The record key of an activity target.
     pub(crate) fn activity_key(&self, target: &ActivityTarget) -> Result<[u8; 32]> {
@@ -174,12 +182,8 @@ impl Paykit {
         ))
     }
 
-    /// An effect can use the accepted activity only when the client still builds on it.
-    pub(crate) async fn require_activity_base(&self, key: &[u8; 32]) -> Result<()> {
-        if self.activity_base_changed(key).await? {
-            return Err(activity_base_refusal());
-        }
-        Ok(())
+    pub(crate) async fn activity_write_base(&self, key: &[u8; 32]) -> Result<Option<SharedRecord>> {
+        usable_activity(self.app.shared_record(key).await?)
     }
 
     /// The activity record the app holds at `target`, bound to its key (Paykit wire 5.3);
@@ -189,21 +193,25 @@ impl Paykit {
         target: &ActivityTarget,
     ) -> Result<Option<ActivityRecord>> {
         let key = self.activity_key(target)?;
-        let Some(held) = self.app.shared_record(&key).await? else {
-            return Ok(None);
-        };
-        let Some(value) = held.content.value() else {
-            return Ok(None);
-        };
-        Ok(bind_activity(
-            value,
+        let held = self.app.shared_record(&key).await?;
+        Ok(self.read_activity(target, held.as_ref()))
+    }
+
+    fn read_activity(
+        &self,
+        target: &ActivityTarget,
+        held: Option<&SharedRecord>,
+    ) -> Option<ActivityRecord> {
+        let held = held?;
+        bind_activity(
+            held.content.value()?,
             &self.identity(),
             target.side.side(),
             target.label().as_ref(),
-            &key,
+            &held.key,
             |t| self.app.record_key(t).ok(),
             &|p| self.rail.settlement_id(p),
-        ))
+        )
     }
 
     /// The activity record at `target`, read from the switch when the app holds none.
@@ -212,15 +220,12 @@ impl Paykit {
         target: &ActivityTarget,
     ) -> Result<Option<ActivityRecord>> {
         let key = self.activity_key(target)?;
-        self.require_activity_base(&key).await?;
-        if let Some(record) = self.held_activity(target).await? {
+        let held = self.activity_write_base(&key).await?;
+        if let Some(record) = self.read_activity(target, held.as_ref()) {
             return Ok(Some(record));
         }
-        let held = self.app.read_record(&target.record_target()).await?;
-        if activity_base_changed(held.as_ref()) {
-            return Err(activity_base_refusal());
-        }
-        self.held_activity(target).await
+        let fresh = self.app.read_record(&target.record_target()).await?;
+        Ok(self.read_activity(target, usable_activity(fresh)?.as_ref()))
     }
 
     /// The write of the record at `target` with `stored` placed in its `role` (Paykit spec 6
@@ -257,10 +262,7 @@ impl Paykit {
         let own = self.identity();
         let side = target.side.side();
         let key = self.activity_key(target)?;
-        let held = self.app.shared_record(&key).await?;
-        if activity_base_changed(held.as_ref()) {
-            return Err(activity_base_refusal());
-        }
+        let held = self.activity_write_base(&key).await?;
         // Every own write takes the record's view first: one written over a divergent view,
         // a stop included, leaves the record paused (`divergent.rs`).
         if let Some(seen) = &held {

@@ -164,6 +164,13 @@ pub(crate) fn effect(
         Body::PaymentRequest(_) if pay => {
             let target =
                 ActivityTarget::payer(natural_key::request_record(&sender, &stored.hash()));
+            if let Some(held) = cx
+                .record(&target.record_target())?
+                .filter(|held| held.different_write_at_held_version)
+            {
+                crate::divergent::step_keep(cx, &held, stored, seq, settlement, false)?;
+                return note_peer(cx, &sender, stored);
+            }
             let held = held_or_unlisted(cx, &target, RecordSide::Payer)?;
             if held.is_some() || admits_new_state(cx, &sender, &scopes, stored)? {
                 // A one-time request that came back after a block opens its record held for
@@ -207,7 +214,7 @@ pub(crate) fn effect(
             // yet, always applies and is kept at once: keeping it needs only the record's
             // key, so the stop never waits for the value's key or a listing, and no give-up
             // of the entry can lose it.
-            if pay && cancellation_protected(cx.record(&payer_target.record_target())?.as_ref()) {
+            if pay && holds_activity(cx.record(&payer_target.record_target())?.as_ref()) {
                 return keep_cancellation(cx, &payer_target, stored, seq, true);
             }
             // A payer's cancellation of a request this app holds goes into its record. One naming a
@@ -581,9 +588,16 @@ pub(crate) fn peer_note(pubky: &[u8; 32], stored: &StoredMessage) -> (String, u6
 
 /// The value of the record the app holds at `target`, if it holds a readable one.
 fn held_value(cx: &ReceiveContext<'_>, target: &ActivityTarget) -> Result<Option<Vec<u8>>, Fail> {
-    Ok(cx
-        .record(&target.record_target())?
-        .and_then(|held| held.content.value().map(<[u8]>::to_vec)))
+    Ok(cx.record(&target.record_target())?.and_then(activity_value))
+}
+
+/// A decision can read these bytes only if the next write still uses the signed
+/// operation that supplied them.
+fn activity_value(held: SharedRecord) -> Option<Vec<u8>> {
+    match held.content {
+        RecordContent::Value(value) if !held.different_write_at_held_version => Some(value),
+        _ => None,
+    }
 }
 
 /// Hold the entry while the record at `target` holds a value not open only for want of its
@@ -635,16 +649,12 @@ fn bound_activity(
 
 /// Whether the app's copy holds the record at `target` ([`holds_record`]).
 fn held_request(cx: &ReceiveContext<'_>, target: &ActivityTarget) -> Result<bool, Fail> {
-    Ok(holds_record(
-        cx.record(&target.record_target())?
-            .map(|held| held.content)
-            .as_ref(),
-    ))
+    Ok(holds_activity(cx.record(&target.record_target())?.as_ref()))
 }
 
 /// A signed delete disputed at its version cannot show the request is gone. Its
 /// cancellation stays protected on admission, under capacity and as it ages.
-pub(crate) fn cancellation_protected(held: Option<&SharedRecord>) -> bool {
+pub(crate) fn holds_activity(held: Option<&SharedRecord>) -> bool {
     held.is_some_and(|r| r.different_write_at_held_version || holds_record(Some(&r.content)))
 }
 
@@ -667,7 +677,12 @@ fn held_or_unlisted(
     target: &ActivityTarget,
     side: RecordSide,
 ) -> Result<Option<Vec<u8>>, Fail> {
-    held_or_unlisted_at(cx, &target.record_target(), side)
+    wait_for_key(cx, target)?;
+    let held = cx.record(&target.record_target())?;
+    if !holds_activity(held.as_ref()) {
+        hold_while_unlisted(cx, side)?;
+    }
+    Ok(held.and_then(activity_value))
 }
 
 /// [`held_or_unlisted`] for the record at any client target, such as an `allowances`
@@ -832,9 +847,6 @@ fn place_with(
     // yet"). Only an app holding no seen state of it opens it again.
     let record_target = target.record_target();
     let held = cx.record(&record_target)?;
-    if let Some(disputed) = held.as_ref().filter(|r| r.different_write_at_held_version) {
-        return crate::divergent::step_keep(cx, disputed, stored, seq, settlement, false);
-    }
     if held
         .as_ref()
         .is_some_and(|held| held.content == RecordContent::Deleted)
@@ -1086,7 +1098,7 @@ pub(crate) fn make_room_for_stop(
                 return Err(Fail::corrupt());
             };
             let (cancellation, _) = kept_with_time(cx, &stop)?;
-            if cancellation_protected(cx.record_at(&record)?.as_ref()) {
+            if holds_activity(cx.record_at(&record)?.as_ref()) {
                 continue;
             }
             let from = cancellation.sender();
@@ -1215,9 +1227,6 @@ fn period_details_effect(
         return Ok(());
     };
     let request_target = ActivityTarget::payer(natural_key::request_record(&sender, &request_hash));
-    if crate::records::activity_base_changed(cx.record(&request_target.record_target())?.as_ref()) {
-        return keep_until_placed(cx, stored, seq, scopes, &request_target);
-    }
     let Some(value) = held_or_unlisted(cx, &request_target, RecordSide::Payer)? else {
         return keep_until_placed(cx, stored, seq, scopes, &request_target);
     };
@@ -1240,9 +1249,6 @@ fn period_details_effect(
     // The period record's paid state decides too; one absent shows nothing paid. One whose
     // value waits for its key holds the entry; one held that doesn't open, read or bind
     // decides nothing and is never written over here: the details are kept until placed.
-    if crate::records::activity_base_changed(cx.record(&target.record_target())?.as_ref()) {
-        return keep_until_placed(cx, stored, seq, scopes, &request_target);
-    }
     wait_for_key(cx, &target)?;
     let period = match held_value(cx, &target)? {
         None if held_request(cx, &target)? => {
@@ -1360,10 +1366,17 @@ fn payer_reply(
             // the sender is its counterparty can't be told: the reply is kept as a reply before
             // its record, under the spam rule, never written over the value, and placed once
             // the record reads naming its sender (Paykit spec 8.1).
-            if crate::records::activity_base_changed(cx.record(&target.record_target())?.as_ref()) {
+            if let Some(held) = cx
+                .record(&target.record_target())?
+                .filter(|r| r.different_write_at_held_version)
+            {
                 // The signed request's hash still binds its recipient. Its reply updates
                 // known activity even while the service's record cannot be used for placement.
-                if held_bound(cx, &target, settlement)?.is_some_and(|known| {
+                let known = match held.content.value() {
+                    Some(value) => bound_activity(cx, &target, value, settlement)?,
+                    None => None,
+                };
+                if known.is_some_and(|known| {
                     known.counterparty == sender
                         && known.request.is_some_and(|r| r.hash() == *request)
                 }) {
@@ -1407,12 +1420,6 @@ fn payer_reply(
                 }
                 // From the counterparty, a proof the period record can't take now updates
                 // activity the app holds: kept outside the spam rule ([`keep_reply`]).
-                if crate::records::activity_base_changed(
-                    cx.record(&target.record_target())?.as_ref(),
-                ) {
-                    keep_reply(cx, &request_target, stored, seq)?;
-                    return Ok(true);
-                }
                 let held = match held_or_unlisted(cx, &target, RecordSide::Payee)? {
                     None if held_request(cx, &target)? => {
                         keep_reply(cx, &request_target, stored, seq)?;
@@ -1452,10 +1459,6 @@ fn payer_reply(
                 natural_key::payee_payment_record(&proof.payment_endpoint_identifier, &settled),
                 None,
             );
-            if crate::records::activity_base_changed(cx.record(&target.record_target())?.as_ref()) {
-                keep_before_record(cx, stored, seq, scopes, &target)?;
-                return Ok(true);
-            }
             // A proof no held record matches is new state, which the spam rule gates.
             let held = held_or_unlisted(cx, &target, RecordSide::Payee)?;
             // A record held whose value doesn't open, read or bind can't show its
@@ -1463,8 +1466,7 @@ fn payer_reply(
             // proof's sender: the proof is new state, under the spam rule first, and one
             // admitted is kept as a reply before its record (`pr/`), within those bounds,
             // never written over the value (Paykit spec 8.1, "Replies before their record").
-            let content = cx.record(&target.record_target())?.map(|held| held.content);
-            if holds_record(content.as_ref()) && held_bound(cx, &target, settlement)?.is_none() {
+            if held_request(cx, &target)? && held_bound(cx, &target, settlement)?.is_none() {
                 if admits_new_state(cx, &sender, scopes, stored)? {
                     keep_reply(cx, &target, stored, seq)?;
                 }
@@ -2492,12 +2494,11 @@ impl Paykit {
             };
             let record_key = self.activity_key(&target)?;
             let held = self.app.shared_record(&record_key).await?;
-            let disputed = crate::records::activity_base_changed(held.as_ref());
-            let content = held.map(|record| record.content);
+            let present = holds_activity(held.as_ref());
             // No record yet: the message waits for it within its window, and past it is
             // dropped with no notice, its sender keeping it no longer either, but never while
             // the copy of its side may lack records.
-            if !disputed && matches!(content, None | Some(RecordContent::Deleted)) {
+            if !present {
                 if crate::stored::past_window(accepted_at, self.service_time())
                     && !self
                         .side_unlisted(crate::stored::record_side(&target))
@@ -2507,10 +2508,17 @@ impl Paykit {
                 }
                 continue;
             }
-            let record = match content {
-                Some(RecordContent::Value(_)) if !disputed => self.held_activity(&target).await?,
-                _ => None,
-            };
+            let record = held.and_then(activity_value).and_then(|value| {
+                crate::records::bind_activity(
+                    &value,
+                    &own,
+                    target.side.side(),
+                    target.label().as_ref(),
+                    &record_key,
+                    |t| self.app.record_key(t).ok(),
+                    &|proof| self.rail.settlement_id(proof),
+                )
+            });
             // A message the record can't take, its sender not the record's counterparty,
             // isn't written: kept no longer than any other.
             let placed = match record {

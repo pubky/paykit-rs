@@ -682,10 +682,8 @@ impl Paykit {
         };
         let target = ActivityTarget::payer(natural);
         let key = self.activity_key(&target)?;
-        self.require_activity_base(&key).await?;
         if self
-            .app
-            .shared_record(&key)
+            .activity_write_base(&key)
             .await?
             .is_some_and(|r| crate::hold::awaits_key(&r.content))
         {
@@ -712,12 +710,7 @@ impl Paykit {
         let held =
             |why: &str| -> crate::error::PaykitError { Refusal::RecordHeld(why.into()).into() };
         let key = self.activity_key(target)?;
-        let current = self.app.shared_record(&key).await?;
-        if crate::records::activity_base_changed(current.as_ref()) {
-            return Err(held(
-                "the switch shows another write at the held activity record's version",
-            ));
-        }
+        let current = self.activity_write_base(&key).await?;
         let read = match current.as_ref().map(|r| &r.content) {
             None | Some(RecordContent::Deleted) => None,
             Some(content) => match activity::read(content.value(), &own, ActivitySide::Payer) {

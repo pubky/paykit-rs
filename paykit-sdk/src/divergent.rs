@@ -1459,7 +1459,7 @@ impl Paykit {
             // counterparty's here, failing closed, and holds the credit only while it is
             // paused, divergent or not confirmed for a credit. A failure to read one is the
             // call's error.
-            match self.payee_record(&held.key).await {
+            match self.bound_payee_record(&held) {
                 Ok((_, other)) if other.counterparty != *counterparty => {}
                 Ok(_) | Err(PaykitError::Refused(Refusal::NotFound) | PaykitError::Lib(_)) => {
                     records.push(held.key)

@@ -2424,9 +2424,8 @@ impl Paykit {
         {
             return Err(refusal.into());
         }
-        if self.payment_base_changed(&entry).await? {
-            return Err(crate::records::activity_base_refusal());
-        }
+        self.activity_write_base(&self.activity_key(&record)?)
+            .await?;
         let op = ClaimOp::attempt(
             entry.obligation,
             step,
@@ -2774,9 +2773,12 @@ impl Paykit {
         entry: &mut JournalEntry,
         mut signed: Option<SignedMessage>,
     ) -> Result<()> {
-        if !entry.acceptance_owed || self.payment_base_changed(entry).await? {
+        if !entry.acceptance_owed {
             return Ok(());
         }
+        let target = ActivityTarget::payer(entry.natural_key.clone());
+        self.activity_write_base(&self.activity_key(&target)?)
+            .await?;
         if entry.acceptance_released {
             if !self.restored_acceptance_lost(entry).await? {
                 return Ok(());
@@ -2836,9 +2838,7 @@ impl Paykit {
         // placed, while the request record is paused, by the one gate of the outcome
         // (Paykit spec 6); the entry stays owed, for a resume after the user's confirmation,
         // which sends it also over a view still divergent.
-        if self.payment_base_changed(entry).await?
-            || Box::pin(self.dispatched_write_waits(&key)).await?
-        {
+        if Box::pin(self.dispatched_write_waits(&key)).await? {
             return Ok(());
         }
         self.release_acceptance(entry, None).await?;
@@ -3299,7 +3299,7 @@ impl Paykit {
         let own = self.identity();
         let key = self.activity_key(target)?;
         let held = self.app.shared_record(&key).await?;
-        if self.payment_base_changed(entry).await? {
+        if crate::records::activity_base_changed(held.as_ref()) {
             return Ok(if paid {
                 OutcomeRecord::Held
             } else {
@@ -4035,21 +4035,11 @@ impl Paykit {
             ))
     }
 
-    /// The payment and, for a billing period, its parent request must each still build
-    /// on the activity whose contents the app used.
+    /// A journal entry binds its payment to this one payer record (Paykit spec 7.2).
     async fn payment_base_changed(&self, entry: &JournalEntry) -> Result<bool> {
-        let key = self.activity_key(&ActivityTarget::payer(entry.natural_key.clone()))?;
-        if self.activity_base_changed(&key).await? {
-            return Ok(true);
-        }
-        if let Some(hash) = entry.request_hash()? {
-            let request = ActivityTarget::payer(natural_key::request_record(&entry.payee, &hash));
-            let request_key = self.activity_key(&request)?;
-            if request_key != key {
-                return self.activity_base_changed(&request_key).await;
-            }
-        }
-        Ok(false)
+        let target = ActivityTarget::payer(entry.natural_key.clone());
+        self.activity_base_changed(&self.activity_key(&target)?)
+            .await
     }
 
     /// Whether `entry` is held from an automatic dispatch, a first dispatch or a repeat, as

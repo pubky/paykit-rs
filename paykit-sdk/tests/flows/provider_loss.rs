@@ -136,10 +136,15 @@ async fn recover_activity_with_phone_write(
         .entries
         .into_iter()
         .find_map(|entry| {
-            let Entry::Signed(op) = entry else { return None };
+            let Entry::Signed(op) = entry else {
+                return None;
+            };
             let verified = pubky_switch_core::ops::SignedOp::verify_with_cert(
-                &op, phone.app().cert(), &w.alice_id(),
-            ).unwrap();
+                &op,
+                phone.app().cert(),
+                &w.alice_id(),
+            )
+            .unwrap();
             match &verified.body().kind {
                 pubky_switch_core::ops::OpKind::RecordPut(write) if write.key == key => Some(op),
                 _ => None,
@@ -503,7 +508,21 @@ async fn test_provider_loss_restore_first_reads_the_current_activity() {
 #[tokio::test]
 async fn test_provider_loss_disputed_delete_protects_its_cancellation_from_expiry_and_eviction() {
     let w = World::new();
-    let mut wallet = w.wallet("wallet").await;
+    let lists = Arc::new(crate::common::ListsStore::default());
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            paykit_sdk::AppScopes::new()
+                .pay()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+            PaykitConfig::default(),
+            lists.clone(),
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
     let mut phone = w.wallet("phone").await;
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
@@ -517,6 +536,7 @@ async fn test_provider_loss_disputed_delete_protects_its_cancellation_from_expir
         pubky_switch_client::app::RecordContent::Deleted
     );
     follow_loss(&mut wallet).await;
+    let wallet_id = wallet.app_id();
     let cancel = |hash| {
         let body = paykit_lib::bodies::RequestReply {
             reason: None,
@@ -532,11 +552,24 @@ async fn test_provider_loss_disputed_delete_protects_its_cancellation_from_expir
             vec![hash],
             body,
         );
-        next.send_plaintext(w.bob_id(), shop.app().cert(), &signed, &[wallet.app_id()])
+        next.send_plaintext(w.bob_id(), shop.app().cert(), &signed, &[wallet_id])
             .unwrap();
     };
+    lists.flag(&w.bob_id());
     cancel(request.request_hash);
+    wallet.receive(None).await.unwrap();
     let stop = format!("kc/{}", pubky_switch_core::enc::b64(&record)).into_bytes();
+    assert!(
+        wallet
+            .app()
+            .protocol_get("paykit", &stop)
+            .await
+            .unwrap()
+            .is_some(),
+        "keep the known request's cancellation on admission"
+    );
+    assert_eq!(wallet.spam_count(&w.bob_id()).await.unwrap(), 0);
+    lists.unflag(&w.bob_id());
     for i in 0..=paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER {
         w.clock.advance_ms(1);
         cancel([u8::try_from(i + 1).unwrap(); 32]);
@@ -635,6 +668,17 @@ async fn test_provider_loss_disputed_request_keeps_its_known_payers_proof() {
         "keep the original proof from the signed request's recipient"
     );
     assert_eq!(shop.spam_count(&w.bob_id()).await.unwrap(), 0);
+    let key = shop.app().record_key(&target).unwrap();
+    for refusal in [
+        shop.verify_payment(&key).await.unwrap_err(),
+        shop.confirm_payment(&key).await.unwrap_err(),
+        shop.cancel_sent_request(&key, None).await.unwrap_err(),
+    ] {
+        assert!(
+            matches!(refusal.refusal(), Some(Refusal::NotNow(why)) if why.contains("another write at the held activity")),
+            "{refusal:?}"
+        );
+    }
     accept_activity_successor(&mut shop, &mut phone, &target).await;
     shop.receive(None).await.unwrap();
     let sale = shop

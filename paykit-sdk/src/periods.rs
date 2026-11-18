@@ -388,7 +388,7 @@ impl Paykit {
             natural_key::request_record(&self.identity(), &request_hash),
             target.label().as_ref(),
         );
-        self.require_activity_base(&self.activity_key(&request)?)
+        self.activity_write_base(&self.activity_key(&request)?)
             .await?;
         self.held_activity(&request).await
     }
@@ -474,7 +474,12 @@ impl Paykit {
         // Period details go to no payer whose sends are held (Paykit spec 8.1, "Blocked
         // counterparties"), refused before anything is signed, written or queued: they are
         // sent once the payer is unblocked or the lists are read.
-        let (_, held) = self.payee_record(record).await?;
+        let held = self
+            .app
+            .shared_record(record)
+            .await?
+            .ok_or(Refusal::NotFound)?;
+        let (target, held) = self.bound_payee_record(&held)?;
         self.refuse_while_sends_held(&held.counterparty).await?;
         let mut tries = 0;
         let msg_id = loop {
@@ -483,9 +488,7 @@ impl Paykit {
             // period record read again below verify the service's time now, which the
             // period-details window is judged on (Paykit spec 8.2): a time verified a while
             // ago can show a period's deadline not passed yet.
-            let (target, _) = self.payee_record(record).await?;
             self.app.read_record(&target.record_target()).await?;
-            self.require_activity_base(record).await?;
             let (target, bound) = self.payee_record(record).await?;
             let (stored, request) = request_of(&bound).ok_or(Refusal::NotFound)?;
             if !request.is_recurring() {

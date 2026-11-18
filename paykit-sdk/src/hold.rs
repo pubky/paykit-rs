@@ -529,7 +529,7 @@ impl Paykit {
             paykit_lib::derive::natural_key::request_record(&request.payee, &request.request_hash),
         );
         let record_key = self.activity_key(&target)?;
-        self.require_activity_base(&record_key).await?;
+        self.activity_write_base(&record_key).await?;
         let Some(record) = self.held_activity(&target).await? else {
             return Err(self.request_record_refusal(&target).await?);
         };

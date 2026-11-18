@@ -683,7 +683,7 @@ impl Paykit {
         let own = self.identity();
         let target =
             ActivityTarget::payee(natural_key::request_record(&own, &hash), label.as_ref());
-        self.require_activity_base(&self.activity_key(&target)?)
+        self.activity_write_base(&self.activity_key(&target)?)
             .await?;
         let mut record = activity::empty(ActivitySide::Payee, to);
         activity::place(&mut record, Role::Request, self.own_copy(&signed)?);
@@ -765,10 +765,18 @@ impl Paykit {
         record: &[u8; 32],
     ) -> Result<(ActivityTarget, ActivityRecord)> {
         let held = self
-            .app
-            .shared_record(record)
+            .activity_write_base(record)
             .await?
             .ok_or(Refusal::NotFound)?;
+        self.bound_payee_record(&held)
+    }
+
+    /// The accepted signed contents, bound to this key, for display and for identifying
+    /// the immutable recipient of a request even when its mutable activity is disputed.
+    pub(crate) fn bound_payee_record(
+        &self,
+        held: &pubky_switch_client::app::SharedRecord,
+    ) -> Result<(ActivityTarget, ActivityRecord)> {
         let label = Collection::PayeeActivity
             .policy_label(&held.policy)
             .ok_or(Refusal::NotFound)?;
@@ -778,7 +786,7 @@ impl Paykit {
             &self.identity(),
             ActivitySide::Payee,
             label.as_ref(),
-            record,
+            &held.key,
             |t| self.app.record_key(t).ok(),
             &|p| self.rail.settlement_id(p),
         )
@@ -806,7 +814,7 @@ impl Paykit {
             .records_of(Collection::PayeeActivity.name())
             .await?
         {
-            match self.payee_record(&held.key).await {
+            match self.bound_payee_record(&held) {
                 // A period record is shown with its request's.
                 Ok((_, record))
                     if record.request.is_none()
@@ -890,7 +898,6 @@ impl Paykit {
         record: &[u8; 32],
         maybe_credited_confirmed: bool,
     ) -> Result<Option<u64>> {
-        self.require_activity_base(record).await?;
         let (target, bound) = self.payee_record(record).await?;
         let proof_stored = bound.proof.as_ref().ok_or(Refusal::NotFound)?;
         let Body::PaymentProof(proof) = proof_stored.body() else {
@@ -1102,7 +1109,7 @@ impl Paykit {
             // to read it is the call's error, never "no other credit".
             let other = match held.content {
                 RecordContent::Deleted if !held.different_write_at_held_version => continue,
-                RecordContent::Value(_) => match self.payee_record(&held.key).await {
+                RecordContent::Value(_) => match self.bound_payee_record(&held) {
                     Ok(bound) => Some(bound),
                     Err(PaykitError::Refused(Refusal::NotFound) | PaykitError::Lib(_)) => None,
                     Err(error) => return Err(error),
@@ -1205,7 +1212,6 @@ impl Paykit {
         }
         let mut tries = 0;
         let msg_id = loop {
-            self.require_activity_base(record).await?;
             let (target, bound) = self.payee_record(record).await?;
             if let Some(receipt) = &bound.receipt {
                 return Ok(Some(receipt.message().msg_id.clone()));
@@ -1280,7 +1286,6 @@ impl Paykit {
         self.require_payee()?;
         let mut tries = 0;
         let msg_id = loop {
-            self.require_activity_base(record).await?;
             let (target, bound) = self.payee_record(record).await?;
             let (request, _) = request_of(&bound).ok_or(Refusal::NotFound)?;
             if bound.cancellation.is_some() {
@@ -1492,7 +1497,7 @@ impl Paykit {
                     .is_some_and(|t| at.saturating_add(KEPT_MESSAGE_MS) <= t)
             });
             if stale
-                && !crate::receive::cancellation_protected(held.as_ref())
+                && !crate::receive::holds_activity(held.as_ref())
                 && !self.side_unlisted(crate::hold::RecordSide::Payer).await?
                 && !self
                     .keeps_stored_of(&cancellation.sender(), &request)
