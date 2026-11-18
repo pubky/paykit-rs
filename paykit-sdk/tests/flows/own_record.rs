@@ -1648,6 +1648,153 @@ async fn test_own_record_losing_request_scope_withdraws_public_endpoints() {
     assert_eq!(published.signed(), wallet.app().record());
 }
 
+/// Alice's publishing wallet holding `paykit_request` and `paykit_pay`, with one public
+/// endpoint.
+async fn publishing_wallet_with_an_endpoint(w: &World) -> Paykit {
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new().request().pay().build().unwrap(),
+            publishing(),
+            store(),
+        )
+        .await;
+    wallet
+        .set_public_endpoint(endpoint("btc-lightning-bolt12"), payload("lno1tips"))
+        .await
+        .unwrap();
+    wallet
+}
+
+#[tokio::test]
+async fn test_own_record_renewal_without_request_scope_signs_no_endpoint() {
+    let w = World::new();
+    let mut wallet = publishing_wallet_with_an_endpoint(&w).await;
+    let old = wallet.app().cert().clone();
+    let narrower = crate::certificate::renew(
+        &w,
+        wallet.app_id(),
+        &AppScopes::new().pay().build().unwrap(),
+        1_000,
+    );
+    crate::certificate::list(&w, wallet.app_id(), &old, &narrower);
+    w.clock.advance_ms(1_000);
+    // The clean-up after the read fails: the payment method's list no longer fits.
+    w.rail.set_endpoint_identifiers(oversized_capabilities());
+    let path = app_record_path(&wallet.app_id());
+    let writes = w.homeserver.writes(&w.alice_id(), &path);
+    assert!(wallet.receive(None).await.is_err());
+    // The record signed with the renewed certificate, the one the Homeserver got, carries
+    // no public endpoint and no expiry: the earlier member was never signed under it.
+    assert_eq!(wallet.app().cert().hash(), narrower.hash());
+    let held = held(&wallet, w.alice_id());
+    assert_eq!(held.cert().hash(), narrower.hash());
+    assert!(PaykitMember::read(&held)
+        .unwrap()
+        .public_endpoints
+        .is_empty());
+    assert_eq!(held.expires_at(), None);
+    assert_eq!(w.homeserver.writes(&w.alice_id(), &path), writes + 1);
+    let bytes = w.homeserver.file(w.alice_id(), &path).unwrap();
+    let published =
+        AppRecord::verify(&serde_json::from_slice(&bytes).unwrap(), &w.alice_id()).unwrap();
+    assert_eq!(published.cert().hash(), narrower.hash());
+    assert!(PaykitMember::read(&published)
+        .unwrap()
+        .public_endpoints
+        .is_empty());
+}
+
+#[tokio::test]
+async fn test_own_record_renewal_keeping_request_scope_keeps_the_member() {
+    let w = World::new();
+    let mut wallet = publishing_wallet_with_an_endpoint(&w).await;
+    let member = |wallet: &Paykit| {
+        held(wallet, w.alice_id())
+            .body()
+            .protocols
+            .get("paykit")
+            .cloned()
+    };
+    let before = member(&wallet);
+    let expiry_set = held(&wallet, w.alice_id()).expires_at().is_some();
+    let old = wallet.app().cert().clone();
+    let renewed = crate::certificate::renew(
+        &w,
+        wallet.app_id(),
+        &AppScopes::new().request().pay().build().unwrap(),
+        1_000,
+    );
+    crate::certificate::list(&w, wallet.app_id(), &old, &renewed);
+    w.clock.advance_ms(1_000);
+    wallet.receive(None).await.unwrap();
+    // The same member, byte for byte, under the renewed certificate, still with its expiry.
+    assert_eq!(wallet.app().cert().hash(), renewed.hash());
+    assert_eq!(member(&wallet), before);
+    assert!(expiry_set && held(&wallet, w.alice_id()).expires_at().is_some());
+}
+
+#[tokio::test]
+async fn test_own_record_renewal_without_pay_scope_signs_no_capabilities() {
+    let w = World::new();
+    let mut wallet = publishing_wallet_with_an_endpoint(&w).await;
+    let old = wallet.app().cert().clone();
+    let narrower = crate::certificate::renew(
+        &w,
+        wallet.app_id(),
+        &AppScopes::new().request().build().unwrap(),
+        1_000,
+    );
+    crate::certificate::list(&w, wallet.app_id(), &old, &narrower);
+    w.clock.advance_ms(1_000);
+    wallet.receive(None).await.unwrap();
+    // Signed with the renewed certificate, Paykit's member has no capabilities, and keeps
+    // its public endpoint under its expiry.
+    let held = held(&wallet, w.alice_id());
+    assert_eq!(held.cert().hash(), narrower.hash());
+    let member = held.body().protocols.get("paykit").unwrap();
+    assert!(!member.contains_key("capabilities"), "{member:?}");
+    assert_eq!(PaykitMember::read(&held).unwrap().public_endpoints.len(), 1);
+    assert!(held.expires_at().is_some());
+}
+
+#[tokio::test]
+async fn test_own_record_member_another_device_changed_is_taken() {
+    let w = World::new();
+    let mut shop = publishing_shop(&w).await;
+    shop.set_public_endpoint(endpoint("btc-lightning-bolt12"), payload("lno1tips"))
+        .await
+        .unwrap();
+    let backup = shop.backup().await.unwrap();
+    let mut other = Paykit::restore(
+        w.env(&w.bob, store()),
+        publishing(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    other.receive(None).await.unwrap();
+    // The first device adds an endpoint; the other takes its record at its next read, and
+    // with it the news that Paykit's member changed, which leaves nothing for the host.
+    shop.set_public_endpoint(endpoint("btc-onchain-address"), payload("bc1q"))
+        .await
+        .unwrap();
+    other.receive(None).await.unwrap();
+    assert_eq!(other.app().record(), shop.app().record());
+    assert_eq!(other.own_public_endpoints().unwrap().len(), 2);
+    let events = other.app_mut().unacknowledged_events().await.unwrap();
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            pubky_switch_client::app::AppEvent::MemberChanged { .. }
+        )),
+        "{events:?}"
+    );
+}
+
 #[tokio::test]
 async fn test_own_record_failed_renewal_keeps_exact_bytes_until_delivery() {
     let w = World::new();

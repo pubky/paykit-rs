@@ -61,11 +61,11 @@ use std::collections::BTreeMap;
 
 use paykit_lib::app_record::{PaykitMember, PROTOCOL_NAME};
 use paykit_lib::{PaymentEndpointIdentifier, PaymentEndpointPayload};
-use pubky_switch_client::app::{AppError, Publication};
+use pubky_switch_client::app::{AppError, Publication, RecordExpiry};
 use pubky_switch_client::error::StoreError;
 use pubky_switch_core::json::MAX_INT;
 use pubky_switch_core::ops::{sign_batch, OpKind};
-use pubky_switch_core::records::{AppRecord, AppRecordBody};
+use pubky_switch_core::records::{AppCert, AppRecord, AppRecordBody};
 use pubky_switch_core::sig::SignedDoc;
 use pubky_switch_core::signing::Signs;
 use pubky_switch_core::time::MAX_TIME_MS;
@@ -289,7 +289,7 @@ impl Paykit {
         &self,
         endpoints: BTreeMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
     ) -> Result<PaykitMember> {
-        let publishes = self.holds("paykit_request") && self.config.app.publishes_record;
+        let publishes = holds_public_endpoints(self.app.cert(), self.config.app.publishes_record);
         Ok(PaykitMember {
             endpoint_identifiers: self.capabilities()?,
             public_endpoints: if publishes {
@@ -317,7 +317,11 @@ impl Paykit {
         }
         let held = AppRecord::verify(self.app.record(), &self.identity())
             .map_err(|_| PaykitError::corrupt())?;
-        capabilities_for(self.rail.as_ref(), self.holds("paykit_pay"), held.body())
+        capabilities_for(
+            self.rail.as_ref(),
+            holds_capabilities(self.app.cert()),
+            held.body(),
+        )
     }
 
     /// Sign `member` into the app's record, with `expires_at` when it carries public
@@ -471,6 +475,61 @@ impl Paykit {
 ///
 /// The client's `Usage` refusal for a list that `base`, with it as its only Paykit member,
 /// can't carry ([`check_member_fits`]).
+/// Whether an app under `cert` holds public endpoints: one holding `paykit_request` that
+/// publishes its record (module docs). The one rule every path that builds the own member
+/// follows, the renewal's included ([`member_under`]).
+pub(crate) fn holds_public_endpoints(cert: &AppCert, publishes_record: bool) -> bool {
+    publishes_record && cert.scopes().iter().any(|s| s == "paykit_request")
+}
+
+/// Whether an app under `cert` lists capabilities: one holding `paykit_pay` (Paykit wire
+/// 3.2).
+pub(crate) fn holds_capabilities(cert: &AppCert) -> bool {
+    cert.scopes().iter().any(|s| s == "paykit_pay")
+}
+
+/// Paykit's member of the record signed under `cert`, a renewal the app takes, and its
+/// expiry ask, from `member` and `ask`, the ones the record has now (Paykit spec 3.2,
+/// "Renewing a certificate"): the public endpoints go when the app under `cert` holds none
+/// ([`holds_public_endpoints`]), the capabilities when it lists none
+/// ([`holds_capabilities`]), and the ask is for no expiry once no public endpoint is left.
+/// Everything else of the member stays as it is, fields this version doesn't read included,
+/// and a member with nothing left is removed. Otherwise the member and its ask are unchanged.
+pub(crate) fn member_under(
+    member: Option<&serde_json::Map<String, serde_json::Value>>,
+    ask: RecordExpiry,
+    cert: &AppCert,
+    publishes_record: bool,
+) -> (
+    Option<serde_json::Map<String, serde_json::Value>>,
+    RecordExpiry,
+) {
+    let Some(member) = member else {
+        return (None, ask);
+    };
+    let mut out = member.clone();
+    if !holds_public_endpoints(cert, publishes_record) {
+        out.remove("public_endpoints");
+    }
+    if !holds_capabilities(cert) {
+        out.remove("capabilities");
+    }
+    let endpoints_left = match out.get("public_endpoints") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Object(endpoints)) => !endpoints.is_empty(),
+        Some(_) => true,
+    };
+    let ask = if endpoints_left {
+        ask
+    } else {
+        RecordExpiry::Never
+    };
+    if out.is_empty() {
+        return (None, RecordExpiry::Never);
+    }
+    (Some(out), ask)
+}
+
 pub(crate) fn capabilities_for(
     rail: &dyn Rail,
     pays: bool,

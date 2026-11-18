@@ -443,6 +443,10 @@ impl Paykit {
                 Box::pin(self.take_divergent_event(record, id)).await?;
                 true
             }
+            // Another device of the app signed a record that changed Paykit's member: the
+            // record is the app's now, and the upkeep after this read writes the member again
+            // if this app's rule wants it otherwise (`crate::own_record`).
+            AppEvent::MemberChanged { .. } => true,
             _ => false,
         };
         if taken {

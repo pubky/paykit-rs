@@ -371,11 +371,16 @@ pub(crate) fn check_own_certificate(cert: &AppCert) -> Result<()> {
 }
 
 impl Paykit {
-    fn protocols<F>(rail: &Arc<dyn Rail>, register: F) -> Result<(Arc<PaykitProtocol>, ProtocolSet)>
+    fn protocols<F>(
+        rail: &Arc<dyn Rail>,
+        config: &PaykitConfig,
+        register: F,
+    ) -> Result<(Arc<PaykitProtocol>, ProtocolSet)>
     where
         F: FnOnce(Arc<PaykitProtocol>) -> std::result::Result<ProtocolSet, AppError>,
     {
         let protocol = Arc::new(PaykitProtocol::with_rail(Arc::clone(rail)));
+        protocol.set_publishes_record(config.app.publishes_record);
         let protocols = register(Arc::clone(&protocol))?;
         let expected = Arc::clone(&protocol) as Arc<dyn pubky_switch_client::app::Protocol>;
         if !protocols
@@ -477,7 +482,7 @@ impl Paykit {
         // Keep the nested client future on the heap, as at `receive`.
         Box::pin(async move {
             check_orphan_window(&config, rail.as_ref())?;
-            let (protocol, protocols) = Self::protocols(&rail, register)?;
+            let (protocol, protocols) = Self::protocols(&rail, &config, register)?;
             // The certificate passes Paykit's checks before the client writes anything: the
             // client's join reads the approval with this same function, on these same inputs,
             // before its first commit, so this is the certificate it would keep. An approval
@@ -588,7 +593,7 @@ impl Paykit {
         // Keep the nested client future on the heap, as at `receive`.
         Box::pin(async move {
             check_orphan_window(&config, rail.as_ref())?;
-            let (protocol, protocols) = Self::protocols(&rail, register)?;
+            let (protocol, protocols) = Self::protocols(&rail, &config, register)?;
             let app = App::load(env.clone(), protocols, config.app.clone(), app_id).await?;
             let mut paykit = Self::assemble(app, env, protocol, config, rail, timer);
             // A record a view showed divergent pauses, also when a crash came before the
@@ -664,7 +669,7 @@ impl Paykit {
             // both go in one commit: on an error, neither is in the store.
             check_orphan_window(&config, rail.as_ref())?;
             crate::protocol::check_restored_loss(&backup.app)?;
-            let (protocol, protocols) = Self::protocols(&rail, register)?;
+            let (protocol, protocols) = Self::protocols(&rail, &config, register)?;
             let app = App::restore(env.clone(), protocols, config.app.clone(), &backup.app).await?;
             let mut paykit = Self::assemble(app, env, protocol, config, rail, timer);
             paykit.bound_restored_cursor_time().await?;
