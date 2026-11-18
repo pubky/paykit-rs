@@ -5150,11 +5150,6 @@ mod tests {
         assert!(held.check_later_write(&other_hash).is_err());
     }
 
-    /// A lower-case UUID v4 for `i`.
-    fn uuid(i: u64) -> String {
-        format!("00000000-0000-4000-8000-{i:012x}")
-    }
-
     #[test]
     fn test_attempted_periods_shape() {
         let map = |v: Value| v.as_object().cloned().unwrap();
