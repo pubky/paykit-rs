@@ -2580,11 +2580,9 @@ async fn test_restore_live_store_delivers_the_original_kept_receipt_once() {
 }
 
 #[tokio::test]
-async fn test_restore_own_receipt_kept_unanswered_sent_again_from_its_record() {
-    // The shop confirms alice's payment, and the receipt's batch is applied with its answer
-    // lost: the receipt is in the shop's record and in no outbox. Backed up then and restored
-    // onto a new store, the shop queues the receipt again with the bytes its record stores,
-    // once (Paykit spec 7.2, "What a restore loses"): alice's record shows it.
+async fn test_restore_fresh_store_keeps_an_issued_receipt_without_assuming_delivery() {
+    // The signed receipt proves credit. After the original batch loses its answer, a
+    // fresh installation cannot tell whether another copy finished the delivery.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -2602,9 +2600,22 @@ async fn test_restore_own_receipt_kept_unanswered_sent_again_from_its_record() {
         .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
-    let _ = shop
+    let kept = shop
         .confirm_payment_with(&record, paykit_sdk::ReceiptDetails::new())
-        .await;
+        .await
+        .unwrap_err()
+        .kept_batch()
+        .unwrap();
+    let original = shop
+        .app()
+        .queued_messages("paykit")
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|message| message.kept_batch == Some(kept))
+        .unwrap();
+    assert_eq!(original.kind, paykit_lib::Kind::PaymentReceipt.as_str());
+    assert_eq!(original.to, w.alice_id());
     wallet.receive(None).await.unwrap();
     assert!(wallet.request(&request).await.unwrap().receipt.is_none());
     let backup = shop.backup().await.unwrap();
@@ -2618,16 +2629,27 @@ async fn test_restore_own_receipt_kept_unanswered_sent_again_from_its_record() {
         .unwrap()
         .is_none());
     wallet.receive(None).await.unwrap();
-    let receipt = wallet.request(&request).await.unwrap().receipt.unwrap();
-    assert_eq!(receipt.payee, w.bob_id());
-    let value = crate::outcome_record::record_value(&mut wallet, &request)
+    assert!(wallet.request(&request).await.unwrap().receipt.is_none());
+    assert_eq!(
+        shop.confirm_payment(&record).await.unwrap(),
+        Some(original.msg_id.clone())
+    );
+    assert!(shop
+        .app()
+        .delivery(&original.msg_id)
         .await
-        .unwrap();
-    assert!(!value["receipt"].is_null(), "{value}");
-    // Once: a later receive queues nothing more.
-    let before = w.alice.switch().entries_from(&w.bob_id());
+        .unwrap()
+        .is_none());
     shop.receive(None).await.unwrap();
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    shop.flush().await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.request(&request).await.unwrap().receipt.is_none());
+    assert!(shop
+        .app()
+        .delivery(&original.msg_id)
+        .await
+        .unwrap()
+        .is_none());
 }
 
 /// Bob's shop sends alice a request, and her wallet rejects it: the rejection's batch is
