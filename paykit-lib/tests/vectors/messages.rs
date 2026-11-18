@@ -5,12 +5,12 @@
 use std::collections::HashMap;
 
 use paykit_lib::amount::{Asset, Decimal, PaymentAmount, Rate};
-use paykit_lib::amount_for_endpoint;
 use paykit_lib::bodies::{check_body, Body, PaymentRequest, ResendRequest};
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::{natural_key, request_obligation};
 use paykit_lib::identifiers::{AllowanceId, PaymentEndpointIdentifier};
 use paykit_lib::kinds::{check_kind_scopes, Kind, PaykitKindRules, OPAQUE_MEMBERS};
+use paykit_lib::{amount_for_endpoint, EndpointAmount};
 use pubky_switch_core::enc::b64;
 use pubky_switch_core::message::{Message, MessagePlaintext, VerifiedSender};
 use pubky_switch_core::receive::KindRules;
@@ -1184,8 +1184,10 @@ fn priced_amount(case: &Value) -> Value {
         PaymentEndpointIdentifier::parse(st(case, "payment_endpoint_identifier")).unwrap();
     let digits = u32::try_from(case["fraction_digits"].as_u64().unwrap()).unwrap();
     match amount_for_endpoint(&requested, rates.as_deref(), &endpoint, digits).unwrap() {
-        Some(amount) => json!({ "asset": amount.asset.as_str(), "value": amount.value.as_str() }),
-        None => Value::Null,
+        EndpointAmount::ByRate { amount, .. } | EndpointAmount::RequestedAsset(amount) => {
+            json!({ "asset": amount.asset.as_str(), "value": amount.value.as_str() })
+        }
+        _ => Value::Null,
     }
 }
 
