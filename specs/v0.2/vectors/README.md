@@ -15,11 +15,7 @@ The `failure_evidence` cases supply already validated counting evidence to the p
 
 ## Settlement marks
 
-`sealed.json` `settlement_marks` covers wire 5.7's bucket values, record keys, sealed
-encodings and deletion-boundary merges. Its `boundaries` cases include zero-mark values,
-canonical known hash sets, malformed boundaries retained as unknown, and union saturation.
-These cases check formats and pure merge rules. They do not test authenticated creation,
-delete application, continuity, cursor holds or the evidence required to credit a settlement.
+`sealed.json` `settlement_marks` and `identifiers.json` use the earlier settlement policy without `permanent`. Their bucket keys, sealed values and deletion-boundary cases describe the earlier format. The vectors for permanent bucket keys and sealed values are pending. Spec Section 18 describes the wallet checks for first credit and retry.
 
 ## Files
 
