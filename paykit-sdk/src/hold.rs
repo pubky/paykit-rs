@@ -899,7 +899,10 @@ impl Paykit {
     pub(crate) async fn list_records(&mut self) -> Result<()> {
         self.refuse_while_scope_keys_missing().await?;
         let signed = self.app.cert().signed().clone();
-        self.app.list_collections().await?;
+        if self.app.list_collections().await? {
+            // Switch keeps the listing position across calls and reloads.
+            return Err(unlisted());
+        }
         let mut tx = Tx::default();
         tx.delete(key::RECORDS_UNLISTED);
         tx.delete(key::MISSED_UNLISTED);
@@ -907,15 +910,10 @@ impl Paykit {
         self.local_commit(tx).await
     }
 
-    /// A read that wasn't stopped got past the client's listing, a restore's included, which
-    /// the client makes only while it holds the keys of the scopes that read the records
-    /// ([`Paykit::holds_scope_keys`]): so the restore's mark goes when those keys were held
-    /// at the read's start, `keys_held_before`, and are under the certificate held after it,
-    /// which a restore's first read may have widened before its listing. Otherwise the
-    /// listing was skipped, and the mark stays until a read that lists. The certificate
-    /// listed under stays as it was, since the read may have taken another one after its
-    /// listing ([`Unlisted::Certificate`]), and so does a `missed` item's mark: the client
-    /// listed before the feed, and the item came after ([`Unlisted::Missed`]).
+    /// Clear the restore's mark once the client finishes its owed listing with the scope
+    /// keys held before and after the read. A read may use its page budget before then.
+    /// A certificate taken during the read and a missed item received after its listing
+    /// each require their own listing.
     pub(crate) async fn records_listed(&mut self, keys_held_before: bool) -> Result<()> {
         if !keys_held_before || !self.holds_scope_keys() {
             return Ok(());
@@ -924,6 +922,7 @@ impl Paykit {
             .local_get::<bool>(key::RECORDS_UNLISTED)
             .await?
             .is_some()
+            && !self.app.listing_owed().await?
         {
             self.local_delete(key::RECORDS_UNLISTED).await?;
         }
