@@ -692,13 +692,13 @@ async fn test_recovery_list_expiring_during_the_own_identity_read_not_paid() {
     };
     drop(wallet);
     // On resume, the list is still usable at the destination check; the own identity.json's
-    // read then takes 61 s and succeeds, past the list's expiry. Nothing is paid on it
+    // read takes 31 s, past the list's expiry but within the own copy's minute. Nothing is paid on it
     // (Paykit spec 5, 7.2).
     let reads = Arc::new(crate::common::ScriptedIdentityReads::new(
         Arc::clone(&w.homeserver),
         Arc::clone(&w.clock),
     ));
-    reads.then(w.alice_id(), 61_000, false);
+    reads.then(w.alice_id(), 31_000, false);
     let mut wallet = w
         .load_with_homeserver(
             &w.alice,

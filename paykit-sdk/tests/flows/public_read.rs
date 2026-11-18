@@ -341,6 +341,71 @@ async fn test_public_read_one_time_judges_every_app() {
 }
 
 #[tokio::test]
+async fn test_public_read_identity_source_at_the_start_of_the_app_reads() {
+    // The first app has returned its old record when the second app supplies the
+    // new clock. Only a pass that began under the observed identity can stand.
+    for (start_before, return_before, expected) in [
+        (60_000, 0, "lnbc1current"),
+        (0, 60_000, "lnbc1current"),
+        (0, 0, "lnbc1before"),
+    ] {
+        let w = Arc::new(World::new());
+        let (mut wallet, reads) = wallet_reading_through(&w).await;
+        let apps = bob_apps(&w, &["shop", "till"]).await;
+        let (name, first_app) = apps[0];
+        let observed = w.clock.now_ms();
+        publish_app_at(
+            &w,
+            name,
+            one_endpoint("btc-lightning-bolt11", "lnbc1before"),
+            observed,
+            Some(observed + DAY_MS),
+        );
+        let initial = wallet
+            .app_mut()
+            .identity_of(&w.bob_id(), true)
+            .await
+            .unwrap();
+        assert_eq!(initial.read_at_ms, Some(observed));
+        w.homeserver.remove(w.bob_id(), IDENTITY_PATH);
+        w.clock.set_ms(observed - start_before);
+        let started = wallet
+            .app_mut()
+            .begin_identity_lookup(&w.bob_id(), false)
+            .await
+            .unwrap();
+        assert_eq!(started.identity.doc.hash(), initial.doc.hash());
+        assert_eq!(started.identity.read_at_ms, Some(observed));
+        assert_eq!(w.clock.now_ms(), observed - start_before);
+        drop(started);
+        let clock = Arc::clone(&w.clock);
+        reads.on_read(&first_app, move || clock.set_ms(observed - return_before));
+        let changed = Arc::clone(&w);
+        reads.on_read(&apps[1].1, move || {
+            changed.clock.set_ms(observed + 1);
+            publish_app_at(
+                &changed,
+                name,
+                one_endpoint("btc-lightning-bolt11", "lnbc1current"),
+                observed + 1,
+                Some(observed + DAY_MS),
+            );
+        });
+        let discovery = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+        let shown = discovery
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.app_id == first_app)
+            .unwrap();
+        assert_eq!(
+            shown.payload.as_str(),
+            expected,
+            "first GET began {start_before} ms and returned {return_before} ms before observation"
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_public_read_identity_source_rereads_a_directory_only_pass() {
     let w = Arc::new(World::new());
     let (mut wallet, reads) = wallet_reading_through(&w).await;
