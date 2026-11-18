@@ -1376,6 +1376,45 @@ async fn test_blocked_resend_request_to_a_blocked_counterparty_refused_with_noth
 }
 
 #[tokio::test]
+async fn test_blocked_queued_resend_waits_for_permission_to_deliver() {
+    let w = World::new();
+    let (mut wallet, _shop, _) = received(&w, PaykitConfig::default()).await;
+    w.bob.switch().fail_next(Fault::Error {
+        path: "/inbox".into(),
+        code: ErrorCode::Unavailable,
+        current: serde_json::Value::Null,
+    });
+    let id = wallet
+        .request_resend(
+            w.bob_id(),
+            paykit_sdk::ResendSelection::default().with_accepted_from_ms(0),
+        )
+        .await
+        .unwrap();
+    async fn may_send(wallet: &Paykit, id: &str) -> bool {
+        wallet
+            .app()
+            .queued_messages("paykit")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|message| message.msg_id == id)
+            .expect("queued re-send request")
+            .may_send
+    }
+    assert!(may_send(&wallet, &id).await);
+    let before = w.bob.switch().entries_from(&w.alice_id());
+    wallet.block(&w.bob_id()).await.unwrap();
+    assert!(!may_send(&wallet, &id).await);
+    wallet.app_mut().flush_outbox().await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet.app_mut().flush_outbox().await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
+}
+
+#[tokio::test]
 async fn test_blocked_resend_request_while_the_deny_list_is_unknown_refused_with_nothing_sent() {
     // The wallet's copy of the lists isn't known: its due read failed, and the read the call
     // tries first fails too. Asking bob to re-send is refused, nothing queued or sent; once
