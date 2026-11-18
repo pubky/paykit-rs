@@ -445,8 +445,13 @@ impl Paykit {
             }
             // Another device of the app signed a record that changed Paykit's member: the
             // record is the app's now, and the upkeep after this read writes the member again
-            // if this app's rule wants it otherwise (`crate::own_record`).
-            AppEvent::MemberChanged { .. } => true,
+            // if this app's rule wants it otherwise (`crate::own_record`). The client owes the
+            // event only to the protocol it names ("a duty event, for that protocol", Switch
+            // spec 3.2 step 3, 4.2), and events not for Paykit are skipped above; the name is
+            // checked here too, so another protocol's event is never taken for it.
+            AppEvent::MemberChanged { protocol, .. } => {
+                protocol.as_str() == paykit_lib::app_record::PROTOCOL_NAME
+            }
             _ => false,
         };
         if taken {

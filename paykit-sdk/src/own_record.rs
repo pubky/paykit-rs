@@ -465,31 +465,22 @@ impl Paykit {
     }
 }
 
-/// `capabilities.endpoint_identifiers` for an app whose record is `base`: what its payment
-/// method pays, sorted and without repeats, at an app holding `paykit_pay` (`pays`), and
-/// nothing at one without (Paykit wire 3.2). [`Rail::endpoint_identifiers`] enters the SDK
-/// here alone, so a list the record can't carry is refused the same way at the join, a
-/// receive, [`Paykit::update_own_record`] and [`Paykit::set_public_endpoints`].
-///
-/// # Errors
-///
-/// The client's `Usage` refusal for a list that `base`, with it as its only Paykit member,
-/// can't carry ([`check_member_fits`]).
 /// Whether an app under `cert` holds public endpoints: one holding `paykit_request` that
 /// publishes its record (module docs). The one rule every path that builds the own member
 /// follows, the renewal's included ([`member_under`]).
 pub(crate) fn holds_public_endpoints(cert: &AppCert, publishes_record: bool) -> bool {
-    publishes_record && cert.scopes().iter().any(|s| s == "paykit_request")
+    publishes_record
+        && paykit_lib::scopes::holds(cert.scopes(), &paykit_lib::scopes::PaykitScope::Request)
 }
 
 /// Whether an app under `cert` lists capabilities: one holding `paykit_pay` (Paykit wire
 /// 3.2).
 pub(crate) fn holds_capabilities(cert: &AppCert) -> bool {
-    cert.scopes().iter().any(|s| s == "paykit_pay")
+    paykit_lib::scopes::holds(cert.scopes(), &paykit_lib::scopes::PaykitScope::Pay)
 }
 
 /// Paykit's member of the record signed under `cert`, a renewal the app takes, and its
-/// expiry ask, from `member` and `ask`, the ones the record has now (Paykit spec 3.2,
+/// expiry ask, from `member` and `ask`, the ones the record has now (Paykit spec, "What this pin adopts",
 /// "Renewing a certificate"): the public endpoints go when the app under `cert` holds none
 /// ([`holds_public_endpoints`]), the capabilities when it lists none
 /// ([`holds_capabilities`]), and the ask is for no expiry once no public endpoint is left.
@@ -530,6 +521,16 @@ pub(crate) fn member_under(
     (Some(out), ask)
 }
 
+/// `capabilities.endpoint_identifiers` for an app whose record is `base`: what its payment
+/// method pays, sorted and without repeats, at an app holding `paykit_pay` (`pays`), and
+/// nothing at one without (Paykit wire 3.2). [`Rail::endpoint_identifiers`] enters the SDK
+/// here alone, so a list the record can't carry is refused the same way at the join, a
+/// receive, [`Paykit::update_own_record`] and [`Paykit::set_public_endpoints`].
+///
+/// # Errors
+///
+/// The client's `Usage` refusal for a list that `base`, with it as its only Paykit member,
+/// can't carry ([`check_member_fits`]).
 pub(crate) fn capabilities_for(
     rail: &dyn Rail,
     pays: bool,

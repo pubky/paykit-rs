@@ -901,13 +901,10 @@ impl Protocol for PaykitProtocol {
             .map_err(|error| error.to_string())
     }
 
-    /// The kinds this SDK handles that the certificate's scopes receive (Switch spec 3.4):
-    /// none for a certificate Paykit's verifiers refuse (Paykit wire 3.1), such as a
-    /// renewal's that the Switch took.
     /// Paykit's member under a renewed certificate, from the record's one
     /// (`crate::own_record::member_under`): signed once with the certificate, so a record
-    /// under it never lists a public endpoint or a capability it doesn't cover (Paykit spec
-    /// 3.2, "Renewing a certificate").
+    /// under it never lists a public endpoint or a capability it doesn't cover (Paykit spec,
+    /// "What this pin adopts", "Renewing a certificate").
     fn member_for(
         &self,
         member: Option<&Map<String, Value>>,
@@ -923,6 +920,9 @@ impl Protocol for PaykitProtocol {
         )
     }
 
+    /// The kinds this SDK handles that the certificate's scopes receive (Switch spec 3.4):
+    /// none for a certificate Paykit's verifiers refuse (Paykit wire 3.1), such as a
+    /// renewal's that the Switch took.
     fn accepts(&self, cert: &AppCert) -> Vec<String> {
         if check_certificate(cert).is_err() {
             return Vec::new();
