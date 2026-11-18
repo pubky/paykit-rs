@@ -146,6 +146,141 @@ async fn test_mixed_protocols_own_load() {
 }
 
 #[tokio::test]
+async fn test_mixed_protocols_attach_to_host_loaded_app() {
+    let w = world();
+    let storage = store();
+    let protocol = Arc::new(PaykitProtocol::with_rail(
+        Arc::clone(&w.rail) as Arc<dyn Rail>
+    ));
+    let mut config = PaykitConfig::default();
+    let mut requested = AppScopes::new().pay().request().build().unwrap();
+    requested.scopes.push("chat".into());
+    let joined = App::join(
+        w.env(&w.alice, Arc::clone(&storage)),
+        register(Arc::clone(&protocol)).unwrap(),
+        config.app.clone(),
+        w.approve(&w.alice, "mixed", &requested),
+    )
+    .await
+    .unwrap();
+    let id = joined.app_id();
+    drop(joined);
+    let app = App::load(
+        w.env(&w.alice, storage),
+        register(Arc::clone(&protocol)).unwrap(),
+        config.app.clone(),
+        id,
+    )
+    .await
+    .unwrap();
+    let clock = app.clock();
+    let homeserver = app.homeserver_reader();
+    config.app.publishes_record = true;
+    let mut wallet = Paykit::attach(app, config, protocol, w.timer())
+        .await
+        .unwrap();
+    assert_eq!(wallet.app_id(), id);
+    assert!(Arc::ptr_eq(&clock, &wallet.app().clock()));
+    assert!(Arc::ptr_eq(&homeserver, &wallet.app().homeserver_reader()));
+    wallet.receive(None).await.unwrap();
+    let _shop = w.shop().await;
+    let keys = w.bob.identity().app_keys("chat");
+    w.bob.register_app(&keys, &AppSpec::new(&["chat"])).unwrap();
+    let chat_id = chat_item(&w, id);
+    payment_request(&w, id, "host-loaded");
+    wallet.receive(None).await.unwrap();
+    chat_took(&wallet, &chat_id).await;
+    assert_eq!(wallet.requests().await.unwrap().len(), 1);
+    let endpoint = paykit_sdk::PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
+    let payload = paykit_sdk::PaymentEndpointPayload::new("lnbc1invoice").unwrap();
+    assert!(matches!(
+        wallet.set_public_endpoint(endpoint, payload).await,
+        Err(paykit_sdk::PaykitError::Refused(
+            paykit_sdk::Refusal::Usage(_)
+        ))
+    ));
+}
+
+#[tokio::test]
+async fn test_mixed_protocols_attach_refuses_a_different_protocol() {
+    let w = world();
+    let app = client(&w, store()).await;
+    let other = Arc::new(PaykitProtocol::with_rail(
+        Arc::clone(&w.rail) as Arc<dyn Rail>
+    ));
+    usage(Paykit::attach(app, PaykitConfig::default(), other, w.timer()).await);
+}
+
+#[tokio::test]
+async fn test_mixed_protocols_attach_refuses_an_unconfigured_protocol() {
+    let w = world();
+    let config = PaykitConfig::default();
+    let protocol = Arc::new(PaykitProtocol::new());
+    let app = App::join(
+        w.env(&w.alice, store()),
+        register(Arc::clone(&protocol)).unwrap(),
+        config.app.clone(),
+        w.approve(&w.alice, "mixed", &scopes()),
+    )
+    .await
+    .unwrap();
+    usage(Paykit::attach(app, config, protocol, w.timer()).await);
+}
+
+#[tokio::test]
+async fn test_mixed_protocols_attach_refuses_a_protocol_with_an_owner() {
+    let w = world();
+    let storage = store();
+    let config = PaykitConfig::default();
+    let protocol = Arc::new(PaykitProtocol::with_rail(
+        Arc::clone(&w.rail) as Arc<dyn Rail>
+    ));
+    let app = App::join(
+        w.env(&w.alice, Arc::clone(&storage)),
+        register(Arc::clone(&protocol)).unwrap(),
+        config.app.clone(),
+        w.approve(&w.alice, "mixed", &scopes()),
+    )
+    .await
+    .unwrap();
+    let wallet = Paykit::attach(app, config.clone(), Arc::clone(&protocol), w.timer())
+        .await
+        .unwrap();
+    let id = wallet.app_id();
+    drop(wallet);
+    let app = App::load(
+        w.env(&w.alice, storage),
+        register(Arc::clone(&protocol)).unwrap(),
+        config.app.clone(),
+        id,
+    )
+    .await
+    .unwrap();
+    usage(Paykit::attach(app, config, protocol, w.timer()).await);
+}
+
+#[tokio::test]
+async fn test_mixed_protocols_attach_refuses_a_raw_restore() {
+    let w = world();
+    let mut joined = client(&w, store()).await;
+    let backup = joined.backup_layered().await.unwrap();
+    let protocol = Arc::new(PaykitProtocol::with_rail(
+        Arc::clone(&w.rail) as Arc<dyn Rail>
+    ));
+    let config = PaykitConfig::default();
+    let app = App::restore(
+        w.env(&w.alice, store()),
+        register(Arc::clone(&protocol)).unwrap(),
+        config.app.clone(),
+        &backup,
+    )
+    .await
+    .unwrap();
+    assert!(app.reconcile_mode());
+    usage(Paykit::attach(app, config, protocol, w.timer()).await);
+}
+
+#[tokio::test]
 async fn test_mixed_protocols_own_restore() {
     let w = world();
     let mut app = client(&w, store()).await;
