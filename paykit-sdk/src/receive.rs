@@ -865,7 +865,12 @@ fn place_with(
     if held
         .as_ref()
         .is_some_and(|held| held.content == RecordContent::Deleted)
-        && cx.record_seen(&cx.record_key(&record_target)?)?.is_some()
+        && {
+            let key = cx.record_key(&record_target)?;
+            cx.record_seen(&key)?.is_some()
+                || (target.side.side() == ActivitySide::Payee
+                    && crate::deletions::held_on_receive(cx, &key)?)
+        }
     {
         return Ok(());
     }

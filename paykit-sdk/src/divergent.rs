@@ -155,8 +155,17 @@ pub(crate) struct SeenVersion {
     version: u64,
 }
 
+impl From<RecordVersion> for SeenVersion {
+    fn from(version: RecordVersion) -> Self {
+        Self {
+            generation: version.generation,
+            version: version.version,
+        }
+    }
+}
+
 impl SeenVersion {
-    fn record_version(self) -> RecordVersion {
+    pub(crate) fn record_version(self) -> RecordVersion {
         RecordVersion {
             generation: self.generation,
             version: self.version,

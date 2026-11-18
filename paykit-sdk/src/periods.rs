@@ -399,9 +399,7 @@ impl Paykit {
         let Some(request) = self.payee_period_parent(target, bound) else {
             return Ok(None);
         };
-        let held = self
-            .activity_write_base(&self.activity_key(&request)?)
-            .await?;
+        let held = self.credit_input(&self.activity_key(&request)?).await?;
         Ok(self.read_activity(&request, held.as_ref()))
     }
 

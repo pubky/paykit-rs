@@ -13,6 +13,7 @@ mod common;
 mod conversion;
 mod crash;
 mod custom_rail;
+mod deletions;
 mod destinations;
 mod discovery_state;
 mod divergent;

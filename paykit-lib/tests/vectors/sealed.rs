@@ -612,6 +612,14 @@ fn activity_cases(keys: &Keys) -> (Vec<ActivityCase>, Vec<ActivityCase>) {
             b.payee_request.clone(),
             &b.payee_request,
         ),
+        keyed(
+            "a payee's request record put back from an older copy",
+            ActivityRecord {
+                lost_to_delete: Some([7; 32]),
+                ..b.payee_request.clone()
+            },
+            &b.payee_request,
+        ),
     ];
     let refused = vec![
         keyed(
@@ -1074,17 +1082,51 @@ fn period_start_cases(keys: &Keys) -> (Vec<ActivityCase>, Vec<ActivityCase>) {
     )
 }
 
-/// Refused `activity_records` cases no record a writer builds can hold, appended last: alice's
-/// period record with `manual_only` `false`, which is `true` or absent (wire 5.3).
-fn written_member_cases(keys: &Keys) -> Vec<(&'static str, Vec<u8>, [u8; 32])> {
+/// Member values the typed activity record writer cannot encode (wire 5.3).
+fn written_member_cases(keys: &Keys) -> Vec<(&'static str, ActivitySide, Vec<u8>, [u8; 32])> {
     let b = bases(keys);
-    let mut value: Value = serde_json::from_slice(&b.period.to_json().unwrap()).unwrap();
-    value["manual_only"] = serde_json::json!(false);
-    vec![(
-        "manual_only false in a payer's period record",
-        serde_json::to_vec(&value).unwrap(),
-        base_key(keys, &b.period),
-    )]
+    let case = |name, record: &ActivityRecord, member: &str, field: Value| {
+        let mut value: Value = serde_json::from_slice(&record.to_json().unwrap()).unwrap();
+        value[member] = field;
+        (
+            name,
+            record.side,
+            serde_json::to_vec(&value).unwrap(),
+            base_key(keys, record),
+        )
+    };
+    vec![
+        case(
+            "manual_only false in a payer's period record",
+            &b.period,
+            "manual_only",
+            serde_json::json!(false),
+        ),
+        case(
+            "a null delete item hash",
+            &b.payee_request,
+            "lost_to_delete",
+            Value::Null,
+        ),
+        case(
+            "a boolean delete item hash",
+            &b.payee_request,
+            "lost_to_delete",
+            serde_json::json!(true),
+        ),
+        case(
+            "a short delete item hash",
+            &b.payee_request,
+            "lost_to_delete",
+            serde_json::json!("AA"),
+        ),
+        case(
+            "a padded delete item hash",
+            &b.payee_request,
+            "lost_to_delete",
+            serde_json::json!(format!("{}=", b64(&[7; 32]))),
+        ),
+    ]
 }
 
 /// A later-write case of `activity_records`: its name, whether the write builds on the
@@ -1288,12 +1330,12 @@ pub(crate) fn generate(keys: &Keys) {
     }
     refused.extend(evidence_refused.iter().map(|c| write(c, false)));
     refused.extend(member_refused.iter().map(|c| write(c, false)));
-    for (name, value, key) in written_member_cases(keys) {
-        let error = bind_activity(keys, &value, ActivitySide::Payer, &key)
+    for (name, side, value, key) in written_member_cases(keys) {
+        let error = bind_activity(keys, &value, side, &key)
             .expect_err(name)
             .to_string();
         refused.push(serde_json::json!({
-            "collection": "payer_activity",
+            "collection": side_collection(side),
             "name": name,
             "reason": quoted(&error),
             "record_key": b64(&key),
