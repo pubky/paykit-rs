@@ -1485,18 +1485,14 @@ impl Paykit {
                 let _ = self.place_kept_cancellation(&target).await;
                 continue;
             }
-            let content = self
-                .app
-                .shared_record(&self.activity_key(&target)?)
-                .await?
-                .map(|record| record.content);
+            let held = self.app.shared_record(&self.activity_key(&target)?).await?;
             // A kept stop always has its acceptance time (the check refuses one without).
             let stale = cancellation.accepted_at().is_some_and(|at| {
                 self.service_time()
                     .is_some_and(|t| at.saturating_add(KEPT_MESSAGE_MS) <= t)
             });
             if stale
-                && !crate::receive::holds_record(content.as_ref())
+                && !crate::receive::cancellation_protected(held.as_ref())
                 && !self.side_unlisted(crate::hold::RecordSide::Payer).await?
                 && !self
                     .keeps_stored_of(&cancellation.sender(), &request)

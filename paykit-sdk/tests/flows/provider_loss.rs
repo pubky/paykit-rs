@@ -79,9 +79,16 @@ async fn follow_loss(app: &mut Paykit) -> u64 {
 
 /// The payer's activity for this request, as both of Alice's apps address it.
 fn request_target(request: &RequestRef) -> pubky_switch_client::app::RecordTarget {
-    use paykit_lib::{collections::Collection, derive::natural_key};
+    use paykit_lib::collections::Collection;
+    activity_target(request, Collection::PayerActivity)
+}
+
+fn activity_target(
+    request: &RequestRef,
+    family: paykit_lib::collections::Collection,
+) -> pubky_switch_client::app::RecordTarget {
+    use paykit_lib::derive::natural_key;
     use pubky_switch_client::app::{Collection as SwitchCollection, RecordTarget};
-    let family = Collection::PayerActivity;
     RecordTarget::new(
         SwitchCollection::new(family.name(), family.fixed_policy()),
         &natural_key::request_record(&request.payee, &request.request_hash),
@@ -95,6 +102,7 @@ async fn recover_activity_with_phone_write(
     wallet: &mut Paykit,
     phone: &mut Paykit,
     target: &pubky_switch_client::app::RecordTarget,
+    delete_held: bool,
 ) -> Arc<ScriptedSwitch> {
     use pubky_switch_client::client::answers::{RecoveryUpload, UploadedOp};
     use pubky_switch_client::client::{Credentials, SwitchClient};
@@ -110,7 +118,9 @@ async fn recover_activity_with_phone_write(
         .unwrap();
     phone.app_mut().read_record(target).await.unwrap().unwrap();
     let mut manual: serde_json::Value = serde_json::from_slice(value).unwrap();
-    manual["manual_only"] = true.into();
+    if target.collection.name == paykit_lib::collections::Collection::PayerActivity.name() {
+        manual["manual_only"] = true.into();
+    }
     w.alice.switch().fail_next(Fault::Unreachable {
         path: "/ops".into(),
         after: 0,
@@ -121,16 +131,34 @@ async fn recover_activity_with_phone_write(
         .await
         .is_err());
     let missed = w.alice.switch().unreached_bodies().pop().unwrap();
-    let mut entries = OpsRequest::parse(&missed).unwrap().entries;
-    assert_eq!(entries.len(), 1);
-    let Entry::Signed(op) = entries.remove(0) else {
-        panic!("a signed record write")
+    let op = OpsRequest::parse(&missed)
+        .unwrap()
+        .entries
+        .into_iter()
+        .find_map(|entry| {
+            let Entry::Signed(op) = entry else { return None };
+            let verified = pubky_switch_core::ops::SignedOp::verify_with_cert(
+                &op, phone.app().cert(), &w.alice_id(),
+            ).unwrap();
+            match &verified.body().kind {
+                pubky_switch_core::ops::OpKind::RecordPut(write) if write.key == key => Some(op),
+                _ => None,
+            }
+        })
+        .expect("the phone's signed write of this record");
+    let applied = if delete_held {
+        wallet
+            .app_mut()
+            .delete_record(target, vec![])
+            .await
+            .unwrap()
+    } else {
+        wallet
+            .app_mut()
+            .put_record(target, value, vec![])
+            .await
+            .unwrap()
     };
-    let applied = wallet
-        .app_mut()
-        .put_record(target, value, vec![])
-        .await
-        .unwrap();
     assert_eq!(applied.version.version, base.version.version + 1);
     let lost = wallet.app().own_identity().signed().clone();
     let next = declare_loss_of(w, ALICE_ORIGIN, NEXT_SECRET);
@@ -187,7 +215,7 @@ async fn test_provider_loss_activity_with_another_write_at_its_version_survives_
     let owed_floor = wallet.app().protocol_scan("paykit", b"fo/").await.unwrap();
     assert_eq!(owed_floor.len(), 1);
     let target = request_target(&request);
-    let next = recover_activity_with_phone_write(&w, &mut wallet, &mut phone, &target).await;
+    let next = recover_activity_with_phone_write(&w, &mut wallet, &mut phone, &target, false).await;
     let key = wallet.app().record_key(&target).unwrap();
     let id = wallet.app_id();
     drop(wallet);
@@ -222,6 +250,15 @@ async fn test_provider_loss_activity_with_another_write_at_its_version_survives_
 
 #[tokio::test]
 async fn test_provider_loss_receipt_waits_for_an_accepted_activity_successor() {
+    disputed_receipt(false).await;
+}
+
+#[tokio::test]
+async fn test_provider_loss_disputed_receipt_expires_with_its_notice() {
+    disputed_receipt(true).await;
+}
+
+async fn disputed_receipt(expires: bool) {
     let w = World::new();
     let disk = store();
     let mut wallet = w.wallet_on("wallet", disk.clone()).await;
@@ -245,7 +282,7 @@ async fn test_provider_loss_receipt_waits_for_an_accepted_activity_successor() {
         .unwrap()
         .record;
     let target = request_target(&request);
-    let next = recover_activity_with_phone_write(&w, &mut wallet, &mut phone, &target).await;
+    let next = recover_activity_with_phone_write(&w, &mut wallet, &mut phone, &target, false).await;
     let key = wallet.app().record_key(&target).unwrap();
     follow_loss(&mut wallet).await;
     if let Some(shown) = wallet
@@ -299,6 +336,44 @@ async fn test_provider_loss_receipt_waits_for_an_accepted_activity_successor() {
         kept
     );
 
+    if expires {
+        w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS - 1);
+        wallet.receive(None).await.unwrap();
+        assert_eq!(
+            wallet.app().protocol_scan("paykit", b"pr/").await.unwrap(),
+            kept
+        );
+        w.clock.advance_ms(1);
+        wallet.receive(None).await.unwrap();
+        assert!(wallet
+            .app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .is_empty());
+        let given_up = wallet
+            .notices()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|n| n.msg_id.as_deref() == Some(&receipt))
+            .collect::<Vec<_>>();
+        assert_eq!(given_up.len(), 1);
+        assert_eq!(given_up[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
+        wallet.receive(None).await.unwrap();
+        assert_eq!(
+            wallet
+                .notices()
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|n| n.msg_id.as_deref() == Some(&receipt))
+                .count(),
+            1
+        );
+        assert_eq!(next.record(&key).unwrap().revision, before);
+        return;
+    }
     accept_activity_successor(&mut wallet, &mut phone, &target).await;
     wallet.receive(None).await.unwrap();
     assert!(wallet
@@ -320,10 +395,12 @@ async fn accept_activity_successor(
     let current = phone.app_mut().read_record(target).await.unwrap().unwrap();
     assert!(!current.different_write_at_held_version);
     let content = current.content.value().unwrap();
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(content).unwrap()["manual_only"],
-        true
-    );
+    if target.collection.name == paykit_lib::collections::Collection::PayerActivity.name() {
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(content).unwrap()["manual_only"],
+            true
+        );
+    }
     phone
         .app_mut()
         .put_record(target, content, vec![])
@@ -352,7 +429,7 @@ async fn test_provider_loss_completed_rail_waits_for_an_accepted_activity_succes
         panic!("pending: {paid:?}")
     };
     let target = request_target(&request);
-    let next = recover_activity_with_phone_write(&w, &mut wallet, &mut phone, &target).await;
+    let next = recover_activity_with_phone_write(&w, &mut wallet, &mut phone, &target, false).await;
     let key = wallet.app().record_key(&target).unwrap();
     follow_loss(&mut wallet).await;
     if let Some(shown) = wallet
@@ -407,7 +484,7 @@ async fn test_provider_loss_restore_first_reads_the_current_activity() {
     let backup = wallet.backup().await.unwrap();
     let target = request_target(&request);
     let key = wallet.app().record_key(&target).unwrap();
-    recover_activity_with_phone_write(&w, &mut wallet, &mut phone, &target).await;
+    recover_activity_with_phone_write(&w, &mut wallet, &mut phone, &target, false).await;
     drop(wallet);
     let mut wallet = restored(&w, &backup).await;
     assert!(wallet.app().shared_record(&key).await.unwrap().is_none());
@@ -421,6 +498,159 @@ async fn test_provider_loss_restore_first_reads_the_current_activity() {
         true
     );
     assert_eq!(executions(&w), 0);
+}
+
+#[tokio::test]
+async fn test_provider_loss_disputed_delete_protects_its_cancellation_from_expiry_and_eviction() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let target = request_target(&request);
+    let next = recover_activity_with_phone_write(&w, &mut wallet, &mut phone, &target, true).await;
+    let record = wallet.app().record_key(&target).unwrap();
+    let held = wallet.app().shared_record(&record).await.unwrap().unwrap();
+    assert_eq!(
+        held.content,
+        pubky_switch_client::app::RecordContent::Deleted
+    );
+    follow_loss(&mut wallet).await;
+    let cancel = |hash| {
+        let body = paykit_lib::bodies::RequestReply {
+            reason: None,
+            label: None,
+        }
+        .to_body()
+        .unwrap();
+        let signed = w.sign_as(
+            &w.bob,
+            "shop",
+            &w.alice,
+            "paykit.payment_request_cancellation",
+            vec![hash],
+            body,
+        );
+        next.send_plaintext(w.bob_id(), shop.app().cert(), &signed, &[wallet.app_id()])
+            .unwrap();
+    };
+    cancel(request.request_hash);
+    let stop = format!("kc/{}", pubky_switch_core::enc::b64(&record)).into_bytes();
+    for i in 0..=paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER {
+        w.clock.advance_ms(1);
+        cancel([u8::try_from(i + 1).unwrap(); 32]);
+    }
+    wallet.receive(None).await.unwrap();
+    let kept = wallet.app().protocol_scan("paykit", b"kc/").await.unwrap();
+    assert!(
+        kept.iter().any(|(key, _)| key == &stop),
+        "the stop stays outside the capacity limit"
+    );
+    assert_eq!(kept.len(), paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER + 1);
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
+    wallet.receive(None).await.unwrap();
+    let kept = wallet.app().protocol_scan("paykit", b"kc/").await.unwrap();
+    assert_eq!(
+        kept.iter().map(|(key, _)| key).collect::<Vec<_>>(),
+        [&stop],
+        "the stop survives ordinary expiry"
+    );
+    accept_activity_successor(&mut wallet, &mut phone, &target).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn test_provider_loss_disputed_request_keeps_its_known_payers_proof() {
+    let w = World::new();
+    let lists = Arc::new(crate::common::ListsStore::default());
+    let seller_scopes = paykit_sdk::AppScopes::new()
+        .request()
+        .manage_contacts()
+        .build()
+        .unwrap();
+    let mut shop = w
+        .join_with(
+            &w.alice,
+            "shop",
+            seller_scopes.clone(),
+            PaykitConfig::default(),
+            lists.clone(),
+        )
+        .await;
+    let mut phone = w.join(&w.alice, "phone", seller_scopes).await;
+    let mut buyer = w
+        .join(
+            &w.bob,
+            "buyer",
+            paykit_sdk::AppScopes::new().pay().build().unwrap(),
+        )
+        .await;
+    buyer.app_mut().invite(&w.alice_id()).await.unwrap();
+    let request = request_from(&mut shop, w.bob_id(), draft("1", w.clock.now_ms())).await;
+    buyer.receive(None).await.unwrap();
+    let paid = buyer
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    let PayOutcome::Paid {
+        proof_msg_id: Some(proof),
+        ..
+    } = paid
+    else {
+        panic!("{paid:?}")
+    };
+    let payer = buyer
+        .app_mut()
+        .read_record(&request_target(&request))
+        .await
+        .unwrap()
+        .unwrap();
+    let value = paykit_lib::records::ActivityRecord::read(
+        payer.content.value().unwrap(),
+        &w.bob_id(),
+        paykit_lib::records::ActivitySide::Payer,
+    )
+    .unwrap();
+    let target = activity_target(&request, paykit_lib::collections::Collection::PayeeActivity);
+    let next = recover_activity_with_phone_write(&w, &mut shop, &mut phone, &target, false).await;
+    follow_loss(&mut shop).await;
+    lists.flag(&w.bob_id());
+    next.send_plaintext(
+        w.bob_id(),
+        buyer.app().cert(),
+        value.proof.unwrap().plaintext(),
+        &[shop.app_id()],
+    )
+    .unwrap();
+    shop.receive(None).await.unwrap();
+    let kept = shop.app().protocol_scan("paykit", b"pr/").await.unwrap();
+    assert!(
+        kept.iter().any(|(key, _)| key.ends_with(proof.as_bytes())),
+        "keep the original proof from the signed request's recipient"
+    );
+    assert_eq!(shop.spam_count(&w.bob_id()).await.unwrap(), 0);
+    accept_activity_successor(&mut shop, &mut phone, &target).await;
+    shop.receive(None).await.unwrap();
+    let sale = shop
+        .payee_activity()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.request_hash == Some(request.request_hash))
+        .unwrap();
+    assert_eq!(sale.status, paykit_sdk::PayeeStatus::ProofReceived);
+    assert!(shop
+        .app()
+        .protocol_scan("paykit", b"pr/")
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 /// The doubt a payment was refused with, as [`Refusal::MayBePaid`] shows it.

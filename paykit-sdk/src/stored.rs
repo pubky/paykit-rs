@@ -273,9 +273,8 @@ enum Place {
     /// Nowhere: taken with no effect, such as period details the payer doesn't store
     /// ([`crate::periods::stores_details`]).
     Taken,
-    /// Into a period record that doesn't hold the period details the proof names yet: it
-    /// waits for them (Paykit wire 5.3), within its window.
-    AwaitsDetails,
+    /// The record cannot take the message yet. The message stays within its normal window.
+    AwaitsWrite,
     /// Period details whose storing can't be decided yet ([`PeriodPlace::Undecided`]).
     Undecided,
 }
@@ -291,9 +290,9 @@ pub(crate) enum PeriodPlace {
     /// Period details the payer doesn't store ([`crate::periods::stores_details`]): taken
     /// with no effect.
     Taken,
-    /// A proof naming period details the period record doesn't hold
-    /// ([`crate::receive::awaits_named_details`]): it waits for them.
-    AwaitsDetails,
+    /// The record cannot take the message yet. Its signed write is disputed or the
+    /// proof names period details the record doesn't hold ([`crate::receive::awaits_named_details`]).
+    AwaitsWrite,
     /// Period details whose storing can't be decided yet: no service time is verified
     /// ([`crate::periods::Window::NoTime`]), or they would be taken with no effect while the
     /// copy of the payer's records may lack records, a newer write such as another own app's
@@ -533,7 +532,7 @@ impl Paykit {
                 | Place::Stop(None)
                 | Place::AwaitsRequest(_)
                 | Place::Taken
-                | Place::AwaitsDetails
+                | Place::AwaitsWrite
                 | Place::Undecided,
             ) => {}
         }
@@ -684,7 +683,7 @@ impl Paykit {
             .activity_base_changed(&self.activity_key(&target)?)
             .await?
         {
-            return Ok(Some(Place::Undecided));
+            return Ok(Some(Place::AwaitsWrite));
         }
         let Some(record) = self.held_activity(&target).await? else {
             return Ok(Some(if periodic {
@@ -709,7 +708,7 @@ impl Paykit {
                 }),
                 PeriodPlace::Invalid => None,
                 PeriodPlace::Taken => Some(Place::Taken),
-                PeriodPlace::AwaitsDetails => Some(Place::AwaitsDetails),
+                PeriodPlace::AwaitsWrite => Some(Place::AwaitsWrite),
                 PeriodPlace::Undecided => Some(Place::Undecided),
             },
         )
@@ -745,7 +744,7 @@ impl Paykit {
             .activity_base_changed(&self.activity_key(&into)?)
             .await?
         {
-            return Ok(PeriodPlace::Undecided);
+            return Ok(PeriodPlace::AwaitsWrite);
         }
         if matches!(stored.body(), Body::PaymentPeriodDetails(_)) {
             let stopped = self.kept_stop(target).await?;
@@ -773,7 +772,7 @@ impl Paykit {
         if into != *target {
             let period = self.held_activity(&into).await?;
             if crate::receive::awaits_named_details(period.as_ref(), into.side.side(), stored) {
-                return Ok(PeriodPlace::AwaitsDetails);
+                return Ok(PeriodPlace::AwaitsWrite);
             }
         }
         Ok(PeriodPlace::Record {
@@ -843,7 +842,7 @@ impl Paykit {
                         }
                     }
                     Some(Place::Taken) => Placed::Done,
-                    Some(Place::AwaitsDetails) => Placed::Not,
+                    Some(Place::AwaitsWrite) => Placed::Not,
                     // Not decided yet: it waits, never given up meanwhile.
                     Some(Place::Undecided) => Placed::Waits,
                     None => Placed::Not,
@@ -984,7 +983,7 @@ impl Paykit {
         let key = self.activity_key(target)?;
         let held = self.app.shared_record(&key).await?;
         if crate::records::activity_base_changed(held.as_ref()) {
-            return Ok(Placed::Waits);
+            return Ok(Placed::Not);
         }
         let content = held.map(|record| record.content);
         // Absent or deleted while the copy of its side may lack records: the copy decides
