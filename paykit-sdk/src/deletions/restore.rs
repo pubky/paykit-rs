@@ -2,14 +2,14 @@
 use std::collections::{btree_map::Entry, BTreeMap};
 
 use super::{
-    period_parent, receipt_binding, signed_request, CreditHold, PayeeDeletion, ReceiptBinding,
-    ReceiptEvidence,
+    payee_natural_key, period_parent, receipt_binding, signed_request, CreditHold, PayeeDeletion,
+    ReceiptBinding, ReceiptEvidence, ReceiptSource, SourceDecision,
 };
 use crate::error::{PaykitError, Result};
 use crate::receive::Settlement;
 use crate::state;
 use paykit_lib::collections::Collection;
-use paykit_lib::records::ActivitySide;
+use paykit_lib::records::{ActivityRecord, ActivitySide};
 use paykit_lib::Label;
 use pubky_switch_client::app::{LocalWrite, RestoreContext};
 
@@ -42,9 +42,16 @@ impl RestoredReceipts {
                     .or_insert(d);
             }
             state::StateKey::RetainedReceipt(..) => {
-                let r = state::restored::<ReceiptEvidence>(key, value, binder)?;
-                r.check_method(binder.identity(), settlement)?;
-                self.receipt(r);
+                let mut r = state::restored::<ReceiptEvidence>(key, value, binder)?;
+                let (decision, _) = r.resolve(
+                    binder.identity(),
+                    settlement,
+                    |t| binder.record_key(t),
+                    !previous,
+                )?;
+                if decision != SourceDecision::Misplaced {
+                    self.receipt(r)?;
+                }
             }
             state::StateKey::CreditHold(_) => {
                 let h = state::restored::<CreditHold>(key, value, binder)?;
@@ -55,13 +62,14 @@ impl RestoredReceipts {
         Ok(())
     }
 
-    fn receipt(&mut self, r: ReceiptEvidence) {
+    fn receipt(&mut self, r: ReceiptEvidence) -> Result<()> {
         match self.receipts.entry(r.key()) {
             Entry::Vacant(v) => {
                 v.insert(r);
             }
-            Entry::Occupied(mut o) => o.get_mut().supplement(r),
+            Entry::Occupied(mut o) => o.get_mut().supplement(r)?,
         }
+        Ok(())
     }
 
     pub(crate) fn previous_activity(
@@ -83,17 +91,29 @@ impl RestoredReceipts {
             let Some(value) = held.content.value() else {
                 continue;
             };
-            let Some(activity) = crate::records::bind_activity(
-                value,
-                &own,
-                ActivitySide::Payee,
-                label.as_ref(),
-                &held.key,
-                |t| binder.record_key(t).ok(),
-                settlement,
-            ) else {
+            let Ok(activity) = ActivityRecord::read(value, &own, ActivitySide::Payee) else {
                 continue;
             };
+            if activity.check_label(label.as_ref()).is_err() {
+                continue;
+            }
+            let Ok(natural_key) = payee_natural_key(&activity, &own, settlement) else {
+                continue;
+            };
+            let Some(natural_key) = natural_key else {
+                let source = ReceiptSource::Pending([held.key].into());
+                if let Some(receipt) =
+                    ReceiptEvidence::of(source, &activity, label.as_ref(), Vec::new())?
+                {
+                    self.receipt(receipt)?;
+                }
+                continue;
+            };
+            let target =
+                crate::activity::ActivityTarget::payee(natural_key.clone(), label.as_ref());
+            if binder.record_key(&target.record_target())? != held.key {
+                continue;
+            }
             if let Some(marker) = activity.lost_to_delete {
                 let h = CreditHold {
                     record: held.key,
@@ -102,12 +122,13 @@ impl RestoredReceipts {
                 self.holds.insert(h.key(), h);
             }
             let Some(e) = ReceiptEvidence::of(
-                held.key,
+                ReceiptSource::Bound {
+                    record: held.key,
+                    natural_key,
+                },
                 &activity,
-                &own,
                 label.as_ref(),
                 Vec::new(),
-                settlement,
             )?
             else {
                 continue;
@@ -116,7 +137,7 @@ impl RestoredReceipts {
                 let k = binder.record_key(&target.record_target())?;
                 periods.entry(k).or_default().push((e, activity));
             } else if receipt_binding(&activity, None) == ReceiptBinding::Verified {
-                self.receipt(e);
+                self.receipt(e)?;
             }
         }
         if !periods.is_empty() {
@@ -150,9 +171,9 @@ impl RestoredReceipts {
                             if let Some(parent) = parent {
                                 e.parent = signed_request(&parent)?;
                             }
-                            self.receipt(e);
+                            self.receipt(e)?;
                         }
-                        ReceiptBinding::MissingRequest => self.receipt(e),
+                        ReceiptBinding::MissingRequest => self.receipt(e)?,
                         ReceiptBinding::Invalid => {}
                     }
                 }
@@ -160,7 +181,7 @@ impl RestoredReceipts {
             // These signed pairs still restrict a second credit of the same settlement.
             // They can only be shown once the original signed request verifies their period.
             for (e, _) in periods.into_values().flatten() {
-                self.receipt(e);
+                self.receipt(e)?;
             }
         }
         Ok(())

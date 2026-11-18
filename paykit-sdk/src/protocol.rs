@@ -448,7 +448,7 @@ pub(crate) fn restore_paykit_layer(
     }
     history
         .previous_activity(restoring, &binder, settlement)
-        .map_err(|_| "the installation's payee activity cannot be retained")?;
+        .map_err(|err| format!("the installation's payee activity cannot be retained: {err}"))?;
     let Some(layer) = layer else {
         return Err("a Paykit App's backup carries Paykit's layer, with its journal".into());
     };
@@ -665,7 +665,9 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::CreditHold(_)) => {
                 history
                     .local(&key, &value, &family, &binder, settlement, false)
-                    .map_err(|_| unread())?;
+                    .map_err(|err| {
+                        format!("the backup's payee history cannot be retained: {err}")
+                    })?;
                 continue;
             }
             StateKey::SeenRecords { .. } => {

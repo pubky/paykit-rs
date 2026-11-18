@@ -1,7 +1,9 @@
 //! Retain a payee’s signed receipt and its credit restriction after a deletion (Paykit spec 6).
 
 mod restore;
+
 pub(crate) use restore::RestoredReceipts;
+use std::collections::BTreeSet;
 
 use crate::divergent::SeenVersion;
 use paykit_lib::collections::Collection;
@@ -101,18 +103,90 @@ impl PayeeDeletion {
     }
 }
 
+/// A method may be temporarily unavailable when an installation restores its receipts.
+/// Keep at most 256 bytes of distinct candidate keys for one signed receipt.
+const MAX_RECEIPT_SOURCES: usize = 8;
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum ReceiptSource {
+    Bound {
+        #[serde(with = "serde_b64")]
+        record: [u8; 32],
+        #[serde(with = "serde_b64_vec")]
+        natural_key: Vec<u8>,
+    },
+    Pending(BTreeSet<[u8; 32]>),
+}
+
+impl ReceiptSource {
+    fn bound(&self) -> Option<[u8; 32]> {
+        match self {
+            Self::Bound { record, .. } => Some(*record),
+            Self::Pending(_) => None,
+        }
+    }
+
+    fn contains(&self, key: &[u8; 32]) -> bool {
+        match self {
+            Self::Bound { record, .. } => key == record,
+            Self::Pending(keys) => keys.contains(key),
+        }
+    }
+
+    fn merge(&mut self, other: Self) -> Result<()> {
+        if let Self::Pending(keys) = self {
+            match other {
+                Self::Bound { .. } => *self = other,
+                Self::Pending(more) => {
+                    if keys.union(&more).count() > MAX_RECEIPT_SOURCES {
+                        return Err(Refusal::NotNow(
+                            "too many source keys for a retained receipt".into(),
+                        )
+                        .into());
+                    }
+                    keys.extend(more);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(PartialEq, Eq)]
+enum SourceDecision {
+    Bound,
+    MethodUnavailable,
+    Misplaced,
+}
+
+/// A payee's unrequested payment needs its method's settlement ID to derive its
+/// original activity key. Its signed messages can be checked independently.
+fn payee_natural_key(
+    activity: &ActivityRecord,
+    own: &[u8; 32],
+    settlement: Settlement<'_>,
+) -> Result<Option<Vec<u8>>> {
+    if matches!(activity.binding()?, RecordBinding::Unrequested) {
+        let Some(paykit_lib::Body::PaymentProof(proof)) = activity.proof.as_ref().map(|p| p.body())
+        else {
+            return Err(PaykitError::corrupt());
+        };
+        return Ok(settlement(&proof.proof)
+            .map(|id| natural_key::payee_payment_record(&proof.payment_endpoint_identifier, &id)));
+    }
+    Ok(Some(activity.natural_key(own)?))
+}
+
 /// A signed receipt and the material needed to check its original occurrence.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReceiptEvidence {
-    #[serde(with = "serde_b64")]
-    pub(crate) record: [u8; 32],
+    source: ReceiptSource,
     #[serde(with = "serde_b64")]
     hash: [u8; 32],
     #[serde(with = "serde_b64_vec")]
     value: Vec<u8>,
-    #[serde(with = "serde_b64_vec")]
-    natural_key: Vec<u8>,
     #[serde(deserialize_with = "Option::deserialize")]
     label: Option<String>,
     #[serde(with = "serde_b64_vec")]
@@ -121,21 +195,18 @@ pub(crate) struct ReceiptEvidence {
 
 impl ReceiptEvidence {
     fn of(
-        record: [u8; 32],
+        source: ReceiptSource,
         activity: &ActivityRecord,
-        own: &[u8; 32],
         label: Option<&Label>,
         parent: Vec<u8>,
-        settlement: Settlement<'_>,
     ) -> Result<Option<Self>> {
         let (Some(_), Some(receipt)) = (&activity.proof, &activity.receipt) else {
             return Ok(None);
         };
         Ok(Some(Self {
-            record,
+            source,
             hash: receipt.hash(),
             value: Self::signed_roles(activity)?,
-            natural_key: activity.natural_key_with(own, settlement)?,
             label: label.map(|l| l.as_str().to_owned()),
             parent,
         }))
@@ -170,16 +241,25 @@ impl ReceiptEvidence {
         let label = self.label.as_deref().map(Label::parse).transpose()?;
         let activity = ActivityRecord::read(&self.value, own, ActivitySide::Payee)?;
         activity.check_label(label.as_ref())?;
-        let target = ActivityTarget::payee(self.natural_key.clone(), label.as_ref());
-        if activity.proof.is_none()
-            || record_key(&target.record_target())? != self.record
+        let unrequested = matches!(activity.binding()?, RecordBinding::Unrequested);
+        let source_valid = match &self.source {
+            ReceiptSource::Bound {
+                record,
+                natural_key,
+            } => {
+                let target = ActivityTarget::payee(natural_key.clone(), label.as_ref());
+                record_key(&target.record_target())? == *record
+                    && (unrequested || activity.natural_key(own)? == *natural_key)
+            }
+            ReceiptSource::Pending(keys) => {
+                unrequested && (1..=MAX_RECEIPT_SOURCES).contains(&keys.len())
+            }
+        };
+        if !source_valid
+            || activity.proof.is_none()
             || activity.receipt.as_ref().map(|r| r.hash()) != Some(self.hash)
-            || (!matches!(activity.binding()?, RecordBinding::Unrequested)
-                && activity.natural_key(own)? != self.natural_key)
+            || self.value != Self::signed_roles(&activity)?
         {
-            return Err(PaykitError::corrupt());
-        }
-        if self.value != Self::signed_roles(&activity)? {
             return Err(PaykitError::corrupt());
         }
         if !self.parent.is_empty() {
@@ -195,28 +275,43 @@ impl ReceiptEvidence {
         Ok(())
     }
 
-    fn check_method(&self, own: &[u8; 32], settlement: Settlement<'_>) -> Result<()> {
+    /// Bind the signed proof to an original source key with the method currently
+    /// installed. An imported natural key cannot attest to an unavailable method.
+    fn resolve(
+        &mut self,
+        own: &[u8; 32],
+        settlement: Settlement<'_>,
+        record_key: impl Fn(&pubky_switch_client::app::RecordTarget) -> Result<[u8; 32]>,
+        imported: bool,
+    ) -> Result<(SourceDecision, ActivityRecord)> {
         let activity = ActivityRecord::read(&self.value, own, ActivitySide::Payee)?;
-        if let Ok(RecordBinding::Unrequested) = activity.binding() {
-            // A backup can outlive a custom method's availability on this host.
-            // Its receipt is shown only once the method can bind this proof again.
-            if let Some(paykit_lib::Body::PaymentProof(proof)) =
-                activity.proof.as_ref().map(|p| p.body())
-            {
-                if settlement(&proof.proof).is_some()
-                    && activity.natural_key_with(own, settlement)? != self.natural_key
-                {
-                    return Err(PaykitError::corrupt());
+        let Some(natural_key) = payee_natural_key(&activity, own, settlement)? else {
+            if imported {
+                if let Some(key) = self.source.bound() {
+                    self.source = ReceiptSource::Pending(BTreeSet::from([key]));
                 }
             }
+            return Ok((SourceDecision::MethodUnavailable, activity));
+        };
+        let label = self.label.as_deref().map(Label::parse).transpose()?;
+        let target = ActivityTarget::payee(natural_key.clone(), label.as_ref());
+        let record = record_key(&target.record_target())?;
+        if !self.source.contains(&record) {
+            return Ok((SourceDecision::Misplaced, activity));
         }
-        Ok(())
+        self.source = ReceiptSource::Bound {
+            record,
+            natural_key,
+        };
+        Ok((SourceDecision::Bound, activity))
     }
 
-    fn supplement(&mut self, other: Self) {
+    fn supplement(&mut self, other: Self) -> Result<()> {
+        self.source.merge(other.source)?;
         if self.parent.is_empty() {
             self.parent = other.parent;
         }
+        Ok(())
     }
 }
 
@@ -408,7 +503,7 @@ pub(crate) fn observe_payee_deletion(
                 && !state::cx_scan::<ReceiptEvidence>(cx, key::RETAINED_RECEIPTS)
                     .map_err(step_failure)?
                     .iter()
-                    .any(|(_, r)| r.record == *deletion.key)
+                    .any(|(_, r)| r.source.bound() == Some(*deletion.key))
             {
                 return Ok(None);
             }
@@ -443,12 +538,15 @@ pub(crate) fn observe_payee_deletion(
                     receipt_binding(&record, None)
                 };
             if let Some(evidence) = ReceiptEvidence::of(
-                *deletion.key,
+                ReceiptSource::Bound {
+                    record: *deletion.key,
+                    natural_key: record
+                        .natural_key_with(&cx.identity(), settlement)
+                        .map_err(|e| view_failure(e.into()))?,
+                },
                 &record,
-                &cx.identity(),
                 label.as_ref(),
                 parent,
-                settlement,
             )
             .map_err(view_failure)?
             {
@@ -458,7 +556,7 @@ pub(crate) fn observe_payee_deletion(
                     let existing =
                         state::cx_get::<ReceiptEvidence>(cx, &k).map_err(step_failure)?;
                     if existing.as_ref().is_none_or(|e| {
-                        e.record != evidence.record
+                        e.source.bound() != evidence.source.bound()
                             || (e.parent.is_empty() && !evidence.parent.is_empty())
                     }) {
                         observed.push(state::local_put(&k, &evidence).map_err(view_failure)?);
@@ -512,9 +610,22 @@ impl Paykit {
     }
 
     async fn checked_receipt(
-        &self,
-        evidence: &ReceiptEvidence,
+        &mut self,
+        evidence: &mut ReceiptEvidence,
     ) -> Result<Option<(ActivityRecord, ReceiptBinding)>> {
+        let was_pending = evidence.source.bound().is_none();
+        let (decision, activity) = evidence.resolve(
+            &self.identity(),
+            &|p| self.rail.settlement_id(p),
+            |t| Ok(self.app.record_key(t)?),
+            false,
+        )?;
+        if decision != SourceDecision::Bound {
+            return Ok(None);
+        }
+        if was_pending {
+            self.local_put(&evidence.key(), evidence).await?;
+        }
         let label = evidence.label.as_deref().map(Label::parse).transpose()?;
         let read = |bytes: &[u8], key: &[u8; 32]| {
             crate::records::bind_activity(
@@ -526,9 +637,6 @@ impl Paykit {
                 |t| self.app.record_key(t).ok(),
                 &|p| self.rail.settlement_id(p),
             )
-        };
-        let Some(activity) = read(&evidence.value, &evidence.record) else {
-            return Ok(None);
         };
         let parent =
             if let Some(target) = period_parent(&self.identity(), &activity, label.as_ref()) {
@@ -558,19 +666,19 @@ impl Paykit {
     }
 
     pub(crate) async fn retained_credit(
-        &self,
+        &mut self,
         already_shown: Option<[u8; 32]>,
         settlement: &[u8],
     ) -> Result<bool> {
         let mut incomplete = false;
-        for (_, evidence) in self
+        for (_, mut evidence) in self
             .local_scan::<ReceiptEvidence>(key::RETAINED_RECEIPTS)
             .await?
         {
             if Some(evidence.hash) == already_shown {
                 continue;
             }
-            let Some((activity, status)) = self.checked_receipt(&evidence).await? else {
+            let Some((activity, status)) = self.checked_receipt(&mut evidence).await? else {
                 continue;
             };
             if self.credits_settlement(&activity, settlement) {
@@ -591,12 +699,14 @@ impl Paykit {
     }
 
     /// The original verified receipts this app retained, including a receipt recovered
-    /// from its previous installation. Each signed receipt appears once.
+    /// from its previous installation. Each signed receipt appears once. When a
+    /// payment method becomes available, its verified source key replaces the
+    /// pending keys before the receipt is shown.
     ///
     /// # Errors
     ///
     /// A local store failure.
-    pub async fn retained_payee_receipts(&self) -> Result<Vec<RetainedPayeeReceipt>> {
+    pub async fn retained_payee_receipts(&mut self) -> Result<Vec<RetainedPayeeReceipt>> {
         let mut by_receipt = std::collections::BTreeMap::<_, Vec<_>>::new();
         for (_, d) in self
             .local_scan::<PayeeDeletion>(key::PAYEE_DELETIONS)
@@ -615,7 +725,7 @@ impl Paykit {
             }
         }
         let mut result = Vec::new();
-        for (_, e) in self
+        for (_, mut e) in self
             .local_scan::<ReceiptEvidence>(key::RETAINED_RECEIPTS)
             .await?
         {
@@ -627,12 +737,14 @@ impl Paykit {
             {
                 continue;
             }
-            if let Some((activity, ReceiptBinding::Verified)) = self.checked_receipt(&e).await? {
+            if let Some((activity, ReceiptBinding::Verified)) = self.checked_receipt(&mut e).await?
+            {
                 if let Some(receipt) = activity.receipt {
+                    let record = e.source.bound().ok_or_else(PaykitError::corrupt)?;
                     result.push(RetainedPayeeReceipt {
-                        record: e.record,
+                        record,
                         receipt,
-                        deletions: by_receipt.remove(&(e.record, e.hash)).unwrap_or_default(),
+                        deletions: by_receipt.remove(&(record, e.hash)).unwrap_or_default(),
                     });
                 }
             }

@@ -5734,7 +5734,7 @@ async fn test_payee_deletion_an_offline_period_receipt_keeps_its_original_signed
         .unwrap();
     let before = w.record_writes(&w.bob, &key);
     drop(shop);
-    let shop = Paykit::restore(
+    let mut shop = Paykit::restore(
         w.env(&w.bob, device),
         Default::default(),
         &backup,

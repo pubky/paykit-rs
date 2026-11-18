@@ -2,6 +2,8 @@
 //! settlement in a spelling of its own, which the rail reads ([`Rail::settlement_id`]), so
 //! a payee credits a payment without a request through it, once per settlement.
 
+mod restore;
+
 use std::sync::{Arc, Mutex};
 
 use paykit_lib::bodies::PaymentProof;
@@ -456,7 +458,7 @@ async fn test_payee_deletion_a_restored_custom_receipt_waits_for_its_payment_met
         .unwrap()
         .is_empty());
     let kept = unavailable.backup().await.unwrap();
-    let restored = Paykit::restore(
+    let mut restored = Paykit::restore(
         w.env(&w.bob, store()),
         Default::default(),
         &kept,
