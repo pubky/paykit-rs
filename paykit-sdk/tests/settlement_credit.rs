@@ -97,8 +97,7 @@ async fn paid_request(
         .ok_or("request was not sent")?;
     buyer.receive(None).await?;
     assert!(matches!(
-        buyer
-            .pay_request(&request, PayOptions::default())
+        Box::pin(buyer.pay_request(&request, PayOptions::default()))
             .await
             .outcome?,
         PayOutcome::Paid { .. }
@@ -191,8 +190,8 @@ async fn competing_tills(world: &World) -> TestResult {
     assert!(till.verify_payment(&first_record).await?.is_some());
     assert!(labelled.verify_payment(&first_record).await?.is_some());
     let (first_receipt, second_receipt) = tokio::join!(
-        till.confirm_payment(&first_record),
-        labelled.confirm_payment(&first_record)
+        Box::pin(till.confirm_payment(&first_record)),
+        Box::pin(labelled.confirm_payment(&first_record))
     );
     let receipt = first_receipt?.ok_or("first till could not confirm the paid request")?;
     assert_eq!(second_receipt?, Some(receipt.clone()));
@@ -222,11 +221,11 @@ async fn competing_tills(world: &World) -> TestResult {
     reopened.receive(None).await?;
     other_till.receive(None).await?;
     assert_eq!(
-        reopened.confirm_payment(&first_record).await?,
+        Box::pin(reopened.confirm_payment(&first_record)).await?,
         Some(receipt.clone())
     );
     assert_eq!(
-        other_till.confirm_payment(&first_record).await?,
+        Box::pin(other_till.confirm_payment(&first_record)).await?,
         Some(receipt.clone())
     );
     let checks = rail.proof_checks();
