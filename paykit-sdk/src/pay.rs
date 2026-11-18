@@ -749,24 +749,23 @@ pub(crate) enum Written {
 /// A new proof for the outcome, or the original already held for this payment.
 enum PaidProof {
     New(Box<SignedMessage>),
-    Original {
-        proof: Box<StoredMessage>,
-        answered: bool,
-    },
+    /// The record supplies the original payment evidence. Any pending delivery
+    /// remains with the outbox that holds the signed message (Paykit spec 7.2).
+    Original(Box<StoredMessage>),
 }
 
 impl PaidProof {
     fn msg_id(&self) -> &str {
         match self {
             Self::New(proof) => proof.msg_id(),
-            Self::Original { proof, .. } => &proof.message().msg_id,
+            Self::Original(proof) => &proof.message().msg_id,
         }
     }
 
     fn hash(&self) -> [u8; 32] {
         match self {
             Self::New(proof) => proof.hash(),
-            Self::Original { proof, .. } => proof.hash(),
+            Self::Original(proof) => proof.hash(),
         }
     }
 }
@@ -3316,7 +3315,7 @@ impl Paykit {
             };
             let step = match entry
                 .step
-                .filter(|_| !matches!(proof, Some(PaidProof::Original { .. })))
+                .filter(|_| !matches!(proof, Some(PaidProof::Original(_))))
             {
                 Some(step) => Some(step),
                 None => match self.attempt_state(entry).await? {
@@ -3352,17 +3351,6 @@ impl Paykit {
             finished.record_held = false;
             finished.proof_msg_id = proof.as_ref().map(|p| p.msg_id().to_owned());
             batch = batch.local(journal_write(&finished)?);
-            if let Some(PaidProof::Original {
-                proof,
-                answered: false,
-            }) = &proof
-            {
-                // This signed proof was already published. Reoffer the original if
-                // it is still owed and this installation has no delivery for it.
-                if self.app.delivery(&proof.message().msg_id).await?.is_none() {
-                    Box::pin(self.queue_stored_again(proof)).await?;
-                }
-            }
             if batch.is_empty() {
                 if let Some(PaidProof::New(proof)) = proof {
                     self.app.queue_signed(*proof).await?;
@@ -3502,7 +3490,7 @@ impl Paykit {
                 {
                     return Ok(OutcomeRecord::Held);
                 }
-                if !changed && matches!(proof, PaidProof::Original { .. }) {
+                if !changed && matches!(proof, PaidProof::Original(_)) {
                     return Ok(OutcomeRecord::Compared(
                         self.app.record_condition(&key).await?,
                     ));
@@ -3655,10 +3643,7 @@ impl Paykit {
                         &refs,
                         &proof,
                     );
-                    return Ok(matches.then(|| PaidProof::Original {
-                        proof: Box::new(original),
-                        answered: record.receipt.is_some(),
-                    }));
+                    return Ok(matches.then(|| PaidProof::Original(Box::new(original))));
                 }
             }
         }
