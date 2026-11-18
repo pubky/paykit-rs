@@ -961,6 +961,7 @@ impl Paykit {
             acceptance_released: false,
             rail_proof: None,
             paid_at_ms: None,
+            offline: None,
             proof_msg_id: None,
             restored: false,
             journaled_at_ms: self.now(),

@@ -1703,24 +1703,30 @@ dependencies = [
 [[package]]
 name = "pubky-switch-client"
 version = "0.1.0"
-source = "git+https://github.com/pubky/pubky-switch?rev=24371d328354cdfd5502bfd825c8042c394f0818#24371d328354cdfd5502bfd825c8042c394f0818"
+source = "git+https://github.com/pubky/pubky-switch?rev=22f0af54ea5903f03a1f760e7851badcb1424fa1#22f0af54ea5903f03a1f760e7851badcb1424fa1"
 dependencies = [
  "blake3",
+ "bytes",
  "ed25519-dalek",
  "getrandom 0.3.4",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "pubky-switch-core",
  "reqwest",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "url",
+ "webpki-roots",
 ]
 
 [[package]]
 name = "pubky-switch-core"
 version = "0.1.0"
-source = "git+https://github.com/pubky/pubky-switch?rev=24371d328354cdfd5502bfd825c8042c394f0818#24371d328354cdfd5502bfd825c8042c394f0818"
+source = "git+https://github.com/pubky/pubky-switch?rev=22f0af54ea5903f03a1f760e7851badcb1424fa1#22f0af54ea5903f03a1f760e7851badcb1424fa1"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -1758,7 +1764,7 @@ dependencies = [
 [[package]]
 name = "pubky-switch-signer"
 version = "0.1.0"
-source = "git+https://github.com/pubky/pubky-switch?rev=24371d328354cdfd5502bfd825c8042c394f0818#24371d328354cdfd5502bfd825c8042c394f0818"
+source = "git+https://github.com/pubky/pubky-switch?rev=22f0af54ea5903f03a1f760e7851badcb1424fa1#22f0af54ea5903f03a1f760e7851badcb1424fa1"
 dependencies = [
  "pubky-switch-client",
  "pubky-switch-core",
