@@ -675,18 +675,26 @@ impl<'a> Pricing<'a> {
                             return None;
                         };
                         let rates = body.rates.as_deref()?;
-                        conversion::rate_for(rates, endpoint).map(|_| (rates, signed))
+                        matches!(paykit_lib::rate_for_endpoint(rates, endpoint), Ok(Some(_)))
+                            .then_some((rates, signed))
                     });
                 match selected {
                     Some((rates, signed)) => (Some(rates), Some(signed)),
-                    None => (Some(&[][..]), None),
+                    None => (None, None),
                 }
             }
         };
-        (
-            conversion::price(rail, self.requested, rates, endpoint),
-            source,
-        )
+        let price = conversion::price(rail, self.requested, rates, endpoint);
+        if matches!(self.rates, Rates::Period(_))
+            && source.is_none()
+            && matches!(price, Priced::ByHand(_))
+        {
+            return (
+                Priced::Unusable("Paykit spec 8.2: no period details price this endpoint"),
+                None,
+            );
+        }
+        (price, source)
     }
 }
 
@@ -694,6 +702,10 @@ impl<'a> Pricing<'a> {
 enum Taken {
     /// The amount paid, and the price its user confirmed for one priced by a rate.
     Pay(PaymentAmount, Option<KeptPrice>),
+    /// The amount handed to the method for a payment made only by hand
+    /// ([`Priced::ByHand`]): paid only on its user's confirmation of what the method would
+    /// transfer for it ([`Paykit::check_transfer`]).
+    ByHand(PaymentAmount),
     /// Unusable for the payment, and why.
     Unusable(&'static str),
 }
@@ -746,6 +758,30 @@ fn rates_usable(
                         && crate::periods::rates_current(details, device, service)
                 }),
             }
+    })
+}
+
+/// The amount a payment of a request that no rate prices pays now, `priced` without rates,
+/// at the final payment check (Paykit spec 7.2 step 1), and whether it is made only by hand.
+/// A payment made only by hand is never a first dispatch of an automatic payment
+/// (`automatic_first`): planning refuses it, and this check refuses it again just before
+/// the call. `Err` inside holds the refusal of an endpoint unusable now.
+///
+/// # Errors
+///
+/// A corrupt store for an amount a rate prices, which no selection without rates gives.
+fn unpriced_now(
+    priced: Priced,
+    automatic_first: bool,
+) -> Result<std::result::Result<(PaymentAmount, bool), Refusal>> {
+    Ok(match priced {
+        Priced::Plain(now) => Ok((now, false)),
+        Priced::ByHand(_) if automatic_first => Err(Refusal::UnsupportedEndpoint(
+            conversion::BY_HAND_ONLY.into(),
+        )),
+        Priced::ByHand(now) => Ok((now, true)),
+        Priced::ByRate { .. } => return Err(PaykitError::corrupt()),
+        Priced::Unusable(why) => Err(Refusal::UnsupportedEndpoint(format!("{why}, now"))),
     })
 }
 
@@ -2112,18 +2148,20 @@ impl Paykit {
             let Some(choice) = gathered.get_mut(at).and_then(Option::take) else {
                 continue;
             };
-            let (amount, price) = match self.price_choice(&choice.destination, pricing, options) {
-                Ok(Taken::Pay(amount, price)) => (amount, price),
-                Ok(Taken::Unusable(why)) => {
-                    unusable.get_or_insert(why);
-                    continue;
-                }
-                Err(error) if matches!(error.refusal(), Some(Refusal::PricedByRate { .. })) => {
-                    refused.get_or_insert(error);
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
+            let (amount, price, by_hand) =
+                match self.price_choice(&choice.destination, pricing, options) {
+                    Ok(Taken::Pay(amount, price)) => (amount, price, false),
+                    Ok(Taken::ByHand(amount)) => (amount, None, true),
+                    Ok(Taken::Unusable(why)) => {
+                        unusable.get_or_insert(why);
+                        continue;
+                    }
+                    Err(error) if matches!(error.refusal(), Some(Refusal::PricedByRate { .. })) => {
+                        refused.get_or_insert(error);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
             let transfer_confirmed = (pricing.by == Initiator::User)
                 .then_some(options.transfer_confirmed.as_ref())
                 .flatten();
@@ -2132,6 +2170,7 @@ impl Paykit {
                 &choice.destination,
                 &amount,
                 price.as_ref(),
+                by_hand,
                 transfer_confirmed,
             ) {
                 Ok(bound) => {
@@ -2166,10 +2205,12 @@ impl Paykit {
 
     /// What a payment pays to `destination` (Paykit spec 7.2 step 1, 8.2), by `pricing`
     /// ([`conversion::price`]): a payment without a request, its own amount; a payment of a
-    /// request no rate prices, the amount asked, rounded up to the endpoint's smallest unit
-    /// when the method names it and the endpoint is of the requested asset; for one a
-    /// rate prices, the amount computed, only once its user has confirmed exactly that
-    /// ([`PayOptions::rate_confirmed`]), and never for an automatic payment; else unusable.
+    /// request to an endpoint of the requested asset no rate prices, the amount asked,
+    /// rounded up to the endpoint's smallest unit; for one a rate prices, the amount
+    /// computed, only once its user has confirmed exactly that
+    /// ([`PayOptions::rate_confirmed`]), and never for an automatic payment; for a request
+    /// without conversion terms to an endpoint of another asset, the amount asked, only by
+    /// hand ([`Taken::ByHand`]), and unusable for an automatic payment; else unusable.
     ///
     /// # Errors
     ///
@@ -2198,6 +2239,12 @@ impl Paykit {
                 ));
             }
             Priced::Plain(amount) => return Ok(Taken::Pay(amount, None)),
+            // Never paid automatically, whatever the method would transfer (Paykit spec 7.2
+            // step 1): a method that converts by itself would report the requested amount.
+            Priced::ByHand(_) if pricing.by == Initiator::Automatic => {
+                return Ok(Taken::Unusable(conversion::BY_HAND_ONLY))
+            }
+            Priced::ByHand(amount) => return Ok(Taken::ByHand(amount)),
             Priced::Unusable(why) => return Ok(Taken::Unusable(why)),
             Priced::ByRate { rate, amount } => (rate, amount),
         };
@@ -2326,14 +2373,17 @@ impl Paykit {
     /// consent. A destination failing it is paid only on the user's explicit choice of
     /// exactly what it would transfer: the method is asked again, and the destination and
     /// its transfer must be the ones the user confirmed ([`TransferQuote`]); otherwise it is
-    /// refused with what it would transfer now, for the user to see. Returns the bound the
-    /// attempt is journaled with, which the final payment check holds the method to again.
+    /// refused with what it would transfer now, for the user to see. A payment made only by
+    /// hand (`by_hand`, [`Priced::ByHand`]) is paid only so, even when the method reports
+    /// exactly the amount handed to it. Returns the bound the attempt is journaled with,
+    /// which the final payment check holds the method to again.
     fn check_transfer(
         &self,
         payee: &[u8; 32],
         destination: &Destination,
         amount: &PaymentAmount,
         price: Option<&KeptPrice>,
+        by_hand: bool,
         confirmed: Option<&TransferQuote>,
     ) -> Result<TransferBound> {
         let endpoint_id = destination.endpoint_id()?;
@@ -2341,7 +2391,9 @@ impl Paykit {
         let transfer = self.rail.transfer(&endpoint_id, &payload, amount);
         let cap = self.config.fee_caps.get(&amount.asset);
         let kept_cap = cap.map(|cap| cap.as_str().to_owned());
-        let Some(reason) = transfer_refused(&transfer, amount, cap) else {
+        let reason = transfer_refused(&transfer, amount, cap)
+            .or_else(|| by_hand.then_some(conversion::BY_HAND_ONLY));
+        let Some(reason) = reason else {
             return Ok(TransferBound::Asked { cap: kept_cap });
         };
         let quote = TransferQuote {
@@ -2378,9 +2430,18 @@ impl Paykit {
     /// within the bound the attempt was journaled with, so a fee estimate that grew, or an
     /// amount that changed, since the attempt was planned is never paid. A transfer that is
     /// what the user asked for, within the cap at planning, passes; a confirmed one passes
-    /// also when it is the one confirmed. `Err` inside holds the refusal, with what the
-    /// method would transfer now.
-    fn transfer_holds(&self, entry: &JournalEntry) -> Result<std::result::Result<(), Refusal>> {
+    /// also when it is the one confirmed. For a payment permitted only by hand,
+    /// [`Paykit::amount_holds`] requires the original selection and the transfer must
+    /// match its confirmation. `Err` inside holds the refusal.
+    fn transfer_holds(
+        &self,
+        entry: &JournalEntry,
+        automatic_first: bool,
+    ) -> Result<std::result::Result<(), Refusal>> {
+        let by_hand = match self.amount_holds(entry, automatic_first)? {
+            Ok(by_hand) => by_hand,
+            Err(refusal) => return Ok(Err(refusal)),
+        };
         let endpoint_id = entry.destination.endpoint_id()?;
         let payload = entry.destination.payload()?;
         let amount = entry.call_amount()?;
@@ -2400,7 +2461,8 @@ impl Paykit {
             }) => (parse(cap)?, Some((amount, max_fee))),
             None => (self.config.fee_caps.get(&amount.asset).cloned(), None),
         };
-        let reason = transfer_refused(&transfer, &amount, cap.as_ref());
+        let reason = transfer_refused(&transfer, &amount, cap.as_ref())
+            .or_else(|| by_hand.then_some(conversion::BY_HAND_ONLY));
         let as_confirmed = (entry.price.is_none() || transfer.amount.as_ref() == Some(&amount))
             && confirmed.is_some_and(|(kept_amount, max_fee)| {
                 transfer.amount.as_ref().map(KeptAmount::of) == *kept_amount
@@ -2434,30 +2496,34 @@ impl Paykit {
     /// that no rule gives, or one the method's unit no longer gives, is never paid. For a
     /// payment priced by a rate, the rates it was confirmed by must still be usable
     /// ([`rates_usable`]), and the kept rate must give exactly the amount its user
-    /// confirmed; for another payment of a request, the plain amount must be the kept one; a
-    /// payment without a request pays its own amount, which [`JournalEntry::check`] holds.
-    /// `Err` inside holds the refusal, with what the payment would be now.
+    /// confirmed; for another payment of a request, the amount the selection gives without
+    /// a rate must be the kept one, and one made only by hand ([`Priced::ByHand`]) is never
+    /// a first dispatch of an automatic payment; a payment without a request pays its own
+    /// amount, which [`JournalEntry::check`] holds. `Ok` inside says whether the payment is
+    /// made only by hand, which [`Paykit::transfer_holds`] then holds to its user's
+    /// confirmation; `Err` inside holds the refusal, with what the payment would be now.
     fn amount_holds(
         &self,
         entry: &JournalEntry,
         automatic_first: bool,
-    ) -> Result<std::result::Result<(), Refusal>> {
+    ) -> Result<std::result::Result<bool, Refusal>> {
         if entry.request_hash()?.is_none() {
-            return Ok(Ok(()));
+            return Ok(Ok(false));
         }
         let endpoint_id = entry.destination.endpoint_id()?;
         let requested = entry.amount.amount()?;
         let paid = entry.call_amount()?;
         let Some(price) = &entry.price else {
-            let Some(now) = conversion::plain_amount(&*self.rail, &requested, &endpoint_id) else {
-                return Ok(Err(Refusal::UnsupportedEndpoint(
-                    "Paykit spec 7.2 step 1: the payment method names no smallest unit for the \
-                     endpoint now"
-                        .into(),
-                )));
+            // The journal check holds a payment no rate prices to the requested amount, or,
+            // to an endpoint of the requested asset, that amount rounded up: the selection
+            // without rates gives it again.
+            let priced = conversion::price(&*self.rail, &requested, None, &endpoint_id);
+            let (now, by_hand) = match unpriced_now(priced, automatic_first)? {
+                Ok(now) => now,
+                Err(refusal) => return Ok(Err(refusal)),
             };
             if now == paid {
-                return Ok(Ok(()));
+                return Ok(Ok(by_hand));
             }
             let payload = entry.destination.payload()?;
             return Ok(Err(Refusal::Transfer {
@@ -2488,7 +2554,7 @@ impl Paykit {
                 shown.amount = amount;
                 false
             }
-            Priced::Plain(_) | Priced::Unusable(_) => false,
+            Priced::Plain(_) | Priced::ByHand(_) | Priced::Unusable(_) => false,
         };
         let selected = entry.selected_rate_details(&self.identity())?;
         if holds
@@ -2500,7 +2566,7 @@ impl Paykit {
                 self.service_time(),
             )
         {
-            return Ok(Ok(()));
+            return Ok(Ok(false));
         }
         Ok(Err(Refusal::PricedByRate {
             payment: Box::new(shown),
@@ -4574,10 +4640,7 @@ impl Paykit {
             return Ok(FinalCheck::Hold);
         }
         let automatic_first = by == Initiator::Automatic && matches!(kind, Dispatch::First { .. });
-        if let Err(refusal) = self.amount_holds(entry, automatic_first)? {
-            return Ok(FinalCheck::Refused(refusal));
-        }
-        if let Err(refusal) = self.transfer_holds(entry)? {
+        if let Err(refusal) = self.transfer_holds(entry, automatic_first)? {
             return Ok(FinalCheck::Refused(refusal));
         }
         let may_attempt = self.app.may_attempt(by == Initiator::Automatic).is_ok();
@@ -4964,8 +5027,48 @@ mod tests {
         let plain = Pricing::of_request(&requested, request, None, Initiator::User);
         assert!(matches!(
             plain.price(&rail, &other, |_| true).0,
-            Priced::Plain(_)
+            Priced::ByHand(_)
         ));
+    }
+
+    #[test]
+    fn test_unpriced_now_refuses_by_hand_on_an_automatic_first_dispatch() {
+        let rail = crate::rail::FakeRail::new();
+        let usd = PaymentAmount {
+            value: paykit_lib::Decimal::new("10").unwrap(),
+            asset: paykit_lib::Asset::new("usd").unwrap(),
+        };
+        let price = |endpoint: &str| {
+            let endpoint = PaymentEndpointIdentifier::new(endpoint).unwrap();
+            conversion::price(&rail, &usd, None, &endpoint)
+        };
+        // A payment made only by hand: refused on an automatic first dispatch, and held to
+        // its user's confirmation otherwise.
+        let refused = unpriced_now(price("eur-sepa-iban"), true).unwrap();
+        assert!(
+            matches!(&refused, Err(Refusal::UnsupportedEndpoint(why)) if why.contains("only by hand")),
+            "{refused:?}"
+        );
+        assert_eq!(
+            unpriced_now(price("eur-sepa-iban"), false).unwrap(),
+            Ok((usd.clone(), true))
+        );
+        // An endpoint of the requested asset is paid automatically, as before.
+        assert_eq!(
+            unpriced_now(price("usd-ach-account"), true).unwrap(),
+            Ok((usd.clone(), false))
+        );
+        // A selection without rates never gives an amount a rate prices.
+        let rate = paykit_lib::Rate::new(
+            paykit_lib::Asset::new("btc").unwrap(),
+            paykit_lib::Decimal::new("1").unwrap(),
+        )
+        .unwrap();
+        let priced = Priced::ByRate {
+            rate,
+            amount: usd.clone(),
+        };
+        assert!(unpriced_now(priced, false).is_err());
     }
 
     #[test]

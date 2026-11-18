@@ -1065,7 +1065,8 @@ impl Paykit {
                 // the proof arrives after the period rate expired.
                 let (price, source) = pricing.price(&*self.rail, id, |_| true);
                 let (amount, rate_window) = match price {
-                    crate::conversion::Priced::Plain(amount) => (amount, None),
+                    crate::conversion::Priced::Plain(amount)
+                    | crate::conversion::Priced::ByHand(amount) => (amount, None),
                     crate::conversion::Priced::ByRate { amount, .. } => {
                         (amount, source.and_then(crate::periods::rate_window))
                     }
