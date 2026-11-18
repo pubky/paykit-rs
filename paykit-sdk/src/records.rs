@@ -564,10 +564,9 @@ mod own_message_tests {
 
     #[test]
     fn test_records_own_message_written_only_where_it_is_queued() {
-        // The stored copy of a message this app signed is made in four places, each in the
-        // batch that queues it or owes it: `send_with_record`, `record_held`, which writes
-        // the held answer that names it, the request's own batch, and the outcome's batch
-        // with its proof; and an acceptance is placed only once released. A new place that
+        // Each stored copy of a message this app signed goes in the batch that queues or
+        // owes it. A receipt's batch also checks the revisions its verification used,
+        // and an acceptance is placed only once released. A new place that
         // stores an own message must queue or owe it in the same batch, so that an own
         // message in a record is always one to be sent (module docs).
         let sources = sources();
@@ -601,7 +600,7 @@ mod own_message_tests {
                 ("allowances.rs", 3),
                 ("pay.rs", 1),
                 ("records.rs", 2),
-                ("requests.rs", 1),
+                ("requests.rs", 2),
             ]),
             "an own message's stored copy is made somewhere new: queue it in the same batch"
         );
@@ -641,6 +640,12 @@ mod own_message_tests {
         let request = body(text("requests.rs"), "send_request_inner");
         assert!(request.contains("self.own_copy(&signed)"));
         assert!(request.contains(".queue(signed)"));
+        let receipt = body(text("requests.rs"), "confirm_payment_with_inner");
+        assert!(receipt.contains("self.own_copy(&signed)"));
+        assert!(receipt.split_whitespace().collect::<String>().contains(
+            "OpBatch::for_protocol(crate::protocol::BACKUP_NAME).entry(entry).queue(signed)"
+        ));
+        assert!(!receipt.contains("queue_signed"));
         // An Allowance's proposal, answer or end, and an end crossing a withdrawal, queue
         // the message in the batch that writes the record (`allowances.rs`, whose own test
         // checks every record write goes through these).

@@ -50,6 +50,16 @@ use crate::state::{key, Tx};
 /// How many times a payee's write is built again after its record changed meanwhile.
 const WRITE_TRIES: usize = 3;
 
+/// The proof and occurrence the payment method verified, with the signed Switch
+/// revisions a receipt must still find when it is recorded and queued.
+struct VerifiedCredit {
+    paid_at: u64,
+    target: ActivityTarget,
+    activity: ActivityRecord,
+    parent: Option<ActivityTarget>,
+    conditions: Vec<Condition>,
+}
+
 /// A request, by its payee and its request hash (Paykit wire 1.5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RequestRef {
@@ -888,7 +898,24 @@ impl Paykit {
         self.refresh_own()?;
         self.records_known().await?;
         // The check goes on the heap, as `receive`'s steps do: it nests deep.
-        Box::pin(self.verified(record, false)).await
+        Ok(Box::pin(self.verified(record, false))
+            .await?
+            .map(|credit| credit.paid_at))
+    }
+
+    /// Credit uses the accepted service write for both the proof and its request.
+    /// A newer refused write may have changed the proof, receipt or restriction.
+    pub(crate) async fn credit_input(
+        &self,
+        key: &[u8; 32],
+    ) -> Result<Option<pubky_switch_client::app::SharedRecord>> {
+        let held = self.activity_write_base(key).await?;
+        if held.as_ref().is_some_and(|r| r.flagged || r.not_taken) {
+            return Err(
+                Refusal::NotNow("the current payee activity was not accepted".into()).into(),
+            );
+        }
+        Ok(held)
     }
 
     /// [`Paykit::verify_payment`], the "can't tell" hold skipped when the user
@@ -897,8 +924,24 @@ impl Paykit {
         &mut self,
         record: &[u8; 32],
         maybe_credited_confirmed: bool,
-    ) -> Result<Option<u64>> {
-        let (target, bound) = self.payee_record(record).await?;
+    ) -> Result<Option<Box<VerifiedCredit>>> {
+        if self.payee_deletion_held(record).await? {
+            return Err(Refusal::CreditHistoryLost.into());
+        }
+        let mut conditions = vec![self.app.record_condition(record).await?];
+        let held = self.credit_input(record).await?.ok_or(Refusal::NotFound)?;
+        let (target, bound) = self.bound_payee_record(&held)?;
+        if bound.lost_to_delete.is_some() {
+            return Err(Refusal::CreditHistoryLost.into());
+        }
+        let parent = self.payee_period_parent(&target, &bound);
+        if let Some(parent) = &parent {
+            let key = self.activity_key(parent)?;
+            if self.payee_deletion_held(&key).await? {
+                return Err(Refusal::CreditHistoryLost.into());
+            }
+            conditions.push(self.app.record_condition(&key).await?);
+        }
         let proof_stored = bound.proof.as_ref().ok_or(Refusal::NotFound)?;
         let Body::PaymentProof(proof) = proof_stored.body() else {
             return Err(Refusal::NotFound.into());
@@ -907,6 +950,12 @@ impl Paykit {
         // request decides whether its own destination or the named period details'
         // destination serves this occurrence (Paykit spec 8.2).
         let request_record = self.payee_request_record(&target, &bound).await?;
+        if request_record
+            .as_ref()
+            .is_some_and(|parent| parent.lost_to_delete.is_some())
+        {
+            return Err(Refusal::CreditHistoryLost.into());
+        }
         let id = &proof.payment_endpoint_identifier;
         let payment = match request_record.as_ref().and_then(request_of) {
             Some((stored_request, request)) => {
@@ -1047,6 +1096,12 @@ impl Paykit {
         };
         let (amount, payload, destination_expires, rate_window) = payment;
         if let Some(settlement) = self.rail.settlement_id(&proof.proof) {
+            if self
+                .retained_credit(bound.receipt.as_ref().map(|r| r.hash()), &settlement)
+                .await?
+            {
+                return Ok(None);
+            }
             match self
                 .other_credit(record, &bound.counterparty, &settlement)
                 .await?
@@ -1068,12 +1123,25 @@ impl Paykit {
         // The method's evidence dates the payment, never this proof's arrival. A details
         // destination must be unexpired; rates include both signed interval boundaries
         // (Paykit spec 8.2, Paykit wire 4.9). Same-asset payments use no rate interval.
-        Ok(self.rail.verify(check).await?.filter(|paid_at| {
-            destination_expires.is_none_or(|expires| *paid_at < expires)
-                && rate_window.is_none_or(|(start, expires)| {
-                    paykit_lib::periods::rates_apply(start, expires, *paid_at)
+        Ok(self
+            .rail
+            .verify(check)
+            .await?
+            .filter(|paid_at| {
+                destination_expires.is_none_or(|expires| *paid_at < expires)
+                    && rate_window.is_none_or(|(start, expires)| {
+                        paykit_lib::periods::rates_apply(start, expires, *paid_at)
+                    })
+            })
+            .map(|paid_at| {
+                Box::new(VerifiedCredit {
+                    paid_at,
+                    target,
+                    activity: bound,
+                    parent,
+                    conditions,
                 })
-        }))
+            }))
     }
 
     /// Whether another `payee_activity` record than `record` credits `settlement` from
@@ -1131,18 +1199,7 @@ impl Paykit {
                 cant_tell = true;
                 continue;
             };
-            let credits = other.counterparty == *payer
-                && other.receipt.is_some()
-                && other
-                    .proof
-                    .as_ref()
-                    .is_some_and(|stored| match stored.body() {
-                        Body::PaymentProof(proof) => {
-                            self.rail.settlement_id(&proof.proof).as_deref() == Some(settlement)
-                        }
-                        _ => false,
-                    });
-            if credits {
+            if other.counterparty == *payer && self.credits_settlement(&other, settlement) {
                 return Ok(OtherCredit::Credited);
             }
         }
@@ -1233,13 +1290,20 @@ impl Paykit {
         self.refresh_own()?;
         self.records_known().await?;
         let confirmed = details.maybe_credited_confirmed.is_some();
-        // The check goes on the heap, as `receive`'s steps do: it nests deep.
-        if Box::pin(self.verified(record, confirmed)).await?.is_none() {
-            return Ok(None);
-        }
         let mut tries = 0;
         let msg_id = loop {
-            let (target, bound) = self.payee_record(record).await?;
+            // A failed conditional write can reveal a deletion or a changed proof.
+            let Some(credit) = Box::pin(self.verified(record, confirmed)).await? else {
+                return Ok(None);
+            };
+            let VerifiedCredit {
+                target,
+                mut activity,
+                parent,
+                conditions,
+                ..
+            } = *credit;
+            let bound = &activity;
             if let Some(receipt) = &bound.receipt {
                 return Ok(Some(receipt.message().msg_id.clone()));
             }
@@ -1265,20 +1329,36 @@ impl Paykit {
                 payment_reference: details.payment_reference.clone(),
             }
             .to_body(refs.len())?;
-            // The receipt goes into the payee's record in the batch that queues it.
+            // Write the receipt into the same verified activity and queue it in that
+            // batch. A changed proof or parent requires a fresh payment-method decision.
             let signed = self.sign(bound.counterparty, Kind::PaymentReceipt, refs, body)?;
-            match self
-                .send_with_record(signed, &target, Role::Receipt, Vec::new(), Vec::new())
-                .await
-            {
-                Ok(msg_id) => break msg_id,
+            let msg_id = signed.msg_id().to_owned();
+            if !activity::place(&mut activity, Role::Receipt, self.own_copy(&signed)?) {
+                return Err(
+                    Refusal::NotNow("the receipt message ID was already used".into()).into(),
+                );
+            }
+            let target = target.record_target();
+            let entry = self
+                .app
+                .record_op(&target, Some(&activity.to_json()?), conditions)
+                .await?;
+            let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
+                .entry(entry)
+                .queue(signed);
+            match self.submit(batch).await {
+                Ok(_) => break msg_id,
                 Err(error) if error.code() == Some(ErrorCode::Conflict) => {
+                    self.app.read_record(&target).await?;
+                    if let Some(parent) = &parent {
+                        self.app.read_record(&parent.record_target()).await?;
+                    }
                     tries += 1;
                     if tries >= WRITE_TRIES {
-                        return Err(conflict(error));
+                        return Err(conflict(error.into()));
                     }
                 }
-                Err(error) => return Err(error),
+                Err(error) => return Err(error.into()),
             }
         };
         self.send_message(&msg_id).await?;

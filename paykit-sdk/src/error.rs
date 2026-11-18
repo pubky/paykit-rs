@@ -58,6 +58,10 @@ pub enum Refusal {
     /// it reads, signs, writes or sends anything.
     #[error("Paykit spec 8.3.1: accepting an Allowance is unavailable in this version")]
     AllowanceAcceptanceUnavailable,
+    /// A payee activity record lost credit history to a delete. A new receipt cannot
+    /// be issued for this occurrence, including by hand (Paykit spec 6).
+    #[error("Paykit spec 6: the payee record lost credit history to a delete")]
+    CreditHistoryLost,
     /// The obligation is paid: its claim is SETTLED, or its record holds the proof of a
     /// payment (Paykit spec 7.2).
     #[error("already paid")]
