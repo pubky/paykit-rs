@@ -363,10 +363,12 @@ async fn read_during_renewal(already_listed: bool) {
     let keys = w.bob.identity().app_keys(name);
     let held = w.bob.switch().app(&id).record.unwrap();
     let old = AppRecord::verify(&held, &w.bob_id()).unwrap();
-    let scopes = paykit_sdk::AppScopes::new().request().build().unwrap();
-    let spec = AppSpec::new(&["paykit_request"]).with_permissions(&scopes.permissions);
+    paykit_lib::scopes::check_certificate(old.cert()).unwrap();
+    let scopes: Vec<_> = old.cert().scopes().iter().map(String::as_str).collect();
+    let spec = AppSpec::new(&scopes).with_permissions(old.cert().permissions());
     w.clock.advance_ms(1);
     let renewed = issue_cert(w.bob.identity().key(), &keys, &spec, w.clock.now_ms()).unwrap();
+    paykit_lib::scopes::check_certificate(&renewed).unwrap();
     let mut replacement = old.body().clone();
     replacement.cert = renewed.signed().clone();
     let list_renewal = move |w: &World| {
