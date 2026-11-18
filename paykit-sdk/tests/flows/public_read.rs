@@ -341,6 +341,91 @@ async fn test_public_read_one_time_judges_every_app() {
 }
 
 #[tokio::test]
+async fn test_public_read_fetches_the_renewed_apps_record() {
+    read_during_renewal(false).await;
+}
+
+#[tokio::test]
+async fn test_public_read_fetches_the_replacement_after_an_open_renewal_closes() {
+    read_during_renewal(true).await;
+}
+
+async fn read_during_renewal(already_listed: bool) {
+    use pubky_switch_client::testing::{issue_cert, AppSpec};
+    use pubky_switch_core::ops::OpKind;
+    use pubky_switch_core::records::{AppRecord, RenewedCert};
+
+    let w = Arc::new(World::new());
+    let (mut wallet, reads) = wallet_reading_through(&w).await;
+    let apps = bob_apps(&w, &["shop", "till"]).await;
+    let (name, id) = apps[0];
+    publish_now(&w, name, one_endpoint("btc-lightning-bolt11", "lnbc1old"));
+    let keys = w.bob.identity().app_keys(name);
+    let held = w.bob.switch().app(&id).record.unwrap();
+    let old = AppRecord::verify(&held, &w.bob_id()).unwrap();
+    let scopes = paykit_sdk::AppScopes::new().request().build().unwrap();
+    let spec = AppSpec::new(&["paykit_request"]).with_permissions(&scopes.permissions);
+    w.clock.advance_ms(1);
+    let renewed = issue_cert(w.bob.identity().key(), &keys, &spec, w.clock.now_ms()).unwrap();
+    let mut replacement = old.body().clone();
+    replacement.cert = renewed.signed().clone();
+    let list_renewal = move |w: &World| {
+        w.bob
+            .switch()
+            .signer_op(OpKind::CertPut {
+                target_app_id: id,
+                cert: renewed.signed().clone(),
+            })
+            .unwrap();
+        w.bob
+            .next_doc(|body| {
+                body.apps.iter_mut().find(|a| a.app_id == id).unwrap().cert = renewed.hash();
+                body.renewed.push(RenewedCert {
+                    app_id: id,
+                    cert: old.cert().hash(),
+                    until: None,
+                });
+            })
+            .unwrap();
+    };
+    if already_listed {
+        list_renewal(&w);
+    }
+    // The first app's record has been read. While the wallet waits for the second app,
+    // Bob publishes a replacement and closes the renewal of the earlier certificate.
+    let world = Arc::clone(&w);
+    reads.on_read(&apps[1].1, move || {
+        world.clock.advance_ms(HOUR_MS);
+        if !already_listed {
+            list_renewal(&world);
+        }
+        let now = world.clock.now_ms();
+        replacement.updated_at = now;
+        replacement.expires_at = Some(now + 30 * DAY_MS);
+        let member = one_endpoint("btc-lightning-bolt11", "lnbc1renewed");
+        replacement
+            .protocols
+            .insert("paykit".into(), member.as_object().unwrap().clone());
+        let current = AppRecord::sign(&keys, replacement).unwrap();
+        world.homeserver.put(
+            world.bob_id(),
+            &app_record_path(&id),
+            serde_json::to_vec(current.signed()).unwrap(),
+        );
+        world
+            .bob
+            .next_doc(|body| {
+                body.close_renewals(&id, now);
+            })
+            .unwrap();
+    });
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(offering(&read), [id], "{read:?}");
+    assert_eq!(read.endpoints[0].payload.as_str(), "lnbc1renewed");
+    assert!(read.failures.is_empty(), "{read:?}");
+}
+
+#[tokio::test]
 async fn test_public_read_refreshes_after_a_newly_listed_apps_slow_read() {
     use pubky_switch_core::records::RemovedApp;
 
@@ -404,6 +489,7 @@ async fn test_public_read_refuses_when_the_directory_keeps_expiring() {
             world.approve(&world.bob, next, &scopes);
         });
     }
+    let lookups = w.homeserver.identity_reads(&w.bob_id());
     let err = wallet
         .public_endpoints(&w.bob_id(), None)
         .await
@@ -412,6 +498,7 @@ async fn test_public_read_refuses_when_the_directory_keeps_expiring() {
         matches!(err.refusal(), Some(Refusal::IdentityUnavailable(_))),
         "{err:?}"
     );
+    assert!(w.homeserver.identity_reads(&w.bob_id()) - lookups <= 4);
 }
 
 #[tokio::test]
