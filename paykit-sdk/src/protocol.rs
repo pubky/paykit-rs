@@ -63,10 +63,8 @@ use crate::state::{self, key, StateKey};
 /// The kinds this SDK handles (Paykit wire 4.3): the one-time request flow, recurring
 /// requests' acceptance and period details, payments without a request, the payer's side of
 /// Private Payment Lists, re-sends, and the Allowance messages with `executor_notice`.
-/// Publishing Private Payment Lists comes later. A `private_payment_list_request` this SDK
-/// receives is taken with no effect: it publishes no list at all yet, so the Publishing
-/// rule's answer to a request naming a used version (Paykit spec 8.4) comes with list
-/// publishing, with that rule's other triggers.
+/// Chosen recipients get reusable Private Payment Lists. An incoming
+/// `private_payment_list_request` currently has no effect.
 pub const HANDLED_KINDS: [Kind; 15] = [
     Kind::PaymentRequest,
     Kind::PaymentRequestAcceptance,
@@ -430,6 +428,20 @@ pub(crate) fn restore_paykit_layer(
     let own_cert = restoring.cert();
     let blind = |input: &[u8]| restoring.blind(input);
     let binder = state::Binder::new(own, own_cert, &blind);
+    let mut publications = crate::publish::RestoredPublications::default();
+    for prefix in [key::PUBLICATIONS, key::LIST_RESERVATIONS] {
+        for (key, value) in restoring
+            .previous_local_scan(prefix.as_bytes())
+            .map_err(|_| "the installation's private list publications cannot be read")?
+        {
+            if prefix == key::PUBLICATIONS {
+                publications.pending(&key, &value, &binder)
+            } else {
+                publications.applied(&key, &value, &binder)
+            }
+            .map_err(|_| "invalid retained private list publication")?;
+        }
+    }
     let mut history = crate::deletions::RestoredReceipts::default();
     for prefix in [
         key::PAYEE_DELETIONS,
@@ -665,18 +677,18 @@ pub(crate) fn restore_paykit_layer(
                 let recipient =
                     state::restored::<crate::publish::ListRecipient>(&key, &value, &binder)
                         .map_err(|_| unread())?;
-                let restored = recipient
-                    .restored()
-                    .and_then(|r| state::encode(&r))
+                publications.recipient(recipient);
+                continue;
+            }
+            StateKey::Publication(_) => {
+                publications
+                    .pending(&key, &value, &binder)
                     .map_err(|_| unread())?;
-                writes.push(LocalWrite::Put {
-                    key,
-                    value: restored,
-                });
                 continue;
             }
             StateKey::ListReservation(_) => {
-                state::restored::<crate::publish::ListReservation>(&key, &value, &binder)
+                publications
+                    .applied(&key, &value, &binder)
                     .map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
@@ -840,6 +852,11 @@ pub(crate) fn restore_paykit_layer(
         history
             .writes()
             .map_err(|_| "the retained payee evidence cannot be stored")?,
+    );
+    writes.extend(
+        publications
+            .writes()
+            .map_err(|_| "the retained private list publications cannot be stored")?,
     );
     if own_cert.holds_scope("paykit_request") {
         writes.push(state::local_put(key::LIST_DISCOVERY, &true).map_err(|e| e.to_string())?);

@@ -231,13 +231,13 @@ async fn test_publication_restore_lists_former_and_current_recipients() {
     .await
     .unwrap();
     restored.receive(None).await.unwrap();
-    let RecordRead::Fresh(second) = restored
+    let read = restored
         .app_mut()
         .read_record_fresh(&withdrawal)
         .await
-        .unwrap()
-    else {
-        panic!("no second withdrawal")
+        .unwrap();
+    let RecordRead::Fresh(second) = read else {
+        panic!("no second withdrawal: {read:?}");
     };
     let second = ListPublicationRecord::read(second.content.value().unwrap()).unwrap();
     assert_eq!((second.generation, second.counter), (2, 2));
@@ -623,4 +623,402 @@ async fn test_publication_restored_contact_needs_a_new_sharing_choice() {
         w.rail.selections().last().unwrap().0[0].payload.as_str(),
         "lno1after"
     );
+}
+
+async fn interrupted_keep(after_commit: bool) {
+    use crate::common::FailNextKeep;
+    use paykit_sdk::{AppScopes, PaykitConfig};
+
+    use pubky_switch_client::store::StateStore;
+    use std::sync::Arc;
+
+    let w = World::new();
+    let disk = Arc::new(FailNextKeep::default());
+    let storage = disk.clone() as Arc<dyn StateStore>;
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "publisher",
+            AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default(),
+            storage.clone(),
+        )
+        .await;
+    let mut wallet = w.wallet("wallet").await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    shop.set_list_endpoints(
+        [(
+            endpoint("btc-lightning-bolt12"),
+            paykit_lib::PaymentEndpointPayload::new("lno1unsent").unwrap(),
+        )]
+        .into_iter()
+        .collect(),
+    )
+    .await
+    .unwrap();
+    let publisher = shop.app_id();
+    let before = w.bob.switch().applied().len();
+    if after_commit {
+        disk.lose_keep_answer();
+    } else {
+        disk.fail_before_keep();
+    }
+    let err = shop.publish_list_to(w.alice_id()).await.unwrap_err();
+    assert_eq!(err.kept_batch().is_some(), after_commit, "{err}");
+    assert_eq!(w.bob.switch().applied().len(), before);
+    drop(shop);
+    let mut shop = w
+        .load_on_clock(&w.bob, storage, publisher, w.clock.clone())
+        .await;
+    let kept = shop.app().queued_messages("paykit").await.unwrap();
+    assert_eq!(kept.len(), usize::from(after_commit));
+    if after_commit {
+        let batch = kept[0].kept_batch.unwrap();
+        assert_eq!(Some(batch), err.kept_batch());
+        let pending = shop.publish_list_to(w.alice_id()).await.unwrap_err();
+        assert!(
+            matches!(pending.refusal(), Some(paykit_sdk::Refusal::NotNow(_))),
+            "{pending}"
+        );
+        shop.app_mut().receive(None).await.unwrap();
+        assert!(matches!(
+            shop.app().kept_batch(batch).await.unwrap(),
+            Some(pubky_switch_client::app::KeptBatchStatus::Applied { .. })
+        ));
+    }
+
+    shop.receive(None).await.unwrap();
+    shop.publish_list_to(w.alice_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(UnrequestedPayment::new(w.bob_id(), btc("0.001")))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }));
+    assert_eq!(
+        w.rail.selections().last().unwrap().0[0].payload.as_str(),
+        "lno1unsent"
+    );
+}
+
+#[tokio::test]
+async fn test_publication_resumes_when_its_first_batch_was_never_kept() {
+    interrupted_keep(false).await;
+}
+
+#[tokio::test]
+async fn test_publication_reloads_the_original_after_its_first_keep_answer_is_lost() {
+    interrupted_keep(true).await;
+}
+
+#[tokio::test]
+async fn test_publication_later_provider_refusal_does_not_release_the_lost_original() {
+    use pubky_switch_client::app::{KeptBatchDrop, KeptBatchStatus};
+    use pubky_switch_client::testing::{Fault, ScriptedSwitch};
+    use pubky_switch_core::records::Inbox;
+    const NEXT: &str = "https://recovered-merchant.example";
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let _wallet = w.wallet("wallet").await;
+    let recipient = w.alice_id();
+    shop.app_mut().invite(&recipient).await.unwrap();
+    let old = shop
+        .app()
+        .record_key(&target(&shop, &recipient, 1))
+        .unwrap();
+    shop.set_list_endpoints(offered("lno1first")).await.unwrap();
+    w.bob.switch().fail_next(Fault::LoseAnswer {
+        path: "/ops".into(),
+    });
+    let original = shop
+        .publish_list_to(recipient)
+        .await
+        .unwrap_err()
+        .kept_batch()
+        .unwrap();
+    assert_eq!(w.record_writes(&w.bob, &old), 1);
+    assert!(matches!(
+        shop.app().kept_batch(original).await.unwrap(),
+        Some(KeptBatchStatus::Kept {
+            sent_at_ms: Some(_),
+            ..
+        })
+    ));
+    let next = ScriptedSwitch::recovering(w.bob.identity().key(), [93; 32], w.clock.clone(), 2, 1)
+        .unwrap();
+    let doc = w
+        .bob
+        .sign_next(|b| {
+            b.generation = 2;
+            b.inbox = Inbox::new(NEXT, next.service_key());
+            b.recovery_from = Some(1);
+        })
+        .unwrap();
+    next.deliver_identity(&doc).unwrap();
+    w.router.remove(crate::common::BOB_ORIGIN);
+    w.router.add_switch(NEXT, &next);
+    shop.app_mut().refresh_identity().await.unwrap();
+    shop.app_mut().follow_provider().await.unwrap();
+    assert!(matches!(shop.app().kept_batch(original).await.unwrap(),
+        Some(KeptBatchStatus::Kept {wire_batch_id,sent_at_ms: None}) if wire_batch_id!=original));
+    // The replacement provider cannot apply the counter write for generation one.
+    for _ in 0..4 {
+        let _report = shop.app_mut().receive(None).await;
+    }
+    let ended = shop.app().kept_batch(original).await.unwrap();
+    assert!(
+        matches!(
+            ended,
+            Some(KeptBatchStatus::Dropped {
+                reason: KeptBatchDrop::Refused { .. } | KeptBatchDrop::Unsent,
+                ..
+            })
+        ),
+        "{ended:?}"
+    );
+    shop.set_list_endpoints(offered("lno1afterloss"))
+        .await
+        .unwrap();
+    let issue = shop.publish_list_to(recipient).await;
+    assert!(
+        matches!(issue.as_ref().err().and_then(|e|e.refusal()),
+        Some(paykit_sdk::Refusal::NotNow(reason)) if reason.contains("previous publication")),
+        "{issue:?}"
+    );
+    let current = shop
+        .app()
+        .record_key(&target(&shop, &recipient, 2))
+        .unwrap();
+    assert!(next.record(&current).is_none());
+}
+
+#[tokio::test]
+async fn test_publication_older_in_place_restore_retains_the_later_unresolved_recipient() {
+    use crate::common::store;
+    use paykit_sdk::{AppScopes, PaykitConfig, Refusal};
+    use pubky_switch_client::testing::Fault;
+    let w = World::new();
+    let storage = store();
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "publisher",
+            AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default(),
+            storage.clone(),
+        )
+        .await;
+    let mut wallet = w.wallet("wallet").await;
+    let mut other = w
+        .join(&w.carol, "other", AppScopes::new().pay().build().unwrap())
+        .await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    shop.app_mut().invite(&other.identity()).await.unwrap();
+    other.app_mut().invite(&w.bob_id()).await.unwrap();
+    let backup = shop.backup().await.unwrap();
+    let recipient = w.alice_id();
+    let first = shop
+        .app()
+        .record_key(&target(&shop, &recipient, 1))
+        .unwrap();
+    shop.set_list_endpoints(offered("lno1first")).await.unwrap();
+    w.bob.switch().fail_next(Fault::LoseAnswer {
+        path: "/ops".into(),
+    });
+    let original = shop
+        .publish_list_to(recipient)
+        .await
+        .unwrap_err()
+        .kept_batch()
+        .unwrap();
+    assert_eq!(w.record_writes(&w.bob, &first), 1);
+    drop(shop);
+    let mut shop = Paykit::restore(
+        w.env(&w.bob, storage),
+        PaykitConfig::default(),
+        &backup,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert!(shop.app().kept_batch(original).await.unwrap().is_none());
+    shop.receive(None).await.unwrap();
+    shop.set_list_endpoints(offered("lno1other")).await.unwrap();
+    let held = shop.publish_list_to(recipient).await.unwrap_err();
+    assert!(
+        matches!(held.refusal(), Some(Refusal::NotNow(reason)) if reason.contains("previous publication")),
+        "{held}"
+    );
+    assert_eq!(w.record_writes(&w.bob, &first), 1);
+    shop.publish_list_to(other.identity()).await.unwrap();
+    other.receive(None).await.unwrap();
+    let paid = other
+        .pay_without_request(UnrequestedPayment::new(w.bob_id(), btc("0.001")))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(
+        w.rail.selections().last().unwrap().0[0].payload.as_str(),
+        "lno1other"
+    );
+}
+
+#[tokio::test]
+async fn test_publication_requires_a_current_own_identity_after_reading_the_counter() {
+    use crate::common::{store, ReadHook};
+    use paykit_sdk::{AppScopes, PaykitConfig, Refusal};
+    use std::sync::Arc;
+
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let hook = Arc::new(ReadHook::new(w.router.clone()));
+    let mut shop = w
+        .join_through(
+            &w.bob,
+            "publisher",
+            AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default(),
+            store(),
+            hook.clone(),
+        )
+        .await;
+    let recipient = wallet.identity();
+    let owner = shop.identity();
+    shop.app_mut().invite(&recipient).await.unwrap();
+    wallet.app_mut().invite(&owner).await.unwrap();
+    shop.set_list_endpoints(offered("lno1current"))
+        .await
+        .unwrap();
+    let held = w.homeserver.identity_doc(&owner).unwrap();
+    let key = shop
+        .app()
+        .record_key(&target(&shop, &recipient, held.generation()))
+        .unwrap();
+    let clock = w.clock.clone();
+    let homeserver = w.homeserver.clone();
+    hook.after_read(
+        &format!("records/{}", pubky_switch_core::enc::b64(&key)),
+        move || {
+            clock.advance_ms(60_000);
+            homeserver.remove(owner, pubky_switch_core::records::IDENTITY_PATH);
+        },
+    );
+    let denied = shop.publish_list_to(recipient).await.unwrap_err();
+    assert!(hook.fired());
+    assert!(
+        matches!(denied.refusal(), Some(Refusal::IdentityUnavailable(_))),
+        "{denied}"
+    );
+    assert_eq!(w.record_writes(&w.bob, &key), 0);
+    assert!(shop
+        .app()
+        .queued_messages("paykit")
+        .await
+        .unwrap()
+        .is_empty());
+    w.homeserver.publish(&held).unwrap();
+    shop.publish_list_to(recipient).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(UnrequestedPayment::new(owner, btc("0.001")))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }));
+    assert_eq!(w.record_writes(&w.bob, &key), 1);
+}
+
+#[tokio::test]
+async fn test_publication_restored_pending_batch_needs_its_matching_applied_write() {
+    use crate::common::store;
+    use paykit_sdk::{AppScopes, PaykitConfig, Refusal};
+    use pubky_switch_client::testing::Fault;
+
+    let w = World::new();
+    let disk = store();
+    let recipient = w.alice_id();
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "publisher",
+            AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default(),
+            disk.clone(),
+        )
+        .await;
+    let _wallet = w.wallet("wallet").await;
+    shop.app_mut().invite(&recipient).await.unwrap();
+    shop.set_list_endpoints(offered("lno1original"))
+        .await
+        .unwrap();
+    w.bob.switch().fail_next(Fault::LoseAnswer {
+        path: "/ops".into(),
+    });
+    let batch = shop
+        .publish_list_to(recipient)
+        .await
+        .unwrap_err()
+        .kept_batch()
+        .unwrap();
+    let backup = shop.backup().await.unwrap();
+    let mut elsewhere = Paykit::restore(
+        w.env(&w.bob, store()),
+        PaykitConfig::default(),
+        &backup,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    elsewhere.receive(None).await.unwrap();
+    elsewhere
+        .set_list_endpoints(offered("lno1new"))
+        .await
+        .unwrap();
+    let no_outcome = elsewhere.publish_list_to(recipient).await.unwrap_err();
+    assert!(
+        matches!(no_outcome.refusal(),Some(Refusal::NotNow(reason)) if reason.contains("previous publication")),
+        "{no_outcome}"
+    );
+    drop(elsewhere);
+    shop.app_mut().receive(None).await.unwrap();
+    assert!(matches!(
+        shop.app().kept_batch(batch).await.unwrap(),
+        Some(pubky_switch_client::app::KeptBatchStatus::Applied { .. })
+    ));
+    let original = target(&shop, &recipient, 1);
+    let key = shop.app().record_key(&original).unwrap();
+    assert_eq!(w.record_writes(&w.bob, &key), 1);
+    drop(shop);
+    let mut restored = Paykit::restore(
+        w.env(&w.bob, disk),
+        PaykitConfig::default(),
+        &backup,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    restored.receive(None).await.unwrap();
+    assert_eq!(
+        w.record_writes(&w.bob, &key),
+        2,
+        "verified earlier application permits the restore withdrawal"
+    );
+    restored
+        .set_list_endpoints(offered("lno1new"))
+        .await
+        .unwrap();
+    assert_eq!(
+        w.record_writes(&w.bob, &key),
+        2,
+        "restore did not renew sharing permission"
+    );
+    restored.publish_list_to(recipient).await.unwrap();
+    assert_eq!(w.record_writes(&w.bob, &key), 3);
 }

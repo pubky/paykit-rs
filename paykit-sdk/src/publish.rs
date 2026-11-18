@@ -1,19 +1,27 @@
 //! Publishing a Private Payment List to a chosen counterparty (Paykit spec 8.4.1).
+//!
+//! A native batch keeps the original message’s hash, recipient and generation in a
+//! protocol-local key naming the batch. Its application records the sharing decision
+//! and queues the signed message together. If the application is undecided, changes
+//! for that recipient wait while other recipients can proceed. An in-place restore
+//! retains outstanding originals from both stores and requires a fresh sharing choice.
+//! Development stores containing the earlier separate reservation fail validation. An
+//! unresolved reservation from that format cannot establish whether the batch was kept.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use paykit_lib::bodies::{ListEndpoint, PrivatePaymentList, PRIVATE_LIST_MAX_AGE_MS};
 use paykit_lib::derive::natural_key;
 use paykit_lib::records::{ListPublicationRecord, UnknownMembers};
 use paykit_lib::{Kind, ListVersion, PaymentEndpointIdentifier, PaymentEndpointPayload};
 use pubky_switch_client::app::{
-    AppError, Collection, DeliveryView, KeptBatchDrop, KeptBatchStatus, KeptReason, OpBatch,
+    Collection, DeliveryView, KeptBatchDrop, KeptBatchStatus, KeptReason, LocalWrite, OpBatch,
     OutgoingMessage, RecordContent, RecordRead, RecordTarget, SharedRecord, StoreFailure,
 };
 use pubky_switch_core::ident::Policy;
 
 use crate::error::{Refusal, Result};
-use crate::state::{key, Tx};
+use crate::state::{self, key, PublicationIds, PublicationKey, Tx};
 use crate::Paykit;
 use pubky_switch_core::enc::random_bytes;
 use serde::{Deserialize, Serialize};
@@ -86,10 +94,6 @@ impl ListRecipient {
             withdraw: !chosen,
         })
     }
-
-    pub(crate) fn restored(self) -> Result<Self> {
-        Self::new(self.recipient, false)
-    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -103,9 +107,6 @@ pub(crate) struct ListReservation {
     counter: u64,
     id: String,
     hash: [u8; 32],
-    applied: bool,
-    #[serde(deserialize_with = "Option::deserialize")]
-    batch_id: Option<[u8; 16]>,
 }
 
 impl ListReservation {
@@ -115,11 +116,74 @@ impl ListReservation {
         Ok(())
     }
 
+    fn original(&self) -> PublicationKey {
+        PublicationKey {
+            recipient: self.recipient,
+            generation: self.generation,
+            hash: self.hash,
+        }
+    }
+
     fn matches(&self, record: &ListPublicationRecord) -> bool {
         self.id == record.msg_id
             && self.hash == record.message_hash
             && self.generation == record.generation
             && self.counter == record.counter
+    }
+}
+
+/// A restore retains outstanding originals from both installations. A matching
+/// applied write settles its signed message without restoring permission to share.
+#[derive(Default)]
+pub(crate) struct RestoredPublications {
+    batches: BTreeMap<PublicationKey, PublicationIds>,
+    applied: BTreeSet<PublicationKey>,
+    recipients: BTreeSet<[u8; 32]>,
+}
+
+impl RestoredPublications {
+    pub(crate) fn pending(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        binder: &state::Binder<'_>,
+    ) -> Result<()> {
+        let (original, ids) = state::publication_entry(key, value, binder.identity())?;
+        self.recipients.insert(original.recipient);
+        self.batches.entry(original).or_default().extend(ids);
+        Ok(())
+    }
+
+    pub(crate) fn applied(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        binder: &state::Binder<'_>,
+    ) -> Result<()> {
+        let issue = state::restored::<ListReservation>(key, value, binder)?;
+        self.recipients.insert(issue.recipient);
+        self.applied.insert(issue.original());
+        Ok(())
+    }
+
+    pub(crate) fn writes(self) -> Result<Vec<LocalWrite>> {
+        let mut writes = Vec::new();
+        for (original, ids) in self.batches {
+            if !self.applied.contains(&original) {
+                writes.push(original.write(&ids)?);
+            }
+        }
+        for recipient in self.recipients {
+            writes.push(state::local_put(
+                &key::list_recipient(&recipient),
+                &ListRecipient::new(recipient, false)?,
+            )?);
+        }
+        Ok(writes)
+    }
+
+    pub(crate) fn recipient(&mut self, recipient: ListRecipient) {
+        self.recipients.insert(recipient.recipient);
     }
 }
 
@@ -140,8 +204,7 @@ pub(crate) fn may_send(view: &DeliveryView<'_>) -> std::result::Result<bool, Sto
         else {
             return Ok(false);
         };
-        if !issue.applied
-            || issue.choice != recipient.choice
+        if issue.choice != recipient.choice
             || issue.id != message.msg_id
             || issue.hash != view.hash()
         {
@@ -332,40 +395,33 @@ impl Paykit {
 
     async fn publish_recipient(&mut self, mut recipient: ListRecipient) -> Result<()> {
         let settings = self.local_get::<ListSettings>(key::LIST_SETTINGS).await?;
-        if !recipient.withdraw && (!recipient.chosen || settings.is_none()) {
+        if recipient.chosen && settings.is_none() {
             return Ok(());
         }
-        let settings = settings.filter(|s| !recipient.withdraw && !s.endpoints.is_empty());
+        let settings =
+            settings.filter(|s| recipient.chosen && !recipient.withdraw && !s.endpoints.is_empty());
         let revision = settings.as_ref().map(|s| s.revision);
         let at = key::list_reservation(&recipient.recipient);
-        if let Some(mut prior) = self.local_get::<ListReservation>(&at).await? {
-            if !prior.applied {
-                let fate = match prior.batch_id {
-                    Some(id) => self.app.kept_batch(id).await?,
-                    None => None,
-                };
-                match fate {
-                    Some(KeptBatchStatus::Applied { .. }) => {
-                        prior.applied = true;
-                        self.local_put(&at, &prior).await?;
-                    }
-                    Some(KeptBatchStatus::Dropped {
-                        reason: KeptBatchDrop::Refused { .. } | KeptBatchDrop::Unsent,
-                        ..
-                    }) => self.local_delete(&at).await?,
-                    // The same counter value can survive an undecided batch. Only the
-                    // original batch's outcome or its atomic local write settles it.
-                    _ => return Err(unresolved().into()),
-                }
+        // Only the original batch's outcome or its atomic applied write settles it.
+        // An equal readable counter can outlive an undecided batch.
+        self.resolve_publications(&recipient.recipient).await?;
+        if let Some(prior) = self
+            .local_get::<ListReservation>(&at)
+            .await?
+            .filter(|prior| prior.choice == recipient.choice && prior.revision == revision)
+        {
+            if recipient.withdraw {
+                recipient.withdraw = false;
+                self.local_put(&key::list_recipient(&recipient.recipient), &recipient)
+                    .await?;
             }
-            if prior.applied && prior.choice == recipient.choice && prior.revision == revision {
-                if recipient.withdraw {
-                    recipient.withdraw = false;
-                    self.local_put(&key::list_recipient(&recipient.recipient), &recipient)
-                        .await?;
-                }
-                return Ok(());
-            }
+            // The native client may have committed application during a raw receive.
+            // Flush only this pending delivery of the exact applied original.
+            self.send_message(&prior.id).await?;
+            return Ok(());
+        }
+        if !recipient.chosen && !recipient.withdraw {
+            return Ok(());
         }
         let endpoints = settings.map_or_else(|| Ok(BTreeMap::new()), |s| s.endpoints())?;
         let issue = Box::pin(self.reserve_private_list(&recipient, revision, &endpoints)).await?;
@@ -375,6 +431,44 @@ impl Paykit {
                 .await?;
         }
         self.send_message(&issue.msg_id).await?;
+        Ok(())
+    }
+
+    async fn resolve_publications(&mut self, recipient: &[u8; 32]) -> Result<()> {
+        let mut pending = false;
+        for (original, ids) in self.publication_batches(recipient).await? {
+            let mut remaining = PublicationIds::new();
+            for &id in &ids {
+                let resolved = match self.app.kept_batch(id).await? {
+                    Some(KeptBatchStatus::Applied { .. }) => true,
+                    Some(KeptBatchStatus::Dropped {
+                        reason: KeptBatchDrop::Refused { .. } | KeptBatchDrop::Unsent,
+                        ..
+                    }) => {
+                        // After a loss the client can sign the batch again under the same
+                        // ID. A refusal of those bytes says nothing about the old service.
+                        self.own_identity_confirmed(false).await?;
+                        let own = self.app.own_identity();
+                        own.generation() >= original.generation
+                            && own
+                                .body()
+                                .recovery_from
+                                .is_none_or(|lost| original.generation > lost)
+                    }
+                    _ => false,
+                };
+                if !resolved {
+                    remaining.insert(id);
+                }
+            }
+            pending |= !remaining.is_empty();
+            if remaining != ids {
+                self.retain_publication_ids(&original, &remaining).await?;
+            }
+        }
+        if pending {
+            return Err(unresolved().into());
+        }
         Ok(())
     }
 
@@ -471,7 +565,7 @@ impl Paykit {
             .record_op(&target, Some(&publication.to_json()?), vec![])
             .await?;
         let at = key::list_reservation(&recipient);
-        let mut reservation = ListReservation {
+        let reservation = ListReservation {
             recipient,
             choice: choice.choice,
             revision,
@@ -479,38 +573,27 @@ impl Paykit {
             counter: publication.counter,
             id: publication.msg_id.clone(),
             hash: publication.message_hash,
-            applied: false,
-            batch_id: None,
         };
-        reservation.applied = true;
+        let marker = reservation.original().key();
         let mut applied = Tx::default();
-        applied.put(&at, &reservation)?;
+        applied.put(&at, &reservation)?.delete(&marker);
         let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
             .entry(put)
             .queue(signed)
+            .keep_id_at(marker.into_bytes())
             .locals(applied.into_writes());
         self.own_identity_confirmed(false).await?;
         if self.app.own_identity().generation() != generation || !self.holds(SCOPE) {
             return Err(counter_unavailable().into());
         }
-        reservation.applied = false;
-        self.local_put(&at, &reservation).await?;
         if let Err(error) = self.submit(batch).await {
             // The client can settle the imported original from a signed conflict answer.
             if self
                 .local_get::<ListReservation>(&at)
                 .await?
-                .is_some_and(|kept| kept.applied && kept.matches(&publication))
+                .is_some_and(|kept| kept.matches(&publication))
             {
                 return Ok(publication);
-            }
-            if let Some(id) = error.kept_batch() {
-                reservation.applied = false;
-                reservation.batch_id = Some(id);
-                self.local_put(&at, &reservation).await?;
-            } else if !matches!(error, AppError::Store(_) | AppError::Protocol(_)) {
-                // A bare submit refusal kept nothing. A store failure can hide a kept batch.
-                self.local_delete(&at).await?;
             }
             return Err(error.into());
         }

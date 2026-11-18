@@ -1653,97 +1653,13 @@ async fn test_blocked_own_unblock_applied_in_the_read_keeps_the_resend_request_o
         .is_empty());
 }
 
-/// A store that, once armed, fails the client's next commit that keeps a batch
-/// (`opq/<batch_id>`), once, applying nothing.
-#[derive(Default)]
-struct FailNextKeep {
-    inner: pubky_switch_client::store::MemoryStore,
-    armed: std::sync::atomic::AtomicBool,
-}
-
-impl pubky_switch_client::store::StateStore for FailNextKeep {
-    fn get(
-        &self,
-        ns: &str,
-        key: &[u8],
-    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
-        self.inner.get(ns, key)
-    }
-
-    fn scan(
-        &self,
-        ns: &str,
-        prefix: &[u8],
-        after: Option<&[u8]>,
-        limit: u32,
-    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
-    {
-        self.inner.scan(ns, prefix, after, limit)
-    }
-
-    fn commit(
-        &self,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<(), pubky_switch_client::error::StoreError> {
-        self.commit_with(batch, |batch| {
-            self.inner
-                .commit(batch)
-                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
-        })
-        .map(|_| ())
-    }
-
-    fn acquire(
-        &self,
-        ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
-    {
-        self.inner.acquire(ns, owner)
-    }
-
-    fn commit_if(
-        &self,
-        ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
-    {
-        self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
-    }
-}
-impl FailNextKeep {
-    fn commit_with(
-        &self,
-        batch: pubky_switch_client::store::WriteBatch,
-        apply: impl FnOnce(
-            pubky_switch_client::store::WriteBatch,
-        ) -> Result<
-            pubky_switch_client::store::CommitOutcome,
-            pubky_switch_client::error::StoreError,
-        >,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
-    {
-        use pubky_switch_client::store::Write;
-        use std::sync::atomic::Ordering;
-        let keeps = batch
-            .writes()
-            .iter()
-            .any(|write| matches!(write, Write::Put { key, .. } if key.starts_with(b"opq/")));
-        if keeps && self.armed.swap(false, Ordering::SeqCst) {
-            return Err(pubky_switch_client::error::StoreError::Unavailable);
-        }
-        apply(batch)
-    }
-}
-
 #[tokio::test]
 async fn test_blocked_block_counted_but_never_kept_written_at_the_next_receive() {
     // The client's commit that keeps the wallet's block fails, so the block is neither sent
     // nor kept, though it counts here. The next receive writes it, and the identity's list
     // holds bob, so the other own apps pause for him too (Paykit spec 8.1).
     let w = World::new();
-    let target = std::sync::Arc::new(FailNextKeep::default());
+    let target = std::sync::Arc::new(crate::common::FailNextKeep::default());
     let mut wallet = w
         .join_with(
             &w.alice,
@@ -1758,9 +1674,7 @@ async fn test_blocked_block_counted_but_never_kept_written_at_the_next_receive()
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
-    target
-        .armed
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    target.fail_before_keep();
     assert!(wallet.block(&w.bob_id()).await.is_err());
     let lists = wallet.app_mut().allow_list().await.unwrap();
     assert!(!lists.deny.contains(&w.bob_id()));
