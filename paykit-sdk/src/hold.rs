@@ -218,7 +218,11 @@ impl RestoreHold {
     /// that isn't clean is known, so a clean restore asks nothing for itself; an earlier
     /// one's the backup owed whatever this verdict.
     pub(crate) fn asks_due(&self) -> bool {
-        !self.asks_queued && (self.verdict == RestoreVerdict::NotClean || self.earlier_asks)
+        !self.asks_queued && self.has_resend_duty()
+    }
+
+    fn has_resend_duty(&self) -> bool {
+        self.verdict == RestoreVerdict::NotClean || self.earlier_asks
     }
 
     /// Whether this restore's own hold holds: until a clean verdict lifts it.
@@ -258,10 +262,11 @@ impl RestoreHold {
         }
     }
 
-    /// Earlier re-sends belong to a carried hold. A partial list of counterparties
-    /// records progress only while re-sends are due.
+    /// Earlier re-sends belong to a carried hold. Partial or completed progress
+    /// belongs to a restore that had re-sends to queue.
     pub(crate) fn is_valid(&self) -> bool {
         (!self.earlier_asks || self.earlier)
+            && (!self.asks_queued || self.has_resend_duty())
             && (self.asked.is_empty() || self.asks_due())
             && self.asked.windows(2).all(|pair| pair[0] < pair[1])
             && self.in_order()

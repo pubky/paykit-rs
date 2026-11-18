@@ -284,6 +284,64 @@ async fn test_recovery_state_restore_retains_only_readable_holds() {
 }
 
 #[tokio::test]
+async fn test_recovery_state_completed_resends_require_a_duty_on_load_and_restore() {
+    for verdict in ["open", "clean", "not_clean"] {
+        for (earlier, earlier_asks) in [(false, false), (true, false), (true, true), (false, true)]
+        {
+            let w = World::new();
+            let (mut wallet, storage, key, good) =
+                Box::pin(produced(&w, Family::RestoreHold)).await;
+            let backup = wallet.backup().await.unwrap();
+            let mut hold: Value = serde_json::from_slice(&good).unwrap();
+            hold["d"]["verdict"] = json!(verdict);
+            hold["d"]["asks_queued"] = json!(true);
+            hold["d"]["earlier"] = json!(earlier);
+            hold["d"]["earlier_asks"] = json!(earlier_asks);
+            let bytes = checkpoint_put(&mut wallet, &key, &hold).await;
+            let id = wallet.app_id();
+            drop(wallet);
+
+            let loaded = Box::pin(Paykit::load(
+                w.env(&w.alice, storage),
+                PaykitConfig::default(),
+                id,
+                Arc::clone(&w.rail) as Arc<dyn Rail>,
+                w.timer(),
+            ))
+            .await;
+            let target = Arc::new(FaultStore::new(store(), Fault::None));
+            let backup = replace(&backup, &[(key, bytes)]);
+            let restored = Box::pin(Paykit::restore(
+                w.env(&w.alice, Arc::clone(&target) as Arc<dyn StateStore>),
+                PaykitConfig::default(),
+                &backup,
+                Arc::clone(&w.rail) as Arc<dyn Rail>,
+                w.timer(),
+            ))
+            .await;
+            let valid = if earlier_asks {
+                earlier
+            } else {
+                verdict == "not_clean"
+            };
+            if valid {
+                loaded.unwrap();
+                restored.unwrap();
+            } else {
+                let error = loaded.unwrap_err();
+                assert!(crate::common::is_corrupt(&error), "{error:?}");
+                assert!(matches!(
+                    restored,
+                    Err(paykit_sdk::PaykitError::Client(AppError::InvalidData(_)))
+                ));
+                assert_eq!(target.commits(), 0);
+            }
+            assert!(w.rail.all_executions().is_empty());
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_recovery_state_held_answer_unknown_at_restore() {
     Box::pin(refuse_backup(Family::HeldAnswer, Damage::Unknown)).await;
 }
