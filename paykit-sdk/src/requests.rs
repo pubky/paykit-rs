@@ -1074,8 +1074,12 @@ impl Paykit {
                         pubky_switch_client::app::Initiator::User,
                     ),
                 };
+                // A request without conversion terms paid to an endpoint of another asset
+                // promises no rate: the payee judges what it received by its own payment
+                // method's check of the requested amount, as in v0.1 (Paykit spec 7.2 step 1).
                 let (amount, rate_window) = match pricing.price(&*self.rail, id) {
-                    crate::conversion::Priced::Plain(amount) => (amount, None),
+                    crate::conversion::Priced::Plain(amount)
+                    | crate::conversion::Priced::ByHand(amount) => (amount, None),
                     crate::conversion::Priced::ByRate { amount, .. } => (
                         amount,
                         period_rates.and_then(|(stored, _)| crate::periods::rate_window(stored)),

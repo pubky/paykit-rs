@@ -19,6 +19,29 @@ async fn test_offline_public_same_selection_pays_once_while_connected() {
     pay_public(false).await;
 }
 
+#[tokio::test]
+async fn test_offline_public_payment_rechecks_the_selected_transfer_before_dispatch() {
+    let world = World::new();
+    let mut wallet = world.wallet("wallet").await;
+    let _shop = shop_with_endpoint(&world).await;
+    wallet.receive(None).await.unwrap();
+    world.router.remove(world.alice.origin());
+    let fee = paykit_lib::Decimal::new("0.0001").unwrap();
+    world.rail.next_max_fees(vec![None, Some(fee.clone())]);
+
+    let error = wallet
+        .pay_without_request(payment(&world))
+        .await
+        .outcome
+        .unwrap_err();
+    let Some(paykit_sdk::Refusal::Transfer { quote, .. }) = error.refusal() else {
+        panic!("{error:?}");
+    };
+    assert_eq!(quote.transfer.amount, Some(btc("0.001")));
+    assert_eq!(quote.transfer.max_fee, Some(fee));
+    assert!(world.rail.all_executions().is_empty());
+}
+
 async fn shop_with_endpoint(world: &World) -> paykit_sdk::Paykit {
     let mut shop = world
         .join_with(
@@ -75,6 +98,7 @@ async fn pay_public(disconnect: bool) {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].endpoint_id, chosen);
     assert_eq!(entries[0].attempt_id, attempt_id);
+    assert_eq!(world.rail.paid_amount(&attempt_id), Some(btc("0.001")));
     if disconnect {
         assert_eq!(entries[0].stage, Stage::RailPaid);
         shop.receive(None).await.unwrap();
