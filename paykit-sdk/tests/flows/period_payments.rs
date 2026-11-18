@@ -936,6 +936,99 @@ async fn check_period_resolution(with_details: bool) {
 }
 
 #[tokio::test]
+async fn test_period_payments_restore_an_orphan_then_confirm_the_owners_paid_proof() {
+    use pubky_switch_client::store::{Fault, FaultStore};
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let fault = Arc::new(FaultStore::new(store(), Fault::None));
+    let mut wallet = w.wallet_on("wallet", fault.clone()).await;
+    let mut phone = w.wallet("phone").await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    w.rail.next(Behaviour::Hang);
+    let attempt = by_user(&mut wallet, &request, january(), PayOptions::default())
+        .await
+        .unwrap()
+        .attempt_id();
+    let obligation = period_obligation(&wallet, january()).await;
+    phone.receive(None).await.unwrap();
+    let pending = phone.backup().await.unwrap();
+    drop(phone);
+    w.clock.advance_ms(4201 * 1000);
+    let mut phone = restored(&w, &pending).await;
+    phone.reconcile().await.unwrap();
+    let error = phone
+        .resolve_attempt(
+            &obligation,
+            attempt,
+            paykit_sdk::Resolution::Done,
+            UserConfirmed::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error.refusal(), Some(Refusal::RecordHeld(_))),
+        "{error:?}"
+    );
+    let open = phone
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(open.view.status, ClaimStatus::Attempting);
+    let mark = period_record(&w, &phone, &request, january())
+        .await
+        .unwrap();
+    assert!(mark.manual_only && mark.stored().is_empty());
+
+    // The method confirms payment. Briefly unavailable local storage prevents
+    // the first outcome batch from being prepared, leaving its proof in the journal.
+    w.rail.settle(&attempt, true);
+    fault.fail_put_once(b"opq/");
+    let interrupted = wallet.resume_payments().await;
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::RailPaid,
+        "{interrupted:?}"
+    );
+    let open = wallet
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(open.view.status, ClaimStatus::Attempting);
+    wallet
+        .resolve_attempt(
+            &obligation,
+            attempt,
+            paykit_sdk::Resolution::Done,
+            UserConfirmed::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        wallet
+            .app_mut()
+            .read_claim(&obligation)
+            .await
+            .unwrap()
+            .unwrap()
+            .view
+            .status,
+        ClaimStatus::Settled
+    );
+    phone.receive(None).await.unwrap();
+    let record = period_record(&w, &phone, &request, january())
+        .await
+        .unwrap();
+    let (_, proof) = proof_of(&record);
+    assert_eq!(proof.attempt_id, attempt);
+    assert_eq!(proof.billing_period, Some(january()));
+    assert_eq!(w.rail.executions(&attempt), 1);
+}
+
+#[tokio::test]
 async fn test_period_payments_divergent_records_pause_their_periods_until_confirmed() {
     // January's period record is divergent: January is paid by hand only once the user has
     // seen it, February goes on. Then the request record is divergent: every period waits
