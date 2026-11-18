@@ -197,6 +197,19 @@ impl PaykitProtocol {
         }
     }
 
+    pub(crate) fn rail(&self) -> Option<&Arc<dyn Rail>> {
+        self.rail.as_ref()
+    }
+
+    pub(crate) fn bind_for_attachment(&self, identity: [u8; 32], cert: AppCert) -> bool {
+        let mut own = self.own.write().unwrap_or_else(PoisonError::into_inner);
+        if own.is_some() {
+            return false;
+        }
+        *own = Some(Own { identity, cert });
+        true
+    }
+
     /// The settlement ID of a proof's `proof` object: the rail's, or else the one
     /// `paykit-lib` knows.
     fn settlement_id(&self, proof: &Map<String, Value>) -> Option<Vec<u8>> {
@@ -461,7 +474,16 @@ pub(crate) fn restore_paykit_layer(
     if keys.len() != state.len() {
         return Err("Paykit's local state in the backup repeats a key".into());
     }
+    let before = state
+        .iter()
+        .find(|(key, _)| key.as_slice() == key::RESTORE_HOLD.as_bytes())
+        .map(|(key, value)| state::restored::<RestoreHold>(key, value, &binder))
+        .transpose()
+        .map_err(|_| String::from("the backup's restore hold cannot be read"))?;
+    let mut confirmed_before = std::collections::BTreeSet::new();
     let mut open = std::collections::BTreeSet::new();
+    let mut recordings = std::collections::BTreeSet::new();
+    let mut awaiting_recording = std::collections::BTreeSet::new();
     let mut journaled = std::collections::BTreeSet::new();
     let mut acknowledged = Vec::new();
     let mut writes = Vec::with_capacity(state.len());
@@ -478,8 +500,32 @@ pub(crate) fn restore_paykit_layer(
         let unread = || String::from("Paykit's local state in the backup doesn't read");
         bounded.count(&family)?;
         let attempt = match family {
-            // A hold, or a user's confirmation of one, belongs to a restore before: this one
-            // sets its own (`hold.rs`).
+            StateKey::RestoreHold => continue, // Validated above before reading its confirmations.
+            StateKey::MissedHold => {
+                state::restored::<crate::hold::MissedHold>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::MissedEndUnknown | StateKey::MissedConsents => {
+                state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            // A confirmation of an earlier hold cannot also confirm a later restore.
+            StateKey::HoldConfirmed(record) | StateKey::HoldConfirmedBefore(record) => {
+                state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
+                if matches!(family, StateKey::HoldConfirmed(_))
+                    || !before.as_ref().is_some_and(RestoreHold::in_force)
+                {
+                    confirmed_before.insert(record);
+                }
+                continue;
+            }
+            StateKey::RestoreConsent(_) => {
+                state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
+                continue;
+            }
             // So do the marks of records not yet listed and of the payer pass owed: this
             // restore sets its own.
             // The certificate last listed under is the backup's own: this restore sets it to
@@ -490,14 +536,9 @@ pub(crate) fn restore_paykit_layer(
             // carries, under the same IDs in place or new ones elsewhere, and taking an event
             // again changes nothing: a dropped entry's time is already in its sender's mark,
             // which asks on its own cadence (`marks.rs`).
-            StateKey::RestoreHold
-            | StateKey::HoldEpoch
-            | StateKey::MissedHold
-            | StateKey::MissedEndUnknown
-            | StateKey::HoldConfirmed(_)
+            StateKey::HoldEpoch
             | StateKey::RecordsUnlisted
             | StateKey::MissedUnlisted
-            | StateKey::MissedConsents
             | StateKey::PayerPassOwed
             | StateKey::OwnResendOwed
             | StateKey::ListedCert
@@ -543,6 +584,12 @@ pub(crate) fn restore_paykit_layer(
             }
             StateKey::NotPaidBeforeLoss(_) => {
                 state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::OfflineBatch(attempt) => {
+                state::restored::<[u8; 16]>(&key, &value, &binder).map_err(|_| unread())?;
+                recordings.insert(attempt);
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -634,14 +681,20 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::Consent(_) => {
+            StateKey::Consent(record_key) => {
                 // The backup may predate an end: every Allowance on the consent list is
                 // confirmed by the user again before the executor pays under it (Paykit spec
                 // 8.3, "After a restore"). A removal stays for good.
                 let entry =
                     state::restored::<ConsentEntry>(&key, &value, &binder).map_err(|_| unread())?;
-                let value = state::encode(&entry.with(entry.consent.confirm_again()))
-                    .map_err(|_| unread())?;
+                let again = entry.consent.confirm_again();
+                if again != entry.consent {
+                    writes.push(
+                        state::local_put(&key::restore_consent(&record_key), &true)
+                            .map_err(|_| unread())?,
+                    );
+                }
+                let value = state::encode(&entry.with(again)).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -790,10 +843,18 @@ pub(crate) fn restore_paykit_layer(
         if entry.open() && !open.insert(entry.obligation) {
             return Err("Paykit spec 7.2: two open journal entries for one obligation".into());
         }
+        if entry.offline == Some(crate::journal::OfflineRecording::AwaitingRecording)
+            && entry.rail_proof.is_some()
+        {
+            awaiting_recording.insert(attempt);
+        }
         journaled.insert(attempt);
         entry.restored = true;
         let value = state::encode(&entry).map_err(|_| bad())?;
         writes.push(LocalWrite::Put { key, value });
+    }
+    if !recordings.is_subset(&awaiting_recording) {
+        return Err("an offline recording has no matching payment journal entry".into());
     }
     if acknowledged
         .iter()
@@ -801,15 +862,20 @@ pub(crate) fn restore_paykit_layer(
     {
         return Err("Paykit's local state in the backup doesn't read".into());
     }
-    // Every open request is held after a restore, set in the restore's own commit (Paykit
-    // spec 7.2, "What a restore loses"; `hold.rs`).
+    for record in confirmed_before {
+        writes.push(
+            state::local_put(&key::hold_confirmed_before(&record), &true)
+                .map_err(|_| String::from("the restored request confirmation cannot be written"))?,
+        );
+    }
+    let restore_hold = RestoreHold::of(cursor_time_ms, before.as_ref());
     let epoch = crate::hold::HoldEpoch::new()
         .map_err(|_| String::from("the restore's hold identifier can't be created"))?;
     writes.push(
         state::local_put(key::HOLD_EPOCH, &epoch)
             .map_err(|_| String::from("the restore's hold identifier can't be written"))?,
     );
-    let hold = state::local_put(key::RESTORE_HOLD, &RestoreHold::of(cursor_time_ms))
+    let hold = state::local_put(key::RESTORE_HOLD, &restore_hold)
         .map_err(|_| String::from("the restore's hold can't be written"))?;
     writes.push(hold);
     // The client's copy of the shared records is empty until they are listed again: until
@@ -832,19 +898,6 @@ pub(crate) fn restore_paykit_layer(
     let resend = state::local_put(key::OWN_RESEND_OWED, &crate::hold::OwnResendOwed::default())
         .map_err(|_| String::from("the restore's re-send mark can't be written"))?;
     writes.push(resend);
-    // What a blocked counterparty's inbox accepted after the backup is gone with the
-    // restore: every counterparty the deny list holds at the next read of the lists is
-    // marked from the backup's cursor time, to ask once it is unblocked (`marks.rs`).
-    let from = cursor_time_ms.saturating_sub(pubky_switch_core::records::CLOCK_TOLERANCE_MS);
-    let widening = state::local_put(
-        &key::blocked_widening(from),
-        &crate::marks::BlockedWindow {
-            from_ms: from,
-            until_ms: crate::marks::BlockedWindow::TO_NOW,
-        },
-    )
-    .map_err(|_| String::from("the restore's block widening can't be written"))?;
-    writes.push(widening);
     writes.extend(
         history
             .writes()
@@ -1197,6 +1250,12 @@ impl Protocol for PaykitProtocol {
             local_write(key::MISSED_CONSENTS, &true)?,
             LocalWrite::DeletePrefix {
                 prefix: key::HOLD_CONFIRMED.as_bytes().to_vec(),
+            },
+            LocalWrite::DeletePrefix {
+                prefix: key::HOLD_CONFIRMED_BEFORE.as_bytes().to_vec(),
+            },
+            LocalWrite::DeletePrefix {
+                prefix: key::RESTORE_CONSENTS.as_bytes().to_vec(),
             },
         ])
     }

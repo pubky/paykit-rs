@@ -43,8 +43,10 @@
 //!   that the outbox shows delivered before the mark's expiry counts as its ask, as at expiry;
 //!   one the bound drops in a receive step owes its notice until the pass after the read has
 //!   read that delivery ([`LostOwed`]). A restore and a `missed` item widen
-//!   these marks for every counterparty the deny list holds then (`bw/`), at the next read
-//!   of the lists; such a speculative mark is the first the bound drops.
+//!   these marks for counterparties on the deny list at its next read. A missed item's
+//!   window (`bw/`) applies regardless of the restore verdict. A restore keeps its first
+//!   read separately (`rh`) and applies it only if the held cursor is ahead or unknown,
+//!   including when a later page ends a clean verdict (Paykit spec 7.2 and 8.1).
 //!
 //! **The block floor** (`crate::floor`). The time before which a one-time request is paid
 //! only by hand is the identity's, in its shared `block_floor` record, so every payer app
@@ -109,7 +111,7 @@ pub const MAX_FLAGGED_COPY: usize = 4096;
 
 /// A widening of the block marks owed at the next read of the lists (`bw/<from_ms>`): every
 /// counterparty the deny list holds then is marked from `from_ms` to `until_ms`, or to the
-/// time it is applied for [`BlockedWindow::TO_NOW`] (a restore's: it runs to the restore).
+/// time it is applied for [`BlockedWindow::TO_NOW`] when the missed item's end is unknown.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct BlockedWindow {
     pub(crate) from_ms: u64,
@@ -119,6 +121,14 @@ pub(crate) struct BlockedWindow {
 impl BlockedWindow {
     /// The end of a widening that runs to the time it is applied.
     pub(crate) const TO_NOW: u64 = u64::MAX;
+}
+
+/// The first list read after a restore, used if the restore requires a block window.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WideningRead {
+    pub(crate) at_ms: u64,
+    pub(crate) deny: Vec<[u8; 32]>,
 }
 
 /// A mark of a sender's dropped messages (module docs).
@@ -788,6 +798,56 @@ impl Paykit {
     /// read (`deny`): every counterparty it holds is marked from each widening's start to
     /// its end (module docs), and the widening goes, in one commit.
     pub(crate) async fn apply_block_widenings(&mut self, deny: &[[u8; 32]]) -> Result<()> {
+        let now = self.service_time().unwrap_or_else(|| self.now());
+        if let Some(mut hold) = self
+            .local_get::<crate::hold::RestoreHold>(key::RESTORE_HOLD)
+            .await?
+        {
+            let first_read = |from_ms| WideningRead {
+                at_ms: now.max(from_ms),
+                deny: deny.to_vec(),
+            };
+            let mut changed = false;
+            if let Some(from_ms) = hold.earlier_unread_from_ms.take() {
+                let owed = crate::hold::OwedWidening {
+                    from_ms,
+                    read: first_read(from_ms),
+                };
+                hold.earlier_widening = Some(match hold.earlier_widening.take() {
+                    Some(previous) => previous.covering(owed),
+                    None => owed,
+                });
+                changed = true;
+            }
+            if let (Some(from_ms), None) = (hold.widening_from_ms, &hold.widening_read) {
+                hold.widening_read = Some(first_read(from_ms));
+                changed = true;
+            }
+            // Keep the first read before marking anyone. A failed write resumes against the
+            // same list, even when the host changes its contacts before retrying.
+            if changed {
+                let mut tx = crate::state::Tx::default();
+                tx.put(key::RESTORE_HOLD, &hold)?;
+                self.local_commit(tx).await?;
+            }
+            if let Some(owed) = &hold.earlier_widening {
+                let mut tx = crate::state::Tx::default();
+                if self.apply_owed_widening(&mut tx, owed).await? {
+                    hold.earlier_widening = None;
+                    tx.put(key::RESTORE_HOLD, &hold)?;
+                    self.local_commit(tx).await?;
+                }
+            }
+            if let Some(owed) = hold.widening_owed() {
+                let mut tx = crate::state::Tx::default();
+                if self.apply_owed_widening(&mut tx, &owed).await? {
+                    hold.widening_from_ms = None;
+                    hold.widening_read = None;
+                    tx.put(key::RESTORE_HOLD, &hold)?;
+                    self.local_commit(tx).await?;
+                }
+            }
+        }
         let widenings = self
             .local_scan::<BlockedWindow>(key::BLOCKED_WIDENINGS)
             .await?;
@@ -796,23 +856,13 @@ impl Paykit {
         }
         // One commit per counterparty, so the bound on marks counts each mark already put; the
         // widening goes last, so a failure part way applies it again, which changes nothing.
-        // A restore's widening runs to the time it is applied (`TO_NOW`), at least to its
-        // start; a `missed` item's keeps the item's end.
-        let now = self.service_time().unwrap_or_else(|| self.now());
         for (_, window) in &widenings {
             let until = if window.until_ms == BlockedWindow::TO_NOW {
                 now.max(window.from_ms)
             } else {
                 window.until_ms
             };
-            let mut applied = true;
-            for counterparty in deny {
-                let mut tx = crate::state::Tx::default();
-                applied &= self
-                    .count_widened_blocked(&mut tx, *counterparty, window.from_ms, until)
-                    .await?;
-                self.local_commit(tx).await?;
-            }
+            let applied = self.widen_marks(deny, window.from_ms, until).await?;
             // A window some counterparty couldn't be marked for yet stays, for the next read.
             // A restore's window also raises the block floor to the time it is applied, in
             // the commit that drops it: a sender blocked and unblocked again after the
@@ -829,6 +879,41 @@ impl Paykit {
             }
         }
         Ok(())
+    }
+
+    /// Apply `owed`, a restore's widening as of a read it kept: each counterparty that read's
+    /// deny list held marked from its start to the read, and, once every one is, the block
+    /// floor raised to the read's time in `tx`, as a restore's window raises it, in the
+    /// commit that drops the widening. Returns whether every one was marked.
+    async fn apply_owed_widening(
+        &mut self,
+        tx: &mut crate::state::Tx,
+        owed: &crate::hold::OwedWidening,
+    ) -> Result<bool> {
+        if !self
+            .widen_marks(&owed.read.deny, owed.from_ms, owed.read.at_ms)
+            .await?
+        {
+            return Ok(false);
+        }
+        let floor = self.local_get::<u64>(key::BLOCK_FLOOR).await?;
+        fold_into_floor(tx, floor, owed.read.at_ms)?;
+        Ok(true)
+    }
+
+    /// Mark each of `deny` for a widening from `from` to `until`, one commit per counterparty,
+    /// so the bound on marks counts each mark already put. Returns whether every one was
+    /// marked.
+    async fn widen_marks(&mut self, deny: &[[u8; 32]], from: u64, until: u64) -> Result<bool> {
+        let mut applied = true;
+        for counterparty in deny {
+            let mut tx = crate::state::Tx::default();
+            applied &= self
+                .count_widened_blocked(&mut tx, *counterparty, from, until)
+                .await?;
+            self.local_commit(tx).await?;
+        }
+        Ok(applied)
     }
 
     /// Act on `mark`, of `family` at the key whose rest after the prefix is `rest`: it goes

@@ -1138,6 +1138,27 @@ pub fn is_corrupt(error: &paykit_sdk::PaykitError) -> bool {
     )
 }
 
+/// Bob's shop sends `request` again, as a re-send does.
+pub async fn send_request_again(w: &World, shop: &mut Paykit, request: &RequestRef) {
+    let sent = shop
+        .app()
+        .sent_to(&w.alice_id(), 0, u64::MAX)
+        .await
+        .unwrap();
+    let msg_id = sent
+        .iter()
+        .find(|s| s.plaintext.hash() == request.request_hash)
+        .unwrap()
+        .msg_id
+        .clone();
+    shop.app_mut().resend(&msg_id).await.unwrap();
+}
+
+/// Moving the cursor before the first restored page gives the client an unknown verdict.
+pub async fn restore_with_unknown_cursor(app: &mut Paykit) {
+    app.app_mut().flush_cursor().await.unwrap();
+}
+
 /// The current hold of a readable request, as shown to the user.
 pub async fn held(app: &Paykit, request: &paykit_sdk::RequestRef) -> paykit_sdk::HeldRequest {
     app.request(request)

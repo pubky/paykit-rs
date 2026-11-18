@@ -36,6 +36,7 @@ async fn restored(w: &World, backup: &PaykitBackup) -> Paykit {
     )
     .await
     .unwrap();
+    crate::common::restore_with_unknown_cursor(&mut app).await;
     app.reconcile().await.unwrap();
     app.end_reconcile(UserConfirmed::new()).await.unwrap();
     app

@@ -1273,6 +1273,7 @@ async fn test_divergent_held_request_shows_held_and_divergent() {
     )
     .await
     .unwrap();
+    crate::common::restore_with_unknown_cursor(&mut restored).await;
     restored.reconcile().await.unwrap();
     restored.end_reconcile(UserConfirmed::new()).await.unwrap();
     restored.receive(None).await.unwrap();

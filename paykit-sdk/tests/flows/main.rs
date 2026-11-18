@@ -25,6 +25,7 @@ mod local_state;
 mod mixed_protocols;
 mod mixed_versions;
 mod notices;
+mod offline_public;
 mod one_time;
 mod outcome_record;
 mod own_record;

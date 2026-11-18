@@ -1000,50 +1000,64 @@ async fn test_allowances_consent_kept_while_accepted_and_dropped_once_ended() {
 
 #[tokio::test]
 async fn test_allowances_restore_asks_consent_again_and_keeps_removals() {
-    // The body's future is large: it goes on the heap, not the test thread's stack.
-    Box::pin(async {
-        let w = World::new();
-        let (_shop, mut wallet, mut exec, _phone, _, mine) = Box::pin(executed(&w)).await;
-        let backup = exec.backup().await.unwrap();
-        let id = exec.app_id();
-        drop(exec);
-        let mut restored = Box::pin(Paykit::restore(
-            w.env(&w.alice, crate::common::store()),
-            paykit_sdk::PaykitConfig::default(),
-            &backup,
-            std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
-            w.timer(),
-        ))
-        .await
-        .unwrap();
-        assert_eq!(restored.app_id(), id);
-        restored.receive(None).await.unwrap();
-        assert_eq!(
-            Box::pin(consent_entry(&restored, &mine)).await,
-            Some(json!({ "held": { "confirm_again": true } }))
-        );
-        assert!(!restored.allowance(&mine).await.unwrap().consented);
-        // A removal stays removed across a restore.
-        wallet.end_allowance(&mine).await.unwrap();
-        restored.receive(None).await.unwrap();
-        let backup = restored.backup().await.unwrap();
-        drop(restored);
-        let mut again = Box::pin(Paykit::restore(
-            w.env(&w.alice, crate::common::store()),
-            paykit_sdk::PaykitConfig::default(),
-            &backup,
-            std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
-            w.timer(),
-        ))
-        .await
-        .unwrap();
-        again.receive(None).await.unwrap();
-        assert_eq!(
-            Box::pin(consent_entry(&again, &mine)).await,
-            Some(json!({ "removed": { "reason": "ended" } }))
-        );
-    })
-    .await;
+    Box::pin(restored_consent(false)).await;
+}
+
+#[tokio::test]
+async fn test_allowances_clean_restore_keeps_consent_and_removals() {
+    Box::pin(restored_consent(true)).await;
+}
+
+async fn restored_consent(clean: bool) {
+    let w = World::new();
+    let (_shop, mut wallet, mut exec, _phone, _, mine) = Box::pin(executed(&w)).await;
+    let backup = exec.backup().await.unwrap();
+    let id = exec.app_id();
+    drop(exec);
+    let mut restored = Box::pin(Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(restored.app_id(), id);
+    if !clean {
+        crate::common::restore_with_unknown_cursor(&mut restored).await;
+    }
+    restored.receive(None).await.unwrap();
+    let expected = if clean {
+        pubky_switch_client::app::HeldCursor::Clean
+    } else {
+        pubky_switch_client::app::HeldCursor::Unknown
+    };
+    assert_eq!(restored.app().restore_held_cursor(), Some(expected));
+    assert_eq!(
+        Box::pin(consent_entry(&restored, &mine)).await,
+        Some(json!({ "held": { "confirm_again": !clean } }))
+    );
+    assert_eq!(restored.allowance(&mine).await.unwrap().consented, clean);
+    // A removal stays removed across a restore.
+    wallet.end_allowance(&mine).await.unwrap();
+    restored.receive(None).await.unwrap();
+    let backup = restored.backup().await.unwrap();
+    drop(restored);
+    let mut again = Box::pin(Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    again.receive(None).await.unwrap();
+    assert_eq!(
+        Box::pin(consent_entry(&again, &mine)).await,
+        Some(json!({ "removed": { "reason": "ended" } }))
+    );
 }
 
 #[tokio::test]
@@ -1137,6 +1151,7 @@ async fn restored_with_allowance(w: &World, ended: bool) -> Paykit {
     ))
     .await
     .unwrap();
+    crate::common::restore_with_unknown_cursor(&mut restored).await;
     restored.receive(None).await.unwrap();
     restored.reconcile().await.unwrap();
     restored.receive(None).await.unwrap();
