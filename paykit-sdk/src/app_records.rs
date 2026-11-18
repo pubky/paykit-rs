@@ -70,7 +70,7 @@ use pubky_switch_core::records::{
 use pubky_switch_core::sig::SignedDoc;
 use serde::{Deserialize, Serialize};
 
-use crate::destination::{current, Carrier, Need};
+use crate::destination::{current, payee_copy_usable, public_read_window, Carrier, Need};
 use crate::error::{PaykitError, Refusal, Result};
 use crate::journal::Destination;
 use crate::paykit::Paykit;
@@ -427,7 +427,7 @@ impl Paykit {
         let mut first = None;
         let (identity, reads) = self
             .payee_identity_with(payee, Need::SwitchCopy, by, confirmed, |identity| {
-                first = Some((identity.doc.hash(), identity.fresh_until_ms()));
+                first = public_read_window(identity).map(|window| (identity.doc.hash(), window));
                 Some(read_records(&identity.doc))
             })
             .await?;
@@ -438,7 +438,9 @@ impl Paykit {
         // The first reads belong to that signed document while fresh. A later copy can
         // close a renewal even when it still lists the same App ID and certificate.
         let mut first_reads = reads.filter(|_| {
-            first.is_some_and(|(hash, until)| hash == identity.doc.hash() && self.now() < until)
+            first.is_some_and(|(hash, window)| {
+                hash == identity.doc.hash() && window.contains(&self.now())
+            })
         });
         const MAX_REFRESHES: usize = 3;
         let mut refreshes = 0;
@@ -448,7 +450,7 @@ impl Paykit {
                 None => read_records(&identity.doc).await,
             };
             let now = self.now();
-            if now < identity.fresh_until_ms() {
+            if payee_copy_usable(now, &identity, Need::SwitchCopy, by, confirmed) {
                 break (fetched, now);
             }
             if refreshes == MAX_REFRESHES {
