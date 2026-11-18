@@ -63,6 +63,7 @@ mod pay;
 mod paykit;
 mod periods;
 mod protocol;
+mod publish;
 pub mod rail;
 mod receipts;
 mod receive;

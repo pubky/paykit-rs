@@ -489,7 +489,8 @@ impl sealed::Sealed for bool {}
 impl Stored for bool {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
-            StateKey::RecordsUnlisted
+            StateKey::ListDiscovery
+            | StateKey::RecordsUnlisted
             | StateKey::MissedUnlisted
             | StateKey::MissedEndUnknown
             | StateKey::MissedConsents
@@ -606,6 +607,38 @@ impl Stored for SeenRecords {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
             StateKey::SeenRecords { payee, app_id } if self.verifies(payee, app_id) => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for crate::publish::ListSettings {}
+impl Stored for crate::publish::ListSettings {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        if !matches!(family, StateKey::ListSettings) {
+            return corrupt();
+        }
+        self.check()
+    }
+}
+
+impl sealed::Sealed for crate::publish::ListRecipient {}
+impl Stored for crate::publish::ListRecipient {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::ListRecipient(id) if self.recipient == *id && id != binder.identity() => {
+                Ok(())
+            }
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for crate::publish::ListReservation {}
+impl Stored for crate::publish::ListReservation {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::ListReservation(id) if self.recipient == *id => self.check(),
             _ => corrupt(),
         }
     }
@@ -1217,6 +1250,9 @@ pub(crate) mod key {
     /// A `missed` item's hold whose end isn't known yet (`Paykit::bound_missed_hold`).
     pub(crate) const MISSED_END_UNKNOWN: &str = "mu";
     pub(crate) const HOLD_CONFIRMED: &str = "hc/";
+    pub(crate) const LIST_SETTINGS: &str = "list";
+    pub(crate) const LIST_RECIPIENTS: &str = "lrec/";
+    pub(crate) const LIST_DISCOVERY: &str = "ld";
     pub(crate) const LISTS_READ: &str = "lr";
     pub(crate) const HELD_LISTS: &str = "lh/";
     pub(crate) const RECORDS_UNLISTED: &str = "nl";
@@ -1449,6 +1485,17 @@ pub(crate) mod key {
     /// the lists shows it, and until then a block whose batch the client neither keeps nor
     /// applied is written again at each receive. An unblock counts for payments and held
     /// sends only while the client keeps its batch, and never for the spam rule.
+    pub(crate) fn list_recipient(recipient: &[u8; 32]) -> String {
+        format!(
+            "{LIST_RECIPIENTS}{}",
+            pubky_switch_core::enc::b64(recipient)
+        )
+    }
+
+    pub(crate) fn list_reservation(recipient: &[u8; 32]) -> String {
+        format!("lres/{}", pubky_switch_core::enc::b64(recipient))
+    }
+
     pub(crate) fn own_block(pubky: &[u8; 32]) -> String {
         format!("{OWN_BLOCKS}{}", b64(pubky))
     }
@@ -1492,6 +1539,10 @@ pub(crate) mod key {
 /// every builder's key parses to its own family, so the two can't drift.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StateKey {
+    ListSettings,
+    ListRecipient([u8; 32]),
+    ListReservation([u8; 32]),
+    ListDiscovery,
     /// A signed receipt, bound to its record and signed receipt hash.
     RetainedReceipt([u8; 32]),
     /// A credit restriction on a record from the previous installation.
@@ -1506,13 +1557,23 @@ pub(crate) enum StateKey {
     /// `j/<attempt ID>`: a journal entry.
     Journal(AttemptId),
     /// `ask/<sender>/<from>`: a `resend_request` to send.
-    Ask { sender: [u8; 32], from_ms: u64 },
+    Ask {
+        sender: [u8; 32],
+        from_ms: u64,
+    },
     /// `ans/<seq>/<msg_id>`: a `resend_request` received, to answer.
-    Answer { seq: u64, msg_id: String },
+    Answer {
+        seq: u64,
+        msg_id: String,
+    },
     /// `missed/<from>`: the re-sends to ask for after a provider loss.
-    Missed { from_ms: u64 },
+    Missed {
+        from_ms: u64,
+    },
     /// `mi/<from>`: a `missed` item's re-sends to ask for.
-    MissedItem { from_ms: u64 },
+    MissedItem {
+        from_ms: u64,
+    },
     /// `peer/<pubky>`: a counterparty with Paykit activity.
     Peer([u8; 32]),
     /// `kc/<record key>`: a payee's cancellation kept to place.
@@ -1546,7 +1607,10 @@ pub(crate) enum StateKey {
     /// `lc`: the certificate the shared records were last listed under.
     ListedCert,
     /// `ha/<payee>/<msg_id>`: an answer recorded while sends to its payee were held.
-    HeldAnswer { payee: [u8; 32], msg_id: String },
+    HeldAnswer {
+        payee: [u8; 32],
+        msg_id: String,
+    },
     /// `hc/<record key>`: the user's confirmation of a held request.
     HoldConfirmed([u8; 32]),
     /// `lr`: when the lists were last read.
@@ -1556,13 +1620,22 @@ pub(crate) enum StateKey {
     /// `side/<msg_id>`: the side of a message the app sent.
     Side(String),
     /// `ar/<payee>/<app>`: a payee app's records a reader has seen.
-    SeenRecords { payee: [u8; 32], app_id: [u8; 16] },
+    SeenRecords {
+        payee: [u8; 32],
+        app_id: [u8; 16],
+    },
     /// `spam/<sender>`: the messages the spam rule only counted.
     Spam([u8; 32]),
     /// `rs/<requester>/<msg_id>`: when a message was re-sent to a requester.
-    Resent { requester: [u8; 32], msg_id: String },
+    Resent {
+        requester: [u8; 32],
+        msg_id: String,
+    },
     /// `rsd/<requester>/<day>`: how many messages were re-sent to a requester that day.
-    ResentDay { requester: [u8; 32], day: u64 },
+    ResentDay {
+        requester: [u8; 32],
+        day: u64,
+    },
     /// `lq/<payee>[/<app>]`: a list request asked of a payee, of one of its apps or none.
     ListAsk {
         payee: [u8; 32],
@@ -1575,16 +1648,27 @@ pub(crate) enum StateKey {
     /// `dt/<event ID>`: a duty event taken.
     Taken(String),
     /// `pd/<sender>`: the mark of a sender's replies dropped for the bounds.
-    DroppedReplies { sender: [u8; 32] },
+    DroppedReplies {
+        sender: [u8; 32],
+    },
     /// `ud/<sender>`: the mark of a sender's entries dropped unverified.
-    DroppedUnverified { sender: [u8; 32] },
+    DroppedUnverified {
+        sender: [u8; 32],
+    },
     /// `bd/<sender>`: the mark of a sender's messages dropped for the user's block.
-    DroppedBlocked { sender: [u8; 32] },
+    DroppedBlocked {
+        sender: [u8; 32],
+    },
     /// `bw/<from_ms>`: a widening of the block marks owed at the next read of the lists.
-    BlockedWidening { from_ms: u64 },
+    BlockedWidening {
+        from_ms: u64,
+    },
     /// `bl/<sender>/<msg_id>`: the notice of lost messages owed on a sender's block mark the
     /// receive step dropped for the bound, naming `msg_id` as queued.
-    LostOwed { sender: [u8; 32], msg_id: String },
+    LostOwed {
+        sender: [u8; 32],
+        msg_id: String,
+    },
     /// `fg`: the flagged senders as the app last read them.
     Flagged,
     /// `bf`: the raise of the block floor this app owes.
@@ -1599,7 +1683,9 @@ pub(crate) enum StateKey {
         from_ms: u64,
     },
     /// `kw/<sender>`: the mark of a sender's entries dropped while they waited for a key.
-    KeyWaits { sender: [u8; 32] },
+    KeyWaits {
+        sender: [u8; 32],
+    },
     /// `pr/<sender>/<record key>/<msg_id>`: a payer's reply kept for its record.
     KeptReply {
         sender: [u8; 32],
@@ -1607,9 +1693,15 @@ pub(crate) enum StateKey {
         msg_id: String,
     },
     /// `se/<sender>/<msg_id>`: a stored entry's message to write later.
-    StoredNote { sender: [u8; 32], msg_id: String },
+    StoredNote {
+        sender: [u8; 32],
+        msg_id: String,
+    },
     /// `nt/<sender>/<msg_id>`: a notice for the host about a message given up.
-    MessageNotice { sender: [u8; 32], msg_id: String },
+    MessageNotice {
+        sender: [u8; 32],
+        msg_id: String,
+    },
     /// `dv/<record key>`: the pause mark of a divergent record.
     Divergent([u8; 32]),
     /// `dw/<record key>/<role>/<sender>/<msg_id>`: a message kept to write over a divergent
@@ -1626,7 +1718,10 @@ pub(crate) enum StateKey {
         kind: crate::notices::NoticeKind,
     },
     /// `ae/<record key>/<msg_id>`: a counterparty's Allowance end kept as the stop.
-    AllowanceEnd { record: [u8; 32], msg_id: String },
+    AllowanceEnd {
+        record: [u8; 32],
+        msg_id: String,
+    },
     /// `ac/<record key>`: an entry of the consent list.
     Consent([u8; 32]),
     /// `cf/<record key>`: a conflicting proposal or response kept as the stop.
@@ -1665,6 +1760,8 @@ impl StateKey {
                 .then(|| s.to_owned())
         };
         Some(match text {
+            "ld" => Self::ListDiscovery,
+            "list" => Self::ListSettings,
             "ct" => Self::CursorTime,
             "rh" => Self::RestoreHold,
             "he" => Self::HoldEpoch,
@@ -1685,6 +1782,8 @@ impl StateKey {
             _ => {
                 let (family, rest) = text.split_once('/')?;
                 match family {
+                    "lrec" => Self::ListRecipient(b64_32(rest)?),
+                    "lres" => Self::ListReservation(b64_32(rest)?),
                     "rc" => Self::RetainedReceipt(b64_32(rest)?),
                     "ch" => Self::CreditHold(b64_32(rest)?),
                     "del" => {

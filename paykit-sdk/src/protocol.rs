@@ -655,6 +655,32 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
+            StateKey::ListSettings => {
+                state::restored::<crate::publish::ListSettings>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                continue;
+            }
+            StateKey::ListDiscovery => continue,
+            StateKey::ListRecipient(_) => {
+                let recipient =
+                    state::restored::<crate::publish::ListRecipient>(&key, &value, &binder)
+                        .map_err(|_| unread())?;
+                let restored = recipient
+                    .restored()
+                    .and_then(|r| state::encode(&r))
+                    .map_err(|_| unread())?;
+                writes.push(LocalWrite::Put {
+                    key,
+                    value: restored,
+                });
+                continue;
+            }
+            StateKey::ListReservation(_) => {
+                state::restored::<crate::publish::ListReservation>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
             StateKey::ListAsk { .. } => {
                 state::restored::<ListAsk>(&key, &value, &binder).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
@@ -815,6 +841,9 @@ pub(crate) fn restore_paykit_layer(
             .writes()
             .map_err(|_| "the retained payee evidence cannot be stored")?,
     );
+    if own_cert.holds_scope("paykit_request") {
+        writes.push(state::local_put(key::LIST_DISCOVERY, &true).map_err(|e| e.to_string())?);
+    }
     Ok(writes)
 }
 
@@ -908,13 +937,15 @@ impl Protocol for PaykitProtocol {
         restore_paykit_layer(layer, restoring, &|proof| self.settlement_id(proof))
     }
 
-    /// Hold every attempt to deliver an Allowance acceptance, including a re-send or an
-    /// acceptance already in the outbox (Paykit spec 8.3.1). This gate allows every
-    /// other message kind through, subject to the Switch's own holds.
+    /// Check a Private Payment List against its current sharing decision, and hold every
+    /// delivery of an Allowance acceptance (Paykit spec 8.4, 8.3.1).
     fn may_send(
         &self,
         delivery: &pubky_switch_client::app::DeliveryView<'_>,
     ) -> Result<bool, StoreFailure> {
+        if delivery.message().kind == Kind::PrivatePaymentList.as_str() {
+            return crate::publish::may_send(delivery);
+        }
         Ok(delivery.message().kind != Kind::AllowanceAcceptance.as_str())
     }
 
@@ -1193,7 +1224,9 @@ impl Protocol for PaykitProtocol {
     /// `payee_activity` with one policy per label, so an app holding `paykit_request` lists and
     /// takes every label's records, and one holding `paykit_request:<label>` its label's.
     fn collections(&self) -> Vec<SwitchCollection> {
-        crate::hold::RecordSide::All.collections()
+        let mut collections = crate::hold::RecordSide::All.collections();
+        collections.push(crate::publish::collection());
+        collections
     }
 
     /// The mark of what the app has seen in a record: the newest value it took that reads
@@ -1206,6 +1239,12 @@ impl Protocol for PaykitProtocol {
         value: Option<&[u8]>,
     ) -> Option<Vec<u8>> {
         let own = self.own()?;
+        if collection == crate::publish::COLLECTION {
+            return value
+                .filter(|bytes| paykit_lib::records::ListPublicationRecord::read(bytes).is_ok())
+                .or(seen)
+                .map(<[u8]>::to_vec);
+        }
         let reads = match (Collection::from_name(collection)?, value) {
             (Collection::PayerActivity, Some(v)) => {
                 activity::read(Some(v), &own.identity, ActivitySide::Payer).is_some()
@@ -1253,6 +1292,18 @@ impl Protocol for PaykitProtocol {
         value: Option<&[u8]>,
         base: WriteBase,
     ) -> Option<String> {
+        if collection == crate::publish::COLLECTION {
+            use paykit_lib::records::ListPublicationRecord;
+            let current = match ListPublicationRecord::read(value?) {
+                Ok(current) => current,
+                Err(error) => return Some(error.to_string()),
+            };
+            let held = ListPublicationRecord::read(seen?).ok()?;
+            return held
+                .check_later_write(&current)
+                .err()
+                .map(|e| e.to_string());
+        }
         // Nothing seen of the record yet, as at its first read: nothing to go back on.
         self.regression(collection, seen?, value, base.held)
     }
