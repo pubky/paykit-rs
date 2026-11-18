@@ -1947,6 +1947,15 @@ async fn test_replies_stored_of_one_millisecond_placed_in_acceptance_order() {
 
 #[tokio::test]
 async fn test_replies_dropped_before_their_record_are_asked_after_a_restored_block_ends() {
+    dropped_before_record_after_unblock(false).await;
+}
+
+#[tokio::test]
+async fn test_replies_dropped_with_a_stored_mark_that_had_no_parent_still_ask_after_unblock() {
+    dropped_before_record_after_unblock(true).await;
+}
+
+async fn dropped_before_record_after_unblock(mark_waited_for_parent: bool) {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w
@@ -1971,7 +1980,20 @@ async fn test_replies_dropped_before_their_record_are_asked_after_a_restored_blo
     shop.app_mut().receive(None).await.unwrap();
     assert_eq!(marks(&shop).await, vec![(accepted, accepted)]);
     shop.block(&payer).await.unwrap();
-    let backup = shop.backup().await.unwrap();
+    let mut backup = shop.backup().await.unwrap();
+    if mark_waited_for_parent {
+        // A sender mark kept before its parent was known can have this readiness value.
+        let saved = serde_json::from_slice(&backup.to_bytes().unwrap()).unwrap();
+        let mut layer = crate::restore::layer_of(&saved);
+        let mut marks = layer.iter_mut().filter(|(key, _)| key.starts_with(b"pd/"));
+        let (_, value) = marks.next().unwrap();
+        assert_eq!(value["d"]["due"], true);
+        value["d"]["due"] = false.into();
+        assert!(marks.next().is_none());
+        let saved = crate::restore::with_layer(&saved, layer);
+        backup =
+            paykit_sdk::PaykitBackup::from_bytes(&serde_json::to_vec(&saved).unwrap()).unwrap();
+    }
     drop(shop);
     let mut shop = Paykit::restore(
         w.env(&w.bob, store()),

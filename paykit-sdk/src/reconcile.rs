@@ -218,7 +218,7 @@ impl Paykit {
         // asked to re-send from the backup's cursor time, once (`hold.rs`, Paykit spec 7.2);
         // what isn't sent now goes at the next receive.
         self.queue_restore_asks().await?;
-        let _ = self.send_asks().await;
+        let _ = self.send_asks(&mut None).await;
         let payer_pass = self.holds("paykit_pay");
         let mut report = ReconcileReport {
             resolved: self.resume_payments().await?,
@@ -764,7 +764,7 @@ impl Paykit {
             self.list_records().await?;
             self.queue_restore_asks().await?;
             // Queued: what isn't sent now goes at the next receive.
-            let _ = self.send_asks().await;
+            let _ = self.send_asks(&mut None).await;
         }
         self.app
             .end_reconcile_for(crate::protocol::BACKUP_NAME, confirmed)

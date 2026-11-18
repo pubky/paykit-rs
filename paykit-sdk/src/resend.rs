@@ -24,7 +24,7 @@ use pubky_switch_core::records::DAY_MS;
 use pubky_switch_core::sig::SignedDoc;
 
 use crate::activity::{KeptSide, SideTag};
-use crate::error::{PaykitError, Result};
+use crate::error::{PaykitError, Refusal, Result};
 use crate::marks::QueuedRequest;
 use crate::paykit::Paykit;
 use crate::protocol::{body_label, holds_role, MissedItemMark, QueuedAsk};
@@ -99,6 +99,7 @@ impl Paykit {
     ///
     /// # Errors
     ///
+    /// [`crate::Refusal::ScopeMissing`] without `paykit_contacts`;
     /// [`crate::Refusal::NotNow`] while sends to `counterparty` are held, or while the app
     /// can't read the block floor it must raise first (Paykit wire 5.6: when `counterparty`
     /// has a live block mark here, or the app owes a raise), with nothing queued;
@@ -124,12 +125,34 @@ impl Paykit {
         Ok(msg_id)
     }
 
+    fn resend_scope_refusal(&self) -> Option<Refusal> {
+        let scope = paykit_lib::scopes::CONTACTS;
+        (!self.holds(scope)).then(|| Refusal::ScopeMissing(scope.into()))
+    }
+
+    /// A recovery ask waits under a missing sender scope or a deny hold. Report the
+    /// missing scope while retaining the obligation and processing other incoming work.
+    pub(crate) async fn resend_held(
+        &self,
+        sender: &[u8; 32],
+        refused: &mut Option<Refusal>,
+    ) -> Result<bool> {
+        if let Some(reason) = self.resend_scope_refusal() {
+            *refused = Some(reason);
+            return Ok(true);
+        }
+        self.sends_held(sender).await
+    }
+
     /// A `resend_request` to `counterparty` for `selection`, signed and not yet queued.
     pub(crate) fn resend_request_message(
         &self,
         counterparty: [u8; 32],
         selection: ResendSelection,
     ) -> Result<pubky_switch_client::app::SignedMessage> {
+        if let Some(reason) = self.resend_scope_refusal() {
+            return Err(reason.into());
+        }
         let body = ResendRequest {
             msg_ids: selection.msg_ids,
             accepted_from: selection.accepted_from_ms,
@@ -150,7 +173,7 @@ impl Paykit {
     /// list isn't known, the ask stays, and goes once it is unblocked (Paykit spec 8.1,
     /// "Blocked counterparties"), until 30 days after the latest time it asks for, when the
     /// counterparty keeps none of it any longer. Returns how many requests went out.
-    pub(crate) async fn send_asks(&mut self) -> Result<u64> {
+    pub(crate) async fn send_asks(&mut self, refused: &mut Option<Refusal>) -> Result<u64> {
         self.queue_missed_asks().await?;
         // Each read bound to its key, as a restore reads it (`state::Stored`).
         let asks = self.local_scan::<QueuedAsk>(key::ASKS).await?;
@@ -170,7 +193,13 @@ impl Paykit {
             // refused for good, or one the outbox no longer knows (after a restore, or 30
             // days after its delivery) leaves the ask to be asked anew: at most a second
             // request, never an ask dropped.
-            if let Some(queued) = &ask.queued {
+            // Without contacts, keep the queued association until a receive can act on it
+            // or the obligation expires under the usual retention rule.
+            if let Some(queued) = ask
+                .queued
+                .as_ref()
+                .filter(|_| self.holds(paykit_lib::scopes::CONTACTS))
+            {
                 match self.queued_ask(&ask.sender, queued).await? {
                     QueuedAskState::Waiting => continue,
                     QueuedAskState::Queued => {
@@ -185,7 +214,7 @@ impl Paykit {
                     QueuedAskState::NotQueued => {}
                 }
             }
-            if self.sends_held(&ask.sender).await? {
+            if self.resend_held(&ask.sender, refused).await? {
                 // Held back, an ask stays until its counterparty keeps nothing it asks for:
                 // once 30 days have passed since the latest time it names (its `until`, or
                 // its `from` for an ask of everything since), on the highest service time

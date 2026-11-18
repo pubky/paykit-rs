@@ -85,7 +85,7 @@ use pubky_switch_core::enc::serde_b64;
 use pubky_switch_core::records::DAY_MS;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{PaykitError, Result};
+use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
 use crate::resend::ResendSelection;
 use crate::state::key;
@@ -586,12 +586,13 @@ impl Paykit {
 
     /// Ask on live marks at a receive, subject to the sender's holds and the mark's cadence.
     /// Returns how many requests were queued.
-    pub(crate) async fn ask_on_marks(&mut self) -> Result<u64> {
+    pub(crate) async fn ask_on_marks(&mut self, refused: &mut Option<Refusal>) -> Result<u64> {
         let mut asked = 0u64;
         for family in [MarkFamily::Replies, MarkFamily::Unverified] {
             for (rest, mark) in self.local_scan::<DropMark>(family.prefix()).await? {
                 let due = family == MarkFamily::Replies || mark.due;
-                asked = asked.saturating_add(self.on_mark(family, &rest, mark, due).await?);
+                asked =
+                    asked.saturating_add(self.on_mark(family, &rest, mark, due, refused).await?);
             }
         }
         // A mark of key waits asks only while the app holds every key its messages waited
@@ -602,9 +603,9 @@ impl Paykit {
                 .epochs
                 .iter()
                 .all(|epoch| self.holds_epoch_keys(*epoch));
-            asked = asked.saturating_add(self.on_mark(family, &rest, held, due).await?);
+            asked = asked.saturating_add(self.on_mark(family, &rest, held, due, refused).await?);
         }
-        asked = asked.saturating_add(Box::pin(self.ask_on_block_marks()).await?);
+        asked = asked.saturating_add(Box::pin(self.ask_on_block_marks(refused)).await?);
         Ok(asked)
     }
 
@@ -620,7 +621,7 @@ impl Paykit {
     /// a service time. The copy kept from a read under [`crate::LISTS_REFRESH_MS`] old only
     /// spares the read: while it shows every such sender denied or flagged, the read isn't
     /// made, as its answer could only hold the ask. It never decides that a mark asks.
-    async fn ask_on_block_marks(&mut self) -> Result<u64> {
+    async fn ask_on_block_marks(&mut self, refused: &mut Option<Refusal>) -> Result<u64> {
         let family = MarkFamily::Blocked;
         let now = self.now();
         // The raise owed goes first, so the floor every payer app reads covers the marks gone
@@ -661,7 +662,7 @@ impl Paykit {
                 && flagged
                     .as_ref()
                     .is_some_and(|flagged| !flagged.contains(&mark.sender));
-            asked = asked.saturating_add(self.on_mark(family, &rest, mark, due).await?);
+            asked = asked.saturating_add(self.on_mark(family, &rest, mark, due, refused).await?);
         }
         Ok(asked)
     }
@@ -829,6 +830,7 @@ impl Paykit {
         rest: &str,
         mut mark: M,
         due: bool,
+        refused: &mut Option<Refusal>,
     ) -> Result<u64> {
         let key = format!("{}{rest}", family.prefix());
         if mark.drop_mark().expired(self.service_time()) {
@@ -855,7 +857,7 @@ impl Paykit {
         // A sender blocked is asked nothing while it is, nor while the copy of the deny list
         // isn't known (Paykit spec 8.1); its mark stays, and asks once it is unblocked, on
         // its cadence, until it expires.
-        if !due || self.sends_held(&sender).await? {
+        if !due || self.resend_held(&sender, refused).await? {
             return Ok(0);
         }
         self.ask_on_mark(family, &key, mark).await
