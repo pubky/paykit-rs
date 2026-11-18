@@ -28,7 +28,7 @@ const LATER_SECRET: [u8; 32] = [0x4f; 32];
 /// service recovering the account at the next generation, routed at [`SWITCH_ORIGIN`], the
 /// next `identity.json` naming it with `recovery_from`, delivered there and published; then
 /// the old service is unreachable.
-pub(crate) fn declare_loss(w: &World) {
+pub(super) fn declare_loss(w: &World) {
     declare_loss_of(w, ALICE_ORIGIN, NEXT_SECRET);
 }
 
@@ -64,7 +64,7 @@ fn declare_loss_of(w: &World, lost_origin: &str, secret: [u8; 32]) -> Arc<Script
 /// `app` follows the loss: its own `identity.json` from the Homeserver, then reads at the new
 /// service until its steps of the recovery have run, and its reconciliation ends. Returns the
 /// end of the loss's residual window.
-pub(crate) async fn follow_loss(app: &mut Paykit) -> u64 {
+pub(super) async fn follow_loss(app: &mut Paykit) -> u64 {
     app.app_mut().refresh_identity().await.unwrap();
     for _ in 0..4 {
         app.receive(None).await.unwrap();

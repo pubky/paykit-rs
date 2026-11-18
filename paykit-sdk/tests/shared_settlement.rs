@@ -249,7 +249,7 @@ async fn manual_period(world: &World, priced: bool) -> TestResult {
         let credit = record.receipt.as_ref().ok_or("missing signed receipt")?;
         assert_eq!(details.message().msg_id, id);
         assert_eq!(proof.message().refs, [request.request_hash, details.hash()]);
-        assert_eq!(credit.message().refs.first(), Some(&proof.hash()));
+        assert_eq!(credit.message().refs, [proof.hash(), request.request_hash]);
         assert_eq!(
             rail.paid_amount(&attempt_id),
             Some(PaymentAmount {

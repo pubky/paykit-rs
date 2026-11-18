@@ -364,6 +364,9 @@ pub(crate) struct JournalEntry {
     pub(crate) rail_proof: Option<Map<String, Value>>,
     pub(crate) paid_at_ms: Option<u64>,
     pub(crate) proof_msg_id: Option<String>,
+    /// Recording a public payment made without the payer's switch (Paykit spec 8.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) offline: Option<OfflineRecording>,
     /// The entry came back from a backup.
     pub(crate) restored: bool,
     /// Device time when journaled: the earliest a dispatch could start.
@@ -418,6 +421,14 @@ impl std::fmt::Debug for JournalEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "JournalEntry({:?})", self.stage)
     }
+}
+
+/// An offline payment starts without a shared attempt. A restored copy of any state
+/// may predate a submission by the original device (Paykit spec 8.4).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum OfflineRecording {
+    AwaitingRecording,
+    Applied,
 }
 
 impl JournalEntry {
@@ -569,6 +580,15 @@ impl JournalEntry {
         self.destination.check()?;
         self.label()?;
         let period = self.period()?;
+        if self.offline.is_some()
+            && (request_hash.is_some()
+                || self.destination.source()? != DestinationSource::Public
+                || self.destination.single_use
+                || self.transfer_bound.is_none()
+                || self.carrier_record.is_none())
+        {
+            return bad();
+        }
         match (&request_hash, &self.payment_reference) {
             (Some(hash), Some(reference)) => {
                 PaymentReference::parse(reference).map_err(|_| PaykitError::corrupt())?;

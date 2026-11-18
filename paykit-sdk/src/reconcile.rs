@@ -42,7 +42,7 @@ use pubky_switch_client::app::{
 use pubky_switch_core::claims::{Basis, ClaimStatus, Outcome};
 use pubky_switch_core::ops::{Condition, OpKind};
 
-use crate::activity::{self, ActivityTarget};
+use crate::activity::ActivityTarget;
 use crate::destination::Carrier;
 use crate::error::{PaykitError, Refusal, Result};
 use crate::hold::RestoreHold;
@@ -107,15 +107,6 @@ pub struct ReconcileReport {
     /// provider loss leaves in doubt. After a restore, no new attempt is made until a
     /// reconcile under `paykit_pay` runs the pass, also after [`Paykit::end_reconcile`].
     pub payer_skipped: bool,
-}
-
-/// What a user's `done` without a proof does to the payer's activity record
-/// ([`Paykit::done_record`]).
-enum DoneRecord {
-    /// The record's write, in `done`'s batch.
-    Write(Box<(Vec<Condition>, OpKind)>),
-    /// The record stays as it is: `done` is conditioned on the version held.
-    Unchanged(Condition),
 }
 
 /// An obligation of the payer's records.
@@ -601,6 +592,7 @@ impl Paykit {
             rail_proof: None,
             paid_at_ms: None,
             proof_msg_id: None,
+            offline: None,
             restored: true,
             journaled_at_ms: self.now(),
             carrier: None,
@@ -635,6 +627,8 @@ impl Paykit {
     /// - otherwise the record gets the journaled acceptance, if any, and `status` `paid`,
     ///   built on the version held; an absent or deleted record is rebuilt from the journal
     ///   entry, and one that doesn't read, with no copy this app trusts, holds;
+    /// - for a Billing Period the shared record must carry the signed proof of this
+    ///   attempt. The claim expires, and a period's status does not establish payment;
     /// - a record this app can't find or rebuild holds too ([`Refusal::RecordHeld`]).
     ///
     /// `unknown` and `failed` move no money toward the payee and need no record update. Neither
@@ -748,16 +742,12 @@ impl Paykit {
         let deadline = entry
             .as_ref()
             .map_or(ObligationDeadline::NotKnown, |e| own_deadline(e.deadline));
-        let mut conditions = Vec::new();
-        let mut record_write = None;
-        if let Some(target) = &done_target {
-            match self.done_record(target, entry.as_ref()).await? {
-                DoneRecord::Write(write) => record_write = Some(*write),
-                DoneRecord::Unchanged(condition) => conditions.push(condition),
-            }
-        }
+        let record_write = match &done_target {
+            Some(target) => Some(self.done_record(target, &attempt, entry.as_ref()).await?),
+            None => None,
+        };
         let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
-            .op_if(op.kind(), conditions)
+            .op(op.kind())
             .obligation_deadline(*obligation, deadline);
         if let Some(write) = record_write {
             batch = batch.entry(write);
@@ -824,28 +814,25 @@ impl Paykit {
     /// with the journaled acceptance placed and `status` `paid`, built on the version held, so
     /// `done` and the update are applied together or not at all. An absent or deleted record
     /// is rebuilt from `entry`; one that doesn't read, with no copy this app trusts, or one
-    /// that can't be rebuilt, holds. A payer's period record that holds no message, such as
-    /// the one an attempt by hand created holding only its mark, takes no `status` (Paykit
-    /// wire 5.3): it is left as it is, and `done` is conditioned on the version held instead,
-    /// so the two still apply together or not at all.
+    /// that can't be rebuilt, holds. A Billing Period also needs its signed proof:
+    /// the period's status and its manual-only mark cannot show payment after claim expiry.
     async fn done_record(
         &mut self,
         target: &ActivityTarget,
+        attempt: &AttemptId,
         entry: Option<&JournalEntry>,
-    ) -> Result<DoneRecord> {
-        let own = self.identity();
+    ) -> Result<(Vec<Condition>, OpKind)> {
         let held =
             |why: &str| -> crate::error::PaykitError { Refusal::RecordHeld(why.into()).into() };
         let key = self.activity_key(target)?;
         let current = self.activity_write_base(&key).await?;
         let read = match current.as_ref().map(|r| &r.content) {
             None | Some(RecordContent::Deleted) => None,
-            Some(content) => match activity::read(content.value(), &own, ActivitySide::Payer) {
+            Some(_) => match self.read_activity(target, current.as_ref()) {
                 Some(record) => Some(record),
                 None => return Err(held("the record holds a value that doesn't read")),
             },
         };
-        let held_value = read.is_some();
         let mut record = match read {
             Some(record) => record,
             None => match entry.map(|e| self.rebuilt_record(e)).transpose()? {
@@ -856,21 +843,31 @@ impl Paykit {
         if let Some(entry) = entry {
             self.place_acceptance(&mut record, entry)?;
         }
-        if record.stored().is_empty() && record.billing_period.is_some() {
-            if held_value {
-                return Ok(DoneRecord::Unchanged(
-                    self.app.record_condition(&key).await?,
-                ));
+        let mut conditions = Vec::new();
+        if let binding @ RecordBinding::Period { request_hash, .. } = record.binding()? {
+            let parent = ActivityTarget::payer(natural_key::request_record(
+                &record.counterparty,
+                &request_hash,
+            ));
+            let parent_key = self.activity_key(&parent)?;
+            let base = self.activity_write_base(&parent_key).await?;
+            let request = self.read_activity(&parent, base.as_ref());
+            let proof = record.proof.as_ref().map(|stored| stored.body());
+            if !matches!(proof, Some(Body::PaymentProof(proof)) if &proof.attempt_id == attempt)
+                || !request.as_ref().is_some_and(|request| {
+                    crate::periods::request_for_payment(request, &record, &binding).is_some()
+                })
+            {
+                return Err(held("the Billing Period needs this attempt's proof and its signed request to record payment"));
             }
-        } else {
-            record.status = Some("paid".into());
+            conditions.push(self.app.record_condition(&parent_key).await?);
         }
+        record.status = Some("paid".into());
         let value = record.to_json()?;
-        Ok(DoneRecord::Write(Box::new(
-            self.app
-                .record_op(&target.record_target(), Some(&value), Vec::new())
-                .await?,
-        )))
+        Ok(self
+            .app
+            .record_op(&target.record_target(), Some(&value), conditions)
+            .await?)
     }
 
     /// Paykit's reconciliation finished (Switch spec 12.4 step 2.4). The app stays in
