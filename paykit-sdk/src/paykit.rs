@@ -1087,11 +1087,8 @@ impl Paykit {
         if blocks_after_read {
             Box::pin(self.send_own_blocks_again()).await?;
         }
-        // The client lists the shared records at its read when a listing is owed, a
-        // restore's included, before the read itself, while it holds the keys that read
-        // them: a read that wasn't stopped got past that listing, so the restore's mark goes
-        // (`Paykit::records_listed`). A stopped one (the app removed here, a provider change
-        // followed) may have returned before it.
+        // A restore's listing may need several reads. Clear its mark only when the client
+        // finishes the listing with the required scope keys.
         if !report.stopped {
             Box::pin(self.records_listed(keys_held_before)).await?;
             // A `missed` item whose end isn't known holds every open request until a read
