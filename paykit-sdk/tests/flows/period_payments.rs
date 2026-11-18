@@ -263,8 +263,8 @@ fn starts_at(conditions: &[Condition]) -> Option<u64> {
     })
 }
 
-async fn restored(w: &World, backup: &PaykitBackup) -> Paykit {
-    let mut app = Paykit::restore(
+async fn restore_before_first_read(w: &World, backup: &PaykitBackup) -> Paykit {
+    Paykit::restore(
         w.env(&w.alice, store()),
         PaykitConfig::default(),
         backup,
@@ -272,7 +272,11 @@ async fn restored(w: &World, backup: &PaykitBackup) -> Paykit {
         w.timer(),
     )
     .await
-    .unwrap();
+    .unwrap()
+}
+
+async fn restored(w: &World, backup: &PaykitBackup) -> Paykit {
+    let mut app = restore_before_first_read(w, backup).await;
     app.receive(None).await.unwrap();
     app
 }
@@ -1345,16 +1349,20 @@ async fn test_period_payments_period_record_divergent_after_the_paying_commit_ho
 }
 
 #[tokio::test]
-async fn test_period_payments_held_after_a_restore_until_the_user_confirms() {
-    // No period is paid after a restore until the user has seen the payee may have
-    // cancelled it (Paykit spec 7.2, "What a restore loses").
+async fn test_period_payments_unknown_restore_holds_until_the_user_confirms() {
     let w = World::new();
     let mut shop = w.shop().await;
     let mut wallet = w.wallet("wallet").await;
     let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
     let backup = wallet.backup().await.unwrap();
     drop(wallet);
-    let mut app = restored(&w, &backup).await;
+    let mut app = restore_before_first_read(&w, &backup).await;
+    crate::common::restore_with_unknown_cursor(&mut app).await;
+    app.receive(None).await.unwrap();
+    assert_eq!(
+        app.app().restore_held_cursor(),
+        Some(pubky_switch_client::app::HeldCursor::Unknown)
+    );
     app.reconcile().await.unwrap();
     app.end_reconcile(UserConfirmed::new()).await.unwrap();
     let refused = by_user(&mut app, &request, january(), PayOptions::default())
@@ -1370,6 +1378,29 @@ async fn test_period_payments_held_after_a_restore_until_the_user_confirms() {
         .await
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    assert_eq!(w.rail.executions(&outcome.attempt_id()), 1);
+}
+
+#[tokio::test]
+async fn test_period_payments_clean_restore_pays_without_hold_confirmation() {
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut app = restored(&w, &backup).await;
+    assert_eq!(
+        app.app().restore_held_cursor(),
+        Some(pubky_switch_client::app::HeldCursor::Clean)
+    );
+    app.reconcile().await.unwrap();
+    app.end_reconcile(UserConfirmed::new()).await.unwrap();
+    let outcome = by_user(&mut app, &request, january(), PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    assert_eq!(w.rail.executions(&outcome.attempt_id()), 1);
 }
 
 /// A wallet on an idempotent rail without history pays January of bob's subscription by
