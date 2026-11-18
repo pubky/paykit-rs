@@ -14,7 +14,7 @@
 //!   entry.
 
 use paykit_lib::bodies::ResendRequest;
-use paykit_lib::kinds::{targets_app, Kind, Side, OPAQUE_MEMBERS};
+use paykit_lib::kinds::{holds_role, targets_app, Kind, Side, OPAQUE_MEMBERS};
 use paykit_lib::scopes::verify_certificate;
 use pubky_switch_client::app::{Delivery, KeptBatchStatus, SENT_RETENTION_MS};
 use pubky_switch_core::enc::unb64_array;
@@ -27,7 +27,7 @@ use crate::activity::{KeptSide, SideTag};
 use crate::error::{PaykitError, Result};
 use crate::marks::QueuedRequest;
 use crate::paykit::Paykit;
-use crate::protocol::{body_label, holds_role, MissedItemMark, QueuedAsk};
+use crate::protocol::{body_label, MissedItemMark, QueuedAsk};
 use crate::state::{key, Tx};
 
 /// What became of the request signed for an ask ([`Paykit::queued_ask`]).

@@ -1301,3 +1301,190 @@ async fn test_publication_retained_report_remains_available_after_selling_scope_
     );
     assert_eq!(w.record_writes(&w.alice, &key), 2);
 }
+
+#[tokio::test]
+async fn test_publication_labelled_seller_can_ask_and_pay_as_a_payer() {
+    use paykit_lib::{kinds::Kind, Label};
+    use paykit_sdk::{AppScopes, PayOptions, Refusal};
+    use pubky_switch_client::app::AppEvent;
+
+    let w = World::new();
+    let label = Label::parse("shop1").unwrap();
+    let mut payer = w
+        .join(
+            &w.alice,
+            "wallet",
+            AppScopes::new()
+                .pay()
+                .request_label(&label)
+                .build()
+                .unwrap(),
+        )
+        .await;
+    let mut publisher = w.shop().await;
+    let mut shop = w.labelled_shop("till", "shop1").await;
+    let asks = Kind::PrivatePaymentListRequest.as_str();
+    let accepts = |app: &Paykit, kind: &str| {
+        pubky_switch_core::records::AppRecord::verify(app.app().record(), &app.identity())
+            .unwrap()
+            .body()
+            .accepts
+            .iter()
+            .any(|name| name == kind)
+    };
+    assert!(accepts(&publisher, asks));
+    assert!(!accepts(&shop, asks));
+    assert!(!accepts(&payer, asks));
+    assert!(accepts(&payer, Kind::PrivatePaymentList.as_str()));
+    assert!(accepts(&shop, Kind::PaymentProof.as_str()));
+    let prior = shop.app().queued_messages("paykit").await.unwrap();
+    assert!(shop.set_list_endpoints(offered("lno1shop")).await.is_err());
+    assert!(shop.publish_list_to(w.alice_id()).await.is_err());
+    assert_eq!(
+        shop.app().queued_messages("paykit").await.unwrap().len(),
+        prior.len()
+    );
+    let key = publisher
+        .app()
+        .record_key(&target(&shop, &w.alice_id(), 1))
+        .unwrap();
+    assert_eq!(w.record_writes(&w.bob, &key), 0);
+
+    payer.app_mut().invite(&w.bob_id()).await.unwrap();
+    publisher.app_mut().invite(&w.alice_id()).await.unwrap();
+    let payment = || {
+        UnrequestedPayment::new(w.bob_id(), btc("0.001"))
+            .with_options(PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")))
+    };
+    let refusal = payer
+        .pay_without_request(payment())
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(refusal.refusal(), Some(Refusal::WaitingForList)),
+        "{refusal}"
+    );
+    let received =
+        |e: &AppEvent| matches!(e, AppEvent::MessageReceived { kind, .. } if kind == asks);
+    assert!(publisher
+        .receive(None)
+        .await
+        .unwrap()
+        .report
+        .events
+        .iter()
+        .any(received));
+    assert!(!shop
+        .receive(None)
+        .await
+        .unwrap()
+        .report
+        .events
+        .iter()
+        .any(received));
+    publisher
+        .set_list_endpoints(offered("lno1plain"))
+        .await
+        .unwrap();
+    publisher.publish_list_to(w.alice_id()).await.unwrap();
+    payer.receive(None).await.unwrap();
+    let result = payer.pay_without_request(payment()).await.outcome.unwrap();
+    assert!(matches!(result, PayOutcome::Paid { .. }), "{result:?}");
+    assert_eq!(
+        w.rail.selections().last().unwrap().0[0].payload.as_str(),
+        "lno1plain"
+    );
+}
+
+#[tokio::test]
+async fn test_publication_restored_while_labelled_discovers_a_former_recipient_when_plain_again() {
+    use crate::common::store;
+    use paykit_lib::Label;
+    use paykit_sdk::{AppScopes, PaykitConfig};
+    use pubky_switch_client::app::Delivery;
+
+    let w = World::new();
+    let labelled = AppScopes::new()
+        .request_label(&Label::parse("shop1").unwrap())
+        .build()
+        .unwrap();
+    let plain = AppScopes::new().request().build().unwrap();
+    let mut app = w.join(&w.alice, "wallet", labelled.clone()).await;
+    let mut buyer = w
+        .join(&w.bob, "payer", AppScopes::new().pay().build().unwrap())
+        .await;
+    let backup = app.backup().await.unwrap();
+    let renew = |app: &Paykit, requested| {
+        let old = app.app().cert().clone();
+        let cert = crate::certificate::renew(&w, app.app_id(), requested, 1_000);
+        crate::certificate::store_bundle(&w, app.app_id(), &cert);
+        crate::certificate::list(&w, app.app_id(), &old, &cert);
+        w.clock.advance_ms(1_000);
+        cert
+    };
+    let authorized = renew(&app, &plain);
+    app.receive(None).await.unwrap();
+    assert_eq!(app.app().cert().hash(), authorized.hash());
+    let counter = target(&app, &w.bob_id(), 1);
+    let key = app.app().record_key(&counter).unwrap();
+    app.set_list_endpoints(offered("lno1original"))
+        .await
+        .unwrap();
+    app.publish_list_to(w.bob_id()).await.unwrap();
+    let first = app.app().shared_record(&key).await.unwrap().unwrap();
+    let issue = ListPublicationRecord::read(first.content.value().unwrap()).unwrap();
+    assert!(matches!(
+        app.app().delivery(&issue.msg_id).await.unwrap(),
+        Some(Delivery::Queued { .. })
+    ));
+    let limited = renew(&app, &labelled);
+    app.receive(None).await.unwrap();
+    assert_eq!(app.app().cert().hash(), limited.hash());
+    buyer.app_mut().invite(&w.alice_id()).await.unwrap();
+    let queued = app.app().queued_messages("paykit").await.unwrap();
+    assert!(queued
+        .iter()
+        .any(|entry| entry.msg_id == issue.msg_id && !entry.may_send));
+    assert!(matches!(
+        app.app_mut().flush_message(&issue.msg_id).await.unwrap(),
+        Some(Delivery::Queued { .. })
+    ));
+    assert!(app
+        .app()
+        .sent_to(&w.bob_id(), 0, u64::MAX)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(w.record_writes(&w.alice, &key), 1);
+    drop(app);
+
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    restored.receive(None).await.unwrap();
+    assert_eq!(restored.app().cert().hash(), limited.hash());
+    assert_eq!(w.record_writes(&w.alice, &key), 1);
+    let authorized = renew(&restored, &plain);
+    restored.receive(None).await.unwrap();
+    assert_eq!(restored.app().cert().hash(), authorized.hash());
+    assert_eq!(w.record_writes(&w.alice, &key), 2);
+    let record = restored.app().shared_record(&key).await.unwrap().unwrap();
+    let withdrawal = ListPublicationRecord::read(record.content.value().unwrap()).unwrap();
+    assert_eq!(withdrawal.counter, issue.counter + 1);
+    let delivered = restored
+        .app()
+        .sent_to(&w.bob_id(), 0, u64::MAX)
+        .await
+        .unwrap();
+    assert_eq!(delivered.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(delivered[0].plaintext.json()).unwrap();
+    assert_eq!(body["msg_id"], withdrawal.msg_id);
+    assert_eq!(body["body"]["payment_endpoints"], serde_json::json!({}));
+}
