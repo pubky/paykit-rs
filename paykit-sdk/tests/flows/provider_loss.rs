@@ -139,6 +139,7 @@ async fn test_provider_loss_request_paid_at_the_old_service_needs_confirmation_b
     let paid = phone
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     let obligation = phone.payments().await.unwrap().remove(0).obligation;
@@ -164,7 +165,10 @@ async fn test_provider_loss_request_paid_at_the_old_service_needs_confirmation_b
         .is_none_or(|read| read.view.status != ClaimStatus::Settled));
     // The request was payable before the declaration: paying it by hand needs the user's
     // confirmation that another app may already have paid it (Switch spec 12.6 step 5).
-    let again = wallet.pay_request(&request, PayOptions::default()).await;
+    let again = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome;
     let doubt = doubt_of(&again);
     assert_eq!(status(&wallet, &request).await, RequestStatus::MayBePaid);
     assert_eq!(doubt.obligation, obligation);
@@ -176,6 +180,7 @@ async fn test_provider_loss_request_paid_at_the_old_service_needs_confirmation_b
             PayOptions::default().with_may_be_paid_confirmed(doubt),
         )
         .await
+        .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     assert_eq!(executions(&w), 2);
@@ -191,7 +196,10 @@ async fn test_provider_loss_own_attempt_before_the_loss_stays_in_doubt() {
     // This app attempts the request at the old service, and the method reports it failed:
     // the claim there is FREE again, its attempt `failed`.
     w.rail.next(Behaviour::Fail);
-    let failed = wallet.pay_request(&request, PayOptions::default()).await;
+    let failed = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome;
     assert!(!matches!(failed, Ok(PayOutcome::Paid { .. })), "{failed:?}");
     assert_eq!(executions(&w), 0);
     w.clock.advance_ms(60_000);
@@ -199,7 +207,10 @@ async fn test_provider_loss_own_attempt_before_the_loss_stays_in_doubt() {
     follow_loss(&mut wallet).await;
     // Another own app may have paid it at the old service meanwhile: this app's own attempt
     // there settles nothing about that.
-    let again = wallet.pay_request(&request, PayOptions::default()).await;
+    let again = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome;
     assert!(doubt_of(&again).before_loss.is_some());
     assert_eq!(executions(&w), 0);
 }
@@ -219,6 +230,7 @@ async fn test_provider_loss_automatic_payment_of_an_obligation_from_before_is_re
     let lost = wallet
         .pay_request(&dispatched, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(!matches!(lost, PayOutcome::Paid { .. }), "{lost:?}");
     assert_eq!(executions(&w), 1);
@@ -238,7 +250,8 @@ async fn test_provider_loss_automatic_payment_of_an_obligation_from_before_is_re
     // its doubt passing nothing.
     let refused = wallet
         .pay_request_automatically(&held, PayOptions::default())
-        .await;
+        .await
+        .outcome;
     let doubt = doubt_of(&refused);
     assert!(doubt.before_loss.is_some(), "{doubt:?}");
     let refused = wallet
@@ -246,7 +259,8 @@ async fn test_provider_loss_automatic_payment_of_an_obligation_from_before_is_re
             &held,
             PayOptions::default().with_may_be_paid_confirmed(doubt),
         )
-        .await;
+        .await
+        .outcome;
     assert!(doubt_of(&refused).before_loss.is_some());
     assert_eq!(executions(&w), 1);
 }
@@ -284,7 +298,7 @@ async fn test_provider_loss_doubt_survives_a_restore_from_a_backup_after_the_los
     // The restore holds the request until the user has seen the payee may have cancelled
     // it; the loss's doubt comes after that, carried by the backup.
     let options = crate::common::over_hold(&app, &request).await;
-    let again = app.pay_request(&request, options).await;
+    let again = app.pay_request(&request, options).await.outcome;
     assert!(doubt_of(&again).before_loss.is_some(), "{again:?}");
     assert_eq!(executions(&w), 0);
 }
@@ -326,7 +340,7 @@ async fn test_provider_loss_restore_from_a_backup_before_the_loss_learns_it_agai
     assert_eq!(kept["d"]["uncertain_until_ms"], loss.uncertain_until_ms);
     app.receive(None).await.unwrap();
     let options = crate::common::over_hold(&app, &request).await;
-    let again = app.pay_request(&request, options).await;
+    let again = app.pay_request(&request, options).await.outcome;
     assert!(doubt_of(&again).before_loss.is_some(), "{again:?}");
     assert_eq!(executions(&w), 0);
 }
@@ -348,7 +362,10 @@ async fn test_provider_loss_doubt_outlasts_the_residual_window() {
         .advance_ms(uncertain_until_ms.saturating_sub(now) + 6 * 3_600_000);
     let after = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
-    let again = wallet.pay_request(&before, PayOptions::default()).await;
+    let again = wallet
+        .pay_request(&before, PayOptions::default())
+        .await
+        .outcome;
     assert!(doubt_of(&again).before_loss.is_some(), "{again:?}");
     assert_eq!(executions(&w), 0);
     // A request created after the declaration plus the clock tolerance isn't uncertain.
@@ -356,6 +373,7 @@ async fn test_provider_loss_doubt_outlasts_the_residual_window() {
     let paid = wallet
         .pay_request(&after, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     assert_eq!(executions(&w), 1);
@@ -372,8 +390,18 @@ async fn test_provider_loss_confirm_not_paid_before_loss_clears_that_obligation_
     w.clock.advance_ms(60_000);
     declare_loss(&w);
     follow_loss(&mut wallet).await;
-    let first_doubt = doubt_of(&wallet.pay_request(&first, PayOptions::default()).await);
-    let second_doubt = doubt_of(&wallet.pay_request(&second, PayOptions::default()).await);
+    let first_doubt = doubt_of(
+        &wallet
+            .pay_request(&first, PayOptions::default())
+            .await
+            .outcome,
+    );
+    let second_doubt = doubt_of(
+        &wallet
+            .pay_request(&second, PayOptions::default())
+            .await
+            .outcome,
+    );
     // A payment the user confirms over the doubt that fails states nothing: the second
     // request stays in doubt.
     w.rail.next(Behaviour::Fail);
@@ -382,13 +410,17 @@ async fn test_provider_loss_confirm_not_paid_before_loss_clears_that_obligation_
             &second,
             PayOptions::default().with_may_be_paid_confirmed(second_doubt),
         )
-        .await;
+        .await
+        .outcome;
     assert!(!matches!(failed, Ok(PayOutcome::Paid { .. })), "{failed:?}");
-    assert!(
-        doubt_of(&wallet.pay_request(&second, PayOptions::default()).await)
-            .before_loss
-            .is_some()
-    );
+    assert!(doubt_of(
+        &wallet
+            .pay_request(&second, PayOptions::default())
+            .await
+            .outcome
+    )
+    .before_loss
+    .is_some());
     // The user states the first wasn't paid before the loss: it is paid as any other.
     wallet
         .confirm_not_paid_before_loss(
@@ -403,13 +435,17 @@ async fn test_provider_loss_confirm_not_paid_before_loss_clears_that_obligation_
     let paid = wallet
         .pay_request(&first, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
-    assert!(
-        doubt_of(&wallet.pay_request(&second, PayOptions::default()).await)
-            .before_loss
-            .is_some()
-    );
+    assert!(doubt_of(
+        &wallet
+            .pay_request(&second, PayOptions::default())
+            .await
+            .outcome
+    )
+    .before_loss
+    .is_some());
     assert_eq!(executions(&w), 1);
 }
 
@@ -428,19 +464,28 @@ async fn test_provider_loss_settled_claim_at_the_new_service_ends_the_doubt() {
     follow_loss(&mut laptop).await;
     assert_eq!(status(&laptop, &request).await, RequestStatus::MayBePaid);
     // The wallet pays it over the doubt: its claim at the new service is SETTLED.
-    let doubt = doubt_of(&wallet.pay_request(&request, PayOptions::default()).await);
+    let doubt = doubt_of(
+        &wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .outcome,
+    );
     let paid = wallet
         .pay_request(
             &request,
             PayOptions::default().with_may_be_paid_confirmed(doubt),
         )
         .await
+        .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     // The laptop's doubt ends with it: the request reads paid, never "may be paid".
     laptop.receive(None).await.unwrap();
     assert_eq!(status(&laptop, &request).await, RequestStatus::Paid);
-    let again = laptop.pay_request(&request, PayOptions::default()).await;
+    let again = laptop
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome;
     assert!(
         matches!(
             again.as_ref().err().and_then(PaykitError::refusal),
@@ -475,7 +520,8 @@ async fn test_provider_loss_request_created_inside_the_residual_window_is_paid_o
     // Never paid automatically, a confirmation of its doubt passing nothing.
     let refused = wallet
         .pay_request_automatically(&request, PayOptions::default())
-        .await;
+        .await
+        .outcome;
     let doubt = doubt_of(&refused);
     assert!(doubt.before_loss.is_some(), "{doubt:?}");
     let refused = wallet
@@ -483,11 +529,17 @@ async fn test_provider_loss_request_created_inside_the_residual_window_is_paid_o
             &request,
             PayOptions::default().with_may_be_paid_confirmed(doubt),
         )
-        .await;
+        .await
+        .outcome;
     assert!(doubt_of(&refused).before_loss.is_some());
     // By hand, it is met by the prompt that it may already be paid, and goes only on the
     // user's confirmation.
-    let doubt = doubt_of(&wallet.pay_request(&request, PayOptions::default()).await);
+    let doubt = doubt_of(
+        &wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .outcome,
+    );
     assert!(doubt.before_loss.is_some(), "{doubt:?}");
     assert_eq!(executions(&w), 0);
     let paid = wallet
@@ -496,6 +548,7 @@ async fn test_provider_loss_request_created_inside_the_residual_window_is_paid_o
             PayOptions::default().with_may_be_paid_confirmed(doubt),
         )
         .await
+        .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     assert_eq!(executions(&w), 1);
@@ -517,6 +570,7 @@ async fn test_provider_loss_resume_never_repeats_a_dispatch_from_before_the_loss
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("in flight");
@@ -563,7 +617,12 @@ async fn test_provider_loss_newer_loss_puts_a_stated_obligation_in_doubt_again()
     w.clock.advance_ms(60_000);
     declare_loss(&w);
     follow_loss(&mut wallet).await;
-    let doubt = doubt_of(&wallet.pay_request(&request, PayOptions::default()).await);
+    let doubt = doubt_of(
+        &wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .outcome,
+    );
     wallet
         .confirm_not_paid_before_loss(
             &doubt.obligation,
@@ -589,7 +648,10 @@ async fn test_provider_loss_newer_loss_puts_a_stated_obligation_in_doubt_again()
     .unwrap();
     assert_eq!(kept["d"]["generation"], loss.generation);
     assert_eq!(status(&wallet, &request).await, RequestStatus::MayBePaid);
-    let again = wallet.pay_request(&request, PayOptions::default()).await;
+    let again = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome;
     assert!(doubt_of(&again).before_loss.is_some(), "{again:?}");
     assert_eq!(executions(&w), 0);
 }
@@ -692,7 +754,10 @@ async fn test_provider_loss_reconcile_lists_each_obligation_from_before_the_loss
             .unwrap();
         assert_eq!(doubtful.payee, Some(w.bob_id()));
         assert!(doubtful.attempts.is_empty(), "{doubtful:?}");
-        let refused = wallet.pay_request(request, PayOptions::default()).await;
+        let refused = wallet
+            .pay_request(request, PayOptions::default())
+            .await
+            .outcome;
         assert_eq!(doubt_of(&refused).obligation, doubtful.obligation);
     }
     assert_eq!(executions(&w), 0);
@@ -701,7 +766,12 @@ async fn test_provider_loss_reconcile_lists_each_obligation_from_before_the_loss
 #[tokio::test]
 async fn test_provider_loss_reconcile_lists_no_obligation_the_user_stated_not_paid() {
     let (_w, mut wallet, [first, second]) = followed_with_requests().await;
-    let doubt = doubt_of(&wallet.pay_request(&first, PayOptions::default()).await);
+    let doubt = doubt_of(
+        &wallet
+            .pay_request(&first, PayOptions::default())
+            .await
+            .outcome,
+    );
     wallet
         .confirm_not_paid_before_loss(
             &doubt.obligation,
@@ -718,13 +788,19 @@ async fn test_provider_loss_reconcile_lists_no_obligation_the_user_stated_not_pa
 #[tokio::test]
 async fn test_provider_loss_reconcile_lists_no_obligation_settled_at_the_new_service() {
     let (w, mut wallet, [first, second]) = followed_with_requests().await;
-    let doubt = doubt_of(&wallet.pay_request(&first, PayOptions::default()).await);
+    let doubt = doubt_of(
+        &wallet
+            .pay_request(&first, PayOptions::default())
+            .await
+            .outcome,
+    );
     let paid = wallet
         .pay_request(
             &first,
             PayOptions::default().with_may_be_paid_confirmed(doubt),
         )
         .await
+        .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     let listed = loss_doubts(&mut wallet).await;
@@ -736,7 +812,12 @@ async fn test_provider_loss_reconcile_lists_no_obligation_settled_at_the_new_ser
 #[tokio::test]
 async fn test_provider_loss_reconcile_lists_a_stated_obligation_again_after_a_newer_loss() {
     let (w, mut wallet, [first, _]) = followed_with_requests().await;
-    let doubt = doubt_of(&wallet.pay_request(&first, PayOptions::default()).await);
+    let doubt = doubt_of(
+        &wallet
+            .pay_request(&first, PayOptions::default())
+            .await
+            .outcome,
+    );
     wallet
         .confirm_not_paid_before_loss(
             &doubt.obligation,
@@ -772,7 +853,12 @@ async fn shown_then_newer_loss(
     // record is written at this service before the next loss.
     let request = request_from(shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
-    let shown = doubt_of(&wallet.pay_request(&request, PayOptions::default()).await);
+    let shown = doubt_of(
+        &wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .outcome,
+    );
     w.clock.advance_ms(60_000);
     let next = declare_loss_of(w, SWITCH_ORIGIN, LATER_SECRET);
     if step_run {
@@ -813,7 +899,8 @@ async fn test_provider_loss_confirmed_doubt_of_an_older_loss_pays_nothing() {
             &request,
             PayOptions::default().with_may_be_paid_confirmed(shown.clone()),
         )
-        .await;
+        .await
+        .outcome;
     let now = doubt_of(&paid);
     assert!(shown_generation(&now) > shown_generation(&shown), "{now:?}");
     assert_eq!(executions(&w), 0);
@@ -824,6 +911,7 @@ async fn test_provider_loss_confirmed_doubt_of_an_older_loss_pays_nothing() {
             PayOptions::default().with_may_be_paid_confirmed(now),
         )
         .await
+        .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     assert_eq!(executions(&w), 1);
@@ -861,7 +949,12 @@ async fn test_provider_loss_statement_about_an_older_loss_refused_after_a_newer_
     assert_eq!(status(&wallet, &request).await, RequestStatus::MayBePaid);
     assert_eq!(executions(&w), 0);
     // The answer to the doubt shown under the newer loss ends it.
-    let again = doubt_of(&wallet.pay_request(&request, PayOptions::default()).await);
+    let again = doubt_of(
+        &wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .outcome,
+    );
     assert_eq!(again.before_loss, Some(decisive));
     wallet
         .confirm_not_paid_before_loss(&again.obligation, &decisive, UserConfirmed::new())
@@ -1021,7 +1114,12 @@ async fn loss_commit_reload(applied: bool) {
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     let old = kept_loss(&wallet).await;
-    let doubt = doubt_of(&wallet.pay_request(&request, PayOptions::default()).await);
+    let doubt = doubt_of(
+        &wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .outcome,
+    );
     wallet
         .confirm_not_paid_before_loss(&doubt.obligation, &old, UserConfirmed::new())
         .await
@@ -1098,7 +1196,12 @@ async fn loss_with_statement() -> (World, Paykit, RequestRef, Vec<(Vec<u8>, Vec<
     w.clock.advance_ms(60_000);
     declare_loss(&w);
     follow_loss(&mut wallet).await;
-    let doubt = doubt_of(&wallet.pay_request(&request, PayOptions::default()).await);
+    let doubt = doubt_of(
+        &wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .outcome,
+    );
     wallet
         .confirm_not_paid_before_loss(
             &doubt.obligation,
@@ -1132,7 +1235,11 @@ async fn test_provider_loss_current_statement_and_boundary_survive_restore() {
     restored.reconcile().await.unwrap();
     restored.end_reconcile(UserConfirmed::new()).await.unwrap();
     let options = crate::common::over_hold(&restored, &request).await;
-    let paid = restored.pay_request(&request, options).await.unwrap();
+    let paid = restored
+        .pay_request(&request, options)
+        .await
+        .outcome
+        .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }));
     assert_eq!(executions(&w), 1);
 }
@@ -1256,6 +1363,7 @@ async fn journaled_orphan_report(after_loss: bool) {
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");

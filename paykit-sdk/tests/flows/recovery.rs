@@ -29,6 +29,7 @@ async fn in_flight(
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -161,6 +162,7 @@ async fn test_recovery_clock_gone_back_own_identity_read_again() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(
@@ -189,6 +191,7 @@ async fn test_recovery_attempt_resolved_failed_may_be_paid_again() {
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -213,6 +216,7 @@ async fn test_recovery_attempt_resolved_failed_may_be_paid_again() {
     let again = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(again, PayOutcome::Paid { .. }), "{again:?}");
 }
@@ -229,6 +233,7 @@ async fn test_recovery_attempt_resolved_done_never_dispatched_again() {
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -430,7 +435,10 @@ async fn stopped_before_the_rail() -> (
         let mut crashing = w
             .load_on_clock(&w.alice, faulty, app_id, Arc::clone(&w.clock))
             .await;
-        let _ = crashing.pay_request(&request, PayOptions::default()).await;
+        let _ = crashing
+            .pay_request(&request, PayOptions::default())
+            .await
+            .outcome;
         drop(crashing);
         if !w.rail.all_executions().is_empty() {
             panic!("the rail was reached before the stop at {n}");
@@ -556,6 +564,7 @@ async fn test_recovery_failure_that_completed_after_all_sends_its_proof() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     let PayOutcome::Failed { attempt_id, .. } = outcome else {
         panic!("{outcome:?}");
@@ -619,6 +628,7 @@ async fn test_recovery_failure_past_the_history_window_not_asked_again() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     let PayOutcome::Failed { attempt_id, .. } = outcome else {
         panic!("{outcome:?}");
@@ -675,6 +685,7 @@ async fn test_recovery_list_expiring_during_the_own_identity_read_not_paid() {
             crate::common::btc("0.001"),
         ))
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -814,6 +825,7 @@ async fn test_recovery_failure_asked_about_only_before_the_history_retention_end
         let outcome = wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap();
         let PayOutcome::Failed { attempt_id, .. } = outcome else {
             panic!("{outcome:?}");
@@ -872,6 +884,7 @@ async fn test_recovery_repeat_of_a_request_cancelled_since_withheld_and_paid_onc
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -966,6 +979,7 @@ async fn test_recovery_repeat_withheld_by_a_kept_stop_it_couldnt_place() {
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -1013,6 +1027,7 @@ async fn test_recovery_repeat_withheld_when_the_request_record_is_gone() {
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -1044,6 +1059,7 @@ async fn in_flight_without_history(
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");

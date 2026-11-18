@@ -131,6 +131,7 @@ async fn in_flight_on(
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -692,6 +693,7 @@ async fn test_outcome_record_receipt_over_a_value_awaiting_its_epoch_key_is_held
     let paid = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     phone.receive(None).await.unwrap();

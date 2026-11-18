@@ -168,6 +168,339 @@ async fn test_mixed_protocols_own_restore() {
         .is_some());
 }
 
+/// Chat, also naming many kinds whose roots chat doesn't own. The client keeps none of them
+/// in the app's record (Switch wire 3.1, 5.1), so they make it no larger.
+struct ChatNamingForeignKinds;
+
+impl Protocol for ChatNamingForeignKinds {
+    fn resend_needed(&self, r: &ResendNeeded) -> Result<Vec<LocalWrite>, StoreFailure> {
+        Chat.resend_needed(r)
+    }
+    fn missed(&self, m: &MissedEntries) -> Result<Vec<LocalWrite>, StoreFailure> {
+        Chat.missed(m)
+    }
+    fn receive(&self, message: &ReceivedMessage, cx: &mut ReceiveContext<'_>) -> Outcome {
+        Chat.receive(message, cx)
+    }
+    fn name(&self) -> String {
+        Chat.name()
+    }
+    fn has_keys(&self, scope: &str) -> bool {
+        Chat.has_keys(scope)
+    }
+    fn sent_between_own_apps(&self, kind: &str) -> bool {
+        Chat.sent_between_own_apps(kind)
+    }
+    fn check_scopes(&self, m: &Message, sender: &AppCert, own: &AppCert) -> Result<(), String> {
+        Chat.check_scopes(m, sender, own)
+    }
+    fn accepts(&self, cert: &AppCert) -> Vec<String> {
+        // Far more than one signed operation carries, under roots of other protocols: a
+        // payment kind, another protocol's, and a root that only starts with `chat`.
+        let pad = "x".repeat(200);
+        let mut kinds = Chat.accepts(cert);
+        for i in 0..2000 {
+            kinds.push(format!("news.item{i}{pad}"));
+        }
+        kinds.push("paykit.chat_receipt".into());
+        kinds.push("chatroom.item".into());
+        kinds
+    }
+    fn check_body(&self, m: &ReceivedMessage) -> Result<(), String> {
+        Chat.check_body(m)
+    }
+}
+
+#[tokio::test]
+async fn test_mixed_protocols_join_counts_only_owned_kinds() {
+    let w = world();
+    let app = Paykit::join_with_protocols(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        w.approve(&w.alice, "mixed", &scopes()),
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+        |p| ProtocolSet::new(vec![p, Arc::new(ChatNamingForeignKinds)]),
+    )
+    .await
+    .expect("the record the client signs fits");
+    let record = w
+        .alice
+        .switch()
+        .app(&app.app_id())
+        .record
+        .expect("the joined app's record");
+    let record = pubky_switch_core::records::AppRecord::verify(&record, &w.alice_id()).unwrap();
+    let accepts = &record.body().accepts;
+    assert!(accepts.iter().any(|k| k == "chat.item"), "{accepts:?}");
+    assert!(
+        accepts
+            .iter()
+            .all(|k| !k.starts_with("news.") && !k.starts_with("chatroom.")),
+        "{accepts:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_mixed_protocols_withdrawal_refused_by_a_lapsed_expiry_keeps_the_member_readable() {
+    let w = world();
+    let mut scopes = AppScopes::new().request().build().unwrap();
+    scopes.scopes.push("chat".into());
+    let mut app = Paykit::join_with_protocols(
+        w.env(&w.alice, store()),
+        PaykitConfig::default().with_app(pubky_switch_client::app::AppConfig {
+            publishes_record: true,
+            ..pubky_switch_client::app::AppConfig::default()
+        }),
+        w.approve(&w.alice, "mixed", &scopes),
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+        register,
+    )
+    .await
+    .unwrap();
+    let id = paykit_lib::PaymentEndpointIdentifier::new("btc-lightning-bolt12").unwrap();
+    app.set_public_endpoint(
+        id.clone(),
+        paykit_lib::PaymentEndpointPayload::new("lno1tips").unwrap(),
+    )
+    .await
+    .unwrap();
+    // Chat's member asks for a fixed expiry, an hour on, which then lapses.
+    let chat = || {
+        let mut member = serde_json::Map::new();
+        member.insert("room".into(), serde_json::json!("lobby"));
+        Some(member)
+    };
+    let hour = 3_600_000;
+    let deadline = pubky_switch_client::clock::Clock::now_ms(w.clock.as_ref()) + hour;
+    app.app_mut()
+        .set_protocol_member("chat", chat(), Some(deadline))
+        .await
+        .unwrap();
+    w.clock.advance_ms(2 * hour);
+    // The last withdrawal can't be signed while chat's expiry has lapsed: the endpoint stays
+    // under Paykit's lifetime, and the record still reads.
+    assert!(app.remove_public_endpoint(&id).await.is_err());
+    assert_eq!(app.own_public_endpoints().unwrap().len(), 1);
+    // Chat asks for no expiry: the record signed then carries Paykit's lifetime with the
+    // endpoint, so it still reads, and a receive goes through.
+    app.app_mut()
+        .set_protocol_member("chat", chat(), None)
+        .await
+        .unwrap();
+    assert_eq!(app.own_public_endpoints().unwrap().len(), 1);
+    app.receive(None).await.unwrap();
+    let held =
+        pubky_switch_core::records::AppRecord::verify(app.app().record(), &w.alice_id()).unwrap();
+    assert!(held.expires_at().is_some());
+    // The withdrawal goes through now, and Paykit's ask goes with it: no expiry is left.
+    app.remove_public_endpoint(&id).await.unwrap();
+    assert!(app.own_public_endpoints().unwrap().is_empty());
+    let held =
+        pubky_switch_core::records::AppRecord::verify(app.app().record(), &w.alice_id()).unwrap();
+    assert_eq!(held.expires_at(), None);
+    app.receive(None).await.unwrap();
+    // Chat asks for an expiry again: a record without public endpoints whose expiry is
+    // chat's alone is left as it is, receive after receive.
+    let deadline = pubky_switch_client::clock::Clock::now_ms(w.clock.as_ref()) + 2 * hour;
+    app.app_mut()
+        .set_protocol_member("chat", chat(), Some(deadline))
+        .await
+        .unwrap();
+    let signed = app.app().record().clone();
+    app.receive(None).await.unwrap();
+    app.receive(None).await.unwrap();
+    assert_eq!(app.app().record(), &signed);
+}
+
+/// Alice's app owning chat and Paykit, holding `paykit_request`, publishing its record.
+async fn publishing_mixed(w: &World) -> Paykit {
+    let mut scopes = AppScopes::new().request().build().unwrap();
+    scopes.scopes.push("chat".into());
+    Paykit::join_with_protocols(
+        w.env(&w.alice, store()),
+        PaykitConfig::default().with_app(pubky_switch_client::app::AppConfig {
+            publishes_record: true,
+            ..pubky_switch_client::app::AppConfig::default()
+        }),
+        w.approve(&w.alice, "mixed", &scopes),
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+        register,
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_mixed_protocols_member_expiry_repair_survives_reload_and_final_withdrawal() {
+    use paykit_lib::PaymentEndpointPayload;
+    use pubky_switch_client::app::{AppConfig, AppEvent};
+    use pubky_switch_core::records::AppRecord;
+
+    let w = world();
+    let config = PaykitConfig::default().with_app(AppConfig {
+        publishes_record: true,
+        ..AppConfig::default()
+    });
+    let mut scopes = AppScopes::new().request().pay().build().unwrap();
+    scopes.scopes.push("chat".into());
+    let mut first = Paykit::join_with_protocols(
+        w.env(&w.alice, store()),
+        config.clone(),
+        w.approve(&w.alice, "mixed", &scopes),
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+        register,
+    )
+    .await
+    .unwrap();
+    first.receive(None).await.unwrap();
+    let storage = store();
+    let mut second = Paykit::restore_with_protocols(
+        w.env(&w.alice, Arc::clone(&storage)),
+        config.clone(),
+        &first.backup().await.unwrap(),
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+        register,
+    )
+    .await
+    .unwrap();
+    second.receive(None).await.unwrap();
+    second.reconcile().await.unwrap();
+    second.end_reconcile(UserConfirmed::new()).await.unwrap();
+    let recovered = second
+        .app_mut()
+        .end_reconcile_for("chat", UserConfirmed::new())
+        .await
+        .unwrap();
+    assert!(recovered);
+    let methods = w.rail.endpoint_identifiers();
+    let id = crate::common::endpoint("btc-lightning-bolt12");
+
+    // Repeat publication and withdrawal for an explicit host edit and ordinary upkeep.
+    for (publishing, retry_on_receive) in
+        [(true, false), (false, false), (true, true), (false, true)]
+    {
+        if publishing {
+            first
+                .set_public_endpoint(id.clone(), PaymentEndpointPayload::new("lno1tips").unwrap())
+                .await
+                .unwrap();
+        } else {
+            first.receive(None).await.unwrap();
+            first.remove_public_endpoint(&id).await.unwrap();
+        }
+        // The event is taken, then upkeep cannot sign the capabilities. Reload in the gap.
+        w.rail
+            .set_endpoint_identifiers(crate::own_record::oversized_capabilities());
+        assert!(second.receive(None).await.is_err());
+        assert_eq!(
+            !second.own_public_endpoints().unwrap().is_empty(),
+            publishing
+        );
+        let events = second.app_mut().unacknowledged_events().await.unwrap();
+        assert!(!events.iter().any(
+            |e| matches!(e, AppEvent::MemberChanged { protocol, .. } if protocol == "paykit")
+        ));
+        let before = second.app().record().clone();
+        drop(second);
+        w.rail.set_endpoint_identifiers(methods.clone());
+        second = Paykit::load_with_protocols(
+            w.env(&w.alice, Arc::clone(&storage)),
+            config.clone(),
+            first.app_id(),
+            Arc::clone(&w.rail) as Arc<dyn Rail>,
+            w.timer(),
+            register,
+        )
+        .await
+        .unwrap();
+        if retry_on_receive {
+            second.receive(None).await.unwrap();
+        } else if publishing {
+            second.update_own_record().await.unwrap();
+        } else {
+            // An unchanged endpoint edit also owes the policy-only repair.
+            second
+                .set_public_endpoints(Default::default())
+                .await
+                .unwrap();
+        }
+        assert_ne!(second.app().record(), &before);
+        let repaired = second.app().record().clone();
+        second.receive(None).await.unwrap();
+        assert_eq!(second.app().record(), &repaired);
+
+        // Chat signs with no expiry of its own. Only this device's Paykit policy decides
+        // whether the new record has an expiry.
+        let chat = if publishing { chat_member() } else { None };
+        second
+            .app_mut()
+            .set_protocol_member("chat", chat, None)
+            .await
+            .unwrap();
+        let record = AppRecord::verify(second.app().record(), &w.alice_id()).unwrap();
+        assert_eq!(record.expires_at().is_some(), publishing);
+    }
+}
+
+/// A chat member.
+fn chat_member() -> Option<serde_json::Map<String, serde_json::Value>> {
+    let mut member = serde_json::Map::new();
+    member.insert("room".into(), serde_json::json!("lobby"));
+    Some(member)
+}
+
+#[tokio::test]
+async fn test_mixed_protocols_unread_paykit_member_kept_beside_chat_expiry() {
+    let w = world();
+    let mut app = publishing_mixed(&w).await;
+    // A Paykit member of a field this version doesn't read only, and chat's expiry.
+    let mut member = serde_json::Map::new();
+    member.insert("future_field".into(), serde_json::json!("kept"));
+    app.app_mut()
+        .set_protocol_member_with_lifetime("paykit", Some(member), None)
+        .await
+        .unwrap();
+    let deadline = pubky_switch_client::clock::Clock::now_ms(w.clock.as_ref()) + 3_600_000;
+    app.app_mut()
+        .set_protocol_member("chat", chat_member(), Some(deadline))
+        .await
+        .unwrap();
+    // No withdrawal is owed: the record keeps its bytes, receive after receive.
+    let signed = app.app().record().clone();
+    app.receive(None).await.unwrap();
+    app.receive(None).await.unwrap();
+    app.update_own_record().await.unwrap();
+    assert_eq!(app.app().record(), &signed);
+}
+
+#[tokio::test]
+async fn test_mixed_protocols_update_beside_chat_expiry_checks_the_homeserver() {
+    use pubky_switch_client::app::Publication;
+    let w = world();
+    let mut app = publishing_mixed(&w).await;
+    // No Paykit member, and chat's expiry: nothing of Paykit's is owed, so the update is
+    // the explicit check of the Homeserver copy, which can't be read now.
+    let deadline = pubky_switch_client::clock::Clock::now_ms(w.clock.as_ref()) + 3_600_000;
+    app.app_mut()
+        .set_protocol_member("chat", chat_member(), Some(deadline))
+        .await
+        .unwrap();
+    let signed = app.app().record().clone();
+    w.homeserver.set_down(true);
+    let publication = app.update_own_record().await.unwrap();
+    w.homeserver.set_down(false);
+    assert!(
+        matches!(publication, Publication::Unchecked { .. }),
+        "{publication:?}"
+    );
+    assert_eq!(app.app().record(), &signed);
+}
+
 fn register(p: Arc<PaykitProtocol>) -> Result<ProtocolSet, AppError> {
     ProtocolSet::new(vec![p, Arc::new(Chat)])
 }

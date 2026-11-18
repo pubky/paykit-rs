@@ -425,7 +425,7 @@ async fn test_blocked_return_proof_comes_back_credited_without_a_hold() {
         .with_options(paykit_sdk::PayOptions::default().with_mode(
             paykit_sdk::PaymentMode::Public(pubky_switch_client::app::UserConfirmed::new()),
         ));
-    let outcome = wallet.pay_without_request(payment).await.unwrap();
+    let outcome = wallet.pay_without_request(payment).await.outcome.unwrap();
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
         "{outcome:?}"
@@ -1224,6 +1224,7 @@ async fn test_blocked_return_repeat_of_a_request_paid_only_by_hand_not_made() {
     let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("in flight");
@@ -1803,6 +1804,7 @@ async fn test_blocked_return_floor_raised_again_before_the_new_app_reads_still_p
     let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = phone
         .pay_request(&request, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("in flight");
@@ -1958,6 +1960,7 @@ async fn test_blocked_return_dispatch_of_a_request_dated_before_the_floor_not_re
     let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&carols, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("in flight");
@@ -2182,6 +2185,7 @@ async fn automatic_first_dispatch_with(
     let outcome = phone
         .pay_request_automatically(&carols, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap();
     let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = outcome else {
         panic!("{outcome:?}");
@@ -2263,6 +2267,7 @@ async fn test_blocked_return_request_back_by_a_live_mark_not_paid_automatically(
     let outcome = wallet
         .pay_request_automatically(&again, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap();
     let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = outcome else {
         panic!("{outcome:?}");
@@ -2276,6 +2281,7 @@ async fn test_blocked_return_request_back_by_a_live_mark_not_paid_automatically(
     let paid = wallet
         .pay_request(&again, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
@@ -2594,6 +2600,7 @@ async fn first_dispatch_with_a_write_after_its_read(w: &Arc<World>, write: Lands
     let outcome =
         Box::pin(phone.pay_request_automatically(&carols, paykit_sdk::PayOptions::default()))
             .await
+            .outcome
             .unwrap();
     let (paykit_sdk::PayOutcome::Pending { attempt_id, .. }
     | paykit_sdk::PayOutcome::Paid { attempt_id, .. }) = &outcome
@@ -2779,6 +2786,7 @@ async fn test_blocked_return_floor_kept_copy_not_taken_for_the_switch_at_a_dispa
     let outcome = phone
         .pay_request_automatically(&carols, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap();
     let (paykit_sdk::PayOutcome::Pending { attempt_id, .. }
     | paykit_sdk::PayOutcome::Paid { attempt_id, .. }) = &outcome
@@ -2814,6 +2822,7 @@ async fn paid_in_flight(
     let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = phone
         .pay_request(carols, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("in flight");

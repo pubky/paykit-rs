@@ -79,6 +79,7 @@ async fn test_conversion_priced_payment_refused_without_confirmation() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     let shown = priced_of(&refused);
     assert_eq!(shown.request, request);
@@ -98,11 +99,13 @@ async fn test_conversion_priced_payment_pays_the_confirmed_amount() {
         &wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap_err(),
     );
     let outcome = wallet
         .pay_request(&request, PayOptions::default().with_rate_confirmed(shown))
         .await
+        .outcome
         .unwrap();
     let PayOutcome::Paid { attempt_id, .. } = outcome else {
         panic!("{outcome:?}");
@@ -130,11 +133,13 @@ async fn test_conversion_invoice_of_the_computed_amount_passes_both_transfer_che
         &wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap_err(),
     );
     let outcome = wallet
         .pay_request(&request, PayOptions::default().with_rate_confirmed(shown))
         .await
+        .outcome
         .unwrap();
     let PayOutcome::Paid { attempt_id, .. } = outcome else {
         panic!("{outcome:?}");
@@ -150,6 +155,7 @@ async fn test_conversion_changed_price_refused_again() {
         &wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap_err(),
     );
     // A confirmation of another amount is no confirmation of this one.
@@ -158,6 +164,7 @@ async fn test_conversion_changed_price_refused_again() {
     let refused = wallet
         .pay_request(&request, PayOptions::default().with_rate_confirmed(other))
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(priced_of(&refused), shown);
     // The method names another smallest unit since: the amount computed now differs, and
@@ -166,6 +173,7 @@ async fn test_conversion_changed_price_refused_again() {
     let refused = wallet
         .pay_request(&request, PayOptions::default().with_rate_confirmed(shown))
         .await
+        .outcome
         .unwrap_err();
     let new = priced_of(&refused);
     assert_eq!(new.amount, btc("0.000124"));
@@ -173,6 +181,7 @@ async fn test_conversion_changed_price_refused_again() {
     let PayOutcome::Paid { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default().with_rate_confirmed(new))
         .await
+        .outcome
         .unwrap()
     else {
         panic!("paid");
@@ -200,6 +209,7 @@ async fn test_conversion_endpoint_of_another_asset_no_rate_prices_unusable() {
             PayOptions::default().with_endpoint(endpoint("eur-sepa-iban")),
         )
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::UnsupportedEndpoint(_))),
@@ -210,6 +220,7 @@ async fn test_conversion_endpoint_of_another_asset_no_rate_prices_unusable() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(priced_of(&refused).endpoint_id, endpoint(BOLT11));
 }
@@ -233,6 +244,7 @@ async fn test_conversion_endpoint_of_the_requested_asset_paid_its_amount() {
     let PayOutcome::Paid { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("paid");
@@ -253,6 +265,7 @@ async fn test_conversion_automatic_payment_of_a_priced_request_refused() {
         &wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap_err(),
     );
     // Even with the amount confirmed, an automatic payment pays nothing a rate prices.
@@ -262,6 +275,7 @@ async fn test_conversion_automatic_payment_of_a_priced_request_refused() {
             PayOptions::default().with_rate_confirmed(shown.clone()),
         )
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(priced_of(&refused), shown);
     nothing_paid(&w, &wallet).await;
@@ -275,6 +289,7 @@ async fn test_conversion_rail_without_the_endpoints_unit_refuses() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::UnsupportedEndpoint(_))),
@@ -286,6 +301,7 @@ async fn test_conversion_rail_without_the_endpoints_unit_refuses() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(priced_of(&refused).amount, btc("0.000123456"));
 }
@@ -298,11 +314,13 @@ async fn test_conversion_payee_credits_a_priced_payment_at_the_confirmed_amount(
         &wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap_err(),
     );
     wallet
         .pay_request(&request, PayOptions::default().with_rate_confirmed(shown))
         .await
+        .outcome
         .unwrap();
     shop.receive(None).await.unwrap();
     let sales = shop.payee_activity().await.unwrap();
@@ -399,12 +417,14 @@ async fn priced_in_flight(
         &wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap_err(),
     );
     w.rail.next(Behaviour::Hang);
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default().with_rate_confirmed(shown))
         .await
+        .outcome
         .unwrap()
     else {
         panic!("in flight");
@@ -511,6 +531,7 @@ async fn test_conversion_amount_finer_than_the_unit_paid_rounded_up_and_credited
     let PayOutcome::Paid { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("paid");
@@ -551,6 +572,7 @@ async fn test_conversion_endpoint_whose_unit_the_method_cant_name_unusable() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::UnsupportedEndpoint(_))),
@@ -652,6 +674,7 @@ async fn test_conversion_unusable_list_endpoints_beside_an_expired_list_ask_for_
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::WaitingForList)),
@@ -679,6 +702,7 @@ async fn test_conversion_unusable_list_endpoints_beside_a_used_up_list_ask_for_i
                 .with_options(PayOptions::default().with_endpoint(endpoint("btc-bitcoin-p2wpkh"))),
         )
         .await
+        .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     let mut till = w
@@ -719,6 +743,7 @@ async fn test_conversion_unusable_list_endpoints_beside_a_used_up_list_ask_for_i
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::WaitingForList)),
@@ -739,6 +764,7 @@ async fn test_conversion_unusable_list_endpoints_refused_without_a_list_to_ask()
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::UnsupportedEndpoint(_))),
@@ -755,12 +781,14 @@ async fn test_conversion_transfer_confirmation_cannot_change_a_priced_amount() {
         &wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap_err(),
     );
     let options = PayOptions::default().with_rate_confirmed(shown);
     let refused = wallet
         .pay_request(&request, options.clone())
         .await
+        .outcome
         .unwrap_err();
     let Some(Refusal::Transfer { quote, .. }) = refused.refusal() else {
         panic!("{refused:?}")
@@ -768,6 +796,7 @@ async fn test_conversion_transfer_confirmation_cannot_change_a_priced_amount() {
     let refused = wallet
         .pay_request(&request, options.with_transfer_confirmed((**quote).clone()))
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::Transfer { .. })),
@@ -819,6 +848,7 @@ async fn test_conversion_blocked_confirmation_uses_the_rounded_amount() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     let Some(Refusal::Blocked { payment }) = refused.refusal() else {
         panic!("{refused:?}")
@@ -834,6 +864,7 @@ async fn test_conversion_blocked_confirmation_uses_the_rounded_amount() {
                 PayOptions::default().with_blocked_confirmed(nominal)
             )
             .await
+            .outcome
             .unwrap_err()
             .refusal(),
         Some(Refusal::Blocked { .. })
@@ -844,6 +875,7 @@ async fn test_conversion_blocked_confirmation_uses_the_rounded_amount() {
             PayOptions::default().with_blocked_confirmed((**payment).clone()),
         )
         .await
+        .outcome
         .unwrap();
     let PayOutcome::Paid { attempt_id, .. } = outcome else {
         panic!("{outcome:?}")
@@ -915,6 +947,7 @@ async fn test_conversion_manual_override_binds_the_actual_blocked_amount() {
         &wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap_err(),
     );
     let options = PayOptions::default().with_transfer_confirmed(transfer);
@@ -922,6 +955,7 @@ async fn test_conversion_manual_override_binds_the_actual_blocked_amount() {
     let refused = wallet
         .pay_request(&request, options.clone())
         .await
+        .outcome
         .unwrap_err();
     let Some(Refusal::Blocked { payment }) = refused.refusal() else {
         panic!("{refused:?}")
@@ -933,6 +967,7 @@ async fn test_conversion_manual_override_binds_the_actual_blocked_amount() {
         wallet
             .pay_request(&request, options.clone().with_blocked_confirmed(nominal))
             .await
+            .outcome
             .unwrap_err()
             .refusal(),
         Some(Refusal::Blocked { .. })
@@ -943,6 +978,7 @@ async fn test_conversion_manual_override_binds_the_actual_blocked_amount() {
             options.with_blocked_confirmed((**payment).clone()),
         )
         .await
+        .outcome
         .unwrap();
     let PayOutcome::Paid { attempt_id, .. } = outcome else {
         panic!("{outcome:?}")
@@ -962,6 +998,7 @@ async fn test_conversion_manual_unknown_transfer_keeps_its_amount_unknown() {
         &wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap_err(),
     );
     assert_eq!(transfer.transfer.amount, None);
@@ -971,6 +1008,7 @@ async fn test_conversion_manual_unknown_transfer_keeps_its_amount_unknown() {
             PayOptions::default().with_transfer_confirmed(transfer),
         )
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     assert_eq!(wallet.payments().await.unwrap()[0].paid, None);
@@ -984,6 +1022,7 @@ async fn test_conversion_unknown_transfer_cannot_supply_a_blocked_amount() {
         &wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap_err(),
     );
     wallet.block(&w.bob_id()).await.unwrap();
@@ -993,6 +1032,7 @@ async fn test_conversion_unknown_transfer_cannot_supply_a_blocked_amount() {
             PayOptions::default().with_transfer_confirmed(transfer),
         )
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::NotNow(reason)) if reason.contains("transfer amount is unknown")),
@@ -1009,6 +1049,7 @@ async fn test_conversion_automatic_payment_ignores_a_manual_transfer_override() 
         &wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap_err(),
     );
     let refused = wallet
@@ -1017,6 +1058,7 @@ async fn test_conversion_automatic_payment_ignores_a_manual_transfer_override() 
             PayOptions::default().with_transfer_confirmed(transfer),
         )
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::Transfer { .. })),

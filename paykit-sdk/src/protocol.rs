@@ -36,8 +36,8 @@ use paykit_lib::{Label, PaykitKindRules};
 use pubky_switch_client::app::{
     decode_local_state, AppBackup, AppError, Collection as SwitchCollection, Effect, LocalView,
     LocalWrite, LossActions, MissedEntries, OpaqueRule, Outcome, Protocol, ProtocolLayer,
-    ProviderLoss, ReceiveContext, ReceivedMessage, ResendNeeded, RestoreContext, StoreFailure,
-    WriteBase,
+    ProviderLoss, ReceiveContext, ReceivedMessage, RecordExpiry, ResendNeeded, RestoreContext,
+    StoreFailure, WriteBase,
 };
 use pubky_switch_client::error::StoreError;
 use pubky_switch_core::enc::{serde_b64, unb64_array};
@@ -128,10 +128,21 @@ struct Own {
 /// context, a [`LocalView`]), and never hold the naming key: they blind through the client.
 pub struct PaykitProtocol {
     own: RwLock<Option<Own>>,
+    /// Whether the app publishes its record, which decides whether it holds public
+    /// endpoints (`crate::own_record`): `PUBLISHES_UNKNOWN` until the SDK's constructors
+    /// set it, as for a protocol a host registers itself, when only the scopes decide.
+    publishes_record: std::sync::atomic::AtomicU8,
     /// The app's rail, which names a proof's settlement (Paykit wire 1.5); without one, the
     /// methods `paykit-lib` knows.
     rail: Option<Arc<dyn Rail>>,
 }
+
+/// [`PaykitProtocol`]'s publishing setting: not told yet.
+const PUBLISHES_UNKNOWN: u8 = 0;
+/// [`PaykitProtocol`]'s publishing setting: the app publishes its record.
+const PUBLISHES_YES: u8 = 1;
+/// [`PaykitProtocol`]'s publishing setting: the app doesn't publish its record.
+const PUBLISHES_NO: u8 = 2;
 
 impl std::fmt::Debug for PaykitProtocol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -150,7 +161,32 @@ impl PaykitProtocol {
     pub fn new() -> Self {
         Self {
             own: RwLock::new(None),
+            publishes_record: std::sync::atomic::AtomicU8::new(PUBLISHES_UNKNOWN),
             rail: None,
+        }
+    }
+
+    /// Set whether the app publishes its record, as its configuration says
+    /// (`pubky_switch_client::app::AppConfig::publishes_record`).
+    pub(crate) fn set_publishes_record(&self, publishes: bool) {
+        let value = if publishes {
+            PUBLISHES_YES
+        } else {
+            PUBLISHES_NO
+        };
+        self.publishes_record
+            .store(value, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether the app publishes its record: `None` when Paykit wasn't told.
+    fn publishes_record(&self) -> Option<bool> {
+        match self
+            .publishes_record
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            PUBLISHES_YES => Some(true),
+            PUBLISHES_NO => Some(false),
+            _ => None,
         }
     }
 
@@ -467,6 +503,13 @@ pub(crate) fn restore_paykit_layer(
                 if mark.blocked() {
                     writes.push(LocalWrite::Put { key, value });
                 }
+                continue;
+            }
+            // A restored app applies the owed expiry policy to its current member after
+            // its confirmed first read (`own_record.rs`).
+            StateKey::RecordExpiryOwed => {
+                state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
                 continue;
             }
             StateKey::LossBoundary => {
@@ -883,6 +926,19 @@ impl Protocol for PaykitProtocol {
             .map_err(|error| error.to_string())
     }
 
+    /// Paykit's member under a renewed certificate, from the record's one
+    /// (`crate::own_record::member_under`): signed once with the certificate, so a record
+    /// under it never lists a public endpoint or a capability it doesn't cover (Paykit spec,
+    /// "What this pin adopts", "Renewing a certificate").
+    fn member_for(
+        &self,
+        member: Option<&Map<String, Value>>,
+        ask: RecordExpiry,
+        cert: &AppCert,
+    ) -> (Option<Map<String, Value>>, RecordExpiry) {
+        crate::own_record::member_under(member, ask, cert, self.publishes_record())
+    }
+
     /// The kinds this SDK handles that the certificate's scopes receive (Switch spec 3.4):
     /// none for a certificate Paykit's verifiers refuse (Paykit wire 3.1), such as a
     /// renewal's that the Switch took.
@@ -1152,11 +1208,12 @@ impl Protocol for PaykitProtocol {
     fn record_regression(
         &self,
         collection: &str,
-        seen: &[u8],
+        seen: Option<&[u8]>,
         value: Option<&[u8]>,
         base: WriteBase,
     ) -> Option<String> {
-        self.regression(collection, seen, value, base.held)
+        // Nothing seen of the record yet, as at its first read: nothing to go back on.
+        self.regression(collection, seen?, value, base.held)
     }
 }
 

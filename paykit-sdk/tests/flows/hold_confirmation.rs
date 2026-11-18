@@ -59,6 +59,7 @@ async fn test_hold_confirmation_payment_rejects_a_second_missed_item_at_the_same
             PayOptions::default().with_possibly_cancelled_confirmed(confirmed),
         )
         .await
+        .outcome
         .expect_err("an answer to the earlier hold must not pay");
     assert!(w.rail.all_executions().is_empty());
     assert_eq!(
@@ -191,6 +192,7 @@ async fn test_hold_confirmation_current_payment_pays() {
             PayOptions::default().with_possibly_cancelled_confirmed(confirmed),
         )
         .await
+        .outcome
         .unwrap();
     assert!(matches!(result, PayOutcome::Paid { .. }));
     assert_eq!(w.rail.all_executions().len(), 1);
@@ -368,6 +370,7 @@ async fn unread_epoch(missing: bool) {
             PayOptions::default().with_possibly_cancelled_confirmed(confirmed.clone()),
         )
         .await
+        .outcome
         .expect_err("an unread hold identity cannot authorize payment");
     wallet
         .confirm_possibly_cancelled(&request, &confirmed, UserConfirmed::new())
@@ -422,6 +425,7 @@ async fn test_hold_confirmation_cancellation_overrides_a_current_token() {
             PayOptions::default().with_possibly_cancelled_confirmed(confirmed),
         )
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(error.refusal(), Some(&paykit_sdk::Refusal::Cancelled));
     assert_eq!(

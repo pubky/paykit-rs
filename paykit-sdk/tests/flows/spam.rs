@@ -140,6 +140,7 @@ async fn receipt_still_applies(standing: Standing) {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     shop.receive(None).await.unwrap();
@@ -218,7 +219,8 @@ async fn test_spam_blocked_sender_list_cancellation_and_resend_only_counted() {
                 PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")),
             ),
         )
-        .await;
+        .await
+        .outcome;
     assert!(refused.is_err(), "{refused:?}");
     assert!(w.rail.all_executions().is_empty());
 }
@@ -411,6 +413,7 @@ async fn test_spam_blocked_payer_unrequested_proof_only_counted() {
             ),
         )
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     // Bob blocks alice before his shop reads her proof, which no record of his matches.
@@ -439,6 +442,7 @@ async fn test_spam_without_contacts_unknown_lists_gate_nothing() {
             ),
         )
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     let got = shop.receive(None).await.unwrap();

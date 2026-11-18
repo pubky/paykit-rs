@@ -511,10 +511,23 @@ impl Paykit {
             // open, or is held as a value that doesn't read or bind, nor while the switch
             // holds a newer write this app refused: either may hold what another own app
             // wrote (Paykit spec 8.1).
+            // Nor while the switch shows another write at the version held, as recovery
+            // uploads can leave: the client builds the next write on that one, which this
+            // app hasn't read, and may hold a receipt (Switch spec 12.6 step 3).
+            let held_version = self
+                .app
+                .shared_record(&self.activity_key(&into)?)
+                .await?
+                .map(|held| held.version);
             match self.app.read_record_fresh(&into.record_target()).await? {
+                RecordRead::Kept {
+                    reason: KeptReason::Older(write),
+                    ..
+                } if Some(write.version) == held_version => return Err(period_record_unread()),
                 RecordRead::Fresh(_)
                 | RecordRead::Kept {
-                    reason: KeptReason::NotFound | KeptReason::NotNewer,
+                    reason:
+                        KeptReason::NotFound | KeptReason::Older(_) | KeptReason::Overtaken { .. },
                     ..
                 } => {}
                 RecordRead::Kept {

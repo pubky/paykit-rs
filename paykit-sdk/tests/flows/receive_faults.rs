@@ -90,6 +90,7 @@ async fn test_receive_faults_proof_applied_once_the_store_heals() {
         let outcome = wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap();
         assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
         receive_through_a_failure(&mut shop, &failing, n).await;
@@ -115,6 +116,7 @@ async fn test_receive_faults_receipt_applied_once_the_store_heals() {
         wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap();
         shop.receive(None).await.unwrap();
         let record = shop.payee_activity().await.unwrap()[0].record;
@@ -152,6 +154,7 @@ async fn test_receive_faults_receipt_parked_on_a_corrupt_journal_then_settles() 
                 ),
         )
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
