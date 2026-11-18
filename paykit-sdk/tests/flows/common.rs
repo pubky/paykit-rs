@@ -972,6 +972,11 @@ impl SlowSwitch {
         }
     }
 
+    /// Whether a public identity read is waiting on this switch.
+    pub fn has_waiter(&self) -> bool {
+        !self.wakers.lock().unwrap().is_empty()
+    }
+
     /// The next held read, once released, takes `ms` on `clock` to answer.
     pub fn delay_answer(&self, clock: Arc<TestClock>, ms: u64) {
         *self.answer_delay.lock().unwrap() = Some((clock, ms));
