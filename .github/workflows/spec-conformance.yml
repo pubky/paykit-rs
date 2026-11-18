@@ -1,6 +1,7 @@
 name: Paykit v0.2 Specification Conformance
 
 on:
+  # The dispatcher selects the specification source. Only code from v0.2 is run.
   workflow_dispatch:
     inputs:
       spec_commit:
@@ -65,8 +66,13 @@ jobs:
             exit 1
           fi
           git -C implementation checkout --quiet --detach "$CODE_COMMIT"
+          code_head=$(git -C implementation rev-parse HEAD)
+          if [[ "$code_head" != "$CODE_COMMIT" ]]; then
+            echo "The implementation checkout does not match its pin." >&2
+            exit 1
+          fi
           printf 'Specification commit: %s\nv0.2 commit: %s\nv0.2 checkout tip: %s\n' \
-            "$spec_head" "$(git -C implementation rev-parse HEAD)" "$code_tip"
+            "$spec_head" "$code_head" "$code_tip"
 
           if [[ -n "$COPY_PATHS" ]]; then
             if [[ "$COPY_PATHS" == *$'\n'* ]]; then
