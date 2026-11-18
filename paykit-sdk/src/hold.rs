@@ -258,8 +258,17 @@ impl RestoreHold {
         }
     }
 
+    /// Earlier re-sends belong to a carried hold. A partial list of counterparties
+    /// records progress only while re-sends are due.
+    pub(crate) fn is_valid(&self) -> bool {
+        (!self.earlier_asks || self.earlier)
+            && (self.asked.is_empty() || self.asks_due())
+            && self.asked.windows(2).all(|pair| pair[0] < pair[1])
+            && self.in_order()
+    }
+
     /// A stored read must belong to a window and be at or after its start.
-    pub(crate) fn in_order(&self) -> bool {
+    fn in_order(&self) -> bool {
         (self.verdict == RestoreVerdict::NotClean || self.widening_from_ms.is_some())
             && self.widening_read.as_ref().is_none_or(|read| {
                 self.widening_from_ms

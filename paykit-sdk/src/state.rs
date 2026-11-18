@@ -525,18 +525,10 @@ impl Stored for crate::hold::HoldEpoch {
 
 impl sealed::Sealed for RestoreHold {}
 
-/// A restore's hold: counterparties already asked are ascending, each once, and cleared
-/// when all asks are queued (Paykit spec 7.2; `Paykit::queue_restore_asks`).
 impl Stored for RestoreHold {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
-            StateKey::RestoreHold
-                if self.in_order()
-                    && (!self.asks_queued || self.asked.is_empty())
-                    && self.asked.windows(2).all(|pair| pair[0] < pair[1]) =>
-            {
-                Ok(())
-            }
+            StateKey::RestoreHold if self.is_valid() => Ok(()),
             _ => corrupt(),
         }
     }
@@ -2079,6 +2071,52 @@ mod tests {
                 key::RESTORE_HOLD,
                 serde_json::to_value(hold).unwrap(),
             ));
+        }
+    }
+
+    #[test]
+    fn test_restore_hold_load_and_restore_require_an_owed_resend() {
+        use crate::hold::RestoreVerdict::{Clean, NotClean, Open};
+
+        let check = |hold: RestoreHold, valid: bool| {
+            let bytes = encode(&hold).unwrap();
+            let key = key::RESTORE_HOLD.as_bytes();
+            let binder = Binder::unblinded([1; 32]);
+            assert_eq!(bound::<RestoreHold>(key, &bytes, &binder).is_ok(), valid);
+            assert_eq!(restored::<RestoreHold>(key, &bytes, &binder).is_ok(), valid);
+        };
+        let initial = RestoreHold::of(0, None);
+        let carried = RestoreHold::of(0, Some(&initial));
+        for verdict in [Open, Clean, NotClean] {
+            check(
+                RestoreHold {
+                    verdict,
+                    earlier_asks: true,
+                    ..initial.clone()
+                },
+                false,
+            );
+        }
+        for (verdict, base, partial_is_valid) in [
+            (Open, &initial, false),
+            (Clean, &initial, false),
+            (NotClean, &initial, true),
+            (Open, &carried, true),
+            (Clean, &carried, true),
+            (NotClean, &carried, true),
+        ] {
+            let hold = RestoreHold {
+                verdict,
+                ..base.clone()
+            };
+            check(hold.clone(), true);
+            check(
+                RestoreHold {
+                    asked: vec![[1; 32]],
+                    ..hold
+                },
+                partial_is_valid,
+            );
         }
     }
 
