@@ -1472,8 +1472,21 @@ async fn test_publication_restored_while_labelled_discovers_a_former_recipient_w
     assert_eq!(restored.app().cert().hash(), limited.hash());
     assert_eq!(w.record_writes(&w.alice, &key), 1);
     let authorized = renew(&restored, &plain);
-    restored.receive(None).await.unwrap();
+    let grant = restored.receive(None).await.unwrap();
     assert_eq!(restored.app().cert().hash(), authorized.hash());
+    let epoch = restored.app().own_identity().body().data_epoch;
+    if restored.app().scope_key(epoch, "paykit_request").is_none() {
+        assert!(grant.scope_keys_awaited);
+        assert_eq!(w.record_writes(&w.alice, &key), 1);
+        assert!(restored
+            .app()
+            .sent_to(&w.bob_id(), 0, u64::MAX)
+            .await
+            .unwrap()
+            .is_empty());
+        w.clock.advance_ms(1_000);
+        restored.receive(None).await.unwrap();
+    }
     assert_eq!(w.record_writes(&w.alice, &key), 2);
     let record = restored.app().shared_record(&key).await.unwrap().unwrap();
     let withdrawal = ListPublicationRecord::read(record.content.value().unwrap()).unwrap();
