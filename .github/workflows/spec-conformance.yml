@@ -1,0 +1,141 @@
+name: Paykit v0.2 Specification Conformance
+
+on:
+  # The dispatcher selects the specification source. Only code from v0.2 is run.
+  workflow_dispatch:
+    inputs:
+      spec_commit:
+        description: Full commit SHA of the master specification or copy candidate
+        required: true
+        type: string
+      code_commit:
+        description: Full commit SHA already merged into v0.2
+        required: true
+        type: string
+      copy_paths:
+        description: Space-separated file paths under specs/v0.2. Leave empty to compare the whole tree.
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    name: Compare specification and generated vectors
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SPEC_COMMIT: ${{ inputs.spec_commit }}
+      CODE_COMMIT: ${{ inputs.code_commit }}
+      COPY_PATHS: ${{ inputs.copy_paths }}
+    steps:
+      - name: Validate commit pins
+        shell: bash
+        run: |
+          if [[ ! "$SPEC_COMMIT" =~ ^[0-9a-f]{40}$ || ! "$CODE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Supply full lowercase commit SHAs for both inputs." >&2
+            exit 1
+          fi
+
+      - name: Check out specification candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.spec_commit }}
+          path: specification
+          persist-credentials: false
+
+      - name: Check out v0.2 history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/heads/v0.2
+          path: implementation
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Compare committed specification files
+        shell: bash
+        run: |
+          spec_head=$(git -C specification rev-parse HEAD)
+          code_tip=$(git -C implementation rev-parse HEAD)
+          if [[ "$spec_head" != "$SPEC_COMMIT" ]]; then
+            echo "The specification checkout does not match its pin." >&2
+            exit 1
+          fi
+          if ! git -C implementation merge-base --is-ancestor "$CODE_COMMIT" "$code_tip"; then
+            echo "The code commit must be in the checked-out v0.2 history." >&2
+            exit 1
+          fi
+          git -C implementation checkout --quiet --detach "$CODE_COMMIT"
+          code_head=$(git -C implementation rev-parse HEAD)
+          if [[ "$code_head" != "$CODE_COMMIT" ]]; then
+            echo "The implementation checkout does not match its pin." >&2
+            exit 1
+          fi
+          printf 'Specification commit: %s\nv0.2 commit: %s\nv0.2 checkout tip: %s\n' \
+            "$spec_head" "$code_head" "$code_tip"
+
+          if [[ -n "$COPY_PATHS" ]]; then
+            if [[ "$COPY_PATHS" == *$'\n'* ]]; then
+              echo "Enter the copy paths on one line." >&2
+              exit 1
+            fi
+            read -r -a paths <<< "$COPY_PATHS"
+            if (( ${#paths[@]} == 0 )); then
+              echo "Name the files being copied or leave the input empty." >&2
+              exit 1
+            fi
+            for path in "${paths[@]}"; do
+              if [[ ! "$path" =~ ^specs/v0[.]2/([a-zA-Z0-9][a-zA-Z0-9._-]*/)*[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+                printf 'Expected a specification file path, got %s\n' "$path" >&2
+                exit 1
+              fi
+            done
+          fi
+
+          for directory in specification implementation; do
+            manifest="$RUNNER_TEMP/paykit-$directory-tree"
+            if [[ -z "$COPY_PATHS" ]]; then
+              test "$(git -C "$directory" cat-file -t HEAD:specs/v0.2)" = tree
+              {
+                git -C "$directory" rev-parse --verify HEAD:specs/v0.2
+                git -C "$directory" ls-tree -r --full-tree HEAD -- specs/v0.2
+              } > "$manifest"
+            else
+              {
+                for path in "${paths[@]}"; do
+                  entry=$(git -C "$directory" ls-tree --full-tree HEAD -- "$path")
+                  case "$entry" in
+                    "100644 blob "* | "100755 blob "*) printf '%s\n' "$entry" ;;
+                    *)
+                      printf '%s is not a tracked file in %s.\n' "$path" "$directory" >&2
+                      exit 1
+                      ;;
+                  esac
+                done
+              } > "$manifest"
+            fi
+          done
+          diff -u --label "Specification $SPEC_COMMIT" --label "v0.2 $CODE_COMMIT" \
+            "$RUNNER_TEMP/paykit-specification-tree" "$RUNNER_TEMP/paykit-implementation-tree"
+
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+
+      - name: Verify the pinned code's vector generator
+        shell: bash
+        working-directory: implementation
+        run: |
+          log="$RUNNER_TEMP/paykit-vector-generator.log"
+          generator=regenerate::test_vectors_set_regenerates_in_dependency_order
+          env -u PAYKIT_WRITE_VECTORS CARGO_TERM_COLOR=never cargo test --locked -p paykit-lib \
+            --test vectors "$generator" -- --exact | tee "$log"
+          if ! grep -Fxq "test $generator ... ok" "$log"; then
+            echo "The expected vector generator test did not pass." >&2
+            exit 1
+          fi
+          vector_changes=$(git status --porcelain -- specs/v0.2/vectors)
+          if [[ -n "$vector_changes" ]]; then
+            printf 'The generator changed the vector files:\n%s\n' "$vector_changes" >&2
+            exit 1
+          fi
