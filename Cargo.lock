@@ -1706,15 +1706,21 @@ version = "0.1.0"
 source = "git+https://github.com/pubky/pubky-switch?rev=28bd84fc41cdb1e045a74516cf46c532f773e597#28bd84fc41cdb1e045a74516cf46c532f773e597"
 dependencies = [
  "blake3",
+ "bytes",
  "ed25519-dalek",
  "getrandom 0.3.4",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "pubky-switch-core",
  "reqwest",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "url",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
