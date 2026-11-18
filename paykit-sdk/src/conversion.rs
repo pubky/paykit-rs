@@ -1,22 +1,24 @@
 //! Pricing a payment by conversion rates (Paykit spec 7.2 step 1, 8.2, Paykit wire 4.4, 4.9).
 //!
 //! The amount to an endpoint is computed before paying, as in v0.1
-//! (`specs/payment-conversion.md`, "Conversion terms"): to an endpoint of the requested asset
-//! that no rate prices, the request's amount, rounded up once to the endpoint's smallest unit
-//! named by the payment method (Paykit wire 1.2); to an endpoint a rate prices, the request's amount times the asset-rail
-//! rate if there is one, else the asset-wide one, rounded up once to the endpoint's smallest
-//! unit, which the payment method names ([`crate::Rail::fraction_digits`]). Under conversion
-//! terms, an endpoint of another asset that no rate prices is unusable. A request without
-//! conversion terms promises no rate: an endpoint of the requested asset is paid as above,
-//! and one of another asset the request's amount as given, only by the user's choice of what
-//! the method would transfer.
+//! (`specs/payment-conversion.md`, "Conversion terms"), by the one selection
+//! [`paykit_lib::amount_for_endpoint`], with the endpoint's smallest unit named by the payment
+//! method ([`crate::Rail::fraction_digits`]): to an endpoint of the requested asset that no
+//! rate prices, the request's amount, rounded up once to that unit (Paykit wire 1.2); to an
+//! endpoint a rate prices, the request's amount times the asset-rail rate if there is one,
+//! else the asset-wide one, rounded up once to that unit. Under conversion terms, an endpoint
+//! of another asset that no rate prices is unusable. A request without conversion terms
+//! promises no rate: an endpoint of another asset is paid only by hand, on its user's
+//! confirmation of what the method would transfer ([`Priced::ByHand`]).
 //!
 //! A payment priced by a rate is made only by hand: its user confirms the amount so
 //! computed ([`PricedPayment`]), and the payer pays exactly that. The payee expects the amount
 //! computed by the same rule for the endpoint its proof names.
 
 use paykit_lib::bodies::Conversion;
-use paykit_lib::{amount_for_endpoint, PaymentAmount, PaymentEndpointIdentifier, Rate};
+use paykit_lib::{
+    amount_for_endpoint, EndpointAmount, PaymentAmount, PaymentEndpointIdentifier, Rate,
+};
 
 use crate::rail::Rail;
 use crate::requests::RequestRef;
@@ -68,9 +70,8 @@ pub struct PricedPayment {
 /// The amount a payment pays to an endpoint ([`price`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Priced {
-    /// No rate prices it: the amount requested, rounded up once to the endpoint's smallest
-    /// unit when the endpoint is of the requested asset, else as given. Every endpoint
-    /// needs a unit named by the method ([`plain_amount`]).
+    /// Of the requested asset, and no rate prices it: the amount requested, rounded up once
+    /// to the endpoint's smallest unit.
     Plain(PaymentAmount),
     /// Priced by `rate`: `amount`, in the endpoint's asset.
     ByRate {
@@ -79,10 +80,21 @@ pub(crate) enum Priced {
         /// The amount computed.
         amount: PaymentAmount,
     },
-    /// Unusable for the payment: of another asset that no rate prices, of no asset that can
-    /// be told, or priced by a rate but without a smallest unit the method names.
+    /// A request without conversion terms, to an endpoint of another asset, or of one that
+    /// can't be told: the amount requested, as given, paid only by hand, once its user has
+    /// confirmed what the method would transfer for it. An automatic payment never pays it.
+    ByHand(PaymentAmount),
+    /// Unusable for the payment: under conversion terms, of another asset that no rate
+    /// prices or of no asset that can be told; or of an endpoint whose smallest unit the
+    /// method can't name; or an amount that doesn't fit.
     Unusable(&'static str),
 }
+
+/// Why a payment of a request without conversion terms to an endpoint of another asset is
+/// made only by hand (Paykit spec 7.2 step 1).
+pub(crate) const BY_HAND_ONLY: &str = "Paykit spec 7.2 step 1: a request without conversion \
+     terms promises no rate, so an endpoint of another asset is paid only by hand, on its \
+     user's confirmation of what the method would transfer";
 
 /// The fixed rates of conversion terms `conversion`: the rates of a request whose
 /// conversion terms are `fixed`, `None` for none or `per_period`.
@@ -93,104 +105,31 @@ pub(crate) fn fixed_rates(conversion: Option<&Conversion>) -> Option<&[Rate]> {
     }
 }
 
-/// The rate of `rates` that prices `endpoint_id`: the asset-rail rate if there is one, else
-/// the asset-wide one (Paykit wire 4.4); `None` for none, or an endpoint not of the form
-/// `<asset>-<rail>-<format>`.
-pub(crate) fn rate_for<'a>(
-    rates: &'a [Rate],
-    endpoint_id: &PaymentEndpointIdentifier,
-) -> Option<&'a Rate> {
-    let asset = endpoint_id.asset_segment()?;
-    let rail = endpoint_id.as_str().split('-').nth(1)?;
-    let asset_rail = format!("{asset}-{rail}");
-    rates
-        .iter()
-        .find(|r| r.asset().as_str() == asset_rail)
-        .or_else(|| rates.iter().find(|r| r.asset().as_str() == asset))
-}
-
-/// The amount a payment of a request for `requested` pays to `endpoint_id` that no rate
-/// prices (Paykit spec 7.2 step 1, Paykit wire 1.2): to an endpoint of the requested asset,
-/// the amount rounded up once to the smallest unit `rail` names for it, `None` when the
-/// method names none or the rounded amount doesn't fit, so the endpoint is unusable; to any
-/// other, the amount as given, which the transfer check then holds the method to, so another
-/// amount or asset is paid only on the user's choice.
-pub(crate) fn plain_amount(
-    rail: &dyn Rail,
-    requested: &PaymentAmount,
-    endpoint_id: &PaymentEndpointIdentifier,
-) -> Option<PaymentAmount> {
-    let digits = rail.fraction_digits(endpoint_id)?;
-    if digits > 18 {
-        return None;
-    }
-    if endpoint_id.asset_segment() != Some(requested.asset.as_str()) {
-        return Some(requested.clone());
-    }
-    amount_for_endpoint(requested, None, endpoint_id, digits)
-        .ok()
-        .flatten()
-}
-
-/// [`plain_amount`] as a [`Priced`]: [`Priced::Unusable`] when the method names no unit.
-fn plain(
-    rail: &dyn Rail,
-    requested: &PaymentAmount,
-    endpoint_id: &PaymentEndpointIdentifier,
-) -> Priced {
-    match plain_amount(rail, requested, endpoint_id) {
-        Some(amount) => Priced::Plain(amount),
-        None => Priced::Unusable(
-            "Paykit spec 7.2 step 1: the payment method names no smallest unit for the endpoint",
-        ),
-    }
-}
-
 /// The amount a payment of a request for `requested` pays to `endpoint_id` (Paykit spec 7.2
-/// step 1), as payer and as payee alike: `rates` are the conversion terms' rates, the
-/// request's fixed rates or the period details' rates, `None` for a request without
-/// conversion terms, which every endpoint takes as [`Priced::Plain`].
-///
-/// Under conversion terms, an endpoint a rate prices is [`Priced::ByRate`], its amount
-/// computed by [`amount_for_endpoint`] with the smallest unit `rail` names for it; one of
-/// the requested asset that no rate prices is [`Priced::Plain`]; any other is
-/// [`Priced::Unusable`], as is a priced one whose smallest unit the method can't name, or
-/// whose amount doesn't fit.
+/// step 1), as payer and as payee alike, by [`amount_for_endpoint`] with the smallest unit
+/// `rail` names for the endpoint: `rates` are the conversion terms' rates, the request's
+/// fixed rates or the period details' rates, `None` for a request without conversion terms.
+/// An endpoint whose unit the method can't name is [`Priced::Unusable`], whatever the terms.
 pub(crate) fn price(
     rail: &dyn Rail,
     requested: &PaymentAmount,
     rates: Option<&[Rate]>,
     endpoint_id: &PaymentEndpointIdentifier,
 ) -> Priced {
-    let Some(rates) = rates else {
-        return plain(rail, requested, endpoint_id);
-    };
-    let Some(asset) = endpoint_id.asset_segment() else {
-        return Priced::Unusable(
-            "Paykit wire 4.4: under conversion terms an endpoint is <asset>-<rail>-<format>",
-        );
-    };
-    let Some(rate) = rate_for(rates, endpoint_id) else {
-        return if asset == requested.asset.as_str() {
-            plain(rail, requested, endpoint_id)
-        } else {
-            Priced::Unusable(
-                "Paykit spec 7.2 step 1: under conversion terms an endpoint of another asset that no rate prices is unusable",
-            )
-        };
-    };
     let Some(digits) = rail.fraction_digits(endpoint_id) else {
         return Priced::Unusable(
-            "Paykit spec 7.2 step 1: the payment method names no smallest unit for the endpoint a rate prices",
+            "Paykit spec 7.2 step 1: the payment method names no smallest unit for the endpoint",
         );
     };
-    match amount_for_endpoint(requested, Some(rates), endpoint_id, digits) {
-        Ok(Some(amount)) => Priced::ByRate {
-            rate: rate.clone(),
-            amount,
-        },
-        _ => Priced::Unusable(
-            "Paykit wire 1.2: the amount a rate prices doesn't fit, or the method's smallest unit is out of bounds",
+    match amount_for_endpoint(requested, rates, endpoint_id, digits) {
+        Ok(EndpointAmount::ByRate { rate, amount }) => Priced::ByRate { rate, amount },
+        Ok(EndpointAmount::RequestedAsset(amount)) => Priced::Plain(amount),
+        Ok(EndpointAmount::ByHandOnly) => Priced::ByHand(requested.clone()),
+        Ok(_) => Priced::Unusable(
+            "Paykit spec 7.2 step 1: under conversion terms an endpoint of another asset that no rate prices, or whose asset can't be told, is unusable",
+        ),
+        Err(_) => Priced::Unusable(
+            "Paykit wire 1.2, 4.4: the rates are malformed, the method's smallest unit is out of bounds, or the amount doesn't fit",
         ),
     }
 }
@@ -244,10 +183,10 @@ mod tests {
     fn test_conversion_price_plain_without_terms_or_for_the_requested_asset() {
         let rail = FakeRail::new();
         let usd = amount("0.05", "usd");
-        // Another asset without terms: the amount as given.
+        // Another asset without terms: the amount as given, only by hand.
         assert_eq!(
             price(&rail, &usd, None, &id("eur-sepa-iban")),
-            Priced::Plain(usd.clone())
+            Priced::ByHand(usd.clone())
         );
         // The requested asset with the method's default unit: no rounding needed.
         let rates = [rate("btc", "0.00001")];
@@ -301,7 +240,7 @@ mod tests {
         for endpoint in [id("eur-sepa-iban"), id("custom")] {
             assert!(matches!(
                 price(&rail, &requested, None, &endpoint),
-                Priced::Plain(_)
+                Priced::ByHand(_)
             ));
             for digits in [None, Some(19)] {
                 rail.set_fraction_digits(endpoint.clone(), digits);

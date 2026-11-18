@@ -279,40 +279,121 @@ pub(crate) fn is_conversion_segment(text: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
 }
 
-/// The amount to pay to an endpoint (Paykit spec 7.2 step 1, Paykit wire 4.4, 4.9,
-/// `specs/payment-conversion.md`): `requested` priced in the endpoint's asset by `rates`, the
-/// request's fixed rates or the rates of the period details being paid, `None` for neither.
+/// What a payment of a request pays to an endpoint ([`amount_for_endpoint`], Paykit spec 7.2
+/// step 1, Paykit wire 4.4, 4.9).
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EndpointAmount {
+    /// The endpoint is priced by `rate`, the asset-rail rate if there is one, else the
+    /// asset-wide one: `amount` is the requested value times the rate, rounded up once to the
+    /// endpoint's smallest unit, in the endpoint's asset. Its user confirms it before paying.
+    ByRate {
+        /// The rate used.
+        rate: Rate,
+        /// The amount to pay, in the endpoint's asset.
+        amount: PaymentAmount,
+    },
+    /// The endpoint is of the requested asset and no rate prices it: the requested amount,
+    /// rounded up once to the endpoint's smallest unit.
+    RequestedAsset(PaymentAmount),
+    /// The request has no conversion terms and the endpoint is of another asset, or of one
+    /// that can't be told: the request promises no rate, so the payer pays it only by hand,
+    /// by its own calculation, which its user confirms. An app may decline it.
+    ByHandOnly,
+    /// Under conversion terms, the endpoint is of another asset that no rate prices, or of
+    /// one that can't be told: it is unusable for the payment. A market rate is never used.
+    Unusable,
+}
+
+/// The rate of `rates` that prices `endpoint` (Paykit wire 4.4): the asset-rail rate,
+/// `usdt-polygon` for `usdt-polygon-address`, if there is one, else the asset-wide rate,
+/// `usdt`, whatever the order of `rates`; `None` for none, or for an endpoint not of the form
+/// `<asset>-<rail>-<format>`, whose asset can't be told. The format segment never selects a
+/// rate, and a rail-qualified rate prices only its own rail. It is the selection
+/// [`amount_for_endpoint`] prices by.
+///
+/// # Errors
+///
+/// [`Error::Validation`] for rates that are empty or name a selector twice, which select
+/// nothing: neither is taken as no rate or as the first match.
+///
+/// # Examples
+///
+/// ```
+/// use paykit_lib::{rate_for_endpoint, Asset, Decimal, PaymentEndpointIdentifier, Rate};
+///
+/// let rate = |asset: &str, value: &str| Rate::new(Asset::new(asset)?, Decimal::new(value)?);
+/// let rates = [rate("usdt", "1")?, rate("usdt-polygon", "1.008")?];
+/// let polygon = PaymentEndpointIdentifier::new("usdt-polygon-address")?;
+/// assert_eq!(rate_for_endpoint(&rates, &polygon)?, Some(&rates[1]));
+/// let sepa = PaymentEndpointIdentifier::new("eur-sepa-iban")?;
+/// assert_eq!(rate_for_endpoint(&rates, &sepa)?, None);
+/// assert!(rate_for_endpoint(&[], &polygon).is_err());
+/// # Ok::<(), paykit_lib::Error>(())
+/// ```
+pub fn rate_for_endpoint<'a>(
+    rates: &'a [Rate],
+    endpoint: &PaymentEndpointIdentifier,
+) -> Result<Option<&'a Rate>> {
+    if rates.is_empty() {
+        return Err(Error::Validation(
+            "Paykit wire 4.4: rates are non-empty when present".into(),
+        ));
+    }
+    for (i, rate) in rates.iter().enumerate() {
+        if rates[..i].iter().any(|r| r.asset == rate.asset) {
+            return Err(Error::Validation(
+                "Paykit wire 4.4: rates name each asset selector once".into(),
+            ));
+        }
+    }
+    let Some(asset) = endpoint.asset_segment() else {
+        return Ok(None);
+    };
+    let rail = endpoint.as_str().split('-').nth(1).unwrap_or_default();
+    let asset_rail = format!("{asset}-{rail}");
+    Ok(rates
+        .iter()
+        .find(|r| r.asset.as_str() == asset_rail)
+        .or_else(|| rates.iter().find(|r| r.asset.as_str() == asset)))
+}
+
+/// What a payment of a request for `requested` pays to `endpoint` (Paykit spec 7.2 step 1,
+/// Paykit wire 4.4, 4.9, `specs/payment-conversion.md`), as payer and as payee alike.
+/// `rates` are the conversion terms' rates, the request's fixed rates or the rates of the
+/// period details being paid; `None` for a request without conversion terms.
 ///
 /// `endpoint` is the selected endpoint's Payment Endpoint Identifier, of the form
 /// `<asset>-<rail>-<format>`, and `fraction_digits` the number of fraction digits of its
 /// smallest unit, from 0 to 18, which the payment method names: 8 for satoshis, 11 for
-/// millisatoshis, 6 for a token with six decimals. The rate is chosen in this order, whatever
-/// the order of `rates`:
+/// millisatoshis, 6 for a token with six decimals. The outcome is, in this order:
 ///
-/// 1. the asset-rail rate, `usdt-polygon` for `usdt-polygon-address`;
-/// 2. else the asset-wide rate, `usdt`;
-/// 3. else exactly 1, when the endpoint's asset is the requested asset;
-/// 4. else none: the endpoint is unusable for conversion, and `None` is returned. A market
-///    rate is never used.
+/// 1. [`EndpointAmount::ByRate`] by the rate [`rate_for_endpoint`] selects: the asset-rail
+///    rate, else the asset-wide one;
+/// 2. else [`EndpointAmount::RequestedAsset`], when the endpoint's asset is the requested
+///    asset;
+/// 3. else, without conversion terms, [`EndpointAmount::ByHandOnly`]: the request promises
+///    no rate, so the payment is made only by hand, by the payer's own calculation;
+/// 4. else [`EndpointAmount::Unusable`]. A market rate is never used.
 ///
-/// The requested value times the rate is computed exactly and rounded up once, to the
-/// endpoint's smallest unit. The result is in the endpoint's asset segment, normalized. The
-/// format segment never selects a rate, and a rail-qualified rate prices only its own rail.
+/// The requested value times the rate, or 1, is computed exactly and rounded up once, to the
+/// endpoint's smallest unit. The amount is in the endpoint's asset segment, normalized.
 ///
 /// It checks neither that the request accepts the endpoint nor that the period details are
 /// the ones to use; the caller does.
 ///
 /// # Errors
 ///
-/// [`Error::Validation`] for an `endpoint` not of the form `<asset>-<rail>-<format>`,
-/// `fraction_digits` above 18, explicit rates that are empty or repeat a selector, or an
-/// amount to pay whose value times 10^18 isn't below 2^128.
+/// [`Error::Validation`] for `fraction_digits` above 18, explicit rates that are empty or
+/// repeat a selector ([`rate_for_endpoint`]), or an amount to pay whose value times 10^18
+/// isn't below 2^128.
 ///
 /// # Examples
 ///
 /// ```
 /// use paykit_lib::{
-///     amount_for_endpoint, Asset, Decimal, PaymentAmount, PaymentEndpointIdentifier, Rate,
+///     amount_for_endpoint, Asset, Decimal, EndpointAmount, PaymentAmount,
+///     PaymentEndpointIdentifier, Rate,
 /// };
 ///
 /// let requested = PaymentAmount {
@@ -322,12 +403,25 @@ pub(crate) fn is_conversion_segment(text: &str) -> bool {
 /// let rates = [Rate::new(Asset::new("btc")?, Decimal::new("0.000012345")?)?];
 /// let onchain = PaymentEndpointIdentifier::new("btc-onchain-address")?;
 /// // 61.725 satoshis, rounded up to 62.
-/// let amount = amount_for_endpoint(&requested, Some(&rates), &onchain, 8)?.unwrap();
+/// let EndpointAmount::ByRate { rate, amount } =
+///     amount_for_endpoint(&requested, Some(&rates), &onchain, 8)?
+/// else {
+///     unreachable!()
+/// };
+/// assert_eq!(rate, rates[0]);
 /// assert_eq!(amount.value.as_str(), "0.00000062");
 /// assert_eq!(amount.asset.as_str(), "btc");
 /// // No rate prices eur, and eur isn't the requested asset.
 /// let sepa = PaymentEndpointIdentifier::new("eur-sepa-iban")?;
-/// assert_eq!(amount_for_endpoint(&requested, Some(&rates), &sepa, 2)?, None);
+/// assert_eq!(
+///     amount_for_endpoint(&requested, Some(&rates), &sepa, 2)?,
+///     EndpointAmount::Unusable
+/// );
+/// // Without conversion terms, only by hand.
+/// assert_eq!(
+///     amount_for_endpoint(&requested, None, &sepa, 2)?,
+///     EndpointAmount::ByHandOnly
+/// );
 /// # Ok::<(), paykit_lib::Error>(())
 /// ```
 pub fn amount_for_endpoint(
@@ -335,49 +429,40 @@ pub fn amount_for_endpoint(
     rates: Option<&[Rate]>,
     endpoint: &PaymentEndpointIdentifier,
     fraction_digits: u32,
-) -> Result<Option<PaymentAmount>> {
+) -> Result<EndpointAmount> {
     let validation = |why: &str| Err(Error::Validation(why.into()));
-    let Some(asset) = endpoint.asset_segment() else {
-        return validation(
-            "Paykit wire 4.4: an endpoint priced by conversion is <asset>-<rail>-<format>, each segment lower-case letters and digits",
-        );
-    };
     let digits = usize::try_from(fraction_digits).unwrap_or(usize::MAX);
     if digits > MAX_FRACTION_DIGITS {
         return validation(
             "Paykit wire 1.2: an endpoint's smallest unit has at most 18 fraction digits",
         );
     }
-    if rates.is_some_and(<[Rate]>::is_empty) {
-        return validation("Paykit wire 4.4: rates are non-empty when present");
-    }
-    let rates = rates.unwrap_or_default();
-    for (i, rate) in rates.iter().enumerate() {
-        if rates[..i].iter().any(|r| r.asset == rate.asset) {
-            return validation("Paykit wire 4.4: rates name each asset selector once");
-        }
-    }
-    let rail = endpoint.as_str().split('-').nth(1).unwrap_or_default();
-    let asset_rail = format!("{asset}-{rail}");
-    let rate = rates
-        .iter()
-        .find(|r| r.asset.as_str() == asset_rail)
-        .or_else(|| rates.iter().find(|r| r.asset.as_str() == asset))
-        .map(|r| r.value.scaled);
-    let rate = match rate {
-        Some(rate) => rate,
-        None if requested.asset.as_str() == asset => SCALE,
-        None => return Ok(None),
+    let rate = match rates {
+        Some(rates) => rate_for_endpoint(rates, endpoint)?,
+        None => None,
+    };
+    let (asset, rate, by_rate) = match (endpoint.asset_segment(), rate) {
+        (Some(asset), Some(rate)) => (asset, rate.value.scaled, Some(rate)),
+        (Some(asset), None) if requested.asset.as_str() == asset => (asset, SCALE, None),
+        _ if rates.is_none() => return Ok(EndpointAmount::ByHandOnly),
+        _ => return Ok(EndpointAmount::Unusable),
     };
     // `digits` is at most 18, so the exponent is at most 18.
     let unit = 10u128.pow(u32::try_from(MAX_FRACTION_DIGITS - digits).unwrap_or(0));
     let Some(scaled) = product_rounded_up(requested.value.scaled, rate, unit) else {
         return validation("Paykit wire 1.2: the amount to pay times 10^18 is below 2^128");
     };
-    Ok(Some(PaymentAmount {
+    let amount = PaymentAmount {
         value: Decimal::from_scaled(scaled),
         asset: Asset(asset.to_owned()),
-    }))
+    };
+    Ok(match by_rate {
+        Some(rate) => EndpointAmount::ByRate {
+            rate: rate.clone(),
+            amount,
+        },
+        None => EndpointAmount::RequestedAsset(amount),
+    })
 }
 
 /// The product of two amounts scaled by 10^18, itself scaled by 10^18 and rounded up to a
@@ -508,16 +593,27 @@ mod tests {
             .collect()
     }
 
-    /// The amount to pay to `endpoint`, as `<value> <asset>`, or `None`.
+    /// What a payment pays to `endpoint`: `<value> <asset>`, with ` by <selector>` for an
+    /// amount a rate prices, `by hand only` or `unusable`.
     fn pay(
         requested: &PaymentAmount,
         rates: Option<&[Rate]>,
         endpoint: &str,
         digits: u32,
-    ) -> Result<Option<String>> {
+    ) -> Result<String> {
         let endpoint = PaymentEndpointIdentifier::parse(endpoint).unwrap();
-        Ok(amount_for_endpoint(requested, rates, &endpoint, digits)?
-            .map(|a| format!("{} {}", a.value, a.asset)))
+        Ok(
+            match amount_for_endpoint(requested, rates, &endpoint, digits)? {
+                EndpointAmount::ByRate { rate, amount } => {
+                    format!("{} {} by {}", amount.value, amount.asset, rate.asset)
+                }
+                EndpointAmount::RequestedAsset(amount) => {
+                    format!("{} {}", amount.value, amount.asset)
+                }
+                EndpointAmount::ByHandOnly => "by hand only".into(),
+                EndpointAmount::Unusable => "unusable".into(),
+            },
+        )
     }
 
     #[test]
@@ -527,10 +623,10 @@ mod tests {
         let reversed = rates(&[("usdt-polygon", "1.008"), ("usdt", "1")]);
         for list in [&both, &reversed] {
             let got = pay(&usd, Some(list), "usdt-polygon-address", 6).unwrap();
-            assert_eq!(got.as_deref(), Some("10.08 usdt"));
+            assert_eq!(got, "10.08 usdt by usdt-polygon");
             // The format segment selects no rate.
             let got = pay(&usd, Some(list), "usdt-polygon-erc20", 6).unwrap();
-            assert_eq!(got.as_deref(), Some("10.08 usdt"));
+            assert_eq!(got, "10.08 usdt by usdt-polygon");
         }
     }
 
@@ -539,7 +635,7 @@ mod tests {
         let usd = amount("10", "usd");
         let both = rates(&[("usdt", "1"), ("usdt-polygon", "1.008")]);
         let got = pay(&usd, Some(&both), "usdt-ethereum-address", 6).unwrap();
-        assert_eq!(got.as_deref(), Some("10 usdt"));
+        assert_eq!(got, "10 usdt by usdt");
     }
 
     #[test]
@@ -548,11 +644,11 @@ mod tests {
         let polygon = rates(&[("usdt-polygon", "1.008")]);
         // An explicit rate for the requested asset takes precedence over parity.
         let got = pay(&usdt, Some(&polygon), "usdt-polygon-address", 6).unwrap();
-        assert_eq!(got.as_deref(), Some("10.08 usdt"));
+        assert_eq!(got, "10.08 usdt by usdt-polygon");
         let got = pay(&usdt, Some(&polygon), "usdt-ethereum-address", 6).unwrap();
-        assert_eq!(got.as_deref(), Some("10 usdt"));
+        assert_eq!(got, "10 usdt");
         let got = pay(&usdt, None, "usdt-ethereum-address", 6).unwrap();
-        assert_eq!(got.as_deref(), Some("10 usdt"));
+        assert_eq!(got, "10 usdt");
     }
 
     #[test]
@@ -560,12 +656,10 @@ mod tests {
         let usd = amount("10", "usd");
         let polygon = rates(&[("usdt-polygon", "1.008")]);
         // Another rail of the asset doesn't inherit a rail-qualified rate.
-        assert_eq!(
-            pay(&usd, Some(&polygon), "usdt-ethereum-address", 6).unwrap(),
-            None
-        );
-        assert_eq!(pay(&usd, Some(&polygon), "eur-sepa-iban", 2).unwrap(), None);
-        assert_eq!(pay(&usd, None, "btc-lightning-bolt11", 11).unwrap(), None);
+        let got = pay(&usd, Some(&polygon), "usdt-ethereum-address", 6).unwrap();
+        assert_eq!(got, "unusable");
+        let got = pay(&usd, Some(&polygon), "eur-sepa-iban", 2).unwrap();
+        assert_eq!(got, "unusable");
     }
 
     #[test]
@@ -574,19 +668,19 @@ mod tests {
         let btc = rates(&[("btc", "0.000012345")]);
         // 61.725 satoshis on chain round up to 62; 61,725 millisatoshis are exact.
         let got = pay(&usd, Some(&btc), "btc-onchain-address", 8).unwrap();
-        assert_eq!(got.as_deref(), Some("0.00000062 btc"));
+        assert_eq!(got, "0.00000062 btc by btc");
         let got = pay(&usd, Some(&btc), "btc-lightning-invoice", 11).unwrap();
-        assert_eq!(got.as_deref(), Some("0.00000061725 btc"));
+        assert_eq!(got, "0.00000061725 btc by btc");
         let usdt = rates(&[("usdt", "1")]);
         let got = pay(&usd, Some(&usdt), "usdt-polygon-address", 6).unwrap();
-        assert_eq!(got.as_deref(), Some("0.05 usdt"));
+        assert_eq!(got, "0.05 usdt by usdt");
         // A product below 10^-18 rounds up, and a same-asset payment rounds up too.
         let tiny = amount("0.000000000000000001", "usd");
         let half = rates(&[("btc", "0.5")]);
         let got = pay(&tiny, Some(&half), "btc-onchain-address", 18).unwrap();
-        assert_eq!(got.as_deref(), Some("0.000000000000000001 btc"));
+        assert_eq!(got, "0.000000000000000001 btc by btc");
         let got = pay(&tiny, Some(&half), "btc-onchain-address", 0).unwrap();
-        assert_eq!(got.as_deref(), Some("1 btc"));
+        assert_eq!(got, "1 btc by btc");
         let got = pay(
             &amount("10.0000001", "usdt"),
             None,
@@ -594,9 +688,9 @@ mod tests {
             6,
         )
         .unwrap();
-        assert_eq!(got.as_deref(), Some("10.000001 usdt"));
+        assert_eq!(got, "10.000001 usdt");
         let got = pay(&amount("0", "usd"), Some(&btc), "btc-onchain-address", 8).unwrap();
-        assert_eq!(got.as_deref(), Some("0 btc"));
+        assert_eq!(got, "0 btc by btc");
     }
 
     #[test]
@@ -611,26 +705,117 @@ mod tests {
         // Rounding up past 2^128 overflows too.
         let error = pay(&max, None, "usd-ach-account", 0).unwrap_err();
         assert!(matches!(error, Error::Validation(_)), "{error}");
-        assert!(pay(&max, None, "usd-ach-account", 18).unwrap().is_some());
+        assert!(pay(&max, None, "usd-ach-account", 18).is_ok());
     }
 
     #[test]
     fn test_amount_for_endpoint_refuses_input_outside_its_rules() {
         let usd = amount("10", "usd");
         let usdt = rates(&[("usdt", "1")]);
-        for endpoint in [
-            "usdt-polygon",
-            "usdt-polygon-address-x",
-            "USDT-polygon-address",
-            "usdt_polygon_address",
-        ] {
-            let error = pay(&usd, Some(&usdt), endpoint, 6).unwrap_err();
-            assert!(matches!(error, Error::Validation(_)), "{endpoint}: {error}");
-        }
         let error = pay(&usd, Some(&usdt), "usdt-polygon-address", 19).unwrap_err();
         assert!(matches!(error, Error::Validation(_)), "{error}");
         let twice = rates(&[("usdt", "1"), ("usdt", "1.01")]);
         let error = pay(&usd, Some(&twice), "usdt-polygon-address", 6).unwrap_err();
         assert!(matches!(error, Error::Validation(_)), "{error}");
+    }
+
+    /// A selection case: the amount requested, the rates, the endpoint, and the outcome
+    /// [`pay`] gives, `None` for a refusal.
+    type Case<'a> = (
+        &'a PaymentAmount,
+        Option<&'a [Rate]>,
+        &'a str,
+        Option<&'a str>,
+    );
+
+    /// Every outcome of the one selection, payer and payee alike (Paykit spec 7.2 step 1):
+    /// the rate it uses, the amount, the by-hand-only outcome of a request without
+    /// conversion terms, and the refusal of malformed rates, which never select a rate.
+    #[test]
+    fn test_amount_for_endpoint_selection_outcomes() {
+        let usd = amount("10", "usd");
+        let usdt = amount("10", "usdt");
+        let both = rates(&[("usdt", "1"), ("usdt-polygon", "1.008")]);
+        let polygon = rates(&[("usdt-polygon", "1.008")]);
+        let twice = rates(&[("usdt-polygon", "1.008"), ("usdt-polygon", "1")]);
+        let twice_wide = rates(&[("usdt", "1"), ("usdt", "2")]);
+        let empty: Vec<Rate> = Vec::new();
+        let cases: [Case<'_>; 16] = [
+            // By rate: the asset-rail rate first, then the asset-wide one.
+            (
+                &usd,
+                Some(&both),
+                "usdt-polygon-address",
+                Some("10.08 usdt by usdt-polygon"),
+            ),
+            (
+                &usd,
+                Some(&both),
+                "usdt-ethereum-address",
+                Some("10 usdt by usdt"),
+            ),
+            (
+                &usdt,
+                Some(&polygon),
+                "usdt-polygon-address",
+                Some("10.08 usdt by usdt-polygon"),
+            ),
+            // The requested asset that no rate prices, with or without terms.
+            (
+                &usdt,
+                Some(&polygon),
+                "usdt-ethereum-address",
+                Some("10 usdt"),
+            ),
+            (&usdt, None, "usdt-ethereum-address", Some("10 usdt")),
+            // Without terms, another asset, or one that can't be told: only by hand.
+            (&usd, None, "usdt-polygon-address", Some("by hand only")),
+            (&usd, None, "eur-sepa-iban", Some("by hand only")),
+            (&usd, None, "custom", Some("by hand only")),
+            (&usd, None, "usd-ach", Some("by hand only")),
+            // Under terms, another asset no rate prices, or one that can't be told.
+            (
+                &usd,
+                Some(&polygon),
+                "usdt-ethereum-address",
+                Some("unusable"),
+            ),
+            (&usd, Some(&both), "eur-sepa-iban", Some("unusable")),
+            (&usd, Some(&both), "usdt-polygon", Some("unusable")),
+            // Malformed rates are refused, never taken as no rate or as the first match.
+            (&usd, Some(&twice), "usdt-polygon-address", None),
+            (&usd, Some(&twice_wide), "usdt-polygon-address", None),
+            (&usd, Some(&empty), "usdt-polygon-address", None),
+            (&usdt, Some(&empty), "usdt-ethereum-address", None),
+        ];
+        for (requested, rates, endpoint, expected) in cases {
+            let got = pay(requested, rates, endpoint, 6);
+            match expected {
+                Some(expected) => assert_eq!(got.unwrap(), expected, "{endpoint}"),
+                None => assert!(
+                    matches!(got, Err(Error::Validation(_))),
+                    "{endpoint}: {got:?}"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn test_rate_for_endpoint_refuses_malformed_rates() {
+        let endpoint = PaymentEndpointIdentifier::parse("usdt-polygon-address").unwrap();
+        let both = rates(&[("usdt-polygon", "1.008"), ("usdt", "1")]);
+        assert_eq!(rate_for_endpoint(&both, &endpoint).unwrap(), Some(&both[0]));
+        let custom = PaymentEndpointIdentifier::parse("custom").unwrap();
+        assert_eq!(rate_for_endpoint(&both, &custom).unwrap(), None);
+        for list in [
+            Vec::new(),
+            rates(&[("usdt", "1"), ("usdt", "1")]),
+            rates(&[("btc", "1"), ("btc", "2")]),
+        ] {
+            assert!(matches!(
+                rate_for_endpoint(&list, &endpoint),
+                Err(Error::Validation(_))
+            ));
+        }
     }
 }
