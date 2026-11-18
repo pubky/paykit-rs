@@ -1278,8 +1278,9 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// [`Refusal::ScopeMissing`] without `paykit_allowance`; [`Refusal::NotNow`] while sends to
-    /// `to` are held, at an app holding `paykit_contacts`: the deny list holds it, or the copy of
+    /// Proposing requires both `paykit_allowance` and `paykit_contacts`.
+    /// [`Refusal::ScopeMissing`] identifies a missing scope. [`Refusal::NotNow`] is returned
+    /// while sends to `to` are held because the deny list holds it, or the copy of
     /// the lists isn't known after a read tried now (Paykit spec 8.1, "Blocked counterparties"),
     /// with nothing signed, written or queued; [`PaykitError::Lib`] with `Validation` for terms
     /// that break Paykit wire 4.15, with nothing sent; the client's errors. A failure that leaves
@@ -1439,7 +1440,7 @@ impl Paykit {
     /// wire 4.16): the rejection is recorded, then sent. Only the proposal's recipient
     /// answers it, once. Returns the rejection's `msg_id`. A rejected Allowance has no
     /// end. A rejection is a stop: it goes over a record seen divergent as over any other
-    /// (Paykit spec 6).
+    /// (Paykit spec 6). Rejecting requires both `paykit_allowance` and `paykit_contacts`.
     ///
     /// # Errors
     ///
@@ -1459,7 +1460,8 @@ impl Paykit {
     /// answer, the proposal's withdrawal by this identity, its sender. The end is recorded,
     /// then sent, with an `executor_notice` to the executor the record's grant names when
     /// that is another own app (Paykit wire 4.17). The records stay as history. Returns the
-    /// end's `msg_id`.
+    /// end's `msg_id`. An app with `paykit_allowance` can end it even after the signer
+    /// removes its contacts permission.
     ///
     /// # Errors
     ///
