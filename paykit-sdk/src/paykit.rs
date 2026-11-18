@@ -607,6 +607,7 @@ impl Paykit {
             // written under a certificate Paykit refuses.
             if paykit.certificate_refused().is_none() {
                 paykit.bound_restored_cursor_time().await?;
+                Box::pin(paykit.take_restore_verdict()).await?;
             }
             // A load keeps nothing as listed under: a certificate the client took since the last
             // listing, a narrower one included, leaves the records unlisted until the next one
@@ -1019,6 +1020,9 @@ impl Paykit {
                 divergent: self.newly_paused(&paused_before).await?,
                 ..ReceiveSummary::default()
             });
+        }
+        if Box::pin(self.take_restore_verdict()).await? {
+            Box::pin(self.refresh_lists_when_due()).await?;
         }
         // Restore-held blocks go before the other outgoing work, after the first page.
         if blocks_after_read {

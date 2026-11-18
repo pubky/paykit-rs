@@ -2037,6 +2037,7 @@ async fn test_one_time_restore_asks_wait_for_a_sealed_records_key() {
     )
     .await
     .unwrap();
+    crate::common::restore_with_unknown_cursor(&mut restored).await;
     restored.reconcile().await.unwrap();
     restored
         .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
@@ -2335,6 +2336,7 @@ async fn test_one_time_restore_asks_the_readable_now_and_the_sealed_once_open() 
     )
     .await
     .unwrap();
+    crate::common::restore_with_unknown_cursor(&mut restored).await;
     restored.reconcile().await.unwrap();
     restored
         .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
