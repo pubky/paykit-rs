@@ -1335,6 +1335,17 @@ pub(crate) fn client_listing_requests(cert: &AppCert) -> usize {
         .count()
 }
 
+async fn read_payee_pages(wallet: &mut Paykit, cert: &AppCert) {
+    let pages = client_listing_requests(cert);
+    for _ in 0..pages.div_ceil(pubky_switch_client::app::LISTING_PAGES_PER_READ as usize) {
+        let summary = wallet.receive(None).await.unwrap();
+        if summary.records_unlisted.is_none() {
+            break;
+        }
+        assert!(is_not_now(&wallet.payee_activity().await.unwrap_err()));
+    }
+}
+
 #[tokio::test]
 async fn test_certificate_renewal_reading_more_lists_its_records_first() {
     // The wallet's copy lacks the till's record until the collection is listed: a call that
@@ -1377,14 +1388,7 @@ async fn test_certificate_renewal_reading_more_lists_its_records_first() {
     let refused = wallet.payee_activity().await.unwrap_err();
     assert!(is_not_now(&refused), "{refused:?}");
     // The next reads finish the remaining pages before the till's request can be shown.
-    let pages = client_listing_requests(&wider);
-    for _ in 0..pages.div_ceil(pubky_switch_client::app::LISTING_PAGES_PER_READ as usize) {
-        let summary = wallet.receive(None).await.unwrap();
-        if summary.records_unlisted.is_none() {
-            break;
-        }
-        assert!(is_not_now(&wallet.payee_activity().await.unwrap_err()));
-    }
+    read_payee_pages(&mut wallet, &wider).await;
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
 }
 
@@ -1439,7 +1443,7 @@ async fn test_certificate_renewal_reading_more_listing_lost_before_its_note_list
     // unlisted again, and the next read lists them once more.
     let w = World::new();
     let base = store();
-    let (mut wallet, _wider) = renewed_to_read_more_on(&w, Arc::clone(&base)).await;
+    let (mut wallet, wider) = renewed_to_read_more_on(&w, Arc::clone(&base)).await;
     let me = wallet.app_id();
     let held = wallet
         .app()
@@ -1467,7 +1471,7 @@ async fn test_certificate_renewal_reading_more_listing_lost_before_its_note_list
         .await;
     let refused = wallet.payee_activity().await.unwrap_err();
     assert!(is_not_now(&refused), "{refused:?}");
-    wallet.receive(None).await.unwrap();
+    read_payee_pages(&mut wallet, &wider).await;
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
 }
 
@@ -2085,7 +2089,7 @@ async fn test_certificate_narrowed_then_widened_lists_again() {
     wallet.receive(None).await.unwrap();
     list(&w, me, &narrow, &again);
     wallet.receive(None).await.unwrap();
-    wallet.receive(None).await.unwrap();
+    read_payee_pages(&mut wallet, &again).await;
     assert_eq!(wallet.app().cert().hash(), again.hash());
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 2);
 }
