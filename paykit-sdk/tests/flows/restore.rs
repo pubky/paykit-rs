@@ -42,6 +42,7 @@ async fn test_restore_reconciles_a_payment_made_after_the_backup() {
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -58,6 +59,7 @@ async fn test_restore_reconciles_a_payment_made_after_the_backup() {
     let refused = app
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::NotNow(_))),
@@ -74,6 +76,7 @@ async fn test_restore_reconciles_a_payment_made_after_the_backup() {
     let refused = app
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::AlreadyPaid));
     assert_eq!(w.rail.executions(&attempt_id), 1);
@@ -91,6 +94,7 @@ async fn test_restore_resolves_a_restored_journal_entry_and_sends_its_proof() {
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -127,6 +131,7 @@ async fn test_restore_unresolvable_attempt_stays_doubtful() {
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -174,7 +179,7 @@ async fn paid_after_the_backup(
     let backup = wallet.backup().await.unwrap();
     w.rail.next(Behaviour::Hang);
     let PayOutcome::Pending { attempt_id, .. } =
-        wallet.pay_request(request, options).await.unwrap()
+        wallet.pay_request(request, options).await.outcome.unwrap()
     else {
         panic!("pending");
     };
@@ -341,6 +346,7 @@ async fn backup_with_a_payment(w: &World) -> (serde_json::Value, [u8; 16]) {
     wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     let bytes = wallet.backup().await.unwrap().to_bytes().unwrap();
     (serde_json::from_slice(&bytes).unwrap(), wallet.app_id())
@@ -803,6 +809,7 @@ async fn test_restore_failure_rebuilt_that_completed_after_all_sends_its_proof()
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -990,6 +997,7 @@ async fn reconcile_with_marks(
                 .with_list_app(shop.app_id()),
         )
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -1105,6 +1113,7 @@ async fn test_restore_unrebuildable_failure_stays_doubtful_then_paid_is_not_lost
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -1138,6 +1147,7 @@ async fn test_restore_unrebuildable_failure_stays_doubtful_then_paid_is_not_lost
     assert!(app
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .is_err());
     assert_eq!(w.rail.all_executions().len(), 1);
 }
@@ -1680,6 +1690,7 @@ async fn restored_with_a_released_acceptance(
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Pending { .. }), "{outcome:?}");
     assert_eq!(
@@ -1786,6 +1797,7 @@ async fn test_restore_bare_then_resume_sends_no_acceptance_the_record_holds() {
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("in flight");
@@ -2069,12 +2081,14 @@ async fn backup_with_a_priced_payment(w: &World) -> (serde_json::Value, [u8; 16]
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     let shown = crate::conversion::priced_of(&refused);
     w.rail.next(Behaviour::Hang);
     wallet
         .pay_request(&request, PayOptions::default().with_rate_confirmed(shown))
         .await
+        .outcome
         .unwrap();
     let bytes = wallet.backup().await.unwrap().to_bytes().unwrap();
     (serde_json::from_slice(&bytes).unwrap(), wallet.app_id())
@@ -2176,6 +2190,7 @@ async fn test_journal_entry_with_no_carrier_holds_its_payment() {
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("in flight");
@@ -2371,7 +2386,7 @@ async fn test_restore_unrequested_entry_naming_another_payments_record_refused()
                 PayOptions::default()
                     .with_endpoint(crate::common::endpoint("btc-lightning-bolt12")),
             );
-        let paid = wallet.pay_without_request(payment).await.unwrap();
+        let paid = wallet.pay_without_request(payment).await.outcome.unwrap();
         assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     }
     let bytes = wallet.backup().await.unwrap().to_bytes().unwrap();
@@ -2503,6 +2518,7 @@ async fn test_restore_own_receipt_kept_unanswered_sent_again_from_its_record() {
     wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     shop.receive(None).await.unwrap();
     let record = shop.payee_activity().await.unwrap()[0].record;
@@ -3240,6 +3256,7 @@ async fn test_restore_rebuilds_a_priced_outcome_without_authorizing_another_disp
         &wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap_err(),
     );
     let (attempt_id, backup) = paid_after_the_backup(

@@ -57,6 +57,7 @@ async fn test_mixed_versions_payment_keeps_members_its_writer_does_not_know() {
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");

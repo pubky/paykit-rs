@@ -55,6 +55,7 @@ async fn test_recurring_request_rejected_before_acceptance() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::Recurring)),

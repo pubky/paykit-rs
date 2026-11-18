@@ -32,6 +32,7 @@ async fn test_destinations_from_a_revoked_app_refused() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::Destination(_))),
@@ -58,6 +59,7 @@ async fn test_destinations_from_a_current_app_paid() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
@@ -80,7 +82,11 @@ async fn test_destinations_payee_identity_unreadable_refused() {
     w.router.remove(crate::common::BOB_ORIGIN);
     w.clock.advance_ms(11 * 60_000);
     let confirmed = PayOptions::default().with_unconfirmed_identity_confirmed(UserConfirmed::new());
-    let stale = wallet.pay_request(&request, confirmed).await.unwrap_err();
+    let stale = wallet
+        .pay_request(&request, confirmed)
+        .await
+        .outcome
+        .unwrap_err();
     assert!(
         matches!(stale.refusal(), Some(Refusal::IdentityUnavailable(_))),
         "{stale:?}"
@@ -104,6 +110,7 @@ async fn test_destinations_request_endpoint_paid_without_the_switch_confirmation
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
@@ -135,6 +142,7 @@ async fn test_destinations_own_identity_missing_for_over_60s_refused() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::IdentityUnavailable(_))),
@@ -161,6 +169,7 @@ async fn test_destinations_own_identity_confirmed_under_60s_ago_paid() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
@@ -199,6 +208,7 @@ async fn test_destinations_list_endpoint_the_request_restricts_refused() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::NoDestination(_))),
@@ -237,6 +247,7 @@ async fn test_destinations_list_paid_only_to_an_endpoint_the_request_allows() {
             PayOptions::default().with_endpoint(crate::common::endpoint("btc-lightning-bolt12")),
         )
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::NoDestination(_))),
@@ -246,6 +257,7 @@ async fn test_destinations_list_paid_only_to_an_endpoint_the_request_allows() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
@@ -289,6 +301,7 @@ async fn test_destinations_check_after_the_attempt_writes_failed_and_says_so() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     // `failed` was written on the attempt, and the refusal says so (Paykit spec 7.2 step 1).
     let Some(Refusal::AttemptFailed(inner)) = refused.refusal() else {
@@ -376,6 +389,7 @@ async fn test_destinations_list_of_a_removed_app_shadows_no_current_one() {
                 ),
         )
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
@@ -429,6 +443,7 @@ async fn test_destinations_payment_method_order_picks_the_endpoint_and_the_payee
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
@@ -464,6 +479,7 @@ async fn test_destinations_no_endpoint_the_payment_method_pays_refused() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::UnsupportedEndpoint(_))),
@@ -476,6 +492,7 @@ async fn test_destinations_no_endpoint_the_payment_method_pays_refused() {
             PayOptions::default().with_endpoint(crate::common::endpoint("btc-lightning-bolt11")),
         )
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(named.refusal(), Some(Refusal::UnsupportedEndpoint(_))),
@@ -492,6 +509,7 @@ async fn test_destinations_no_endpoint_the_payment_method_pays_refused() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
@@ -518,6 +536,7 @@ async fn test_destinations_list_without_an_endpoint_the_payment_method_pays_refu
             crate::common::btc("1"),
         ))
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::UnsupportedEndpoint(_))),
@@ -546,6 +565,7 @@ async fn test_destinations_list_pays_the_payment_methods_first_endpoint() {
             crate::common::btc("1"),
         ))
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
@@ -620,6 +640,7 @@ async fn test_destinations_unsupported_live_list_beside_an_expired_one_asks_for_
             crate::common::btc("1"),
         ))
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::WaitingForList)),
@@ -723,6 +744,7 @@ async fn test_destinations_lists_of_every_app_in_the_payment_methods_order() {
             crate::common::btc("1"),
         ))
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
@@ -756,6 +778,7 @@ async fn test_destinations_request_to_any_app_takes_the_payment_methods_first_ac
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
@@ -808,6 +831,7 @@ async fn test_destinations_same_endpoint_in_two_lists_paid_from_the_greater_pair
             crate::common::btc("1"),
         ))
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
@@ -863,6 +887,7 @@ async fn test_destinations_preferred_endpoint_of_another_amount_falls_to_the_nex
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
@@ -930,6 +955,7 @@ async fn test_destinations_malformed_endpoint_of_one_app_falls_to_another_apps()
             crate::common::btc("1"),
         ))
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
@@ -962,6 +988,7 @@ async fn test_destinations_every_payable_endpoint_of_another_amount_refused() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::Transfer { .. })),
@@ -1019,6 +1046,7 @@ async fn test_destinations_method_answering_about_a_candidate_it_wasnt_handed_re
         let refused = wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap_err();
         assert!(
             matches!(
@@ -1040,6 +1068,7 @@ async fn test_destinations_method_answering_about_a_candidate_it_wasnt_handed_re
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
@@ -1067,6 +1096,7 @@ async fn test_destinations_candidate_in_error_then_a_payable_one_paid() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
@@ -1146,6 +1176,7 @@ async fn test_destinations_method_failing_fails_the_payment_not_as_unsupported()
         let failed = wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap_err();
         assert_eq!(
             failed,
@@ -1158,6 +1189,7 @@ async fn test_destinations_method_failing_fails_the_payment_not_as_unsupported()
                 crate::common::btc("1"),
             ))
             .await
+            .outcome
             .unwrap_err();
         assert_eq!(
             failed,
@@ -1180,6 +1212,7 @@ async fn test_destinations_method_failing_fails_the_payment_not_as_unsupported()
         let outcome = wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap();
         assert!(
             matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
@@ -1256,6 +1289,7 @@ async fn test_destinations_method_choosing_none_refused_as_unsupported() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::UnsupportedEndpoint(_))),
@@ -1267,6 +1301,7 @@ async fn test_destinations_method_choosing_none_refused_as_unsupported() {
             crate::common::btc("1"),
         ))
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::UnsupportedEndpoint(_))),
@@ -1297,6 +1332,7 @@ async fn test_destinations_used_up_list_asked_for_whatever_the_method_pays() {
             crate::common::btc("1"),
         ))
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
@@ -1316,6 +1352,7 @@ async fn test_destinations_used_up_list_asked_for_whatever_the_method_pays() {
             crate::common::btc("1"),
         ))
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::WaitingForList)),
@@ -1355,6 +1392,7 @@ async fn test_destinations_confirmed_transfer_of_another_destination_refused_aga
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     let on_chain = quote_of(&refused);
     assert_eq!(on_chain.endpoint_id.as_str(), "btc-bitcoin-p2wpkh");
@@ -1378,6 +1416,7 @@ async fn test_destinations_confirmed_transfer_of_another_destination_refused_aga
             PayOptions::default().with_transfer_confirmed(on_chain.clone()),
         )
         .await
+        .outcome
         .unwrap_err();
     let lightning = quote_of(&again);
     assert_eq!(lightning.endpoint_id.as_str(), "btc-lightning-bolt11");
@@ -1390,6 +1429,7 @@ async fn test_destinations_confirmed_transfer_of_another_destination_refused_aga
             PayOptions::default().with_transfer_confirmed(lightning),
         )
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
@@ -1417,6 +1457,7 @@ async fn test_destinations_confirmed_transfer_quoted_again_differently_refused_a
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     let five = quote_of(&refused);
     assert_eq!(
@@ -1431,6 +1472,7 @@ async fn test_destinations_confirmed_transfer_quoted_again_differently_refused_a
             PayOptions::default().with_transfer_confirmed(five.clone()),
         )
         .await
+        .outcome
         .unwrap_err();
     let six = quote_of(&again);
     assert_eq!(
@@ -1444,6 +1486,7 @@ async fn test_destinations_confirmed_transfer_quoted_again_differently_refused_a
     let outcome = wallet
         .pay_request(&request, PayOptions::default().with_transfer_confirmed(six))
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
@@ -1478,6 +1521,7 @@ async fn test_destinations_confirmed_retry_pays_a_destination_that_passes_withou
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     let on_chain = quote_of(&refused);
     w.rail.set_endpoint_identifiers(vec![
@@ -1490,6 +1534,7 @@ async fn test_destinations_confirmed_retry_pays_a_destination_that_passes_withou
             PayOptions::default().with_transfer_confirmed(on_chain),
         )
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
@@ -1523,6 +1568,7 @@ async fn test_destinations_fee_grown_since_planning_not_paid() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     let Some(Refusal::AttemptFailed(inner)) = refused.refusal() else {
         panic!("{refused:?}");
@@ -1551,6 +1597,7 @@ async fn test_destinations_fee_grown_past_the_confirmed_quote_not_paid() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     let five = quote_of(&refused);
     w.rail.next_max_fees(fees(&[Some("5"), Some("6")]));
@@ -1560,6 +1607,7 @@ async fn test_destinations_fee_grown_past_the_confirmed_quote_not_paid() {
             PayOptions::default().with_transfer_confirmed(five),
         )
         .await
+        .outcome
         .unwrap_err();
     let Some(Refusal::AttemptFailed(inner)) = refused.refusal() else {
         panic!("{refused:?}");
@@ -1627,6 +1675,7 @@ async fn test_destinations_list_expiring_while_the_payee_is_read_asked_for_again
             crate::common::btc("1"),
         ))
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::WaitingForList)),
@@ -1650,6 +1699,7 @@ async fn used_up_list(w: &World) -> (paykit_sdk::Paykit, paykit_sdk::Paykit) {
             ),
         )
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
@@ -1672,6 +1722,7 @@ async fn test_destinations_used_up_list_asked_for_an_endpoint_it_lacks() {
             ),
         )
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::WaitingForList)),
@@ -1703,6 +1754,7 @@ async fn test_destinations_used_up_list_asked_for_a_request_accepting_what_it_la
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::WaitingForList)),
@@ -1766,6 +1818,7 @@ async fn test_destinations_used_up_list_beside_a_list_without_the_endpoint_asked
             ),
         )
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::WaitingForList)),
@@ -1792,6 +1845,7 @@ async fn test_destinations_used_up_and_expired_list_beside_a_list_without_the_en
             ),
         )
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::WaitingForList)),
@@ -1823,6 +1877,7 @@ async fn test_destinations_used_up_list_beside_a_list_the_method_doesnt_pay_aske
             crate::common::btc("1"),
         ))
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::WaitingForList)),

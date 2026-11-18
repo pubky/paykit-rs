@@ -28,6 +28,7 @@ async fn test_receipts_carry_metadata_and_are_listed_by_payee_request_and_period
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     let attempt_id = outcome.attempt_id();
     shop.receive(None).await.unwrap();
@@ -89,6 +90,7 @@ async fn test_receipts_of_a_request_carry_no_payment_reference() {
     wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     shop.receive(None).await.unwrap();
     let record = shop.payee_activity().await.unwrap()[0].record;
@@ -119,6 +121,7 @@ async fn test_receipts_of_a_payment_without_a_request_carry_the_payees_reference
             ),
         )
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     shop.receive(None).await.unwrap();

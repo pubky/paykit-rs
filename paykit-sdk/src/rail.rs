@@ -464,8 +464,8 @@ pub trait Rail: Send + Sync {
 
     /// The Payment Endpoint Identifiers the method can pay to: what an app's record lists as
     /// its `capabilities.endpoint_identifiers`, so payees can offer matching destinations
-    /// (Paykit spec 4, Paykit wire 3.2), once the SDK publishes its own record. The SDK
-    /// never chooses a destination by them: [`Rail::select_endpoints`] does.
+    /// (Paykit spec 4, Paykit wire 3.2), at an app holding `paykit_pay`. The SDK never
+    /// chooses a destination by them: [`Rail::select_endpoints`] does.
     fn endpoint_identifiers(&self) -> Vec<PaymentEndpointIdentifier>;
 
     /// What paying `amount` to `payload` would transfer (Paykit spec 7.2 step 1): a payload

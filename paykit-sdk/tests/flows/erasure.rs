@@ -52,6 +52,7 @@ async fn test_erasure_wait_is_the_switch_not_answering_then_the_account_gone() {
     let paid = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     drop(wallet);

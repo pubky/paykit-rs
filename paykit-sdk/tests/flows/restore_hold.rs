@@ -82,6 +82,7 @@ async fn test_restore_hold_cancellation_resent_after_the_restore_stops_for_good(
     let refused = app
         .pay_request(&request, crate::common::over_hold(&app, &request).await)
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
     assert!(w.rail.all_executions().is_empty());
@@ -134,6 +135,7 @@ async fn test_restore_hold_kept_when_the_confirmed_payment_is_refused() {
                 .with_endpoint(crate::common::endpoint("btc-no-such-endpoint")),
         )
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::NoDestination(_))),
@@ -142,6 +144,7 @@ async fn test_restore_hold_kept_when_the_confirmed_payment_is_refused() {
     let refused = app
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(matches!(
         refused.refusal(),
@@ -168,6 +171,7 @@ async fn test_restore_hold_payee_silent_held_until_the_user_confirms() {
     let refused = app
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(matches!(
         refused.refusal(),
@@ -178,6 +182,7 @@ async fn test_restore_hold_payee_silent_held_until_the_user_confirms() {
     let paid = app
         .pay_request(&request, crate::common::over_hold(&app, &request).await)
         .await
+        .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
 }
@@ -202,12 +207,14 @@ async fn test_restore_hold_backup_after_the_stop_keeps_it_and_holds_the_rest() {
     let refused = app
         .pay_request(&r1, crate::common::over_hold(&app, &r1).await)
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
     // R3 is held until the user confirms it.
     let refused = app
         .pay_request(&r3, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(matches!(
         refused.refusal(),
@@ -216,6 +223,7 @@ async fn test_restore_hold_backup_after_the_stop_keeps_it_and_holds_the_rest() {
     let paid = app
         .pay_request(&r3, crate::common::over_hold(&app, &r3).await)
         .await
+        .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     assert_eq!(w.rail.all_executions().len(), 1);
@@ -247,6 +255,7 @@ async fn test_restore_hold_another_apps_record_write_stops_it() {
     let refused = app
         .pay_request(&request, crate::common::over_hold(&app, &request).await)
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
     // The other is held, as every open request after a restore.
@@ -278,6 +287,7 @@ async fn test_restore_hold_holds_a_request_first_seen_after_the_restore_until_co
     let refused = app
         .pay_request(&after, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(matches!(
         refused.refusal(),
@@ -286,6 +296,7 @@ async fn test_restore_hold_holds_a_request_first_seen_after_the_restore_until_co
     let paid = app
         .pay_request(&after, crate::common::over_hold(&app, &after).await)
         .await
+        .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
 }
@@ -385,6 +396,7 @@ async fn test_restore_hold_stop_kept_before_the_backup_stops_after_it() {
     let refused = app
         .pay_request(&request, crate::common::over_hold(&app, &request).await)
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
     app.receive(None).await.unwrap();
@@ -416,6 +428,7 @@ async fn test_restore_hold_stop_placed_before_the_backup_survives_the_request_se
     let refused = app
         .pay_request(&request, crate::common::over_hold(&app, &request).await)
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
     assert!(w.rail.all_executions().is_empty());
@@ -441,6 +454,7 @@ async fn test_restore_hold_rejected_request_stays_rejected_after_it_is_sent_agai
     let refused = app
         .pay_request(&request, crate::common::over_hold(&app, &request).await)
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Rejected));
     assert!(w.rail.all_executions().is_empty());
@@ -459,6 +473,7 @@ async fn test_restore_hold_resolved_attempt_never_dispatched_again() {
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -507,6 +522,7 @@ async fn test_restore_hold_confirmation_is_asked_again_after_another_restore() {
     let failed = app
         .pay_request(&request, crate::common::over_hold(&app, &request).await)
         .await
+        .outcome
         .unwrap();
     assert!(matches!(failed, PayOutcome::Failed { .. }), "{failed:?}");
     assert_eq!(
@@ -561,6 +577,7 @@ async fn test_restore_hold_missed_item_holds_an_open_request_until_the_user_conf
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(matches!(
         refused.refusal(),
@@ -570,6 +587,7 @@ async fn test_restore_hold_missed_item_holds_an_open_request_until_the_user_conf
     let paid = wallet
         .pay_request(&request, crate::common::over_hold(&wallet, &request).await)
         .await
+        .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
 }
@@ -595,6 +613,7 @@ async fn test_restore_hold_missed_item_holds_a_repeat_until_the_user_confirms() 
             PayOptions::default().with_possibly_cancelled_confirmed(earlier.clone()),
         )
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -952,6 +971,7 @@ async fn test_restore_hold_missed_item_at_the_payee_asks_the_payer_of_an_open_re
     wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     shop.receive(None).await.unwrap();
     let now = w.clock.now_ms();

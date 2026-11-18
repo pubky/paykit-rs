@@ -22,11 +22,12 @@ use pubky_switch_client::app::{
     IdentityRefresh, JoinRequest, ProtocolSet, ReceiveReport,
 };
 use pubky_switch_client::clock::Clock;
-use pubky_switch_core::records::{AppCert, Approval};
+use pubky_switch_core::records::{AppCert, AppRecordBody, Approval};
 use pubky_switch_core::scopes::owns_root;
 
 use crate::destination::KeptLookup;
 use crate::error::{Refusal, Result};
+use crate::own_record::capabilities_for;
 use crate::protocol::PaykitProtocol;
 use crate::rail::{Rail, RailDeclaration};
 use crate::state::{key, Tx};
@@ -347,6 +348,14 @@ pub struct Paykit {
     pub(crate) first_read_done: bool,
     /// A read made before a public write, to include in the host's next receive summary.
     pub(crate) first_read_summary: Option<Box<ReceiveSummary>>,
+    /// Whether a write of the app's own record ended with the store unable to tell whether
+    /// it was applied: the record this handle holds may not be the stored one, so no
+    /// public endpoint edit builds on it until the app is loaded again
+    /// (`crate::own_record`).
+    pub(crate) own_record_unknown: bool,
+    /// The capabilities the join checked, which its first update signs as they are
+    /// (`crate::own_record`); `None` otherwise.
+    pub(crate) capability_snapshot: Option<Vec<paykit_lib::PaymentEndpointIdentifier>>,
 }
 
 impl std::fmt::Debug for Paykit {
@@ -362,11 +371,16 @@ pub(crate) fn check_own_certificate(cert: &AppCert) -> Result<()> {
 }
 
 impl Paykit {
-    fn protocols<F>(rail: &Arc<dyn Rail>, register: F) -> Result<(Arc<PaykitProtocol>, ProtocolSet)>
+    fn protocols<F>(
+        rail: &Arc<dyn Rail>,
+        config: &PaykitConfig,
+        register: F,
+    ) -> Result<(Arc<PaykitProtocol>, ProtocolSet)>
     where
         F: FnOnce(Arc<PaykitProtocol>) -> std::result::Result<ProtocolSet, AppError>,
     {
         let protocol = Arc::new(PaykitProtocol::with_rail(Arc::clone(rail)));
+        protocol.set_publishes_record(config.app.publishes_record);
         let protocols = register(Arc::clone(&protocol))?;
         let expected = Arc::clone(&protocol) as Arc<dyn pubky_switch_client::app::Protocol>;
         if !protocols
@@ -388,13 +402,13 @@ impl Paykit {
         config: PaykitConfig,
         rail: Arc<dyn Rail>,
         timer: Arc<dyn Timer>,
-    ) -> Result<Self> {
+    ) -> Self {
         // The certificate is checked before a join or a restore writes anything. A stored
         // one may fail Paykit's checks, a renewal the Switch took: the app still loads, so
         // it can read the feed and take a renewal that passes, and takes no Paykit action
         // meanwhile ([`Paykit::certificate_refused`]).
         protocol.set_own(app.identity(), app.cert().clone());
-        Ok(Self {
+        Self {
             app,
             protocol,
             rail,
@@ -405,7 +419,9 @@ impl Paykit {
             config,
             first_read_done: false,
             first_read_summary: None,
-        })
+            own_record_unknown: false,
+            capability_snapshot: None,
+        }
     }
 
     /// Join from an approval (Switch spec 12.1), as a Paykit App: the client's join, with
@@ -414,11 +430,24 @@ impl Paykit {
     /// This convenience constructor registers only Paykit. Use [`Paykit::join_with_protocols`]
     /// when the own certificate also holds another protocol's scopes (Paykit spec 3.2).
     ///
+    /// The join then brings the app's record to its capabilities ([`crate::own_record`]),
+    /// as each receive does.
+    ///
     /// # Errors
     ///
-    /// The client's errors; [`Refusal::CertificateRefused`] for a certificate Paykit refuses,
-    /// and `Validation` for an `orphan_after_s` below the rail's floor ([`orphan_floor_s`]),
-    /// before anything is written.
+    /// Before anything is written: [`Refusal::CertificateRefused`] for a certificate Paykit
+    /// refuses; `Validation` for an `orphan_after_s` below the rail's floor
+    /// ([`orphan_floor_s`]); the client's `Usage` refusal for a capabilities list
+    /// ([`crate::Rail::endpoint_identifiers`]) the app's record can't carry. Otherwise the
+    /// client's join errors, as [`pubky_switch_client::app::App::join`] gives them: after a
+    /// network error there, the app is kept, and [`Paykit::load`] then a receive finish it.
+    ///
+    /// Once the client's join has returned the app, nothing else fails the join: the app is
+    /// joined and kept, and its handle is returned. The record update that follows is then
+    /// owed when it fails, and the next receive or [`Paykit::update_own_record`] completes
+    /// it: after a delivery error the client keeps the new record and sends it again; after
+    /// a store, clock or other failure before the client kept it, the record held still
+    /// lacks the capabilities, so the next call puts it again.
     pub async fn join(
         env: AppEnv,
         config: PaykitConfig,
@@ -432,8 +461,8 @@ impl Paykit {
     /// Join with the host's complete protocol set (Paykit spec 3.2; Switch spec 3.3).
     /// `register` receives the Paykit implementation configured for this rail and must
     /// include that same instance in its returned set, alongside the host's protocols.
-    /// The set routes approval keys and callbacks to their owners. Registration and the
-    /// own certificate are checked before any state is written.
+    /// The set routes approval keys and callbacks to their owners. Registration, the own
+    /// certificate and the capabilities list are checked before any state is written.
     ///
     /// # Errors
     ///
@@ -453,11 +482,12 @@ impl Paykit {
         // Keep the nested client future on the heap, as at `receive`.
         Box::pin(async move {
             check_orphan_window(&config, rail.as_ref())?;
-            let (protocol, protocols) = Self::protocols(&rail, register)?;
+            let (protocol, protocols) = Self::protocols(&rail, &config, register)?;
             // The certificate passes Paykit's checks before the client writes anything: the
             // client's join reads the approval with this same function, on these same inputs,
             // before its first commit, so this is the certificate it would keep. An approval
             // that doesn't read is left to the client's join, which refuses it, writing nothing.
+            let mut snapshot = None;
             if let Ok(approved) = Approval::read(
                 &request.approval,
                 &request.request,
@@ -474,13 +504,46 @@ impl Paykit {
                 },
             ) {
                 check_own_certificate(&approved.cert)?;
+                // The record the client's join signs, with the capabilities the update below
+                // adds: a list it can't carry refuses the join here, before anything is
+                // written. Its `accepts` is the client's: each registered protocol's kinds for
+                // the certificate, in registration order, each kept only when that protocol
+                // owns the kind's root, its prefix before the first `.` (Switch wire 3.1,
+                // 5.1), once. The client's set computes it privately, so its rule is applied
+                // here with the same public ownership check.
+                let mut accepts: Vec<String> = Vec::new();
+                for name in protocols.names() {
+                    let Some(owner) = protocols.get(&name) else {
+                        continue;
+                    };
+                    for kind in owner.accepts(&approved.cert) {
+                        let root = kind.split_once('.').map_or(kind.as_str(), |(root, _)| root);
+                        if owns_root(&name, root) && !accepts.contains(&kind) {
+                            accepts.push(kind);
+                        }
+                    }
+                }
+                let mut base = AppRecordBody::new(&approved.cert, accepts, 0);
+                base.label.clone_from(&config.app.label);
+                let pays = approved.cert.scopes().iter().any(|s| s == "paykit_pay");
+                // One reading of what the payment method pays, checked here and signed by the
+                // update after the join: the method promises no two readings agree.
+                snapshot = Some(capabilities_for(rail.as_ref(), pays, &base)?);
             }
             let app = App::join(env.clone(), protocols, config.app.clone(), request).await?;
             // No certificate is kept as listed under: the copy is empty until a listing has run
             // with the keys held, the client's at its first read or one of Paykit's, so until then
             // the records count as unlisted (Paykit spec 8.1, "Records not listed yet";
             // `Paykit::unlisted`) and a call that reads them lists first or is refused.
-            let paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
+            let mut paykit = Self::assemble(app, env, protocol, config, rail, timer);
+            // The app is joined and kept: an error here would hide it from the host, which
+            // could join again or lose it. A failed update stays owed instead, for the next
+            // receive or `update_own_record` (the Errors section above), and nothing is
+            // marked done for it. The update signs the capabilities checked above; later
+            // upkeep reads the payment method again.
+            paykit.capability_snapshot = snapshot;
+            let _owed = Box::pin(paykit.tend_own_record()).await;
+            paykit.capability_snapshot = None;
             Ok(paykit)
         })
         .await
@@ -530,9 +593,9 @@ impl Paykit {
         // Keep the nested client future on the heap, as at `receive`.
         Box::pin(async move {
             check_orphan_window(&config, rail.as_ref())?;
-            let (protocol, protocols) = Self::protocols(&rail, register)?;
+            let (protocol, protocols) = Self::protocols(&rail, &config, register)?;
             let app = App::load(env.clone(), protocols, config.app.clone(), app_id).await?;
-            let mut paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
+            let mut paykit = Self::assemble(app, env, protocol, config, rail, timer);
             // A record a view showed divergent pauses, also when a crash came before the
             // receive's events were taken (`divergent.rs`): every record held is looked at once.
             Box::pin(paykit.sweep_divergent()).await?;
@@ -606,9 +669,9 @@ impl Paykit {
             // both go in one commit: on an error, neither is in the store.
             check_orphan_window(&config, rail.as_ref())?;
             crate::protocol::check_restored_loss(&backup.app)?;
-            let (protocol, protocols) = Self::protocols(&rail, register)?;
+            let (protocol, protocols) = Self::protocols(&rail, &config, register)?;
             let app = App::restore(env.clone(), protocols, config.app.clone(), &backup.app).await?;
-            let mut paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
+            let mut paykit = Self::assemble(app, env, protocol, config, rail, timer);
             paykit.bound_restored_cursor_time().await?;
             paykit.stamp_restore_time().await?;
             Ok(paykit)
@@ -814,7 +877,10 @@ impl Paykit {
         // cannot be made leaves the first read owed (Switch spec 12.4, "The held cursor").
         let first_read = self.first_read_pending();
         if first_read && self.certificate_refused().is_none() {
-            match self.app.refresh_identity().await {
+            let refreshed = self.app.refresh_identity().await;
+            // The refresh can take a renewal into the own record.
+            self.note_own_record_write(&refreshed);
+            match refreshed {
                 Ok(IdentityRefresh::Current { .. } | IdentityRefresh::Newer { .. }) => {}
                 Ok(_) | Err(AppError::Transport(_)) => {
                     return Err(Refusal::IdentityUnavailable(
@@ -844,7 +910,10 @@ impl Paykit {
         let paused_before = Box::pin(self.paused_records()).await?;
         // Whether the client may list at this read's start ([`Paykit::records_listed`]).
         let keys_held_before = self.holds_scope_keys();
-        let report = match Box::pin(self.app.receive(wait)).await {
+        let received = Box::pin(self.app.receive(wait)).await;
+        // A read can take another device's record or a renewal into the own record.
+        self.note_own_record_write(&received);
+        let report = match received {
             Ok(report) => report,
             // The erasure's wait: the switch answers as for an account it doesn't host, and
             // nothing authenticates that, so it counts as not answering until the wait ends.
@@ -959,6 +1028,7 @@ impl Paykit {
             // completes: this one did, so the hold is bounded by the service time verified
             // (`hold.rs`).
             Box::pin(self.bound_missed_hold()).await?;
+            Box::pin(self.tend_own_record()).await?;
         }
         // A certificate the read took, any other than the one the records were listed under,
         // a narrower one included: they are listed now, or stay unlisted for the next
@@ -1134,6 +1204,12 @@ mod tests {
         assert_send(&wallet.receive(None));
         assert_send(&wallet.flush());
         assert_send(&wallet.public_endpoints(&key, Some(confirmed)));
+        assert_send(&wallet.set_public_endpoints(std::collections::BTreeMap::new()));
+        let endpoint = paykit_lib::PaymentEndpointIdentifier::new("btc-lightning-bolt12").unwrap();
+        let payload = paykit_lib::PaymentEndpointPayload::new("lno1tips").unwrap();
+        assert_send(&wallet.set_public_endpoint(endpoint.clone(), payload));
+        assert_send(&wallet.remove_public_endpoint(&endpoint));
+        assert_send(&wallet.update_own_record());
         assert_send(&wallet.reconcile());
         assert_send(&wallet.resolve_attempt(&key, attempt, resolution, confirmed));
         assert_send(&wallet.end_reconcile(confirmed));

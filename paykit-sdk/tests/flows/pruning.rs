@@ -21,6 +21,7 @@ async fn paid(w: &World, behaviour: Behaviour) -> Paykit {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(outcome, PayOutcome::Paid { .. } | PayOutcome::Failed { .. })
@@ -73,6 +74,7 @@ async fn test_pruning_keeps_a_payment_without_deadline_past_30_days() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     // Its claim is pinned to none: kept 400 days after its last entry.

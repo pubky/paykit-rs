@@ -55,6 +55,7 @@ use pubky_switch_core::ops::{Condition, OpKind, RecordVersion};
 use pubky_switch_core::records::{CLOCK_TOLERANCE_MS, DAY_MS};
 
 use crate::activity::{self, ActivityTarget, Role};
+use crate::app_records::PublicAppFailure;
 use crate::conversion::{self, Priced, PricedPayment, RateSource};
 use crate::destination::{Carrier, Need};
 use crate::error::{PaykitError, Refusal, Result};
@@ -328,6 +329,29 @@ pub struct TransferQuote {
     pub amount: PaymentAmount,
     /// What the method said it would transfer: its amount and largest fee.
     pub transfer: Transfer,
+}
+
+/// What a payment call returns ([`Paykit::pay_request`], [`Paykit::pay_without_request`]):
+/// the payment's outcome or the error that stopped it, and, beside it, the payee's apps whose
+/// public endpoints couldn't be used in the read this call made, with why (Paykit spec 4).
+/// The failures come with every outcome and every error alike, so the host can tell the user
+/// of each failed app, as it must of records that conflict (Switch wire 3.2), whatever the
+/// payment did. A failure doesn't mean the payment went to another app: an app whose records
+/// conflict is listed and can still be paid from the earlier record it holds (module docs of
+/// [`crate::app_records`]). A payment resumed or repaired later ([`Paykit::resume_payments`],
+/// [`Paykit::repair_activity_record`]) reads no public endpoints and returns its outcome
+/// alone.
+#[derive(Debug)]
+#[non_exhaustive]
+#[must_use = "a payment's outcome or error, and the failed apps to tell the user of"]
+pub struct PayResult {
+    /// The payment's outcome, or the error that stopped it, as a payment call returned
+    /// before: `outcome?` gives the outcome.
+    pub outcome: Result<PayOutcome>,
+    /// The payee's apps whose public endpoints couldn't be used in this call's read, in
+    /// [`PaymentMode::Public`]; empty for a call that read no public endpoints. A payment
+    /// refused with [`Refusal::NoDestination`] names them in its text as well.
+    pub public_failures: Vec<PublicAppFailure>,
 }
 
 /// The result of a payment.
@@ -863,13 +887,23 @@ impl Paykit {
     /// whose new claim is not SETTLED is [`Refusal::MayBePaid`] with
     /// [`PaymentDoubt::before_loss`] (Paykit spec 7.3). The user must confirm that exact
     /// doubt or state it was not paid with [`Paykit::confirm_not_paid_before_loss`].
-    pub async fn pay_request(
-        &mut self,
-        request: &RequestRef,
-        options: PayOptions,
-    ) -> Result<PayOutcome> {
+    ///
+    /// The call returns a [`PayResult`]: these errors are its `outcome`'s, and its
+    /// `public_failures` come with them, as with any outcome.
+    pub async fn pay_request(&mut self, request: &RequestRef, options: PayOptions) -> PayResult {
+        let mut public_failures = Vec::new();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
-        Box::pin(self.pay_request_inner(request, options, Initiator::User)).await
+        let outcome = Box::pin(self.pay_request_inner(
+            request,
+            options,
+            Initiator::User,
+            &mut public_failures,
+        ))
+        .await;
+        PayResult {
+            outcome,
+            public_failures,
+        }
     }
 
     /// [`Paykit::pay_request`] started as an automatic payment ([`Initiator::Automatic`]), for
@@ -887,8 +921,19 @@ impl Paykit {
         &mut self,
         request: &RequestRef,
         options: PayOptions,
-    ) -> Result<PayOutcome> {
-        Box::pin(self.pay_request_inner(request, options, Initiator::Automatic)).await
+    ) -> PayResult {
+        let mut public_failures = Vec::new();
+        let outcome = Box::pin(self.pay_request_inner(
+            request,
+            options,
+            Initiator::Automatic,
+            &mut public_failures,
+        ))
+        .await;
+        PayResult {
+            outcome,
+            public_failures,
+        }
     }
 
     async fn pay_request_inner(
@@ -896,6 +941,7 @@ impl Paykit {
         request: &RequestRef,
         options: PayOptions,
         by: Initiator,
+        public_failures: &mut Vec<PublicAppFailure>,
     ) -> Result<PayOutcome> {
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
@@ -985,6 +1031,7 @@ impl Paykit {
                 &options,
                 body.accepted_payment_endpoint_identifiers.as_deref(),
                 &pricing,
+                public_failures,
             )
             .await?;
         if blocked {
@@ -1054,6 +1101,8 @@ impl Paykit {
     /// Choose the request's destination under its accepted identifiers and pricing
     /// (Paykit spec 7.2, 8.1; Paykit wire 4.5). `accepted` may further restrict the request's
     /// identifiers, as an Allowance does.
+    // Each input is a separate part of the choice, and the failures are this call's sink.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn request_destination(
         &mut self,
         payee: &[u8; 32],
@@ -1062,6 +1111,7 @@ impl Paykit {
         options: &PayOptions,
         accepted: Option<&[PaymentEndpointIdentifier]>,
         pricing: &Pricing<'_>,
+        public_failures: &mut Vec<PublicAppFailure>,
     ) -> Result<Chosen> {
         let accepted_ids: Option<Vec<_>> =
             match (&body.accepted_payment_endpoint_identifiers, accepted) {
@@ -1110,12 +1160,26 @@ impl Paykit {
             // The request's accepted identifiers restrict a destination from the payee's lists
             // as they do its own endpoints (Paykit wire 4.5).
             RequestDestination::RequiredApp(app) => {
-                self.list_destination(payee, Some(*app), accepted, pricing, options)
-                    .await?
+                self.list_destination(
+                    payee,
+                    Some(*app),
+                    accepted,
+                    pricing,
+                    options,
+                    public_failures,
+                )
+                .await?
             }
             RequestDestination::Any => {
-                self.list_destination(payee, options.list_app, accepted, pricing, options)
-                    .await?
+                self.list_destination(
+                    payee,
+                    options.list_app,
+                    accepted,
+                    pricing,
+                    options,
+                    public_failures,
+                )
+                .await?
             }
         })
     }
@@ -1128,15 +1192,22 @@ impl Paykit {
     /// # Errors
     ///
     /// As [`Paykit::pay_request`]; [`PaykitError::Conflict`] when the `payment_lists` record
-    /// changed meanwhile, after which the caller pays to the next usable endpoint.
-    pub async fn pay_without_request(&mut self, payment: UnrequestedPayment) -> Result<PayOutcome> {
+    /// changed meanwhile, after which the caller pays to the next usable endpoint. As there,
+    /// they are the [`PayResult`]'s `outcome`.
+    pub async fn pay_without_request(&mut self, payment: UnrequestedPayment) -> PayResult {
+        let mut public_failures = Vec::new();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
-        Box::pin(self.pay_without_request_inner(payment)).await
+        let outcome = Box::pin(self.pay_without_request_inner(payment, &mut public_failures)).await;
+        PayResult {
+            outcome,
+            public_failures,
+        }
     }
 
     async fn pay_without_request_inner(
         &mut self,
         payment: UnrequestedPayment,
+        public_failures: &mut Vec<PublicAppFailure>,
     ) -> Result<PayOutcome> {
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
@@ -1164,6 +1235,7 @@ impl Paykit {
                 None,
                 &Pricing::unrequested(&payment.amount),
                 &options,
+                public_failures,
             )
             .await?;
         if blocked {
@@ -1572,18 +1644,22 @@ impl Paykit {
         allowed: Option<&[PaymentEndpointIdentifier]>,
         pricing: &Pricing<'_>,
         options: &PayOptions,
+        public_failures: &mut Vec<PublicAppFailure>,
     ) -> Result<Chosen> {
         let wanted = |id: &PaymentEndpointIdentifier| {
             options.endpoint.as_ref().is_none_or(|want| want == id)
                 && allowed.is_none_or(|ids| ids.contains(id))
         };
         if let PaymentMode::Public(_) = options.mode {
+            // The failures go into the call's list as each app is judged, so an error later in
+            // the read still returns those found before it ([`PayResult`]).
             let mut records = self
                 .public_records(
                     payee,
                     app,
                     pricing.by,
                     options.unconfirmed_identity_confirmed,
+                    public_failures,
                 )
                 .await??;
             // The payee's public Payment List is every current app's public endpoints together
@@ -1604,11 +1680,17 @@ impl Paykit {
                         })
                 })
                 .collect();
+            // An app whose record served now failed gave no endpoints (`public_records`), so
+            // a request requiring it has no public destination (Paykit spec 4, 8.1), unless
+            // its records conflict and it keeps an earlier one (Switch spec 4.2). Each failure
+            // is in the refusal, and in the call's `PayResult` with any outcome.
             if gathered.is_empty() {
-                return Err(Refusal::NoDestination(
-                    "Paykit spec 4: the payee has no usable public endpoint".into(),
-                )
-                .into());
+                let mut text =
+                    String::from("Paykit spec 4: the payee has no usable public endpoint");
+                for failure in public_failures.iter() {
+                    text.push_str(&format!("; {failure}"));
+                }
+                return Err(Refusal::NoDestination(text).into());
             }
             return self
                 .choose(payee, gathered, pricing, options)?
@@ -2540,7 +2622,10 @@ impl Paykit {
             // confirmation held still counts if it is fresh once the read is over. An error
             // is more: a copy that doesn't verify, a store that fails, or an alarm, such as
             // the own identity.json equivocating (Switch wire 3.3), and it stops the payment.
-            if let Err(error) = self.app.refresh_identity().await {
+            let refreshed = self.app.refresh_identity().await;
+            // The refresh can take a renewal into the own record.
+            self.note_own_record_write(&refreshed);
+            if let Err(error) = refreshed {
                 return Err(Refusal::IdentityUnavailable(format!(
                     "Paykit spec 4: the own identity.json can't be read again: {error}"
                 )));

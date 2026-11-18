@@ -57,6 +57,7 @@ mod loss;
 mod marks;
 mod notices;
 mod outbound;
+pub mod own_record;
 mod pay;
 mod paykit;
 mod periods;
@@ -86,8 +87,9 @@ pub use journal::{PaymentView, Stage};
 pub use loss::LossBoundary;
 pub use marks::MAX_DROPPED_MARKS;
 pub use notices::{Notice, NoticeKind};
+pub use own_record::{MAX_OWN_PUBLIC_ENDPOINTS, RECORD_LIFETIME_MS};
 pub use pay::{
-    BlockedPayment, PayOptions, PayOutcome, PaymentDoubt, PaymentMode, TransferQuote,
+    BlockedPayment, PayOptions, PayOutcome, PayResult, PaymentDoubt, PaymentMode, TransferQuote,
     UnrequestedPayment, UNREQUESTED_DEADLINE_MS,
 };
 pub use paykit::{

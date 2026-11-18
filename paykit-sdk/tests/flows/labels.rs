@@ -26,6 +26,7 @@ async fn test_labels_reply_reaches_only_the_labelled_app_and_request() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 

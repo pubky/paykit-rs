@@ -201,7 +201,11 @@ async fn paid_and_pending(w: &World, wallet: &mut Paykit, shop: &mut Paykit) -> 
     let b = request_from(shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
     let a = request_from(shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
-    let paid = wallet.pay_request(&b, PayOptions::default()).await.unwrap();
+    let paid = wallet
+        .pay_request(&b, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
     let PayOutcome::Paid {
         attempt_id: b_attempt,
         ..
@@ -210,7 +214,11 @@ async fn paid_and_pending(w: &World, wallet: &mut Paykit, shop: &mut Paykit) -> 
         panic!("{paid:?}");
     };
     w.rail.next(Behaviour::Hang);
-    let pending = wallet.pay_request(&a, PayOptions::default()).await.unwrap();
+    let pending = wallet
+        .pay_request(&a, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
     let PayOutcome::Pending {
         attempt_id: a_attempt,
         ..
@@ -246,6 +254,7 @@ async fn refused_then_pending(w: &World, wallet: &mut Paykit, shop: &mut Paykit)
     let failed = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     let PayOutcome::Failed {
         attempt_id: b_attempt,
@@ -258,6 +267,7 @@ async fn refused_then_pending(w: &World, wallet: &mut Paykit, shop: &mut Paykit)
     let pending = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     let PayOutcome::Pending {
         attempt_id: a_attempt,
@@ -538,7 +548,11 @@ async fn test_local_state_entry_naming_another_payments_record_is_corrupt() {
     wallet.receive(None).await.unwrap();
     let mut attempts = Vec::new();
     for value in ["0.0015", "0.0025"] {
-        let paid = wallet.pay_without_request(to_bob(&w, value)).await.unwrap();
+        let paid = wallet
+            .pay_without_request(to_bob(&w, value))
+            .await
+            .outcome
+            .unwrap();
         let PayOutcome::Paid { attempt_id, .. } = paid else {
             panic!("{paid:?}");
         };
@@ -564,6 +578,7 @@ async fn test_local_state_list_ask_of_another_payee_is_corrupt() {
     let refused = wallet
         .pay_without_request(to_bob(&w, "1"))
         .await
+        .outcome
         .unwrap_err();
     assert!(refused.refusal().is_some(), "{refused:?}");
     let key = format!("lq/{}", b64(&w.bob_id()));
@@ -573,6 +588,7 @@ async fn test_local_state_list_ask_of_another_payee_is_corrupt() {
     let error = wallet
         .pay_without_request(to_bob(&w, "1"))
         .await
+        .outcome
         .unwrap_err();
     assert!(corrupt(&error), "{error:?}");
 }
@@ -711,6 +727,7 @@ async fn test_local_state_cancellation_under_another_requests_key_stops_as_corru
     let error = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(corrupt(&error), "{error:?}");
     assert!(w.rail.all_executions().is_empty());

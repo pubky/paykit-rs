@@ -57,6 +57,7 @@ async fn paid_before_recorded_then(
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     let held = shop.payee_activity().await.unwrap().len();
@@ -554,6 +555,7 @@ async fn test_replies_dropped_asked_for_from_the_marks_time() {
     wallet
         .pay_request(&earlier, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     shop.receive(None).await.unwrap();
     w.clock.advance_ms(60_000);
@@ -963,6 +965,7 @@ async fn test_replies_with_their_record_in_one_read_placed() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     let got = shop.receive(None).await.unwrap();

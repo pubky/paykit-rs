@@ -109,6 +109,7 @@ async fn test_one_time_request_paid_proven_and_receipted() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     let PayOutcome::Paid { attempt_id, .. } = outcome else {
         panic!("{outcome:?}");
@@ -158,6 +159,7 @@ async fn test_one_time_payer_rejects_and_the_payee_sees_it() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Rejected));
     let again = wallet.reject_request(&request, None).await.unwrap_err();
@@ -216,6 +218,7 @@ async fn test_one_time_payee_cancels_and_the_payer_makes_no_attempt() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
     assert!(w.rail.all_executions().is_empty());
@@ -233,6 +236,7 @@ async fn test_one_time_rejection_refused_while_a_payment_is_in_progress() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     let PayOutcome::Pending { attempt_id, .. } = outcome else {
         panic!("{outcome:?}");
@@ -279,6 +283,7 @@ async fn test_one_time_expired_request_refused() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::DeadlinePassed));
     assert!(w.rail.all_executions().is_empty());
@@ -297,6 +302,7 @@ async fn test_one_time_request_within_its_expiry_is_paid() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
@@ -313,6 +319,7 @@ async fn test_one_time_failed_payment_writes_failed_and_may_be_paid_again() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Failed { .. }), "{outcome:?}");
     assert_eq!(
@@ -322,6 +329,7 @@ async fn test_one_time_failed_payment_writes_failed_and_may_be_paid_again() {
     let again = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(again, PayOutcome::Paid { .. }), "{again:?}");
 }
@@ -341,6 +349,7 @@ async fn test_one_time_rail_refusal_writes_failed_and_may_be_paid_again() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Failed { .. }), "{outcome:?}");
     assert!(wallet.resume_payments().await.unwrap().is_empty());
@@ -352,6 +361,7 @@ async fn test_one_time_rail_refusal_writes_failed_and_may_be_paid_again() {
     let again = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     let PayOutcome::Paid { attempt_id, .. } = again else {
         panic!("{again:?}");
@@ -376,6 +386,7 @@ async fn test_one_time_transfer_of_another_amount_refused() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::Transfer { .. })),
@@ -484,6 +495,7 @@ async fn test_one_time_cancellation_before_its_request_keeps_it_cancelled() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
     assert!(w.rail.all_executions().is_empty());
@@ -515,6 +527,7 @@ async fn test_one_time_cancellation_kept_applies_to_another_wallets_record() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
     assert!(w.rail.all_executions().is_empty());
@@ -536,6 +549,7 @@ async fn test_one_time_receipt_naming_another_proof_leaves_the_proof_recordable(
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -641,6 +655,7 @@ async fn test_one_time_kept_stop_refuses_a_first_payment_it_couldnt_place() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
     assert!(w.rail.all_executions().is_empty());
@@ -664,6 +679,7 @@ async fn test_one_time_kept_stop_refuses_a_payment_after_a_resume() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
     assert!(w.rail.all_executions().is_empty());
@@ -699,6 +715,7 @@ async fn test_one_time_kept_stop_refuses_a_payment_after_a_restore() {
     let refused = app
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
     assert!(w.rail.all_executions().is_empty());
@@ -814,6 +831,7 @@ async fn test_one_time_attempt_kept_unsent_stays_recorded_through_a_resume() {
     let kept = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(kept.kept_batch().is_some(), "{kept:?}");
     let stage = |payments: Vec<paykit_sdk::PaymentView>| payments[0].stage;
@@ -837,6 +855,7 @@ async fn test_one_time_attempt_kept_unsent_stays_recorded_through_a_resume() {
     let paid = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     assert_eq!(w.rail.all_executions().len(), 1);
@@ -1050,6 +1069,7 @@ async fn test_one_time_attempt_kept_then_forgotten_reads_the_claim_and_pays_once
     let kept = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     let batch_id = kept.kept_batch().expect("the attempt's batch is kept");
     w.alice
@@ -1084,6 +1104,7 @@ async fn test_one_time_attempt_kept_then_forgotten_reads_the_claim_and_pays_once
     let paid = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     assert_eq!(w.rail.all_executions().len(), 1);
@@ -1103,6 +1124,7 @@ async fn test_one_time_attempt_kept_at_the_backup_restored_never_pays_again() {
     let kept = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(kept.kept_batch().is_some(), "{kept:?}");
     let backup = wallet.backup().await.unwrap();
@@ -1114,6 +1136,7 @@ async fn test_one_time_attempt_kept_at_the_backup_restored_never_pays_again() {
     let paid = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     drop(wallet);
@@ -1145,6 +1168,7 @@ async fn test_one_time_attempt_kept_at_the_backup_restored_never_pays_again() {
     let again = restored
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(again.refusal(), Some(&Refusal::AlreadyPaid), "{again:?}");
     assert_eq!(w.rail.all_executions().len(), 1);
@@ -1174,6 +1198,7 @@ async fn test_one_time_expired_request_not_found_at_the_switch_is_not_found() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::NotFound), "{refused:?}");
     assert!(w.rail.all_executions().is_empty());
@@ -1193,6 +1218,7 @@ async fn test_one_time_attempt_kept_then_refused_reads_the_claim_while_its_end_i
     let batch_id = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err()
         .kept_batch()
         .expect("the attempt's batch is kept");
@@ -1219,6 +1245,7 @@ async fn test_one_time_attempt_kept_then_refused_reads_the_claim_while_its_end_i
     let paid = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     assert_eq!(w.rail.all_executions().len(), 1);
@@ -1237,6 +1264,7 @@ async fn test_one_time_attempt_kept_then_applied_writes_failed_and_pays_once() {
     let batch_id = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err()
         .kept_batch()
         .expect("the attempt's batch is kept");
@@ -1252,6 +1280,7 @@ async fn test_one_time_attempt_kept_then_applied_writes_failed_and_pays_once() {
     let busy = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(
         busy.refusal(),
@@ -1266,6 +1295,7 @@ async fn test_one_time_attempt_kept_then_applied_writes_failed_and_pays_once() {
     let paid = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     assert_eq!(w.rail.all_executions().len(), 1);
@@ -1294,6 +1324,7 @@ async fn test_one_time_expired_request_read_refused_by_the_switch_keeps_its_code
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(
         refused.code(),
@@ -1416,6 +1447,7 @@ async fn test_one_time_cancellation_while_its_record_awaits_its_key_stops_it_pas
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
     assert!(w.rail.all_executions().is_empty());
@@ -1674,6 +1706,7 @@ async fn test_one_time_stop_for_a_request_kept_to_write_stays_past_30_days() {
     assert!(wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .is_err());
     assert!(w.rail.all_executions().is_empty());
 }
@@ -1832,6 +1865,7 @@ async fn failed_after_acceptance(
     let PayOutcome::Pending { attempt_id, .. } = app
         .pay_request(request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -1901,6 +1935,7 @@ async fn test_one_time_rejection_of_a_request_not_accepted_sent() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Rejected));
     assert!(w.rail.all_executions().is_empty());
@@ -2113,6 +2148,7 @@ async fn test_one_time_no_response_after_the_payers_own_cancellation() {
         wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap_err(),
     ] {
         assert_eq!(refused.refusal(), Some(&Refusal::Cancelled), "{refused:?}");
@@ -2166,6 +2202,7 @@ async fn test_one_time_no_response_over_a_record_sealed_at_a_key_not_held() {
         wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap_err(),
     ] {
         assert!(

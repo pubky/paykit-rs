@@ -490,6 +490,7 @@ impl Stored for bool {
             | StateKey::MissedEndUnknown
             | StateKey::MissedConsents
             | StateKey::PayerPassOwed
+            | StateKey::RecordExpiryOwed
             | StateKey::HoldConfirmed(_)
             | StateKey::NotPaidBeforeLoss(_)
             | StateKey::FloorOpened(_)
@@ -1169,6 +1170,7 @@ pub(crate) mod key {
     pub(crate) const MISSED_UNLISTED: &str = "ml";
     pub(crate) const MISSED_CONSENTS: &str = "mc";
     pub(crate) const PAYER_PASS_OWED: &str = "pp";
+    pub(crate) const RECORD_EXPIRY_OWED: &str = "wc";
     pub(crate) const OWN_RESEND_OWED: &str = "ro";
     pub(crate) const HELD_ANSWERS: &str = "ha/";
     pub(crate) const LISTED_CERT: &str = "lc";
@@ -1473,6 +1475,8 @@ pub(crate) enum StateKey {
     MissedConsents,
     /// `pp`: no reconcile ran the payer pass since a restore.
     PayerPassOwed,
+    /// `wc`: the Paykit expiry policy for the own record's current endpoints is owed (`crate::own_record`).
+    RecordExpiryOwed,
     /// `ro`: the restore's re-send of this app's own messages is owed.
     OwnResendOwed,
     /// `lc`: the certificate the shared records were last listed under.
@@ -1607,6 +1611,7 @@ impl StateKey {
             "ml" => Self::MissedUnlisted,
             "mc" => Self::MissedConsents,
             "pp" => Self::PayerPassOwed,
+            "wc" => Self::RecordExpiryOwed,
             "ro" => Self::OwnResendOwed,
             "lc" => Self::ListedCert,
             "lr" => Self::ListsRead,
@@ -2144,6 +2149,14 @@ mod tests {
             key::PAYER_PASS_OWED,
             serde_json::json!(false)
         ));
+        assert!(reads::<bool>(
+            key::RECORD_EXPIRY_OWED,
+            serde_json::json!(true)
+        ));
+        assert!(!reads::<bool>(
+            key::RECORD_EXPIRY_OWED,
+            serde_json::json!(false)
+        ));
         assert!(!reads::<bool>(&key::peer(&pubky), serde_json::json!(true)));
         // The restore's re-send owed at its key only, its waiting counterparties ascending.
         let owed = |waiting: serde_json::Value| serde_json::json!({ "waiting": waiting, "restored_at_ms": null });
@@ -2421,6 +2434,7 @@ mod tests {
             (key::MISSED_UNLISTED.into(), StateKey::MissedUnlisted),
             (key::MISSED_CONSENTS.into(), StateKey::MissedConsents),
             (key::PAYER_PASS_OWED.into(), StateKey::PayerPassOwed),
+            (key::RECORD_EXPIRY_OWED.into(), StateKey::RecordExpiryOwed),
             (key::OWN_RESEND_OWED.into(), StateKey::OwnResendOwed),
             (key::LISTED_CERT.into(), StateKey::ListedCert),
             (key::hold_confirmed(&pubky), StateKey::HoldConfirmed(pubky)),

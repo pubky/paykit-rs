@@ -431,6 +431,7 @@ async fn test_certificate_renewal_dropping_pay_keeps_finished_payments_backed_up
     let paid = wallet
         .pay_request(&request, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
@@ -477,6 +478,7 @@ async fn test_certificate_renewal_dropping_pay_raises_a_notice_for_a_held_paymen
     let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("in flight");
@@ -526,6 +528,7 @@ async fn test_certificate_acknowledged_held_payment_notice_raises_none_again_aft
     wallet
         .pay_request(&request, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap();
     let first = wallet.app().cert().clone();
     let reduced = renew(&w, me, &AppScopes::new().contacts().build().unwrap(), 1_000);
@@ -572,6 +575,7 @@ async fn test_certificate_renewal_bringing_pay_back_drops_the_held_payment_notic
     let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("in flight");
@@ -619,6 +623,7 @@ async fn test_certificate_renewal_dropping_pay_keeps_a_dispatched_payment() {
     let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("in flight");
@@ -699,6 +704,7 @@ async fn test_certificate_issued_ahead_of_the_apps_clock_keeps_its_acceptance_ba
     let paid = wallet
         .pay_request(&request, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
@@ -744,6 +750,7 @@ async fn test_certificate_restored_lost_acceptance_not_signed_again_without_pay(
     let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("in flight");
@@ -839,6 +846,7 @@ async fn test_certificate_acceptance_kept_under_an_expired_certificate_backs_up(
     let paid = wallet
         .pay_request(&request, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
@@ -894,7 +902,8 @@ async fn test_certificate_renewal_dropping_pay_makes_no_rail_call() {
     w.rail.next(paykit_sdk::rail::Behaviour::LoseAnswer);
     let outcome = wallet
         .pay_request(&request, paykit_sdk::PayOptions::default())
-        .await;
+        .await
+        .outcome;
     let attempt_id = wallet.payments().await.unwrap()[0].attempt_id;
     assert!(
         !matches!(outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
@@ -937,6 +946,7 @@ async fn test_certificate_renewal_dropping_pay_resumes_without_reading_claims() 
     let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("in flight");
@@ -1001,6 +1011,7 @@ async fn test_certificate_renewal_dropping_pay_rechecks_no_failed_payment() {
     let outcome = wallet
         .pay_request(&request, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap();
     let paykit_sdk::PayOutcome::Failed { attempt_id, .. } = outcome else {
         panic!("{outcome:?}");
@@ -1063,6 +1074,7 @@ async fn test_certificate_restore_without_pay_attempts_nothing_until_a_reconcile
     let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&paid, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("in flight");
@@ -1100,6 +1112,7 @@ async fn test_certificate_restore_without_pay_attempts_nothing_until_a_reconcile
         let refused = restored
             .pay_request(request, crate::common::over_hold(&restored, request).await)
             .await
+            .outcome
             .unwrap_err();
         assert!(payer_pass_owed(&refused), "{refused:?}");
     }
@@ -1115,11 +1128,13 @@ async fn test_certificate_restore_without_pay_attempts_nothing_until_a_reconcile
     assert!(restored
         .pay_request(&paid, crate::common::over_hold(&restored, &paid).await)
         .await
+        .outcome
         .is_err());
     w.rail.next(paykit_sdk::rail::Behaviour::Succeed);
     let outcome = restored
         .pay_request(&other, crate::common::over_hold(&restored, &other).await)
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
@@ -1164,6 +1179,7 @@ async fn test_certificate_restore_ended_without_reconcile_pays_nothing_until_one
             crate::common::over_hold(&restored, &request).await,
         )
         .await
+        .outcome
         .unwrap_err();
     assert!(payer_pass_owed(&refused), "{refused:?}");
     assert!(w.rail.all_executions().is_empty());
@@ -1176,6 +1192,7 @@ async fn test_certificate_restore_ended_without_reconcile_pays_nothing_until_one
             crate::common::over_hold(&restored, &request).await,
         )
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
@@ -1706,6 +1723,7 @@ async fn test_certificate_join_first_receive_lists_before_taking_its_entries() {
     let paid = phone
         .pay_request(&request, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
@@ -1818,6 +1836,7 @@ async fn in_flight_under_a_wider_certificate_without_keys(
     let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&paid, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("in flight");
@@ -1919,6 +1938,7 @@ async fn test_certificate_wider_without_keys_holds_a_new_payment_and_a_reconcile
     let refused = wallet
         .pay_request(&other, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(waits_for_keys(&refused), "{refused:?}");
     let refused = wallet.reconcile().await.unwrap_err();
@@ -2111,6 +2131,7 @@ async fn narrowed_then_renewed_back(narrowed: Narrowed) {
     let paid = payer
         .pay_request(&first, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
@@ -2153,6 +2174,7 @@ async fn narrowed_then_renewed_back(narrowed: Narrowed) {
     let paid = payer
         .pay_request(&request, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
@@ -2253,6 +2275,7 @@ async fn narrowed_on_the_payer_side_then_back(narrowed: RequestedScopes) {
     let paid = phone
         .pay_request(&request, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
@@ -2392,6 +2415,7 @@ async fn payer_side_widened(narrowed: RequestedScopes, cancelled: bool) {
     let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&paid, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("in flight");
@@ -2489,6 +2513,7 @@ async fn test_certificate_restore_unlisted_with_payee_keys_awaited_resumes_nothi
     let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("in flight");
@@ -2578,6 +2603,7 @@ async fn test_certificate_payee_side_widening_with_a_data_epoch_rotation_writes_
     let kept = wallet
         .pay_request(&request, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(kept.kept_batch().is_some(), "{kept:?}");
     wallet.flush().await.unwrap();
@@ -2828,6 +2854,7 @@ async fn test_certificate_receipt_for_a_record_not_listed_yet_is_held_until_list
     let paid = phone
         .pay_request(&request, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap();
     let paykit_sdk::PayOutcome::Paid { attempt_id, .. } = paid else {
         panic!("{paid:?}");
@@ -2935,6 +2962,7 @@ async fn test_certificate_proof_for_a_payee_record_not_listed_yet_is_held_until_
     let paid = payer
         .pay_request(&request, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
@@ -3019,6 +3047,7 @@ async fn test_certificate_restore_taking_a_wider_one_without_keys_stays_unlisted
     let paid = payer
         .pay_request(&request, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
@@ -3189,6 +3218,7 @@ async fn test_certificate_late_receipt_for_a_record_not_listed_yet_is_held_then_
     let paykit_sdk::PayOutcome::Failed { attempt_id, .. } = phone
         .pay_request(&request, paykit_sdk::PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("failed");

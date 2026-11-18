@@ -27,6 +27,7 @@ async fn test_wallets_race_and_exactly_one_pays() {
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -36,6 +37,7 @@ async fn test_wallets_race_and_exactly_one_pays() {
     let refused = phone
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::BeingHandledByOtherWallet));
     phone.receive(None).await.unwrap();
@@ -55,6 +57,7 @@ async fn test_wallets_race_and_exactly_one_pays() {
     let refused = phone
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::AlreadyPaid));
     assert_eq!(w.rail.all_executions().len(), 1);
@@ -77,6 +80,7 @@ async fn test_wallets_one_rejects_the_other_cannot_pay() {
     let raced = phone
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(raced, paykit_sdk::PaykitError::Conflict(_)),
@@ -86,6 +90,7 @@ async fn test_wallets_one_rejects_the_other_cannot_pay() {
     let refused = phone
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Rejected));
     assert!(w.rail.all_executions().is_empty());
@@ -110,6 +115,7 @@ async fn test_wallets_payment_crossing_the_others_rejection_past_the_deadline_sh
     let raced = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(raced.refusal(), Some(&Refusal::Rejected), "{raced:?}");
     assert_eq!(
@@ -135,6 +141,7 @@ async fn test_wallets_payment_past_the_deadline_shows_the_others_open_attempt() 
     let outcome = phone
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Pending { .. }), "{outcome:?}");
     w.clock.advance_ms(25 * crate::common::HOUR_MS);
@@ -142,6 +149,7 @@ async fn test_wallets_payment_past_the_deadline_shows_the_others_open_attempt() 
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(
         refused.refusal(),
@@ -269,6 +277,7 @@ async fn attempt_answered_past_the_deadline(crossing: Crossing) -> paykit_sdk::P
     let error = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(w.rail.all_executions().is_empty());
     error
@@ -368,6 +377,7 @@ async fn test_wallets_payment_past_the_deadline_shows_the_payees_cancellation_pl
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Cancelled), "{refused:?}");
     assert!(w.rail.all_executions().is_empty());
@@ -413,6 +423,7 @@ async fn test_wallets_payment_past_the_deadline_over_a_record_gone_or_unreadable
         let error = wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap_err();
         if write == "delete" {
             assert_eq!(
@@ -463,6 +474,7 @@ async fn test_wallets_confirmed_doubt_changed_since_refused_again() {
     let first = phone
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
         .attempt_id();
     let obligation = phone.payments().await.unwrap()[0].obligation;
@@ -480,6 +492,7 @@ async fn test_wallets_confirmed_doubt_changed_since_refused_again() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     let seen = doubt_of(&refused);
     assert_eq!(seen.obligation, obligation);
@@ -490,6 +503,7 @@ async fn test_wallets_confirmed_doubt_changed_since_refused_again() {
         &tablet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap_err(),
     );
     w.rail.next(Behaviour::Hang);
@@ -499,6 +513,7 @@ async fn test_wallets_confirmed_doubt_changed_since_refused_again() {
             PayOptions::default().with_may_be_paid_confirmed(tablet_doubt),
         )
         .await
+        .outcome
         .unwrap()
         .attempt_id();
     w.clock.advance_ms(PAST_ORPHAN_MS);
@@ -518,6 +533,7 @@ async fn test_wallets_confirmed_doubt_changed_since_refused_again() {
             PayOptions::default().with_may_be_paid_confirmed(seen.clone()),
         )
         .await
+        .outcome
         .unwrap_err();
     let now = doubt_of(&again);
     assert_ne!(now, seen);
@@ -531,6 +547,7 @@ async fn test_wallets_confirmed_doubt_changed_since_refused_again() {
             PayOptions::default().with_may_be_paid_confirmed(now),
         )
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
@@ -551,6 +568,7 @@ async fn test_wallets_status_shows_the_records_cancellation_over_a_kept_open_att
     phone
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     wallet.receive(None).await.unwrap();
     assert_eq!(
@@ -578,6 +596,7 @@ async fn test_wallets_receipt_settles_a_claim_the_app_never_read() {
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");

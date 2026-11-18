@@ -5092,7 +5092,7 @@ async fn test_allowances_answer_dropped_mark_not_due_from_a_payment_without_a_re
                         paykit_sdk::PayOptions::default()
                             .with_endpoint(crate::common::endpoint("btc-lightning-bolt12")),
                     );
-            let paid = wallet.pay_without_request(payment).await.unwrap();
+            let paid = wallet.pay_without_request(payment).await.outcome.unwrap();
             assert!(
                 matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
                 "{paid:?}"
