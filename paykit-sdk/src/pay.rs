@@ -1655,7 +1655,7 @@ impl Paykit {
         if let PaymentMode::Public(_) = options.mode {
             // The failures go into the call's list as each app is judged, so an error later in
             // the read still returns those found before it ([`PayResult`]).
-            let mut records = self
+            let (_, mut records) = self
                 .public_records(
                     payee,
                     app,
@@ -2649,10 +2649,8 @@ impl Paykit {
     /// device clock now. A confirmation the clock puts in the future is no evidence of a
     /// recent one: the clock went back.
     fn own_identity_fresh(&self) -> bool {
-        let now = self.now();
         self.app
-            .identity_confirmed_at()
-            .and_then(|at| now.checked_sub(at))
+            .identity_confirmation_age_ms()
             .is_some_and(|age| age < REVALIDATION_MS)
     }
 
@@ -3999,11 +3997,35 @@ impl Paykit {
         if matches!(kind, Dispatch::First { .. }) && self.dispatch_held(entry, by, kind).await? {
             return Ok((FinalCheck::Hold, payee));
         }
-        let payee = match self.take_kept_lookup(&entry.payee).await? {
-            Ok(Some(answered)) => answered,
-            Ok(None) => payee,
+        let answered = match self.take_kept_lookup(&entry.payee).await? {
+            Ok(answered) => answered,
             Err(refusal) => return Ok((FinalCheck::Refused(refusal), payee)),
         };
+        let public = entry.destination.source()? == DestinationSource::Public;
+        let now = self.now();
+        let recheck_records = public
+            && (answered.is_some()
+                || !self
+                    .last_public_read
+                    .as_ref()
+                    .is_some_and(|read| read.current(&payee, now))
+                || !payee_copy_usable(now, &payee, Need::SwitchCopy, by, confirmed));
+        let mut payee = answered.unwrap_or(payee);
+        if recheck_records {
+            match Box::pin(self.check_destination(
+                &entry.payee,
+                &entry.destination,
+                &entry.kept_carrier(&self.identity())?,
+                entry.request_hash()?.as_ref(),
+                by,
+                confirmed,
+            ))
+            .await?
+            {
+                Ok(checked) => payee = checked,
+                Err(_) => return Ok((FinalCheck::Hold, payee)),
+            }
+        }
         let check = self.final_gates(entry, &payee, by, confirmed, kind)?;
         Ok((check, payee))
     }
@@ -4265,7 +4287,17 @@ impl Paykit {
         if let Err(refusal) = self.transfer_holds(entry)? {
             return Ok(FinalCheck::Refused(refusal));
         }
-        let now = self.now();
+        let may_attempt = self.app.may_attempt(by == Initiator::Automatic).is_ok();
+        // The last sample before the rail decides every wall-clock limit, including
+        // the age of this exact own document. A later sample could invalidate it.
+        let (now, own_fresh) = self
+            .app
+            .identity_confirmed_at()
+            .zip(self.app.identity_confirmation_age_ms())
+            .map_or_else(
+                || (self.now(), false),
+                |(start, age)| (start + age, age < REVALIDATION_MS),
+            );
         match kind {
             Dispatch::Repeat {
                 idempotency_retention_ms,
@@ -4301,15 +4333,21 @@ impl Paykit {
                 &carrier,
                 entry.request_hash()?.as_ref(),
                 &payee.doc,
+                now,
             )
             .is_ok();
         // An alarm or a restore question raised during any await holds the payment back
         // (Switch spec 10.1, 12.4).
-        let clear = self.app.may_attempt(by == Initiator::Automatic).is_ok()
+        let clear = may_attempt
             && destination
-            && payee_copy_usable(self.now(), payee, Need::of(&carrier), by, confirmed)
-            && self.own_identity_fresh()
-            && self.own_identity_authorizes(entry).is_ok();
+            && (!matches!(carrier, Carrier::Record(_))
+                || self
+                    .last_public_read
+                    .as_ref()
+                    .is_some_and(|read| read.current(payee, now)))
+            && payee_copy_usable(now, payee, Need::of(&carrier), by, confirmed)
+            && own_fresh
+            && self.own_identity_authorizes(entry, now).is_ok();
         Ok(if clear {
             FinalCheck::Pay
         } else {
@@ -4431,23 +4469,28 @@ impl Paykit {
             carrier,
             request_hash.as_ref(),
             &doc.doc,
+            self.now(),
         ) {
             return Ok(Err(Held::Check(refusal)));
         }
-        if let Err(why) = self.own_identity_authorizes(entry) {
+        if let Err(why) = self.own_identity_authorizes(entry, self.now()) {
             return Ok(Err(Held::Check(Refusal::NotCurrent(why))));
         }
         Ok(Ok(doc))
     }
 
     /// Checks 5 and 6 of [`Paykit::pay_gate`], on the own `identity.json` held.
-    fn own_identity_authorizes(&self, entry: &JournalEntry) -> std::result::Result<(), String> {
+    fn own_identity_authorizes(
+        &self,
+        entry: &JournalEntry,
+        now: u64,
+    ) -> std::result::Result<(), String> {
         let doc = self.app.own_identity();
         let me = self.app_id();
         let cert = self.app.cert().hash();
         if doc.lists_removed(&me)
             || doc.listed_cert(&me).is_none()
-            || !doc.counts_at(&me, &cert, self.now())
+            || !doc.counts_at(&me, &cert, now)
         {
             return Err(
                 "Paykit spec 4: the own identity.json doesn't list this app with its certificate"

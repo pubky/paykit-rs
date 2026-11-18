@@ -343,6 +343,8 @@ pub struct Paykit {
     /// The payees' switch lookups still running after their grace: an answer that arrives
     /// before money moves is still used (Paykit spec 4).
     pub(crate) lookups: HashMap<[u8; 32], KeptLookup>,
+    /// The last payable public records and the source observations covering their reads.
+    pub(crate) last_public_read: Option<crate::app_records::PublicRead>,
     pub(crate) config: PaykitConfig,
     /// Whether this load made the restore's identity-confirmed first read.
     pub(crate) first_read_done: bool,
@@ -409,13 +411,14 @@ impl Paykit {
         // meanwhile ([`Paykit::certificate_refused`]).
         protocol.set_own(app.identity(), app.cert().clone());
         Self {
+            clock: app.clock(),
             app,
             protocol,
             rail,
-            clock: env.clock,
             homeserver: env.homeserver,
             timer,
             lookups: HashMap::new(),
+            last_public_read: None,
             config,
             first_read_done: false,
             first_read_summary: None,

@@ -553,6 +553,55 @@ async fn test_public_identity_source_starts_a_new_lookup_after_rollback() {
 }
 
 #[tokio::test]
+async fn test_public_automatic_payment_waits_for_a_pending_switch() {
+    use std::future::{poll_fn, Future};
+    use std::sync::Arc;
+    use std::task::Poll;
+    let w = World::new();
+    let saved = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&saved)).await;
+    let app_id = wallet.app_id();
+    let mut shop = w.shop().await;
+    let mut draft = crate::common::draft("1", w.clock.now_ms());
+    draft.destination = paykit_lib::bodies::RequestDestination::Any;
+    let request = crate::common::request_from(&mut shop, w.alice_id(), draft).await;
+    wallet.receive(None).await.unwrap();
+    drop(wallet);
+    w.clock.advance_ms(11 * 60_000);
+    publish(&w, tip_jar(), Some(w.clock.now_ms() + DAY_MS));
+    let slow = Arc::new(crate::common::SlowSwitch::new(
+        Arc::clone(&w.router),
+        crate::common::BOB_ORIGIN,
+    ));
+    let mut wallet = w
+        .load_with_transport(
+            &w.alice,
+            saved,
+            app_id,
+            Arc::clone(&slow) as Arc<dyn pubky_switch_client::transport::Transport>,
+        )
+        .await;
+    let mut payment =
+        Box::pin(wallet.pay_request_automatically(&request, public_to_bob(&w).options));
+    bounded(poll_fn(|cx| {
+        assert!(
+            payment.as_mut().poll(cx).is_pending(),
+            "the payment stopped before the switch answered"
+        );
+        if slow.has_waiter() {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }))
+    .await;
+    assert!(w.rail.all_executions().is_empty());
+    slow.release();
+    let outcome = bounded(payment).await.outcome.unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+}
+
+#[tokio::test]
 async fn test_public_slow_switch_paid_once_the_user_confirms() {
     let w = World::new();
     let mut shop = w.shop().await;
@@ -624,6 +673,67 @@ async fn test_public_identity_source_stale_service_requires_user_confirmation() 
         .await
         .outcome
         .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_public_failed_lookup_needs_the_exact_homeserver_version_even_with_consent() {
+    use pubky_switch_client::app::SwitchCopy;
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    publish(&w, tip_jar(), Some(w.clock.now_ms() + 30 * DAY_MS));
+    let higher = w.bob_directory_version(&mut wallet).await;
+    let source = wallet
+        .app_mut()
+        .identity_of(&w.bob_id(), true)
+        .await
+        .unwrap();
+    assert_eq!(source.doc.hash(), higher.hash());
+    assert_eq!(source.switch_copy, SwitchCopy::Read);
+    assert!(source.switch_read_ms.is_some());
+    assert_eq!(source.homeserver_read_ms, None);
+
+    w.router.remove(crate::common::BOB_ORIGIN);
+    let source = wallet
+        .app_mut()
+        .identity_of(&w.bob_id(), true)
+        .await
+        .unwrap();
+    assert_eq!(source.switch_copy, SwitchCopy::Unavailable);
+    assert_eq!(source.homeserver_read_ms, None);
+    let mut payment = public_to_bob(&w);
+    payment.options.unconfirmed_identity_confirmed = Some(UserConfirmed::new());
+    let refused = wallet
+        .pay_without_request(payment.clone())
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::IdentityUnavailable(_))),
+        "{refused:?}"
+    );
+    assert!(wallet.payments().await.unwrap().is_empty());
+    assert!(w.rail.all_executions().is_empty());
+
+    w.homeserver.publish(&higher).unwrap();
+    let source = wallet
+        .app_mut()
+        .identity_of(&w.bob_id(), true)
+        .await
+        .unwrap();
+    assert_eq!(source.switch_copy, SwitchCopy::Unavailable);
+    assert_eq!(source.homeserver_read_ms, Some(w.clock.now_ms()));
+    let refused = wallet
+        .pay_without_request(public_to_bob(&w))
+        .await
+        .outcome
+        .unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::IdentityUnconfirmed));
+    assert!(wallet.payments().await.unwrap().is_empty());
+    let paid = wallet.pay_without_request(payment).await.outcome.unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     assert_eq!(w.rail.all_executions().len(), 1);
 }
