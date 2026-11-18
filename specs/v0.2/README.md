@@ -14,6 +14,7 @@ The design may still change before it is frozen. The spec's Section 17 lists the
 | --- | --- |
 | [`spec.md`](spec.md) | The specification. It decides behaviour: Paykit's scopes and authorization, app records, message kinds, shared records, paying, payment flows and features, re-sends, threat model, guarantees and performance targets. Start here. |
 | [`wire-format.md`](wire-format.md) | The wire format. It decides bytes: Paykit's encodings, derivations, signature, certificate and record checks, messages and shared record values, so that a second team can build a compatible implementation. |
+| [`capabilities-and-routing.md`](capabilities-and-routing.md) | Draft architecture and specification breakdown for Paykit Capabilities, sibling Switch `swap` integration, and route solving (`cheapest`, `fastest`, `most_private`) across Contacts Allowances, Pubky swaps, Orchestra swaps, and Arkade swaps ([#448](https://github.com/pubky/paykit-rs/issues/448)). |
 | [`vectors/`](vectors/) | Test vectors for the wire format, as JSON files. Its `README.md` lists the files and how they were made. They are self-contained: Paykit's own fixed keys, certificates and records, built with the Switch's algorithms. |
 
 ## Settlement implementation status
