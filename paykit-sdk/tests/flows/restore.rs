@@ -2505,6 +2505,80 @@ async fn restored_unreceived(
 }
 
 #[tokio::test]
+async fn test_restore_live_store_delivers_the_original_kept_receipt_once() {
+    use pubky_switch_client::app::{Delivery, DeliveryOrigin, KeptBatchStatus};
+
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let original = store();
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default(),
+            Arc::clone(&original),
+        )
+        .await;
+    let app_id = shop.app_id();
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let PayOutcome::Paid { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap()
+    else {
+        panic!("payment must finish");
+    };
+    shop.receive(None).await.unwrap();
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+            path: "/ops".into(),
+        });
+    let batch_id = shop
+        .confirm_payment(&record)
+        .await
+        .unwrap_err()
+        .kept_batch()
+        .expect("the original batch is still in this store");
+    let receipts = shop.app().queued_messages("paykit").await.unwrap();
+    let receipt = receipts
+        .iter()
+        .find(|r| r.kept_batch == Some(batch_id))
+        .expect("receipt kept with the write");
+    assert_eq!(receipt.kind, paykit_lib::Kind::PaymentReceipt.as_str());
+    assert_eq!(receipt.to, w.alice_id());
+    assert_eq!(receipt.origin, DeliveryOrigin::Original);
+    let msg_id = receipt.msg_id.clone();
+    drop(shop);
+    let mut shop = w
+        .load_on_clock(&w.bob, original, app_id, Arc::clone(&w.clock))
+        .await;
+    shop.receive(None).await.unwrap();
+    shop.flush().await.unwrap();
+    assert!(matches!(
+        shop.app().kept_batch(batch_id).await.unwrap(),
+        Some(KeptBatchStatus::Applied { .. })
+    ));
+    assert!(matches!(
+        shop.app().delivery(&msg_id).await.unwrap(),
+        Some(Delivery::Accepted { .. })
+    ));
+    wallet.receive(None).await.unwrap();
+    let received = wallet.request(&request).await.unwrap().receipt.unwrap();
+    assert_eq!(received.msg_id, msg_id);
+    assert_eq!(received.attempt_id, attempt_id);
+    let count = w.alice.switch().entries_from(&w.bob_id());
+    assert_eq!(shop.confirm_payment(&record).await.unwrap(), Some(msg_id));
+    shop.flush().await.unwrap();
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), count);
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}
+
+#[tokio::test]
 async fn test_restore_own_receipt_kept_unanswered_sent_again_from_its_record() {
     // The shop confirms alice's payment, and the receipt's batch is applied with its answer
     // lost: the receipt is in the shop's record and in no outbox. Backed up then and restored
