@@ -371,6 +371,21 @@ impl Paykit {
         Ok(out)
     }
 
+    /// The parent of a billed period, using the request hash in its signed messages.
+    pub(crate) fn payee_period_parent(
+        &self,
+        target: &ActivityTarget,
+        bound: &ActivityRecord,
+    ) -> Option<ActivityTarget> {
+        let RecordBinding::Period { request_hash, .. } = bound.binding().ok()? else {
+            return None;
+        };
+        Some(ActivityTarget::payee(
+            natural_key::request_record(&self.identity(), &request_hash),
+            target.label().as_ref(),
+        ))
+    }
+
     /// The payee's request record a record at `target`, `bound`, belongs to: itself for a
     /// request record, the one of its request, under the same label, for a period record.
     pub(crate) async fn payee_request_record(
@@ -381,14 +396,13 @@ impl Paykit {
         if bound.request.is_some() {
             return Ok(Some(bound.clone()));
         }
-        let Ok(RecordBinding::Period { request_hash, .. }) = bound.binding() else {
+        let Some(request) = self.payee_period_parent(target, bound) else {
             return Ok(None);
         };
-        let request = ActivityTarget::payee(
-            natural_key::request_record(&self.identity(), &request_hash),
-            target.label().as_ref(),
-        );
-        self.held_activity(&request).await
+        let held = self
+            .activity_write_base(&self.activity_key(&request)?)
+            .await?;
+        Ok(self.read_activity(&request, held.as_ref()))
     }
 
     /// Whether the app holds, though it may not open or bind it, the payee's request record
@@ -398,13 +412,9 @@ impl Paykit {
         target: &ActivityTarget,
         bound: &ActivityRecord,
     ) -> Result<bool> {
-        let Ok(RecordBinding::Period { request_hash, .. }) = bound.binding() else {
+        let Some(request) = self.payee_period_parent(target, bound) else {
             return Ok(false);
         };
-        let request = ActivityTarget::payee(
-            natural_key::request_record(&self.identity(), &request_hash),
-            target.label().as_ref(),
-        );
         Ok(self
             .app
             .shared_record(&self.activity_key(&request)?)
@@ -472,7 +482,7 @@ impl Paykit {
         // Period details go to no payer whose sends are held (Paykit spec 8.1, "Blocked
         // counterparties"), refused before anything is signed, written or queued: they are
         // sent once the payer is unblocked or the lists are read.
-        let (_, held) = self.payee_record(record).await?;
+        let (target, held) = self.payee_record(record).await?;
         self.refuse_while_sends_held(&held.counterparty).await?;
         let mut tries = 0;
         let msg_id = loop {
@@ -481,7 +491,6 @@ impl Paykit {
             // period record read again below verify the service's time now, which the
             // period-details window is judged on (Paykit spec 8.2): a time verified a while
             // ago can show a period's deadline not passed yet.
-            let (target, _) = self.payee_record(record).await?;
             self.app.read_record(&target.record_target()).await?;
             let (target, bound) = self.payee_record(record).await?;
             let (stored, request) = request_of(&bound).ok_or(Refusal::NotFound)?;
@@ -514,16 +523,7 @@ impl Paykit {
             // Nor while the switch shows another write at the version held, as recovery
             // uploads can leave: the client builds the next write on that one, which this
             // app hasn't read, and may hold a receipt (Switch spec 12.6 step 3).
-            let held_version = self
-                .app
-                .shared_record(&self.activity_key(&into)?)
-                .await?
-                .map(|held| held.version);
             match self.app.read_record_fresh(&into.record_target()).await? {
-                RecordRead::Kept {
-                    reason: KeptReason::Older(write),
-                    ..
-                } if Some(write.version) == held_version => return Err(period_record_unread()),
                 RecordRead::Fresh(_)
                 | RecordRead::Kept {
                     reason:
@@ -536,12 +536,11 @@ impl Paykit {
                 } => return Err(Refusal::SwitchUnavailable(why).into()),
                 _ => return Err(period_record_unread()),
             }
-            let held = match self
-                .app
-                .shared_record(&self.activity_key(&into)?)
-                .await?
-                .map(|held| held.content)
-            {
+            let held = self.app.shared_record(&self.activity_key(&into)?).await?;
+            if crate::records::activity_base_changed(held.as_ref()) {
+                return Err(period_record_unread());
+            }
+            let held = match held.map(|held| held.content) {
                 None | Some(RecordContent::Deleted) => None,
                 Some(content) if crate::hold::awaits_key(&content) => {
                     return Err(crate::hold::value_awaits_key());

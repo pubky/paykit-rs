@@ -825,8 +825,18 @@ pub(crate) fn store_bundle_from(
     cert: &pubky_switch_core::records::AppCert,
     first: u64,
 ) {
+    store_bundle_at(w, w.alice.switch(), app, cert, first);
+}
+
+pub(crate) fn store_bundle_at(
+    w: &World,
+    switch: &pubky_switch_client::testing::ScriptedSwitch,
+    app: [u8; 16],
+    cert: &pubky_switch_core::records::AppCert,
+    first: u64,
+) {
     use pubky_switch_client::app::Protocol as _;
-    let epoch = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let epoch = switch.identity_doc().unwrap().data_epoch();
     let protocol = paykit_sdk::PaykitProtocol::new();
     let parts = pubky_switch_core::records::seal_bundle_parts(
         w.alice.identity().key(),
@@ -837,8 +847,7 @@ pub(crate) fn store_bundle_from(
     )
     .unwrap();
     for part in parts {
-        w.alice
-            .switch()
+        switch
             .signer_op(pubky_switch_core::ops::OpKind::KeyBundlePut(
                 pubky_switch_core::ops::KeyBundlePut {
                     target_app_id: app,

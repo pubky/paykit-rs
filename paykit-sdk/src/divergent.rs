@@ -1459,7 +1459,7 @@ impl Paykit {
             // counterparty's here, failing closed, and holds the credit only while it is
             // paused, divergent or not confirmed for a credit. A failure to read one is the
             // call's error.
-            match self.payee_record(&held.key).await {
+            match self.bound_payee_record(&held) {
                 Ok((_, other)) if other.counterparty != *counterparty => {}
                 Ok(_) | Err(PaykitError::Refused(Refusal::NotFound) | PaykitError::Lib(_)) => {
                     records.push(held.key)
@@ -1597,6 +1597,12 @@ impl Paykit {
             // The record's mark is judged by the one check below (`Paykit::pause_at`): one
             // that doesn't point to its record is paused.
             let held = self.app.shared_record(&record).await?;
+            if role != WriteRole::List && crate::records::activity_base_changed(held.as_ref()) {
+                if crate::stored::past_window(accepted_at, self.service_time()) {
+                    self.give_up_divergent(&kept_key, &stored).await?;
+                }
+                continue;
+            }
             let view = held.as_ref().and_then(View::of);
             let kept = match kept {
                 Some(kept) => {

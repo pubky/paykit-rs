@@ -374,7 +374,15 @@ impl Paykit {
         else {
             return Ok(None);
         };
-        if body.is_recurring() {
+        let target = ActivityTarget::payer(natural_key::request_record(
+            &obligation.payee,
+            &request_hash,
+        ));
+        if body.is_recurring()
+            || self
+                .activity_base_changed(&self.activity_key(&target)?)
+                .await?
+        {
             return Ok(None);
         }
         let (destination, carrier) = match &body.destination {
@@ -584,7 +592,7 @@ impl Paykit {
                 return match self.write_outcome(&mut paid, true, false).await? {
                     Written::Done => Ok(()),
                     Written::Held => Err(Refusal::RecordHeld(
-                        "the record holds a value that doesn't read".into(),
+                        "the payment waits for an activity record it can update".into(),
                     )
                     .into()),
                     Written::Divergent(record) => {
@@ -675,8 +683,7 @@ impl Paykit {
         let target = ActivityTarget::payer(natural);
         let key = self.activity_key(&target)?;
         if self
-            .app
-            .shared_record(&key)
+            .activity_write_base(&key)
             .await?
             .is_some_and(|r| crate::hold::awaits_key(&r.content))
         {
@@ -703,7 +710,7 @@ impl Paykit {
         let held =
             |why: &str| -> crate::error::PaykitError { Refusal::RecordHeld(why.into()).into() };
         let key = self.activity_key(target)?;
-        let current = self.app.shared_record(&key).await?;
+        let current = self.activity_write_base(&key).await?;
         let read = match current.as_ref().map(|r| &r.content) {
             None | Some(RecordContent::Deleted) => None,
             Some(content) => match activity::read(content.value(), &own, ActivitySide::Payer) {

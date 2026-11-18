@@ -528,10 +528,11 @@ impl Paykit {
         let target = crate::activity::ActivityTarget::payer(
             paykit_lib::derive::natural_key::request_record(&request.payee, &request.request_hash),
         );
+        let record_key = self.activity_key(&target)?;
+        self.activity_write_base(&record_key).await?;
         let Some(record) = self.held_activity(&target).await? else {
             return Err(self.request_record_refusal(&target).await?);
         };
-        let record_key = self.activity_key(&target)?;
         if let Some(key) = self.pass_hold(&record_key, &record, Some(held)).await? {
             self.local_put(&key::hold_confirmed(&key), &true).await?;
         }
@@ -869,6 +870,10 @@ impl Paykit {
                 let Some(label) = collection.policy_label(&record_held.policy) else {
                     continue;
                 };
+                if record_held.different_write_at_held_version {
+                    unread = true;
+                    continue;
+                }
                 if record_held.content == RecordContent::Deleted {
                     continue;
                 }
@@ -1093,7 +1098,9 @@ impl Paykit {
         let Some(held) = self.app.shared_record(&key).await? else {
             return Ok(AnswerRecord::Gone);
         };
-        if let RecordContent::Unreadable(_) = held.content {
+        if held.different_write_at_held_version
+            || matches!(held.content, RecordContent::Unreadable(_))
+        {
             return Ok(AnswerRecord::Undecided);
         }
         // A record seen divergent whose user hasn't confirmed it since, its current write a
@@ -1192,6 +1199,12 @@ impl Paykit {
             paykit_lib::derive::natural_key::request_record(&self.identity(), &request_hash),
             label,
         );
+        if self
+            .activity_base_changed(&self.activity_key(&target)?)
+            .await?
+        {
+            return Ok(DetailsStop::Unknown);
+        }
         Ok(match self.held_activity(&target).await? {
             None => DetailsStop::Unknown,
             Some(request) if rejected(&request) || cancelled(&request) => DetailsStop::Stopped,

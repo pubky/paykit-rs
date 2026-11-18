@@ -714,7 +714,7 @@ async fn test_periods_details_refused_for_good_written_at_a_later_receive() {
 
 /// A payment of 1 btc at the fake rail, and a payer's proof of it to `payee_app`'s invoice,
 /// naming `period`. Returns the proof's body.
-async fn period_proof(
+pub(crate) async fn period_proof(
     w: &World,
     payee_app: [u8; 16],
     period: PeriodRef,

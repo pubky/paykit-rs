@@ -46,7 +46,8 @@ use paykit_lib::records::{
 use paykit_lib::{AttemptId, Body, ListVersion};
 use pubky_switch_client::app::{
     AppError, ClaimFetch, ClaimOp, KeptBatchStatus, LocalWrite, Need, ObligationDeadline,
-    ReceiveContext, RecordContent, RecordTarget, Refusal as ClientRefusal, StoreFailure, Unopened,
+    ReceiveContext, RecordContent, RecordTarget, Refusal as ClientRefusal, SharedRecord,
+    StoreFailure, Unopened,
 };
 use pubky_switch_client::error::StoreError;
 use pubky_switch_core::claims::{Basis, ClaimStatus, ClaimView, Outcome, RECONCILIATION_MS};
@@ -163,7 +164,12 @@ pub(crate) fn effect(
         Body::PaymentRequest(_) if pay => {
             let target =
                 ActivityTarget::payer(natural_key::request_record(&sender, &stored.hash()));
-            let held = held_or_unlisted(cx, &target, RecordSide::Payer)?;
+            let held = intake_activity(cx, &target, RecordSide::Payer)?;
+            if let Some(record) = held.as_ref().filter(|r| r.different_write_at_held_version) {
+                crate::divergent::step_keep(cx, record, stored, seq, settlement, false)?;
+                return note_peer(cx, &sender, stored);
+            }
+            let held = held.and_then(activity_value);
             if held.is_some() || admits_new_state(cx, &sender, &scopes, stored)? {
                 // A one-time request that came back after a block opens its record held for
                 // the user's confirmation (`manual_only`).
@@ -206,7 +212,7 @@ pub(crate) fn effect(
             // yet, always applies and is kept at once: keeping it needs only the record's
             // key, so the stop never waits for the value's key or a listing, and no give-up
             // of the entry can lose it.
-            if pay && held_request(cx, &payer_target)? {
+            if pay && holds_activity(cx.record(&payer_target.record_target())?.as_ref()) {
                 return keep_cancellation(cx, &payer_target, stored, seq, true);
             }
             // A payer's cancellation of a request this app holds goes into its record. One naming a
@@ -580,9 +586,16 @@ pub(crate) fn peer_note(pubky: &[u8; 32], stored: &StoredMessage) -> (String, u6
 
 /// The value of the record the app holds at `target`, if it holds a readable one.
 fn held_value(cx: &ReceiveContext<'_>, target: &ActivityTarget) -> Result<Option<Vec<u8>>, Fail> {
-    Ok(cx
-        .record(&target.record_target())?
-        .and_then(|held| held.content.value().map(<[u8]>::to_vec)))
+    Ok(cx.record(&target.record_target())?.and_then(activity_value))
+}
+
+/// A decision can read these bytes only if the next write still uses the signed
+/// operation that supplied them.
+fn activity_value(held: SharedRecord) -> Option<Vec<u8>> {
+    match held.content {
+        RecordContent::Value(value) if !held.different_write_at_held_version => Some(value),
+        _ => None,
+    }
 }
 
 /// Hold the entry while the record at `target` holds a value not open only for want of its
@@ -601,13 +614,22 @@ pub(crate) fn wait_for_record_key(
     cx: &ReceiveContext<'_>,
     target: &RecordTarget,
 ) -> Result<(), Fail> {
+    record_with_key(cx, target).map(|_| ())
+}
+
+fn record_with_key(
+    cx: &ReceiveContext<'_>,
+    target: &RecordTarget,
+) -> Result<Option<SharedRecord>, Fail> {
     let held = cx.record(target)?;
     if let Some(RecordContent::Unreadable(Unopened::KeyNotHeld { data_epoch })) =
-        held.map(|held| held.content)
+        held.as_ref().map(|record| &record.content)
     {
-        return Err(Fail::AwaitsKey { data_epoch });
+        return Err(Fail::AwaitsKey {
+            data_epoch: *data_epoch,
+        });
     }
-    Ok(())
+    Ok(held)
 }
 
 /// `value`, the activity record value the app's copy holds at `target`, read bound to its
@@ -634,11 +656,13 @@ fn bound_activity(
 
 /// Whether the app's copy holds the record at `target` ([`holds_record`]).
 fn held_request(cx: &ReceiveContext<'_>, target: &ActivityTarget) -> Result<bool, Fail> {
-    Ok(holds_record(
-        cx.record(&target.record_target())?
-            .map(|held| held.content)
-            .as_ref(),
-    ))
+    Ok(holds_activity(cx.record(&target.record_target())?.as_ref()))
+}
+
+/// A signed delete disputed at its version cannot show the request is gone. Its
+/// cancellation stays protected on admission, under capacity and as it ages.
+pub(crate) fn holds_activity(held: Option<&SharedRecord>) -> bool {
+    held.is_some_and(|r| r.different_write_at_held_version || holds_record(Some(&r.content)))
 }
 
 /// Whether `content`, what the app's copy holds at a record, is a record held, for the stop a
@@ -660,7 +684,21 @@ fn held_or_unlisted(
     target: &ActivityTarget,
     side: RecordSide,
 ) -> Result<Option<Vec<u8>>, Fail> {
-    held_or_unlisted_at(cx, &target.record_target(), side)
+    Ok(intake_activity(cx, target, side)?.and_then(activity_value))
+}
+
+/// The record an incoming activity message can classify. A missing scope key
+/// holds the original entry even when a different write at the same version is current.
+fn intake_activity(
+    cx: &ReceiveContext<'_>,
+    target: &ActivityTarget,
+    side: RecordSide,
+) -> Result<Option<SharedRecord>, Fail> {
+    let held = record_with_key(cx, &target.record_target())?;
+    if !holds_activity(held.as_ref()) {
+        hold_while_unlisted(cx, side)?;
+    }
+    Ok(held)
 }
 
 /// [`held_or_unlisted`] for the record at any client target, such as an `allowances`
@@ -670,8 +708,7 @@ pub(crate) fn held_or_unlisted_at(
     target: &RecordTarget,
     side: RecordSide,
 ) -> Result<Option<Vec<u8>>, Fail> {
-    wait_for_record_key(cx, target)?;
-    let record = cx.record(target)?;
+    let record = record_with_key(cx, target)?;
     if !holds_record(record.as_ref().map(|held| &held.content)) {
         hold_while_unlisted(cx, side)?;
     }
@@ -1076,8 +1113,7 @@ pub(crate) fn make_room_for_stop(
                 return Err(Fail::corrupt());
             };
             let (cancellation, _) = kept_with_time(cx, &stop)?;
-            let content = cx.record_at(&record)?.map(|held| held.content);
-            if holds_record(content.as_ref()) {
+            if holds_activity(cx.record_at(&record)?.as_ref()) {
                 continue;
             }
             let from = cancellation.sender();
@@ -1345,8 +1381,11 @@ fn payer_reply(
             // the sender is its counterparty can't be told: the reply is kept as a reply before
             // its record, under the spam rule, never written over the value, and placed once
             // the record reads naming its sender (Paykit spec 8.1).
-            let bound = match held_or_unlisted(cx, &target, RecordSide::Payee)? {
-                Some(_) => held_bound(cx, &target, settlement)?,
+            let held = intake_activity(cx, &target, RecordSide::Payee)?;
+            let disputed = crate::records::activity_base_changed(held.as_ref());
+            // The bound signed request still identifies its payer and its periods.
+            let bound = match held.as_ref().and_then(|r| r.content.value()) {
+                Some(bytes) => bound_activity(cx, &target, bytes, settlement)?,
                 None => None,
             };
             let Some(bound) = bound else {
@@ -1361,22 +1400,22 @@ fn payer_reply(
                 .ok_or_else(|| {
                     Fail::Drop("Paykit wire 4.4: a message naming another period".into())
                 })?;
-            // A proof naming period details the period record doesn't hold, such as ones
-            // another own app sent whose record this app hasn't taken yet, would leave the
-            // record unbound (Paykit wire 5.3): it waits for them as a reply before its
-            // record, placed once the period record holds them. The period record is read
-            // bound to its key, as the later writes read it: one whose value doesn't read or
-            // bind is never written over here, and the proof waits the same way.
-            if target != request_target {
-                // Only the request's counterparty, whom its stored request names, pays its
-                // Billing Periods: a proof from anyone else is no update of activity the app
-                // holds. It never goes into a period record, where it would open one under
-                // another counterparty; it is new state, kept through the spam rule as a
-                // reply before its record ([`keep_before_record`]), and never placed.
-                if bound.counterparty != sender {
+            if bound.counterparty != sender {
+                if target != request_target {
+                    // A third party's proof of a valid period is new state. Admission
+                    // may keep it, but it never becomes the named payer's proof.
                     keep_before_record(cx, stored, seq, scopes, &request_target)?;
                     return Ok(true);
                 }
+                return Err(Fail::Drop(
+                    "Paykit spec 8.1: a reply from someone other than the request's payer".into(),
+                ));
+            }
+            if disputed {
+                keep_reply(cx, &request_target, stored, seq)?;
+                return Ok(true);
+            }
+            if target != request_target {
                 // From the counterparty, a proof the period record can't take now updates
                 // activity the app holds: kept outside the spam rule ([`keep_reply`]).
                 let held = match held_or_unlisted(cx, &target, RecordSide::Payee)? {
@@ -1425,8 +1464,7 @@ fn payer_reply(
             // proof's sender: the proof is new state, under the spam rule first, and one
             // admitted is kept as a reply before its record (`pr/`), within those bounds,
             // never written over the value (Paykit spec 8.1, "Replies before their record").
-            let content = cx.record(&target.record_target())?.map(|held| held.content);
-            if holds_record(content.as_ref()) && held_bound(cx, &target, settlement)?.is_none() {
+            if held_request(cx, &target)? && held_bound(cx, &target, settlement)?.is_none() {
                 if admits_new_state(cx, &sender, scopes, stored)? {
                     keep_reply(cx, &target, stored, seq)?;
                 }
@@ -1494,10 +1532,15 @@ fn receipt_effect(
     let sender = stored.sender();
     let own = cx.identity();
     let target = receipt_target(stored, &own, &attempt_id);
-    let held = cx.record(&target.record_target())?;
+    let held = intake_activity(cx, &target, RecordSide::Payer)?;
+    if crate::records::activity_base_changed(held.as_ref()) {
+        return receipt_over_unread_record(cx, &target, stored, seq);
+    }
     let content = held.as_ref().map(|held| held.content.clone());
-    held_or_unlisted(cx, &target, RecordSide::Payer)?;
-    let record = held_bound(cx, &target, settlement)?;
+    let record = match content.as_ref().and_then(RecordContent::value) {
+        Some(value) => bound_activity(cx, &target, value, settlement)?,
+        None => None,
+    };
     // A record that reads names its counterparty: a receipt from anyone else does nothing,
     // paused or not, and is never kept over it.
     let found = match &record {
@@ -2450,15 +2493,12 @@ impl Paykit {
                 _ => return Err(crate::error::PaykitError::corrupt()),
             };
             let record_key = self.activity_key(&target)?;
-            let content = self
-                .app
-                .shared_record(&record_key)
-                .await?
-                .map(|held| held.content);
+            let held = self.app.shared_record(&record_key).await?;
+            let present = holds_activity(held.as_ref());
             // No record yet: the message waits for it within its window, and past it is
             // dropped with no notice, its sender keeping it no longer either, but never while
             // the copy of its side may lack records.
-            if matches!(content, None | Some(RecordContent::Deleted)) {
+            if !present {
                 if crate::stored::past_window(accepted_at, self.service_time())
                     && !self
                         .side_unlisted(crate::stored::record_side(&target))
@@ -2468,10 +2508,17 @@ impl Paykit {
                 }
                 continue;
             }
-            let record = match content {
-                Some(RecordContent::Value(_)) => self.held_activity(&target).await?,
-                _ => None,
-            };
+            let record = held.and_then(activity_value).and_then(|value| {
+                crate::records::bind_activity(
+                    &value,
+                    &own,
+                    target.side.side(),
+                    target.label().as_ref(),
+                    &record_key,
+                    |t| self.app.record_key(t).ok(),
+                    &|proof| self.rail.settlement_id(proof),
+                )
+            });
             // A message the record can't take, its sender not the record's counterparty,
             // isn't written: kept no longer than any other.
             let placed = match record {
@@ -2542,7 +2589,7 @@ impl Paykit {
                         }
                         // A proof naming details the period record doesn't hold waits for
                         // them, within its window.
-                        PeriodPlace::AwaitsDetails => Placed::Not,
+                        PeriodPlace::AwaitsWrite => Placed::Not,
                         // Details whose storing can't be decided yet wait.
                         PeriodPlace::Undecided => Placed::Waits,
                     }
