@@ -369,10 +369,21 @@ async fn test_mixed_protocols_member_expiry_repair_survives_reload_and_final_wit
     .await
     .unwrap();
     second.receive(None).await.unwrap();
+    second.reconcile().await.unwrap();
+    second.end_reconcile(UserConfirmed::new()).await.unwrap();
+    let recovered = second
+        .app_mut()
+        .end_reconcile_for("chat", UserConfirmed::new())
+        .await
+        .unwrap();
+    assert!(recovered);
     let methods = w.rail.endpoint_identifiers();
     let id = crate::common::endpoint("btc-lightning-bolt12");
 
-    for publishing in [true, false] {
+    // Repeat publication and withdrawal for an explicit host edit and ordinary upkeep.
+    for (publishing, retry_on_receive) in
+        [(true, false), (false, false), (true, true), (false, true)]
+    {
         if publishing {
             first
                 .set_public_endpoint(id.clone(), PaymentEndpointPayload::new("lno1tips").unwrap())
@@ -407,7 +418,9 @@ async fn test_mixed_protocols_member_expiry_repair_survives_reload_and_final_wit
         )
         .await
         .unwrap();
-        if publishing {
+        if retry_on_receive {
+            second.receive(None).await.unwrap();
+        } else if publishing {
             second.update_own_record().await.unwrap();
         } else {
             // An unchanged endpoint edit also owes the policy-only repair.
