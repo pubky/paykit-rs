@@ -623,7 +623,7 @@ mod own_message_tests {
         assert!(body(text("allowances.rs"), "as_read").contains("StoredMessage::new("));
         assert!(body(text("journal.rs"), "acceptance_message").contains("StoredMessage::new("));
         assert!(body(text("stored.rs"), "note_stored").contains("StoredMessage::new("));
-        // Each place that makes an own copy queues it with the record write.
+        // Each requested delivery is queued with the write of the signed message.
         let send = body(text("records.rs"), "send_with_record");
         assert!(send.contains("self.own_copy(&signed)"));
         assert!(send.contains(".queue(signed.clone())"));
@@ -642,9 +642,12 @@ mod own_message_tests {
         assert!(request.contains(".queue(signed)"));
         let receipt = body(text("requests.rs"), "confirm_payment_with_inner");
         assert!(receipt.contains("self.own_copy(&signed)"));
-        assert!(receipt.split_whitespace().collect::<String>().contains(
-            "OpBatch::for_protocol(crate::protocol::BACKUP_NAME).entry(entry).queue(signed)"
-        ));
+        let receipt = receipt.split_whitespace().collect::<String>();
+        assert!(
+            receipt.contains("OpBatch::for_protocol(crate::protocol::BACKUP_NAME).entry(entry)")
+        );
+        assert!(receipt.contains("if!details.store_only{batch=batch.queue(signed);"));
+        assert!(receipt.contains("self.submit_settlement_credit(batch,write,"));
         assert!(!receipt.contains("queue_signed"));
         // An Allowance's proposal, answer or end, and an end crossing a withdrawal, queue
         // the message in the batch that writes the record (`allowances.rs`, whose own test

@@ -71,6 +71,7 @@ mod records;
 mod requests;
 mod resend;
 mod settlement_marks;
+mod settlements;
 mod state;
 mod stored;
 #[cfg(test)]

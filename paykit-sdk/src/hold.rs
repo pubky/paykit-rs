@@ -161,14 +161,15 @@ impl RecordSide {
     pub(crate) fn collections(self) -> Vec<SwitchCollection> {
         let payer = crate::activity::family(Collection::PayerActivity);
         let payee = crate::activity::family(Collection::PayeeActivity);
+        let settlements = crate::activity::family(Collection::Settlements);
         let lists = crate::activity::family(Collection::PaymentLists);
         let floor = crate::activity::family(Collection::BlockFloor);
         let allowances = crate::activity::family(Collection::Allowances);
         match self {
             Self::Payer => vec![payer, lists, floor],
-            Self::Payee => vec![payee],
+            Self::Payee => vec![payee, settlements],
             Self::Allowances => vec![allowances],
-            Self::All => vec![payer, payee, lists, floor, allowances],
+            Self::All => vec![payer, payee, lists, floor, allowances, settlements],
         }
     }
 }
@@ -1377,16 +1378,13 @@ pub(crate) struct HeldAnswer {
 
 /// The messages of `record` this app signed, `app_id` of identity `own`, that it queues again
 /// after a restore (Paykit spec 7.2, "What a restore loses"): each a record stores to be
-/// sent, since every message this app stores in a record it also queues
-/// (`records::own_message_tests`), while the counterparty hasn't answered it and no later
+/// sent, while the counterparty has not answered it and no later
 /// stop covers it. A request goes while the record holds no response and no cancellation;
 /// a Billing Period's details too ([`own_details`]), and only while `details_go`: no stop
 /// the period's request record or the period's credit shows covers them
 /// ([`DetailsStop`]); an acceptance or a rejection while it holds no cancellation and no
-/// receipt; a proof while it holds no receipt; a cancellation and a receipt always. A
-/// receipt the app stored without sending it is never sent this way: this app stores its
-/// own receipt only in the batch that queues it ([`Paykit::confirm_payment_with`]), so its
-/// receipt in a record is one it sent.
+/// receipt; a proof while it holds no receipt; a cancellation always. A receipt can be
+/// stored without sending. Only its original pending delivery authorizes a send.
 pub(crate) fn own_to_send_again<'a>(
     record: &'a ActivityRecord,
     own: &[u8; 32],
@@ -1407,7 +1405,6 @@ pub(crate) fn own_to_send_again<'a>(
         ),
         (&record.proof, record.receipt.is_none()),
         (&record.cancellation, true),
-        (&record.receipt, true),
     ]
     .into_iter()
     .filter_map(|(stored, send)| stored.as_ref().filter(|_| send));

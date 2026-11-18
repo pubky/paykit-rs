@@ -2864,10 +2864,7 @@ mod receive_tests {
     }
 
     #[test]
-    fn test_protocol_own_receipt_sent_again_after_a_restore() {
-        // A restore queues again a payee's own receipt and cancellation from its record: this
-        // app stores its own receipt only in the batch that queues it, so the record holds
-        // one it sent (Paykit spec 7.2); never a message another app signed.
+    fn test_protocol_receipt_in_activity_does_not_authorize_delivery_after_restore() {
         let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
         let bob = Party::new(
             "bob",
@@ -2895,20 +2892,14 @@ mod receive_tests {
                 .map(|stored| stored.message().kind.clone())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(own(&record), ["paykit.payment_receipt"]);
+        assert!(own(&record).is_empty());
         record.cancellation = Some(bob.message(
             &alice,
             "paykit.payment_request_cancellation",
             vec![[4; 32]],
             object(json!({ "reason": null })),
         ));
-        assert_eq!(
-            own(&record),
-            [
-                "paykit.payment_request_cancellation",
-                "paykit.payment_receipt"
-            ]
-        );
+        assert_eq!(own(&record), ["paykit.payment_request_cancellation"]);
         record.cancellation = Some(till.message(
             &alice,
             "paykit.payment_request_cancellation",
