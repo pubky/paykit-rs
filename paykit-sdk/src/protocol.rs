@@ -27,7 +27,9 @@ use std::sync::{Arc, PoisonError, RwLock};
 
 use paykit_lib::bodies::check_body;
 use paykit_lib::collections::Collection;
-use paykit_lib::kinds::{targets_app, Kind, Role as KindRole, Side, OPAQUE_MEMBERS};
+use paykit_lib::kinds::{
+    check_sender_scopes, targets_app, Kind, Role as KindRole, Side, OPAQUE_MEMBERS,
+};
 use paykit_lib::records::{
     ActivitySide, AllowanceRecord, BlockFloorRecord, PaymentListRecord, StoredMessage,
 };
@@ -963,15 +965,18 @@ impl Protocol for PaykitProtocol {
 
     /// Hold every attempt to deliver an Allowance acceptance, including a re-send or an
     /// acceptance already in the outbox (Paykit spec 8.3.1). Proposals and rejections
-    /// require the sender's current contacts permission on every attempt (Paykit spec 3.3).
+    /// require both current sender scopes on each attempt. An end requires the current
+    /// Allowance scope (Paykit spec 3.3).
     fn may_send(
         &self,
         delivery: &pubky_switch_client::app::DeliveryView<'_>,
     ) -> Result<bool, StoreFailure> {
         Ok(match Kind::from_kind(&delivery.message().kind) {
             Some(Kind::AllowanceAcceptance) => false,
-            Some(kind) => kind.has_allowance_sender_contacts(delivery.cert().scopes()),
-            None => true,
+            Some(Kind::AllowanceProposal | Kind::AllowanceRejection | Kind::AllowanceEnd) => {
+                check_sender_scopes(delivery.message(), delivery.cert().scopes()).is_ok()
+            }
+            _ => true,
         })
     }
 
