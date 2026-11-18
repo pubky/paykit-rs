@@ -1525,33 +1525,6 @@ mod tests {
     }
 
     #[test]
-    fn test_protocol_only_a_readable_nonempty_private_list_can_add_a_conversation() {
-        let shop = Party::new("shop", "shop", &["paykit_request", "paykit_settlements"]);
-        let p = protocol_of(&shop);
-        for (endpoints, expected) in [
-            (json!({"btc-bitcoin-p2wpkh": {"payload": "bc1q"}}), true),
-            (json!({}), false),
-            (json!(null), false),
-        ] {
-            let message = Message::new(
-                Kind::PrivatePaymentList.as_str(),
-                pubky_switch_core::message::Sender::of_app(shop.id(), &shop.keys),
-                [4; 32],
-                NOW,
-                vec![],
-                object(json!({
-                    "version": {"generation": 1, "counter": 1},
-                    "expires_at": pubky_switch_core::time::rfc3339(NOW + 3_600_000),
-                    "payment_endpoints": endpoints
-                })),
-            )
-            .unwrap();
-            let plaintext = message.sign(&shop.keys).unwrap();
-            assert_eq!(p.message_adds_conversation(&message, &plaintext), expected);
-        }
-    }
-
-    #[test]
     fn test_protocol_roles_follow_the_scope_table() {
         let pay = vec!["paykit_pay".to_owned()];
         let shop = vec!["paykit_request:shop1".to_owned()];
@@ -1703,6 +1676,33 @@ mod receive_tests {
         let p = PaykitProtocol::new();
         p.set_own(own.id(), own.cert.clone());
         p
+    }
+
+    #[test]
+    fn test_protocol_only_a_readable_nonempty_private_list_can_add_a_conversation() {
+        let shop = Party::new("shop", "shop", &["paykit_request", "paykit_settlements"]);
+        let p = protocol_of(&shop);
+        for (endpoints, expected) in [
+            (json!({"btc-bitcoin-p2wpkh": {"payload": "bc1q"}}), true),
+            (json!({}), false),
+            (json!(null), false),
+        ] {
+            let message = Message::new(
+                Kind::PrivatePaymentList.as_str(),
+                pubky_switch_core::message::Sender::of_app(shop.id(), &shop.keys),
+                [4; 32],
+                NOW,
+                vec![],
+                object(json!({
+                    "version": {"generation": 1, "counter": 1},
+                    "expires_at": pubky_switch_core::time::rfc3339(NOW + 3_600_000),
+                    "payment_endpoints": endpoints
+                })),
+            )
+            .unwrap();
+            let plaintext = message.sign(&shop.keys).unwrap();
+            assert_eq!(p.message_adds_conversation(&message, &plaintext), expected);
+        }
     }
 
     fn request_body() -> serde_json::Map<String, serde_json::Value> {
