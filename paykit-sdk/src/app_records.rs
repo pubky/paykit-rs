@@ -829,7 +829,7 @@ mod tests {
             ))
             .unwrap()
         };
-        let records = SeenRecords {
+        let mut records = SeenRecords {
             records: vec![
                 signed(0, tip_jar()),
                 signed(2, tip_jar()),
@@ -837,9 +837,18 @@ mod tests {
                 signed(2, json!({})),
             ],
         };
-        let (view, _) = records.view(&bob.id(), NOW + 2).unwrap();
+        let (view, held) = records.view(&bob.id(), NOW + 2).unwrap();
         assert!(view.in_conflict());
         assert_eq!(view.used().unwrap().updated_at(), NOW + 1);
+
+        let conflicting = AppRecord::verify(&signed(1, tip_jar()), &bob.id()).unwrap();
+        records.keep(&conflicting, held, NOW + 1).unwrap();
+        let times: Vec<_> = records
+            .records
+            .iter()
+            .map(|doc| AppRecord::verify(doc, &bob.id()).unwrap().updated_at() - NOW)
+            .collect();
+        assert_eq!(times, [0, 1, 1, 2, 2]);
     }
 
     #[test]
