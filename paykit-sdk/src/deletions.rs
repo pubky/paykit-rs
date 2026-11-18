@@ -392,13 +392,7 @@ fn period_parent(
     record: &ActivityRecord,
     label: Option<&Label>,
 ) -> Option<ActivityTarget> {
-    let RecordBinding::Period { request_hash, .. } = record.binding().ok()? else {
-        return None;
-    };
-    Some(ActivityTarget::payee(
-        natural_key::request_record(own, &request_hash),
-        label,
-    ))
+    crate::receipts::period_request_target(record, own, label)
 }
 
 fn signed_request(parent: &ActivityRecord) -> Result<Vec<u8>> {
@@ -417,28 +411,21 @@ enum ReceiptBinding {
 }
 
 fn receipt_binding(record: &ActivityRecord, parent: Option<&ActivityRecord>) -> ReceiptBinding {
-    let (Some(proof), Some(receipt)) = (&record.proof, &record.receipt) else {
+    if record.proof.is_none() || record.receipt.is_none() {
+        return ReceiptBinding::Invalid;
+    }
+    let Ok(binding) = record.binding() else {
         return ReceiptBinding::Invalid;
     };
-    let (request_hash, occurrence, parent) = match record.binding() {
-        Ok(RecordBinding::Unrequested) => return ReceiptBinding::Verified,
-        Ok(RecordBinding::Request { request_hash }) => (request_hash, None, Some(record)),
-        Ok(RecordBinding::Period {
-            request_hash,
-            billing_period,
-        }) => (request_hash, Some(billing_period), parent),
-        Err(_) => return ReceiptBinding::Invalid,
+    let parent = match binding {
+        RecordBinding::Unrequested => return ReceiptBinding::Verified,
+        RecordBinding::Request { .. } => record,
+        RecordBinding::Period { .. } => match parent {
+            Some(p) if crate::requests::request_of(p).is_some() => p,
+            _ => return ReceiptBinding::MissingRequest,
+        },
     };
-    let Some((parent, (stored, request))) =
-        parent.and_then(|p| crate::requests::request_of(p).map(|r| (p, r)))
-    else {
-        return ReceiptBinding::MissingRequest;
-    };
-    if parent.counterparty == record.counterparty
-        && stored.hash() == request_hash
-        && crate::periods::named_period(request, proof).is_ok_and(|p| p == occurrence)
-        && crate::periods::named_period(request, receipt).is_ok_and(|p| p == occurrence)
-    {
+    if crate::periods::request_for_payment(parent, record, &binding).is_some() {
         ReceiptBinding::Verified
     } else {
         ReceiptBinding::Invalid

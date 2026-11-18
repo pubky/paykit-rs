@@ -7,7 +7,7 @@ use paykit_lib::bodies::{PaymentReceipt, PaymentRequest};
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::natural_key;
 use paykit_lib::periods::PeriodRef;
-use paykit_lib::records::{ActivityRecord, ActivitySide};
+use paykit_lib::records::{ActivityRecord, ActivitySide, RecordBinding, StoredMessage};
 use paykit_lib::{AttemptId, Body, Label, PaymentReference};
 use pubky_switch_client::app::UserConfirmed;
 use serde_json::{Map, Value};
@@ -15,7 +15,7 @@ use serde_json::{Map, Value};
 use crate::activity::ActivityTarget;
 use crate::error::Result;
 use crate::paykit::Paykit;
-use crate::requests::{request_of, RequestRef};
+use crate::requests::RequestRef;
 
 /// What a payee's receipt carries beyond the proof it confirms (Paykit wire 4.11): its
 /// opaque `metadata`, and, for a payment without a request only, the payee's
@@ -161,10 +161,12 @@ pub(crate) fn period_request_target(
     own: &[u8; 32],
     label: Option<&Label>,
 ) -> Option<ActivityTarget> {
-    if record.request.is_some() {
+    let RecordBinding::Period {
+        request_hash: hash, ..
+    } = record.binding().ok()?
+    else {
         return None;
-    }
-    let hash = record.request_hash?;
+    };
     Some(match record.side {
         ActivitySide::Payer => {
             ActivityTarget::payer(natural_key::request_record(&record.counterparty, &hash))
@@ -175,6 +177,21 @@ pub(crate) fn period_request_target(
     })
 }
 
+/// The receipt to display for a bound activity (Paykit wire 4.11, 5.3).
+/// A payee credits the payment its signed receipt confirms. A payer may hold
+/// the payee's receipt before it has the signed proof. Reading the activity
+/// checks both messages' signatures, roles, attempt, occurrence and proof hash.
+pub(crate) fn displayed_receipt(record: &ActivityRecord) -> Option<&StoredMessage> {
+    let receipt = record.receipt.as_ref()?;
+    if record.side == ActivitySide::Payee && !record.shows_paid() {
+        return None;
+    }
+    if record.request.is_some() {
+        crate::periods::request_for_payment(record, record, &record.binding().ok()?)?;
+    }
+    Some(receipt)
+}
+
 /// The receipt `record`, held at `key`, stores, as the payer sees it. `request` is the
 /// request it pays: the one `record` holds, or, for a period record, the one its request
 /// record holds ([`period_request_target`]).
@@ -183,7 +200,7 @@ pub(crate) fn received_receipt(
     record: &ActivityRecord,
     request: Option<&PaymentRequest>,
 ) -> Option<ReceivedReceipt> {
-    let stored = record.receipt.as_ref()?;
+    let stored = displayed_receipt(record)?;
     let Body::PaymentReceipt(PaymentReceipt {
         attempt_id,
         billing_period,
@@ -195,7 +212,7 @@ pub(crate) fn received_receipt(
     };
     Some(ReceivedReceipt {
         record: key,
-        payee: record.counterparty,
+        payee: stored.sender(),
         request_hash: stored.message().refs.get(1).copied(),
         billing_period: *billing_period,
         attempt_id: *attempt_id,
@@ -228,9 +245,19 @@ impl Paykit {
             Some(target) => self.held_activity(&target).await?,
             None => None,
         };
-        let request = request_of(record)
-            .or_else(|| held.as_ref().and_then(request_of))
-            .map(|(_, request)| request);
+        let binding = record.binding()?;
+        let parent = held.as_ref().unwrap_or(record);
+        let request = match binding {
+            RecordBinding::Unrequested => None,
+            _ => {
+                let Some((_, request)) =
+                    crate::periods::request_for_payment(parent, record, &binding)
+                else {
+                    return Ok(None);
+                };
+                Some(request)
+            }
+        };
         Ok(received_receipt(key, record, request))
     }
 

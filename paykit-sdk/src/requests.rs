@@ -515,7 +515,7 @@ pub enum PayeeStatus {
     /// A proof is held, not credited: the payee verifies it by its own method. One whose
     /// settlement credits another occurrence already stays so (Paykit spec 8.4).
     ProofReceived,
-    /// Credited: the record holds the payee's receipt, which it sent.
+    /// Credited: the record holds the payee's receipt and the payer's proof it confirms.
     Receipted,
 }
 
@@ -833,11 +833,8 @@ impl Paykit {
                             .is_ok_and(|b| matches!(b, RecordBinding::Period { .. })) => {}
                 Ok((_, record)) => {
                     let mut view = payee_view(held.key, &record, None);
-                    if let (Some(hash), Some((_, request))) =
-                        (view.request_hash, request_of(&record))
-                    {
-                        let held = periods.remove(&hash).unwrap_or_default();
-                        view.periods = crate::periods::period_views(held, request);
+                    if let Some(children) = periods.remove(&held.key) {
+                        view.periods = crate::periods::period_views(children, &record);
                     }
                     // Shown divergent when its record, or one of its period records, is
                     // paused or its latest view divergent (Paykit spec 6).
@@ -957,8 +954,14 @@ impl Paykit {
             return Err(Refusal::CreditHistoryLost.into());
         }
         let id = &proof.payment_endpoint_identifier;
-        let payment = match request_record.as_ref().and_then(request_of) {
-            Some((stored_request, request)) => {
+        let binding = bound.binding()?;
+        let payment = match request_record.as_ref() {
+            Some(parent) => {
+                let Some((stored_request, request)) =
+                    crate::periods::request_for_payment(parent, &bound, &binding)
+                else {
+                    return Ok(None);
+                };
                 if request
                     .accepted_payment_endpoint_identifiers
                     .as_ref()
@@ -1086,7 +1089,7 @@ impl Paykit {
                 )
                 .into());
             }
-            None if bound.request_hash.is_none() && bound.billing_period.is_none() => (
+            None if binding == RecordBinding::Unrequested => (
                 proof.amount.clone().ok_or(Refusal::NotFound)?,
                 None,
                 None,
@@ -1675,10 +1678,7 @@ impl Paykit {
             ) else {
                 continue;
             };
-            let hash = request_of(&record).map(|(stored, _)| stored.hash());
-            let held_periods = hash
-                .and_then(|hash| periods.remove(&hash))
-                .unwrap_or_default();
+            let held_periods = periods.remove(&held.key).unwrap_or_default();
             if let Some(view) = self.request_view(held.key, &record, held_periods).await? {
                 out.push(view);
             }
@@ -1719,7 +1719,7 @@ impl Paykit {
         let periods = self
             .periods_of(Collection::PayerActivity)
             .await?
-            .remove(&request.request_hash)
+            .remove(&key)
             .unwrap_or_default();
         self.request_view(key, &record, periods)
             .await?
@@ -1735,7 +1735,7 @@ impl Paykit {
         let Some((stored, request)) = request_of(record) else {
             return Ok(None);
         };
-        let periods = crate::periods::period_views(periods, request);
+        let periods = crate::periods::period_views(periods, record);
         let payee = record.counterparty;
         let hash = stored.hash();
         let mut status = self.request_status(record, request, &payee, &hash).await?;
@@ -2462,7 +2462,7 @@ fn payee_view(
         record.response.as_ref().map(StoredMessage::body),
         Some(Body::PaymentRequestRejection(_))
     );
-    let status = if record.receipt.is_some() {
+    let status = if crate::receipts::displayed_receipt(record).is_some() {
         PayeeStatus::Receipted
     } else if record.proof.is_some() {
         PayeeStatus::ProofReceived
