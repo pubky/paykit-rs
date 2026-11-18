@@ -1152,7 +1152,8 @@ impl Paykit {
     /// Whether another `payee_activity` record than `record` credits `settlement` from
     /// any payer: its signed proof and receipt belong to the same occurrence (Paykit spec
     /// 6 and 8.1 step 4). When the app cannot open a held value or its copy may lack
-    /// records, it cannot tell whether another occurrence was credited. A record under a policy that isn't Paykit's is ignored.
+    /// records, it cannot tell whether another occurrence was credited. A record under a
+    /// policy that isn't Paykit's is ignored.
     async fn other_credit(
         &self,
         record: &[u8; 32],
@@ -1228,6 +1229,11 @@ impl Paykit {
         payer: &[u8; 32],
         settlement: &[u8],
     ) -> Result<bool> {
+        // The accepted copy still holds this settlement's receipt. Another payer
+        // on the requested payment does not resolve the disputed write.
+        if self.credits_settlement(other, settlement) {
+            return Ok(false);
+        }
         if let Some(request) = &other.request {
             return Ok(request.message().to != *payer);
         }
