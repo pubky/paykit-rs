@@ -781,7 +781,7 @@ async fn test_mixed_protocols_foreign_drop_stays_with_its_owner() {
 }
 
 #[tokio::test]
-async fn test_mixed_protocols_host_receives_the_delete_that_stopped_a_chat_record_job() {
+async fn test_mixed_protocols_message_acknowledgement_keeps_the_stopped_record_for_its_owner() {
     use pubky_switch_client::app::{
         AppEvent, Collection, OutgoingMessage, RecordJob, RecordTarget,
     };
@@ -790,16 +790,16 @@ async fn test_mixed_protocols_host_receives_the_delete_that_stopped_a_chat_recor
     use pubky_switch_core::ops::SignedOp;
 
     let w = world();
-    let chat = ProtocolSpec {
-        name: "chat".into(),
-        accepts: vec!["chat.item".into()],
+    let news = ProtocolSpec {
+        name: "news".into(),
+        accepts: vec!["news.item".into()],
         ..ProtocolSpec::default()
     };
     let mut recipient_scopes = scopes();
-    recipient_scopes.scopes = vec!["chat".into()];
+    recipient_scopes.scopes = vec!["news".into()];
     let mut recipient = App::join(
         w.env(&w.bob, store()),
-        Arc::new(TestProtocol::new(chat.clone())),
+        Arc::new(TestProtocol::new(news.clone())),
         PaykitConfig::default().app,
         w.approve(&w.bob, "recipient", &recipient_scopes),
     )
@@ -812,15 +812,18 @@ async fn test_mixed_protocols_host_receives_the_delete_that_stopped_a_chat_recor
     let chat = Arc::new(TestProtocol::new(ProtocolSpec {
         keyed_scopes: vec!["chat".into()],
         collections: vec![collection],
-        ..chat
+        name: "chat".into(),
+        ..ProtocolSpec::default()
     }));
+    let mut sender_scopes = scopes();
+    sender_scopes.scopes.push("news".into());
     let mut wallet = Paykit::join_with_protocols(
         w.env(&w.alice, store()),
         PaykitConfig::default(),
-        w.approve(&w.alice, "mixed", &scopes()),
+        w.approve(&w.alice, "mixed", &sender_scopes),
         Arc::clone(&w.rail) as Arc<dyn Rail>,
         w.timer(),
-        |p| ProtocolSet::new(vec![p, chat]),
+        |p| ProtocolSet::new(vec![p, chat, Arc::new(TestProtocol::new(news))]),
     )
     .await
     .unwrap();
@@ -829,7 +832,7 @@ async fn test_mixed_protocols_host_receives_the_delete_that_stopped_a_chat_recor
     let message = app
         .sign_message(OutgoingMessage::new(
             w.bob_id(),
-            "chat.item",
+            "news.item",
             Default::default(),
         ))
         .unwrap()
@@ -841,7 +844,7 @@ async fn test_mixed_protocols_host_receives_the_delete_that_stopped_a_chat_recor
     let deleted = app.delete_record(&target, vec![]).await.unwrap();
     let evidence = app.shared_evidence().await.unwrap();
     let [operation] = evidence.ops.as_slice() else {
-        panic!("expected the deleted chat record")
+        panic!("expected the deleted conversation record")
     };
     let expected = SignedOp::peek(&operation.op).unwrap().item_hash().unwrap();
     app.flush_outbox().await.unwrap();
@@ -851,14 +854,17 @@ async fn test_mixed_protocols_host_receives_the_delete_that_stopped_a_chat_recor
         AppEvent::RecordJobStopped { msg_id, key, generation, version, item_hash, .. }
             if *msg_id == sent && *key == deleted.key && *generation == deleted.version.generation
                 && *version == deleted.version.version && *item_hash == expected
-    )).expect("the host receives the signed delete for the stopped chat job");
+    )).expect("the host receives the signed delete for the stopped record job");
     let app = wallet.app_mut();
-    assert_eq!(app.event_owners(stopped.id().unwrap()).unwrap(), ["chat"]);
+    let id = stopped.id().unwrap();
+    app.ack_event_with("news", id, &[]).await.unwrap();
     assert!(app
         .unacknowledged_events_for("chat")
         .await
         .unwrap()
-        .contains(stopped));
+        .contains(stopped), "the collection owner still needs the signed delete after the message owner acknowledges it");
+    app.ack_event_with("chat", id, &[]).await.unwrap();
+    assert!(app.event_owners(id).is_none());
 }
 
 #[tokio::test]
