@@ -68,31 +68,99 @@ async fn test_destinations_from_a_current_app_paid() {
 }
 
 #[tokio::test]
-async fn test_destinations_payee_identity_unreadable_refused() {
-    let w = World::new();
+async fn test_destinations_identity_source_expires_at_ten_minutes() {
+    for age in [10 * 60_000 - 1, 10 * 60_000] {
+        let w = World::new();
+        let mut wallet = w.wallet("wallet").await;
+        let mut shop = w.shop().await;
+        let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        wallet.receive(None).await.unwrap();
+        let first = wallet
+            .app_mut()
+            .identity_of(&w.bob_id(), true)
+            .await
+            .unwrap()
+            .read_at_ms
+            .unwrap();
+        w.homeserver
+            .remove(w.bob_id(), pubky_switch_core::records::IDENTITY_PATH);
+        w.router.remove(crate::common::BOB_ORIGIN);
+        w.clock.set_ms(first + age);
+        let confirmed =
+            PayOptions::default().with_unconfirmed_identity_confirmed(UserConfirmed::new());
+        let outcome = wallet.pay_request(&request, confirmed).await.outcome;
+        if age == 10 * 60_000 {
+            let stale = outcome.unwrap_err();
+            assert!(
+                matches!(stale.refusal(), Some(Refusal::IdentityUnavailable(_))),
+                "{stale:?}"
+            );
+            assert!(wallet.payments().await.unwrap().is_empty());
+            assert!(w.rail.all_executions().is_empty());
+        } else {
+            assert!(
+                matches!(outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+                "{outcome:?}"
+            );
+            assert_eq!(w.rail.all_executions().len(), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_destinations_identity_source_at_zero_is_required_before_payment() {
+    let w = World::at(0);
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
-    // The payee's identity.json can be read neither from its Homeserver nor from its
-    // switch, and the copy held is more than 10 minutes old: the request's destination isn't
-    // acted on, not even on the user's confirmation, and nothing is written (Paykit spec 7.2).
-    w.homeserver
-        .remove(w.bob_id(), pubky_switch_core::records::IDENTITY_PATH);
+
+    // Only the directory has supplied this higher, honestly signed version.
+    let higher = w.bob_directory_version(&mut wallet).await;
     w.router.remove(crate::common::BOB_ORIGIN);
-    w.clock.advance_ms(11 * 60_000);
-    let confirmed = PayOptions::default().with_unconfirmed_identity_confirmed(UserConfirmed::new());
-    let stale = wallet
-        .pay_request(&request, confirmed)
+    let directory = wallet
+        .app_mut()
+        .identity_of(&w.bob_id(), true)
+        .await
+        .unwrap();
+    assert_eq!(directory.doc.hash(), higher.hash());
+    assert_eq!(directory.read_at_ms, None);
+    assert_eq!(w.clock.now_ms(), 0);
+    let refused = wallet
+        .pay_request(
+            &request,
+            PayOptions::default().with_unconfirmed_identity_confirmed(UserConfirmed::new()),
+        )
         .await
         .outcome
         .unwrap_err();
     assert!(
-        matches!(stale.refusal(), Some(Refusal::IdentityUnavailable(_))),
-        "{stale:?}"
+        matches!(refused.refusal(), Some(Refusal::IdentityUnavailable(_))),
+        "{refused:?}"
     );
     assert!(w.rail.all_executions().is_empty());
     assert!(wallet.payments().await.unwrap().is_empty());
+
+    // The Homeserver actually serves this same version at zero. A private destination
+    // may use that observation even while the payee's switch is unreachable.
+    w.homeserver.publish(&higher).unwrap();
+    let read = wallet
+        .app_mut()
+        .identity_of(&w.bob_id(), true)
+        .await
+        .unwrap();
+    assert_eq!(read.doc.hash(), higher.hash());
+    assert_eq!(read.read_at_ms, Some(0));
+    let paid = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(
+        matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
+        "{paid:?}"
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
 }
 
 #[tokio::test]

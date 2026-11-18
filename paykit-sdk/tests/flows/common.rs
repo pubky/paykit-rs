@@ -89,21 +89,29 @@ impl World {
     }
 
     pub fn new() -> Self {
+        Self::at(START_MS)
+    }
+
+    pub fn at(now_ms: u64) -> Self {
+        let clock = Arc::new(TestClock::new(now_ms));
+        Self::on_clocks(Arc::clone(&clock), clock)
+    }
+
+    pub fn on_clocks(clock: Arc<TestClock>, bob_clock: Arc<TestClock>) -> Self {
         let seeds = Seeds::default();
-        let clock = Arc::new(TestClock::new(START_MS));
         let homeserver = Arc::new(TestHomeserver::new());
-        let signer = |name: &str, origin: &str| {
+        let signer = |name: &str, origin: &str, time: &Arc<TestClock>| {
             TestSigner::at(
                 TestIdentity::new(&seeds, name),
                 origin,
-                Arc::clone(&clock),
+                Arc::clone(time),
                 Arc::clone(&homeserver),
                 spec(),
             )
         };
-        let alice = signer("alice", ALICE_ORIGIN);
-        let bob = signer("bob", BOB_ORIGIN);
-        let carol = signer("carol", CAROL_ORIGIN);
+        let alice = signer("alice", ALICE_ORIGIN, &clock);
+        let bob = signer("bob", BOB_ORIGIN, &bob_clock);
+        let carol = signer("carol", CAROL_ORIGIN, &clock);
         let router = Arc::new(Router::new());
         router.add_switch(alice.origin(), alice.switch());
         router.add_switch(bob.origin(), bob.switch());
@@ -126,6 +134,45 @@ impl World {
 
     pub fn bob_id(&self) -> [u8; 32] {
         self.bob.identity().public()
+    }
+
+    /// The wallet learns a higher signed version through Bob's recipient directory.
+    /// The Homeserver still serves the previous document.
+    pub async fn bob_directory_version(
+        &self,
+        wallet: &mut Paykit,
+    ) -> pubky_switch_core::records::IdentityDoc {
+        use paykit_lib::bodies::PrivatePaymentListRequest;
+        use pubky_switch_core::message::{Message, Sender};
+        use pubky_switch_core::records::IdentityDoc;
+        let mut body = self.bob.body();
+        body.version += 1;
+        let higher = IdentityDoc::sign(self.bob.identity().key(), body).unwrap();
+        self.bob.switch().deliver_identity(&higher).unwrap();
+        let message = Message::new(
+            "paykit.private_payment_list_request",
+            Sender {
+                identity: self.alice_id(),
+                app_id: wallet.app_id(),
+            },
+            self.bob_id(),
+            self.clock.now_ms(),
+            vec![],
+            PrivatePaymentListRequest::default().to_body().unwrap(),
+        )
+        .unwrap();
+        wallet
+            .app_mut()
+            .forget_directory(&self.bob_id())
+            .await
+            .unwrap();
+        assert!(!wallet
+            .app_mut()
+            .recipients_for(&self.bob_id(), &message)
+            .await
+            .unwrap()
+            .is_empty());
+        higher
     }
 
     pub fn carol_id(&self) -> [u8; 32] {
@@ -923,6 +970,11 @@ impl SlowSwitch {
             wakers: std::sync::Mutex::new(Vec::new()),
             answer_delay: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Whether a public identity read is waiting on this switch.
+    pub fn has_waiter(&self) -> bool {
+        !self.wakers.lock().unwrap().is_empty()
     }
 
     /// The next held read, once released, takes `ms` on `clock` to answer.

@@ -57,7 +57,7 @@ use paykit_lib::records::{DestinationSource, StoredMessage};
 use paykit_lib::scopes::{acts_as_payee, check_certificate, holds, PaykitScope};
 use paykit_lib::Body;
 use pubky_switch_client::app::{
-    Initiator, MayAct, PeerIdentity, SwitchAnswer, UserConfirmed, DOC_CACHE_MS,
+    Initiator, MayAct, PeerIdentity, SwitchAnswer, SwitchCopy, UserConfirmed, DOC_CACHE_MS,
 };
 use pubky_switch_client::transport::BoxFuture;
 use pubky_switch_core::records::{AppCert, AppRecord, IdentityDoc, Standing};
@@ -70,6 +70,61 @@ use crate::paykit::Paykit;
 /// after the Homeserver's read, before a user's payment may go on the user's confirmation
 /// (Switch spec 4.3, "No added latency").
 pub const IDENTITY_GRACE_MS: u64 = 2_000;
+
+/// The time during which both parts of a public identity lookup are current
+/// (Switch spec 4.3). A directory-only version has no qualifying observation.
+pub(crate) fn public_read_window(identity: &PeerIdentity) -> Option<std::ops::Range<u64>> {
+    let read = identity.read_at_ms?;
+    Some(read.max(identity.switch_lookup_ms)..identity.fresh_until_ms())
+}
+
+/// The exact Homeserver observation available to a user when the lookup cannot confirm it.
+pub(crate) fn homeserver_window(identity: &PeerIdentity) -> Option<std::ops::Range<u64>> {
+    let at = identity.homeserver_read_ms?;
+    Some(at..at.saturating_add(DOC_CACHE_MS))
+}
+
+fn public_action(identity: &PeerIdentity, now: u64, by: Initiator) -> MayAct {
+    match (identity.switch_copy, by) {
+        (SwitchCopy::Pending, Initiator::User)
+            if now < identity.switch_lookup_ms.saturating_add(IDENTITY_GRACE_MS) =>
+        {
+            MayAct::WaitUntil(identity.switch_lookup_ms.saturating_add(IDENTITY_GRACE_MS))
+        }
+        (SwitchCopy::Unavailable | SwitchCopy::Stale | SwitchCopy::Pending, Initiator::User) => {
+            if homeserver_window(identity).is_some_and(|window| window.contains(&now)) {
+                MayAct::IfUserConfirms
+            } else {
+                MayAct::LookUpAgain
+            }
+        }
+        _ => identity.may_act(now, by, IDENTITY_GRACE_MS),
+    }
+}
+
+/// The payee's copy of `identity.json` may still be acted on now, on the clock (Paykit
+/// spec 4, 7.2; Switch spec 4.3): read in the last 10 minutes, for a destination a
+/// verified message carries; for a public endpoint, as the switch's rules let `by`
+/// act, `confirmed` standing for the user's confirmation.
+pub(crate) fn payee_copy_usable(
+    now: u64,
+    identity: &PeerIdentity,
+    need: Need,
+    by: Initiator,
+    confirmed: Option<UserConfirmed>,
+) -> bool {
+    match need {
+        Need::FreshCopy => identity
+            .read_at_ms
+            .and_then(|at| now.checked_sub(at))
+            .is_some_and(|age| age < DOC_CACHE_MS),
+        Need::SwitchCopy => match public_action(identity, now, by) {
+            MayAct::Now => true,
+            MayAct::IfUserConfirms => confirmed.is_some(),
+            _ => false,
+        },
+    }
+}
 
 impl Paykit {
     /// The payee's `identity.json` for acting on its destinations (Paykit spec 4, 7.2; Switch
@@ -93,13 +148,11 @@ impl Paykit {
     /// fresh, else the Homeserver's copy and then the payee's switch's, through the client's
     /// version floor and equivocation check.
     ///
-    /// The switch's lookup runs beside `reads`, the Homeserver reads the caller starts from
-    /// the copy taken, and is waited on for at most [`IDENTITY_GRACE_MS`] after them, on the
-    /// host's timer (Paykit spec 4, 14; Switch spec 4.3, "No added latency"). One still
-    /// running then is kept: its answer is taken whenever it arrives before money moves, at
-    /// the next check of this payee. A copy the switch confirmed is acted on. One it couldn't
-    /// confirm, or hasn't yet, is acted on only for a payment the user started and confirmed
-    /// (`confirmed`); an automatic payment looks it up once more and otherwise isn't made.
+    /// The switch's lookup runs beside `reads`, the Homeserver reads started from this copy.
+    /// For a public endpoint a user may confirm the exact Homeserver observation after the
+    /// lookup fails or the grace period on the host timer passes. An automatic payment waits
+    /// for an answer. An outstanding lookup stays with this payee for the next check
+    /// before money moves (Paykit spec 4, 14; Switch spec 4.3, "No added latency").
     /// `Err` inside holds the refusal; the reads' result comes with it.
     pub(crate) async fn payee_identity_with<R: Send + 'static>(
         &mut self,
@@ -115,10 +168,15 @@ impl Paykit {
         loop {
             // A lookup still running from an earlier check goes on: its copy and its answer,
             // while the copy is fresh.
-            let kept = self
-                .lookups
-                .remove(payee)
-                .filter(|kept| self.now() < kept.identity.fresh_until_ms());
+            // Apply an answer already received, including one for a copy whose
+            // time window has since expired. Its signed document still sets the floor.
+            if let Err(refusal) = self.take_kept_lookup(payee).await? {
+                return Ok((Err(refusal), read));
+            }
+            let kept = self.lookups.remove(payee).filter(|kept| {
+                public_read_window(&kept.identity)
+                    .is_some_and(|window| window.contains(&self.now()))
+            });
             let (identity, switch) = match kept {
                 Some(kept) => (kept.identity, Some(kept.switch)),
                 None => match self.app.begin_identity_lookup(payee, refresh).await {
@@ -145,9 +203,12 @@ impl Paykit {
                 Some(switch) => {
                     // A destination a verified message carries doesn't wait on the switch:
                     // its answer is taken only if it is there already.
-                    let sleep = match need {
-                        Need::SwitchCopy => self.timer.sleep(IDENTITY_GRACE_MS),
-                        Need::FreshCopy => Box::pin(async {}),
+                    let sleep: BoxFuture<'static, ()> = match (need, by) {
+                        (Need::SwitchCopy, Initiator::Automatic) => {
+                            Box::pin(std::future::pending())
+                        }
+                        (Need::SwitchCopy, _) => self.timer.sleep(IDENTITY_GRACE_MS),
+                        (Need::FreshCopy, _) => Box::pin(async {}),
                     };
                     let (lookup, done) = race(switch, started, sleep).await;
                     if done.is_some() {
@@ -176,11 +237,7 @@ impl Paykit {
             if need == Need::FreshCopy {
                 // A copy read in the last 10 minutes, from the Homeserver or the switch, is
                 // the one acted on (Paykit spec 7.2); the switch's confirmation isn't needed.
-                let fresh = self
-                    .now()
-                    .checked_sub(identity.read_at_ms)
-                    .is_some_and(|age| age < DOC_CACHE_MS);
-                if fresh {
+                if payee_copy_usable(self.now(), &identity, need, by, confirmed) {
                     return Ok((Ok(identity), read));
                 }
                 if !refresh {
@@ -196,7 +253,7 @@ impl Paykit {
                     read,
                 ));
             }
-            match identity.may_act(self.now(), by, IDENTITY_GRACE_MS) {
+            match public_action(&identity, self.now(), by) {
                 MayAct::Now => return Ok((Ok(identity), read)),
                 MayAct::IfUserConfirms if confirmed.is_some() => return Ok((Ok(identity), read)),
                 MayAct::IfUserConfirms => return Ok((Err(Refusal::IdentityUnconfirmed), read)),
@@ -236,41 +293,52 @@ impl Paykit {
         }
         // Switch spec 4.3 asks for the switch's confirmation for public endpoints only; a
         // request's or a list's endpoint is the payee's verified message (Paykit spec 7.2).
-        let identity = match self
+        let mut identity = match self
             .payee_identity(payee, Need::of(carrier), by, confirmed)
             .await?
         {
             Ok(identity) => identity,
             Err(refusal) => return Ok(Err(refusal)),
         };
+        match carrier {
+            Carrier::Record(record)
+                if !self
+                    .last_public_read
+                    .as_ref()
+                    .is_some_and(|read| read.qualifies(record, &identity, self.now())) =>
+            {
+                // A changed source or a recovered payment needs a fresh read of the selected app.
+                let mut failures = Vec::new();
+                let checked = Box::pin(self.public_records(
+                    payee,
+                    Some(destination.app_id),
+                    by,
+                    confirmed,
+                    &mut failures,
+                ))
+                .await?;
+                match checked {
+                    Ok((checked, records)) if records.iter().any(|r|
+                        record_carries(payee, destination, &r.record, self.now()).is_ok()) => identity = checked,
+                    Ok(_) => return Ok(Err(Refusal::Destination(
+                        "Paykit spec 7.2: the payee app no longer offers the selected public endpoint".into(),
+                    ))),
+                    Err(refusal) => return Ok(Err(refusal)),
+                }
+            }
+            _ => {}
+        }
         // The lookup awaited the network: the destination is judged again on the clock now.
         Ok(self
-            .destination_valid(payee, destination, carrier, request_hash, &identity.doc)
+            .destination_valid(
+                payee,
+                destination,
+                carrier,
+                request_hash,
+                &identity.doc,
+                self.now(),
+            )
             .map(|()| identity))
-    }
-
-    /// The payee's copy of `identity.json` may still be acted on now, on the clock (Paykit
-    /// spec 4, 7.2; Switch spec 4.3): read in the last 10 minutes, for a destination a
-    /// verified message carries; for a public endpoint, as the switch's rules let `by`
-    /// act, `confirmed` standing for the user's confirmation.
-    pub(crate) fn payee_copy_usable(
-        &self,
-        identity: &PeerIdentity,
-        need: Need,
-        by: Initiator,
-        confirmed: Option<UserConfirmed>,
-    ) -> bool {
-        let now = self.now();
-        match need {
-            Need::FreshCopy => now
-                .checked_sub(identity.read_at_ms)
-                .is_some_and(|age| age < DOC_CACHE_MS),
-            Need::SwitchCopy => match identity.may_act(now, by, IDENTITY_GRACE_MS) {
-                MayAct::Now => true,
-                MayAct::IfUserConfirms => confirmed.is_some(),
-                _ => false,
-            },
-        }
     }
 
     /// The payee's switch lookup kept from an earlier check, taken if its answer has come,
@@ -333,8 +401,8 @@ impl Paykit {
         carrier: &Carrier,
         request_hash: Option<&[u8; 32]>,
         doc: &IdentityDoc,
+        now: u64,
     ) -> std::result::Result<(), Refusal> {
-        let now = self.now();
         carries(payee, destination, carrier, request_hash, now).map_err(Refusal::Destination)?;
         current(doc, &destination.app_id, carrier, now).map_err(Refusal::Destination)
     }

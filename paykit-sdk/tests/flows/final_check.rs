@@ -461,7 +461,330 @@ async fn stopped_before_the_rail() -> (World, Arc<HookedStore>, [u8; 16], paykit
 }
 
 // ---------------------------------------------------------------------------------------
+// The payer's own Homeserver confirmation at dispatch.
+
+#[tokio::test]
+async fn test_final_check_own_observation_rollback_during_read_requires_a_new_read() {
+    use pubky_switch_client::clock::TestClock;
+    let w = World::new();
+    let (store, app_id, request) = with_a_request(&w).await;
+    let now = w.clock.now_ms() + 10_000;
+    let device = Arc::new(TestClock::new(now));
+    let reads = HookedReads::new(&w);
+    let changed = Arc::clone(&device);
+    reads.then(
+        w.alice_id(),
+        0,
+        Some(Box::new(move || changed.set_ms(now - 1))),
+    );
+    let mut env = w.env(&w.alice, store);
+    env.clock = Arc::clone(&device) as Arc<dyn Clock>;
+    env.homeserver = reads;
+    let mut wallet = Paykit::load(
+        env,
+        PaykitConfig::default(),
+        app_id,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::IdentityUnavailable(_))
+        ),
+        "{refused:?}"
+    );
+    assert!(wallet.payments().await.unwrap().is_empty());
+    assert!(w.rail.all_executions().is_empty());
+    // Catching up cannot restore the discarded confirmation. A new actual read can.
+    device.set_ms(now);
+    assert_eq!(wallet.app().identity_confirmed_at(), None);
+    let paid = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_final_check_raw_host_takes_a_newer_own_version_across_a_clock_adjustment() {
+    use pubky_switch_client::app::IdentityRefresh;
+    use pubky_switch_client::clock::TestClock;
+    let w = World::new();
+    let (saved, app_id, _) = with_a_request(&w).await;
+    let now = w.clock.now_ms() + 100;
+    let device = Arc::new(TestClock::new(now));
+    let reads = HookedReads::new(&w);
+    let mut env = w.env(&w.alice, saved);
+    env.clock = Arc::clone(&device) as Arc<dyn Clock>;
+    env.homeserver = reads.clone();
+    let mut wallet = Paykit::load(
+        env,
+        PaykitConfig::default(),
+        app_id,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    let higher = w
+        .alice
+        .sign_next(|body| body.record_max_age = Some(86_400))
+        .unwrap();
+    let changed = Arc::clone(&device);
+    reads.then(
+        w.alice_id(),
+        0,
+        Some(Box::new(move || changed.set_ms(now - 1))),
+    );
+    assert_eq!(
+        wallet.app_mut().refresh_identity().await.unwrap(),
+        IdentityRefresh::ClockMovedBack { newer: true }
+    );
+    assert_eq!(wallet.app().own_identity().hash(), higher.hash());
+    device.set_ms(now);
+    assert_eq!(wallet.app().identity_confirmation_age_ms(), None);
+    assert_eq!(
+        wallet.app_mut().refresh_identity().await.unwrap(),
+        IdentityRefresh::Current { confirmed_at: now }
+    );
+    assert_eq!(wallet.app().identity_confirmation_age_ms(), Some(0));
+}
+
+/// The device returns one earlier observation after its paying journal commit,
+/// then reads its previous time again before the method is called.
+struct BackwardsOnce {
+    now: u64,
+    back: std::sync::atomic::AtomicBool,
+}
+
+impl Clock for BackwardsOnce {
+    fn now_ms(&self) -> u64 {
+        self.now - u64::from(self.back.swap(false, std::sync::atomic::Ordering::SeqCst))
+    }
+}
+
+#[tokio::test]
+async fn test_final_check_own_observation_rollback_after_read_stays_invalid_at_dispatch() {
+    let w = World::new();
+    let (store, app_id, request) = with_a_request(&w).await;
+    let clock = Arc::new(BackwardsOnce {
+        now: w.clock.now_ms() + 10_000,
+        back: false.into(),
+    });
+    let changed = Arc::clone(&clock);
+    store.on_paying(Box::new(move || {
+        changed
+            .back
+            .store(true, std::sync::atomic::Ordering::SeqCst)
+    }));
+    let mut env = w.env(&w.alice, store);
+    env.clock = clock;
+    let mut wallet = Paykit::load(
+        env,
+        PaykitConfig::default(),
+        app_id,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Pending { .. }), "{outcome:?}");
+    assert!(w.rail.all_executions().is_empty());
+    assert_eq!(wallet.app().identity_confirmed_at(), None);
+}
+
+/// Observe the device reads between the paying commit and the actual rail call.
+struct FenceClock {
+    rail: Arc<paykit_sdk::rail::FakeRail>,
+    now: u64,
+    changed_at: Option<(usize, u64)>,
+    samples: Mutex<Option<usize>>,
+}
+
+impl Clock for FenceClock {
+    fn now_ms(&self) -> u64 {
+        let mut samples = self.samples.lock().unwrap();
+        if let Some(count) = samples.as_mut() {
+            if self.rail.all_executions().is_empty() {
+                *count += 1;
+                if let Some((at, value)) = self.changed_at {
+                    if *count == at {
+                        return value;
+                    }
+                }
+            }
+        }
+        self.now
+    }
+}
+
+async fn at_last_fence_sample(change: Option<(usize, i64)>) -> (PayOutcome, usize, bool) {
+    let w = World::new();
+    let (store, app_id, request) = with_a_request(&w).await;
+    let now = w.clock.now_ms();
+    let clock = Arc::new(FenceClock {
+        rail: w.rail.clone(),
+        now,
+        changed_at: change.map(|(at, delta)| (at, now.checked_add_signed(delta).unwrap())),
+        samples: Mutex::new(None),
+    });
+    let armed = clock.clone();
+    store.on_paying(Box::new(move || *armed.samples.lock().unwrap() = Some(0)));
+    let mut env = w.env(&w.alice, store);
+    env.clock = clock.clone();
+    let mut wallet = Paykit::load(
+        env,
+        PaykitConfig::default(),
+        app_id,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    let reads = clock.samples.lock().unwrap().unwrap();
+    (outcome, reads, !w.rail.all_executions().is_empty())
+}
+
+#[tokio::test]
+async fn test_final_check_own_observation_at_the_last_clock_sample_before_the_rail() {
+    let (ordinary, last, paid) = at_last_fence_sample(None).await;
+    assert!(matches!(ordinary, PayOutcome::Paid { .. }) && paid && last > 0);
+    let mut outcomes = Vec::new();
+    for delta in [-1, 59_999, 60_000] {
+        let (outcome, _, paid) = at_last_fence_sample(Some((last, delta))).await;
+        outcomes.push((delta, matches!(outcome, PayOutcome::Paid { .. }), paid));
+    }
+    assert_eq!(
+        outcomes,
+        [
+            (-1, false, false),
+            (59_999, true, true),
+            (60_000, false, false)
+        ]
+    );
+}
+
 // A late switch answer that removes the destination's app
+
+#[tokio::test]
+async fn test_final_check_current_public_read_remains_usable_without_a_second_get() {
+    let w = Arc::new(World::new());
+    let saved = Arc::new(HookedStore::default());
+    let mut payer = w
+        .wallet_on("wallet", saved.clone() as Arc<dyn StateStore>)
+        .await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    crate::public::publish(
+        &w,
+        crate::public::one_endpoint("btc-lightning-bolt12", "lno1shop"),
+        Some(w.clock.now_ms() + 86_400_000),
+    );
+    let owner = w.bob_id();
+    let path = pubky_switch_core::records::app_record_path(&shop.app_id());
+    let changed = Arc::clone(&w);
+    saved.on_attempted(Box::new(move || changed.homeserver.remove(owner, &path)));
+    let paid = payer
+        .pay_without_request(crate::public::public_to_bob(&w))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_final_check_late_public_lookup_rechecks_the_selected_endpoint() {
+    for (on_acceptance, replace) in [(false, false), (false, true), (true, false), (true, true)] {
+        let w = Arc::new(World::new());
+        let store = Arc::new(HookedStore::default());
+        let mut original = w
+            .wallet_on("wallet", Arc::clone(&store) as Arc<dyn StateStore>)
+            .await;
+        let app_id = original.app_id();
+        let mut shop = w.shop().await;
+        shop.app_mut().invite(&w.alice_id()).await.unwrap();
+        let mut invoice = draft("1", w.clock.now_ms());
+        invoice.destination = paykit_lib::bodies::RequestDestination::Any;
+        let request = request_from(&mut shop, w.alice_id(), invoice).await;
+        original.receive(None).await.unwrap();
+        drop(original);
+        w.clock.advance_ms(11 * 60_000);
+        let endpoint = |payload| crate::public::one_endpoint("btc-lightning-bolt12", payload);
+        let expires = Some(w.clock.now_ms() + 86_400_000);
+        crate::public::publish(&w, endpoint("lno1first"), expires);
+        // Only the switch knows this newer document. It still admits the same app and certificate.
+        let older = w.homeserver.file(w.bob_id(), IDENTITY_PATH).unwrap();
+        let higher = w
+            .bob
+            .sign_next(|body| body.record_max_age = Some(86_400))
+            .unwrap();
+        w.bob.switch().deliver_identity(&higher).unwrap();
+        w.homeserver.put(w.bob_id(), IDENTITY_PATH, older);
+        w.clock.advance_ms(1);
+        let slow = held_switch(&w);
+        let release = Arc::clone(&slow);
+        let changed = Arc::clone(&w);
+        let hook: Hook = Box::new(move || {
+            if replace {
+                crate::public::publish(&changed, endpoint("lno1next"), expires);
+            }
+            release.release();
+        });
+        if on_acceptance {
+            store.on_acceptance_journaled(hook);
+        } else {
+            store.on_attempted(hook);
+        }
+        let mut payer = self::wallet(&w, store, app_id, &HookedReads::new(&w), &slow).await;
+        let mut payment = crate::public::public_to_bob(&w);
+        payment.options.unconfirmed_identity_confirmed =
+            Some(pubky_switch_client::app::UserConfirmed::new());
+        let result = if on_acceptance {
+            payer.pay_request(&request, payment.options).await.outcome
+        } else {
+            payer.pay_without_request(payment).await.outcome
+        };
+        if replace {
+            if on_acceptance {
+                assert!(
+                    matches!(result, Ok(PayOutcome::Pending { .. })),
+                    "{result:?}"
+                );
+            } else {
+                let refused = result.unwrap_err();
+                assert!(
+                    matches!(refused.refusal(), Some(paykit_sdk::Refusal::AttemptFailed(reason)) if matches!(reason.as_ref(), paykit_sdk::Refusal::Destination(_))),
+                    "{refused:?}"
+                );
+            }
+            assert!(w.rail.all_executions().is_empty());
+        } else {
+            assert!(matches!(result, Ok(PayOutcome::Paid { .. })), "{result:?}");
+            assert_eq!(w.rail.all_executions().len(), 1);
+        }
+    }
+}
 
 #[tokio::test]
 async fn test_final_check_first_dispatch_late_answer_removing_the_app_not_paid() {
@@ -550,20 +873,29 @@ async fn test_final_check_recovery_late_answer_removing_the_app_not_paid() {
 }
 
 // ---------------------------------------------------------------------------------------
-// An own identity.json read that succeeds after 11 minutes
+// The payee identity reaches its ten-minute limit during a current own identity read
+
+/// Read Bob's signed document now so its ten-minute boundary is known.
+async fn observe_payee(w: &World, wallet: &mut Paykit) -> u64 {
+    let at = w.clock.now_ms();
+    let identity = wallet
+        .app_mut()
+        .identity_of(&w.bob_id(), true)
+        .await
+        .unwrap();
+    assert_eq!(identity.read_at_ms, Some(at));
+    at
+}
 
 #[tokio::test]
 async fn test_final_check_first_dispatch_payee_copy_aged_during_the_own_read_not_paid() {
     let w = World::new();
     let (store, app_id, request) = with_a_request(&w).await;
-    w.clock.advance_ms(11 * 60_000);
-    // Before the attempt: the own identity.json is read at once, then bob's, which takes
-    // 61 s. After it, the own copy is over 60 s old and read again: that read succeeds after
-    // 11 minutes, leaving bob's copy past its 10.
     let reads = HookedReads::new(&w);
     reads.then(w.alice_id(), 0, None);
-    reads.then(w.bob_id(), 61_000, None);
-    reads.then(w.alice_id(), 11 * 60_000, None);
+    reads.then(w.alice_id(), 1_000, None);
+    let clock = Arc::clone(&w.clock);
+    store.on_attempted(Box::new(move || clock.advance_ms(5 * 60_000 - 1_000)));
     let slow = held_switch(&w);
     slow.release();
     let mut wallet = wallet(
@@ -574,8 +906,11 @@ async fn test_final_check_first_dispatch_payee_copy_aged_during_the_own_read_not
         &slow,
     )
     .await;
-    // A read that long also takes the attempt past its pre-dispatch budget: nothing is
-    // paid, and the attempt is written `failed`.
+    // The attempt starts five minutes after the payee observation. Its journal commit
+    // takes just under five minutes. The final one-second own read takes the payee to
+    // ten minutes and, with the five-minute clock tolerance, exhausts the attempt budget.
+    let observed = observe_payee(&w, &mut wallet).await;
+    w.clock.set_ms(observed + 5 * 60_000);
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
@@ -589,6 +924,7 @@ async fn test_final_check_first_dispatch_payee_copy_aged_during_the_own_read_not
         ),
         "{refused:?}"
     );
+    assert_eq!(w.clock.now_ms(), observed + 10 * 60_000);
     assert!(w.rail.all_executions().is_empty());
     let payment = wallet.payments().await.unwrap().remove(0);
     assert_eq!(w.rail.pay_calls(&payment.attempt_id), 0);
@@ -598,11 +934,8 @@ async fn test_final_check_first_dispatch_payee_copy_aged_during_the_own_read_not
 async fn test_final_check_resume_payee_copy_aged_during_the_own_read_not_paid() {
     let w = World::new();
     let (store, app_id, attempt_id) = in_flight(&w).await;
-    w.clock.advance_ms(11 * 60_000);
-    // The destination's check reads bob's copy; the own identity.json's read after it
-    // succeeds after 11 minutes.
     let reads = HookedReads::new(&w);
-    reads.then(w.alice_id(), 11 * 60_000, None);
+    reads.then(w.alice_id(), 1_000, None);
     let slow = held_switch(&w);
     slow.release();
     let mut wallet = wallet(
@@ -613,11 +946,14 @@ async fn test_final_check_resume_payee_copy_aged_during_the_own_read_not_paid() 
         &slow,
     )
     .await;
+    let observed = observe_payee(&w, &mut wallet).await;
+    w.clock.set_ms(observed + 10 * 60_000 - 1_000);
     let resumed = wallet.resume_payments().await.unwrap();
     assert!(
         matches!(resumed.as_slice(), [PayOutcome::Pending { .. }]),
         "{resumed:?}"
     );
+    assert_eq!(w.clock.now_ms(), observed + 10 * 60_000);
     assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
@@ -625,9 +961,8 @@ async fn test_final_check_resume_payee_copy_aged_during_the_own_read_not_paid() 
 #[tokio::test]
 async fn test_final_check_recovery_payee_copy_aged_during_the_own_read_not_paid() {
     let (w, store, app_id, attempt_id) = stopped_before_the_rail().await;
-    w.clock.advance_ms(11 * 60_000);
     let reads = HookedReads::new(&w);
-    reads.then(w.alice_id(), 11 * 60_000, None);
+    reads.then(w.alice_id(), 1_000, None);
     let slow = held_switch(&w);
     slow.release();
     let mut wallet = wallet(
@@ -638,11 +973,14 @@ async fn test_final_check_recovery_payee_copy_aged_during_the_own_read_not_paid(
         &slow,
     )
     .await;
+    let observed = observe_payee(&w, &mut wallet).await;
+    w.clock.set_ms(observed + 10 * 60_000 - 1_000);
     let resumed = wallet.resume_payments().await.unwrap();
     assert!(
         matches!(resumed.as_slice(), [PayOutcome::Pending { .. }]),
         "{resumed:?}"
     );
+    assert_eq!(w.clock.now_ms(), observed + 10 * 60_000);
     assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 0);
 }

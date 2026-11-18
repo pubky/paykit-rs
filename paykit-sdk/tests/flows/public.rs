@@ -530,6 +530,78 @@ async fn test_public_slow_switch_waited_on_only_through_its_grace() {
 }
 
 #[tokio::test]
+async fn test_public_identity_source_starts_a_new_lookup_after_rollback() {
+    let w = World::new();
+    let mut shop = w.shop().await;
+    publish(&w, tip_jar(), Some(w.clock.now_ms() + 30 * DAY_MS));
+    let (mut wallet, _slow, _) = beside_a_slow_switch(&w, &mut shop).await;
+    let began = w.clock.now_ms();
+    let first = bounded(wallet.public_endpoints(&w.bob_id(), None))
+        .await
+        .unwrap_err();
+    assert_eq!(first.refusal(), Some(&Refusal::IdentityUnconfirmed));
+
+    // The first switch lookup is still pending when the clock moves behind its
+    // start. A fresh Homeserver read and a fresh grace can serve this confirmed call.
+    w.clock.set_ms(began - 60_000);
+    let reads = w.homeserver.identity_reads(&w.bob_id());
+    let list = bounded(wallet.public_endpoints(&w.bob_id(), Some(UserConfirmed::new())))
+        .await
+        .unwrap();
+    assert_eq!(ids(&list), ["btc-lightning-bolt12"]);
+    assert!(w.homeserver.identity_reads(&w.bob_id()) > reads);
+}
+
+#[tokio::test]
+async fn test_public_automatic_payment_waits_for_a_pending_switch() {
+    use std::future::{poll_fn, Future};
+    use std::sync::Arc;
+    use std::task::Poll;
+    let w = World::new();
+    let saved = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&saved)).await;
+    let app_id = wallet.app_id();
+    let mut shop = w.shop().await;
+    let mut draft = crate::common::draft("1", w.clock.now_ms());
+    draft.destination = paykit_lib::bodies::RequestDestination::Any;
+    let request = crate::common::request_from(&mut shop, w.alice_id(), draft).await;
+    wallet.receive(None).await.unwrap();
+    drop(wallet);
+    w.clock.advance_ms(11 * 60_000);
+    publish(&w, tip_jar(), Some(w.clock.now_ms() + DAY_MS));
+    let slow = Arc::new(crate::common::SlowSwitch::new(
+        Arc::clone(&w.router),
+        crate::common::BOB_ORIGIN,
+    ));
+    let mut wallet = w
+        .load_with_transport(
+            &w.alice,
+            saved,
+            app_id,
+            Arc::clone(&slow) as Arc<dyn pubky_switch_client::transport::Transport>,
+        )
+        .await;
+    let mut payment =
+        Box::pin(wallet.pay_request_automatically(&request, public_to_bob(&w).options));
+    bounded(poll_fn(|cx| {
+        assert!(
+            payment.as_mut().poll(cx).is_pending(),
+            "the payment stopped before the switch answered"
+        );
+        if slow.has_waiter() {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }))
+    .await;
+    assert!(w.rail.all_executions().is_empty());
+    slow.release();
+    let outcome = bounded(payment).await.outcome.unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+}
+
+#[tokio::test]
 async fn test_public_slow_switch_paid_once_the_user_confirms() {
     let w = World::new();
     let mut shop = w.shop().await;
@@ -543,6 +615,126 @@ async fn test_public_slow_switch_paid_once_the_user_confirms() {
         .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_public_identity_source_stale_service_requires_user_confirmation() {
+    use pubky_switch_client::app::SwitchCopy;
+    use pubky_switch_client::clock::TestClock;
+    use pubky_switch_client::testing::START_MS;
+    use std::sync::Arc;
+
+    let w = World::on_clocks(
+        Arc::new(TestClock::new(START_MS)),
+        Arc::new(TestClock::new(START_MS)),
+    );
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let mut draft = crate::common::draft("1", w.clock.now_ms());
+    draft.destination = paykit_lib::bodies::RequestDestination::Any;
+    let request = crate::common::request_from(&mut shop, w.alice_id(), draft).await;
+    wallet.receive(None).await.unwrap();
+    publish(&w, tip_jar(), Some(w.clock.now_ms() + 30 * DAY_MS));
+
+    // Bob's switch still signs with its old clock. Only his Homeserver supplies a
+    // current observation of the same document to the wallet.
+    w.clock.advance_ms(11 * 60_000 + 1);
+    let source = wallet
+        .app_mut()
+        .identity_of(&w.bob_id(), true)
+        .await
+        .unwrap();
+    assert_eq!(source.switch_copy, SwitchCopy::Stale);
+    assert_eq!(source.homeserver_read_ms, Some(w.clock.now_ms()));
+    let public = public_to_bob(&w).options;
+    let confirmed = public
+        .clone()
+        .with_unconfirmed_identity_confirmed(UserConfirmed::new());
+    let refused = wallet
+        .pay_request_automatically(&request, confirmed.clone())
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::IdentityUnavailable(_))),
+        "{refused:?}"
+    );
+    let refused = wallet
+        .pay_request(&request, public)
+        .await
+        .outcome
+        .unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::IdentityUnconfirmed));
+    assert!(w.rail.all_executions().is_empty());
+    assert!(wallet.payments().await.unwrap().is_empty());
+    let paid = wallet
+        .pay_request(&request, confirmed)
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_public_failed_lookup_needs_the_exact_homeserver_version_even_with_consent() {
+    use pubky_switch_client::app::SwitchCopy;
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    publish(&w, tip_jar(), Some(w.clock.now_ms() + 30 * DAY_MS));
+    let higher = w.bob_directory_version(&mut wallet).await;
+    let source = wallet
+        .app_mut()
+        .identity_of(&w.bob_id(), true)
+        .await
+        .unwrap();
+    assert_eq!(source.doc.hash(), higher.hash());
+    assert_eq!(source.switch_copy, SwitchCopy::Read);
+    assert!(source.switch_read_ms.is_some());
+    assert_eq!(source.homeserver_read_ms, None);
+
+    w.router.remove(crate::common::BOB_ORIGIN);
+    let source = wallet
+        .app_mut()
+        .identity_of(&w.bob_id(), true)
+        .await
+        .unwrap();
+    assert_eq!(source.switch_copy, SwitchCopy::Unavailable);
+    assert_eq!(source.homeserver_read_ms, None);
+    let mut payment = public_to_bob(&w);
+    payment.options.unconfirmed_identity_confirmed = Some(UserConfirmed::new());
+    let refused = wallet
+        .pay_without_request(payment.clone())
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::IdentityUnavailable(_))),
+        "{refused:?}"
+    );
+    assert!(wallet.payments().await.unwrap().is_empty());
+    assert!(w.rail.all_executions().is_empty());
+
+    w.homeserver.publish(&higher).unwrap();
+    let source = wallet
+        .app_mut()
+        .identity_of(&w.bob_id(), true)
+        .await
+        .unwrap();
+    assert_eq!(source.switch_copy, SwitchCopy::Unavailable);
+    assert_eq!(source.homeserver_read_ms, Some(w.clock.now_ms()));
+    let refused = wallet
+        .pay_without_request(public_to_bob(&w))
+        .await
+        .outcome
+        .unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::IdentityUnconfirmed));
+    assert!(wallet.payments().await.unwrap().is_empty());
+    let paid = wallet.pay_without_request(payment).await.outcome.unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     assert_eq!(w.rail.all_executions().len(), 1);
 }
 
