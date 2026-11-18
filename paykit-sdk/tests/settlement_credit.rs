@@ -182,6 +182,7 @@ async fn competing_tills(world: &World) -> TestResult {
         wallet.app_mut().invite(&till.identity()).await?;
         till.app_mut().invite(&wallet.identity()).await?;
     }
+    let before_credit = till.backup().await?;
     // Both authorized tills see the same legitimate purchase in the shop's labelled activity.
     let (winner, first_record) =
         Box::pin(paid_request(&mut labelled, &mut buyer, "ln-one-invoice")).await?;
@@ -203,7 +204,7 @@ async fn competing_tills(world: &World) -> TestResult {
     let second_id = labelled.app_id();
     drop((till, labelled));
     let mut reopened = Paykit::load(
-        world.app_env(till_store),
+        world.app_env(till_store.clone()),
         Default::default(),
         first_id,
         rail.clone(),
@@ -256,14 +257,18 @@ async fn competing_tills(world: &World) -> TestResult {
             naming,
             &natural_key::request_record(&reader.identity(), &winner.request_hash),
         );
-        assert_eq!(
-            view.marks(),
-            &[SettlementMark::new(
-                &tag,
-                OccurrenceKind::OneTimeRequest,
-                occurrence
-            )]
+        let mark = SettlementMark::new(&tag, OccurrenceKind::OneTimeRequest, occurrence);
+        assert_eq!(view.marks(), &[mark]);
+        let retained = format!(
+            "sm/{}/{}",
+            pubky_switch_core::enc::b64(&key),
+            pubky_switch_core::enc::b64(&mark.to_bytes())
         );
+        assert!(reader
+            .app()
+            .protocol_get("paykit", retained.as_bytes())
+            .await?
+            .is_some());
     }
     assert_eq!(rail.all_executions().values().sum::<u64>(), 1);
 
@@ -322,5 +327,36 @@ async fn competing_tills(world: &World) -> TestResult {
         .await?
         .is_empty());
     assert_eq!(rail.all_executions().values().sum::<u64>(), 3);
+    // Selecting a backup predating these credits keeps the marks this installation
+    // already saw. A new store learns them from its own authenticated read.
+    reopened.receive(None).await?;
+    let marks = reopened.app().protocol_scan("paykit", b"sm/").await?;
+    assert_eq!(marks.len(), 3);
+    drop(reopened);
+    let in_place = Paykit::restore(
+        world.app_env(till_store),
+        Default::default(),
+        &before_credit,
+        rail.clone(),
+        Arc::new(TestTimer),
+    )
+    .await?;
+    assert_eq!(in_place.app().protocol_scan("paykit", b"sm/").await?, marks);
+    drop(in_place);
+    let mut fresh = Paykit::restore(
+        world.app_env(Arc::new(MemoryStore::new())),
+        Default::default(),
+        &before_credit,
+        rail.clone(),
+        Arc::new(TestTimer),
+    )
+    .await?;
+    assert!(fresh
+        .app()
+        .protocol_scan("paykit", b"sm/")
+        .await?
+        .is_empty());
+    fresh.receive(None).await?;
+    assert_eq!(fresh.app().protocol_scan("paykit", b"sm/").await?, marks);
     Ok(())
 }
