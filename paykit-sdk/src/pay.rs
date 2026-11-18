@@ -27,6 +27,8 @@
 //! payment a crash interrupted without paying twice (Paykit spec 7.2, "Starting to pay", "No
 //! second execution").
 
+mod offline;
+
 use paykit_lib::bodies::{
     PaymentProof, PaymentRequest, PaymentRequestAcceptance, PrivatePaymentListRequest,
     RequestDestination,
@@ -1070,6 +1072,7 @@ impl Paykit {
             rail_proof: None,
             paid_at_ms: None,
             proof_msg_id: None,
+            offline: None,
             restored: false,
             journaled_at_ms: self.now(),
             carrier: None,
@@ -1187,7 +1190,10 @@ impl Paykit {
     /// Pay without a request (Paykit spec 8.4): to the payee's Private Payment List, or its
     /// public endpoints when the user chose them. The attempt, its `payer_activity` record and
     /// a single-use endpoint's mark go in one batch, so two own apps can't both pay one
-    /// single-use endpoint.
+    /// single-use endpoint. When the payer's switch is unavailable, the user can still
+    /// pay an explicitly selected reusable public endpoint with current identity and
+    /// deny-list evidence. A successful transfer stays in the journal until the
+    /// original attempt and its payer activity can be recorded (Paykit spec 8.4).
     ///
     /// # Errors
     ///
@@ -1253,22 +1259,26 @@ impl Paykit {
             refuse_blocked(true, shown, options.blocked_confirmed.as_ref())?;
         }
         let attempt_id = AttemptId::generate()?;
-        // The own switch is asked first, before anything is written: Paykit spec 8.4 lets
-        // a payment to a reusable public endpoint go ahead while it doesn't answer, and this
-        // SDK doesn't make one, every payment being attempt-first (Paykit spec 7.2). So a
-        // switch that doesn't answer refuses the payment, nothing written or paid. The read
-        // also makes the service time current.
         let obligation = payment_obligation(&attempt_id);
-        self.app.read_claim(&obligation).await.map_err(|error| {
-            if switch_unavailable(&error) {
-                PaykitError::from(Refusal::SwitchUnavailable(error.to_string()))
-            } else {
-                error.into()
+        let deadline = match self.app.read_claim(&obligation).await {
+            Ok(_) => Some(
+                self.recent_service_time(&obligation)
+                    .await?
+                    .saturating_add(UNREQUESTED_DEADLINE_MS),
+            ),
+            Err(error) if switch_unavailable(&error) => {
+                if !matches!(options.mode, PaymentMode::Public(_))
+                    || options.endpoint.as_ref() != Some(&destination.endpoint_id()?)
+                    || destination.source()? != DestinationSource::Public
+                    || destination.single_use
+                    || reserve.is_some()
+                {
+                    return Err(Refusal::SwitchUnavailable(error.to_string()).into());
+                }
+                None
             }
-        })?;
-        // 10 minutes after the latest service time the app has seen (Paykit spec 8.4),
-        // which a recent read makes current (Switch spec 10.1).
-        let seen = self.recent_service_time(&obligation).await?;
+            Err(error) => return Err(error.into()),
+        };
         let own = self.identity();
         let natural = natural_key::payer_payment_record(&own, &attempt_id);
         let mut record = activity::empty(ActivitySide::Payer, payment.payee);
@@ -1287,7 +1297,7 @@ impl Paykit {
             amount: KeptAmount::of(&payment.amount),
             payment_amount: KeptAmount::of(&payment_amount),
             destination,
-            deadline: Some(seen.saturating_add(UNREQUESTED_DEADLINE_MS)),
+            deadline,
             stage: Stage::Recorded,
             step: None,
             label: None,
@@ -1300,6 +1310,7 @@ impl Paykit {
             rail_proof: None,
             paid_at_ms: None,
             proof_msg_id: None,
+            offline: None,
             restored: false,
             journaled_at_ms: self.now(),
             carrier: None,
@@ -1312,6 +1323,9 @@ impl Paykit {
             price: None,
             failed_on_claim: false,
         };
+        if deadline.is_none() {
+            return Box::pin(self.pay_public_offline(entry, carrier, &options)).await;
+        }
         self.execute(Plan {
             entry,
             record: ActivityTarget::payer(natural),
@@ -3076,6 +3090,18 @@ impl Paykit {
     pub(crate) async fn report(&mut self, entry: &mut JournalEntry) -> Result<PayOutcome> {
         let attempt_id = entry.attempt()?;
         let paid = entry.rail_proof.is_some();
+        if entry.offline.is_some() {
+            if !paid {
+                self.set_stage(entry, Stage::Finished).await?;
+                return Ok(PayOutcome::Failed {
+                    attempt_id,
+                    reason: "the payment method reported a failure".into(),
+                });
+            }
+            if !matches!(self.record_offline_attempt(entry).await, Ok(true)) {
+                return Ok(PayOutcome::PaidOutcomeUnwritten { attempt_id });
+            }
+        }
         match self.write_outcome(entry, paid, false).await {
             Ok(Written::Done) => {}
             Ok(Written::Held) => return Ok(PayOutcome::RecordHeld { attempt_id }),
@@ -3563,6 +3589,13 @@ impl Paykit {
                 continue;
             }
             match entry.stage {
+                Stage::Recorded | Stage::Paying if entry.offline.is_some() => {
+                    if entry.stage == Stage::Recorded && !entry.restored {
+                        self.set_stage(&mut entry, Stage::Abandoned).await?;
+                    } else {
+                        out.push(self.offline_method_outcome(&mut entry).await?);
+                    }
+                }
                 Stage::Recorded | Stage::Attempted | Stage::Paying if entry.restored => {
                     match self.attempt_state(&entry).await? {
                         Some((step, Outcome::Open | Outcome::Unknown)) => {
@@ -3744,7 +3777,7 @@ impl Paykit {
             // The attempt is `failed` on the claim: no claim entry is written, and the
             // payee's receipt settles it by evidence (Switch spec 10.2 row 3), or, once the
             // claim is gone, tells the user it was paid.
-            entry.failed_on_claim = true;
+            entry.failed_on_claim = entry.offline.is_none() || entry.step.is_some();
             entry.step = None;
             entry.rail_proof = Some(proof);
             entry.paid_at_ms = paid_at_ms;
@@ -4266,6 +4299,34 @@ impl Paykit {
         Ok(())
     }
 
+    /// The last clock sample before calling the rail, and whether that sample
+    /// still authorizes the currently held own identity (Paykit spec 4).
+    fn dispatch_time(&self) -> (u64, bool) {
+        self.app
+            .identity_confirmed_at()
+            .zip(self.app.identity_confirmation_age_ms())
+            .map_or_else(
+                || (self.now(), false),
+                |(start, age)| (start + age, age < REVALIDATION_MS),
+            )
+    }
+
+    fn payee_source_current(
+        &self,
+        carrier: &Carrier,
+        payee: &PeerIdentity,
+        by: Initiator,
+        confirmed: Option<UserConfirmed>,
+        now: u64,
+    ) -> bool {
+        (!matches!(carrier, Carrier::Record(_))
+            || self
+                .last_public_read
+                .as_ref()
+                .is_some_and(|read| read.current(payee, now)))
+            && payee_copy_usable(now, payee, Need::of(carrier), by, confirmed)
+    }
+
     /// Checks 2 to 6 of the final payment check, with no await, on the clock now and the
     /// payee's copy `payee`, and for a first dispatch the pre-dispatch budget
     /// ([`Paykit::within_budget`]).
@@ -4288,16 +4349,7 @@ impl Paykit {
             return Ok(FinalCheck::Refused(refusal));
         }
         let may_attempt = self.app.may_attempt(by == Initiator::Automatic).is_ok();
-        // The last sample before the rail decides every wall-clock limit, including
-        // the age of this exact own document. A later sample could invalidate it.
-        let (now, own_fresh) = self
-            .app
-            .identity_confirmed_at()
-            .zip(self.app.identity_confirmation_age_ms())
-            .map_or_else(
-                || (self.now(), false),
-                |(start, age)| (start + age, age < REVALIDATION_MS),
-            );
+        let (now, own_fresh) = self.dispatch_time();
         match kind {
             Dispatch::Repeat {
                 idempotency_retention_ms,
@@ -4340,12 +4392,7 @@ impl Paykit {
         // (Switch spec 10.1, 12.4).
         let clear = may_attempt
             && destination
-            && (!matches!(carrier, Carrier::Record(_))
-                || self
-                    .last_public_read
-                    .as_ref()
-                    .is_some_and(|read| read.current(payee, now)))
-            && payee_copy_usable(now, payee, Need::of(&carrier), by, confirmed)
+            && self.payee_source_current(&carrier, payee, by, confirmed, now)
             && own_fresh
             && self.own_identity_authorizes(entry, now).is_ok();
         Ok(if clear {
@@ -4479,12 +4526,7 @@ impl Paykit {
         Ok(Ok(doc))
     }
 
-    /// Checks 5 and 6 of [`Paykit::pay_gate`], on the own `identity.json` held.
-    fn own_identity_authorizes(
-        &self,
-        entry: &JournalEntry,
-        now: u64,
-    ) -> std::result::Result<(), String> {
+    fn own_identity_lists_app(&self, now: u64) -> std::result::Result<(), String> {
         let doc = self.app.own_identity();
         let me = self.app_id();
         let cert = self.app.cert().hash();
@@ -4497,6 +4539,17 @@ impl Paykit {
                     .into(),
             );
         }
+        Ok(())
+    }
+
+    /// Checks 5 and 6 of [`Paykit::pay_gate`], on the own `identity.json` held.
+    fn own_identity_authorizes(
+        &self,
+        entry: &JournalEntry,
+        now: u64,
+    ) -> std::result::Result<(), String> {
+        self.own_identity_lists_app(now)?;
+        let doc = self.app.own_identity();
         let Some(signed) = &entry.attempt_proof else {
             return Err("Paykit spec 4: the attempt's proof isn't kept".into());
         };
