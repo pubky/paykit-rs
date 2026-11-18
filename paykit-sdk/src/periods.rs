@@ -514,7 +514,8 @@ impl Paykit {
             match self.app.read_record_fresh(&into.record_target()).await? {
                 RecordRead::Fresh(_)
                 | RecordRead::Kept {
-                    reason: KeptReason::NotFound | KeptReason::NotNewer,
+                    reason:
+                        KeptReason::NotFound | KeptReason::Older(_) | KeptReason::Overtaken { .. },
                     ..
                 } => {}
                 RecordRead::Kept {
