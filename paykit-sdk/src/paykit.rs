@@ -27,6 +27,7 @@ use pubky_switch_core::scopes::owns_root;
 
 use crate::destination::KeptLookup;
 use crate::error::{Refusal, Result};
+use crate::hold::OwnResendOwed;
 use crate::own_record::capabilities_for;
 use crate::protocol::PaykitProtocol;
 use crate::rail::{Rail, RailDeclaration};
@@ -75,12 +76,12 @@ pub const DEFAULT_RESEND_BUDGET: u64 = 500;
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PaykitConfig {
-    /// The client's choices.
+    /// The client's choices when Paykit opens the app. An attached app has its own choices.
     pub app: AppConfig,
     /// Seconds after which an open attempt of this app is orphaned (Switch spec 10.2).
     /// `None`, the default, is [`orphan_floor_s`] for the app's rail: its declared longest
     /// time to complete or fail plus [`PRE_DISPATCH_BUDGET_MS`], so a default config suits
-    /// any rail. A value set below that floor is refused by `join`, `load`, `restore` and
+    /// any rail. A value set below that floor is refused when opening the app and on
     /// every attempt. An idempotent dispatch is repeated after a crash only while the rail's
     /// longest time still fits before the orphan age (Paykit spec 7.2, "Dispatch window"):
     /// at the floor that leaves only the pre-dispatch budget, less the clock tolerance, so
@@ -384,7 +385,12 @@ impl Paykit {
         let protocol = Arc::new(PaykitProtocol::with_rail(Arc::clone(rail)));
         protocol.set_publishes_record(config.app.publishes_record);
         let protocols = register(Arc::clone(&protocol))?;
-        let expected = Arc::clone(&protocol) as Arc<dyn pubky_switch_client::app::Protocol>;
+        Self::check_protocol(&protocol, &protocols)?;
+        Ok((protocol, protocols))
+    }
+
+    fn check_protocol(protocol: &Arc<PaykitProtocol>, protocols: &ProtocolSet) -> Result<()> {
+        let expected = Arc::clone(protocol) as Arc<dyn pubky_switch_client::app::Protocol>;
         if !protocols
             .get("paykit")
             .is_some_and(|p| Arc::ptr_eq(p, &expected))
@@ -394,28 +400,22 @@ impl Paykit {
             ))
             .into());
         }
-        Ok((protocol, protocols))
+        Ok(())
     }
 
     fn assemble(
         app: App,
-        env: AppEnv,
         protocol: Arc<PaykitProtocol>,
         config: PaykitConfig,
         rail: Arc<dyn Rail>,
         timer: Arc<dyn Timer>,
     ) -> Self {
-        // The certificate is checked before a join or a restore writes anything. A stored
-        // one may fail Paykit's checks, a renewal the Switch took: the app still loads, so
-        // it can read the feed and take a renewal that passes, and takes no Paykit action
-        // meanwhile ([`Paykit::certificate_refused`]).
-        protocol.set_own(app.identity(), app.cert().clone());
         Self {
             clock: app.clock(),
+            homeserver: app.homeserver_reader(),
             app,
             protocol,
             rail,
-            homeserver: env.homeserver,
             timer,
             lookups: HashMap::new(),
             last_public_read: None,
@@ -533,12 +533,13 @@ impl Paykit {
                 // update after the join: the method promises no two readings agree.
                 snapshot = Some(capabilities_for(rail.as_ref(), pays, &base)?);
             }
-            let app = App::join(env.clone(), protocols, config.app.clone(), request).await?;
+            let app = App::join(env, protocols, config.app.clone(), request).await?;
             // No certificate is kept as listed under: the copy is empty until a listing has run
             // with the keys held, the client's at its first read or one of Paykit's, so until then
             // the records count as unlisted (Paykit spec 8.1, "Records not listed yet";
             // `Paykit::unlisted`) and a call that reads them lists first or is refused.
-            let mut paykit = Self::assemble(app, env, protocol, config, rail, timer);
+            protocol.set_own(app.identity(), app.cert().clone());
+            let mut paykit = Self::assemble(app, protocol, config, rail, timer);
             // The app is joined and kept: an error here would hide it from the host, which
             // could join again or lose it. A failed update stays owed instead, for the next
             // receive or `update_own_record` (the Errors section above), and nothing is
@@ -597,24 +598,85 @@ impl Paykit {
         Box::pin(async move {
             check_orphan_window(&config, rail.as_ref())?;
             let (protocol, protocols) = Self::protocols(&rail, &config, register)?;
-            let app = App::load(env.clone(), protocols, config.app.clone(), app_id).await?;
-            let mut paykit = Self::assemble(app, env, protocol, config, rail, timer);
-            // A record a view showed divergent pauses, also when a crash came before the
-            // receive's events were taken (`divergent.rs`): every record held is looked at once.
-            Box::pin(paykit.sweep_divergent()).await?;
-            // A restore clamps its cursor time after its commit: a crash between the two leaves
-            // it for the next load (`Paykit::bound_restored_cursor_time`, idempotent). Nothing is
-            // written under a certificate Paykit refuses.
-            if paykit.certificate_refused().is_none() {
-                paykit.bound_restored_cursor_time().await?;
-                Box::pin(paykit.take_restore_verdict()).await?;
-            }
-            // A load keeps nothing as listed under: a certificate the client took since the last
-            // listing, a narrower one included, leaves the records unlisted until the next one
-            // (`hold::side_unlisted`).
-            Ok(paykit)
+            let app = App::load(env, protocols, config.app.clone(), app_id).await?;
+            protocol.set_own(app.identity(), app.cert().clone());
+            Self::assemble(app, protocol, config, rail, timer)
+                .finish_load()
+                .await
         })
         .await
+    }
+
+    /// Take ownership of a host-built Switch app immediately after [`App::join`] or
+    /// [`App::load`]. Register a fresh [`PaykitProtocol::with_rail`] for that app and pass
+    /// the same instance here. The app supplies its clock, Homeserver reader and record
+    /// publishing setting. The host supplies Paykit's other settings and its timer.
+    ///
+    /// Use [`Paykit::restore`] or [`Paykit::restore_with_protocols`] to open a backup so
+    /// Paykit checks its layer before the first write. To reopen a store after an SDK
+    /// restore that is still in reconciliation, use [`Paykit::load_with_protocols`].
+    ///
+    /// # Errors
+    ///
+    /// The client's `Usage` refusal if the protocol differs from the registered one,
+    /// has no rail, already has an owner, or the app is in reconciliation or has an
+    /// unfinished restore. As with [`Paykit::load`], returns an error for an invalid
+    /// orphan window or a store failure.
+    pub async fn attach(
+        app: App,
+        config: PaykitConfig,
+        protocol: Arc<PaykitProtocol>,
+        timer: Arc<dyn Timer>,
+    ) -> Result<Self> {
+        Box::pin(async move {
+            Self::check_protocol(&protocol, app.protocols())?;
+            let rail = Arc::clone(protocol.rail().ok_or_else(|| {
+                AppError::Refused(pubky_switch_client::app::Refusal::Usage(
+                    "the registered Paykit protocol must have a rail".into(),
+                ))
+            })?);
+            check_orphan_window(&config, rail.as_ref())?;
+            let wallet = Self::assemble(app, protocol, config, rail, timer);
+            if wallet.app.reconcile_mode()
+                || wallet
+                    .local_get::<OwnResendOwed>(key::OWN_RESEND_OWED)
+                    .await?
+                    .is_some_and(|owed| owed.restored_at_ms.is_none())
+            {
+                return Err(AppError::Refused(pubky_switch_client::app::Refusal::Usage(
+                    "use Paykit's restore and load constructors for backup recovery".into(),
+                ))
+                .into());
+            }
+            if !wallet
+                .protocol
+                .bind_for_attachment(wallet.app.identity(), wallet.app.cert().clone())
+            {
+                return Err(AppError::Refused(pubky_switch_client::app::Refusal::Usage(
+                    "the registered Paykit protocol already has an owner".into(),
+                ))
+                .into());
+            }
+            wallet
+                .protocol
+                .set_publishes_record(wallet.app.publishes_record());
+            wallet.finish_load().await
+        })
+        .await
+    }
+
+    async fn finish_load(mut self) -> Result<Self> {
+        // A divergent record pauses even when a crash came before the receive's events
+        // were taken: look at each held record once (`divergent.rs`).
+        Box::pin(self.sweep_divergent()).await?;
+        // A crash between the restore's commit and clock clamp leaves the clamp for the
+        // next load. Nothing is written under a certificate Paykit refuses.
+        if self.certificate_refused().is_none() {
+            self.bound_restored_cursor_time().await?;
+            Box::pin(self.take_restore_verdict()).await?;
+        }
+        // Records are unlisted here until the next list read (`hold::side_unlisted`).
+        Ok(self)
     }
 
     /// Restore from a backup (Switch spec 12.4): the client's restore, which installs
@@ -674,8 +736,9 @@ impl Paykit {
             check_orphan_window(&config, rail.as_ref())?;
             crate::protocol::check_restored_loss(&backup.app)?;
             let (protocol, protocols) = Self::protocols(&rail, &config, register)?;
-            let app = App::restore(env.clone(), protocols, config.app.clone(), &backup.app).await?;
-            let mut paykit = Self::assemble(app, env, protocol, config, rail, timer);
+            let app = App::restore(env, protocols, config.app.clone(), &backup.app).await?;
+            protocol.set_own(app.identity(), app.cert().clone());
+            let mut paykit = Self::assemble(app, protocol, config, rail, timer);
             paykit.bound_restored_cursor_time().await?;
             paykit.stamp_restore_time().await?;
             Ok(paykit)
