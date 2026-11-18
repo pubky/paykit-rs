@@ -1105,7 +1105,7 @@ async fn test_own_record_join_signs_the_capabilities_it_checked() {
     assert_eq!(member.endpoint_identifiers, [only]);
 }
 
-fn oversized_capabilities() -> Vec<paykit_lib::PaymentEndpointIdentifier> {
+pub(crate) fn oversized_capabilities() -> Vec<paykit_lib::PaymentEndpointIdentifier> {
     (0..10_000)
         .map(|i| endpoint(&format!("btc-{i:057}")))
         .collect()

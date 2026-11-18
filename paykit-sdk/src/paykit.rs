@@ -356,9 +356,6 @@ pub struct Paykit {
     /// The capabilities the join checked, which its first update signs as they are
     /// (`crate::own_record`); `None` otherwise.
     pub(crate) capability_snapshot: Option<Vec<paykit_lib::PaymentEndpointIdentifier>>,
-    /// Whether this load took another device's record that changed Paykit's member, and the
-    /// upkeep owes Paykit's expiry ask for its endpoints (`crate::own_record`).
-    pub(crate) expiry_ask_owed: bool,
 }
 
 impl std::fmt::Debug for Paykit {
@@ -424,7 +421,6 @@ impl Paykit {
             first_read_summary: None,
             own_record_unknown: false,
             capability_snapshot: None,
-            expiry_ask_owed: false,
         }
     }
 

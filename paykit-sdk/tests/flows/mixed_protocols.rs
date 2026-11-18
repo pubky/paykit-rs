@@ -333,6 +333,120 @@ async fn publishing_mixed(w: &World) -> Paykit {
     .unwrap()
 }
 
+#[tokio::test]
+async fn test_mixed_protocols_member_expiry_repair_survives_reload_and_final_withdrawal() {
+    use paykit_lib::PaymentEndpointPayload;
+    use pubky_switch_client::app::{AppConfig, AppEvent};
+    use pubky_switch_core::records::AppRecord;
+
+    let w = world();
+    let config = PaykitConfig::default().with_app(AppConfig {
+        publishes_record: true,
+        ..AppConfig::default()
+    });
+    let mut scopes = AppScopes::new().request().pay().build().unwrap();
+    scopes.scopes.push("chat".into());
+    let mut first = Paykit::join_with_protocols(
+        w.env(&w.alice, store()),
+        config.clone(),
+        w.approve(&w.alice, "mixed", &scopes),
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+        register,
+    )
+    .await
+    .unwrap();
+    first.receive(None).await.unwrap();
+    let storage = store();
+    let mut second = Paykit::restore_with_protocols(
+        w.env(&w.alice, Arc::clone(&storage)),
+        config.clone(),
+        &first.backup().await.unwrap(),
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+        register,
+    )
+    .await
+    .unwrap();
+    second.receive(None).await.unwrap();
+    second.reconcile().await.unwrap();
+    second.end_reconcile(UserConfirmed::new()).await.unwrap();
+    let recovered = second
+        .app_mut()
+        .end_reconcile_for("chat", UserConfirmed::new())
+        .await
+        .unwrap();
+    assert!(recovered);
+    let methods = w.rail.endpoint_identifiers();
+    let id = crate::common::endpoint("btc-lightning-bolt12");
+
+    // Repeat publication and withdrawal for an explicit host edit and ordinary upkeep.
+    for (publishing, retry_on_receive) in
+        [(true, false), (false, false), (true, true), (false, true)]
+    {
+        if publishing {
+            first
+                .set_public_endpoint(id.clone(), PaymentEndpointPayload::new("lno1tips").unwrap())
+                .await
+                .unwrap();
+        } else {
+            first.receive(None).await.unwrap();
+            first.remove_public_endpoint(&id).await.unwrap();
+        }
+        // The event is taken, then upkeep cannot sign the capabilities. Reload in the gap.
+        w.rail
+            .set_endpoint_identifiers(crate::own_record::oversized_capabilities());
+        assert!(second.receive(None).await.is_err());
+        assert_eq!(
+            !second.own_public_endpoints().unwrap().is_empty(),
+            publishing
+        );
+        let events = second.app_mut().unacknowledged_events().await.unwrap();
+        assert!(!events.iter().any(
+            |e| matches!(e, AppEvent::MemberChanged { protocol, .. } if protocol == "paykit")
+        ));
+        let before = second.app().record().clone();
+        drop(second);
+        w.rail.set_endpoint_identifiers(methods.clone());
+        second = Paykit::load_with_protocols(
+            w.env(&w.alice, Arc::clone(&storage)),
+            config.clone(),
+            first.app_id(),
+            Arc::clone(&w.rail) as Arc<dyn Rail>,
+            w.timer(),
+            register,
+        )
+        .await
+        .unwrap();
+        if retry_on_receive {
+            second.receive(None).await.unwrap();
+        } else if publishing {
+            second.update_own_record().await.unwrap();
+        } else {
+            // An unchanged endpoint edit also owes the policy-only repair.
+            second
+                .set_public_endpoints(Default::default())
+                .await
+                .unwrap();
+        }
+        assert_ne!(second.app().record(), &before);
+        let repaired = second.app().record().clone();
+        second.receive(None).await.unwrap();
+        assert_eq!(second.app().record(), &repaired);
+
+        // Chat signs with no expiry of its own. Only this device's Paykit policy decides
+        // whether the new record has an expiry.
+        let chat = if publishing { chat_member() } else { None };
+        second
+            .app_mut()
+            .set_protocol_member("chat", chat, None)
+            .await
+            .unwrap();
+        let record = AppRecord::verify(second.app().record(), &w.alice_id()).unwrap();
+        assert_eq!(record.expires_at().is_some(), publishing);
+    }
+}
+
 /// A chat member.
 fn chat_member() -> Option<serde_json::Map<String, serde_json::Value>> {
     let mut member = serde_json::Map::new();

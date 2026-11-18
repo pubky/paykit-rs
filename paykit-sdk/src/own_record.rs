@@ -140,9 +140,9 @@ impl Paykit {
 
     /// Publish exactly `endpoints` as the app's public endpoints, none to publish none
     /// (module docs): a new record is signed, kept, delivered to the own switch and written
-    /// to the own Homeserver. When the record already holds them, its saved lifetime
-    /// policy is kept and owed delivery finishes. An unaccepted restored record is signed
-    /// anew; accepted and pending records retain their bytes.
+    /// to the own Homeserver. When the record already holds them, the client finishes owed
+    /// delivery. It signs again when this device owes an expiry policy change or the
+    /// restored record was never accepted.
     ///
     /// # Errors
     ///
@@ -251,26 +251,15 @@ impl Paykit {
         let wanted = self.own_member_with(held.public_endpoints.clone())?;
         let publication = if wanted != held {
             Box::pin(self.put_member(wanted)).await?
-        } else if held.public_endpoints.is_empty() && self.withdrawal_cleanup_owed().await? {
-            // The second step of a last withdrawal is owed, the withdrawal itself signed.
-            match Box::pin(self.finish_withdrawal()).await? {
-                Some(publication) => publication,
-                None => return Ok(None),
-            }
-        } else if !held.public_endpoints.is_empty()
-            && (self.expiry_ask_owed || self.renewal_due()?)
-        {
-            // Renewed when due, and after this device took another device's record that
-            // changed Paykit's member: asks are each device's own, so the member's endpoints
-            // may have come with none here, and an unchanged member leaves the ask as it is.
-            // The renewal sets Paykit's lifetime ask with the endpoints it signs.
+        } else if self.record_expiry_owed().await? {
+            let lifetime = (!held.public_endpoints.is_empty()).then(|| self.record_lifetime());
+            return Box::pin(self.finish_record_expiry(lifetime)).await;
+        } else if !held.public_endpoints.is_empty() && self.renewal_due()? {
             let lifetime = Some(self.record_lifetime());
             let renewed =
                 Box::pin(self.app.renew_record_with_lifetime(PROTOCOL_NAME, lifetime)).await;
             self.note_own_record_write(&renewed);
-            let renewed = renewed?;
-            self.expiry_ask_owed = false;
-            renewed
+            renewed?
         } else {
             // The member unchanged still goes to the client: a restored record the switch
             // never accepted, such as a withdrawal whose `app.put` failed before the backup,
@@ -343,23 +332,31 @@ impl Paykit {
     /// reader takes (Paykit wire 3.2). First Paykit's durable mark that the second step is
     /// owed is written, and the withdrawal is signed with Paykit's lifetime ask kept, the
     /// member staying in the record (with the capabilities of an app that pays, or empty).
-    /// Then the second step asks for no expiry ([`Paykit::finish_withdrawal`]). Setting
-    /// endpoints again clears the mark: the lifetime ask is wanted again.
+    /// Then the second step asks for no expiry ([`Paykit::finish_record_expiry`]).
     async fn put_member(&mut self, member: PaykitMember) -> Result<Publication> {
         self.own_record_known()?;
-        let withdraws_last =
-            member.public_endpoints.is_empty() && !self.own_member()?.public_endpoints.is_empty();
+        let held = self.own_member()?;
+        let unchanged = member == held;
+        let has_endpoints = !member.public_endpoints.is_empty();
+        let withdraws_last = !has_endpoints && !held.public_endpoints.is_empty();
+        let expiry_owed = self.record_expiry_owed().await?;
         if withdraws_last {
-            self.local_put(key::WITHDRAWAL_CLEANUP_OWED, &true).await?;
-        } else if !member.public_endpoints.is_empty() && self.withdrawal_cleanup_owed().await? {
-            self.local_delete(key::WITHDRAWAL_CLEANUP_OWED).await?;
+            self.local_put(key::RECORD_EXPIRY_OWED, &true).await?;
         }
-        let lifetime =
-            (!member.public_endpoints.is_empty() || withdraws_last).then(|| self.record_lifetime());
+        if unchanged && expiry_owed {
+            let lifetime = has_endpoints.then(|| self.record_lifetime());
+            if let Some(publication) = Box::pin(self.finish_record_expiry(lifetime)).await? {
+                return Ok(publication);
+            }
+            let published = self.app.publish_record().await;
+            self.note_own_record_write(&published);
+            return Ok(published?);
+        }
+        let lifetime = (has_endpoints || withdraws_last).then(|| self.record_lifetime());
         // A member that changes nothing goes as the record holds it, so what this version
         // doesn't read is kept and nothing is signed for it. The client asks for no expiry
         // for a member it removes: through the last withdrawal the member stays.
-        let value = if member == self.own_member()? {
+        let value = if unchanged {
             AppRecord::verify(self.app.record(), &self.identity())
                 .map_err(|_| PaykitError::corrupt())?
                 .body()
@@ -371,34 +368,31 @@ impl Paykit {
         };
         let publication = Box::pin(self.put_member_value(value, lifetime)).await?;
         if withdraws_last {
-            if let Some(cleaned) = Box::pin(self.finish_withdrawal()).await? {
+            if let Some(cleaned) = Box::pin(self.finish_record_expiry(None)).await? {
                 return Ok(cleaned);
             }
+        } else if expiry_owed {
+            // The changed member and its desired expiry policy were kept together.
+            self.local_delete(key::RECORD_EXPIRY_OWED).await?;
         }
         Ok(publication)
     }
 
-    /// Whether the second step of a last withdrawal is owed ([`Paykit::put_member`]).
-    async fn withdrawal_cleanup_owed(&self) -> Result<bool> {
+    /// Whether this device owes Paykit's expiry policy for its current member.
+    async fn record_expiry_owed(&self) -> Result<bool> {
         Ok(self
-            .local_get::<bool>(key::WITHDRAWAL_CLEANUP_OWED)
+            .local_get::<bool>(key::RECORD_EXPIRY_OWED)
             .await?
             .unwrap_or(false))
     }
 
-    /// The second step of a last withdrawal: Paykit asks for no expiry, the member's bytes
-    /// kept, which signs the record anew (Paykit wire 3.2: a record without public endpoints
-    /// may write `null`). It runs only while the mark is set and the record held has no
-    /// public endpoints, never on what the record looks like: another protocol's expiry or
-    /// a member of fields this version doesn't read decides nothing. The mark goes once the
-    /// client has signed the record, whatever its delivery did; a result the store can't
-    /// tell keeps it and stops the handle's edits until a load (`own_record_known`).
-    /// `Ok(None)` when the client refused before signing, as while another protocol's
-    /// expiry has lapsed: nothing changed, the mark stays and a later upkeep tries again.
-    async fn finish_withdrawal(&mut self) -> Result<Option<Publication>> {
+    /// Reconcile this device's expiry policy after a member change or the last withdrawal.
+    /// The client keeps the signed record before delivery. A refusal before signing leaves
+    /// the obligation for the next upkeep, and an unknown store result requires a reload.
+    async fn finish_record_expiry(&mut self, lifetime: Option<u64>) -> Result<Option<Publication>> {
         self.own_record_known()?;
         let before = self.app.record().clone();
-        let renewed = Box::pin(self.app.renew_record_with_lifetime(PROTOCOL_NAME, None)).await;
+        let renewed = Box::pin(self.app.renew_record_with_lifetime(PROTOCOL_NAME, lifetime)).await;
         self.note_own_record_write(&renewed);
         if self.own_record_unknown {
             return Err(renewed
@@ -406,11 +400,13 @@ impl Paykit {
                 .map_or_else(PaykitError::corrupt, PaykitError::from));
         }
         if self.app.record() != &before {
-            self.local_delete(key::WITHDRAWAL_CLEANUP_OWED).await?;
+            self.local_delete(key::RECORD_EXPIRY_OWED).await?;
         }
         match renewed {
             Ok(publication) => Ok(Some(publication)),
-            Err(AppError::Refused(_)) if self.app.record() == &before => Ok(None),
+            Err(AppError::Refused(_)) if lifetime.is_none() && self.app.record() == &before => {
+                Ok(None)
+            }
             Err(error) => Err(error.into()),
         }
     }

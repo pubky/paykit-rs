@@ -1,6 +1,7 @@
 //! Reading a payee's public endpoints (Paykit spec 4): each app's failure is that app's, the
 //! other apps' usable endpoints stay available, and the read is bounded over all the apps.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use paykit_sdk::app_records::{
@@ -57,8 +58,7 @@ async fn test_public_read_labelled_only_app_cannot_offer_an_unlabelled_destinati
 struct FailingRecords {
     inner: Arc<TestHomeserver>,
     failing: Mutex<Vec<String>>,
-    clock: Arc<TestClock>,
-    slow: Mutex<Option<(String, u64)>>,
+    on_read: Mutex<BTreeMap<String, Box<dyn FnOnce() + Send>>>,
 }
 
 impl FailingRecords {
@@ -72,9 +72,12 @@ impl FailingRecords {
         self.failing.lock().unwrap().clear();
     }
 
-    /// Reading the record of `app_id` moves the clock on by `ms`.
-    fn slow(&self, app_id: &[u8; 16], ms: u64) {
-        *self.slow.lock().unwrap() = Some((app_record_path(app_id), ms));
+    /// Run a change during the next read of this app's record.
+    fn on_read(&self, app_id: &[u8; 16], change: impl FnOnce() + Send + 'static) {
+        self.on_read
+            .lock()
+            .unwrap()
+            .insert(app_record_path(app_id), Box::new(change));
     }
 }
 
@@ -87,14 +90,8 @@ impl HomeserverReader for FailingRecords {
         if self.failing.lock().unwrap().contains(&path) {
             return Box::pin(async { Err(TransportError::Connect("unreachable".into())) });
         }
-        if let Some((_, ms)) = self
-            .slow
-            .lock()
-            .unwrap()
-            .as_ref()
-            .filter(|(p, _)| *p == path)
-        {
-            self.clock.advance_ms(*ms);
+        if let Some(change) = self.on_read.lock().unwrap().remove(&path) {
+            change();
         }
         self.inner.get(identity, path)
     }
@@ -118,8 +115,7 @@ async fn wallet_reading_through_on(
     let reads = Arc::new(FailingRecords {
         inner: Arc::clone(&w.homeserver),
         failing: Mutex::new(Vec::new()),
-        clock: Arc::clone(&w.clock),
-        slow: Mutex::new(None),
+        on_read: Mutex::new(BTreeMap::new()),
     });
     let wallet = w
         .load_with_homeserver(
@@ -323,7 +319,8 @@ async fn test_public_read_one_time_judges_every_app() {
         one_endpoint("btc-lightning-bolt11", "lnbc1till"),
     );
     w.homeserver.put(w.bob_id(), IDENTITY_PATH, older);
-    reads.slow(&till.1, HOUR_MS);
+    let clock = Arc::clone(&w.clock);
+    reads.on_read(&till.1, move || clock.advance_ms(HOUR_MS));
     let looked_up = w.homeserver.identity_reads(&w.bob_id());
     let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
     // The copy of identity.json taken first is over 10 minutes old once the records are
@@ -340,6 +337,80 @@ async fn test_public_read_one_time_judges_every_app() {
     assert!(
         matches!(read.failures[0].reason, PublicAppFailureReason::Expired(_)),
         "{read:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_public_read_refreshes_after_a_newly_listed_apps_slow_read() {
+    use pubky_switch_core::records::RemovedApp;
+
+    let w = Arc::new(World::new());
+    let (mut wallet, reads) = wallet_reading_through(&w).await;
+    bob_apps(&w, &["shop"]).await;
+    let first_doc = w.homeserver.file(w.bob_id(), IDENTITY_PATH).unwrap();
+    let till = bob_apps(&w, &["till"]).await[0];
+    publish_now(
+        &w,
+        till.0,
+        one_endpoint("btc-lightning-bolt11", "lnbc1till"),
+    );
+    w.homeserver.put(w.bob_id(), IDENTITY_PATH, first_doc);
+
+    // The switch lists the till. While its record is read a kiosk joins, so the next
+    // identity lookup must also collect the kiosk's record.
+    let kiosk = w.bob.identity().app_keys("kiosk").app_id_bytes();
+    let world = Arc::clone(&w);
+    reads.on_read(&till.1, move || {
+        world.clock.advance_ms(HOUR_MS);
+        let scopes = paykit_sdk::AppScopes::new().request().build().unwrap();
+        world.approve(&world.bob, "kiosk", &scopes);
+    });
+    // That read outlasts the new identity too. The final document no longer lists the till.
+    let world = Arc::clone(&w);
+    reads.on_read(&kiosk, move || {
+        world.clock.advance_ms(HOUR_MS);
+        world
+            .bob
+            .next_doc(|body| {
+                body.apps.retain(|listed| listed.app_id != till.1);
+                body.removed.push(RemovedApp {
+                    app_id: till.1,
+                    distrust_from: world.clock.now_ms(),
+                });
+            })
+            .unwrap();
+    });
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert!(reads.on_read.lock().unwrap().is_empty());
+    assert!(!offering(&read).contains(&till.1), "{read:?}");
+}
+
+#[tokio::test]
+async fn test_public_read_refuses_when_the_directory_keeps_expiring() {
+    let w = Arc::new(World::new());
+    let (mut wallet, reads) = wallet_reading_through(&w).await;
+    bob_apps(&w, &["shop"]).await;
+    let first_doc = w.homeserver.file(w.bob_id(), IDENTITY_PATH).unwrap();
+    bob_apps(&w, &["till"]).await;
+    w.homeserver.put(w.bob_id(), IDENTITY_PATH, first_doc);
+    let names = ["till", "kiosk", "counter", "desk", "terminal", "office"];
+    for pair in names.windows(2) {
+        let id = w.bob.identity().app_keys(pair[0]).app_id_bytes();
+        let next = pair[1];
+        let world = Arc::clone(&w);
+        reads.on_read(&id, move || {
+            world.clock.advance_ms(HOUR_MS);
+            let scopes = paykit_sdk::AppScopes::new().request().build().unwrap();
+            world.approve(&world.bob, next, &scopes);
+        });
+    }
+    let err = wallet
+        .public_endpoints(&w.bob_id(), None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err.refusal(), Some(Refusal::IdentityUnavailable(_))),
+        "{err:?}"
     );
 }
 
@@ -702,7 +773,8 @@ async fn test_public_read_payment_tells_a_conflict_it_first_finds() {
 #[tokio::test]
 async fn test_public_read_withdrawal_served_after_a_clock_rollback_is_used() {
     let w = World::new();
-    let mut wallet = w.wallet("wallet").await;
+    let storage = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&storage)).await;
     let mut shop = w
         .join(
             &w.bob,
@@ -758,6 +830,31 @@ async fn test_public_read_withdrawal_served_after_a_clock_rollback_is_used() {
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     assert_eq!(
         wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
+        "btc-lightning-bolt11"
+    );
+    // The clock catches up after a reload. Two bodies at T2 must fall back to T1.
+    let wallet_id = wallet.app_id();
+    drop(wallet);
+    let mut wallet = w
+        .load_on_clock(&w.alice, storage, wallet_id, Arc::clone(&w.clock))
+        .await;
+    w.clock.set_ms(t0 + HOUR_MS);
+    publish_app_at(
+        &w,
+        app.0,
+        one_endpoint("btc-onchain-address", "bc1qother"),
+        t0 + HOUR_MS,
+        expiry,
+    );
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(read.failures.len(), 1, "{read:?}");
+    assert!(matches!(
+        read.failures[0].reason,
+        PublicAppFailureReason::Refused(_)
+    ));
+    assert_eq!(read.endpoints.len(), 1, "{read:?}");
+    assert_eq!(
+        read.endpoints[0].endpoint_id.as_str(),
         "btc-lightning-bolt11"
     );
 }
