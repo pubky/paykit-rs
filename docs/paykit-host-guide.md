@@ -7,16 +7,16 @@ for store guarantees, approval and client outcomes. Keep app keys and backups in
 host-protected storage and serialize operations on the handle. A memory store
 cannot preserve unanswered writes or payments across a restart.
 
-## Approve access to outgoing payment history
+## Outgoing payment history and payer access
 
-When the effective grant includes `paykit_pay`, the signer or host must show
-the following disclosure on the approval screen before the user confirms. This
-applies to a direct payer grant, an Allowance executor grant with payer access,
-and a grant that bundles payer access with another protocol.
+An app granted `paykit_pay` can make payments and read the identity's past and
+future outgoing Paykit history. This includes earlier payments made by other
+wallets under the same identity and payments made without a request.
 
-> This app can make payments and read your past and future outgoing Paykit history, including payments made without a request.
->
-> This includes earlier outgoing payments made by your other wallets under this identity.
+We recommend that the signer or host explain this access in its own words
+before the user approves the grant. This applies to direct payer grants,
+Allowance executor grants with payer access, and grants that bundle payer
+access with another protocol.
 
 ## Open a wallet and pay a one-time request
 
