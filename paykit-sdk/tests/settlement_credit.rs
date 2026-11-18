@@ -79,11 +79,12 @@ async fn join(
 async fn paid_request(
     shop: &mut Paykit,
     mut buyer: Paykit,
-    invoice: &str,
+    endpoint_id: &str,
+    payload: &str,
 ) -> TestResult<(Paykit, RequestRef, [u8; 32])> {
     let endpoints = BTreeMap::from([(
-        PaymentEndpointIdentifier::new("btc-lightning-bolt11")?,
-        PaymentEndpointPayload::new(invoice)?,
+        PaymentEndpointIdentifier::new(endpoint_id)?,
+        PaymentEndpointPayload::new(payload)?,
     )]);
     let draft = RequestDraft::new(
         PaymentAmount {
@@ -221,8 +222,13 @@ async fn competing_tills(world: &World) -> TestResult {
     } = Box::pin(enrolled_tills(world)).await?;
     let before_credit = till.backup().await?;
     // Both authorized tills see the same legitimate purchase in the shop's labelled activity.
-    let (mut buyer, winner, first_record) =
-        Box::pin(paid_request(&mut labelled, buyer, "ln-one-invoice")).await?;
+    let (mut buyer, winner, first_record) = Box::pin(paid_request(
+        &mut labelled,
+        buyer,
+        "btc-lightning-bolt11",
+        "ln-one-invoice",
+    ))
+    .await?;
     till.receive(None).await?;
     assert_eq!(rail.all_executions().values().sum::<u64>(), 1);
     assert!(till.verify_payment(&first_record).await?.is_some());
@@ -309,8 +315,13 @@ async fn competing_tills(world: &World) -> TestResult {
     }
     assert_eq!(rail.all_executions().values().sum::<u64>(), 1);
 
-    let (mut other, second, second_record) =
-        Box::pin(paid_request(&mut reopened, other, "ln-independent-paid")).await?;
+    let (mut other, second, second_record) = Box::pin(paid_request(
+        &mut reopened,
+        other,
+        "btc-lightning-bolt11",
+        "ln-independent-paid",
+    ))
+    .await?;
     let second_receipt = reopened
         .confirm_payment(&second_record)
         .await?
@@ -325,6 +336,7 @@ async fn competing_tills(world: &World) -> TestResult {
     let (mut other, independent, third_record) = Box::pin(paid_request(
         &mut other_till,
         other,
+        "btc-lightning-bolt11",
         "ln-independent-invoice",
     ))
     .await?;
@@ -434,7 +446,8 @@ async fn two_transactions(world: &World) -> TestResult {
         let (buyer, plain, plain_key) = Box::pin(paid_request(
             &mut wallets.till,
             wallets.buyer,
-            "ln-batch-plain",
+            "btc-bitcoin-p2wpkh",
+            "bcrt1qqyqszqgpqyqszqgpqyqszqgpqyqszqgpvxat9t",
         ))
         .await?;
         wallets.rail.next(Behaviour::InTransaction(txid));
@@ -442,7 +455,8 @@ async fn two_transactions(world: &World) -> TestResult {
         let (other, label, label_key) = Box::pin(paid_request(
             &mut wallets.labelled,
             wallets.other,
-            "ln-batch-label",
+            "btc-bitcoin-p2wpkh",
+            "bcrt1qqgpqyqszqgpqyqszqgpqyqszqgpqyqszazmwwa",
         ))
         .await?;
         wallets.other = other;
@@ -506,6 +520,7 @@ async fn test_full_bucket_warns_once_and_a_confirmed_stored_receipt_stays_unsent
     let (buyer, request, record) = Box::pin(paid_request(
         &mut tills.till,
         tills.buyer,
+        "btc-lightning-bolt11",
         "ln-needs-confirmation",
     ))
     .await?;
