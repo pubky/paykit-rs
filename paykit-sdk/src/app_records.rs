@@ -58,7 +58,6 @@
 
 use paykit_lib::app_record::PaykitMember;
 use paykit_lib::{PaymentEndpointIdentifier, PaymentEndpointPayload};
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use pubky_switch_client::app::{Initiator, UserConfirmed};
@@ -272,7 +271,7 @@ pub(crate) fn usable(
     })
 }
 
-/// The Homeserver's answers for each app's record path.
+/// The selected apps' record reads, in identity.json order.
 type RecordReads = Vec<(
     [u8; 16],
     std::result::Result<Option<Vec<u8>>, TransportError>,
@@ -405,15 +404,16 @@ impl Paykit {
         // lookup, from the copy of identity.json taken first (Paykit spec 4, 14).
         let homeserver = Arc::clone(&self.homeserver);
         let owner = *payee;
-        let start = move |doc: &IdentityDoc| -> Option<BoxFuture<'static, RecordReads>> {
-            let apps: Vec<[u8; 16]> = doc
+        let read_records = |doc: &IdentityDoc| -> BoxFuture<'static, RecordReads> {
+            let apps: Vec<_> = doc
                 .body()
                 .apps
                 .iter()
                 .map(|a| a.app_id)
                 .filter(|id| app.is_none_or(|a| a == *id))
                 .collect();
-            Some(Box::pin(async move {
+            let homeserver = Arc::clone(&homeserver);
+            Box::pin(async move {
                 let mut out = Vec::with_capacity(apps.len());
                 for app_id in apps {
                     out.push((
@@ -422,36 +422,31 @@ impl Paykit {
                     ));
                 }
                 out
-            }))
+            })
         };
+        let mut first = None;
         let (identity, reads) = self
-            .payee_identity_with(payee, Need::SwitchCopy, by, confirmed, start)
+            .payee_identity_with(payee, Need::SwitchCopy, by, confirmed, |identity| {
+                first = Some((identity.doc.hash(), identity.fresh_until_ms()));
+                Some(read_records(&identity.doc))
+            })
             .await?;
         let mut identity = match identity {
             Ok(identity) => identity,
             Err(refusal) => return Ok(Err(refusal)),
         };
-        let Some(reads) = reads else {
-            return Ok(Ok(Vec::new()));
-        };
-        let mut reads: BTreeMap<_, _> = reads.into_iter().collect();
-        // Reconcile records in the current document's order. A newly listed app can itself
-        // take long enough to expire that document. Bound directory churn within one call.
+        // The first reads belong to that signed document while fresh. A later copy can
+        // close a renewal even when it still lists the same App ID and certificate.
+        let mut first_reads = reads.filter(|_| {
+            first.is_some_and(|(hash, until)| hash == identity.doc.hash() && self.now() < until)
+        });
         const MAX_REFRESHES: usize = 3;
         let mut refreshes = 0;
         let (fetched, now) = loop {
-            let mut fetched = Vec::new();
-            for listed in &identity.doc.body().apps {
-                let id = listed.app_id;
-                if app.is_some_and(|a| a != id) {
-                    continue;
-                }
-                let bytes = match reads.remove(&id) {
-                    Some(bytes) => bytes,
-                    None => self.homeserver.get(*payee, app_record_path(&id)).await,
-                };
-                fetched.push((id, bytes));
-            }
+            let fetched = match first_reads.take() {
+                Some(records) => records,
+                None => read_records(&identity.doc).await,
+            };
             let now = self.now();
             if now < identity.fresh_until_ms() {
                 break (fetched, now);
@@ -470,7 +465,6 @@ impl Paykit {
                 Ok(identity) => identity,
                 Err(refusal) => return Ok(Err(refusal)),
             };
-            reads = fetched.into_iter().collect();
         };
         let doc = identity.doc;
         let mut usable_records = Vec::new();
