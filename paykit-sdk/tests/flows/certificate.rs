@@ -3400,3 +3400,118 @@ async fn test_restore_first_read_listing_key_wait_holds_the_queued_reply() {
 async fn test_restore_first_read_listing_with_keys_sends_the_queued_reply() {
     Box::pin(restored_queued_reply_before_wider_keys(true)).await;
 }
+
+async fn wallet_with_multiple_listing_pages(w: &World, storage: Arc<dyn StateStore>) -> Paykit {
+    w.join_with(
+        &w.alice,
+        "wallet",
+        AppScopes::new()
+            .allowance_execute()
+            .request()
+            .manage_contacts()
+            .build()
+            .unwrap(),
+        PaykitConfig::default(),
+        storage,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn test_reconcile_waits_for_the_last_collection_of_the_wallet() {
+    use pubky_switch_client::app::{Protocol, LISTING_PAGES_PER_READ};
+    let w = World::new();
+    let storage = store();
+    let mut wallet = wallet_with_multiple_listing_pages(&w, Arc::clone(&storage)).await;
+    let collections = paykit_sdk::PaykitProtocol::new()
+        .collections()
+        .iter()
+        .filter(|c| c.readable_by(wallet.app().cert()))
+        .count();
+    let budget = LISTING_PAGES_PER_READ as usize;
+    assert!(collections > budget);
+    for _ in 0..3 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert!(!wallet.app().listing_owed().await.unwrap());
+    let before = w.router.log().len();
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "records?collection".into(),
+            after: budget,
+        });
+    let result = wallet.reconcile().await;
+    let pages = w.router.log()[before..]
+        .iter()
+        .filter(|request| request.contains("records?collection"))
+        .count();
+    assert!(matches!(
+        result.unwrap_err().refusal(),
+        Some(Refusal::NotNow(_))
+    ));
+    assert_eq!(pages, budget);
+
+    let id = wallet.app_id();
+    drop(wallet);
+    let mut wallet = w
+        .load_on_clock(&w.alice, storage, id, w.clock.clone())
+        .await;
+    // The next collection is unavailable once. Its error leaves the listing at that page.
+    assert!(wallet.reconcile().await.is_err());
+    let before = w.router.log().len();
+    wallet.reconcile().await.unwrap();
+    let remaining = w.router.log()[before..]
+        .iter()
+        .filter(|request| request.contains("records?collection"))
+        .count();
+    assert_eq!(remaining, collections - budget);
+}
+
+#[tokio::test]
+async fn test_restore_keeps_records_unlisted_until_the_last_page_after_reload() {
+    let w = World::new();
+    let mut wallet = wallet_with_multiple_listing_pages(&w, store()).await;
+    let id = wallet.app_id();
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let storage = store();
+    let mut wallet = Box::pin(Paykit::restore(
+        w.env(&w.alice, Arc::clone(&storage)),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    let partial = wallet.receive(None).await.unwrap();
+    assert!(partial.report.more);
+    assert!(!partial.report.stopped);
+    assert!(wallet.app().listing_owed().await.unwrap());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"nl")
+        .await
+        .unwrap()
+        .is_some());
+    drop(wallet);
+
+    let mut wallet = w
+        .load_on_clock(&w.alice, storage, id, Arc::clone(&w.clock))
+        .await;
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"nl")
+        .await
+        .unwrap()
+        .is_some());
+    wallet.receive(None).await.unwrap();
+    assert!(!wallet.app().listing_owed().await.unwrap());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"nl")
+        .await
+        .unwrap()
+        .is_none());
+}
