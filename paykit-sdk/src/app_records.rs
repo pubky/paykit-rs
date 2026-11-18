@@ -515,8 +515,8 @@ impl Paykit {
                     // failure, and the other apps' reads go on (Paykit spec 4, below).
                     let Some(kept) = seen.keep(&record, held, now) else {
                         failures.push(fail(PublicAppFailureReason::Refused(format!(
-                            "Paykit spec 4: keeping the app's served record would exceed \
-                             {SEEN_RECORDS} records or {SEEN_RECORDS_BYTES} bytes"
+                            "Paykit spec 4: the served record exceeds the history a reader keeps \
+                             for this app ({SEEN_RECORDS} records, {SEEN_RECORDS_BYTES} bytes)"
                         ))));
                         continue;
                     };
