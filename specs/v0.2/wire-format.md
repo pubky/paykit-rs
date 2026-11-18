@@ -261,7 +261,7 @@ New in v0.2: `per_period_endpoints`, `payment_period_details`, `resend_request`,
 | `private_payment_list_request` | `paykit_pay` | `paykit_request` | 4.14 | none | no |
 | `allowance_proposal` | `paykit_allowance` and `paykit_contacts` | `paykit_allowance` | 4.15 | none | original in `allowance_proposals` before acceptance (5.4) |
 | `allowance_acceptance` | `paykit_allowance` and `paykit_contacts` | `paykit_allowance` | 4.16 | proposal hash | matched with its proposal in permanent `allowances` when acceptance is supported (5.4, 5.9) |
-| `allowance_rejection` | `paykit_allowance` and `paykit_contacts` | `paykit_allowance` | 4.16 | proposal hash | deletes its current pending proposal. A distinct response conflicting with an existing acceptance belongs in `allowances.conflicted` (5.4) |
+| `allowance_rejection` | `paykit_allowance` and `paykit_contacts` | `paykit_allowance` | 4.16 | proposal hash | ordinarily deletes its exact pending proposal. If an earlier distinct acceptance remains unplaced, the later rejection is kept as the stop for that pending lifetime (spec 8.3.1). A distinct response conflicting with a permanent acceptance belongs in `allowances.conflicted` (5.4) |
 | `allowance_end` | `paykit_allowance` | `paykit_allowance` | 4.16 | proposal hash, then the acceptance hash for an accepted Allowance | deletes the current pending proposal on withdrawal, or is stored in the accepted `allowances` record (5.4) |
 | `executor_notice` | `paykit_allowance` | `paykit_allowance_execute` | 4.17 | none | no |
 | an extension kind `<prefix>.<name>` | `paykit_ext:<prefix>` and `paykit_contacts` | `paykit_ext:<prefix>` | defined by the extension | the extension's | no |
