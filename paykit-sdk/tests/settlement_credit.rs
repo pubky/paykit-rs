@@ -36,9 +36,14 @@ async fn setup_identity(world: &World, name: &str, origin: &str) -> TestResult<S
     world.add_switch(origin, &[&identity]).await?;
     let mut env = world.signer_env(&identity, Arc::new(MemoryStore::new()))?;
     env.protocols = Protocols::new(vec![Arc::new(paykit_lib::signer::PaykitProtocol)])?;
-    let mut signer = Signer::create(env, world.keyring(&identity)?, origin).await?;
-    signer.resume().await?;
-    Ok(signer)
+    let keyring = world.keyring(&identity)?;
+    let origin = origin.to_owned();
+    Ok(tokio::spawn(Box::pin(async move {
+        let mut signer = Signer::create(env, keyring, &origin).await?;
+        signer.resume().await?;
+        Ok::<_, pubky_switch_signer::SignerError>(signer)
+    }))
+    .await??)
 }
 
 async fn join(
