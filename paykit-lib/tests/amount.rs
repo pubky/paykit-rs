@@ -1,7 +1,8 @@
 //! Caller-created conversion rates and public endpoint pricing (Paykit wire 4.4).
 
 use paykit_lib::{
-    amount_for_endpoint, Asset, Decimal, Error, PaymentAmount, PaymentEndpointIdentifier, Rate,
+    amount_for_endpoint, Asset, Decimal, EndpointAmount, Error, PaymentAmount,
+    PaymentEndpointIdentifier, Rate,
 };
 
 #[test]
@@ -51,19 +52,18 @@ fn test_amount_explicit_empty_rates_never_fall_back_to_parity() {
     ));
     assert_eq!(
         amount_for_endpoint(&requested, None, &endpoint, 6).unwrap(),
-        Some(requested.clone())
+        EndpointAmount::RequestedAsset(requested.clone())
     );
     let rates = [Rate::new(
         Asset::new("usdt-polygon").unwrap(),
         Decimal::new("1.008").unwrap(),
     )
     .unwrap()];
-    assert_eq!(
-        amount_for_endpoint(&requested, Some(&rates), &endpoint, 6)
-            .unwrap()
-            .unwrap()
-            .value
-            .as_str(),
-        "1.008"
-    );
+    let EndpointAmount::ByRate { rate, amount } =
+        amount_for_endpoint(&requested, Some(&rates), &endpoint, 6).unwrap()
+    else {
+        panic!("not priced by a rate")
+    };
+    assert_eq!(rate, rates[0]);
+    assert_eq!(amount.value.as_str(), "1.008");
 }
