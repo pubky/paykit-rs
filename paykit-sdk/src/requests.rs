@@ -42,7 +42,9 @@ use crate::pay::{BlockedPayment, WriteStamp};
 use crate::paykit::Paykit;
 use crate::periods::PeriodView;
 use crate::rail::ProofCheck;
-use crate::receipts::{received_receipt, ReceiptDetails, ReceivedReceipt};
+use crate::receipts::{
+    receipt_binding, received_receipt, ReceiptBinding, ReceiptDetails, ReceivedReceipt,
+};
 use crate::receive::KEPT_MESSAGE_MS;
 use crate::records::{conflict, KeptMessage};
 use crate::state::{key, Tx};
@@ -664,7 +666,7 @@ impl Paykit {
                 return Err(paykit_lib::Error::Validation(
                     "Paykit wire 4.5: a request has one payment deadline".into(),
                 )
-                .into())
+                .into());
             }
             (Some(at), None) => Some(PaymentDeadline::At(at)),
             (None, Some(seconds)) => Some(PaymentDeadline::PeriodStart { seconds }),
@@ -1111,7 +1113,7 @@ impl Paykit {
             {
                 OtherCredit::Credited => return Ok(None),
                 OtherCredit::CantTell if !maybe_credited_confirmed => {
-                    return Err(Refusal::MaybeCredited.into())
+                    return Err(Refusal::MaybeCredited.into());
                 }
                 _ => {}
             }
@@ -1148,10 +1150,9 @@ impl Paykit {
     }
 
     /// Whether another `payee_activity` record than `record` credits `settlement` from
-    /// `payer`: it holds a proof of that settlement with its receipt. A record the app holds
-    /// but can't open (sealed at a key it doesn't hold, or a value that doesn't read), whose
-    /// payer can't be seen, and a copy of the payee's records that may lack records, mean
-    /// it can't be told. A record under a policy that isn't Paykit's is ignored.
+    /// any payer: its signed proof and receipt belong to the same occurrence (Paykit spec
+    /// 6 and 8.1 step 4). When the app cannot open a held value or its copy may lack
+    /// records, it cannot tell whether another occurrence was credited. A record under a policy that isn't Paykit's is ignored.
     async fn other_credit(
         &self,
         record: &[u8; 32],
@@ -1198,12 +1199,17 @@ impl Paykit {
                 }
                 return Err(crate::records::activity_base_refusal());
             }
-            let Some((_, other)) = other else {
+            let Some((target, other)) = other else {
                 cant_tell = true;
                 continue;
             };
-            if other.counterparty == *payer && self.credits_settlement(&other, settlement) {
-                return Ok(OtherCredit::Credited);
+            if self.credits_settlement(&other, settlement) {
+                let parent = self.payee_request_record(&target, &other).await?;
+                match receipt_binding(&other, parent.as_ref()) {
+                    ReceiptBinding::Verified => return Ok(OtherCredit::Credited),
+                    ReceiptBinding::MissingRequest => cant_tell = true,
+                    ReceiptBinding::Invalid => {}
+                }
             }
         }
         Ok(if cant_tell {

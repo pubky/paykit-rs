@@ -719,7 +719,15 @@ pub(crate) async fn period_proof(
     payee_app: [u8; 16],
     period: PeriodRef,
 ) -> serde_json::Map<String, serde_json::Value> {
-    let attempt = AttemptId::from_bytes([9; 16]);
+    period_proof_for_attempt(w, payee_app, period, AttemptId::from_bytes([9; 16])).await
+}
+
+async fn period_proof_for_attempt(
+    w: &World,
+    payee_app: [u8; 16],
+    period: PeriodRef,
+    attempt: AttemptId,
+) -> serde_json::Map<String, serde_json::Value> {
     let outcome = w
         .rail
         .pay_outside(
@@ -2579,10 +2587,12 @@ async fn test_periods_no_response_while_the_request_record_is_sealed() {
 }
 
 #[tokio::test]
-async fn test_periods_another_payers_credit_of_a_settlement_leaves_the_payment_credited() {
-    // Carol's proof of the same settlement is credited first, as a payment without a
-    // request: one payment credits one occurrence per payer, so alice's period is still
-    // credited, carol's record not being of her.
+async fn test_periods_credit_a_settlement_once_across_payers() {
+    check_prior_settlement(true).await;
+    check_prior_settlement(false).await;
+}
+
+async fn check_prior_settlement(same_settlement: bool) {
     let w = World::new();
     let mut shop = w.shop().await;
     let mut wallet = w.wallet("wallet").await;
@@ -2591,7 +2601,17 @@ async fn test_periods_another_payers_credit_of_a_settlement_leaves_the_payment_c
         .await;
     let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
     let body = period_proof(&w, shop.app_id(), january()).await;
-    let mut unrequested = body.clone();
+    let mut unrequested = if same_settlement {
+        body.clone()
+    } else {
+        period_proof_for_attempt(
+            &w,
+            shop.app_id(),
+            january(),
+            AttemptId::from_bytes([18; 16]),
+        )
+        .await
+    };
     unrequested.remove("billing_period");
     unrequested.insert("amount".into(), json!({ "asset": "btc", "value": "1" }));
     w.inject(
@@ -2612,7 +2632,7 @@ async fn test_periods_another_payers_credit_of_a_settlement_leaves_the_payment_c
         .find(|s| s.payer == w.carol_id())
         .unwrap()
         .record;
-    assert!(shop.confirm_payment(&carols).await.unwrap().is_some());
+    let first_receipt = shop.confirm_payment(&carols).await.unwrap().unwrap();
     w.inject(
         &w.alice,
         "wallet",
@@ -2630,11 +2650,17 @@ async fn test_periods_another_payers_credit_of_a_settlement_leaves_the_payment_c
         .into_iter()
         .find(|s| s.request_hash == Some(request.request_hash))
         .unwrap();
-    assert!(shop
-        .confirm_payment(&sale.periods[0].record)
-        .await
-        .unwrap()
-        .is_some());
+    let result = shop.confirm_payment(&sale.periods[0].record).await.unwrap();
+    assert_eq!(result.is_some(), !same_settlement);
+    assert_ne!(result.as_ref(), Some(&first_receipt));
+    assert_eq!(
+        shop.confirm_payment(&carols).await.unwrap(),
+        Some(first_receipt)
+    );
+    assert_eq!(
+        w.rail.all_executions().values().sum::<u64>(),
+        if same_settlement { 1 } else { 2 }
+    );
 }
 
 #[tokio::test]
