@@ -253,13 +253,15 @@ async fn test_restore_first_read_preserves_the_implicit_report_through_an_error(
     request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     let backup = wallet.backup().await.unwrap();
-    let sent = shop
-        .send_request(w.alice_id(), draft("1", w.clock.now_ms()))
-        .await
-        .unwrap();
+    request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
     drop(wallet);
+    // The backup is behind the service cursor. This request is still unread by either wallet.
+    let sent = shop
+        .send_request(w.alice_id(), draft("3", w.clock.now_ms()))
+        .await
+        .unwrap();
     let mut restored = Paykit::restore(
         w.env(&w.alice, store()),
         PaykitConfig::default(),
@@ -270,7 +272,10 @@ async fn test_restore_first_read_preserves_the_implicit_report_through_an_error(
     .await
     .unwrap();
     restored.flush().await.unwrap();
-    assert!(restored.app().restore_held_cursor().is_some());
+    assert!(matches!(
+        restored.app().restore_held_cursor(),
+        Some(pubky_switch_client::app::HeldCursor::Ahead { .. })
+    ));
     assert!(restored
         .app()
         .sent_to(&w.bob_id(), 0, u64::MAX)
@@ -326,7 +331,7 @@ async fn test_restore_first_read_does_not_confirm_a_held_request() {
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     let backup = wallet.backup().await.unwrap();
-    request_from(&mut shop, w.alice_id(), draft("later", w.clock.now_ms())).await;
+    request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
     let mut restored = Paykit::restore(
@@ -339,7 +344,10 @@ async fn test_restore_first_read_does_not_confirm_a_held_request() {
     .await
     .unwrap();
     restored.flush().await.unwrap();
-    assert!(restored.app().restore_held_cursor().is_some());
+    assert!(matches!(
+        restored.app().restore_held_cursor(),
+        Some(pubky_switch_client::app::HeldCursor::Ahead { .. })
+    ));
     assert!(restored.request(&request).await.unwrap().held.is_some());
     assert!(restored
         .app()
