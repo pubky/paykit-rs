@@ -371,6 +371,21 @@ impl Paykit {
         Ok(out)
     }
 
+    /// The parent of a billed period, using the request hash in its signed messages.
+    pub(crate) fn payee_period_parent(
+        &self,
+        target: &ActivityTarget,
+        bound: &ActivityRecord,
+    ) -> Option<ActivityTarget> {
+        let RecordBinding::Period { request_hash, .. } = bound.binding().ok()? else {
+            return None;
+        };
+        Some(ActivityTarget::payee(
+            natural_key::request_record(&self.identity(), &request_hash),
+            target.label().as_ref(),
+        ))
+    }
+
     /// The payee's request record a record at `target`, `bound`, belongs to: itself for a
     /// request record, the one of its request, under the same label, for a period record.
     pub(crate) async fn payee_request_record(
@@ -381,16 +396,13 @@ impl Paykit {
         if bound.request.is_some() {
             return Ok(Some(bound.clone()));
         }
-        let Ok(RecordBinding::Period { request_hash, .. }) = bound.binding() else {
+        let Some(request) = self.payee_period_parent(target, bound) else {
             return Ok(None);
         };
-        let request = ActivityTarget::payee(
-            natural_key::request_record(&self.identity(), &request_hash),
-            target.label().as_ref(),
-        );
-        self.activity_write_base(&self.activity_key(&request)?)
+        let held = self
+            .activity_write_base(&self.activity_key(&request)?)
             .await?;
-        self.held_activity(&request).await
+        Ok(self.read_activity(&request, held.as_ref()))
     }
 
     /// Whether the app holds, though it may not open or bind it, the payee's request record
@@ -400,13 +412,9 @@ impl Paykit {
         target: &ActivityTarget,
         bound: &ActivityRecord,
     ) -> Result<bool> {
-        let Ok(RecordBinding::Period { request_hash, .. }) = bound.binding() else {
+        let Some(request) = self.payee_period_parent(target, bound) else {
             return Ok(false);
         };
-        let request = ActivityTarget::payee(
-            natural_key::request_record(&self.identity(), &request_hash),
-            target.label().as_ref(),
-        );
         Ok(self
             .app
             .shared_record(&self.activity_key(&request)?)
@@ -474,12 +482,7 @@ impl Paykit {
         // Period details go to no payer whose sends are held (Paykit spec 8.1, "Blocked
         // counterparties"), refused before anything is signed, written or queued: they are
         // sent once the payer is unblocked or the lists are read.
-        let held = self
-            .app
-            .shared_record(record)
-            .await?
-            .ok_or(Refusal::NotFound)?;
-        let (target, held) = self.bound_payee_record(&held)?;
+        let (target, held) = self.payee_record(record).await?;
         self.refuse_while_sends_held(&held.counterparty).await?;
         let mut tries = 0;
         let msg_id = loop {

@@ -104,67 +104,92 @@ async fn recover_activity_with_phone_write(
     target: &pubky_switch_client::app::RecordTarget,
     delete_held: bool,
 ) -> Arc<ScriptedSwitch> {
+    recover_activity_writes(w, wallet, phone, &[(target, delete_held)]).await
+}
+
+async fn recover_activity_writes(
+    w: &World,
+    wallet: &mut Paykit,
+    phone: &mut Paykit,
+    targets: &[(&pubky_switch_client::app::RecordTarget, bool)],
+) -> Arc<ScriptedSwitch> {
+    use pubky_switch_client::app::OpBatch;
     use pubky_switch_client::client::answers::{RecoveryUpload, UploadedOp};
     use pubky_switch_client::client::{Credentials, SwitchClient};
     use pubky_switch_client::testing::Fault;
-    use pubky_switch_core::ops::{Entry, OpsRequest};
-    let key = wallet.app().record_key(target).unwrap();
-    let current = wallet.app_mut().read_record(target).await.unwrap().unwrap();
-    let value = current.content.value().unwrap();
-    let base = wallet
-        .app_mut()
-        .put_record(target, value, vec![])
-        .await
-        .unwrap();
-    phone.app_mut().read_record(target).await.unwrap().unwrap();
-    let mut manual: serde_json::Value = serde_json::from_slice(value).unwrap();
-    if target.collection.name == paykit_lib::collections::Collection::PayerActivity.name() {
-        manual["manual_only"] = true.into();
+    use pubky_switch_core::ops::{Entry, OpKind, OpsRequest, SignedOp};
+
+    let mut batch = OpBatch::for_protocol("paykit");
+    let mut applied = Vec::new();
+    for &(target, delete) in targets {
+        let key = wallet.app().record_key(target).unwrap();
+        let current = wallet.app_mut().read_record(target).await.unwrap().unwrap();
+        let value = current.content.value().unwrap();
+        let base = wallet
+            .app_mut()
+            .put_record(target, value, vec![])
+            .await
+            .unwrap();
+        phone.app_mut().read_record(target).await.unwrap().unwrap();
+        let mut alternate: serde_json::Value = serde_json::from_slice(value).unwrap();
+        if target.collection.name == paykit_lib::collections::Collection::PayerActivity.name() {
+            alternate["manual_only"] = true.into();
+        }
+        let op = phone
+            .app_mut()
+            .record_op(
+                target,
+                Some(&serde_json::to_vec(&alternate).unwrap()),
+                vec![],
+            )
+            .await
+            .unwrap();
+        batch = batch.entry(op);
+        let write = if delete {
+            wallet
+                .app_mut()
+                .delete_record(target, vec![])
+                .await
+                .unwrap()
+        } else {
+            wallet
+                .app_mut()
+                .put_record(target, value, vec![])
+                .await
+                .unwrap()
+        };
+        assert_eq!(write.version.version, base.version.version + 1);
+        applied.push((target, key, write.version));
     }
     w.alice.switch().fail_next(Fault::Unreachable {
         path: "/ops".into(),
         after: 0,
     });
-    assert!(phone
-        .app_mut()
-        .put_record(target, &serde_json::to_vec(&manual).unwrap(), vec![])
-        .await
-        .is_err());
+    assert!(phone.app_mut().submit_batch(batch).await.is_err());
     let missed = w.alice.switch().unreached_bodies().pop().unwrap();
-    let op = OpsRequest::parse(&missed)
+    let records = OpsRequest::parse(&missed)
         .unwrap()
         .entries
         .into_iter()
-        .find_map(|entry| {
+        .filter_map(|entry| {
             let Entry::Signed(op) = entry else {
                 return None;
             };
-            let verified = pubky_switch_core::ops::SignedOp::verify_with_cert(
-                &op,
-                phone.app().cert(),
-                &w.alice_id(),
-            )
-            .unwrap();
+            let verified =
+                SignedOp::verify_with_cert(&op, phone.app().cert(), &w.alice_id()).unwrap();
             match &verified.body().kind {
-                pubky_switch_core::ops::OpKind::RecordPut(write) if write.key == key => Some(op),
+                OpKind::RecordPut(write) if applied.iter().any(|(_, key, _)| *key == write.key) => {
+                    Some(UploadedOp {
+                        op,
+                        cert: phone.app().cert().signed().clone(),
+                        proof: None,
+                    })
+                }
                 _ => None,
             }
         })
-        .expect("the phone's signed write of this record");
-    let applied = if delete_held {
-        wallet
-            .app_mut()
-            .delete_record(target, vec![])
-            .await
-            .unwrap()
-    } else {
-        wallet
-            .app_mut()
-            .put_record(target, value, vec![])
-            .await
-            .unwrap()
-    };
-    assert_eq!(applied.version.version, base.version.version + 1);
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), targets.len());
     let lost = wallet.app().own_identity().signed().clone();
     let next = declare_loss_of(w, ALICE_ORIGIN, NEXT_SECRET);
     phone.app_mut().refresh_identity().await.unwrap();
@@ -186,11 +211,7 @@ async fn recover_activity_with_phone_write(
         .recovery_upload(
             &RecoveryUpload {
                 lost_identity: Some(lost),
-                records: vec![UploadedOp {
-                    op,
-                    cert: phone.app().cert().signed().clone(),
-                    proof: None,
-                }],
+                records,
                 ..Default::default()
             },
             true,
@@ -199,10 +220,12 @@ async fn recover_activity_with_phone_write(
         .unwrap();
     wallet.app_mut().refresh_identity().await.unwrap();
     wallet.app_mut().follow_provider().await.unwrap();
-    let held = wallet.app_mut().read_record(target).await.unwrap().unwrap();
-    assert_eq!(held.version, applied.version);
-    assert!(held.different_write_at_held_version);
-    assert_eq!(next.record(&key).unwrap().state.version, held.version);
+    for (target, key, version) in applied {
+        let held = wallet.app_mut().read_record(target).await.unwrap().unwrap();
+        assert_eq!(held.version, version);
+        assert!(held.different_write_at_held_version);
+        assert_eq!(next.record(&key).unwrap().state.version, held.version);
+    }
     next
 }
 
@@ -695,6 +718,210 @@ async fn test_provider_loss_disputed_request_keeps_its_known_payers_proof() {
         .await
         .unwrap()
         .is_empty());
+}
+
+#[tokio::test]
+async fn test_provider_loss_disputed_subscription_classifies_replies_by_its_signed_payer() {
+    use crate::periods::{january_details, monthly, period_proof};
+    use paykit_lib::collections::Collection;
+    use paykit_sdk::AppScopes;
+    use pubky_switch_client::app::AppEvent;
+
+    for delete_parent in [false, true] {
+        let w = World::new();
+        let lists = Arc::new(crate::common::ListsStore::default());
+        let scopes = AppScopes::new()
+            .request()
+            .manage_contacts()
+            .build()
+            .unwrap();
+        let mut shop = w
+            .join_with(
+                &w.alice,
+                "shop",
+                scopes.clone(),
+                PaykitConfig::default(),
+                lists.clone(),
+            )
+            .await;
+        let mut phone = w.join(&w.alice, "phone", scopes).await;
+        let pay = AppScopes::new().pay().build().unwrap();
+        let mut buyer = w.join(&w.bob, "buyer", pay.clone()).await;
+        let guest = w.join(&w.carol, "guest", pay).await;
+        buyer.app_mut().invite(&w.alice_id()).await.unwrap();
+        let request = request_from(&mut shop, w.bob_id(), monthly(w.clock.now_ms(), None)).await;
+        let target = activity_target(&request, Collection::PayeeActivity);
+        let next =
+            recover_activity_with_phone_write(&w, &mut shop, &mut phone, &target, delete_parent)
+                .await;
+        follow_loss(&mut shop).await;
+
+        // Carol's certificate and replies are valid, but the signed request names Bob.
+        for kind in [
+            "paykit.payment_request_acceptance",
+            "paykit.payment_request_rejection",
+            "paykit.payment_request_cancellation",
+        ] {
+            let reply = w.sign_as(
+                &w.carol,
+                "guest",
+                &w.alice,
+                kind,
+                vec![request.request_hash],
+                Default::default(),
+            );
+            let id = pubky_switch_core::message::Message::parse(reply.json(), &[])
+                .unwrap()
+                .msg_id;
+            next.send_plaintext(w.carol_id(), guest.app().cert(), &reply, &[shop.app_id()])
+                .unwrap();
+            let read = shop.app_mut().receive(None).await.unwrap();
+            let kept = shop.app().protocol_scan("paykit", b"pr/").await.unwrap();
+            assert_eq!(
+                kept.iter().any(|(key, _)| key.ends_with(id.as_bytes())),
+                delete_parent,
+                "{kind}: {read:?}"
+            );
+            if !delete_parent {
+                assert!(read.events.iter().any(|e| matches!(e, AppEvent::MessageDropped { reason, .. } if reason.contains("payer"))), "{kind}: {read:?}");
+            }
+        }
+
+        let period = january_details(w.clock.now_ms() + crate::common::HOUR_MS).billing_period;
+        let body = period_proof(&w, shop.app_id(), period).await;
+        for flagged in [false, true] {
+            if flagged {
+                lists.flag(&w.carol_id());
+            }
+            let proof = w.sign_as(
+                &w.carol,
+                "guest",
+                &w.alice,
+                "paykit.payment_proof",
+                vec![request.request_hash],
+                body.clone(),
+            );
+            let id = pubky_switch_core::message::Message::parse(proof.json(), &[])
+                .unwrap()
+                .msg_id;
+            next.send_plaintext(w.carol_id(), guest.app().cert(), &proof, &[shop.app_id()])
+                .unwrap();
+            shop.receive(None).await.unwrap();
+            let kept = shop.app().protocol_scan("paykit", b"pr/").await.unwrap();
+            assert_eq!(
+                kept.iter().any(|(key, _)| key.ends_with(id.as_bytes())),
+                !flagged
+            );
+        }
+        assert_eq!(shop.spam_count(&w.carol_id()).await.unwrap(), 1);
+        accept_activity_successor(&mut shop, &mut phone, &target).await;
+        shop.receive(None).await.unwrap();
+        let sale = shop
+            .payee_activity()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|s| s.request_hash == Some(request.request_hash))
+            .unwrap();
+        assert!(sale.periods.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn test_provider_loss_credit_uses_the_signed_payer_of_a_disputed_period() {
+    use crate::periods::{january_details, monthly};
+    use paykit_lib::collections::Collection;
+    use paykit_lib::derive::natural_key;
+    use paykit_sdk::AppScopes;
+    use pubky_switch_client::app::{Collection as SwitchCollection, RecordTarget};
+
+    for (same_payer, delete_parent) in [(false, false), (true, false), (false, true)] {
+        let w = World::new();
+        let scopes = AppScopes::new().request().build().unwrap();
+        let mut shop = w.join(&w.alice, "shop", scopes.clone()).await;
+        let mut phone = w.join(&w.alice, "phone", scopes).await;
+        let pay = AppScopes::new().pay().build().unwrap();
+        let mut bob = w.join(&w.bob, "buyer", pay.clone()).await;
+        let mut carol = w.join(&w.carol, "subscriber", pay).await;
+        bob.app_mut().invite(&w.alice_id()).await.unwrap();
+        carol.app_mut().invite(&w.alice_id()).await.unwrap();
+        let now = w.clock.now_ms();
+        let purchase = request_from(&mut shop, w.bob_id(), draft("1", now)).await;
+        bob.receive(None).await.unwrap();
+        assert!(matches!(
+            bob.pay_request(&purchase, PayOptions::default())
+                .await
+                .outcome
+                .unwrap(),
+            PayOutcome::Paid { .. }
+        ));
+        shop.receive(None).await.unwrap();
+        let family = Collection::PayeeActivity;
+        let credit = shop
+            .app()
+            .record_key(&activity_target(&purchase, family))
+            .unwrap();
+        assert!(shop.verify_payment(&credit).await.unwrap().is_some());
+
+        let subscriber = if same_payer { &mut bob } else { &mut carol };
+        let subscription = request_from(&mut shop, subscriber.identity(), monthly(now, None)).await;
+        subscriber.receive(None).await.unwrap();
+        subscriber.accept_subscription(&subscription).await.unwrap();
+        shop.receive(None).await.unwrap();
+        let parent = activity_target(&subscription, family);
+        let sale = shop.app().record_key(&parent).unwrap();
+        let details = january_details(now + crate::common::HOUR_MS);
+        let period = RecordTarget::new(
+            SwitchCollection::new(family.name(), family.fixed_policy()),
+            &natural_key::period_record(
+                &w.alice_id(),
+                &subscription.request_hash,
+                details.billing_period.start_secs(),
+            ),
+        );
+        shop.send_period_details(&sale, details.clone())
+            .await
+            .unwrap();
+        recover_activity_writes(
+            &w,
+            &mut shop,
+            &mut phone,
+            &[(&parent, delete_parent), (&period, false)],
+        )
+        .await;
+        follow_loss(&mut shop).await;
+        let verified = shop.verify_payment(&credit).await;
+        if same_payer || delete_parent {
+            assert!(
+                matches!(verified.as_ref().err().and_then(PaykitError::refusal), Some(Refusal::NotNow(why)) if why.contains("another write at the held activity")),
+                "{verified:?}"
+            );
+        } else {
+            assert!(verified.unwrap().is_some());
+            assert!(shop.confirm_payment(&credit).await.unwrap().is_some());
+        }
+        for (target, reason) in [
+            (&parent, "another write at the held activity"),
+            (&period, "period record held doesn't read"),
+        ] {
+            let refused = shop
+                .send_period_details(&sale, details.clone())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(refused.refusal(), Some(Refusal::NotNow(why)) if why.contains(reason)),
+                "{refused:?}"
+            );
+            accept_activity_successor(&mut shop, &mut phone, target).await;
+        }
+        for shown in shop.divergent_records().await.unwrap() {
+            shop.confirm_divergent(&shown, UserConfirmed::new())
+                .await
+                .unwrap();
+        }
+        // The same period can take another signed set of details after both successors.
+        shop.send_period_details(&sale, details).await.unwrap();
+    }
 }
 
 /// The doubt a payment was refused with, as [`Refusal::MayBePaid`] shows it.

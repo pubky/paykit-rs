@@ -1366,28 +1366,16 @@ fn payer_reply(
             // the sender is its counterparty can't be told: the reply is kept as a reply before
             // its record, under the spam rule, never written over the value, and placed once
             // the record reads naming its sender (Paykit spec 8.1).
-            if let Some(held) = cx
-                .record(&target.record_target())?
-                .filter(|r| r.different_write_at_held_version)
-            {
-                // The signed request's hash still binds its recipient. Its reply updates
-                // known activity even while the service's record cannot be used for placement.
-                let known = match held.content.value() {
-                    Some(value) => bound_activity(cx, &target, value, settlement)?,
-                    None => None,
-                };
-                if known.is_some_and(|known| {
-                    known.counterparty == sender
-                        && known.request.is_some_and(|r| r.hash() == *request)
-                }) {
-                    keep_reply(cx, &target, stored, seq)?;
-                } else {
-                    keep_before_record(cx, stored, seq, scopes, &target)?;
-                }
-                return Ok(true);
-            }
-            let bound = match held_or_unlisted(cx, &target, RecordSide::Payee)? {
-                Some(_) => held_bound(cx, &target, settlement)?,
+            let held = cx.record(&target.record_target())?;
+            let disputed = crate::records::activity_base_changed(held.as_ref());
+            let value = if disputed {
+                // The signed request still identifies its payer and its periods.
+                held.and_then(|r| r.content.value().map(<[u8]>::to_vec))
+            } else {
+                held_or_unlisted(cx, &target, RecordSide::Payee)?
+            };
+            let bound = match value {
+                Some(bytes) => bound_activity(cx, &target, &bytes, settlement)?,
                 None => None,
             };
             let Some(bound) = bound else {
@@ -1402,22 +1390,22 @@ fn payer_reply(
                 .ok_or_else(|| {
                     Fail::Drop("Paykit wire 4.4: a message naming another period".into())
                 })?;
-            // A proof naming period details the period record doesn't hold, such as ones
-            // another own app sent whose record this app hasn't taken yet, would leave the
-            // record unbound (Paykit wire 5.3): it waits for them as a reply before its
-            // record, placed once the period record holds them. The period record is read
-            // bound to its key, as the later writes read it: one whose value doesn't read or
-            // bind is never written over here, and the proof waits the same way.
-            if target != request_target {
-                // Only the request's counterparty, whom its stored request names, pays its
-                // Billing Periods: a proof from anyone else is no update of activity the app
-                // holds. It never goes into a period record, where it would open one under
-                // another counterparty; it is new state, kept through the spam rule as a
-                // reply before its record ([`keep_before_record`]), and never placed.
-                if bound.counterparty != sender {
+            if bound.counterparty != sender {
+                if target != request_target {
+                    // A third party's proof of a valid period is new state. Admission
+                    // may keep it, but it never becomes the named payer's proof.
                     keep_before_record(cx, stored, seq, scopes, &request_target)?;
                     return Ok(true);
                 }
+                return Err(Fail::Drop(
+                    "Paykit spec 8.1: a reply from someone other than the request's payer".into(),
+                ));
+            }
+            if disputed {
+                keep_reply(cx, &request_target, stored, seq)?;
+                return Ok(true);
+            }
+            if target != request_target {
                 // From the counterparty, a proof the period record can't take now updates
                 // activity the app holds: kept outside the spam rule ([`keep_reply`]).
                 let held = match held_or_unlisted(cx, &target, RecordSide::Payee)? {

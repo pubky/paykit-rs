@@ -1118,17 +1118,11 @@ impl Paykit {
             };
             if held.different_write_at_held_version {
                 if let Some((target, other)) = &other {
-                    // The signed request fixes its recipient, also for its period keys.
-                    if let Some(request) = self.payee_request_record(target, other).await? {
-                        if request.counterparty != *payer {
-                            continue;
-                        }
-                    } else if matches!(other.binding()?, RecordBinding::Unrequested) {
-                        // A payment without a request is keyed by endpoint and settlement.
-                        if other.proof.as_ref().is_some_and(|stored| matches!(stored.body(),
-                            Body::PaymentProof(proof) if self.rail.settlement_id(&proof.proof).as_deref() != Some(settlement))) {
-                            continue;
-                        }
+                    if self
+                        .disputed_credit_unrelated(target, other, payer, settlement)
+                        .await?
+                    {
+                        continue;
                     }
                 }
                 return Err(crate::records::activity_base_refusal());
@@ -1157,6 +1151,39 @@ impl Paykit {
         } else {
             OtherCredit::None
         })
+    }
+
+    /// Exclude a disputed activity only from evidence fixed by its key. The signed
+    /// request fixes the payer even when another write at its version is disputed.
+    async fn disputed_credit_unrelated(
+        &self,
+        target: &ActivityTarget,
+        other: &ActivityRecord,
+        payer: &[u8; 32],
+        settlement: &[u8],
+    ) -> Result<bool> {
+        if let Some(request) = &other.request {
+            return Ok(request.message().to != *payer);
+        }
+        if let Some(target) = self.payee_period_parent(target, other) {
+            let request = self.held_activity(&target).await?;
+            return Ok(request
+                .as_ref()
+                .and_then(request_of)
+                .is_some_and(|(signed, _)| signed.message().to != *payer));
+        }
+        // An unrequested payee record is keyed by endpoint and settlement. The
+        // binding already required a readable proof with a settlement for this key.
+        Ok(other
+            .proof
+            .as_ref()
+            .is_some_and(|stored| match stored.body() {
+                Body::PaymentProof(proof) => self
+                    .rail
+                    .settlement_id(&proof.proof)
+                    .is_some_and(|id| id != settlement),
+                _ => false,
+            }))
     }
 
     /// Verify the proof in `record` and, when the payment method confirms it, send the

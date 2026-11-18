@@ -197,7 +197,7 @@ impl Paykit {
         Ok(self.read_activity(target, held.as_ref()))
     }
 
-    fn read_activity(
+    pub(crate) fn read_activity(
         &self,
         target: &ActivityTarget,
         held: Option<&SharedRecord>,
