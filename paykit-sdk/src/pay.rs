@@ -57,7 +57,7 @@ use pubky_switch_core::records::{CLOCK_TOLERANCE_MS, DAY_MS};
 use crate::activity::{self, ActivityTarget, Role};
 use crate::app_records::PublicAppFailure;
 use crate::conversion::{self, Priced, PricedPayment, RateSource};
-use crate::destination::{Carrier, Need};
+use crate::destination::{payee_copy_usable, Carrier, Need};
 use crate::error::{PaykitError, Refusal, Result};
 use crate::journal::{
     Destination, JournalEntry, KeptAmount, KeptPrice, KeptRateSource, PaymentView, Stage,
@@ -4307,7 +4307,7 @@ impl Paykit {
         // (Switch spec 10.1, 12.4).
         let clear = self.app.may_attempt(by == Initiator::Automatic).is_ok()
             && destination
-            && self.payee_copy_usable(payee, Need::of(&carrier), by, confirmed)
+            && payee_copy_usable(self.now(), payee, Need::of(&carrier), by, confirmed)
             && self.own_identity_fresh()
             && self.own_identity_authorizes(entry).is_ok();
         Ok(if clear {

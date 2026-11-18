@@ -550,20 +550,29 @@ async fn test_final_check_recovery_late_answer_removing_the_app_not_paid() {
 }
 
 // ---------------------------------------------------------------------------------------
-// An own identity.json read that succeeds after 11 minutes
+// The payee identity reaches its ten-minute limit during a current own identity read
+
+/// Read Bob's signed document now so its ten-minute boundary is known.
+async fn observe_payee(w: &World, wallet: &mut Paykit) -> u64 {
+    let at = w.clock.now_ms();
+    let identity = wallet
+        .app_mut()
+        .identity_of(&w.bob_id(), true)
+        .await
+        .unwrap();
+    assert_eq!(identity.read_at_ms, Some(at));
+    at
+}
 
 #[tokio::test]
 async fn test_final_check_first_dispatch_payee_copy_aged_during_the_own_read_not_paid() {
     let w = World::new();
     let (store, app_id, request) = with_a_request(&w).await;
-    w.clock.advance_ms(11 * 60_000);
-    // Before the attempt: the own identity.json is read at once, then bob's, which takes
-    // 61 s. After it, the own copy is over 60 s old and read again: that read succeeds after
-    // 11 minutes, leaving bob's copy past its 10.
     let reads = HookedReads::new(&w);
     reads.then(w.alice_id(), 0, None);
-    reads.then(w.bob_id(), 61_000, None);
-    reads.then(w.alice_id(), 11 * 60_000, None);
+    reads.then(w.alice_id(), 1_000, None);
+    let clock = Arc::clone(&w.clock);
+    store.on_attempted(Box::new(move || clock.advance_ms(5 * 60_000 - 1_000)));
     let slow = held_switch(&w);
     slow.release();
     let mut wallet = wallet(
@@ -574,8 +583,11 @@ async fn test_final_check_first_dispatch_payee_copy_aged_during_the_own_read_not
         &slow,
     )
     .await;
-    // A read that long also takes the attempt past its pre-dispatch budget: nothing is
-    // paid, and the attempt is written `failed`.
+    // The attempt starts five minutes after the payee observation. Its journal commit
+    // takes just under five minutes. The final one-second own read takes the payee to
+    // ten minutes and, with the five-minute clock tolerance, exhausts the attempt budget.
+    let observed = observe_payee(&w, &mut wallet).await;
+    w.clock.set_ms(observed + 5 * 60_000);
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
@@ -589,6 +601,7 @@ async fn test_final_check_first_dispatch_payee_copy_aged_during_the_own_read_not
         ),
         "{refused:?}"
     );
+    assert_eq!(w.clock.now_ms(), observed + 10 * 60_000);
     assert!(w.rail.all_executions().is_empty());
     let payment = wallet.payments().await.unwrap().remove(0);
     assert_eq!(w.rail.pay_calls(&payment.attempt_id), 0);
@@ -598,11 +611,8 @@ async fn test_final_check_first_dispatch_payee_copy_aged_during_the_own_read_not
 async fn test_final_check_resume_payee_copy_aged_during_the_own_read_not_paid() {
     let w = World::new();
     let (store, app_id, attempt_id) = in_flight(&w).await;
-    w.clock.advance_ms(11 * 60_000);
-    // The destination's check reads bob's copy; the own identity.json's read after it
-    // succeeds after 11 minutes.
     let reads = HookedReads::new(&w);
-    reads.then(w.alice_id(), 11 * 60_000, None);
+    reads.then(w.alice_id(), 1_000, None);
     let slow = held_switch(&w);
     slow.release();
     let mut wallet = wallet(
@@ -613,11 +623,14 @@ async fn test_final_check_resume_payee_copy_aged_during_the_own_read_not_paid() 
         &slow,
     )
     .await;
+    let observed = observe_payee(&w, &mut wallet).await;
+    w.clock.set_ms(observed + 10 * 60_000 - 1_000);
     let resumed = wallet.resume_payments().await.unwrap();
     assert!(
         matches!(resumed.as_slice(), [PayOutcome::Pending { .. }]),
         "{resumed:?}"
     );
+    assert_eq!(w.clock.now_ms(), observed + 10 * 60_000);
     assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
@@ -625,9 +638,8 @@ async fn test_final_check_resume_payee_copy_aged_during_the_own_read_not_paid() 
 #[tokio::test]
 async fn test_final_check_recovery_payee_copy_aged_during_the_own_read_not_paid() {
     let (w, store, app_id, attempt_id) = stopped_before_the_rail().await;
-    w.clock.advance_ms(11 * 60_000);
     let reads = HookedReads::new(&w);
-    reads.then(w.alice_id(), 11 * 60_000, None);
+    reads.then(w.alice_id(), 1_000, None);
     let slow = held_switch(&w);
     slow.release();
     let mut wallet = wallet(
@@ -638,11 +650,14 @@ async fn test_final_check_recovery_payee_copy_aged_during_the_own_read_not_paid(
         &slow,
     )
     .await;
+    let observed = observe_payee(&w, &mut wallet).await;
+    w.clock.set_ms(observed + 10 * 60_000 - 1_000);
     let resumed = wallet.resume_payments().await.unwrap();
     assert!(
         matches!(resumed.as_slice(), [PayOutcome::Pending { .. }]),
         "{resumed:?}"
     );
+    assert_eq!(w.clock.now_ms(), observed + 10 * 60_000);
     assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 0);
 }

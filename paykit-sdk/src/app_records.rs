@@ -58,9 +58,10 @@
 
 use paykit_lib::app_record::PaykitMember;
 use paykit_lib::{PaymentEndpointIdentifier, PaymentEndpointPayload};
+use std::ops::Range;
 use std::sync::Arc;
 
-use pubky_switch_client::app::{Initiator, UserConfirmed};
+use pubky_switch_client::app::{Initiator, PeerIdentity, UserConfirmed};
 use pubky_switch_client::error::TransportError;
 use pubky_switch_client::transport::BoxFuture;
 use pubky_switch_core::enc::zbase32_encode;
@@ -70,7 +71,7 @@ use pubky_switch_core::records::{
 use pubky_switch_core::sig::SignedDoc;
 use serde::{Deserialize, Serialize};
 
-use crate::destination::{current, Carrier, Need};
+use crate::destination::{current, payee_copy_usable, public_read_window, Carrier, Need};
 use crate::error::{PaykitError, Refusal, Result};
 use crate::journal::Destination;
 use crate::paykit::Paykit;
@@ -271,11 +272,14 @@ pub(crate) fn usable(
     })
 }
 
-/// The selected apps' record reads, in identity.json order.
-type RecordReads = Vec<(
-    [u8; 16],
-    std::result::Result<Option<Vec<u8>>, TransportError>,
-)>;
+type AppRecordResult = std::result::Result<Option<Vec<u8>>, TransportError>;
+
+/// The selected apps' record reads, in identity.json order, with the original
+/// identity observation window if every read began and ended within it.
+struct RecordReads {
+    window: Option<Range<u64>>,
+    records: Vec<([u8; 16], AppRecordResult)>,
+}
 
 /// How many records of one payee app are kept to rebuild its comparison state.
 /// At a renewal a fortnight this is years of records. The oldest timestamp groups are
@@ -403,9 +407,12 @@ impl Paykit {
         // The current apps' records are read from the Homeserver beside the payee's switch
         // lookup, from the copy of identity.json taken first (Paykit spec 4, 14).
         let homeserver = Arc::clone(&self.homeserver);
+        let clock = Arc::clone(&self.clock);
         let owner = *payee;
-        let read_records = |doc: &IdentityDoc| -> BoxFuture<'static, RecordReads> {
-            let apps: Vec<_> = doc
+        let read_records = |identity: &PeerIdentity| -> BoxFuture<'static, RecordReads> {
+            let window = public_read_window(identity);
+            let apps: Vec<_> = identity
+                .doc
                 .body()
                 .apps
                 .iter()
@@ -413,22 +420,29 @@ impl Paykit {
                 .filter(|id| app.is_none_or(|a| a == *id))
                 .collect();
             let homeserver = Arc::clone(&homeserver);
+            let clock = Arc::clone(&clock);
             Box::pin(async move {
+                // A clock correction during one GET cannot qualify bytes read outside
+                // the original identity's window. Keep the pass only if every read fits.
+                let mut window = window;
                 let mut out = Vec::with_capacity(apps.len());
                 for app_id in apps {
-                    out.push((
-                        app_id,
-                        homeserver.get(owner, app_record_path(&app_id)).await,
-                    ));
+                    let started = clock.now_ms();
+                    let bytes = homeserver.get(owner, app_record_path(&app_id)).await;
+                    window = window.filter(|w| w.contains(&started) && w.contains(&clock.now_ms()));
+                    out.push((app_id, bytes));
                 }
-                out
+                RecordReads {
+                    window,
+                    records: out,
+                }
             })
         };
         let mut first = None;
         let (identity, reads) = self
             .payee_identity_with(payee, Need::SwitchCopy, by, confirmed, |identity| {
-                first = Some((identity.doc.hash(), identity.fresh_until_ms()));
-                Some(read_records(&identity.doc))
+                first = Some(identity.doc.hash());
+                Some(read_records(identity))
             })
             .await?;
         let mut identity = match identity {
@@ -437,19 +451,25 @@ impl Paykit {
         };
         // The first reads belong to that signed document while fresh. A later copy can
         // close a renewal even when it still lists the same App ID and certificate.
-        let mut first_reads = reads.filter(|_| {
-            first.is_some_and(|(hash, until)| hash == identity.doc.hash() && self.now() < until)
+        let mut first_reads = reads.filter(|reads| {
+            first == Some(identity.doc.hash())
+                && reads
+                    .window
+                    .as_ref()
+                    .is_some_and(|w| w.contains(&self.now()))
         });
         const MAX_REFRESHES: usize = 3;
         let mut refreshes = 0;
         let (fetched, now) = loop {
             let fetched = match first_reads.take() {
                 Some(records) => records,
-                None => read_records(&identity.doc).await,
+                None => read_records(&identity).await,
             };
             let now = self.now();
-            if now < identity.fresh_until_ms() {
-                break (fetched, now);
+            if fetched.window.is_some_and(|w| w.contains(&now))
+                && payee_copy_usable(now, &identity, Need::SwitchCopy, by, confirmed)
+            {
+                break (fetched.records, now);
             }
             if refreshes == MAX_REFRESHES {
                 return Ok(Err(Refusal::IdentityUnavailable(

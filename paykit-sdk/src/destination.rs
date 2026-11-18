@@ -71,6 +71,37 @@ use crate::paykit::Paykit;
 /// (Switch spec 4.3, "No added latency").
 pub const IDENTITY_GRACE_MS: u64 = 2_000;
 
+/// The time during which both parts of a public identity lookup are current
+/// (Switch spec 4.3). A directory-only version has no qualifying observation.
+pub(crate) fn public_read_window(identity: &PeerIdentity) -> Option<std::ops::Range<u64>> {
+    let read = identity.read_at_ms?;
+    Some(read.max(identity.switch_lookup_ms)..identity.fresh_until_ms())
+}
+
+/// The payee's copy of `identity.json` may still be acted on now, on the clock (Paykit
+/// spec 4, 7.2; Switch spec 4.3): read in the last 10 minutes, for a destination a
+/// verified message carries; for a public endpoint, as the switch's rules let `by`
+/// act, `confirmed` standing for the user's confirmation.
+pub(crate) fn payee_copy_usable(
+    now: u64,
+    identity: &PeerIdentity,
+    need: Need,
+    by: Initiator,
+    confirmed: Option<UserConfirmed>,
+) -> bool {
+    match need {
+        Need::FreshCopy => identity
+            .read_at_ms
+            .and_then(|at| now.checked_sub(at))
+            .is_some_and(|age| age < DOC_CACHE_MS),
+        Need::SwitchCopy => match identity.may_act(now, by, IDENTITY_GRACE_MS) {
+            MayAct::Now => true,
+            MayAct::IfUserConfirms => confirmed.is_some(),
+            _ => false,
+        },
+    }
+}
+
 impl Paykit {
     /// The payee's `identity.json` for acting on its destinations (Paykit spec 4, 7.2; Switch
     /// spec 4.3, "The switch's copy"), as [`Paykit::payee_identity_with`] takes it, with no
@@ -115,10 +146,10 @@ impl Paykit {
         loop {
             // A lookup still running from an earlier check goes on: its copy and its answer,
             // while the copy is fresh.
-            let kept = self
-                .lookups
-                .remove(payee)
-                .filter(|kept| self.now() < kept.identity.fresh_until_ms());
+            let kept = self.lookups.remove(payee).filter(|kept| {
+                public_read_window(&kept.identity)
+                    .is_some_and(|window| window.contains(&self.now()))
+            });
             let (identity, switch) = match kept {
                 Some(kept) => (kept.identity, Some(kept.switch)),
                 None => match self.app.begin_identity_lookup(payee, refresh).await {
@@ -176,11 +207,7 @@ impl Paykit {
             if need == Need::FreshCopy {
                 // A copy read in the last 10 minutes, from the Homeserver or the switch, is
                 // the one acted on (Paykit spec 7.2); the switch's confirmation isn't needed.
-                let fresh = self
-                    .now()
-                    .checked_sub(identity.read_at_ms)
-                    .is_some_and(|age| age < DOC_CACHE_MS);
-                if fresh {
+                if payee_copy_usable(self.now(), &identity, need, by, confirmed) {
                     return Ok((Ok(identity), read));
                 }
                 if !refresh {
@@ -247,30 +274,6 @@ impl Paykit {
         Ok(self
             .destination_valid(payee, destination, carrier, request_hash, &identity.doc)
             .map(|()| identity))
-    }
-
-    /// The payee's copy of `identity.json` may still be acted on now, on the clock (Paykit
-    /// spec 4, 7.2; Switch spec 4.3): read in the last 10 minutes, for a destination a
-    /// verified message carries; for a public endpoint, as the switch's rules let `by`
-    /// act, `confirmed` standing for the user's confirmation.
-    pub(crate) fn payee_copy_usable(
-        &self,
-        identity: &PeerIdentity,
-        need: Need,
-        by: Initiator,
-        confirmed: Option<UserConfirmed>,
-    ) -> bool {
-        let now = self.now();
-        match need {
-            Need::FreshCopy => now
-                .checked_sub(identity.read_at_ms)
-                .is_some_and(|age| age < DOC_CACHE_MS),
-            Need::SwitchCopy => match identity.may_act(now, by, IDENTITY_GRACE_MS) {
-                MayAct::Now => true,
-                MayAct::IfUserConfirms => confirmed.is_some(),
-                _ => false,
-            },
-        }
     }
 
     /// The payee's switch lookup kept from an earlier check, taken if its answer has come,

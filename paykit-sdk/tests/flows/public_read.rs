@@ -341,6 +341,228 @@ async fn test_public_read_one_time_judges_every_app() {
 }
 
 #[tokio::test]
+async fn test_public_read_identity_source_at_the_start_of_the_app_reads() {
+    // The first app has returned its old record when the second app supplies the
+    // new clock. Only a pass that began under the observed identity can stand.
+    for (start_before, return_before, expected) in [
+        (60_000, 0, "lnbc1current"),
+        (0, 60_000, "lnbc1current"),
+        (0, 0, "lnbc1before"),
+    ] {
+        let w = Arc::new(World::new());
+        let (mut wallet, reads) = wallet_reading_through(&w).await;
+        let apps = bob_apps(&w, &["shop", "till"]).await;
+        let (name, first_app) = apps[0];
+        let observed = w.clock.now_ms();
+        publish_app_at(
+            &w,
+            name,
+            one_endpoint("btc-lightning-bolt11", "lnbc1before"),
+            observed,
+            Some(observed + DAY_MS),
+        );
+        let initial = wallet
+            .app_mut()
+            .identity_of(&w.bob_id(), true)
+            .await
+            .unwrap();
+        assert_eq!(initial.read_at_ms, Some(observed));
+        w.homeserver.remove(w.bob_id(), IDENTITY_PATH);
+        w.clock.set_ms(observed - start_before);
+        let started = wallet
+            .app_mut()
+            .begin_identity_lookup(&w.bob_id(), false)
+            .await
+            .unwrap();
+        assert_eq!(started.identity.doc.hash(), initial.doc.hash());
+        assert_eq!(started.identity.read_at_ms, Some(observed));
+        assert_eq!(w.clock.now_ms(), observed - start_before);
+        drop(started);
+        let clock = Arc::clone(&w.clock);
+        reads.on_read(&first_app, move || clock.set_ms(observed - return_before));
+        let changed = Arc::clone(&w);
+        reads.on_read(&apps[1].1, move || {
+            changed.clock.set_ms(observed + 1);
+            publish_app_at(
+                &changed,
+                name,
+                one_endpoint("btc-lightning-bolt11", "lnbc1current"),
+                observed + 1,
+                Some(observed + DAY_MS),
+            );
+        });
+        let discovery = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+        let shown = discovery
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.app_id == first_app)
+            .unwrap();
+        assert_eq!(
+            shown.payload.as_str(),
+            expected,
+            "first GET began {start_before} ms and returned {return_before} ms before observation"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_public_read_identity_source_rereads_a_directory_only_pass() {
+    let w = Arc::new(World::new());
+    let (mut wallet, reads) = wallet_reading_through(&w).await;
+    let apps = bob_apps(&w, &["shop", "till"]).await;
+    let (name, first) = apps[0];
+    publish_now(
+        &w,
+        name,
+        one_endpoint("btc-lightning-bolt11", "lnbc1before"),
+    );
+    let higher = w.bob_directory_version(&mut wallet).await;
+    let started = wallet
+        .app_mut()
+        .begin_identity_lookup(&w.bob_id(), false)
+        .await
+        .unwrap();
+    assert_eq!(started.identity.doc.hash(), higher.hash());
+    assert_eq!(started.identity.read_at_ms, None);
+    // Records and the switch read run together. The second app's read happens after the
+    // first app's old bytes have returned. The switch then qualifies the very same hash.
+    let changed = Arc::clone(&w);
+    reads.on_read(&apps[1].1, move || {
+        changed.clock.advance_ms(1);
+        publish_now(
+            &changed,
+            name,
+            one_endpoint("btc-lightning-bolt11", "lnbc1current"),
+        );
+    });
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    let endpoint = read
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.app_id == first)
+        .unwrap();
+    assert_eq!(endpoint.payload.as_str(), "lnbc1current");
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_public_read_identity_source_rereads_after_rollback_past_either_observation() {
+    use pubky_switch_client::testing::START_MS;
+    use pubky_switch_core::records::IdentityDoc;
+
+    for later_homeserver in [true, false] {
+        let base = START_MS;
+        let bob_clock = Arc::new(TestClock::new(base));
+        let w = Arc::new(World::on_clocks(
+            Arc::new(TestClock::new(base)),
+            Arc::clone(&bob_clock),
+        ));
+        let (mut wallet, reads) = wallet_reading_through(&w).await;
+        let apps = bob_apps(&w, &["shop", "till"]).await;
+        let (name, first) = apps[0];
+        let expiry = Some(base + DAY_MS);
+        publish_app_at(
+            &w,
+            name,
+            one_endpoint("btc-lightning-bolt11", "lnbc1before"),
+            base,
+            expiry,
+        );
+        // A higher version known only from the Homeserver. A later switch lookup
+        // can complete without supplying that version again.
+        let mut body = w.bob.body();
+        body.version += 1;
+        let higher = IdentityDoc::sign(w.bob.identity().key(), body).unwrap();
+        w.homeserver.publish(&higher).unwrap();
+        wallet
+            .app_mut()
+            .identity_of(&w.bob_id(), true)
+            .await
+            .unwrap();
+        let later = base + 4 * 60_000;
+        w.clock.set_ms(later);
+        if !later_homeserver {
+            bob_clock.set_ms(later);
+            w.homeserver.remove(w.bob_id(), IDENTITY_PATH);
+        }
+        let source = wallet
+            .app_mut()
+            .identity_of(&w.bob_id(), true)
+            .await
+            .unwrap();
+        let (version_at, lookup_at) = if later_homeserver {
+            (later, base)
+        } else {
+            (base, later)
+        };
+        assert_eq!(
+            (source.read_at_ms, source.switch_lookup_ms),
+            (Some(version_at), lookup_at)
+        );
+        let changed = Arc::clone(&w);
+        reads.on_read(&apps[1].1, move || {
+            changed.clock.set_ms(base + 2 * 60_000);
+            changed.homeserver.publish(&higher).unwrap();
+            publish_app_at(
+                &changed,
+                name,
+                one_endpoint("btc-lightning-bolt11", "lnbc1after"),
+                base + 1,
+                expiry,
+            );
+        });
+        let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+        let endpoint = read
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.app_id == first)
+            .unwrap();
+        assert_eq!(
+            endpoint.payload.as_str(),
+            "lnbc1after",
+            "later Homeserver {later_homeserver}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_public_read_identity_source_rechecks_after_a_newly_listed_apps_read() {
+    use pubky_switch_core::records::RemovedApp;
+    let w = Arc::new(World::new());
+    let (mut wallet, reads) = wallet_reading_through(&w).await;
+    bob_apps(&w, &["shop"]).await;
+    let first_doc = w.homeserver.file(w.bob_id(), IDENTITY_PATH).unwrap();
+    let till = bob_apps(&w, &["till"]).await[0];
+    publish_now(
+        &w,
+        till.0,
+        one_endpoint("btc-lightning-bolt11", "lnbc1till"),
+    );
+    w.homeserver.put(w.bob_id(), IDENTITY_PATH, first_doc);
+    let before = w.clock.now_ms();
+    w.clock.advance_ms(4 * 60_000);
+    // The switch adds the till to the second pass. Its record returns after the
+    // clock moves behind that lookup. A new lookup now shows the till's removal.
+    let changed = Arc::clone(&w);
+    reads.on_read(&till.1, move || {
+        changed.clock.set_ms(before + 60_000);
+        changed
+            .bob
+            .next_doc(|body| {
+                body.apps.retain(|a| a.app_id != till.1);
+                body.removed.push(RemovedApp {
+                    app_id: till.1,
+                    distrust_from: changed.clock.now_ms(),
+                });
+            })
+            .unwrap();
+    });
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert!(reads.on_read.lock().unwrap().is_empty());
+    assert!(!offering(&read).contains(&till.1), "{read:?}");
+}
+
+#[tokio::test]
 async fn test_public_read_fetches_the_renewed_apps_record() {
     read_during_renewal(false).await;
 }
