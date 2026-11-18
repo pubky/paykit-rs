@@ -30,3 +30,6 @@ paykit-sdk = { path = ".", features = ["test-support"] }
 pubky-switch-client = { workspace = true, features = ["test-support"] }
 pubky-switch-core = { workspace = true, features = ["test-vectors"] }
 tokio = { version = "1", features = ["macros", "rt", "time"] }
+paykit-lib = { workspace = true, features = ["signer"] }
+pubky-switch-signer.workspace = true
+pubky-switch-harness = { git = "https://github.com/pubky/pubky-switch", rev = "24371d328354cdfd5502bfd825c8042c394f0818" }

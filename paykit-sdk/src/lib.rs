@@ -70,6 +70,7 @@ mod reconcile;
 mod records;
 mod requests;
 mod resend;
+mod settlements;
 mod state;
 mod stored;
 #[cfg(test)]
