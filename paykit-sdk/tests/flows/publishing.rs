@@ -411,3 +411,133 @@ async fn test_publication_lost_answer_settles_the_original_before_replacing_its_
         "lno1changed"
     );
 }
+
+#[tokio::test]
+async fn test_publication_expired_original_batch_still_waits_at_the_same_counter() {
+    use pubky_switch_client::app::{KeptBatchDrop, KeptBatchStatus};
+    use pubky_switch_client::testing::Fault;
+
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let _wallet = w.wallet("wallet").await;
+    let recipient = w.alice_id();
+    shop.app_mut().invite(&recipient).await.unwrap();
+    shop.set_list_endpoints(offered("lno1original"))
+        .await
+        .unwrap();
+    let target = target(&shop, &recipient, 1);
+    let key = shop.app().record_key(&target).unwrap();
+    w.bob.switch().fail_next(Fault::LoseAnswer {
+        path: "/ops".into(),
+    });
+    let lost = shop.publish_list_to(recipient).await.unwrap_err();
+    let batch = lost.kept_batch().unwrap();
+    let owned = shop.app().queued_messages("paykit").await.unwrap();
+    let original = owned.iter().find(|m| m.kept_batch == Some(batch)).unwrap();
+    assert_eq!(w.record_writes(&w.bob, &key), 1);
+    w.clock.advance_ms(31 * 24 * crate::common::HOUR_MS);
+    shop.app_mut().receive(None).await.unwrap();
+    assert!(matches!(
+        shop.app().kept_batch(batch).await.unwrap(),
+        Some(KeptBatchStatus::Dropped {
+            reason: KeptBatchDrop::Uncertain,
+            ..
+        })
+    ));
+    let RecordRead::Fresh(held) = shop.app_mut().read_record_fresh(&target).await.unwrap() else {
+        panic!("the signed counter is still current")
+    };
+    let held = ListPublicationRecord::read(held.content.value().unwrap()).unwrap();
+    assert_eq!(held.msg_id, original.msg_id);
+    assert_eq!(held.message_hash, original.hash);
+    shop.set_list_endpoints(offered("lno1replacement"))
+        .await
+        .unwrap();
+    let result = shop.publish_list_to(recipient).await;
+    assert!(
+        matches!(
+            result.as_ref().err().and_then(|e| e.refusal()),
+            Some(paykit_sdk::Refusal::NotNow(_))
+        ),
+        "{result:?}"
+    );
+    assert_eq!(w.record_writes(&w.bob, &key), 1);
+    assert!(shop
+        .app()
+        .sent_to(&recipient, 0, u64::MAX)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn test_publication_imported_original_settles_before_a_new_generation_list() {
+    use pubky_switch_client::app::{AppEvent, KeptBatchStatus};
+    use pubky_switch_client::testing::Fault;
+    use pubky_switch_core::records::Inbox;
+    const NEXT: &str = "https://moved-merchant.example";
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let recipient = w.alice_id();
+    shop.app_mut().invite(&recipient).await.unwrap();
+    let first_key = shop
+        .app()
+        .record_key(&target(&shop, &recipient, 1))
+        .unwrap();
+    shop.set_list_endpoints(offered("lno1old")).await.unwrap();
+    w.bob.switch().fail_next(Fault::LoseAnswer {
+        path: "/ops".into(),
+    });
+    let lost = shop.publish_list_to(recipient).await.unwrap_err();
+    let batch = lost.kept_batch().unwrap();
+    assert_eq!(w.record_writes(&w.bob, &first_key), 1);
+    shop.set_list_endpoints(offered("lno1afterimport"))
+        .await
+        .unwrap();
+    let next = w.bob.switch().import_into_at([85; 32], NEXT);
+    w.router.add_switch(NEXT, &next);
+    let changed = w
+        .bob
+        .sign_next(|body| {
+            body.generation = 2;
+            body.inbox = Inbox::new(NEXT, next.service_key());
+        })
+        .unwrap();
+    next.deliver_identity(&changed).unwrap();
+    shop.app_mut().refresh_identity().await.unwrap();
+    let report = shop.app_mut().receive(None).await.unwrap();
+    assert!(
+        report
+            .events
+            .iter()
+            .any(|e| matches!(e, AppEvent::KeptBatchApplied {batch_id} if *batch_id==batch)),
+        "{:?}",
+        report.events
+    );
+    assert!(matches!(
+        shop.app().kept_batch(batch).await.unwrap(),
+        Some(KeptBatchStatus::Applied { .. })
+    ));
+    assert_eq!(shop.app().own_identity().generation(), 2);
+    let current = target(&shop, &recipient, 2);
+    let key = shop.app().record_key(&current).unwrap();
+    assert!(next.record(&key).is_none());
+    shop.publish_list_to(recipient).await.unwrap();
+    let RecordRead::Fresh(held) = shop.app_mut().read_record_fresh(&current).await.unwrap() else {
+        panic!("no current publication")
+    };
+    let issued = ListPublicationRecord::read(held.content.value().unwrap()).unwrap();
+    assert_eq!((issued.generation, issued.counter), (2, 1));
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(UnrequestedPayment::new(w.bob_id(), btc("0.001")))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }));
+    assert_eq!(
+        w.rail.selections().last().unwrap().0[0].payload.as_str(),
+        "lno1afterimport"
+    );
+}

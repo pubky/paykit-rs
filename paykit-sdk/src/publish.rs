@@ -7,8 +7,8 @@ use paykit_lib::derive::natural_key;
 use paykit_lib::records::{ListPublicationRecord, UnknownMembers};
 use paykit_lib::{Kind, ListVersion, PaymentEndpointIdentifier, PaymentEndpointPayload};
 use pubky_switch_client::app::{
-    AppError, Collection, Delivery, DeliveryView, KeptBatchDrop, KeptBatchStatus, KeptReason,
-    OpBatch, OutgoingMessage, RecordContent, RecordRead, RecordTarget, SharedRecord, StoreFailure,
+    AppError, Collection, DeliveryView, KeptBatchDrop, KeptBatchStatus, KeptReason, OpBatch,
+    OutgoingMessage, RecordContent, RecordRead, RecordTarget, SharedRecord, StoreFailure,
 };
 use pubky_switch_core::ident::Policy;
 
@@ -342,33 +342,22 @@ impl Paykit {
         let at = key::list_reservation(&recipient.recipient);
         if let Some(mut prior) = self.local_get::<ListReservation>(&at).await? {
             if !prior.applied {
-                // A crash can leave the first batch kept before this layer recorded its ID.
-                let batch = match self.app.delivery(&prior.id).await? {
-                    Some(Delivery::Kept { batch_id }) => Some(batch_id),
-                    _ => prior.batch_id,
-                };
-                let fate = match batch {
+                let fate = match prior.batch_id {
                     Some(id) => self.app.kept_batch(id).await?,
                     None => None,
                 };
                 match fate {
+                    Some(KeptBatchStatus::Applied { .. }) => {
+                        prior.applied = true;
+                        self.local_put(&at, &prior).await?;
+                    }
                     Some(KeptBatchStatus::Dropped {
                         reason: KeptBatchDrop::Refused { .. } | KeptBatchDrop::Unsent,
                         ..
                     }) => self.local_delete(&at).await?,
-                    Some(KeptBatchStatus::Kept { .. }) => return Err(unresolved().into()),
-                    _ => {
-                        let prior_target =
-                            target(&self.app_id(), &prior.recipient, prior.generation);
-                        let applied = matches!(self.app.read_record_fresh(&prior_target).await?, RecordRead::Fresh(held)
-                            if self.bound_publication(&held).is_ok_and(|record| prior.matches(&record))
-                                && !held.flagged && !held.not_taken && !held.different_write_at_held_version);
-                        if !applied {
-                            return Err(unresolved().into());
-                        }
-                        prior.applied = true;
-                        self.local_put(&at, &prior).await?;
-                    }
+                    // The same counter value can survive an undecided batch. Only the
+                    // original batch's outcome or its atomic local write settles it.
+                    _ => return Err(unresolved().into()),
                 }
             }
             if prior.applied && prior.choice == recipient.choice && prior.revision == revision {
