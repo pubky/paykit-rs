@@ -673,6 +673,7 @@ impl Paykit {
         // next load. Nothing is written under a certificate Paykit refuses.
         if self.certificate_refused().is_none() {
             self.bound_restored_cursor_time().await?;
+            Box::pin(self.take_restore_verdict()).await?;
         }
         // Records are unlisted here until the next list read (`hold::side_unlisted`).
         Ok(self)
@@ -1082,6 +1083,9 @@ impl Paykit {
                 divergent: self.newly_paused(&paused_before).await?,
                 ..ReceiveSummary::default()
             });
+        }
+        if Box::pin(self.take_restore_verdict()).await? {
+            Box::pin(self.refresh_lists_when_due()).await?;
         }
         // Restore-held blocks go before the other outgoing work, after the first page.
         if blocks_after_read {

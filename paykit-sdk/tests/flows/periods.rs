@@ -896,6 +896,7 @@ async fn test_periods_subscription_held_after_a_restore() {
     )
     .await
     .unwrap();
+    crate::common::restore_with_unknown_cursor(&mut app).await;
     app.resume_payments().await.unwrap();
     assert_eq!(
         app.request(&request).await.unwrap().status,
@@ -1445,6 +1446,7 @@ async fn test_periods_accept_held_after_restore_waits_for_the_user() {
     )
     .await
     .unwrap();
+    crate::common::restore_with_unknown_cursor(&mut app).await;
     app.resume_payments().await.unwrap();
     app.receive(None).await.unwrap();
     assert_eq!(
@@ -2908,6 +2910,7 @@ async fn test_periods_acceptance_stays_after_a_restore() {
     )
     .await
     .unwrap();
+    crate::common::restore_with_unknown_cursor(&mut app).await;
     app.resume_payments().await.unwrap();
     app.receive(None).await.unwrap();
     let options = paykit_sdk::AcceptOptions::default()
