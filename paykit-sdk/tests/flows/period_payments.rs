@@ -1028,6 +1028,115 @@ async fn test_period_payments_restore_an_orphan_then_confirm_the_owners_paid_pro
     assert_eq!(w.rail.executions(&attempt), 1);
 }
 
+/// A backup taken after the rail paid can predate the original wallet's
+/// successful outcome batch. Its signed proof remains the same payment.
+async fn restore_before_original_completion(answered: bool) {
+    use pubky_switch_client::store::{Fault, FaultStore};
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let fault = Arc::new(FaultStore::new(store(), Fault::None));
+    let mut wallet = w.wallet_on("wallet", fault.clone()).await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    let period = january();
+    let natural = period_natural(&request, period);
+    w.rail.next(Behaviour::Hang);
+    let attempt = by_user(&mut wallet, &request, period, PayOptions::default())
+        .await
+        .unwrap()
+        .attempt_id();
+    let obligation = period_obligation(&wallet, period).await;
+    w.rail.settle(&attempt, true);
+    fault.fail_put_once(b"opq/");
+    let interrupted = wallet.resume_payments().await;
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::RailPaid,
+        "{interrupted:?}"
+    );
+    let backup = wallet.backup().await.unwrap();
+
+    let first = wallet.resume_payments().await.unwrap();
+    let [PayOutcome::Paid {
+        attempt_id,
+        proof_msg_id: Some(original_id),
+        ..
+    }] = first.as_slice()
+    else {
+        panic!("original completion: {first:?}");
+    };
+    assert_eq!(attempt_id, &attempt);
+    let first_record = period_record(&w, &wallet, &request, period).await.unwrap();
+    let (signed, body) = proof_of(&first_record);
+    assert_eq!(&signed.message().msg_id, original_id);
+    assert_eq!(body.attempt_id, attempt);
+    assert_eq!(body.billing_period, Some(period));
+    let original_hash = signed.hash();
+    shop.receive(None).await.unwrap();
+    if answered {
+        let sale = shop.payee_activity().await.unwrap();
+        let id = Box::pin(shop.confirm_payment(&sale[0].periods[0].record))
+            .await
+            .unwrap()
+            .unwrap();
+        wallet.receive(None).await.unwrap();
+        let paid = period_record(&w, &wallet, &request, period).await.unwrap();
+        let receipt = paid.receipt.unwrap();
+        assert_eq!(receipt.message().msg_id, id);
+        assert_eq!(receipt.message().refs, vec![original_hash]);
+    }
+    let paid = period_record(&w, &wallet, &request, period)
+        .await
+        .unwrap()
+        .to_json()
+        .unwrap();
+    let writes = puts(&w, &wallet, &natural).len();
+    let claim_entries = w
+        .alice
+        .switch()
+        .applied()
+        .iter()
+        .filter(
+            |op| matches!(&op.body().kind, OpKind::Claim(c) if c.claim_key == obligation.to_vec()),
+        )
+        .count();
+    drop(wallet);
+
+    let mut wallet = restored(&w, &backup).await;
+    let report = wallet.reconcile().await.unwrap();
+    assert_eq!(report.resolved, first);
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Finished
+    );
+    assert_eq!(w.rail.executions(&attempt), 1);
+    let current = period_record(&w, &wallet, &request, period).await.unwrap();
+    assert_eq!(current.to_json().unwrap(), paid);
+    assert_eq!(puts(&w, &wallet, &natural).len(), writes);
+    assert_eq!(w.alice.switch().applied().iter()
+        .filter(|op| matches!(&op.body().kind, OpKind::Claim(c) if c.claim_key == obligation.to_vec())).count(), claim_entries);
+    assert_eq!(
+        wallet
+            .app_mut()
+            .read_claim(&obligation)
+            .await
+            .unwrap()
+            .unwrap()
+            .view
+            .status,
+        ClaimStatus::Settled
+    );
+}
+
+#[tokio::test]
+async fn test_period_payments_restore_the_original_paid_proof_with_its_receipt() {
+    Box::pin(restore_before_original_completion(true)).await;
+}
+
+#[tokio::test]
+async fn test_period_payments_restore_the_original_unanswered_paid_proof() {
+    Box::pin(restore_before_original_completion(false)).await;
+}
+
 #[tokio::test]
 async fn test_period_payments_divergent_records_pause_their_periods_until_confirmed() {
     // January's period record is divergent: January is paid by hand only once the user has

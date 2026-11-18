@@ -744,10 +744,53 @@ pub(crate) enum Written {
     Divergent([u8; 32]),
 }
 
+/// A new proof for the outcome, or the original already held for this payment.
+enum PaidProof {
+    New(Box<SignedMessage>),
+    Original {
+        proof: Box<StoredMessage>,
+        answered: bool,
+    },
+}
+
+impl PaidProof {
+    fn msg_id(&self) -> &str {
+        match self {
+            Self::New(proof) => proof.msg_id(),
+            Self::Original { proof, .. } => &proof.message().msg_id,
+        }
+    }
+
+    fn hash(&self) -> [u8; 32] {
+        match self {
+            Self::New(proof) => proof.hash(),
+            Self::Original { proof, .. } => proof.hash(),
+        }
+    }
+}
+
+/// Whether an authenticated payer proof records the journaled payment.
+fn matches_paid_proof(
+    original: &StoredMessage,
+    payer: [u8; 32],
+    app: [u8; 16],
+    payee: [u8; 32],
+    refs: &[[u8; 32]],
+    expected: &PaymentProof,
+) -> bool {
+    original.sender() == payer
+        && original.cert().app_id() == app
+        && original.message().to == payee
+        && original.message().refs == refs
+        && matches!(original.body(), Body::PaymentProof(held) if held == expected)
+}
+
 /// The payer's activity record's part of an outcome's batch.
 enum OutcomeRecord {
     /// This write.
     Write(Box<(Vec<Condition>, OpKind)>),
+    /// A correctly bound original proof is already present at this record revision.
+    Compared(Condition),
     /// None: the record already holds what the outcome places.
     Unchanged,
     /// The record can't be updated now: the outcome waits.
@@ -3218,15 +3261,23 @@ impl Paykit {
             // The record's update is settled first: without it nothing is written, `done`
             // included (Paykit spec 7.2 step 3).
             let proof = if paid {
-                Some(self.sign_proof(entry)?)
+                Box::pin(self.outcome_proof(entry, &target)).await?
             } else {
                 None
             };
-            let record_write = match self
-                .outcome_record(entry, &target, paid, proof.as_ref(), overwrite)
-                .await?
-            {
+            let decision = if paid && proof.is_none() {
+                OutcomeRecord::Held
+            } else {
+                self.outcome_record(entry, &target, paid, proof.as_ref(), overwrite)
+                    .await?
+            };
+            let mut compare = None;
+            let record_write = match decision {
                 OutcomeRecord::Write(write) => Some(*write),
+                OutcomeRecord::Compared(condition) => {
+                    compare = Some(condition);
+                    None
+                }
                 OutcomeRecord::Unchanged => None,
                 OutcomeRecord::Held => {
                     if !entry.record_held {
@@ -3237,7 +3288,10 @@ impl Paykit {
                 }
                 OutcomeRecord::Divergent(record) => return Ok(Written::Divergent(record)),
             };
-            let step = match entry.step {
+            let step = match entry
+                .step
+                .filter(|_| !matches!(proof, Some(PaidProof::Original { .. })))
+            {
                 Some(step) => Some(step),
                 None => match self.attempt_state(entry).await? {
                     Some((step, Outcome::Open | Outcome::Unknown)) => Some(step),
@@ -3255,6 +3309,9 @@ impl Paykit {
                     .op(op.kind())
                     .obligation_deadline(entry.obligation, own_deadline(entry.deadline));
             }
+            if let Some(condition) = compare {
+                batch = batch.when(condition);
+            }
             if let Some(write) = record_write {
                 batch = batch.entry(write);
             }
@@ -3269,17 +3326,27 @@ impl Paykit {
             finished.record_held = false;
             finished.proof_msg_id = proof.as_ref().map(|p| p.msg_id().to_owned());
             batch = batch.local(journal_write(&finished)?);
+            if let Some(PaidProof::Original {
+                proof,
+                answered: false,
+            }) = &proof
+            {
+                // This signed proof was already published. Reoffer the original if
+                // it is still owed and this installation has no delivery for it.
+                if self.app.delivery(&proof.message().msg_id).await?.is_none() {
+                    Box::pin(self.queue_stored_again(proof)).await?;
+                }
+            }
             if batch.is_empty() {
-                // Nothing to write at the switch: the proof is queued alone.
-                if let Some(proof) = proof {
-                    self.app.queue_signed(proof).await?;
+                if let Some(PaidProof::New(proof)) = proof {
+                    self.app.queue_signed(*proof).await?;
                 }
                 self.save(&finished).await?;
                 *entry = finished;
                 return Ok(Written::Done);
             }
-            if let Some(proof) = proof {
-                batch = batch.queue(proof);
+            if let Some(PaidProof::New(proof)) = proof {
+                batch = batch.queue(*proof);
             }
             match self.submit(batch).await {
                 Ok(_) => {
@@ -3334,7 +3401,7 @@ impl Paykit {
         entry: &JournalEntry,
         target: &ActivityTarget,
         paid: bool,
-        proof: Option<&SignedMessage>,
+        proof: Option<&PaidProof>,
         overwrite: bool,
     ) -> Result<OutcomeRecord> {
         let key = self.activity_key(target)?;
@@ -3386,7 +3453,9 @@ impl Paykit {
         };
         changed |= self.place_acceptance(&mut record, entry)?;
         if let Some(proof) = proof {
-            changed |= activity::place(&mut record, Role::Proof, self.own_copy(proof)?);
+            if let PaidProof::New(proof) = proof {
+                changed |= activity::place(&mut record, Role::Proof, self.own_copy(proof)?);
+            }
             if entry.billing_period.is_some() {
                 // The claim can expire. The payer must then be able to bind the
                 // period at this key and find the proof of the payment just recorded.
@@ -3407,9 +3476,11 @@ impl Paykit {
                 {
                     return Ok(OutcomeRecord::Held);
                 }
-                // Even when the same proof was already there, settle only while
-                // the checked record is still current.
-                changed = true;
+                if !changed && matches!(proof, PaidProof::Original { .. }) {
+                    return Ok(OutcomeRecord::Compared(
+                        self.app.record_condition(&key).await?,
+                    ));
+                }
             }
         }
         // A payment made after `failed` was written on its claim: the record's informational
@@ -3525,7 +3596,11 @@ impl Paykit {
     }
 
     /// The proof (Paykit spec 7.2 step 4, Paykit wire 4.10), signed for the outcome's batch.
-    fn sign_proof(&self, entry: &JournalEntry) -> Result<SignedMessage> {
+    async fn outcome_proof(
+        &self,
+        entry: &JournalEntry,
+        target: &ActivityTarget,
+    ) -> Result<Option<PaidProof>> {
         let request_hash = entry.request_hash()?;
         let proof = PaymentProof {
             attempt_id: entry.attempt()?,
@@ -3543,8 +3618,31 @@ impl Paykit {
             proof: entry.rail_proof.clone().ok_or_else(PaykitError::corrupt)?,
         };
         let refs: Vec<[u8; 32]> = request_hash.into_iter().collect();
+        if entry.billing_period.is_some() {
+            if let Some(record) = self.held_activity(target).await? {
+                if let Some(original) = record.proof {
+                    let matches = matches_paid_proof(
+                        &original,
+                        self.identity(),
+                        self.app_id(),
+                        entry.payee,
+                        &refs,
+                        &proof,
+                    );
+                    return Ok(matches.then(|| PaidProof::Original {
+                        proof: Box::new(original),
+                        answered: record.receipt.is_some(),
+                    }));
+                }
+            }
+        }
         let body = proof.to_body(refs.len())?;
-        self.sign(entry.payee, Kind::PaymentProof, refs, body)
+        Ok(Some(PaidProof::New(Box::new(self.sign(
+            entry.payee,
+            Kind::PaymentProof,
+            refs,
+            body,
+        )?))))
     }
 
     /// Finish the payments a crash, a lost answer or a pending payment method left in the
@@ -4684,6 +4782,53 @@ mod tests {
 
     fn lost() -> AppError {
         AppError::Transport(TransportError::Connect("down".into()))
+    }
+
+    #[test]
+    fn test_restored_payment_compares_the_signed_occurrence_and_method_result() {
+        let vectors: serde_json::Value =
+            serde_json::from_str(include_str!("../../specs/v0.2/vectors/sealed.json")).unwrap();
+        let period = vectors["activity_records"]["accepted"].as_array().unwrap().iter()
+            .find(|r| r["name"] == "a period record whose proof names earlier details, with later ones in earlier_details").unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(period["value"].as_str().unwrap()).unwrap();
+        let payee =
+            pubky_switch_core::enc::pubky_key(value["counterparty"].as_str().unwrap()).unwrap();
+        let signed = StoredMessage::read(&value["proof"], &payee).unwrap();
+        let Body::PaymentProof(proof) = signed.body() else {
+            panic!("expected a payment proof")
+        };
+        let payer = signed.sender();
+        let app = signed.cert().app_id();
+        let refs = &signed.message().refs;
+        let matches = |expected: &PaymentProof| {
+            matches_paid_proof(&signed, payer, app, payee, refs, expected)
+        };
+        assert!(matches(proof));
+        assert!(!matches_paid_proof(&signed, payee, app, payer, refs, proof));
+        assert!(!matches_paid_proof(
+            &signed, payer, [0; 16], payee, refs, proof
+        ));
+        assert!(!matches_paid_proof(
+            &signed,
+            payer,
+            app,
+            payee,
+            &[[0; 32]],
+            proof
+        ));
+        let mut other = proof.clone();
+        other.attempt_id = AttemptId::from_bytes([0; 16]);
+        assert!(!matches(&other));
+        let mut other = proof.clone();
+        other.billing_period.as_mut().unwrap().ends_at += 1;
+        assert!(!matches(&other));
+        let mut other = proof.clone();
+        other.payment_app_id = [0; 16];
+        assert!(!matches(&other));
+        let mut other = proof.clone();
+        other.proof.clear();
+        assert!(!matches(&other));
     }
 
     #[test]
