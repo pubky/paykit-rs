@@ -341,12 +341,14 @@ async fn test_public_read_one_time_judges_every_app() {
 }
 
 #[tokio::test]
-async fn test_public_read_identity_source_at_the_start_of_the_app_reads() {
-    // The first app has returned its old record when the second app supplies the
-    // new clock. Only a pass that began under the observed identity can stand.
-    for (start_before, return_before, expected) in [
-        (60_000, 0, "lnbc1current"),
-        (0, 60_000, "lnbc1current"),
+async fn test_public_read_identity_source_covers_both_ends_of_every_app_read() {
+    // The second app read moves the clock back inside the observation and changes
+    // the first app's offer. Both ends of every GET must fit before its bytes are used.
+    for (start_offset, end_offset, expected) in [
+        (-60_000, 0, "lnbc1current"),
+        (0, -60_000, "lnbc1current"),
+        (0, 599_999, "lnbc1before"),
+        (0, 600_000, "lnbc1current"),
         (0, 0, "lnbc1before"),
     ] {
         let w = Arc::new(World::new());
@@ -368,7 +370,9 @@ async fn test_public_read_identity_source_at_the_start_of_the_app_reads() {
             .unwrap();
         assert_eq!(initial.read_at_ms, Some(observed));
         w.homeserver.remove(w.bob_id(), IDENTITY_PATH);
-        w.clock.set_ms(observed - start_before);
+        let start = observed.checked_add_signed(start_offset).unwrap();
+        let end = observed.checked_add_signed(end_offset).unwrap();
+        w.clock.set_ms(start);
         let started = wallet
             .app_mut()
             .begin_identity_lookup(&w.bob_id(), false)
@@ -376,10 +380,10 @@ async fn test_public_read_identity_source_at_the_start_of_the_app_reads() {
             .unwrap();
         assert_eq!(started.identity.doc.hash(), initial.doc.hash());
         assert_eq!(started.identity.read_at_ms, Some(observed));
-        assert_eq!(w.clock.now_ms(), observed - start_before);
+        assert_eq!(w.clock.now_ms(), start);
         drop(started);
         let clock = Arc::clone(&w.clock);
-        reads.on_read(&first_app, move || clock.set_ms(observed - return_before));
+        reads.on_read(&first_app, move || clock.set_ms(end));
         let changed = Arc::clone(&w);
         reads.on_read(&apps[1].1, move || {
             changed.clock.set_ms(observed + 1);
@@ -400,7 +404,7 @@ async fn test_public_read_identity_source_at_the_start_of_the_app_reads() {
         assert_eq!(
             shown.payload.as_str(),
             expected,
-            "first GET began {start_before} ms and returned {return_before} ms before observation"
+            "first GET started at {start_offset:+} ms and ended at {end_offset:+} ms from observation"
         );
     }
 }
