@@ -922,6 +922,317 @@ async fn test_period_payments_divergent_records_pause_their_periods_until_confir
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
 
+async fn priced_period_on(
+    with_endpoints: bool,
+    base: Arc<dyn StateStore>,
+) -> (World, Paykit, Paykit, RequestRef, String) {
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet_on("wallet", base).await;
+    let rule = AnchoredRule::new(START_MS, 1, Unit::Month).unwrap();
+    let draft = crate::conversion::priced(
+        START_MS,
+        &[("btc-lightning-bolt11", "lnbc1invoice")],
+        &[("btc", "0.0000123456")],
+    )
+    .with_conversion(paykit_lib::bodies::Conversion::PerPeriod)
+    .with_recurrence(Recurrence::new(rule, START_MS, None).unwrap());
+    let (request, sale) = subscribed_to(&w, &mut shop, &mut wallet, draft).await;
+    let period = january();
+    w.clock.set_ms(period.starts_at);
+    let mut rate_details = details(period, "lnbc1period", period.starts_at + 120_000);
+    if !with_endpoints {
+        rate_details.payment_endpoints = None;
+    }
+    rate_details.rates = Some(vec![paykit_lib::Rate::new(
+        paykit_lib::Asset::new("btc").unwrap(),
+        paykit_lib::Decimal::new("0.0000123456").unwrap(),
+    )
+    .unwrap()]);
+    let msg_id = shop
+        .send_period_details(&sale, rate_details)
+        .await
+        .unwrap()
+        .msg_id;
+    wallet.receive(None).await.unwrap();
+    (w, shop, wallet, request, msg_id)
+}
+
+#[tokio::test]
+async fn test_period_payments_priced_repeat_requires_unexpired_selected_rates() {
+    let (w, _shop, mut wallet, request, _) = Box::pin(priced_period_on(false, store())).await;
+    w.rail.set_declaration(
+        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true),
+    );
+    let shown = crate::conversion::priced_of(
+        &by_user(&mut wallet, &request, january(), PayOptions::default())
+            .await
+            .unwrap_err(),
+    );
+    w.rail.next(Behaviour::Hang);
+    let outcome = by_user(
+        &mut wallet,
+        &request,
+        january(),
+        PayOptions::default().with_rate_confirmed(shown),
+    )
+    .await
+    .unwrap();
+    let PayOutcome::Pending { attempt_id, .. } = outcome else {
+        panic!("{outcome:?}")
+    };
+    w.clock.advance_ms(120_000);
+    let outcomes = wallet.resume_payments().await.unwrap();
+    assert!(
+        outcomes.iter().any(|outcome| matches!(outcome,
+        PayOutcome::Uncertain { attempt_id: id, .. } if *id == attempt_id)),
+        "{outcomes:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_period_payments_priced_first_dispatch_rechecks_selected_rate_expiry() {
+    for stage in ["attempted", "paying"] {
+        let base = Arc::new(StageStore::default());
+        let (w, _shop, mut wallet, request, _) = Box::pin(priced_period_on(
+            false,
+            Arc::clone(&base) as Arc<dyn StateStore>,
+        ))
+        .await;
+        let shown = crate::conversion::priced_of(
+            &by_user(&mut wallet, &request, january(), PayOptions::default())
+                .await
+                .unwrap_err(),
+        );
+        let clock = Arc::clone(&w.clock);
+        base.on_stage(stage, move || clock.advance_ms(120_000));
+        let error = by_user(
+            &mut wallet,
+            &request,
+            january(),
+            PayOptions::default().with_rate_confirmed(shown),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(refusal(&error), Refusal::AttemptFailed(why)
+            if matches!(*why, Refusal::PricedByRate { .. })),
+            "{stage}: {error:?}"
+        );
+        assert!(w.rail.all_executions().is_empty(), "{stage}");
+    }
+}
+
+#[tokio::test]
+async fn test_period_payments_priced_repeat_preserves_selected_rate_and_amount() {
+    let (w, _shop, mut wallet, request, _) = Box::pin(priced_period_on(false, store())).await;
+    w.rail.set_declaration(
+        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true),
+    );
+    let shown = crate::conversion::priced_of(
+        &by_user(&mut wallet, &request, january(), PayOptions::default())
+            .await
+            .unwrap_err(),
+    );
+    w.rail.next(Behaviour::Hang);
+    let outcome = by_user(
+        &mut wallet,
+        &request,
+        january(),
+        PayOptions::default().with_rate_confirmed(shown),
+    )
+    .await
+    .unwrap();
+    let PayOutcome::Pending { attempt_id, .. } = outcome else {
+        panic!("{outcome:?}")
+    };
+    w.clock.advance_ms(60_000);
+    let outcomes = wallet.resume_payments().await.unwrap();
+    assert!(
+        outcomes.iter().any(|outcome| matches!(outcome,
+        PayOutcome::Pending { attempt_id: id, .. } if *id == attempt_id)),
+        "{outcomes:?}"
+    );
+    assert_eq!(
+        w.rail.pay_call_amounts(&attempt_id),
+        vec![btc("0.00012346"), btc("0.00012346")]
+    );
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_period_payments_priced_default_uses_latest_details_carrying_rates() {
+    let (w, mut shop, mut wallet, request, first) = Box::pin(priced_period_on(true, store())).await;
+    let confirmed = crate::conversion::priced_of(
+        &by_user(&mut wallet, &request, january(), PayOptions::default())
+            .await
+            .unwrap_err(),
+    );
+    let sale = shop.payee_activity().await.unwrap()[0].record;
+    w.clock.advance_ms(1_000);
+    let mut body = details(january(), "unused", START_MS + 120_000);
+    body.payment_endpoints = None;
+    body.rates = Some(vec![paykit_lib::Rate::new(
+        paykit_lib::Asset::new("btc").unwrap(),
+        paykit_lib::Decimal::new("0.00002").unwrap(),
+    )
+    .unwrap()]);
+    let latest = shop.send_period_details(&sale, body).await.unwrap().msg_id;
+    wallet.receive(None).await.unwrap();
+    let earlier = crate::conversion::priced_of(
+        &by_user(
+            &mut wallet,
+            &request,
+            january(),
+            PayOptions::default().with_period_details(&first),
+        )
+        .await
+        .unwrap_err(),
+    );
+    assert_eq!(
+        earlier.source,
+        paykit_sdk::RateSource::PeriodDetails { msg_id: first }
+    );
+    assert_eq!(earlier.amount, btc("0.00012346"));
+    assert_eq!(earlier, confirmed);
+    let shown = crate::conversion::priced_of(
+        &by_user(&mut wallet, &request, january(), PayOptions::default())
+            .await
+            .unwrap_err(),
+    );
+    assert_eq!(
+        shown.source,
+        paykit_sdk::RateSource::PeriodDetails { msg_id: latest }
+    );
+    assert_eq!(
+        shown.payload_hash,
+        pubky_switch_core::enc::hash(b"lnbc1invoice")
+    );
+    assert_eq!(shown.amount, btc("0.0002"));
+    w.clock.advance_ms(1_000);
+    let euro_details = PeriodDetails {
+        billing_period: january(),
+        payment_endpoints: Some(BTreeMap::from([(
+            endpoint("eur-sepa-iban"),
+            PaymentEndpointPayload::new("DE00iban").unwrap(),
+        )])),
+        rates: Some(vec![paykit_lib::Rate::new(
+            paykit_lib::Asset::new("eur").unwrap(),
+            paykit_lib::Decimal::new("0.92").unwrap(),
+        )
+        .unwrap()]),
+        expires_at: START_MS + 120_000,
+    };
+    shop.send_period_details(&sale, euro_details).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let still_shown = crate::conversion::priced_of(
+        &by_user(&mut wallet, &request, january(), PayOptions::default())
+            .await
+            .unwrap_err(),
+    );
+    assert_eq!(still_shown, shown);
+    let outcome = by_user(
+        &mut wallet,
+        &request,
+        january(),
+        PayOptions::default().with_rate_confirmed(confirmed),
+    )
+    .await
+    .unwrap();
+    assert_eq!(w.rail.executions(&outcome.attempt_id()), 1);
+    assert_eq!(
+        w.rail.paid_amount(&outcome.attempt_id()),
+        Some(btc("0.00012346"))
+    );
+}
+
+#[tokio::test]
+async fn test_period_payments_held_rate_lasts_beyond_the_details_intake_window() {
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let rule = AnchoredRule::new(START_MS, 1, Unit::Minute).unwrap();
+    let recurrence = Recurrence::new(rule, START_MS, None).unwrap();
+    let first = PeriodRef::from(recurrence.first().unwrap());
+    let draft =
+        crate::conversion::priced(START_MS, &[("btc-lightning-bolt11", "lnbc1invoice")], &[])
+            .with_conversion(paykit_lib::bodies::Conversion::PerPeriod)
+            .with_recurrence(recurrence);
+    let (request, sale) = subscribed_to(&w, &mut shop, &mut wallet, draft).await;
+    let quote = PeriodDetails {
+        billing_period: first,
+        payment_endpoints: None,
+        rates: Some(vec![paykit_lib::Rate::new(
+            paykit_lib::Asset::new("btc").unwrap(),
+            paykit_lib::Decimal::new("0.0000123456").unwrap(),
+        )
+        .unwrap()]),
+        expires_at: START_MS + HOUR_MS,
+    };
+    let signed = shop
+        .send_period_details(&sale, quote.clone())
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+
+    w.clock.advance_ms(16 * 60_000);
+    let closed = shop.send_period_details(&sale, quote).await.unwrap_err();
+    assert!(
+        matches!(&closed, PaykitError::Lib(paykit_lib::Error::Validation(why)) if why.contains("16 latest")),
+        "{closed:?}"
+    );
+    wallet.receive(None).await.unwrap();
+    let shown = crate::conversion::priced_of(
+        &by_user(&mut wallet, &request, first, PayOptions::default())
+            .await
+            .unwrap_err(),
+    );
+    assert_eq!(
+        shown.source,
+        paykit_sdk::RateSource::PeriodDetails {
+            msg_id: signed.msg_id
+        }
+    );
+    assert_eq!(shown.amount, btc("0.00012346"));
+    let outcome = by_user(
+        &mut wallet,
+        &request,
+        first,
+        PayOptions::default().with_rate_confirmed(shown),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }));
+    assert_eq!(
+        w.rail.paid_amount(&outcome.attempt_id()),
+        Some(btc("0.00012346"))
+    );
+    assert_eq!(w.rail.pay_calls(&outcome.attempt_id()), 1);
+}
+
+#[tokio::test]
+async fn test_period_payments_priced_terms_allow_requested_asset_without_details() {
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, _) = subscribed_to(
+        &w,
+        &mut shop,
+        &mut wallet,
+        monthly().with_conversion(paykit_lib::bodies::Conversion::PerPeriod),
+    )
+    .await;
+    let outcome = by_user(&mut wallet, &request, january(), PayOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(w.rail.paid_amount(&outcome.attempt_id()), Some(btc("1")));
+    assert!(wallet.payments().await.unwrap()[0].rate.is_none());
+}
+
 /// A hook [`StageStore`] runs once.
 type StageHook = Box<dyn FnOnce() + Send>;
 
@@ -1132,6 +1443,51 @@ async fn test_period_payments_resume_repeats_a_periods_dispatch_unless_cancelled
     })
     .await;
     assert_eq!(calls, 1);
+}
+
+#[tokio::test]
+async fn test_period_payments_reconcile_holds_without_selected_period_rate() {
+    let (w, _shop, mut wallet, request, _) = Box::pin(priced_period_on(false, store())).await;
+    let backup = wallet.backup().await.unwrap();
+    let shown = crate::conversion::priced_of(
+        &by_user(&mut wallet, &request, january(), PayOptions::default())
+            .await
+            .unwrap_err(),
+    );
+    w.rail.next(Behaviour::Hang);
+    let attempt = by_user(
+        &mut wallet,
+        &request,
+        january(),
+        PayOptions::default().with_rate_confirmed(shown),
+    )
+    .await
+    .unwrap()
+    .attempt_id();
+    assert_eq!(w.rail.paid_amount(&attempt), Some(btc("0.00012346")));
+    w.rail.settle(&attempt, true);
+    drop(wallet);
+    let mut app = Box::pin(restored(&w, &backup)).await;
+    let report = app.reconcile().await.unwrap();
+    assert_eq!(report.doubtful.len(), 1, "{report:?}");
+    assert_eq!(report.doubtful[0].attempts, [attempt]);
+    assert!(
+        !report
+            .resolved
+            .iter()
+            .any(|outcome| matches!(outcome, PayOutcome::Paid { .. })),
+        "{report:?}"
+    );
+    assert!(app.payments().await.unwrap().is_empty());
+    let claim = app
+        .app_mut()
+        .read_claim(&report.doubtful[0].obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.view.status, ClaimStatus::Attempting);
+    assert_eq!(w.rail.executions(&attempt), 1);
+    assert_eq!(w.rail.pay_calls(&attempt), 1);
 }
 
 #[tokio::test]

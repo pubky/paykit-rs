@@ -75,14 +75,27 @@ async fn test_two_payee_wallets_reopen_the_same_manual_period_receipt() -> TestR
         let Some(world) = World::start(backend)? else {
             continue;
         };
-        let result = Box::pin(manual_period(&world)).await;
+        let result = Box::pin(manual_period(&world, false)).await;
         world.close().await?;
         result?;
     }
     Ok(())
 }
 
-async fn manual_period(world: &World) -> TestResult {
+#[tokio::test]
+async fn test_two_wallets_settle_a_period_at_its_signed_rate() -> TestResult {
+    for backend in [Backend::Scripted, Backend::Service] {
+        let Some(world) = World::start(backend)? else {
+            continue;
+        };
+        let result = Box::pin(manual_period(&world, true)).await;
+        world.close().await?;
+        result?;
+    }
+    Ok(())
+}
+
+async fn manual_period(world: &World, priced: bool) -> TestResult {
     use paykit_lib::periods::{AnchoredRule, PeriodRef, Recurrence, Unit};
 
     let mut buyer_signer = Box::pin(setup_identity(
@@ -123,16 +136,27 @@ async fn manual_period(world: &World) -> TestResult {
         PaymentEndpointIdentifier::new("btc-lightning-bolt11")?,
         PaymentEndpointPayload::new("ln-manual-period")?,
     )]);
-    let draft = RequestDraft::new(
+    let requested = if priced {
+        PaymentAmount {
+            asset: Asset::new("usd")?,
+            value: Decimal::new("10")?,
+        }
+    } else {
         PaymentAmount {
             asset: Asset::new("btc")?,
             value: Decimal::new("0.00025")?,
-        },
+        }
+    };
+    let mut draft = RequestDraft::new(
+        requested,
         PaymentReference::new("monthly-plan")?,
         RequestDestination::Endpoints(endpoints),
     )
     .with_proposal_expires_at_ms(start + 86_400_000)
     .with_recurrence(recurrence);
+    if priced {
+        draft = draft.with_conversion(paykit_lib::bodies::Conversion::PerPeriod);
+    }
     let request = Box::pin(shop.send_request(buyer.identity(), draft))
         .await?
         .request
@@ -140,7 +164,47 @@ async fn manual_period(world: &World) -> TestResult {
     buyer.receive(None).await?;
     Box::pin(buyer.accept_subscription(&request)).await?;
     shop.receive(None).await?;
-    let payment = Box::pin(buyer.pay_period(&request, &period, PayOptions::default())).await;
+    let mut options = PayOptions::default();
+    let mut rate_source = None;
+    if priced {
+        let sale = shop
+            .payee_activity()
+            .await?
+            .into_iter()
+            .find(|sale| sale.request_hash == Some(request.request_hash))
+            .ok_or("missing subscription")?;
+        let rate = paykit_lib::Rate::new(Asset::new("btc")?, Decimal::new("0.0000123456")?)?;
+        let details = paykit_lib::bodies::PeriodDetails {
+            billing_period: period,
+            payment_endpoints: None,
+            rates: Some(vec![rate]),
+            expires_at: start + 600_000,
+        };
+        let id = Box::pin(shop.send_period_details(&sale.record, details))
+            .await?
+            .msg_id;
+        buyer.receive(None).await?;
+        let quote = Box::pin(buyer.pay_period(&request, &period, PayOptions::default())).await;
+        let refusal = quote.outcome.unwrap_err();
+        let Some(paykit_sdk::Refusal::PricedByRate { payment }) = refusal.refusal() else {
+            return Err("expected confirmation of the signed period price".into());
+        };
+        assert_eq!(
+            payment.source,
+            paykit_sdk::RateSource::PeriodDetails { msg_id: id.clone() }
+        );
+        assert_eq!(
+            payment.amount,
+            PaymentAmount {
+                asset: Asset::new("btc")?,
+                value: Decimal::new("0.00012346")?
+            }
+        );
+        assert!(rail.all_executions().is_empty());
+        rate_source = Some(id);
+        options = options.with_rate_confirmed((**payment).clone());
+    }
+    let payment = Box::pin(buyer.pay_period(&request, &period, options)).await;
     assert!(payment.public_failures.is_empty());
     let PayOutcome::Paid { attempt_id, .. } = payment.outcome? else {
         return Err("manual payment did not settle".into());
@@ -168,6 +232,33 @@ async fn manual_period(world: &World) -> TestResult {
         .shared_record(&period_record.record)
         .await?
         .ok_or("missing shared credit")?;
+    if let Some(id) = rate_source {
+        let record = paykit_lib::records::ActivityRecord::read(
+            issued
+                .content
+                .value()
+                .ok_or("missing period record value")?,
+            &shop.identity(),
+            paykit_lib::records::ActivitySide::Payee,
+        )?;
+        let details = record
+            .period_details
+            .as_ref()
+            .ok_or("missing signed rate")?;
+        let proof = record.proof.as_ref().ok_or("missing signed proof")?;
+        let credit = record.receipt.as_ref().ok_or("missing signed receipt")?;
+        assert_eq!(details.message().msg_id, id);
+        assert_eq!(proof.message().refs, [request.request_hash, details.hash()]);
+        assert_eq!(credit.message().refs.first(), Some(&proof.hash()));
+        assert_eq!(
+            rail.paid_amount(&attempt_id),
+            Some(PaymentAmount {
+                asset: Asset::new("btc")?,
+                value: Decimal::new("0.00012346")?
+            })
+        );
+    }
+
     buyer.receive(None).await?;
     let received = buyer.receipts(ReceiptsOf::Period(request, period)).await?;
     assert_eq!(received.len(), 1);

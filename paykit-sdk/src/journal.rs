@@ -208,7 +208,7 @@ impl TransferBound {
 /// The price of a payment priced by a rate, as its user confirmed it (Paykit spec 7.2 step 1,
 /// 8.2): the rate the call amount ([`JournalEntry::payment_amount`]) was computed by, with where the
 /// rate comes from.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct KeptPrice {
     /// The rate's asset selector, bare or rail-qualified.
     pub(crate) rate_asset: String,
@@ -219,7 +219,7 @@ pub(crate) struct KeptPrice {
 }
 
 /// Where a kept price's rate comes from ([`crate::RateSource`]).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum KeptRateSource {
     /// The request's fixed rates.
@@ -228,21 +228,25 @@ pub(crate) enum KeptRateSource {
     PeriodDetails {
         /// The period details' `msg_id`.
         msg_id: String,
+        /// The signed rate source, kept for dispatch, its proof and a later restore.
+        details: Box<KeptMessage>,
     },
 }
 
 impl KeptPrice {
     /// The price of `shown`, as kept.
-    pub(crate) fn of(shown: &PricedPayment) -> Self {
+    pub(crate) fn of(shown: &PricedPayment, details: Option<&StoredMessage>) -> Self {
+        let source = match details {
+            Some(signed) => KeptRateSource::PeriodDetails {
+                msg_id: signed.message().msg_id.clone(),
+                details: Box::new(KeptMessage::of(signed)),
+            },
+            None => KeptRateSource::Request,
+        };
         Self {
             rate_asset: shown.rate.asset().as_str().to_owned(),
             rate_value: shown.rate.value().as_str().to_owned(),
-            source: match &shown.source {
-                RateSource::Request => KeptRateSource::Request,
-                RateSource::PeriodDetails { msg_id } => KeptRateSource::PeriodDetails {
-                    msg_id: msg_id.clone(),
-                },
-            },
+            source,
         }
     }
 
@@ -257,7 +261,7 @@ impl KeptPrice {
     pub(crate) fn source(&self) -> RateSource {
         match &self.source {
             KeptRateSource::Request => RateSource::Request,
-            KeptRateSource::PeriodDetails { msg_id } => RateSource::PeriodDetails {
+            KeptRateSource::PeriodDetails { msg_id, .. } => RateSource::PeriodDetails {
                 msg_id: msg_id.clone(),
             },
         }
@@ -430,6 +434,45 @@ impl JournalEntry {
             .map(|bound| bound.paid_amount(&self.call_amount()?))
             .transpose()
             .map(Option::flatten)
+    }
+
+    /// The signed rates carried by this period's selected details (Paykit wire 4.9).
+    /// Verify the occurrence, its payee, and the rate for the exact paid endpoint.
+    pub(crate) fn selected_rate_details(&self, own: &[u8; 32]) -> Result<Option<StoredMessage>> {
+        let Some(price) = &self.price else {
+            return Ok(None);
+        };
+        let KeptRateSource::PeriodDetails { msg_id, details } = &price.source else {
+            return Ok(None);
+        };
+        let signed = details.stored(own)?;
+        let request = self
+            .request
+            .as_ref()
+            .ok_or_else(PaykitError::corrupt)?
+            .stored(own)?;
+        let (Body::PaymentRequest(parent), Body::PaymentPeriodDetails(body)) =
+            (request.body(), signed.body())
+        else {
+            return Err(PaykitError::corrupt());
+        };
+        let endpoint = self.destination.endpoint_id()?;
+        let rate = body
+            .rates
+            .as_deref()
+            .and_then(|rates| crate::conversion::rate_for(rates, &endpoint));
+        if request.sender() != self.payee
+            || Some(request.hash()) != self.request_hash()?
+            || signed.sender() != self.payee
+            || &signed.message().msg_id != msg_id
+            || signed.message().refs != [request.hash()]
+            || Some(body.billing_period) != self.period()?
+            || body.check_against(parent).is_err()
+            || rate != Some(&price.rate()?)
+        {
+            return Err(PaykitError::corrupt());
+        }
+        Ok(Some(signed))
     }
 
     /// What a payment priced by a rate showed its user ([`PricedPayment`]), as kept; `None` for
@@ -748,7 +791,7 @@ impl JournalEntry {
                     let expected = crate::conversion::rate_for(rates, &endpoint_id);
                     match (expected, price) {
                         (Some(expected), Some(price))
-                            if price.source == KeptRateSource::Request
+                            if matches!(price.source, KeptRateSource::Request)
                                 && price.rate()? == *expected => {}
                         (None, None)
                             if endpoint_id.asset_segment() == Some(body.amount.asset.as_str()) => {}
@@ -758,10 +801,12 @@ impl JournalEntry {
                 (None, None) => {}
                 (Some(Conversion::PerPeriod), Some(price))
                     if matches!(price.source, KeptRateSource::PeriodDetails { .. }) => {}
-                (Some(Conversion::PerPeriod), None) => {}
+                (Some(Conversion::PerPeriod), None)
+                    if endpoint_id.asset_segment() == Some(body.amount.asset.as_str()) => {}
                 _ => return corrupt(),
             }
         }
+        self.selected_rate_details(own)?;
         self.kept_carrier(own)?;
         if let Some(acceptance) = self
             .acceptance_message(own, own_cert)
