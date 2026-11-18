@@ -12,7 +12,7 @@ use paykit_lib::identifiers::{
 };
 use paykit_lib::records::{OccurrenceKind, SettlementBucket, SettlementMark};
 use paykit_lib::{Asset, Decimal, Label, PaymentAmount};
-use paykit_sdk::rail::{FakeRail, Rail};
+use paykit_sdk::rail::{Behaviour, FakeRail, Rail};
 use paykit_sdk::{
     AppScopes, PayOptions, PayOutcome, PayeeStatus, Paykit, ReceiptDetails, ReceiptsOf,
     RequestDraft, RequestRef, RequestedScopes, Timer,
@@ -126,7 +126,17 @@ async fn test_two_tills_confirm_one_paid_request() -> TestResult {
     Ok(())
 }
 
-async fn competing_tills(world: &World) -> TestResult {
+struct Tills {
+    buyer: Paykit,
+    other: Paykit,
+    till: Paykit,
+    labelled: Paykit,
+    rail: Arc<FakeRail>,
+    till_store: Arc<MemoryStore>,
+    labelled_store: Arc<MemoryStore>,
+}
+
+async fn enrolled_tills(world: &World) -> TestResult<Tills> {
     let mut first = setup_identity(world, "buyer", "https://buyer.payment.test").await?;
     let mut second =
         setup_identity(world, "other-buyer", "https://other-buyer.payment.test").await?;
@@ -164,7 +174,7 @@ async fn competing_tills(world: &World) -> TestResult {
     )
     .await?;
     let labelled_store = Arc::new(MemoryStore::new());
-    let mut labelled = join(
+    let labelled = join(
         world,
         &mut shop,
         "shop",
@@ -181,6 +191,27 @@ async fn competing_tills(world: &World) -> TestResult {
         wallet.app_mut().invite(&till.identity()).await?;
         till.app_mut().invite(&wallet.identity()).await?;
     }
+    Ok(Tills {
+        buyer,
+        other,
+        till,
+        labelled,
+        rail,
+        till_store,
+        labelled_store,
+    })
+}
+
+async fn competing_tills(world: &World) -> TestResult {
+    let Tills {
+        mut buyer,
+        mut other,
+        mut till,
+        mut labelled,
+        rail,
+        till_store,
+        labelled_store,
+    } = Box::pin(enrolled_tills(world)).await?;
     let before_credit = till.backup().await?;
     // Both authorized tills see the same legitimate purchase in the shop's labelled activity.
     let (winner, first_record) =
@@ -357,5 +388,103 @@ async fn competing_tills(world: &World) -> TestResult {
         .is_empty());
     fresh.receive(None).await?;
     assert_eq!(fresh.app().protocol_scan("paykit", b"sm/").await?, marks);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_different_requests_compete_for_one_transaction_in_a_new_and_current_bucket(
+) -> TestResult {
+    for backend in [Backend::Scripted, Backend::Service] {
+        let Some(world) = World::start(backend)? else {
+            continue;
+        };
+        let result = Box::pin(two_transactions(&world)).await;
+        world.close().await?;
+        result?;
+    }
+    Ok(())
+}
+
+/// Two independent transactions in the same bucket. Each has two payments and one
+/// method settlement ID under Paykit wire 1.5.
+async fn two_transactions(world: &World) -> TestResult {
+    let mut wallets = Box::pin(enrolled_tills(world)).await?;
+    let naming = wallets.till.app().naming_key();
+    let transaction = |number: u64| {
+        let mut id = [0; 32];
+        id[24..].copy_from_slice(&number.to_be_bytes());
+        let text = format!("{number:064x}");
+        let tag = settlement_tag(naming, text.as_bytes());
+        (id, tag)
+    };
+    let first = transaction(1);
+    let number = settlement_bucket(&first.1);
+    let second = (2..100_000)
+        .map(transaction)
+        .find(|(_, tag)| settlement_bucket(tag) == number)
+        .ok_or("second test transaction must be in the same bucket")?;
+    let key = SettlementBucket::record_key(number, naming)?;
+    assert!(wallets.till.app().shared_record(&key).await?.is_none());
+    let mut credited = Vec::new();
+    for (txid, tag) in [first, second] {
+        wallets.rail.next(Behaviour::InTransaction(txid));
+        let (plain, plain_key) = Box::pin(paid_request(
+            &mut wallets.till,
+            &mut wallets.buyer,
+            "ln-batch-plain",
+        ))
+        .await?;
+        wallets.rail.next(Behaviour::InTransaction(txid));
+        let (label, label_key) = Box::pin(paid_request(
+            &mut wallets.labelled,
+            &mut wallets.other,
+            "ln-batch-label",
+        ))
+        .await?;
+        assert_ne!(plain_key, label_key);
+        let (a, b) = tokio::join!(
+            Box::pin(wallets.till.confirm_payment(&plain_key)),
+            Box::pin(wallets.labelled.confirm_payment(&label_key)),
+        );
+        let (a, b) = (a?, b?);
+        assert_ne!(a.is_some(), b.is_some());
+        wallets.buyer.receive(None).await?;
+        wallets.other.receive(None).await?;
+        let receipt_ids = |receipts: Vec<paykit_sdk::ReceivedReceipt>| {
+            receipts.into_iter().map(|r| r.msg_id).collect::<Vec<_>>()
+        };
+        let observed = wallets.buyer.receipts(ReceiptsOf::Request(plain)).await?;
+        assert_eq!(receipt_ids(observed), a.iter().cloned().collect::<Vec<_>>());
+        let observed = wallets.other.receipts(ReceiptsOf::Request(label)).await?;
+        assert_eq!(receipt_ids(observed), b.iter().cloned().collect::<Vec<_>>());
+        let winner = if a.is_some() { plain } else { label };
+        let natural = natural_key::request_record(&wallets.till.identity(), &winner.request_hash);
+        let winner_tag = occurrence_tag(wallets.till.app().naming_key(), &natural);
+        credited.push(SettlementMark::new(
+            &tag,
+            OccurrenceKind::OneTimeRequest,
+            winner_tag,
+        ));
+        credited.sort();
+        for till in [&mut wallets.till, &mut wallets.labelled] {
+            till.receive(None).await?;
+            let record = till
+                .app()
+                .shared_record(&key)
+                .await?
+                .ok_or("missing shared credit bucket")?;
+            let bucket = SettlementBucket::bind(
+                record.content.value().ok_or("unreadable bucket")?,
+                number,
+                till.app().naming_key(),
+                &key,
+            )?;
+            assert_eq!(bucket.marks(), credited.as_slice());
+        }
+        assert_eq!(
+            wallets.rail.all_executions().values().sum::<u64>(),
+            2 * credited.len() as u64
+        );
+    }
     Ok(())
 }
