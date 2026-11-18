@@ -1082,7 +1082,10 @@ async fn restore_before_original_completion(answered: bool) {
         let paid = period_record(&w, &wallet, &request, period).await.unwrap();
         let receipt = paid.receipt.unwrap();
         assert_eq!(receipt.message().msg_id, id);
-        assert_eq!(receipt.message().refs, vec![original_hash]);
+        assert_eq!(
+            receipt.message().refs,
+            vec![original_hash, request.request_hash]
+        );
     }
     let paid = period_record(&w, &wallet, &request, period)
         .await
