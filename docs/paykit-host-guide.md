@@ -16,8 +16,9 @@ Paykit layer and installs the payment journal with the client state. The
 `*_with_protocols` constructors allow other protocols on the same App ID. Keep
 the exact Paykit protocol instance supplied to the registration closure.
 
-The one-time payment path uses these SDK calls. The host lists received requests
-and shows the selected request's payee and amount. Call `pay_request` with
+The one-time payment path uses these SDK calls. Keep the receive summary so
+the host can handle its duty events. List received requests and show the
+selected request's payee and amount. Call `pay_request` with
 that request's opaque reference only after the user chooses to pay it. Retain
 the returned attempt ID and exact outcome through UI refreshes. An unanswered
 or uncertain call stays pending while the existing attempt is resolved.
@@ -26,7 +27,8 @@ or uncertain call stays pending while the existing attempt is resolved.
 use std::sync::Arc;
 
 use paykit_sdk::{
-    AppEnv, PayOptions, PayResult, Paykit, PaykitConfig, Rail, RequestRef, RequestView, Result, Timer,
+    AppEnv, AttemptId, PayOptions, PayResult, Paykit, PaykitConfig, Rail, ReceiveSummary,
+    RequestRef, RequestView, Result, Stage, Timer,
 };
 
 async fn open_wallet(
@@ -38,8 +40,11 @@ async fn open_wallet(
     Paykit::load(env, PaykitConfig::default(), app_id, rail, timer).await
 }
 
-async fn refresh_requests(wallet: &mut Paykit) -> Result<Vec<RequestView>> {
-    wallet.receive(None).await?;
+async fn refresh_wallet(wallet: &mut Paykit) -> Result<ReceiveSummary> {
+    wallet.receive(None).await
+}
+
+async fn one_time_requests(wallet: &Paykit) -> Result<Vec<RequestView>> {
     Ok(wallet
         .requests()
         .await?
@@ -50,6 +55,15 @@ async fn refresh_requests(wallet: &mut Paykit) -> Result<Vec<RequestView>> {
 
 async fn pay_selected(wallet: &mut Paykit, request: &RequestRef) -> PayResult {
     wallet.pay_request(request, PayOptions::default()).await
+}
+
+async fn payment_after_restart(wallet: &Paykit, attempt_id: &AttemptId) -> Result<Option<Stage>> {
+    Ok(wallet
+        .payments()
+        .await?
+        .into_iter()
+        .find(|payment| &payment.attempt_id == attempt_id)
+        .map(|payment| payment.stage))
 }
 ```
 
@@ -80,7 +94,7 @@ async fn attach_wallet(
     timer: Arc<dyn Timer>,
 ) -> Result<Paykit> {
     let protocol = Arc::new(PaykitProtocol::with_rail(rail));
-    let app = App::load(env, Arc::clone(&protocol).into(), config.app.clone(), app_id).await?;
+    let app = App::load(env, Arc::clone(&protocol), config.app.clone(), app_id).await?;
     Paykit::attach(app, config, protocol, timer).await
 }
 ```
@@ -93,11 +107,15 @@ reconciliation on startup, reopen it with the SDK load constructors.
 
 ## Payment and delivery progress
 
-Use `resume_payments` after loading to continue existing journaled work. After
-restoring, process `receive` and `reconcile`, show unresolved attempts using the
-report, and complete `end_reconcile` after user confirmation. Reconciliation
-does not turn a missing receipt or an unavailable provider into proof that no
-payment occurred.
+After loading, read the durable journal with `Paykit::payments()`. Match the
+existing `PaymentView::attempt_id` and display its `stage`. A durable
+`Stage::RailPaid` entry means the rail paid, with outcome reporting still
+pending. Use `resume_payments` to progress outstanding work, then read
+`payments()` again to refresh the journal view.
+
+After restoring, process `receive` and `reconcile`, show unresolved attempts
+using the report, and complete `end_reconcile` after user confirmation.
+A missing receipt or an unavailable provider can leave the outcome unresolved.
 
 | Case | What to show or do |
 |---|---|
@@ -162,11 +180,14 @@ payment occurred.
 
 Read `notices` and `payee_deletion_notices` by their stable identities. Acknowledge
 each through its matching SDK API after recording or showing it. Handle Switch
-duty events from `ReceiveSummary::report` using the Switch guide and the
-acknowledgment order in `Paykit::receive`. After a receive error, the client may
-still have committed events. Read its unacknowledged queue before acknowledging
-those duties. A confirmed receipt that survives a local deletion does not
-replace the missing shared record.
+duty events from `ReceiveSummary::report`. After a receive error, read and
+retain committed duties from `wallet.app_mut().unacknowledged_events()`.
+Wait for a later successful `receive` so the SDK can process its duties, then
+acknowledge for `"paykit"` with `App::ack_events_for` up to the last duty in
+that successful report. Use the app-wide `App::ack_events` only after the
+other responsible protocols have handled their duties too. Keep the deletion
+notice and any surviving confirmed receipt together when showing a missing
+shared record.
 
 | Case | What to show or do |
 |---|---|

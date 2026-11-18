@@ -124,6 +124,10 @@ pub use requests::{
 pub use resend::{ResendSelection, RESEND_COOLDOWN_MS};
 pub use timer::Timer;
 
+#[cfg(doctest)]
+#[doc = include_str!("../../docs/paykit-host-guide.md")]
+mod host_guide {}
+
 #[cfg(test)]
 mod tests {
     use paykit_lib::bodies::RequestDestination;
