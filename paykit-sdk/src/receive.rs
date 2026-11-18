@@ -164,14 +164,12 @@ pub(crate) fn effect(
         Body::PaymentRequest(_) if pay => {
             let target =
                 ActivityTarget::payer(natural_key::request_record(&sender, &stored.hash()));
-            if let Some(held) = cx
-                .record(&target.record_target())?
-                .filter(|held| held.different_write_at_held_version)
-            {
-                crate::divergent::step_keep(cx, &held, stored, seq, settlement, false)?;
+            let held = intake_activity(cx, &target, RecordSide::Payer)?;
+            if let Some(record) = held.as_ref().filter(|r| r.different_write_at_held_version) {
+                crate::divergent::step_keep(cx, record, stored, seq, settlement, false)?;
                 return note_peer(cx, &sender, stored);
             }
-            let held = held_or_unlisted(cx, &target, RecordSide::Payer)?;
+            let held = held.and_then(activity_value);
             if held.is_some() || admits_new_state(cx, &sender, &scopes, stored)? {
                 // A one-time request that came back after a block opens its record held for
                 // the user's confirmation (`manual_only`).
@@ -616,13 +614,22 @@ pub(crate) fn wait_for_record_key(
     cx: &ReceiveContext<'_>,
     target: &RecordTarget,
 ) -> Result<(), Fail> {
+    record_with_key(cx, target).map(|_| ())
+}
+
+fn record_with_key(
+    cx: &ReceiveContext<'_>,
+    target: &RecordTarget,
+) -> Result<Option<SharedRecord>, Fail> {
     let held = cx.record(target)?;
     if let Some(RecordContent::Unreadable(Unopened::KeyNotHeld { data_epoch })) =
-        held.map(|held| held.content)
+        held.as_ref().map(|record| &record.content)
     {
-        return Err(Fail::AwaitsKey { data_epoch });
+        return Err(Fail::AwaitsKey {
+            data_epoch: *data_epoch,
+        });
     }
-    Ok(())
+    Ok(held)
 }
 
 /// `value`, the activity record value the app's copy holds at `target`, read bound to its
@@ -677,12 +684,21 @@ fn held_or_unlisted(
     target: &ActivityTarget,
     side: RecordSide,
 ) -> Result<Option<Vec<u8>>, Fail> {
-    wait_for_key(cx, target)?;
-    let held = cx.record(&target.record_target())?;
+    Ok(intake_activity(cx, target, side)?.and_then(activity_value))
+}
+
+/// The record an incoming activity message can classify. A missing scope key
+/// holds the original entry even when a different write at the same version is current.
+fn intake_activity(
+    cx: &ReceiveContext<'_>,
+    target: &ActivityTarget,
+    side: RecordSide,
+) -> Result<Option<SharedRecord>, Fail> {
+    let held = record_with_key(cx, &target.record_target())?;
     if !holds_activity(held.as_ref()) {
         hold_while_unlisted(cx, side)?;
     }
-    Ok(held.and_then(activity_value))
+    Ok(held)
 }
 
 /// [`held_or_unlisted`] for the record at any client target, such as an `allowances`
@@ -692,8 +708,7 @@ pub(crate) fn held_or_unlisted_at(
     target: &RecordTarget,
     side: RecordSide,
 ) -> Result<Option<Vec<u8>>, Fail> {
-    wait_for_record_key(cx, target)?;
-    let record = cx.record(target)?;
+    let record = record_with_key(cx, target)?;
     if !holds_record(record.as_ref().map(|held| &held.content)) {
         hold_while_unlisted(cx, side)?;
     }
@@ -1366,16 +1381,11 @@ fn payer_reply(
             // the sender is its counterparty can't be told: the reply is kept as a reply before
             // its record, under the spam rule, never written over the value, and placed once
             // the record reads naming its sender (Paykit spec 8.1).
-            let held = cx.record(&target.record_target())?;
+            let held = intake_activity(cx, &target, RecordSide::Payee)?;
             let disputed = crate::records::activity_base_changed(held.as_ref());
-            let value = if disputed {
-                // The signed request still identifies its payer and its periods.
-                held.and_then(|r| r.content.value().map(<[u8]>::to_vec))
-            } else {
-                held_or_unlisted(cx, &target, RecordSide::Payee)?
-            };
-            let bound = match value {
-                Some(bytes) => bound_activity(cx, &target, &bytes, settlement)?,
+            // The bound signed request still identifies its payer and its periods.
+            let bound = match held.as_ref().and_then(|r| r.content.value()) {
+                Some(bytes) => bound_activity(cx, &target, bytes, settlement)?,
                 None => None,
             };
             let Some(bound) = bound else {
@@ -1522,13 +1532,15 @@ fn receipt_effect(
     let sender = stored.sender();
     let own = cx.identity();
     let target = receipt_target(stored, &own, &attempt_id);
-    let held = cx.record(&target.record_target())?;
+    let held = intake_activity(cx, &target, RecordSide::Payer)?;
     if crate::records::activity_base_changed(held.as_ref()) {
         return receipt_over_unread_record(cx, &target, stored, seq);
     }
     let content = held.as_ref().map(|held| held.content.clone());
-    held_or_unlisted(cx, &target, RecordSide::Payer)?;
-    let record = held_bound(cx, &target, settlement)?;
+    let record = match content.as_ref().and_then(RecordContent::value) {
+        Some(value) => bound_activity(cx, &target, value, settlement)?,
+        None => None,
+    };
     // A record that reads names its counterparty: a receipt from anyone else does nothing,
     // paused or not, and is never kept over it.
     let found = match &record {

@@ -2036,14 +2036,20 @@ async fn phone_paying_carol_through(
 /// payment check and before the payment method's call; and another once, during the next
 /// commit that keeps the deny list as read from the switch.
 #[derive(Default)]
-struct PayingStore {
+pub(crate) struct PayingStore {
     inner: pubky_switch_client::store::MemoryStore,
+    fail_payer_activity_read: std::sync::atomic::AtomicBool,
     hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     lists_hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl PayingStore {
-    fn on_paying(&self, hook: impl FnOnce() + Send + 'static) {
+    pub(crate) fn fail_next_payer_activity_read(&self) {
+        self.fail_payer_activity_read
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn on_paying(&self, hook: impl FnOnce() + Send + 'static) {
         *self.hook.lock().unwrap() = Some(Box::new(hook));
     }
 
@@ -2058,7 +2064,21 @@ impl StateStore for PayingStore {
         ns: &str,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
-        self.inner.get(ns, key)
+        let value = self.inner.get(ns, key)?;
+        if self
+            .fail_payer_activity_read
+            .load(std::sync::atomic::Ordering::SeqCst)
+            && key.starts_with(b"rec/")
+            && value.as_deref().is_some_and(|bytes| {
+                serde_json::from_slice::<serde_json::Value>(bytes).unwrap()["d"]["collection"]
+                    == paykit_lib::collections::Collection::PayerActivity.name()
+            })
+        {
+            self.fail_payer_activity_read
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            return Err(pubky_switch_client::error::StoreError::Unavailable);
+        }
+        Ok(value)
     }
 
     fn scan(
