@@ -1075,7 +1075,7 @@ async fn unconverted_request(
     wallet: &mut Paykit,
     endpoint_id: &str,
     payload: &str,
-) -> RequestRef {
+) -> (Paykit, RequestRef) {
     w.rail.set_endpoint_identifiers(vec![endpoint(endpoint_id)]);
     let mut shop = w.shop().await;
     let draft = RequestDraft::new(
@@ -1092,7 +1092,7 @@ async fn unconverted_request(
     .with_proposal_expires_at_ms(w.clock.now_ms() + 24 * HOUR_MS);
     let request = request_from(&mut shop, w.alice_id(), draft).await;
     wallet.receive(None).await.unwrap();
-    request
+    (shop, request)
 }
 
 #[tokio::test]
@@ -1101,7 +1101,7 @@ async fn test_conversion_automatic_cross_asset_payment_without_terms_refused() {
     // it to an endpoint of another asset, though the method reports the requested amount.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
-    let request = unconverted_request(&w, &mut wallet, "eur-sepa-iban", "DE00iban").await;
+    let (_shop, request) = unconverted_request(&w, &mut wallet, "eur-sepa-iban", "DE00iban").await;
     let refused = wallet
         .pay_request_automatically(&request, PayOptions::default())
         .await
@@ -1120,7 +1120,8 @@ async fn test_conversion_cross_asset_payment_without_terms_needs_the_confirmed_q
     // the requested amount and asset, and is paid once its user confirms exactly that.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
-    let request = unconverted_request(&w, &mut wallet, "eur-sepa-iban", "DE00iban").await;
+    let (mut shop, request) =
+        unconverted_request(&w, &mut wallet, "eur-sepa-iban", "DE00iban").await;
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
@@ -1158,6 +1159,14 @@ async fn test_conversion_cross_asset_payment_without_terms_needs_the_confirmed_q
         panic!("{outcome:?}")
     };
     assert_eq!(w.rail.paid_amount(&attempt_id), Some(usd("10")));
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    shop.receive(None).await.unwrap();
+    let sales = shop.payee_activity().await.unwrap();
+    let [sale] = sales.as_slice() else {
+        panic!("expected the paid request");
+    };
+    assert!(shop.verify_payment(&sale.record).await.unwrap().is_some());
+    assert!(shop.confirm_payment(&sale.record).await.unwrap().is_some());
 }
 
 #[tokio::test]
@@ -1173,7 +1182,7 @@ async fn test_conversion_cross_asset_payment_in_flight_repeats_only_as_confirmed
             crate::common::day_window(),
         )
         .await;
-    let request = unconverted_request(&w, &mut wallet, "eur-sepa-iban", "DE00iban").await;
+    let (_shop, request) = unconverted_request(&w, &mut wallet, "eur-sepa-iban", "DE00iban").await;
     let quote = transfer_of(
         &wallet
             .pay_request(&request, PayOptions::default())
@@ -1216,7 +1225,7 @@ async fn test_conversion_same_asset_payment_without_terms_pays_automatically() {
     // it the requested amount, as before.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
-    let request = unconverted_request(&w, &mut wallet, "usd-ach-account", "acct-1").await;
+    let (_shop, request) = unconverted_request(&w, &mut wallet, "usd-ach-account", "acct-1").await;
     let outcome = wallet
         .pay_request_automatically(&request, PayOptions::default())
         .await
