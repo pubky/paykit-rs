@@ -18,6 +18,93 @@ fn metadata() -> serde_json::Map<String, serde_json::Value> {
         .unwrap()
 }
 
+/// Bob's receipt for the payment Alice's signed proof identifies.
+pub(crate) fn signed_receipt(
+    w: &World,
+    shop: &paykit_sdk::Paykit,
+    request: &RequestRef,
+    proof: &paykit_lib::records::StoredMessage,
+) -> paykit_lib::records::StoredMessage {
+    let paykit_lib::Body::PaymentProof(payment) = proof.body() else {
+        panic!("expected a signed payment proof");
+    };
+    let receipt = paykit_lib::bodies::PaymentReceipt {
+        attempt_id: payment.attempt_id,
+        billing_period: payment.billing_period,
+        metadata: None,
+        payment_reference: None,
+    }
+    .to_body(2)
+    .unwrap();
+    let plaintext = w.sign_as(
+        &w.bob,
+        "shop",
+        &w.alice,
+        "paykit.payment_receipt",
+        vec![proof.hash(), request.request_hash],
+        receipt,
+    );
+    paykit_lib::records::StoredMessage::new(
+        w.bob_id(),
+        shop.app().cert().signed(),
+        plaintext,
+        Some(w.clock.now_ms()),
+        &w.alice_id(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_receipts_one_time_credit_is_shown_once_the_payee_holds_the_signed_proof() {
+    use crate::periods::{payee_request_at, writes_value};
+    use paykit_lib::records::{ActivityRecord, ActivitySide};
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    let payer_key = wallet.request(&request).await.unwrap().record;
+    let payer = wallet
+        .app()
+        .shared_record(&payer_key)
+        .await
+        .unwrap()
+        .unwrap();
+    let proof = ActivityRecord::read(
+        payer.content.value().unwrap(),
+        &w.alice_id(),
+        ActivitySide::Payer,
+    )
+    .unwrap()
+    .proof
+    .unwrap();
+    let target = payee_request_at(&request);
+    let key = shop.app().record_key(&target).unwrap();
+    let held = shop.app().shared_record(&key).await.unwrap().unwrap();
+    let mut record = ActivityRecord::read(
+        held.content.value().unwrap(),
+        &w.bob_id(),
+        ActivitySide::Payee,
+    )
+    .unwrap();
+    let initial = shop.payee_activity().await.unwrap().remove(0);
+    record.receipt = Some(signed_receipt(&w, &shop, &request, &proof));
+    writes_value(&mut shop, &target, &record.to_json().unwrap()).await;
+    let before = shop.payee_activity().await.unwrap().remove(0);
+    assert_eq!(before.status, initial.status);
+    assert!(before.attempt_id.is_none());
+    record.proof = Some(proof);
+    writes_value(&mut shop, &target, &record.to_json().unwrap()).await;
+    let after = shop.payee_activity().await.unwrap().remove(0);
+    assert_eq!(after.status, PayeeStatus::Receipted);
+    assert_eq!(after.attempt_id, Some(outcome.attempt_id()));
+}
+
 #[tokio::test]
 async fn test_receipts_carry_metadata_and_are_listed_by_payee_request_and_period() {
     let w = World::new();

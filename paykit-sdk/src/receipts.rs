@@ -7,7 +7,7 @@ use paykit_lib::bodies::{PaymentReceipt, PaymentRequest};
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::natural_key;
 use paykit_lib::periods::PeriodRef;
-use paykit_lib::records::{ActivityRecord, ActivitySide, RecordBinding};
+use paykit_lib::records::{ActivityRecord, ActivitySide, RecordBinding, StoredMessage};
 use paykit_lib::{AttemptId, Body, Label, PaymentReference};
 use pubky_switch_client::app::UserConfirmed;
 use serde_json::{Map, Value};
@@ -177,6 +177,21 @@ pub(crate) fn period_request_target(
     })
 }
 
+/// The receipt to display for a bound activity (Paykit wire 4.11, 5.3).
+/// A payee credits the payment its signed receipt confirms. A payer may hold
+/// the payee's receipt before it has the signed proof. Reading the activity
+/// checks both messages' signatures, roles, attempt, occurrence and proof hash.
+pub(crate) fn displayed_receipt(record: &ActivityRecord) -> Option<&StoredMessage> {
+    let receipt = record.receipt.as_ref()?;
+    if record.side == ActivitySide::Payee && !record.shows_paid() {
+        return None;
+    }
+    if record.request.is_some() {
+        crate::periods::request_for_payment(record, record, &record.binding().ok()?)?;
+    }
+    Some(receipt)
+}
+
 /// The receipt `record`, held at `key`, stores, as the payer sees it. `request` is the
 /// request it pays: the one `record` holds, or, for a period record, the one its request
 /// record holds ([`period_request_target`]).
@@ -185,7 +200,7 @@ pub(crate) fn received_receipt(
     record: &ActivityRecord,
     request: Option<&PaymentRequest>,
 ) -> Option<ReceivedReceipt> {
-    let stored = record.receipt.as_ref()?;
+    let stored = displayed_receipt(record)?;
     let Body::PaymentReceipt(PaymentReceipt {
         attempt_id,
         billing_period,

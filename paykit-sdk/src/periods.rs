@@ -75,11 +75,11 @@ pub struct PeriodView {
     pub details: Vec<PeriodDetailsView>,
     /// The record holds a proof of the period's payment, credited or not.
     pub paid: bool,
-    /// The record holds the payee's receipt: the payment is credited to this period. A
-    /// proof held without it is `paid` and not `credited`, such as one whose settlement
-    /// credits another occurrence already, or one not confirmed yet.
+    /// The payee issued a receipt for this period. The payee shows the credit
+    /// once it holds the signed proof the receipt confirms. The payer can see
+    /// the payee's receipt before it holds the proof (Paykit wire 4.11).
     pub credited: bool,
-    /// The payee's receipt of the period, if the record holds one.
+    /// The receipt shown for the credit.
     pub receipt: Option<ReceivedReceipt>,
 }
 
@@ -171,14 +171,15 @@ fn period_view(
             })
         })
         .collect();
+    // The request's reference stays on the request's view.
+    let receipt = received_receipt(key, record, None);
     Some(PeriodView {
         record: key,
         billing_period,
         details,
         paid: record.shows_paid(),
-        credited: record.receipt.is_some(),
-        // The request's reference stays on the request's view.
-        receipt: received_receipt(key, record, None),
+        credited: receipt.is_some(),
+        receipt,
     })
 }
 

@@ -5463,30 +5463,7 @@ async fn signed_period_payment(
         &w.bob_id(),
     )
     .unwrap();
-    let receipt = paykit_lib::bodies::PaymentReceipt {
-        attempt_id: AttemptId::from_bytes([9; 16]),
-        billing_period: Some(period),
-        metadata: None,
-        payment_reference: None,
-    }
-    .to_body(2)
-    .unwrap();
-    let plaintext = w.sign_as(
-        &w.bob,
-        "shop",
-        &w.alice,
-        "paykit.payment_receipt",
-        vec![proof.hash(), request.request_hash],
-        receipt,
-    );
-    let receipt = StoredMessage::new(
-        w.bob_id(),
-        shop.app().cert().signed(),
-        plaintext,
-        Some(w.clock.now_ms()),
-        &w.alice_id(),
-    )
-    .unwrap();
+    let receipt = crate::receipts::signed_receipt(w, shop, request, &proof);
     let mut record = ActivityRecord::new(ActivitySide::Payee, w.alice_id());
     record.proof = Some(proof);
     record.receipt = Some(receipt);
@@ -5968,4 +5945,70 @@ async fn confirm_current_period() {
     );
     assert_eq!(receipt.body().billing_period(), Some(&january()));
     assert!(shop.payee_activity().await.unwrap()[0].periods[0].credited);
+}
+
+#[tokio::test]
+async fn test_recurring_receipt_evidence_as_its_proof_becomes_available() {
+    Box::pin(recurring_receipt_evidence_arrives()).await;
+}
+
+async fn recurring_receipt_evidence_arrives() {
+    use paykit_lib::records::ActivitySide;
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    let mut record = signed_period_payment(&w, &shop, &wallet, &request, january()).await;
+    let id = record.receipt.as_ref().unwrap().message().msg_id.clone();
+    let proof = record.proof.take().unwrap();
+    let payee_period = payee_period_at(&request, january());
+    let payer_period = payer_period_at(&request, january());
+    writes_value(&mut shop, &payee_period, &record.to_json().unwrap()).await;
+    record.side = ActivitySide::Payer;
+    record.counterparty = w.bob_id();
+    writes_value(&mut wallet, &payer_period, &record.to_json().unwrap()).await;
+
+    let payee_before = shop
+        .payee_activity()
+        .await
+        .unwrap()
+        .remove(0)
+        .periods
+        .remove(0);
+    assert!(!payee_before.paid && !payee_before.credited && payee_before.receipt.is_none());
+    let payer_before = wallet.request(&request).await.unwrap().periods.remove(0);
+    assert!(!payer_before.paid && payer_before.credited);
+    let payer_receipts = wallet
+        .receipts(paykit_sdk::ReceiptsOf::Period(request, january()))
+        .await
+        .unwrap();
+    assert_eq!(payer_receipts.len(), 1);
+    assert_eq!(payer_receipts[0].payee, w.bob_id());
+    assert_eq!(payer_receipts[0].msg_id, id);
+    assert_eq!(
+        payer_before.receipt.as_ref().unwrap().msg_id,
+        payer_receipts[0].msg_id
+    );
+
+    record.proof = Some(proof);
+    writes_value(&mut wallet, &payer_period, &record.to_json().unwrap()).await;
+    record.side = ActivitySide::Payee;
+    record.counterparty = w.alice_id();
+    writes_value(&mut shop, &payee_period, &record.to_json().unwrap()).await;
+    let payee_after = shop
+        .payee_activity()
+        .await
+        .unwrap()
+        .remove(0)
+        .periods
+        .remove(0);
+    let payer_after = wallet.request(&request).await.unwrap().periods.remove(0);
+    assert!(payee_after.paid && payee_after.credited);
+    assert!(payer_after.paid && payer_after.credited);
+    assert_eq!(payee_after.receipt.as_ref().unwrap().payee, w.bob_id());
+    assert_eq!(
+        payee_after.receipt.as_ref().unwrap().msg_id,
+        payer_receipts[0].msg_id
+    );
+    assert_eq!(payer_after.receipt.as_ref().unwrap().msg_id, id);
 }

@@ -515,7 +515,7 @@ pub enum PayeeStatus {
     /// A proof is held, not credited: the payee verifies it by its own method. One whose
     /// settlement credits another occurrence already stays so (Paykit spec 8.4).
     ProofReceived,
-    /// Credited: the record holds the payee's receipt, which it sent.
+    /// Credited: the record holds the payee's receipt and the payer's proof it confirms.
     Receipted,
 }
 
@@ -2462,7 +2462,7 @@ fn payee_view(
         record.response.as_ref().map(StoredMessage::body),
         Some(Body::PaymentRequestRejection(_))
     );
-    let status = if record.receipt.is_some() {
+    let status = if crate::receipts::displayed_receipt(record).is_some() {
         PayeeStatus::Receipted
     } else if record.proof.is_some() {
         PayeeStatus::ProofReceived
