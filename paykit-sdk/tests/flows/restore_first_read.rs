@@ -257,6 +257,8 @@ async fn test_restore_first_read_preserves_the_implicit_report_through_an_error(
         .send_request(w.alice_id(), draft("1", w.clock.now_ms()))
         .await
         .unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
     drop(wallet);
     let mut restored = Paykit::restore(
         w.env(&w.alice, store()),
@@ -324,6 +326,9 @@ async fn test_restore_first_read_does_not_confirm_a_held_request() {
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     let backup = wallet.backup().await.unwrap();
+    request_from(&mut shop, w.alice_id(), draft("later", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
     let mut restored = Paykit::restore(
         w.env(&w.alice, store()),
         PaykitConfig::default(),

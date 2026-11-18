@@ -180,28 +180,30 @@ async fn refuse_current(family: Family, how: Damage) {
         .await
         .unwrap();
     let sends = w.bob.switch().entries_from(&w.alice_id());
-    // With a current cursor, load leaves these checkpoints unread. The public
-    // recovery pass reads rh/ro/ha/mi; an open request's status reads mh.
-    let mut loaded = Paykit::load(
+    let result = Paykit::load(
         w.env(&w.alice, storage),
         PaykitConfig::default(),
         wallet.app_id(),
         Arc::clone(&w.rail) as Arc<dyn Rail>,
         w.timer(),
     )
-    .await
-    .expect("load must preserve this checkpoint's lazy read boundary");
-    let error = if matches!(family, Family::MissedHold) {
-        loaded.receive(None).await.unwrap();
-        loaded
-            .requests()
-            .await
-            .expect_err("malformed missed hold was read")
-    } else {
-        loaded
+    .await;
+    let error = match family {
+        // Load checks the restore's durable verdict and bounds its block window.
+        Family::RestoreHold => result.expect_err("malformed restore hold was loaded"),
+        Family::MissedHold => {
+            let mut loaded = result.unwrap();
+            loaded.receive(None).await.unwrap();
+            loaded
+                .requests()
+                .await
+                .expect_err("malformed missed hold was read")
+        }
+        _ => result
+            .unwrap()
             .receive(None)
             .await
-            .expect_err("malformed recovery state was read")
+            .expect_err("malformed recovery state was read"),
     };
     assert!(crate::common::is_corrupt(&error), "{error:?}");
     assert_eq!(
@@ -276,6 +278,12 @@ async fn test_recovery_state_missed_item_unknown_after_reload() {
 }
 
 #[tokio::test]
+async fn test_recovery_state_restore_retains_only_readable_holds() {
+    Box::pin(refuse_backup(Family::RestoreHold, Damage::Unknown)).await;
+    Box::pin(refuse_backup(Family::MissedHold, Damage::Duplicate)).await;
+}
+
+#[tokio::test]
 async fn test_recovery_state_held_answer_unknown_at_restore() {
     Box::pin(refuse_backup(Family::HeldAnswer, Damage::Unknown)).await;
 }
@@ -340,7 +348,8 @@ async fn test_recovery_state_produced_values_reload_and_progress() {
                     .unwrap(),
             )
             .unwrap();
-            assert_eq!(held["d"]["asks_queued"], true);
+            assert_eq!(held["d"]["verdict"], "clean");
+            assert_eq!(held["d"]["asks_queued"], false);
             assert_eq!(held["d"]["asked"], json!([]));
         }
         if matches!(family, Family::HeldAnswer) {
@@ -382,17 +391,16 @@ async fn test_recovery_state_restore_regenerates_old_checkpoints() {
     let now = w.clock.now_ms();
     w.alice.switch().push_missed(1, now - 1_000, now);
     wallet.app_mut().receive(None).await.unwrap();
-    let mut changes = Vec::new();
-    for key in [b"rh", b"mh", b"ro"] {
-        assert!(wallet
-            .app()
-            .protocol_get("paykit", key)
-            .await
-            .unwrap()
-            .is_some());
-        changes.push((key.to_vec(), b"{".to_vec()));
-    }
-    let backup = replace(&wallet.backup().await.unwrap(), &changes);
+    let missed = wallet
+        .app()
+        .protocol_get("paykit", b"mh")
+        .await
+        .unwrap()
+        .unwrap();
+    let backup = replace(
+        &wallet.backup().await.unwrap(),
+        &[(b"ro".to_vec(), b"{".to_vec())],
+    );
     let loaded = restore(&w, store(), &backup).await;
     let hold: Value = serde_json::from_slice(
         &loaded
@@ -416,12 +424,10 @@ async fn test_recovery_state_restore_regenerates_old_checkpoints() {
     .unwrap();
     assert!(owed["d"].get("waiting").unwrap().is_null());
     assert!(owed["d"].get("restored_at_ms").unwrap().is_u64());
-    assert!(loaded
-        .app()
-        .protocol_get("paykit", b"mh")
-        .await
-        .unwrap()
-        .is_none());
+    assert_eq!(
+        loaded.app().protocol_get("paykit", b"mh").await.unwrap(),
+        Some(missed)
+    );
 }
 
 #[derive(Default)]
@@ -906,6 +912,7 @@ async fn checkpoint_partial_asks(w: &World) -> PartialAsks {
     crate::unrequested::store_bundle_from(w, app_id, &cert, newest);
     let storage = store();
     let mut wallet = restore(w, Arc::clone(&storage), &backup).await;
+    crate::common::restore_with_unknown_cursor(&mut wallet).await;
     for _ in 0..2 {
         wallet.receive(None).await.unwrap();
     }
@@ -966,11 +973,15 @@ async fn checkpoint_refuse_asks(how: AskedDamage) {
     let mut value = checkpoint_value(&wallet, b"rh").await;
     checkpoint_damage_asks(&mut value, how);
     let bad = checkpoint_put(&mut wallet, b"rh", &value).await;
-    let wallet = checkpoint_reload(&w, wallet, storage).await;
-    let error = wallet
-        .requests()
-        .await
-        .expect_err("an inconsistent restore checkpoint was read");
+    let error = Paykit::load(
+        w.env(&w.alice, storage),
+        PaykitConfig::default(),
+        wallet.app_id(),
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .expect_err("an inconsistent restore checkpoint was loaded");
     assert!(crate::common::is_corrupt(&error), "{error:?}");
     assert_eq!(
         wallet.app().protocol_get("paykit", b"rh").await.unwrap(),
@@ -1056,10 +1067,6 @@ async fn checkpoint_regenerated(w: &World, backup: &PaykitBackup) {
 async fn test_recovery_checkpoint_malformed_live_transients_remain_backable() {
     let w = World::new();
     let (mut wallet, _, _, _) = Box::pin(produced(&w, Family::RestoreHold)).await;
-    let mut hold = checkpoint_value(&wallet, b"rh").await;
-    hold["d"]["asks_queued"] = json!(true);
-    hold["d"]["asked"] = json!([w.bob_id()]);
-    let rh = checkpoint_put(&mut wallet, b"rh", &hold).await;
     let mut owed = checkpoint_value(&wallet, b"ro").await;
     owed["d"]["waiting"] = json!([]);
     let ro = checkpoint_put(&mut wallet, b"ro", &owed).await;
@@ -1067,9 +1074,7 @@ async fn test_recovery_checkpoint_malformed_live_transients_remain_backable() {
     let value: Value = serde_json::from_slice(&backup.to_bytes().unwrap()).unwrap();
     let data = pubky_switch_core::enc::unb64(value["layers"][0]["data"].as_str().unwrap()).unwrap();
     let layer = pubky_switch_client::app::decode_local_state(&data).unwrap();
-    for (key, bytes) in [(b"rh", rh), (b"ro", ro)] {
-        assert_eq!(layer.iter().find(|(k, _)| k == key).unwrap().1, bytes);
-    }
+    assert_eq!(layer.iter().find(|(key, _)| key == b"ro").unwrap().1, ro);
     Box::pin(checkpoint_regenerated(&w, &backup)).await;
 }
 
@@ -1078,16 +1083,11 @@ async fn test_recovery_checkpoint_malformed_saved_transients_regenerate() {
     let w = World::new();
     let (mut wallet, _, _, _) = Box::pin(produced(&w, Family::RestoreHold)).await;
     let backup = wallet.backup().await.unwrap();
-    let mut hold = checkpoint_value(&wallet, b"rh").await;
-    hold["d"]["asked"] = json!([w.carol_id(), w.bob_id(), w.bob_id()]);
     let mut owed = checkpoint_value(&wallet, b"ro").await;
     owed["d"]["waiting"] = json!([]);
     let changed = replace(
         &backup,
-        &[
-            (b"rh".to_vec(), serde_json::to_vec(&hold).unwrap()),
-            (b"ro".to_vec(), serde_json::to_vec(&owed).unwrap()),
-        ],
+        &[(b"ro".to_vec(), serde_json::to_vec(&owed).unwrap())],
     );
     Box::pin(checkpoint_regenerated(&w, &changed)).await;
 }
