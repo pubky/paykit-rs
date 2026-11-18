@@ -2888,12 +2888,11 @@ async fn test_blocked_receipt_to_a_blocked_payer_delivered() {
 }
 
 #[tokio::test]
-async fn test_blocked_subscription_cancellation_and_rejection_refused_with_nothing_recorded() {
-    // Alice's wallet accepted bob's subscription, and bob is then blocked: a payer's
-    // cancellation of a subscription isn't built at this head, so it is refused as
-    // `Recurring`, and a rejection after the acceptance as `Subscribed`. Neither is
-    // recorded or held, though a rejection or cancellation of a request is recorded while
-    // sends to its payee are held (Paykit spec 8.1, "Blocked counterparties"; 8.2).
+async fn test_blocked_subscription_cancellation_recorded_and_held_rejection_refused() {
+    // Alice's wallet accepted bob's subscription, and bob is then blocked: a rejection after
+    // the acceptance is refused as `Subscribed`, nothing recorded; the payer's cancellation is
+    // a stop, recorded as when bob isn't blocked, and only its message waits (Paykit spec
+    // 8.1, "Blocked counterparties"; 8.2, "Ending").
     let w = World::new();
     let (mut wallet, mut shop, _) = received(&w, PaykitConfig::default()).await;
     let request = request_from(
@@ -2909,26 +2908,25 @@ async fn test_blocked_subscription_cancellation_and_rejection_refused_with_nothi
     let version = |held: Option<pubky_switch_client::app::SharedRecord>| held.unwrap().version;
     let before = version(wallet.app().shared_record(&record).await.unwrap());
     let entries = w.bob.switch().entries_from(&w.alice_id());
-    let refused = wallet.cancel_request(&request, None).await.unwrap_err();
-    assert_eq!(refused.refusal(), Some(&Refusal::Recurring));
     let refused = wallet.reject_request(&request, None).await.unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Subscribed));
-    wallet.receive(None).await.unwrap();
     assert_eq!(
         version(wallet.app().shared_record(&record).await.unwrap()),
         before
     );
-    assert!(wallet
+    wallet.cancel_request(&request, None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_ne!(
+        version(wallet.app().shared_record(&record).await.unwrap()),
+        before
+    );
+    assert!(!wallet
         .app()
         .protocol_scan("paykit", b"ha/")
         .await
         .unwrap()
         .is_empty());
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
-    assert_eq!(
-        wallet.request(&request).await.unwrap().status,
-        RequestStatus::Blocked
-    );
 }
 
 #[tokio::test]

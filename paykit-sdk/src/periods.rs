@@ -25,18 +25,24 @@ use paykit_lib::derive::natural_key;
 use paykit_lib::kinds::Kind;
 use paykit_lib::periods::{BillingPeriod, PeriodRef};
 use paykit_lib::records::{
-    ActivityRecord, ActivitySide, RecordBinding, StoredMessage, MAX_PERIOD_DETAILS,
+    ActivityRecord, ActivitySide, RecordBinding, StoredMessage, MAX_ATTEMPTED_PERIODS,
+    MAX_PERIOD_DETAILS,
 };
-use paykit_lib::{Body, PaymentEndpointIdentifier, Rate};
-use pubky_switch_client::app::{KeptReason, RecordContent, RecordRead};
+use paykit_lib::{AttemptId, Body, PaymentEndpointIdentifier, Rate};
+use pubky_switch_client::app::{Initiator, KeptReason, RecordContent, RecordRead};
+use pubky_switch_core::claims::{ClaimStatus, ClaimView, Outcome};
 use pubky_switch_core::http::ErrorCode;
+use pubky_switch_core::ops::{Condition, OpKind};
 
 use crate::activity::{ActivityTarget, Role};
+use crate::app_records::PublicAppFailure;
 use crate::error::{PaykitError, Refusal, Result};
+use crate::journal::{JournalEntry, KeptAmount, KeptPeriod, Stage};
+use crate::pay::{BlockedPayment, Chosen, PayOptions, PayOutcome, PayResult, Plan, Pricing};
 use crate::paykit::Paykit;
 use crate::receipts::{period_request_target, received_receipt, ReceivedReceipt};
-use crate::records::conflict;
-use crate::requests::{cancelled, rejected, request_of, MessageDelivery, SentMessage};
+use crate::records::{conflict, KeptMessage};
+use crate::requests::{cancelled, rejected, request_of, MessageDelivery, RequestRef, SentMessage};
 
 /// How many times a payee's write of period details is built again after its record changed
 /// meanwhile.
@@ -649,6 +655,453 @@ impl Paykit {
             delivery: self.delivered(&msg_id).await?,
             msg_id,
         })
+    }
+}
+
+/// `attempted_periods` with `start` added (Paykit spec 8.2, "Attempted periods"): the listed
+/// periods in `finished`, whose claims have no open attempt, dropped, the list ascending,
+/// each start once. `None` when 16 would stay listed besides it: no attempt on another
+/// period then. A listed `start` needs no write; the caller doesn't ask.
+pub(crate) fn attempted_with(listed: &[u64], start: u64, finished: &[u64]) -> Option<Vec<u64>> {
+    let mut list: Vec<u64> = listed
+        .iter()
+        .copied()
+        .filter(|period| !finished.contains(period))
+        .collect();
+    if list.len() >= MAX_ATTEMPTED_PERIODS {
+        return None;
+    }
+    list.push(start);
+    list.sort_unstable();
+    list.dedup();
+    Some(list)
+}
+
+/// The step of a listed period's claim, `view`, when it has no open attempt, at which a
+/// write that drops the period from `attempted_periods`, or a payer's cancellation, is
+/// conditioned (Paykit spec 8.2): 0 for no claim. `None` while an attempt is open or its
+/// outcome `unknown`, which counts as open: it may have paid, and stays so until its owner
+/// reports it or another own app writes it `failed` (Switch spec 10.2 row 5). The period
+/// stays listed.
+pub(crate) fn finished_step(view: Option<&ClaimView>) -> Option<u64> {
+    match view {
+        None => Some(0),
+        Some(view)
+            if view.status == ClaimStatus::Attempting
+                || view
+                    .attempts
+                    .iter()
+                    .any(|a| matches!(a.outcome, Outcome::Open | Outcome::Unknown)) =>
+        {
+            None
+        }
+        Some(view) => Some(view.step),
+    }
+}
+
+/// The payer's period record of `period` of `request` holding no message, only the members
+/// that name it (Paykit wire 5.3): the record an attempt by hand creates, holding its mark,
+/// for a period that has none yet.
+fn bare_period_record(request: &RequestRef, period: &PeriodRef) -> ActivityRecord {
+    let mut record = crate::activity::empty(ActivitySide::Payer, request.payee);
+    record.request_hash = Some(request.request_hash);
+    record.billing_period = Some(*period);
+    record
+}
+
+impl Paykit {
+    /// Pay one Billing Period, `period`, of the subscription `request` by hand, to the
+    /// request's own destination (Paykit spec 7.2, 8.2): the paying order of every payment,
+    /// on the period's obligation, its proof naming the period and going into the payer's
+    /// period record. Accepting a subscription pays nothing: the host calls this for each
+    /// period its user confirms paying, with the confirmations of [`Paykit::pay_request`] in
+    /// `options`.
+    ///
+    /// - The attempt carries `server_time_in(s, null)`: `s` the period's start, or, for a
+    ///   period that hasn't started on the latest service time verified, that time, once the
+    ///   user has confirmed paying it early ([`PayOptions::with_early_payment_confirmed`];
+    ///   Paykit spec 8.2, "Not before its start").
+    /// - An attempt on a period the request record doesn't list in `attempted_periods` writes
+    ///   that record in its batch, adding the period and dropping the listed ones whose
+    ///   claims have no open or `unknown` attempt, each conditioned on its claim's step
+    ///   (Paykit spec 8.2, "Attempted periods").
+    /// - Its batch marks the period `manual_only` on its period record, at the version read,
+    ///   creating the record holding the mark and no message when the period has none
+    ///   (Paykit spec 8.3, "Manual only"): no app pays that period automatically after it,
+    ///   whatever the attempt's outcome. A record holding the mark already is only
+    ///   conditioned on.
+    /// - A provider loss leaves the period in doubt only when it started before the end of
+    ///   the residual window (Paykit spec 7.3).
+    ///
+    /// # Errors
+    ///
+    /// As [`Paykit::pay_request`], and: [`Refusal::Usage`] for a one-time request, or a
+    /// period that isn't one of the request's; [`Refusal::NotSubscribed`] before the
+    /// subscription is accepted; [`Refusal::Divergent`] while the request record or the
+    /// period record is divergent or was seen so, until the user confirms it;
+    /// [`Refusal::AlreadyPaid`] for a period whose record holds its proof;
+    /// [`Refusal::NoDestination`] for a later period of a request with
+    /// `per_period_endpoints`, paid only to its period details' destination;
+    /// [`Refusal::PeriodNotStarted`]; [`Refusal::AttemptedPeriodsFull`];
+    /// [`Refusal::NotNow`] while the period record's value waits for its scope key or
+    /// doesn't read.
+    pub async fn pay_period(
+        &mut self,
+        request: &RequestRef,
+        period: &PeriodRef,
+        options: PayOptions,
+    ) -> PayResult {
+        let mut public_failures = Vec::new();
+        let outcome =
+            Box::pin(self.pay_period_inner(request, period, options, &mut public_failures)).await;
+        PayResult {
+            outcome,
+            public_failures,
+        }
+    }
+
+    async fn pay_period_inner(
+        &mut self,
+        request: &RequestRef,
+        period: &PeriodRef,
+        options: PayOptions,
+        public_failures: &mut Vec<PublicAppFailure>,
+    ) -> Result<PayOutcome> {
+        self.refresh_own()?;
+        Box::pin(self.first_read_before_writing()).await?;
+        self.refresh_own()?;
+        self.records_known().await?;
+        self.require_pay()?;
+        self.app.may_attempt(false).map_err(crate::pay::not_now)?;
+        self.refuse_while_payer_pass_owed().await?;
+        let (target, record) = self.payer_request(request).await?;
+        let (stored, body) = request_of(&record).ok_or(Refusal::NotFound)?;
+        let (stored, body) = (stored.clone(), body.clone());
+        if !body.is_recurring() {
+            return Err(Refusal::Usage(
+                "Paykit spec 8.1: a one-time request is paid with pay_request".into(),
+            )
+            .into());
+        }
+        let billing = body.named_period(period).map_err(|_| {
+            Refusal::Usage("Paykit wire 4.4: not a Billing Period of the request".into())
+        })?;
+        let period = PeriodRef::from(billing);
+        if rejected(&record) {
+            return Err(Refusal::Rejected.into());
+        }
+        // A cancellation either side recorded, or a payee's the app keeps, stops every
+        // period (Paykit spec 8.2, "Ending").
+        if cancelled(&record) || self.kept_stop(&target).await? {
+            return Err(Refusal::Cancelled.into());
+        }
+        // Only a subscription the request record shows accepted is paid (Paykit spec 8.2).
+        if record.response.is_none() {
+            return Err(Refusal::NotSubscribed.into());
+        }
+        let period_target =
+            ActivityTarget::payer(period_key(&request.payee, &request.request_hash, &period));
+        let record_key = self.activity_key(&target)?;
+        let period_record_key = self.activity_key(&period_target)?;
+        if let Some(held) = self.app.shared_record(&period_record_key).await? {
+            if crate::hold::awaits_key(&held.content) {
+                return Err(crate::hold::value_awaits_key());
+            }
+        }
+        let held_period = self.held_activity(&period_target).await?;
+        // The period record shows it paid (Paykit spec 7.2).
+        if held_period.as_ref().is_some_and(ActivityRecord::shows_paid) {
+            return Err(Refusal::AlreadyPaid.into());
+        }
+        // With `per_period_endpoints`, the request's destination serves only its first
+        // period: a later one is paid to its period details' destination, which this call
+        // doesn't pay (Paykit spec 8.2, "Destinations per period").
+        let first = body
+            .recurrence
+            .as_ref()
+            .ok_or_else(PaykitError::corrupt)?
+            .first()?;
+        if body.per_period_endpoints && billing != first {
+            return Err(Refusal::NoDestination(
+                "Paykit spec 8.2: a later Billing Period of this request is paid to its period \
+                 details' destination"
+                    .into(),
+            )
+            .into());
+        }
+        // Divergent after a provider loss, or seen so: the request record pauses every period
+        // of the request, its upload maybe holding a cancellation, and the period record its
+        // own period. Paid by hand only once the user has seen that the payee may have
+        // cancelled it (Paykit spec 6); a period that can't be paid anyway is refused for what
+        // stops it instead, as a one-time request is: one past its deadline goes on to the
+        // checks below, and one whose destination's app is no longer current, or that
+        // requires an app the payee removed, is refused for that.
+        let deadline = body.attempt_deadline(Some(&billing))?;
+        if !self.deadline_passed(deadline) {
+            let mut paused = false;
+            for key in [record_key, period_record_key] {
+                paused |= Box::pin(self.pause_at(&key)).await?.blocks_by_hand();
+            }
+            if paused {
+                Box::pin(self.refuse_unpayable_request(
+                    &request.payee,
+                    &stored,
+                    &body.destination,
+                    &options,
+                ))
+                .await?;
+                Box::pin(self.refuse_while_paused(&[record_key, period_record_key])).await?;
+            }
+        }
+        // Held after a restore: paid only once the user has seen the payee may have
+        // cancelled it, which ends the hold (Paykit spec 7.2, "What a restore loses").
+        let end_hold = self
+            .pass_hold(
+                &record_key,
+                &record,
+                options.possibly_cancelled_confirmed.as_ref(),
+            )
+            .await?;
+        // A blocked payee's period is paid only once the user confirms it (Paykit spec 8.1).
+        let blocked = self.denied_for_user(&request.payee).await?;
+        let obligation =
+            self.obligation(&request.payee, &request.request_hash, period.start_secs());
+        let restored = self.restored_attempts(&obligation).await?;
+        let step = self
+            .claim_step(
+                &obligation,
+                &stored,
+                Some(period.starts_at),
+                deadline,
+                restored,
+                &options,
+                Initiator::User,
+            )
+            .await?;
+        if self.deadline_passed(deadline) {
+            return Err(self.past_deadline(&target, None).await?);
+        }
+        // The claim was read just before: the service time it verified is current.
+        let mut conditions = vec![self.not_before(&period, &options)?];
+        let pricing = Pricing::of_request(
+            &body.amount,
+            *request,
+            body.conversion.as_ref(),
+            Initiator::User,
+        );
+        let Chosen {
+            destination,
+            carrier,
+            reserve,
+            bound,
+            payment_amount,
+            paid,
+            price,
+        } = self
+            .request_destination(
+                &request.payee,
+                &stored,
+                &body,
+                &options,
+                body.accepted_payment_endpoint_identifiers.as_deref(),
+                &pricing,
+                public_failures,
+            )
+            .await?;
+        if blocked {
+            let amount = paid.ok_or_else(|| {
+                Refusal::NotNow(
+                    "Paykit spec 8.1: the blocked payment's transfer amount is unknown".into(),
+                )
+            })?;
+            let shown = BlockedPayment {
+                payee: request.payee,
+                request: Some(*request),
+                period: Some(period),
+                amount,
+            };
+            crate::pay::refuse_blocked(true, shown, options.blocked_confirmed.as_ref())?;
+        }
+        let mut record_writes = Vec::new();
+        if let Some(write) = self
+            .attempted_write(&target, &record, request, period.start_secs())
+            .await?
+        {
+            record_writes.push(write);
+        }
+        // In the attempt's batch, at the version read, so no attempt by hand exists without
+        // its mark, and a batch refused or in conflict writes neither (Paykit spec 8.3,
+        // "Manual only").
+        match self
+            .hand_period_mark(&period_target, held_period.as_ref(), request, &period)
+            .await?
+        {
+            Some(write) => record_writes.push(write),
+            None => conditions.push(self.app.record_condition(&period_record_key).await?),
+        }
+        let entry = JournalEntry {
+            attempt_id: AttemptId::generate()?.to_text(),
+            obligation,
+            payee: request.payee,
+            request_hash: Some(pubky_switch_core::enc::b64(&request.request_hash)),
+            natural_key: period_target.natural_key.clone(),
+            amount: KeptAmount::of(&body.amount),
+            payment_amount: KeptAmount::of(&payment_amount),
+            destination,
+            deadline,
+            stage: Stage::Recorded,
+            step: None,
+            label: body.label.as_ref().map(|l| l.as_str().to_owned()),
+            payment_reference: Some(body.payment_reference.as_str().to_owned()),
+            // A subscription is accepted before its periods are paid (Paykit spec 8.2).
+            acceptance_owed: false,
+            acceptance_msg_id: None,
+            acceptance_plaintext: None,
+            acceptance_cert: None,
+            acceptance_released: false,
+            rail_proof: None,
+            paid_at_ms: None,
+            proof_msg_id: None,
+            restored: false,
+            journaled_at_ms: self.now(),
+            carrier: None,
+            carrier_record: None,
+            attempt_proof: None,
+            failed_by_method: false,
+            request: Some(KeptMessage::of(&stored)),
+            record_held: false,
+            transfer_bound: Some(bound),
+            price,
+            failed_on_claim: false,
+            billing_period: Some(KeptPeriod::of(&period)),
+        };
+        self.execute(Plan {
+            entry,
+            record: target,
+            carrier,
+            step,
+            reserve,
+            create: None,
+            on_record: true,
+            by: Initiator::User,
+            unconfirmed: options.unconfirmed_identity_confirmed,
+            blocked_confirmed: options.blocked_confirmed,
+            end_hold,
+            conditions,
+            record_writes,
+        })
+        .await
+    }
+
+    /// The attempt's `server_time_in(s, null)` on a Billing Period (Paykit spec 8.2, "Not
+    /// before its start"): `s` the period's start once the latest service time verified is
+    /// at or past it; before it, the period is paid only by the user who confirmed paying
+    /// it early, and `s` is that latest service time, so the service never applies the
+    /// attempt before the user agreed.
+    fn not_before(&self, period: &PeriodRef, options: &PayOptions) -> Result<Condition> {
+        let start = match self.service_time() {
+            Some(t) if t >= period.starts_at => period.starts_at,
+            Some(t) if options.early_payment_confirmed.is_some() => t,
+            _ => return Err(Refusal::PeriodNotStarted.into()),
+        };
+        Ok(Condition::ServerTimeIn {
+            start: Some(start),
+            end: None,
+        })
+    }
+
+    /// The period record's write in the batch of an attempt on `period` the user started by
+    /// hand (Paykit spec 8.3, "Manual only"; Paykit wire 5.3): the record `held` with
+    /// `manual_only`, every other member kept, at the version read, or, with none, created
+    /// holding the mark and no message, built on no version. `None` for a record holding
+    /// the mark already, which the attempt is only conditioned on.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::NotNow`] for a period record held whose value doesn't read, never written
+    /// over; the client's errors.
+    async fn hand_period_mark(
+        &mut self,
+        target: &ActivityTarget,
+        held: Option<&ActivityRecord>,
+        request: &RequestRef,
+        period: &PeriodRef,
+    ) -> Result<Option<(Vec<Condition>, OpKind)>> {
+        let mut next = match held {
+            Some(record) if record.manual_only => return Ok(None),
+            Some(record) => record.clone(),
+            None => {
+                let content = self
+                    .app
+                    .shared_record(&self.activity_key(target)?)
+                    .await?
+                    .map(|held| held.content);
+                if !matches!(content, None | Some(RecordContent::Deleted)) {
+                    return Err(period_record_unread());
+                }
+                bare_period_record(request, period)
+            }
+        };
+        next.manual_only = true;
+        Ok(Some(
+            self.app
+                .record_op(&target.record_target(), Some(&next.to_json()?), Vec::new())
+                .await?,
+        ))
+    }
+
+    /// The request record's write in the batch of an attempt on the Billing Period starting
+    /// at `start`, when `record`, at `target`, doesn't list it in `attempted_periods`
+    /// (Paykit spec 8.2): the period added at the record's next version, and every listed
+    /// period whose claim, read now, has no open attempt dropped, each with a `claim_step`
+    /// condition at the step read, so an attempt on it meanwhile fails the batch. `None` for
+    /// a period listed already, whose attempt writes no record.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::AttemptedPeriodsFull`] with 16 listed and none finished; the client's
+    /// errors.
+    async fn attempted_write(
+        &mut self,
+        target: &ActivityTarget,
+        record: &ActivityRecord,
+        request: &RequestRef,
+        start: u64,
+    ) -> Result<Option<(Vec<Condition>, OpKind)>> {
+        if record.attempted_periods.contains(&start) {
+            return Ok(None);
+        }
+        let (finished, conditions) = self.finished_periods(record, request).await?;
+        let list = attempted_with(&record.attempted_periods, start, &finished)
+            .ok_or(Refusal::AttemptedPeriodsFull)?;
+        let mut next = record.clone();
+        next.attempted_periods = list;
+        Ok(Some(
+            self.app
+                .record_op(&target.record_target(), Some(&next.to_json()?), conditions)
+                .await?,
+        ))
+    }
+
+    /// The periods `record` lists in `attempted_periods` whose claims, read now, have no
+    /// open attempt, with the `claim_step` condition of each at the step read (Paykit spec
+    /// 8.2, "Attempted periods").
+    pub(crate) async fn finished_periods(
+        &mut self,
+        record: &ActivityRecord,
+        request: &RequestRef,
+    ) -> Result<(Vec<u64>, Vec<Condition>)> {
+        let mut finished = Vec::new();
+        let mut conditions = Vec::new();
+        for listed in &record.attempted_periods {
+            let claim_key = self.obligation(&request.payee, &request.request_hash, *listed);
+            let view = self.app.read_claim(&claim_key).await?.map(|read| read.view);
+            if let Some(step) = finished_step(view.as_ref()) {
+                finished.push(*listed);
+                conditions.push(Condition::ClaimStep { claim_key, step });
+            }
+        }
+        Ok((finished, conditions))
     }
 }
 

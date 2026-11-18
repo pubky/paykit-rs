@@ -28,7 +28,7 @@ const LATER_SECRET: [u8; 32] = [0x4f; 32];
 /// service recovering the account at the next generation, routed at [`SWITCH_ORIGIN`], the
 /// next `identity.json` naming it with `recovery_from`, delivered there and published; then
 /// the old service is unreachable.
-fn declare_loss(w: &World) {
+pub(crate) fn declare_loss(w: &World) {
     declare_loss_of(w, ALICE_ORIGIN, NEXT_SECRET);
 }
 
@@ -64,7 +64,7 @@ fn declare_loss_of(w: &World, lost_origin: &str, secret: [u8; 32]) -> Arc<Script
 /// `app` follows the loss: its own `identity.json` from the Homeserver, then reads at the new
 /// service until its steps of the recovery have run, and its reconciliation ends. Returns the
 /// end of the loss's residual window.
-async fn follow_loss(app: &mut Paykit) -> u64 {
+pub(crate) async fn follow_loss(app: &mut Paykit) -> u64 {
     app.app_mut().refresh_identity().await.unwrap();
     for _ in 0..4 {
         app.receive(None).await.unwrap();
@@ -1563,7 +1563,7 @@ async fn test_provider_loss_the_final_activity_read_precedes_the_payment_method_
 }
 
 /// The doubt a payment was refused with, as [`Refusal::MayBePaid`] shows it.
-fn doubt_of(paid: &paykit_sdk::Result<PayOutcome>) -> PaymentDoubt {
+pub(crate) fn doubt_of(paid: &paykit_sdk::Result<PayOutcome>) -> PaymentDoubt {
     match paid.as_ref().err().and_then(PaykitError::refusal) {
         Some(Refusal::MayBePaid {
             doubt: Some(doubt), ..
