@@ -3536,7 +3536,7 @@ impl Paykit {
                 let proof = self.own_copy(proof)?;
                 if activity::names_details_not_held(&record, &proof) {
                     let details = entry
-                        .selected_rate_details(&own)?
+                        .selected_rate_details(&self.identity())?
                         .ok_or_else(PaykitError::corrupt)?;
                     changed |= activity::place(&mut record, Role::PeriodDetails, details);
                     if activity::names_details_not_held(&record, &proof) {
