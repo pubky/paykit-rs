@@ -430,6 +430,15 @@ pub(crate) fn restore_paykit_layer(
     let own_cert = restoring.cert();
     let blind = |input: &[u8]| restoring.blind(input);
     let binder = state::Binder::new(own, own_cert, &blind);
+    let mut settlement_marks = std::collections::BTreeMap::new();
+    for (key, value) in restoring
+        .previous_local_scan(key::SETTLEMENT_MARKS.as_bytes())
+        .map_err(|_| "the installation's settlement marks cannot be read")?
+    {
+        state::restored::<crate::settlement_marks::ObservedMark>(&key, &value, &binder)
+            .map_err(|_| "invalid retained settlement mark")?;
+        settlement_marks.insert(key, value);
+    }
     let mut history = crate::deletions::RestoredReceipts::default();
     for prefix in [
         key::PAYEE_DELETIONS,
@@ -660,6 +669,12 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
+            StateKey::SettlementMark { .. } => {
+                state::restored::<crate::settlement_marks::ObservedMark>(&key, &value, &binder)
+                    .map_err(|_| "invalid restored settlement mark")?;
+                settlement_marks.insert(key, value);
+                continue;
+            }
             family @ (StateKey::PayeeDeletion { .. }
             | StateKey::RetainedReceipt(..)
             | StateKey::CreditHold(_)) => {
@@ -810,6 +825,11 @@ pub(crate) fn restore_paykit_layer(
     )
     .map_err(|_| String::from("the restore's block widening can't be written"))?;
     writes.push(widening);
+    writes.extend(
+        settlement_marks
+            .into_iter()
+            .map(|(key, value)| LocalWrite::Put { key, value }),
+    );
     writes.extend(
         history
             .writes()
@@ -1194,6 +1214,14 @@ impl Protocol for PaykitProtocol {
     /// takes every label's records, and one holding `paykit_request:<label>` its label's.
     fn collections(&self) -> Vec<SwitchCollection> {
         crate::hold::RecordSide::All.collections()
+    }
+
+    fn observe_record(
+        &self,
+        observation: &pubky_switch_client::app::RecordObservation<'_>,
+        context: &ReceiveContext<'_>,
+    ) -> Result<Vec<LocalWrite>, StoreFailure> {
+        crate::settlement_marks::observe(observation, context)
     }
 
     /// The mark of what the app has seen in a record: the newest value it took that reads

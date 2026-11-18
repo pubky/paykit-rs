@@ -1054,6 +1054,24 @@ impl Stored for KeyWaitMark {
     }
 }
 
+impl sealed::Sealed for crate::settlement_marks::ObservedMark {}
+
+impl Stored for crate::settlement_marks::ObservedMark {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let StateKey::SettlementMark { record, mark } = family else {
+            return corrupt();
+        };
+        if self.bucket >= paykit_lib::derive::SETTLEMENT_BUCKETS
+            || self.mark != *mark
+            || paykit_lib::records::SettlementMark::from_bytes(mark).is_err()
+            || binder.record_key(&crate::settlement_marks::target(self.bucket))? != *record
+        {
+            return corrupt();
+        }
+        Ok(())
+    }
+}
+
 impl sealed::Sealed for crate::deletions::PayeeDeletion {}
 
 impl Stored for crate::deletions::PayeeDeletion {
@@ -1188,6 +1206,7 @@ pub(crate) mod key {
 
     pub(crate) const RETAINED_RECEIPTS: &str = "rc/";
     pub(crate) const CREDIT_HOLDS: &str = "ch/";
+    pub(crate) const SETTLEMENT_MARKS: &str = "sm/";
     pub(crate) fn retained_receipt(hash: &[u8; 32]) -> String {
         format!("{RETAINED_RECEIPTS}{}", b64(hash))
     }
@@ -1492,6 +1511,11 @@ pub(crate) mod key {
 /// every builder's key parses to its own family, so the two can't drift.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StateKey {
+    /// A complete mark observed at the permanently bound settlement bucket key.
+    SettlementMark {
+        record: [u8; 32],
+        mark: [u8; paykit_lib::records::SETTLEMENT_MARK_LEN],
+    },
     /// A signed receipt, bound to its record and signed receipt hash.
     RetainedReceipt([u8; 32]),
     /// A credit restriction on a record from the previous installation.
@@ -1685,6 +1709,17 @@ impl StateKey {
             _ => {
                 let (family, rest) = text.split_once('/')?;
                 match family {
+                    "sm" => {
+                        let (record, mark) = rest.split_once('/')?;
+                        let bytes = pubky_switch_core::enc::unb64_array(mark).ok()?;
+                        if pubky_switch_core::enc::b64(&bytes) != mark {
+                            return None;
+                        }
+                        Self::SettlementMark {
+                            record: b64_32(record)?,
+                            mark: bytes,
+                        }
+                    }
                     "rc" => Self::RetainedReceipt(b64_32(rest)?),
                     "ch" => Self::CreditHold(b64_32(rest)?),
                     "del" => {

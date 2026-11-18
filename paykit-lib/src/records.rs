@@ -2726,6 +2726,22 @@ impl SeenMarks {
         }
     }
 
+    /// Restore marks that the owner previously retained from verified reads of this
+    /// bucket. Distinct occurrences for one tag remain distinct evidence.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the bucket number is outside the wire range.
+    pub fn from_retained(bucket: u16, mut marks: Vec<SettlementMark>) -> Result<Self> {
+        ensure(
+            bucket < SETTLEMENT_BUCKETS,
+            "Paykit wire 5.7: invalid settlement bucket number",
+        )?;
+        marks.sort();
+        marks.dedup();
+        Ok(Self { bucket, marks })
+    }
+
     /// The bucket the marks were read from.
     pub fn bucket(&self) -> u16 {
         self.bucket
@@ -3233,12 +3249,35 @@ impl SettlementBucket {
     /// [`Error::Invalid`], [`Error::Validation`] or [`Error::Switch`]: the reader doesn't act
     /// on it and flags it.
     pub fn bind(json: &[u8], bucket: u16, naming_key: &NamingKey, key: &[u8; 32]) -> Result<Self> {
-        let record = Self::read(json, bucket)?;
+        Self::bind_with_blinding(json, bucket, key, |input| naming_key.blind(input))
+    }
+
+    /// Bind a bucket using the host's naming-key operation (Paykit wire 5.7).
+    ///
+    /// # Errors
+    ///
+    /// The same errors as [`Self::bind`] for an invalid bucket or a different key.
+    pub fn bind_with_blinding(
+        json: &[u8],
+        bucket: u16,
+        key: &[u8; 32],
+        blind: impl FnOnce(&[u8]) -> [u8; 32],
+    ) -> Result<Self> {
         ensure(
-            &Self::record_key(bucket, naming_key)? == key,
+            bucket < SETTLEMENT_BUCKETS,
+            "Paykit wire 5.7: invalid settlement bucket number",
+        )?;
+        let collection = Collection::Settlements;
+        let expected = pubky_switch_core::ident::record_key_from_blinded(
+            collection.name(),
+            &blind(&natural_key::settlement_bucket(bucket)),
+            &collection.fixed_policy().hash()?,
+        );
+        ensure(
+            &expected == key,
             "Paykit wire 5.7: the record isn't at the key of its bucket",
         )?;
-        Ok(record)
+        Self::read(json, bucket)
     }
 
     /// Write the bucket value, with the members it doesn't know as it read them (Paykit wire
