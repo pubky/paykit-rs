@@ -832,6 +832,10 @@ impl Paykit {
     /// An outgoing method may make the restore's first read before preparing its effects.
     /// This receive includes that read's events and effects in its summary, then its own.
     /// After a reload, the client still holds unacknowledged duty events for the host.
+    /// When a deletion stops a record job, the host can read [`AppEvent::RecordJobStopped`]
+    /// from the report. The message protocol and the record collection's protocol can each
+    /// retrieve and acknowledge the notice through their own event queue. The record version
+    /// and `item_hash` identify the signed delete so the collection owner can reconsider the write.
     ///
     /// A receive that returns an error shows no report. When the client's read returned
     /// before the error, the client counts the duty events the read raised as handed to the
