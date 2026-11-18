@@ -8,6 +8,9 @@
 //! Development stores containing the earlier separate reservation fail validation. An
 //! unresolved reservation from that format cannot establish whether the batch was kept.
 
+pub(crate) mod history;
+
+use history::PublicationHistory;
 use std::collections::{BTreeMap, BTreeSet};
 
 use paykit_lib::bodies::{ListEndpoint, PrivatePaymentList, PRIVATE_LIST_MAX_AGE_MS};
@@ -47,49 +50,11 @@ fn counter_unavailable() -> Refusal {
     )
 }
 
-/// Only a publication signed by this app supplies its retained floor (Paykit wire 5.8).
-/// The client checks every verified write from another app before calling `record_seen`.
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct PublicationFloor {
-    #[serde(with = "pubky_switch_core::enc::serde_b64")]
-    writer: [u8; 16],
-    #[serde(with = "pubky_switch_core::enc::serde_b64")]
-    recipient: [u8; 32],
-    generation: u64,
-    counter: u64,
-}
-
-impl PublicationFloor {
-    pub(crate) fn mark(writer: [u8; 16], value: &[u8]) -> Option<Vec<u8>> {
-        let publication = ListPublicationRecord::read(value).ok()?;
-        if publication.publisher != writer {
-            return None;
-        }
-        serde_json::to_vec(&Self {
-            writer,
-            recipient: publication.recipient,
-            generation: publication.generation,
-            counter: publication.counter,
-        })
-        .ok()
-    }
-
-    fn for_target(
-        bytes: &[u8],
-        publisher: [u8; 16],
-        recipient: [u8; 32],
-        generation: u64,
-    ) -> Result<u64> {
-        let floor: Self = serde_json::from_slice(bytes).map_err(|_| counter_unavailable())?;
-        if floor.writer != publisher
-            || floor.recipient != recipient
-            || floor.generation != generation
-        {
-            return Err(counter_unavailable().into());
-        }
-        Ok(ListVersion::new(generation, floor.counter)?.counter())
-    }
+/// A native cache mark for identifying a foreign replacement of this app's counter.
+/// It supplies neither a version nor a recipient. The qualified history is owner-local.
+pub(crate) fn own_counter_mark(writer: [u8; 16], value: &[u8]) -> Option<Vec<u8>> {
+    let record = ListPublicationRecord::read(value).ok()?;
+    (record.publisher == writer).then(|| vec![1])
 }
 
 /// The client calls this only for a verified write by a different app. The publishing
@@ -103,8 +68,7 @@ pub(crate) fn foreign_publication(
         Ok(current) => current,
         Err(error) => return Some(error.to_string()),
     };
-    let retained = seen.and_then(|bytes| serde_json::from_slice::<PublicationFloor>(bytes).ok());
-    if own == Some(current.publisher) || retained.is_some() {
+    if own == Some(current.publisher) || seen == Some(&[1]) {
         return Some("Paykit wire 5.8: the write is not by the publisher of this counter".into());
     }
     None
@@ -202,6 +166,7 @@ pub(crate) struct RestoredPublications {
     batches: BTreeMap<PublicationKey, PublicationIds>,
     applied: BTreeSet<PublicationKey>,
     floors: BTreeMap<[u8; 32], ListReservation>,
+    observed: BTreeMap<Vec<u8>, PublicationHistory>,
     recipients: BTreeSet<[u8; 32]>,
 }
 
@@ -241,12 +206,34 @@ impl RestoredPublications {
         Ok(())
     }
 
+    pub(crate) fn observed(
+        &mut self,
+        key: &[u8],
+        bytes: &[u8],
+        binder: &state::Binder<'_>,
+    ) -> Result<()> {
+        let history = state::restored::<PublicationHistory>(key, bytes, binder)?;
+        self.recipients.insert(history.floor.recipient);
+        if let Some(held) = self.observed.get_mut(key) {
+            held.merge(history)?;
+        } else {
+            self.observed.insert(key.to_vec(), history);
+        }
+        Ok(())
+    }
+
     pub(crate) fn writes(self) -> Result<Vec<LocalWrite>> {
         let mut writes = Vec::new();
         for (original, ids) in self.batches {
             if !self.applied.contains(&original) {
                 writes.push(original.write(&ids)?);
             }
+        }
+        for (key, history) in self.observed {
+            writes.push(LocalWrite::Put {
+                key,
+                value: state::encode(&history)?,
+            });
         }
         for (recipient, issue) in self.floors {
             writes.push(state::local_put(
@@ -351,21 +338,49 @@ fn current_publication(record: &SharedRecord) -> Result<ListPublicationRecord> {
     Ok(publication)
 }
 
+fn bound_publication(
+    record: &SharedRecord,
+    derive: impl FnOnce(
+        &RecordTarget,
+    ) -> std::result::Result<[u8; 32], pubky_switch_client::app::AppError>,
+) -> Result<ListPublicationRecord> {
+    let publication = current_publication(record)?;
+    let expected = target(
+        &publication.publisher,
+        &publication.recipient,
+        publication.generation,
+    );
+    if record.collection != COLLECTION
+        || record.policy != expected.collection.policy
+        || derive(&expected)? != record.key
+    {
+        return Err(counter_unavailable().into());
+    }
+    Ok(publication)
+}
+
 impl Paykit {
-    fn bound_publication(&self, record: &SharedRecord) -> Result<ListPublicationRecord> {
-        let publication = current_publication(record)?;
-        let expected = target(
-            &publication.publisher,
-            &publication.recipient,
-            publication.generation,
-        );
-        if record.collection != COLLECTION
-            || record.policy != expected.collection.policy
-            || self.app.record_key(&expected)? != record.key
-        {
-            return Err(counter_unavailable().into());
+    async fn publication_at(&self, record: &SharedRecord) -> Result<ListPublicationRecord> {
+        let current = bound_publication(record, |target| self.app.record_key(target))?;
+        if current.publisher == self.app_id() {
+            let history = self
+                .local_get::<PublicationHistory>(&key::publication_history(&record.key))
+                .await?
+                .ok_or_else(counter_unavailable)?;
+            history.check_current(&current)?;
+            if let Some(applied) = self
+                .local_get::<ListReservation>(&key::list_reservation(&current.recipient))
+                .await?
+                .filter(|issue| issue.generation == current.generation)
+            {
+                if applied.counter > current.counter
+                    || (applied.counter == current.counter && !applied.matches(&current))
+                {
+                    return Err(counter_unavailable().into());
+                }
+            }
         }
-        Ok(publication)
+        Ok(current)
     }
 
     /// Set the reusable Private Payment List. Each chosen contact is owed the changed
@@ -463,7 +478,7 @@ impl Paykit {
             let page = self.app.list_collection(&collection()).await?;
             let mut undiscovered = page.more;
             for held in self.app.records_of(COLLECTION).await? {
-                let Ok(prior) = self.bound_publication(&held) else {
+                let Ok(prior) = self.publication_at(&held).await else {
                     // A later key or a readable successor can still identify its recipient.
                     undiscovered |= held.content != RecordContent::Deleted;
                     continue;
@@ -595,29 +610,29 @@ impl Paykit {
         let publisher = self.app_id();
         let target = target(&publisher, &recipient, generation);
         let key = self.app.record_key(&target)?;
-        let seen = self.app.record_seen(&key).await?;
-        let applied = self
-            .local_get::<ListReservation>(&key::list_reservation(&recipient))
-            .await?
-            .filter(|issue| issue.generation == generation);
+
         let (counter, unknown) = match self.app.read_record_fresh(&target).await? {
             RecordRead::Fresh(held) => {
-                let current = self.bound_publication(&held)?;
+                let current = self.publication_at(&held).await?;
                 (current.counter, current.unknown)
             }
             RecordRead::Kept {
                 record: None,
                 reason: KeptReason::NotFound,
-            } if seen.is_none() && applied.is_none() => (0, UnknownMembers::default()),
+            } if self
+                .local_get::<PublicationHistory>(&key::publication_history(&key))
+                .await?
+                .is_none()
+                && self
+                    .local_get::<ListReservation>(&key::list_reservation(&recipient))
+                    .await?
+                    .is_none_or(|issue| issue.generation != generation)
+                && self.app.record_seen(&key).await?.is_none() =>
+            {
+                (0, UnknownMembers::default())
+            }
             _ => return Err(counter_unavailable().into()),
         };
-        let floor = seen
-            .as_deref()
-            .map(|bytes| PublicationFloor::for_target(bytes, publisher, recipient, generation))
-            .transpose()?;
-        let counter = counter
-            .max(floor.unwrap_or(0))
-            .max(applied.map_or(0, |issue| issue.counter));
         let version = ListVersion::new(generation, counter + 1)?;
         let list = PrivatePaymentList {
             version,
@@ -741,10 +756,9 @@ mod tests {
         let own = issued.publisher;
         let sibling = [9; 16];
         let issued_bytes = issued.to_json().unwrap();
-        let floor = PublicationFloor::mark(own, &issued_bytes).unwrap();
-        assert!(PublicationFloor::mark(sibling, &issued_bytes).is_none());
-        assert!(PublicationFloor::for_target(&issued_bytes, own, issued.recipient, 1).is_err());
-        for seen in [None, Some(floor.as_slice())] {
+        let mark = own_counter_mark(own, &issued_bytes).unwrap();
+        assert!(own_counter_mark(sibling, &issued_bytes).is_none());
+        for seen in [None, Some(mark.as_slice())] {
             for counter in [2, 6, 9_007_199_254_740_991] {
                 let mut observed = issued.clone();
                 observed.counter = counter;
@@ -761,22 +775,13 @@ mod tests {
                 current_publication(&record(&recovered, own)).unwrap(),
                 recovered
             );
-            if let Some(seen) = seen {
-                assert_eq!(
-                    PublicationFloor::for_target(seen, own, issued.recipient, 1).unwrap(),
-                    5
-                );
-                assert!(PublicationFloor::for_target(seen, own, [8; 32], 1).is_err());
-                assert!(PublicationFloor::for_target(seen, own, issued.recipient, 2).is_err());
-                assert!(PublicationFloor::for_target(seen, sibling, issued.recipient, 1).is_err());
-            }
         }
         let mut other = issued;
         other.publisher = sibling;
         let bytes = other.to_json().unwrap();
         assert!(foreign_publication(Some(own), None, Some(&bytes)).is_none());
         assert!(foreign_publication(Some(own), Some(&bytes), Some(&bytes)).is_none());
-        assert!(foreign_publication(Some(own), Some(&floor), Some(&bytes)).is_some());
+        assert!(foreign_publication(Some(own), Some(&mark), Some(&bytes)).is_some());
     }
 
     #[test]

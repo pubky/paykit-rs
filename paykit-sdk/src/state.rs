@@ -644,6 +644,19 @@ impl Stored for SeenRecords {
     }
 }
 
+impl sealed::Sealed for crate::publish::history::PublicationHistory {}
+impl Stored for crate::publish::history::PublicationHistory {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::PublicationHistory(key) => {
+                let cert = binder.cert.ok_or_else(PaykitError::corrupt)?;
+                self.check_binding(key, binder, cert.app_id())
+            }
+            _ => corrupt(),
+        }
+    }
+}
+
 impl sealed::Sealed for crate::publish::ListSettings {}
 impl Stored for crate::publish::ListSettings {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
@@ -1341,6 +1354,7 @@ pub(crate) mod key {
     pub(crate) const LIST_SETTINGS: &str = "list";
     pub(crate) const PUBLICATIONS: &str = "lp/";
     pub(crate) const LIST_RESERVATIONS: &str = "lres/";
+    pub(crate) const PUBLICATION_HISTORY: &str = "lhi/";
     pub(crate) const LIST_RECIPIENTS: &str = "lrec/";
     pub(crate) const LIST_DISCOVERY: &str = "ld";
     pub(crate) const LISTS_READ: &str = "lr";
@@ -1586,6 +1600,10 @@ pub(crate) mod key {
         format!("{PUBLICATIONS}{}/", b64(recipient))
     }
 
+    pub(crate) fn publication_history(record: &[u8; 32]) -> String {
+        format!("{PUBLICATION_HISTORY}{}", b64(record))
+    }
+
     pub(crate) fn list_reservation(recipient: &[u8; 32]) -> String {
         format!("{LIST_RESERVATIONS}{}", b64(recipient))
     }
@@ -1636,6 +1654,7 @@ pub(crate) enum StateKey {
     ListSettings,
     ListRecipient([u8; 32]),
     ListReservation([u8; 32]),
+    PublicationHistory([u8; 32]),
     Publication(PublicationKey),
     ListDiscovery,
     /// A signed receipt, bound to its record and signed receipt hash.
@@ -1890,6 +1909,7 @@ impl StateKey {
                         })
                     }
                     "lres" => Self::ListReservation(b64_32(rest)?),
+                    "lhi" => Self::PublicationHistory(b64_32(rest)?),
                     "rc" => Self::RetainedReceipt(b64_32(rest)?),
                     "ch" => Self::CreditHold(b64_32(rest)?),
                     "del" => {
@@ -2724,6 +2744,10 @@ mod tests {
         let attempt = AttemptId::from_bytes([5; 16]);
         let id = "123e4567-e89b-42d3-a456-426614174000";
         let cases: Vec<(String, StateKey)> = vec![
+            (
+                key::publication_history(&pubky),
+                StateKey::PublicationHistory(pubky),
+            ),
             (key::journal(&attempt), StateKey::Journal(attempt)),
             (
                 key::ask(&pubky, 7),

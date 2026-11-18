@@ -101,6 +101,7 @@ pub use paykit::{
 };
 pub use periods::{PeriodDetailsView, PeriodView};
 pub use protocol::{PaykitProtocol, HANDLED_KINDS};
+pub use publish::history::PublicationConflict;
 pub use rail::{
     CandidateError, CandidateId, EndpointSelection, PaymentEndpointCandidate, Rail,
     RailDeclaration, RailError, RailOutcome, RailPaid, RailPayment, Transfer,

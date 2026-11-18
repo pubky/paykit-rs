@@ -1110,3 +1110,102 @@ async fn test_publication_restored_pending_batch_needs_its_matching_applied_writ
     restored.publish_list_to(recipient).await.unwrap();
     assert_eq!(w.record_writes(&w.bob, &key), 3);
 }
+
+#[tokio::test]
+async fn test_publication_observed_by_a_second_installation_survives_selected_restore() {
+    use crate::common::store;
+    use paykit_sdk::PaykitConfig;
+    use pubky_switch_core::enc::b64;
+
+    let w = World::new();
+    let mut publisher = w.shop().await;
+    let _wallet = w.wallet("wallet").await;
+    let initial = publisher.backup().await.unwrap();
+    let mut observer = Paykit::restore(
+        w.env(&w.bob, store()),
+        PaykitConfig::default(),
+        &initial,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    observer.receive(None).await.unwrap();
+    let recipient = w.alice_id();
+    let counter = target(&publisher, &recipient, 1);
+    let key = publisher.app().record_key(&counter).unwrap();
+
+    publisher
+        .set_list_endpoints(offered("lno1observed"))
+        .await
+        .unwrap();
+    publisher.publish_list_to(recipient).await.unwrap();
+    let RecordRead::Fresh(current) = observer
+        .app_mut()
+        .read_record_fresh(&counter)
+        .await
+        .unwrap()
+    else {
+        panic!("the publisher's original issue must be current")
+    };
+    let issued = ListPublicationRecord::read(current.content.value().unwrap()).unwrap();
+    let at = format!("lhi/{}", b64(&key));
+    let history = observer
+        .app()
+        .protocol_get("paykit", at.as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    let stored: serde_json::Value = serde_json::from_slice(&history).unwrap();
+    let floor =
+        ListPublicationRecord::read(&serde_json::to_vec(&stored["d"]["floor"]).unwrap()).unwrap();
+    assert_eq!(floor, issued);
+    // This installation only read the counter. It never prepared or applied this issue.
+    let reservation = format!("lres/{}", b64(&recipient));
+    assert!(observer
+        .app()
+        .protocol_get("paykit", reservation.as_bytes())
+        .await
+        .unwrap()
+        .is_none());
+
+    let selected = observer.backup().await.unwrap();
+    drop(observer);
+    let mut restored = Paykit::restore(
+        w.env(&w.bob, store()),
+        PaykitConfig::default(),
+        &selected,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        restored
+            .app()
+            .protocol_get("paykit", at.as_bytes())
+            .await
+            .unwrap()
+            .unwrap(),
+        history
+    );
+    assert!(restored.publication_conflicts().await.unwrap().is_empty());
+    restored.receive(None).await.unwrap();
+    let RecordRead::Fresh(current) = restored
+        .app_mut()
+        .read_record_fresh(&counter)
+        .await
+        .unwrap()
+    else {
+        panic!("the restored withdrawal must be current")
+    };
+    let withdrawal = ListPublicationRecord::read(current.content.value().unwrap()).unwrap();
+    assert_eq!(withdrawal.counter, issued.counter + 1);
+    assert_ne!(withdrawal.msg_id, issued.msg_id);
+    assert_ne!(withdrawal.message_hash, issued.message_hash);
+    restored
+        .set_list_endpoints(offered("lno1unselected"))
+        .await
+        .unwrap();
+    assert_eq!(w.record_writes(&w.bob, &key), 2);
+}

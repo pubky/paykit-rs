@@ -429,15 +429,19 @@ pub(crate) fn restore_paykit_layer(
     let blind = |input: &[u8]| restoring.blind(input);
     let binder = state::Binder::new(own, own_cert, &blind);
     let mut publications = crate::publish::RestoredPublications::default();
-    for prefix in [key::PUBLICATIONS, key::LIST_RESERVATIONS] {
+    for prefix in [
+        key::PUBLICATIONS,
+        key::LIST_RESERVATIONS,
+        key::PUBLICATION_HISTORY,
+    ] {
         for (key, value) in restoring
             .previous_local_scan(prefix.as_bytes())
             .map_err(|_| "the installation's private list publications cannot be read")?
         {
-            if prefix == key::PUBLICATIONS {
-                publications.pending(&key, &value, &binder)
-            } else {
-                publications.applied(&key, &value, &binder)
+            match prefix {
+                key::PUBLICATIONS => publications.pending(&key, &value, &binder),
+                key::LIST_RESERVATIONS => publications.applied(&key, &value, &binder),
+                _ => publications.observed(&key, &value, &binder),
             }
             .map_err(|_| "invalid retained private list publication")?;
         }
@@ -683,6 +687,12 @@ pub(crate) fn restore_paykit_layer(
             StateKey::Publication(_) => {
                 publications
                     .pending(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                continue;
+            }
+            StateKey::PublicationHistory(_) => {
+                publications
+                    .observed(&key, &value, &binder)
                     .map_err(|_| unread())?;
                 continue;
             }
@@ -1265,7 +1275,7 @@ impl Protocol for PaykitProtocol {
         let own = self.own()?;
         if collection == crate::publish::COLLECTION {
             return value
-                .and_then(|bytes| crate::publish::PublicationFloor::mark(own.cert.app_id(), bytes))
+                .and_then(|bytes| crate::publish::own_counter_mark(own.cert.app_id(), bytes))
                 .or_else(|| seen.map(<[u8]>::to_vec));
         }
         let reads = match (Collection::from_name(collection)?, value) {
@@ -1286,6 +1296,14 @@ impl Protocol for PaykitProtocol {
             (true, Some(v)) => Some(v.to_vec()),
             _ => seen.map(<[u8]>::to_vec),
         }
+    }
+
+    fn observe_record(
+        &self,
+        observation: &pubky_switch_client::app::RecordObservation<'_>,
+        cx: &ReceiveContext<'_>,
+    ) -> Result<Vec<LocalWrite>, StoreFailure> {
+        crate::publish::history::observe(observation, cx)
     }
 
     fn record_put_back(
