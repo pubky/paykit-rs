@@ -28,6 +28,7 @@
 //! | `ans/<seq>/<msg_id>` | a `resend_request` received and still to be answered | |
 //! | `missed/<from>` | entries missed before a provider loss: every counterparty with Paykit activity is asked to re-send | |
 //! | `mi/<from>` | entries missed while lagging, a `missed` item's: the counterparties of open requests and unfinished payments are asked to re-send; kept, with those asked already, while a record whose counterparty it may ask is sealed | |
+//! | `off/<attempt_id>` | the original batch ID for an unresolved offline recording, committed with its signed operations before first submission (Paykit spec 8.4) | yes |
 //! | `j/<attempt_id>` | the payment journal: one payment, from before its `attempt` | yes |
 //! | `side/<msg_id>` | the side a cancellation is sent from, kept with the batch that queues it | |
 //! | `ar/<payee>/<app_id>` | a payee app's records that took part in its comparison, for its public endpoints | |
@@ -1417,6 +1418,10 @@ pub(crate) mod key {
         format!("{JOURNAL}{}", attempt_id.to_text())
     }
 
+    pub(crate) fn offline_batch(attempt: &AttemptId) -> String {
+        format!("off/{}", attempt.to_text())
+    }
+
     /// A rejection or payer's cancellation `msg_id` to `payee`, recorded while sends to it
     /// were held and not queued yet.
     pub(crate) fn held_answer(payee: &[u8; 32], msg_id: &str) -> String {
@@ -1505,6 +1510,8 @@ pub(crate) enum StateKey {
     },
     /// `j/<attempt ID>`: a journal entry.
     Journal(AttemptId),
+    /// The original Switch batch ID of a paid offline attempt.
+    OfflineBatch(AttemptId),
     /// `ask/<sender>/<from>`: a `resend_request` to send.
     Ask { sender: [u8; 32], from_ms: u64 },
     /// `ans/<seq>/<msg_id>`: a `resend_request` received, to answer.
@@ -1698,9 +1705,16 @@ impl StateKey {
                             delete: b64_32(hash)?,
                         }
                     }
-                    "j" => {
+                    "j" | "off" => {
                         let attempt = AttemptId::parse(rest).ok()?;
-                        (attempt.to_text() == rest).then_some(Self::Journal(attempt))?
+                        if attempt.to_text() != rest {
+                            return None;
+                        }
+                        if family == "j" {
+                            Self::Journal(attempt)
+                        } else {
+                            Self::OfflineBatch(attempt)
+                        }
                     }
                     "ask" => {
                         let (sender, from) = rest.split_once('/')?;
@@ -2476,6 +2490,10 @@ mod tests {
         let id = "123e4567-e89b-42d3-a456-426614174000";
         let cases: Vec<(String, StateKey)> = vec![
             (key::journal(&attempt), StateKey::Journal(attempt)),
+            (
+                key::offline_batch(&attempt),
+                StateKey::OfflineBatch(attempt),
+            ),
             (
                 key::ask(&pubky, 7),
                 StateKey::Ask {

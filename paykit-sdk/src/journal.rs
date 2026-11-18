@@ -389,11 +389,7 @@ impl std::fmt::Debug for JournalEntry {
 /// may predate a submission by the original device (Paykit spec 8.4).
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum OfflineRecording {
-    Unsubmitted,
-    Prepared {
-        orphan_after_s: u64,
-        payer_activity: Vec<u8>,
-    },
+    AwaitingRecording,
     Applied,
 }
 
@@ -484,28 +480,14 @@ impl JournalEntry {
         self.amount.amount()?;
         self.destination.check()?;
         self.label()?;
-        if let Some(recording) = &self.offline {
-            if request_hash.is_some()
+        if self.offline.is_some()
+            && (request_hash.is_some()
                 || self.destination.source()? != DestinationSource::Public
                 || self.destination.single_use
                 || self.transfer_bound.is_none()
-                || self.carrier_record.is_none()
-            {
-                return bad();
-            }
-            if let OfflineRecording::Prepared {
-                payer_activity,
-                orphan_after_s,
-            } = recording
-            {
-                if self.deadline.is_none()
-                    || self.rail_proof.is_none()
-                    || payer_activity.is_empty()
-                    || *orphan_after_s == 0
-                {
-                    return bad();
-                }
-            }
+                || self.carrier_record.is_none())
+        {
+            return bad();
         }
         match (&request_hash, &self.payment_reference) {
             (Some(hash), Some(reference)) => {

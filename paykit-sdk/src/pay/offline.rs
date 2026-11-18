@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::journal::OfflineRecording;
-use pubky_switch_client::app::{server_time_in, ProviderStatus};
+use pubky_switch_client::app::{server_time_in, KeptBatchDrop, ProviderStatus};
 
 impl Paykit {
     pub(super) async fn pay_public_offline(
@@ -28,7 +28,7 @@ impl Paykit {
                 options.unconfirmed_identity_confirmed,
             )
             .await??;
-        entry.offline = Some(OfflineRecording::Unsubmitted);
+        entry.offline = Some(OfflineRecording::AwaitingRecording);
         entry.keep_carrier(&carrier);
         self.save(&entry).await?;
         self.set_stage(&mut entry, Stage::Paying).await?;
@@ -171,6 +171,7 @@ impl Paykit {
         entry: &mut JournalEntry,
     ) -> Result<bool> {
         let attempt = entry.attempt()?;
+        let marker = key::offline_batch(&attempt);
         let claim = self.app.read_claim(&entry.obligation).await?;
         let target = ActivityTarget::payer(entry.natural_key.clone());
         // A checked missing-claim answer can outlive the service's retention. A
@@ -198,7 +199,10 @@ impl Paykit {
             .then_some(view.step);
             entry.failed_on_claim = shown.outcome == Outcome::Failed;
             entry.offline = Some(OfflineRecording::Applied);
-            self.save(entry).await?;
+            let mut tx = state::Tx::default();
+            entry.check()?;
+            tx.put(&key::journal(&attempt), entry)?.delete(&marker);
+            self.local_commit(tx).await?;
             return Ok(true);
         }
         if matches!(entry.offline, Some(OfflineRecording::Applied)) {
@@ -206,12 +210,32 @@ impl Paykit {
             entry.step = None;
             return Ok(true);
         }
-        if entry.restored
-            || claim.is_some()
-            || self.app.reconcile_mode()
-            || !matches!(entry.offline, Some(OfflineRecording::Unsubmitted))
-        {
+        if entry.restored || claim.is_some() || self.app.reconcile_mode() {
             return Ok(false);
+        }
+        if let Some(bytes) = self
+            .app
+            .protocol_get(crate::protocol::BACKUP_NAME, marker.as_bytes())
+            .await?
+        {
+            let id: [u8; 16] = bytes.try_into().map_err(|_| PaykitError::corrupt())?;
+            let original = ClaimAttempt {
+                claim_key: entry.obligation,
+                attempt_id: attempt.to_bytes(),
+            };
+            // A marker outlives the client's status retention. Only a definite drop of
+            // this same attempt and batch permits another recording (Paykit spec 8.4).
+            match self.app.kept_attempt(original).await? {
+                Some(KeptBatch {
+                    batch_id,
+                    status:
+                        KeptBatchStatus::Dropped {
+                            reason: KeptBatchDrop::Unsent | KeptBatchDrop::Refused { .. },
+                            ..
+                        },
+                }) if batch_id == id => self.local_delete(&marker).await?,
+                _ => return Ok(false),
+            }
         }
         // Read the payer record before creating it. Existing or unreadable data cannot
         // establish that a previous recording never applied.
@@ -245,13 +269,8 @@ impl Paykit {
         if !matches!(&write.1, OpKind::RecordPut(put) if put.expected_version.is_none()) {
             return Ok(false);
         }
-        entry.deadline = Some(deadline);
-        entry.offline = Some(OfflineRecording::Prepared {
-            orphan_after_s,
-            payer_activity: value,
-        });
-        self.save(entry).await?;
         let mut applied = entry.clone();
+        applied.deadline = Some(deadline);
         applied.offline = Some(OfflineRecording::Applied);
         let op = ClaimOp::attempt(
             entry.obligation,
@@ -265,20 +284,13 @@ impl Paykit {
             .first_send_before(deadline)
             .obligation_deadline(entry.obligation, ObligationDeadline::At(deadline))
             .entry(write)
-            .local(journal_write(&applied)?);
-        let submitted = match self.app.submit_batch(batch).await {
-            Ok(submitted) => submitted,
-            Err(AppError::ExpiredUnsent) => {
-                // This uninterrupted installation started with no candidate. The client
-                // has durably retired this one without a handoff. Only a later resume
-                // may read the claim and time again and prepare a fresh deadline.
-                entry.offline = Some(OfflineRecording::Unsubmitted);
-                entry.deadline = None;
-                self.save(entry).await?;
-                return Ok(false);
-            }
-            Err(error) => return Err(error.into()),
-        };
+            // The original ID and signed operations become durable together (Paykit spec 8.4).
+            .keep_id_at(marker.as_bytes().to_vec())
+            .local(journal_write(&applied)?)
+            .local(LocalWrite::Delete {
+                key: marker.into_bytes(),
+            });
+        let submitted = self.app.submit_batch(batch).await?;
         let proof = submitted.proofs.first().ok_or_else(PaykitError::corrupt)?;
         applied.step = proof.body().step;
         applied.attempt_proof = Some(proof.signed().clone());

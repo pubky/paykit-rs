@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use paykit_lib::{derive::payment_obligation, AttemptId};
 use pubky_switch_client::app::{server_time_in, ClaimOp, ObligationDeadline, OpBatch};
@@ -15,6 +15,14 @@ struct CommitClock {
     inner: MemoryStore,
     clock: Arc<TestClock>,
     advance: AtomicU64,
+    stop: Mutex<Option<RecordingStop>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RecordingStop {
+    BeforeCustody,
+    AfterCustody,
+    Closed,
 }
 
 impl CommitClock {
@@ -29,10 +37,46 @@ impl CommitClock {
         self.clock
             .advance_ms(self.advance.swap(0, Ordering::SeqCst));
     }
+
+    fn apply(
+        &self,
+        writes: WriteBatch,
+        apply: impl FnOnce(WriteBatch) -> Result<CommitOutcome, StoreError>,
+    ) -> Result<CommitOutcome, StoreError> {
+        let queued = Self::queues_batch(&writes);
+        // A recording's attempt index and its signed operations share one commit.
+        let recording = writes.writes().iter().any(|write| {
+            matches!(
+                write, Write::Put { key, .. } if key.starts_with(b"kba/")
+            )
+        });
+        let mut stop = self.stop.lock().unwrap();
+        if *stop == Some(RecordingStop::Closed)
+            || (recording && *stop == Some(RecordingStop::BeforeCustody))
+        {
+            *stop = Some(RecordingStop::Closed);
+            return Err(StoreError::Unavailable);
+        }
+        let outcome = apply(writes)?;
+        if recording
+            && *stop == Some(RecordingStop::AfterCustody)
+            && outcome == CommitOutcome::Applied
+        {
+            *stop = Some(RecordingStop::Closed);
+            return Err(StoreError::Unknown);
+        }
+        if queued && outcome == CommitOutcome::Applied {
+            self.after_queue();
+        }
+        Ok(outcome)
+    }
 }
 
 impl StateStore for CommitClock {
     fn get(&self, namespace: &str, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
+        if *self.stop.lock().unwrap() == Some(RecordingStop::Closed) {
+            return Err(StoreError::Unavailable);
+        }
         self.inner.get(namespace, key)
     }
 
@@ -47,12 +91,11 @@ impl StateStore for CommitClock {
     }
 
     fn commit(&self, writes: WriteBatch) -> Result<(), StoreError> {
-        let queued = Self::queues_batch(&writes);
-        self.inner.commit(writes)?;
-        if queued {
-            self.after_queue();
-        }
-        Ok(())
+        self.apply(writes, |writes| {
+            self.inner.commit(writes)?;
+            Ok(CommitOutcome::Applied)
+        })
+        .map(|_| ())
     }
 
     fn acquire(&self, namespace: &str, owner: StoreOwner) -> Result<AcquireOutcome, StoreError> {
@@ -65,12 +108,9 @@ impl StateStore for CommitClock {
         owner: StoreOwner,
         writes: WriteBatch,
     ) -> Result<CommitOutcome, StoreError> {
-        let queued = Self::queues_batch(&writes);
-        let outcome = self.inner.commit_if(namespace, owner, writes)?;
-        if queued && outcome == CommitOutcome::Applied {
-            self.after_queue();
-        }
-        Ok(outcome)
+        self.apply(writes, |writes| {
+            self.inner.commit_if(namespace, owner, writes)
+        })
     }
 }
 
@@ -80,6 +120,7 @@ async fn record_after_commit(delay: u64) {
         inner: MemoryStore::new(),
         clock: Arc::clone(&world.clock),
         advance: AtomicU64::new(0),
+        stop: Mutex::new(None),
     });
     let mut wallet = world.wallet_on("wallet", store.clone()).await;
     let attempt = AttemptId::generate().unwrap();
@@ -140,6 +181,7 @@ async fn test_offline_public_renews_after_only_candidate_is_retired_unsent() {
         inner: MemoryStore::new(),
         clock: world.clock.clone(),
         advance: AtomicU64::new(0),
+        stop: Mutex::new(None),
     });
     let mut wallet = world.wallet_on("wallet", store.clone()).await;
     let _shop = super::shop_with_endpoint(&world).await;
@@ -186,6 +228,123 @@ async fn test_offline_public_renews_after_only_candidate_is_retired_unsent() {
         pubky_switch_core::claims::Outcome::Done
     );
     assert_eq!(world.rail.pay_calls(&id), 1);
+}
+
+#[tokio::test]
+async fn test_offline_public_reload_on_either_side_of_recording_custody() {
+    use pubky_switch_client::app::{ClaimAttempt, KeptBatchStatus};
+    for stop in [RecordingStop::BeforeCustody, RecordingStop::AfterCustody] {
+        let world = World::new();
+        let store = Arc::new(CommitClock {
+            inner: MemoryStore::new(),
+            clock: Arc::clone(&world.clock),
+            advance: AtomicU64::new(0),
+            stop: Mutex::new(None),
+        });
+        let mut wallet = world.wallet_on("wallet", store.clone()).await;
+        let app_id = wallet.app_id();
+        let mut shop = super::shop_with_endpoint(&world).await;
+        wallet.receive(None).await.unwrap();
+        world.router.remove(world.alice.origin());
+        let id = wallet
+            .pay_without_request(super::payment(&world))
+            .await
+            .outcome
+            .unwrap()
+            .attempt_id();
+        let obligation = payment_obligation(&id);
+        world
+            .router
+            .add_switch(world.alice.origin(), world.alice.switch());
+        *store.stop.lock().unwrap() = Some(stop);
+        let result = wallet.resume_payments().await;
+        assert!(
+            *store.stop.lock().unwrap() == Some(RecordingStop::Closed),
+            "{result:?}"
+        );
+        drop(wallet);
+        *store.stop.lock().unwrap() = None;
+        let mut wallet = world
+            .load_on_clock(&world.alice, store, app_id, world.clock.clone())
+            .await;
+        let attempt = ClaimAttempt {
+            claim_key: obligation,
+            attempt_id: id.to_bytes(),
+        };
+        let retained = wallet.app_mut().kept_attempt(attempt).await.unwrap();
+        assert_eq!(retained.is_some(), stop == RecordingStop::AfterCustody);
+        if let Some(original) = &retained {
+            let backup = wallet.backup().await.unwrap();
+            let mut restored = paykit_sdk::Paykit::restore(
+                world.env(&world.alice, Arc::new(MemoryStore::new())),
+                paykit_sdk::PaykitConfig::default(),
+                &backup,
+                Arc::clone(&world.rail) as Arc<dyn paykit_sdk::Rail>,
+                world.timer(),
+            )
+            .await
+            .unwrap();
+            restored.receive(None).await.unwrap();
+            restored.reconcile().await.unwrap();
+            restored
+                .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+                .await
+                .unwrap();
+            restored.resume_payments().await.unwrap();
+            assert!(restored
+                .app_mut()
+                .kept_batch(original.batch_id)
+                .await
+                .unwrap()
+                .is_none());
+            assert!(restored
+                .app_mut()
+                .read_claim(&obligation)
+                .await
+                .unwrap()
+                .is_none());
+            assert_eq!(
+                restored.payments().await.unwrap()[0].stage,
+                paykit_sdk::Stage::RailPaid
+            );
+        }
+        for _ in 0..2 {
+            wallet.resume_payments().await.unwrap();
+        }
+        if let Some(original) = retained {
+            assert!(matches!(
+                wallet
+                    .app_mut()
+                    .kept_batch(original.batch_id)
+                    .await
+                    .unwrap(),
+                Some(KeptBatchStatus::Applied { .. })
+            ));
+        }
+        let view = wallet
+            .app_mut()
+            .read_claim(&obligation)
+            .await
+            .unwrap()
+            .unwrap()
+            .view;
+        assert_eq!(view.attempts.len(), 1);
+        assert_eq!(
+            view.attempt(&id.to_bytes()).unwrap().outcome,
+            pubky_switch_core::claims::Outcome::Done
+        );
+        assert_eq!(
+            wallet.payments().await.unwrap()[0].stage,
+            paykit_sdk::Stage::Finished
+        );
+        assert_eq!(world.rail.pay_calls(&id), 1);
+        assert_eq!(world.rail.executions(&id), 1);
+        shop.receive(None).await.unwrap();
+        shop.receive(None).await.unwrap();
+        let sales = shop.payee_activity().await.unwrap();
+        assert_eq!(sales.len(), 1);
+        assert_eq!(sales[0].status, paykit_sdk::PayeeStatus::ProofReceived);
+    }
 }
 
 /// Count device reads until dispatch so the changed sample lands on the last

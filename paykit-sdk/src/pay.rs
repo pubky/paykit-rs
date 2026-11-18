@@ -3725,7 +3725,8 @@ impl Paykit {
             };
             if bound_passed(bound, service, now) {
                 let attempt = entry.attempt()?;
-                tx.delete(&key::journal(&attempt));
+                tx.delete(&key::journal(&attempt))
+                    .delete(&key::offline_batch(&attempt));
                 // Its acknowledged notices go with it; one not acknowledged stays for the
                 // host, and goes when acknowledged.
                 for kind in [NoticeKind::PaidAfterFailed, NoticeKind::HeldWithoutPay] {

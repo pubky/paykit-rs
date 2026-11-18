@@ -459,6 +459,8 @@ pub(crate) fn restore_paykit_layer(
         return Err("Paykit's local state in the backup repeats a key".into());
     }
     let mut open = std::collections::BTreeSet::new();
+    let mut recordings = std::collections::BTreeSet::new();
+    let mut awaiting_recording = std::collections::BTreeSet::new();
     let mut journaled = std::collections::BTreeSet::new();
     let mut acknowledged = Vec::new();
     let mut writes = Vec::with_capacity(state.len());
@@ -540,6 +542,12 @@ pub(crate) fn restore_paykit_layer(
             }
             StateKey::NotPaidBeforeLoss(_) => {
                 state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::OfflineBatch(attempt) => {
+                let _: [u8; 16] = value.as_slice().try_into().map_err(|_| unread())?;
+                recordings.insert(attempt);
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -755,10 +763,18 @@ pub(crate) fn restore_paykit_layer(
         if entry.open() && !open.insert(entry.obligation) {
             return Err("Paykit spec 7.2: two open journal entries for one obligation".into());
         }
+        if entry.offline == Some(crate::journal::OfflineRecording::AwaitingRecording)
+            && entry.rail_proof.is_some()
+        {
+            awaiting_recording.insert(attempt);
+        }
         journaled.insert(attempt);
         entry.restored = true;
         let value = state::encode(&entry).map_err(|_| bad())?;
         writes.push(LocalWrite::Put { key, value });
+    }
+    if !recordings.is_subset(&awaiting_recording) {
+        return Err("an offline recording has no matching payment journal entry".into());
     }
     if acknowledged
         .iter()
