@@ -778,6 +778,7 @@ async fn test_periods_payee_takes_a_periods_proof_and_receipts_it() {
     let sale = &shop.payee_activity().await.unwrap()[0];
     let held = sale.periods[0].receipt.as_ref().unwrap();
     assert_eq!(held.billing_period, Some(january()));
+    assert_eq!(held.payee, w.bob_id());
     assert_eq!(held.request_hash, Some(request.request_hash));
 }
 
@@ -5436,19 +5437,16 @@ async fn test_payee_deletion_a_missing_signed_request_leaves_prior_credit_unreso
     Box::pin(credit_after_wrong_period(true)).await;
 }
 
-async fn credit_after_wrong_period(missing_request: bool) {
+/// Alice's payment to the fixed invoice with the proof and receipt signed by both apps.
+async fn signed_period_payment(
+    w: &World,
+    shop: &Paykit,
+    wallet: &Paykit,
+    request: &RequestRef,
+    period: PeriodRef,
+) -> paykit_lib::records::ActivityRecord {
     use paykit_lib::records::{ActivityRecord, ActivitySide, StoredMessage};
-    let w = World::new();
-    let mut shop = w.shop().await;
-    let mut wallet = w.wallet("wallet").await;
-    let mut till = w
-        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
-        .await;
-    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
-    let mut off = january();
-    off.ends_at += 1;
-    let proof = period_proof(&w, shop.app_id(), off).await;
-    let mut elsewhere = proof.clone();
+    let proof = period_proof(w, shop.app_id(), period).await;
     let plaintext = w.sign_as(
         &w.alice,
         "wallet",
@@ -5467,7 +5465,7 @@ async fn credit_after_wrong_period(missing_request: bool) {
     .unwrap();
     let receipt = paykit_lib::bodies::PaymentReceipt {
         attempt_id: AttemptId::from_bytes([9; 16]),
-        billing_period: Some(off),
+        billing_period: Some(period),
         metadata: None,
         payment_reference: None,
     }
@@ -5492,6 +5490,21 @@ async fn credit_after_wrong_period(missing_request: bool) {
     let mut record = ActivityRecord::new(ActivitySide::Payee, w.alice_id());
     record.proof = Some(proof);
     record.receipt = Some(receipt);
+    record
+}
+
+async fn credit_after_wrong_period(missing_request: bool) {
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let mut till = w
+        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        .await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    let mut off = january();
+    off.ends_at += 1;
+    let mut record = signed_period_payment(&w, &shop, &wallet, &request, off).await;
+    let mut elsewhere = record.proof.as_ref().unwrap().message().body.clone();
     record.lost_to_delete = Some([7; 32]);
     let target = payee_period_at(&request, january());
     let key = shop.app().record_key(&target).unwrap();
@@ -5823,4 +5836,136 @@ async fn test_payee_deletion_a_period_confirmation_rereads_its_changed_request()
         .await
         .unwrap()
         .is_empty());
+}
+
+#[tokio::test]
+async fn test_periods_shared_payment_must_belong_to_the_signed_request() {
+    Box::pin(shared_period_payment()).await;
+}
+
+async fn shared_period_payment() {
+    use paykit_lib::records::ActivitySide;
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    let mut period = january();
+    period.ends_at += 1;
+    let mut record = signed_period_payment(&w, &shop, &wallet, &request, period).await;
+    let receipt = record.receipt.take();
+    let target = payee_period_at(&request, january());
+    let key = shop.app().record_key(&target).unwrap();
+    writes_value(&mut shop, &target, &record.to_json().unwrap()).await;
+
+    let checks = w.rail.proof_checks().len();
+    let writes = w.record_writes(&w.bob, &key);
+    let entries = w.alice.switch().entries_from(&w.bob_id());
+    assert!(shop.payee_activity().await.unwrap()[0].periods.is_empty());
+    assert_eq!(shop.verify_payment(&key).await.unwrap(), None);
+    assert_eq!(shop.confirm_payment(&key).await.unwrap(), None);
+    assert_eq!(w.record_writes(&w.bob, &key), writes);
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), entries);
+    assert_eq!(w.rail.proof_checks().len(), checks);
+
+    record.receipt = receipt;
+    writes_value(&mut shop, &target, &record.to_json().unwrap()).await;
+    assert!(shop.payee_activity().await.unwrap()[0].periods.is_empty());
+    assert_eq!(shop.confirm_payment(&key).await.unwrap(), None);
+    record.side = ActivitySide::Payer;
+    record.counterparty = w.bob_id();
+    let target = payer_period_at(&request, january());
+    writes_value(&mut wallet, &target, &record.to_json().unwrap()).await;
+    assert!(wallet.request(&request).await.unwrap().periods.is_empty());
+    assert!(wallet.requests().await.unwrap()[0].periods.is_empty());
+    assert!(wallet
+        .receipts(paykit_sdk::ReceiptsOf::All)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn test_periods_receipt_is_attributed_when_its_signed_request_arrives() {
+    use paykit_lib::records::ActivitySide;
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    wallet.receive(None).await.unwrap();
+    let request = shop
+        .send_request(w.alice_id(), monthly(w.clock.now_ms(), None))
+        .await
+        .unwrap()
+        .request
+        .unwrap();
+    let mut record = signed_period_payment(&w, &shop, &wallet, &request, january()).await;
+    record.side = ActivitySide::Payer;
+    record.counterparty = w.bob_id();
+    let target = payer_period_at(&request, january());
+    writes_value(&mut wallet, &target, &record.to_json().unwrap()).await;
+    let of = paykit_sdk::ReceiptsOf::Period(request, january());
+    assert!(wallet.receipts(of.clone()).await.unwrap().is_empty());
+    wallet.receive(None).await.unwrap();
+    let receipts = wallet.receipts(of).await.unwrap();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(
+        receipts[0].msg_id,
+        record.receipt.as_ref().unwrap().message().msg_id
+    );
+    assert_eq!(receipts[0].payment_reference.as_deref(), Some("plan-1"));
+    let view = wallet.request(&request).await.unwrap();
+    assert!(view.periods[0].paid && view.periods[0].credited);
+    assert_eq!(
+        view.periods[0].receipt.as_ref().unwrap().msg_id,
+        receipts[0].msg_id
+    );
+}
+
+#[tokio::test]
+async fn test_periods_credit_uses_the_current_period_after_a_competing_write() {
+    Box::pin(confirm_current_period()).await;
+}
+
+async fn confirm_current_period() {
+    use paykit_lib::records::{ActivityRecord, ActivitySide};
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let mut till = w
+        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        .await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    let mut record = signed_period_payment(&w, &shop, &wallet, &request, january()).await;
+    record.receipt = None;
+    let target = payee_period_at(&request, january());
+    let key = shop.app().record_key(&target).unwrap();
+    writes_value(&mut shop, &target, &record.to_json().unwrap()).await;
+    till.receive(None).await.unwrap();
+    let mut winning: serde_json::Value =
+        serde_json::from_slice(&record.to_json().unwrap()).unwrap();
+    winning["shop_note"] = serde_json::json!("January invoice");
+    writes_value(&mut till, &target, &serde_json::to_vec(&winning).unwrap()).await;
+
+    let checks = w.rail.proof_checks().len();
+    let writes = w.record_writes(&w.bob, &key);
+    let entries = w.alice.switch().entries_from(&w.bob_id());
+    let id = shop.confirm_payment(&key).await.unwrap().unwrap();
+    assert_eq!(w.rail.proof_checks().len(), checks + 2);
+    assert_eq!(w.record_writes(&w.bob, &key), writes + 1);
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), entries + 1);
+    let held = shop.app().shared_record(&key).await.unwrap().unwrap();
+    let value = held.content.value().unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(value).unwrap()["shop_note"],
+        winning["shop_note"]
+    );
+    let current = ActivityRecord::read(value, &w.bob_id(), ActivitySide::Payee).unwrap();
+    let proof = current.proof.unwrap();
+    let receipt = current.receipt.unwrap();
+    assert_eq!(receipt.message().msg_id, id);
+    assert_eq!(
+        receipt.message().refs,
+        vec![proof.hash(), request.request_hash]
+    );
+    assert_eq!(receipt.body().billing_period(), Some(&january()));
+    assert!(shop.payee_activity().await.unwrap()[0].periods[0].credited);
 }
