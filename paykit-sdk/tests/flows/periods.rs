@@ -5428,13 +5428,26 @@ async fn test_periods_named_endpoints_keep_the_required_app_constraint() {
 }
 
 #[tokio::test]
+async fn test_payee_deletion_rejects_a_signed_receipt_for_a_different_period_start() {
+    let mut period = january();
+    period.starts_at += 1;
+    // The activity key uses whole seconds. The signed start still belongs to this key.
+    assert_eq!(period.start_secs(), january().start_secs());
+    Box::pin(credit_after_wrong_period(period, false)).await;
+}
+
+#[tokio::test]
 async fn test_payee_deletion_rejects_a_signed_receipt_for_a_different_period_end() {
-    Box::pin(credit_after_wrong_period(false)).await;
+    let mut period = january();
+    period.ends_at += 1;
+    Box::pin(credit_after_wrong_period(period, false)).await;
 }
 
 #[tokio::test]
 async fn test_payee_deletion_a_missing_signed_request_leaves_prior_credit_unresolved() {
-    Box::pin(credit_after_wrong_period(true)).await;
+    let mut period = january();
+    period.ends_at += 1;
+    Box::pin(credit_after_wrong_period(period, true)).await;
 }
 
 /// Alice's payment to the fixed invoice with the proof and receipt signed by both apps.
@@ -5470,7 +5483,7 @@ async fn signed_period_payment(
     record
 }
 
-async fn credit_after_wrong_period(missing_request: bool) {
+async fn credit_after_wrong_period(period: PeriodRef, missing_request: bool) {
     let w = World::new();
     let mut shop = w.shop().await;
     let mut wallet = w.wallet("wallet").await;
@@ -5478,9 +5491,7 @@ async fn credit_after_wrong_period(missing_request: bool) {
         .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
         .await;
     let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
-    let mut off = january();
-    off.ends_at += 1;
-    let mut record = signed_period_payment(&w, &shop, &wallet, &request, off).await;
+    let mut record = signed_period_payment(&w, &shop, &wallet, &request, period).await;
     let mut elsewhere = record.proof.as_ref().unwrap().message().body.clone();
     record.lost_to_delete = Some([7; 32]);
     let target = payee_period_at(&request, january());
