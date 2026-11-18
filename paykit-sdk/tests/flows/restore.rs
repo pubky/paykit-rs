@@ -1944,6 +1944,7 @@ async fn test_restore_asks_start_bounded_where_they_are_queued() {
     let backup = wallet.backup().await.unwrap();
     drop(wallet);
     let mut app = restored_bare(&w, &backup).await;
+    crate::common::restore_with_unknown_cursor(&mut app).await;
     let ahead = w.clock.now_ms() + 365 * 24 * crate::common::HOUR_MS;
     let hold = app
         .app()
@@ -2688,15 +2689,9 @@ async fn test_restore_own_rejection_to_a_blocked_payee_waits_until_unblocked() {
         .is_some());
     wallet.unblock(&w.bob_id()).await.unwrap();
     wallet.receive(None).await.unwrap();
-    // The rejection goes, once. So does the ask of the restore's block mark of bob, once:
-    // the ask reads the lists itself, and they show the unblock landed (Paykit spec 8.1,
-    // "Blocked counterparties").
-    let asks = crate::common::asked(&wallet, &w.bob_id()).await.len();
-    assert_eq!(asks, 1);
-    assert_eq!(
-        w.bob.switch().entries_from(&w.alice_id()),
-        before + 1 + asks
-    );
+    // A clean restore sends its queued rejection once without asking for a resend.
+    assert!(crate::common::asked(&wallet, &w.bob_id()).await.is_empty());
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
     assert!(wallet
         .app()
         .protocol_get("paykit", b"ro")
@@ -2704,10 +2699,7 @@ async fn test_restore_own_rejection_to_a_blocked_payee_waits_until_unblocked() {
         .unwrap()
         .is_none());
     wallet.receive(None).await.unwrap();
-    assert_eq!(
-        w.bob.switch().entries_from(&w.alice_id()),
-        before + 1 + asks
-    );
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
     shop.receive(None).await.unwrap();
     assert_eq!(
         shop.payee_activity().await.unwrap()[0].status,

@@ -15,7 +15,7 @@ The `failure_evidence` cases supply already validated counting evidence to the p
 
 ## Settlement marks
 
-`sealed.json` `settlement_marks` covers wire 5.7's bucket values, record keys and sealed
+`identifiers.json` gives the permanent settlement bucket policy and its derived record keys. `sealed.json` `settlement_marks` covers wire 5.7's permanent bucket values, record keys and sealed
 encodings. Its `merges` cases merge a seen copy into a current write: the lower of two marks
 of one settlement, the union of different marks, and, over 9,000 marks, which seen marks fill
 the places left, with no write when the result equals the current write. These cases check

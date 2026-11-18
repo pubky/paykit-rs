@@ -28,16 +28,19 @@
 //! | `ans/<seq>/<msg_id>` | a `resend_request` received and still to be answered | |
 //! | `missed/<from>` | entries missed before a provider loss: every counterparty with Paykit activity is asked to re-send | |
 //! | `mi/<from>` | entries missed while lagging, a `missed` item's: the counterparties of open requests and unfinished payments are asked to re-send; kept, with those asked already, while a record whose counterparty it may ask is sealed | |
+//! | `off/<attempt_id>` | the original batch ID for an unresolved offline recording, committed with its signed operations before first submission (Paykit spec 8.4) | yes |
 //! | `j/<attempt_id>` | the payment journal: one payment, from before its `attempt` | yes |
 //! | `side/<msg_id>` | the side a cancellation is sent from, kept with the batch that queues it | |
 //! | `ar/<payee>/<app_id>` | a payee app's records that took part in its comparison, for its public endpoints | |
 //! | `ct` | the acceptance time of the last Paykit entry the receive step passed | |
-//! | `rh` | the hold a restore set on the open requests (`hold.rs`); never backed up | |
-//! | `hc/<record key>` | the user confirmed a held request; never backed up | |
+//! | `rh` | the cursor verdict, earlier holds and block windows for restored requests (`hold.rs`) | |
+//! | `hc/<record key>` | the user confirmed the current hold on a request | |
+//! | `hb/<record key>` | the backup's confirmation of an earlier hold | |
+//! | `rsc/<record key>` | an Allowance whose consent this restore marked for confirmation, until the held cursor settles it | |
 //! | `pl` | the latest provider-loss boundary followed, retained across restore (`loss.rs`, Paykit spec 7.3) | |
 //! | `pn/<obligation>` | the user states this obligation was not paid before the kept loss; a newer loss clears these statements | |
-//! | `mh` | the hold a `missed` item set on the open requests, bounded by a time: the item's last acceptance time, or, for an item whose end isn't known, a service time verified after the read that handed it (`hold.rs`); never restored | |
-//! | `mu` | set by a `missed` item whose end isn't known: every open request is held, as after a restore, until a read that completes bounds the hold by the service time verified then, into `mh`, and clears it (`hold.rs`); never restored | |
+//! | `mh` | the hold a `missed` item set on the open requests, bounded by a time: the item's last acceptance time, or, for an item whose end isn't known, a service time verified after the read that handed it (`hold.rs`) | |
+//! | `mu` | set by a `missed` item whose end isn't known: every open request is held, as after a restore, until a read that completes bounds the hold by the service time verified then, into `mh`, and clears it (`hold.rs`) | |
 //! | `ml` | set by a `missed` item: the shared records aren't listed by Paykit since, so a record's absence means nothing yet; cleared by Paykit's next listing (`hold.rs`); never restored | |
 //! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read: never written over it, which could drop its single-use marks, until the record reads | |
 //! | `kc/<record key>` | a payee's cancellation of a request, kept until it is placed in the payer's request record | |
@@ -61,7 +64,7 @@
 //! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`); at most `MAX_DROPPED_MARKS` in each family of marks (`pd/`, `ud/`, `kw/`, `bd/`), and a restore refuses a backup holding more | |
 //! | `bd/<sender>` | a mark of a sender's messages dropped for the user's block, each as one never processed (its pair forgotten), as `pd/` holds; it asks that sender once it is neither blocked nor flagged (`marks.rs`, Paykit spec 8.1) | |
 //! | `bl/<sender>/<msg_id>` | a notice of lost messages owed on a block's mark the receive step dropped for the bound while it named a request as queued: the mark's window, when the notice was raised, and the request's `msg_id` and hash; settled in the pass after the read from the outbox's answer on that request, told or dropped (`marks.rs`, `Paykit::settle_lost_owed`); at most `MAX_LOST_OWED`, the receive step holding the next entry that would owe one more; restored, and a restore refuses a backup holding more | |
-//! | `bw/<from_ms>` | a widening of the block marks, from `from_ms` to the time it holds, owed to every counterparty the deny list holds at the next read of the lists: written by a restore and by a `missed` item (`marks.rs`) | |
+//! | `bw/<from_ms>` | a widening of the block marks, from `from_ms` to the time it holds, owed to every counterparty the deny list holds at the next read of the lists: written by a `missed` item (`marks.rs`) | |
 //! | `ud/<sender>` | a mark of a sender's entries dropped unverified, as `pd/` holds (`marks.rs`) | |
 //! | `kw/<sender>` | a mark of a sender's entries the client dropped while they waited for a scope key, as `pd/` holds, with the data epochs they waited for; it asks only while the app holds every key of those epochs (`marks.rs`) | |
 //! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply, or a payee's period details, for a request the app holds no record of yet, or whose record it holds but can't open, read or bind, kept until it does, placed only once the record names its sender, a proof of a payment without a request for the payee's record of its settlement that the app holds but can't read, placed once it reads naming its sender and removed if it names another, or a receipt for a payer record the app holds but can't read and that isn't paused as divergent, kept until it reads, and moved to `dw/` if it reads paused (`receive.rs`), or a counterparty's Allowance answer the receive step took, which it never writes into the record's response itself: a rejection placed after the read, or kept before the app holds its Allowance record, or waiting over a record seen divergent for the user's confirmation; an acceptance kept unplaced if it would fill the record's empty `response` (Paykit spec 8.3.1; `allowances.rs`); each with the feed `seq` its entry was read at, which orders it (`records::KeptOrder`) | |
@@ -72,7 +75,7 @@
 //! | `ae/<record key>/<msg_id>` | a counterparty's `allowance_end`, kept as the stop until the Allowance record holds an end or a rejection; every distinct end is kept, each under its `msg_id` and with the feed `seq` that orders it, until the record shows which one names what it holds (`allowances.rs`, Paykit spec 8.3) | |
 //! | `ac/<record key>` | the consent list: an Allowance this app may pay under, or removed from it for good (`allowances.rs`, Paykit spec 8.3); a restore marks every entry to confirm again | |
 //! | `cf/<record key>` | a second, different proposal or response of an Allowance, with the feed `seq` its entry was read at, kept as the stop until the Allowance record holds `conflicted` (`allowances.rs`, Paykit spec 8.3) | |
-//! | `mc` | set by a `missed` item: every entry of the consent list is to be confirmed again, as after a restore; nothing is consented while it is set, and the next receive marks each entry so and clears it (`allowances.rs`); never restored | |
+//! | `mc` | set by a `missed` item: every entry of the consent list is to be confirmed again, as after a restore; nothing is consented while it is set, and the next receive marks each entry so and clears it (`allowances.rs`) | |
 //! | `en/<msg_id>` | the executor app an `executor_notice` is wrapped to, kept with the batch that queues it | |
 //! | `eo/<record key>` | this app's own crossing end of an Allowance, recorded while sends to its counterparty were held, whose message is sent from the record once they aren't (`allowances.rs`, `Paykit::send_owed_ends`); never restored | |
 
@@ -316,6 +319,11 @@ mod sealed {
 /// binds what it decodes; the type is sealed, and [`decode`] private, so no value of
 /// Paykit's state is read anywhere without its binding.
 pub(crate) trait Stored: sealed::Sealed + DeserializeOwned {
+    /// Decode the bytes written by the owner of this state family.
+    fn read_bytes(bytes: &[u8]) -> Result<Self> {
+        decode(bytes)
+    }
+
     /// Bind the value read at `key`, of family `family`, to it: a corrupt store for a value
     /// of another family, or one naming anything other than what its key names.
     fn bind(&self, key: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()>;
@@ -325,7 +333,7 @@ pub(crate) trait Stored: sealed::Sealed + DeserializeOwned {
 fn bound<T: Stored>(key: &[u8], bytes: &[u8], binder: &Binder<'_>) -> Result<T> {
     let text = std::str::from_utf8(key).map_err(|_| PaykitError::corrupt())?;
     let family = StateKey::parse(key).ok_or_else(PaykitError::corrupt)?;
-    let value = decode::<T>(bytes)?;
+    let value = T::read_bytes(bytes)?;
     value.bind(text, &family, binder)?;
     Ok(value)
 }
@@ -394,6 +402,22 @@ pub(crate) fn restored<T: Stored>(key: &[u8], value: &[u8], binder: &Binder<'_>)
 
 fn corrupt() -> Result<()> {
     Err(PaykitError::corrupt())
+}
+
+impl sealed::Sealed for [u8; 16] {}
+
+/// The original batch ID is written by the Switch client as exactly sixteen bytes.
+impl Stored for [u8; 16] {
+    fn read_bytes(bytes: &[u8]) -> Result<Self> {
+        bytes.try_into().map_err(|_| PaykitError::corrupt())
+    }
+
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::OfflineBatch(_) => Ok(()),
+            _ => corrupt(),
+        }
+    }
 }
 
 impl sealed::Sealed for u64 {}
@@ -497,6 +521,8 @@ impl Stored for bool {
             | StateKey::PayerPassOwed
             | StateKey::RecordExpiryOwed
             | StateKey::HoldConfirmed(_)
+            | StateKey::HoldConfirmedBefore(_)
+            | StateKey::RestoreConsent(_)
             | StateKey::NotPaidBeforeLoss(_)
             | StateKey::FloorOpened(_)
             | StateKey::Taken(_)
@@ -522,17 +548,10 @@ impl Stored for crate::hold::HoldEpoch {
 
 impl sealed::Sealed for RestoreHold {}
 
-/// A restore's hold: counterparties already asked are ascending, each once, and cleared
-/// when all asks are queued (Paykit spec 7.2; `Paykit::queue_restore_asks`).
 impl Stored for RestoreHold {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
-            StateKey::RestoreHold
-                if (!self.asks_queued || self.asked.is_empty())
-                    && self.asked.windows(2).all(|pair| pair[0] < pair[1]) =>
-            {
-                Ok(())
-            }
+            StateKey::RestoreHold if self.is_valid() => Ok(()),
             _ => corrupt(),
         }
     }
@@ -1238,6 +1257,8 @@ pub(crate) mod key {
     /// A `missed` item's hold whose end isn't known yet (`Paykit::bound_missed_hold`).
     pub(crate) const MISSED_END_UNKNOWN: &str = "mu";
     pub(crate) const HOLD_CONFIRMED: &str = "hc/";
+    pub(crate) const HOLD_CONFIRMED_BEFORE: &str = "hb/";
+    pub(crate) const RESTORE_CONSENTS: &str = "rsc/";
     pub(crate) const LISTS_READ: &str = "lr";
     pub(crate) const HELD_LISTS: &str = "lh/";
     pub(crate) const RECORDS_UNLISTED: &str = "nl";
@@ -1438,6 +1459,10 @@ pub(crate) mod key {
         format!("{JOURNAL}{}", attempt_id.to_text())
     }
 
+    pub(crate) fn offline_batch(attempt: &AttemptId) -> String {
+        format!("off/{}", attempt.to_text())
+    }
+
     /// A rejection or payer's cancellation `msg_id` to `payee`, recorded while sends to it
     /// were held and not queued yet.
     pub(crate) fn held_answer(payee: &[u8; 32], msg_id: &str) -> String {
@@ -1458,6 +1483,14 @@ pub(crate) mod key {
 
     pub(crate) fn hold_confirmed(record_key: &[u8; 32]) -> String {
         format!("{HOLD_CONFIRMED}{}", b64(record_key))
+    }
+
+    pub(crate) fn hold_confirmed_before(record_key: &[u8; 32]) -> String {
+        format!("{HOLD_CONFIRMED_BEFORE}{}", b64(record_key))
+    }
+
+    pub(crate) fn restore_consent(record_key: &[u8; 32]) -> String {
+        format!("{RESTORE_CONSENTS}{}", b64(record_key))
     }
 
     pub(crate) fn held_list(record_key: &[u8; 32]) -> String {
@@ -1533,6 +1566,8 @@ pub(crate) enum StateKey {
     },
     /// `j/<attempt ID>`: a journal entry.
     Journal(AttemptId),
+    /// The original Switch batch ID of a paid offline attempt.
+    OfflineBatch(AttemptId),
     /// `ask/<sender>/<from>`: a `resend_request` to send.
     Ask { sender: [u8; 32], from_ms: u64 },
     /// `ans/<seq>/<msg_id>`: a `resend_request` received, to answer.
@@ -1577,6 +1612,10 @@ pub(crate) enum StateKey {
     HeldAnswer { payee: [u8; 32], msg_id: String },
     /// `hc/<record key>`: the user's confirmation of a held request.
     HoldConfirmed([u8; 32]),
+    /// A request confirmation carried from before the restore.
+    HoldConfirmedBefore([u8; 32]),
+    /// An Allowance consent held specifically by this restore.
+    RestoreConsent([u8; 32]),
     /// `lr`: when the lists were last read.
     ListsRead,
     /// `lh/<record key>`: a list held over a record that didn't read.
@@ -1737,9 +1776,16 @@ impl StateKey {
                             delete: b64_32(hash)?,
                         }
                     }
-                    "j" => {
+                    "j" | "off" => {
                         let attempt = AttemptId::parse(rest).ok()?;
-                        (attempt.to_text() == rest).then_some(Self::Journal(attempt))?
+                        if attempt.to_text() != rest {
+                            return None;
+                        }
+                        if family == "j" {
+                            Self::Journal(attempt)
+                        } else {
+                            Self::OfflineBatch(attempt)
+                        }
                     }
                     "ask" => {
                         let (sender, from) = rest.split_once('/')?;
@@ -1765,6 +1811,8 @@ impl StateKey {
                     "kc" => Self::KeptCancellation(b64_32(rest)?),
                     "bk" => Self::OwnBlock(b64_32(rest)?),
                     "hc" => Self::HoldConfirmed(b64_32(rest)?),
+                    "hb" => Self::HoldConfirmedBefore(b64_32(rest)?),
+                    "rsc" => Self::RestoreConsent(b64_32(rest)?),
                     "pn" => Self::NotPaidBeforeLoss(b64_32(rest)?),
                     "fo" => Self::FloorOpened(b64_32(rest)?),
                     "lh" => Self::HeldList(b64_32(rest)?),
@@ -2010,6 +2058,17 @@ mod tests {
         assert!(calls("self.local_get::<u64>(key::CURSOR_TIME)", "local_get").is_empty());
     }
 
+    #[test]
+    fn test_offline_batch_id_requires_its_key_and_native_width() {
+        let attempt = AttemptId::from_bytes([5; 16]);
+        let marker = key::offline_batch(&attempt);
+        let binder = Binder::unblinded([1; 32]);
+        let read = |key: &str, bytes: &[u8]| restored::<[u8; 16]>(key.as_bytes(), bytes, &binder);
+        assert_eq!(read(&marker, &[7; 16]).unwrap(), [7; 16]);
+        assert!(read(&marker, &[7; 15]).is_err());
+        assert!(read(&key::journal(&attempt), &[7; 16]).is_err());
+    }
+
     /// `value` read at `key` as a `T`, through a reader without the naming key.
     fn reads<T: Stored>(key: &str, value: serde_json::Value) -> bool {
         let bytes = serde_json::to_vec(&serde_json::json!({ "v": 1, "d": value })).unwrap();
@@ -2085,27 +2144,69 @@ mod tests {
     }
 
     #[test]
-    fn test_recovery_checkpoint_completed_asked_refused() {
-        assert!(!reads::<RestoreHold>(
-            key::RESTORE_HOLD,
-            serde_json::json!({ "resend_from_ms": 1, "asks_queued": true, "asked": [vec![1u8; 32]] })
-        ));
+    fn test_recovery_checkpoint_rejects_inconsistent_asked_list() {
+        for (asks_queued, asked) in [
+            (true, vec![[1; 32]]),
+            (false, vec![[1; 32], [1; 32]]),
+            (false, vec![[2; 32], [1; 32]]),
+        ] {
+            let hold = RestoreHold {
+                asks_queued,
+                asked,
+                verdict: crate::hold::RestoreVerdict::NotClean,
+                ..RestoreHold::of(0, None)
+            };
+            assert!(!reads::<RestoreHold>(
+                key::RESTORE_HOLD,
+                serde_json::to_value(hold).unwrap(),
+            ));
+        }
     }
 
     #[test]
-    fn test_recovery_checkpoint_duplicate_asked_refused() {
-        assert!(!reads::<RestoreHold>(
-            key::RESTORE_HOLD,
-            serde_json::json!({ "resend_from_ms": 1, "asks_queued": false, "asked": [vec![1u8; 32], vec![1u8; 32]] })
-        ));
-    }
+    fn test_restore_hold_load_and_restore_require_an_owed_resend() {
+        use crate::hold::RestoreVerdict::{Clean, NotClean, Open};
 
-    #[test]
-    fn test_recovery_checkpoint_descending_asked_refused() {
-        assert!(!reads::<RestoreHold>(
-            key::RESTORE_HOLD,
-            serde_json::json!({ "resend_from_ms": 1, "asks_queued": false, "asked": [vec![2u8; 32], vec![1u8; 32]] })
-        ));
+        let check = |hold: RestoreHold, valid: bool| {
+            let bytes = encode(&hold).unwrap();
+            let key = key::RESTORE_HOLD.as_bytes();
+            let binder = Binder::unblinded([1; 32]);
+            assert_eq!(bound::<RestoreHold>(key, &bytes, &binder).is_ok(), valid);
+            assert_eq!(restored::<RestoreHold>(key, &bytes, &binder).is_ok(), valid);
+        };
+        let initial = RestoreHold::of(0, None);
+        let carried = RestoreHold::of(0, Some(&initial));
+        for verdict in [Open, Clean, NotClean] {
+            check(
+                RestoreHold {
+                    verdict,
+                    earlier_asks: true,
+                    ..initial.clone()
+                },
+                false,
+            );
+        }
+        for (verdict, base, partial_is_valid) in [
+            (Open, &initial, false),
+            (Clean, &initial, false),
+            (NotClean, &initial, true),
+            (Open, &carried, true),
+            (Clean, &carried, true),
+            (NotClean, &carried, true),
+        ] {
+            let hold = RestoreHold {
+                verdict,
+                ..base.clone()
+            };
+            check(hold.clone(), true);
+            check(
+                RestoreHold {
+                    asked: vec![[1; 32]],
+                    ..hold
+                },
+                partial_is_valid,
+            );
+        }
     }
 
     #[test]
@@ -2138,6 +2239,8 @@ mod tests {
                     resend_from_ms: 1,
                     asks_queued,
                     asked,
+                    verdict: crate::hold::RestoreVerdict::NotClean,
+                    ..RestoreHold::of(0, None)
                 })
                 .unwrap()
             ));
@@ -2307,7 +2410,7 @@ mod tests {
         let read: OwnResendOwed = serde_json::from_value(stamped).unwrap();
         assert_eq!(read.restored_at_ms, Some(7));
         // A restore's hold at its key only.
-        let hold = serde_json::json!({ "resend_from_ms": 1, "asks_queued": false, "asked": [] });
+        let hold = serde_json::to_value(RestoreHold::of(1, None)).unwrap();
         assert!(reads::<RestoreHold>(key::RESTORE_HOLD, hold.clone()));
         assert!(!reads::<RestoreHold>(key::CURSOR_TIME, hold));
         // A queued ask of the sender and time its key names.
@@ -2520,6 +2623,10 @@ mod tests {
         let cases: Vec<(String, StateKey)> = vec![
             (key::journal(&attempt), StateKey::Journal(attempt)),
             (
+                key::offline_batch(&attempt),
+                StateKey::OfflineBatch(attempt),
+            ),
+            (
                 key::ask(&pubky, 7),
                 StateKey::Ask {
                     sender: pubky,
@@ -2558,6 +2665,14 @@ mod tests {
             (key::OWN_RESEND_OWED.into(), StateKey::OwnResendOwed),
             (key::LISTED_CERT.into(), StateKey::ListedCert),
             (key::hold_confirmed(&pubky), StateKey::HoldConfirmed(pubky)),
+            (
+                key::hold_confirmed_before(&pubky),
+                StateKey::HoldConfirmedBefore(pubky),
+            ),
+            (
+                key::restore_consent(&pubky),
+                StateKey::RestoreConsent(pubky),
+            ),
             (key::LISTS_READ.into(), StateKey::ListsRead),
             (key::DENIED.into(), StateKey::Denied),
             (key::own_block(&pubky), StateKey::OwnBlock(pubky)),
