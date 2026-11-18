@@ -1528,6 +1528,23 @@ async fn test_own_record_restored_changes_wait_for_confirmed_first_read() {
             "{change:?}"
         );
         assert_eq!(restored.app().restore_held_cursor(), None);
+        // The app still needs the last collection page before it can publish.
+        let pending = change_record(&mut restored, change).await.unwrap_err();
+        assert!(
+            matches!(
+                pending,
+                PaykitError::Client(pubky_switch_client::app::AppError::Refused(
+                    pubky_switch_client::app::Refusal::NotNow(_)
+                ))
+            ),
+            "{pending:?}"
+        );
+        assert_eq!(restored.app().restore_held_cursor(), None);
+        assert_eq!(restored.app().record(), &before);
+        assert_eq!(
+            on_homeserver(&w, &restored).unwrap().signed(),
+            published.signed()
+        );
         change_record(&mut restored, change).await.unwrap();
         assert!(restored.app().restore_held_cursor().is_some(), "{change:?}");
         assert_ne!(restored.app().record(), &before, "{change:?}");

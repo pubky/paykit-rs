@@ -1326,7 +1326,7 @@ pub(crate) fn is_not_now(error: &PaykitError) -> bool {
 
 /// How many listing requests the client makes for `cert`: one per collection it reads,
 /// each of one page here.
-fn client_listing_requests(cert: &AppCert) -> usize {
+pub(crate) fn client_listing_requests(cert: &AppCert) -> usize {
     use pubky_switch_client::app::Protocol as _;
     paykit_sdk::PaykitProtocol::new()
         .collections()
@@ -1357,20 +1357,34 @@ async fn test_certificate_renewal_reading_more_lists_its_records_first() {
     assert!(wallet.receive(None).await.is_err());
     let refused = wallet.payee_activity().await.unwrap_err();
     assert!(is_not_now(&refused), "{refused:?}");
-    // The client's listing goes through and Paykit's own, after the read, can't connect:
-    // the read keeps its report, and says the records stay unlisted.
+    // The client's pages succeed. Paykit's next listing request after that read
+    // cannot connect, so the report must carry the outage and keep the records held.
     w.alice
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Unreachable {
             path: "/records".into(),
-            after: client_listing_requests(&wider),
+            after: client_listing_requests(&wider)
+                .min(pubky_switch_client::app::LISTING_PAGES_PER_READ as usize),
         });
     let summary = wallet.receive(None).await.unwrap();
-    assert!(summary.records_unlisted.is_some(), "{summary:?}");
+    assert!(
+        summary
+            .records_unlisted
+            .as_deref()
+            .is_some_and(|why| why.contains("connection failed: scripted")),
+        "{summary:?}"
+    );
     let refused = wallet.payee_activity().await.unwrap_err();
     assert!(is_not_now(&refused), "{refused:?}");
-    // The next read lists them: the till's request shows.
-    wallet.receive(None).await.unwrap();
+    // The next reads finish the remaining pages before the till's request can be shown.
+    let pages = client_listing_requests(&wider);
+    for _ in 0..pages.div_ceil(pubky_switch_client::app::LISTING_PAGES_PER_READ as usize) {
+        let summary = wallet.receive(None).await.unwrap();
+        if summary.records_unlisted.is_none() {
+            break;
+        }
+        assert!(is_not_now(&wallet.payee_activity().await.unwrap_err()));
+    }
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
 }
 
@@ -2741,11 +2755,20 @@ async fn test_certificate_duty_event_raised_by_the_sdks_listing_reaches_a_report
     let mut wallet = w
         .load_with_transport(&w.alice, Arc::clone(&base), me, transport)
         .await;
-    let mut events = Vec::new();
+    let mut events = wallet.receive(None).await.unwrap().report.events;
+    assert_eq!(wallet.app().cert().hash(), wider.hash());
+    // The native read lists the first pages after it acquires the wider keys. The
+    // following SDK call finishes that listing, then lists under the new certificate.
+    let partial = wallet.app_mut().receive(None).await.unwrap();
+    assert!(partial.more);
+    assert!(wallet.app().listing_owed().await.unwrap());
+    assert!(!partial
+        .events
+        .iter()
+        .any(|e| matches!(e, AppEvent::RecordUncheckable { .. })));
     for _ in 0..3 {
         events.extend(wallet.receive(None).await.unwrap().report.events);
     }
-    assert_eq!(wallet.app().cert().hash(), wider.hash());
     assert!(
         events
             .iter()
@@ -3355,8 +3378,24 @@ async fn restored_queued_reply_before_wider_keys(keys_present: bool) {
     .await
     .unwrap();
     assert_eq!(restored.app().restore_held_cursor(), None);
-    let result = restored.flush().await;
+    let mut result = restored.flush().await;
     assert_eq!(restored.app().cert().hash(), wider.hash());
+    if keys_present {
+        // This certificate reads more collections than fit in one native read.
+        assert!(matches!(
+            result,
+            Err(PaykitError::Client(AppError::Refused(
+                ClientRefusal::NotNow(_)
+            )))
+        ));
+        assert_eq!(restored.app().restore_held_cursor(), None);
+        assert!(matches!(
+            restored.message_delivery(&msg_id).await.unwrap(),
+            Some(paykit_sdk::MessageDelivery::Queued { .. })
+        ));
+        assert!(!shop.receive(None).await.unwrap().applied.contains(&msg_id));
+        result = restored.flush().await;
+    }
     let verdict = restored.app().restore_held_cursor();
     if keys_present {
         assert!(verdict.is_some(), "{result:?}");
