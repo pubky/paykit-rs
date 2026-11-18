@@ -1066,3 +1066,164 @@ async fn test_conversion_automatic_payment_ignores_a_manual_transfer_override() 
     );
     nothing_paid(&w, &wallet).await;
 }
+
+/// Alice's wallet, with bob's request for 10 usd without conversion terms to one endpoint,
+/// `endpoint_id`, which the payment method pays and reports transferring exactly the amount
+/// handed to it: the requested amount and asset, as a method that converts by itself would.
+async fn unconverted_request(
+    w: &World,
+    wallet: &mut Paykit,
+    endpoint_id: &str,
+    payload: &str,
+) -> RequestRef {
+    w.rail.set_endpoint_identifiers(vec![endpoint(endpoint_id)]);
+    let mut shop = w.shop().await;
+    let draft = RequestDraft::new(
+        usd("10"),
+        PaymentReference::new("order-unconverted").unwrap(),
+        RequestDestination::Endpoints(
+            [(
+                endpoint(endpoint_id),
+                PaymentEndpointPayload::new(payload).unwrap(),
+            )]
+            .into(),
+        ),
+    )
+    .with_proposal_expires_at_ms(w.clock.now_ms() + 24 * HOUR_MS);
+    let request = request_from(&mut shop, w.alice_id(), draft).await;
+    wallet.receive(None).await.unwrap();
+    request
+}
+
+#[tokio::test]
+async fn test_conversion_automatic_cross_asset_payment_without_terms_refused() {
+    // A request without conversion terms promises no rate: an automatic payment never pays
+    // it to an endpoint of another asset, though the method reports the requested amount.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let request = unconverted_request(&w, &mut wallet, "eur-sepa-iban", "DE00iban").await;
+    let refused = wallet
+        .pay_request_automatically(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::UnsupportedEndpoint(why)) if why.contains("only by hand")),
+        "{refused:?}"
+    );
+    nothing_paid(&w, &wallet).await;
+}
+
+#[tokio::test]
+async fn test_conversion_cross_asset_payment_without_terms_needs_the_confirmed_quote() {
+    // By hand, the payment is refused with what the method would transfer, though that is
+    // the requested amount and asset, and is paid once its user confirms exactly that.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let request = unconverted_request(&w, &mut wallet, "eur-sepa-iban", "DE00iban").await;
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap_err();
+    let Some(Refusal::Transfer { reason, quote }) = refused.refusal() else {
+        panic!("{refused:?}")
+    };
+    assert!(reason.contains("only by hand"), "{reason}");
+    assert_eq!(quote.transfer.amount, Some(usd("10")));
+    nothing_paid(&w, &wallet).await;
+    // Automatic, the confirmation is ignored.
+    let refused = wallet
+        .pay_request_automatically(
+            &request,
+            PayOptions::default().with_transfer_confirmed((**quote).clone()),
+        )
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::UnsupportedEndpoint(_))),
+        "{refused:?}"
+    );
+    nothing_paid(&w, &wallet).await;
+    let outcome = wallet
+        .pay_request(
+            &request,
+            PayOptions::default().with_transfer_confirmed((**quote).clone()),
+        )
+        .await
+        .outcome
+        .unwrap();
+    let PayOutcome::Paid { attempt_id, .. } = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert_eq!(w.rail.paid_amount(&attempt_id), Some(usd("10")));
+}
+
+#[tokio::test]
+async fn test_conversion_cross_asset_payment_in_flight_repeats_only_as_confirmed() {
+    // The first repeat keeps the confirmed transfer. A new amount from the method then
+    // leaves the same attempt uncertain.
+    let w = World::new();
+    idempotent(&w);
+    let mut wallet = w
+        .wallet_with(
+            "wallet",
+            crate::common::store(),
+            crate::common::day_window(),
+        )
+        .await;
+    let request = unconverted_request(&w, &mut wallet, "eur-sepa-iban", "DE00iban").await;
+    let quote = transfer_of(
+        &wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .outcome
+            .unwrap_err(),
+    );
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(
+            &request,
+            PayOptions::default().with_transfer_confirmed(quote),
+        )
+        .await
+        .outcome
+        .unwrap()
+    else {
+        panic!("in flight");
+    };
+    w.clock.advance_ms(60_000);
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(w.rail.pay_call_amounts(&attempt_id), [usd("10"), usd("10")]);
+
+    w.rail.set_transfer_amount(Some(usd("11")));
+    w.clock.advance_ms(60_000);
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        resumed.iter().any(|item| matches!(
+            item, PayOutcome::Uncertain { attempt_id: id, .. } if *id == attempt_id
+        )),
+        "{resumed:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 2);
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_conversion_same_asset_payment_without_terms_pays_automatically() {
+    // An endpoint of the requested asset needs no confirmation: an automatic payment pays
+    // it the requested amount, as before.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let request = unconverted_request(&w, &mut wallet, "usd-ach-account", "acct-1").await;
+    let outcome = wallet
+        .pay_request_automatically(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    let PayOutcome::Paid { attempt_id, .. } = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert_eq!(w.rail.paid_amount(&attempt_id), Some(usd("10")));
+}

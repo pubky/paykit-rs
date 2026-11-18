@@ -548,7 +548,10 @@ impl JournalEntry {
                 || self.paid_amount()?.as_ref() != Some(&paid)
                 || self.transfer_bound.is_none()
                 || endpoint_id.asset_segment() != Some(paid.asset.as_str())
-                || crate::conversion::rate_for(std::slice::from_ref(&rate), &endpoint_id).is_none()
+                || !matches!(
+                    paykit_lib::rate_for_endpoint(std::slice::from_ref(&rate), &endpoint_id),
+                    Ok(Some(_))
+                )
             {
                 return bad();
             }
@@ -655,7 +658,9 @@ impl JournalEntry {
             match (&body.conversion, &self.price) {
                 (_, None) if self.transfer_bound.is_none() => {}
                 (Some(Conversion::Fixed(rates)), price) => {
-                    let expected = crate::conversion::rate_for(rates, &endpoint_id);
+                    let Ok(expected) = paykit_lib::rate_for_endpoint(rates, &endpoint_id) else {
+                        return corrupt();
+                    };
                     match (expected, price) {
                         (Some(expected), Some(price))
                             if price.source == KeptRateSource::Request
