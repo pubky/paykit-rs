@@ -1,4 +1,6 @@
 //! Two independently enrolled payee apps read the receipt for a manually paid Billing Period.
+#![recursion_limit = "256"]
+
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::sync::Arc;
