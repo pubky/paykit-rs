@@ -144,8 +144,8 @@ pub struct AllowanceView {
     pub status: AllowanceStatus,
     /// The executor app the record's current grant names, if it holds one that verifies.
     pub executor_app_id: Option<[u8; 16]>,
-    /// Whether this app's consent list holds it, confirmed since any restore: an executor
-    /// pays under an Allowance only then (Paykit spec 8.3). This version adds no Allowance
+    /// Whether this app holds current consent. A clean restore preserves it. A missed
+    /// item or a restore without a clean verdict requires confirmation (Paykit spec 8.3). This version adds no Allowance
     /// to the list: it accepts none and writes no grant.
     pub consented: bool,
     /// Whether the counterparty is on the identity's deny list, as the app last read it

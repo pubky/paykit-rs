@@ -881,10 +881,11 @@ impl Paykit {
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
+        Box::pin(self.restore_verdict_not_known_holds()).await?;
         let asks_owed = self
             .local_get::<RestoreHold>(key::RESTORE_HOLD)
             .await?
-            .is_some_and(|hold| !hold.asks_queued);
+            .is_some_and(|hold| hold.asks_due());
         if asks_owed {
             self.list_records().await?;
             self.queue_restore_asks().await?;

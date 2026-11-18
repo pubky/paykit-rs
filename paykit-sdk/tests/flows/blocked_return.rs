@@ -313,6 +313,7 @@ async fn test_blocked_return_restore_marks_every_blocked_counterparty() {
     let mut restored = restored;
     // The first read of the lists after the restore marks bob, blocked, from the backup's
     // time on.
+    crate::common::restore_with_unknown_cursor(&mut restored).await;
     restored.receive(None).await.unwrap();
     assert_eq!(block_marks(&restored).await, 1);
 }
