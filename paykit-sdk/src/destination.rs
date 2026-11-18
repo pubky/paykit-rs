@@ -107,7 +107,7 @@ impl Paykit {
         need: Need,
         by: Initiator,
         confirmed: Option<UserConfirmed>,
-        reads: impl FnOnce(&IdentityDoc) -> Option<BoxFuture<'static, R>>,
+        reads: impl FnOnce(&PeerIdentity) -> Option<BoxFuture<'static, R>>,
     ) -> Result<(std::result::Result<PeerIdentity, Refusal>, Option<R>)> {
         let mut reads = Some(reads);
         let mut read: Option<R> = None;
@@ -134,7 +134,7 @@ impl Paykit {
                     }
                 },
             };
-            let started = reads.take().and_then(|start| start(&identity.doc));
+            let started = reads.take().and_then(|start| start(&identity));
             let identity = match switch {
                 None => {
                     if let Some(started) = started {
