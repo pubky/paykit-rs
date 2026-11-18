@@ -34,7 +34,7 @@ use pubky_switch_core::http::ErrorCode;
 use crate::activity::{ActivityTarget, Role};
 use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
-use crate::receipts::{received_receipt, ReceivedReceipt};
+use crate::receipts::{period_request_target, received_receipt, ReceivedReceipt};
 use crate::records::conflict;
 use crate::requests::{cancelled, rejected, request_of, MessageDelivery, SentMessage};
 
@@ -75,11 +75,11 @@ pub struct PeriodView {
     pub details: Vec<PeriodDetailsView>,
     /// The record holds a proof of the period's payment, credited or not.
     pub paid: bool,
-    /// The record holds the payee's receipt: the payment is credited to this period. A
-    /// proof held without it is `paid` and not `credited`, such as one whose settlement
-    /// credits another occurrence already, or one not confirmed yet.
+    /// The payee issued a receipt for this period. The payee shows the credit
+    /// once it holds the signed proof the receipt confirms. The payer can see
+    /// the payee's receipt before it holds the proof (Paykit wire 4.11).
     pub credited: bool,
-    /// The payee's receipt of the period, if the record holds one.
+    /// The receipt shown for the credit.
     pub receipt: Option<ReceivedReceipt>,
 }
 
@@ -112,6 +112,30 @@ pub(crate) fn rate_window(details: &StoredMessage) -> Option<(u64, u64)> {
         paykit_lib::periods::rates_start(details.message().created_at_ms),
         body.expires_at,
     ))
+}
+
+/// A requested payment must belong to the signed request and its payer. A bound
+/// activity already requires all its signed messages to name the same occurrence;
+/// the record key alone identifies only the start of a Billing Period (Paykit wire 4.4, 5.3).
+pub(crate) fn request_for_payment<'a>(
+    parent: &'a ActivityRecord,
+    record: &ActivityRecord,
+    binding: &RecordBinding,
+) -> Option<(&'a StoredMessage, &'a PaymentRequest)> {
+    let (signed, request) = request_of(parent)?;
+    let hash = match binding {
+        RecordBinding::Request { request_hash } if !request.is_recurring() => request_hash,
+        RecordBinding::Period {
+            request_hash,
+            billing_period,
+        } => {
+            request.named_period(billing_period).ok()?;
+            request_hash
+        }
+        _ => return None,
+    };
+    (parent.counterparty == record.counterparty && signed.hash() == *hash)
+        .then_some((signed, request))
 }
 
 /// The view of a period record, `record` held at `key`, of a Billing Period of `request`;
@@ -147,25 +171,29 @@ fn period_view(
             })
         })
         .collect();
+    // The request's reference stays on the request's view.
+    let receipt = received_receipt(key, record, None);
     Some(PeriodView {
         record: key,
         billing_period,
         details,
         paid: record.shows_paid(),
-        credited: record.receipt.is_some(),
-        // The request's reference stays on the request's view.
-        receipt: received_receipt(key, record, None),
+        credited: receipt.is_some(),
+        receipt,
     })
 }
 
-/// The views of `held`, period records of `request` with their keys, in period order.
+/// The period records that belong to the signed request in `parent`, in period order.
 pub(crate) fn period_views(
     held: Vec<([u8; 32], ActivityRecord)>,
-    request: &PaymentRequest,
+    parent: &ActivityRecord,
 ) -> Vec<PeriodView> {
     let mut views: Vec<PeriodView> = held
         .iter()
-        .filter_map(|(key, record)| period_view(*key, record, request))
+        .filter_map(|(key, record)| {
+            let (_, request) = request_for_payment(parent, record, &record.binding().ok()?)?;
+            period_view(*key, record, request)
+        })
         .collect();
     views.sort_by_key(|v| v.billing_period.starts_at);
     views
@@ -362,8 +390,8 @@ impl Paykit {
             ) else {
                 continue;
             };
-            if let Ok(RecordBinding::Period { request_hash, .. }) = record.binding() {
-                out.entry(request_hash)
+            if let Some(parent) = period_request_target(&record, &own, label.as_ref()) {
+                out.entry(self.activity_key(&parent)?)
                     .or_default()
                     .push((held.key, record));
             }
@@ -377,13 +405,7 @@ impl Paykit {
         target: &ActivityTarget,
         bound: &ActivityRecord,
     ) -> Option<ActivityTarget> {
-        let RecordBinding::Period { request_hash, .. } = bound.binding().ok()? else {
-            return None;
-        };
-        Some(ActivityTarget::payee(
-            natural_key::request_record(&self.identity(), &request_hash),
-            target.label().as_ref(),
-        ))
+        period_request_target(bound, &self.identity(), target.label().as_ref())
     }
 
     /// The payee's request record a record at `target`, `bound`, belongs to: itself for a
@@ -755,9 +777,9 @@ mod tests {
         let shown = valid_details(&record, &monthly(None));
         assert_eq!(shown.len(), 1);
         assert_eq!(shown[0].hash(), endpoints_only.hash());
-        let views = period_views(vec![([1; 32], record)], &monthly(None));
-        assert_eq!(views[0].details.len(), 1);
-        assert_eq!(views[0].details[0].msg_id, endpoints_only.message().msg_id);
+        let view = period_view([1; 32], &record, &monthly(None)).unwrap();
+        assert_eq!(view.details.len(), 1);
+        assert_eq!(view.details[0].msg_id, endpoints_only.message().msg_id);
     }
 
     #[test]
