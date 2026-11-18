@@ -541,3 +541,86 @@ async fn test_publication_imported_original_settles_before_a_new_generation_list
         "lno1afterimport"
     );
 }
+
+#[tokio::test]
+async fn test_publication_restored_contact_needs_a_new_sharing_choice() {
+    use crate::common::store;
+    use paykit_sdk::{PaykitConfig, Refusal};
+
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    shop.set_list_endpoints(offered("lno1before"))
+        .await
+        .unwrap();
+    shop.publish_list_to(w.alice_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let backup = shop.backup().await.unwrap();
+    shop.withdraw_list_from(w.alice_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    drop(shop);
+
+    let mut shop = Paykit::restore(
+        w.env(&w.bob, store()),
+        PaykitConfig::default(),
+        &backup,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    shop.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let current = target(&shop, &w.alice_id(), shop.app().own_identity().generation());
+    let key = shop.app().record_key(&current).unwrap();
+    let withdrawn = w.record_writes(&w.bob, &key);
+    assert_eq!(withdrawn, 3, "one issue and both withdrawals");
+    let before_reset = wallet
+        .pay_without_request(UnrequestedPayment::new(w.bob_id(), btc("0.001")))
+        .await
+        .outcome;
+    assert!(
+        matches!(
+            before_reset.as_ref().err().and_then(|e| e.refusal()),
+            Some(Refusal::NoDestination(_))
+        ),
+        "{before_reset:?}"
+    );
+    shop.set_list_endpoints(offered("lno1after")).await.unwrap();
+    shop.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let held = wallet
+        .pay_without_request(UnrequestedPayment::new(w.bob_id(), btc("0.001")))
+        .await
+        .outcome;
+    assert!(
+        matches!(
+            held.as_ref().err().and_then(|e| e.refusal()),
+            Some(Refusal::NoDestination(_))
+        ),
+        "payment {held:?}, selected {:?}, counter writes {}",
+        w.rail
+            .selections()
+            .last()
+            .map(|s| s.0[0].payload.as_str().to_owned()),
+        w.record_writes(&w.bob, &key)
+    );
+    assert_eq!(w.record_writes(&w.bob, &key), withdrawn);
+    assert!(w.rail.all_executions().is_empty());
+
+    shop.publish_list_to(w.alice_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(w.record_writes(&w.bob, &key), withdrawn + 1);
+    let paid = wallet
+        .pay_without_request(UnrequestedPayment::new(w.bob_id(), btc("0.001")))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(
+        w.rail.selections().last().unwrap().0[0].payload.as_str(),
+        "lno1after"
+    );
+}

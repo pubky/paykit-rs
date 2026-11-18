@@ -87,10 +87,8 @@ impl ListRecipient {
         })
     }
 
-    pub(crate) fn restored(mut self) -> Result<Self> {
-        self.choice = random_bytes()?;
-        self.withdraw = true;
-        Ok(self)
+    pub(crate) fn restored(self) -> Result<Self> {
+        Self::new(self.recipient, false)
     }
 }
 
