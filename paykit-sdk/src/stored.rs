@@ -450,7 +450,11 @@ impl Paykit {
             // spec 3.2 step 3, 4.2), and events not for Paykit are skipped above; the name is
             // checked here too, so another protocol's event is never taken for it.
             AppEvent::MemberChanged { protocol, .. } => {
-                protocol.as_str() == paykit_lib::app_record::PROTOCOL_NAME
+                let ours = protocol.as_str() == paykit_lib::app_record::PROTOCOL_NAME;
+                // The upkeep after this read gives the member's endpoints this device's
+                // expiry ask (`crate::own_record`).
+                self.expiry_ask_owed |= ours;
+                ours
             }
             _ => false,
         };

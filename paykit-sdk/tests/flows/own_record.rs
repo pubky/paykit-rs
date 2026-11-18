@@ -1684,7 +1684,8 @@ async fn test_own_record_renewal_without_request_scope_signs_no_endpoint() {
     w.rail.set_endpoint_identifiers(oversized_capabilities());
     let path = app_record_path(&wallet.app_id());
     let writes = w.homeserver.writes(&w.alice_id(), &path);
-    assert!(wallet.receive(None).await.is_err());
+    let error = wallet.receive(None).await.unwrap_err();
+    assert!(is_usage(&error), "{error:?}");
     // The record signed with the renewed certificate, the one the Homeserver got, carries
     // no public endpoint and no expiry: the earlier member was never signed under it.
     assert_eq!(wallet.app().cert().hash(), narrower.hash());
@@ -1710,6 +1711,19 @@ async fn test_own_record_renewal_without_request_scope_signs_no_endpoint() {
 async fn test_own_record_renewal_keeping_request_scope_keeps_the_member() {
     let w = World::new();
     let mut wallet = publishing_wallet_with_an_endpoint(&w).await;
+    // The member also carries a field this version doesn't read.
+    let mut raw = held(&wallet, w.alice_id())
+        .body()
+        .protocols
+        .get("paykit")
+        .cloned()
+        .unwrap();
+    raw.insert("future_field".into(), serde_json::json!("kept"));
+    wallet
+        .app_mut()
+        .set_protocol_member_with_lifetime("paykit", Some(raw), Some(RECORD_LIFETIME_MS))
+        .await
+        .unwrap();
     let member = |wallet: &Paykit| {
         held(wallet, w.alice_id())
             .body()
@@ -1718,6 +1732,9 @@ async fn test_own_record_renewal_keeping_request_scope_keeps_the_member() {
             .cloned()
     };
     let before = member(&wallet);
+    let before_bytes = serde_json::to_vec(&before).unwrap();
+    let path = app_record_path(&wallet.app_id());
+    let writes = w.homeserver.writes(&w.alice_id(), &path);
     let expiry_set = held(&wallet, w.alice_id()).expires_at().is_some();
     let old = wallet.app().cert().clone();
     let renewed = crate::certificate::renew(
@@ -1729,10 +1746,107 @@ async fn test_own_record_renewal_keeping_request_scope_keeps_the_member() {
     crate::certificate::list(&w, wallet.app_id(), &old, &renewed);
     w.clock.advance_ms(1_000);
     wallet.receive(None).await.unwrap();
-    // The same member, byte for byte, under the renewed certificate, still with its expiry.
+    // The same member, byte for byte, under the renewed certificate, still with its expiry,
+    // in the one record the Homeserver got.
     assert_eq!(wallet.app().cert().hash(), renewed.hash());
     assert_eq!(member(&wallet), before);
     assert!(expiry_set && held(&wallet, w.alice_id()).expires_at().is_some());
+    assert_eq!(w.homeserver.writes(&w.alice_id(), &path), writes + 1);
+    let bytes = w.homeserver.file(w.alice_id(), &path).unwrap();
+    let published =
+        AppRecord::verify(&serde_json::from_slice(&bytes).unwrap(), &w.alice_id()).unwrap();
+    assert_eq!(published.cert().hash(), renewed.hash());
+    let published_member = published.body().protocols.get("paykit").cloned();
+    assert_eq!(serde_json::to_vec(&published_member).unwrap(), before_bytes);
+}
+
+/// Alice's publishing wallet with no endpoint, and a second device of it restored from its
+/// backup, each having read once.
+async fn wallet_on_two_devices(w: &World) -> (Paykit, Paykit) {
+    let mut first = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new().request().pay().build().unwrap(),
+            publishing(),
+            store(),
+        )
+        .await;
+    first.receive(None).await.unwrap();
+    let backup = first.backup().await.unwrap();
+    let mut second = Paykit::restore(
+        w.env(&w.alice, store()),
+        publishing(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    second.receive(None).await.unwrap();
+    (first, second)
+}
+
+#[tokio::test]
+async fn test_own_record_endpoint_from_another_device_gets_this_devices_expiry() {
+    let w = World::new();
+    let (mut first, mut second) = wallet_on_two_devices(&w).await;
+    // The first device adds the first endpoint. The second takes its record, whose
+    // endpoint came with no expiry ask of the second's own: its upkeep renews the record
+    // with Paykit's lifetime ask.
+    first
+        .set_public_endpoint(endpoint("btc-lightning-bolt12"), payload("lno1tips"))
+        .await
+        .unwrap();
+    second.receive(None).await.unwrap();
+    assert_eq!(second.own_public_endpoints().unwrap().len(), 1);
+    assert_ne!(second.app().record(), first.app().record());
+    assert!(held(&second, w.alice_id()).expires_at().is_some());
+    // A renewal the second device takes later signs the endpoint with an expiry.
+    let old = second.app().cert().clone();
+    let renewed = crate::certificate::renew(
+        &w,
+        second.app_id(),
+        &AppScopes::new().request().pay().build().unwrap(),
+        1_000,
+    );
+    crate::certificate::list(&w, second.app_id(), &old, &renewed);
+    w.clock.advance_ms(1_000);
+    second.receive(None).await.unwrap();
+    let held = held(&second, w.alice_id());
+    assert_eq!(held.cert().hash(), renewed.hash());
+    assert_eq!(PaykitMember::read(&held).unwrap().public_endpoints.len(), 1);
+    assert!(held.expires_at().is_some());
+}
+
+#[tokio::test]
+async fn test_own_record_renewal_over_another_devices_endpoint_signs_an_expiry() {
+    let w = World::new();
+    let (mut first, mut second) = wallet_on_two_devices(&w).await;
+    first
+        .set_public_endpoint(endpoint("btc-lightning-bolt12"), payload("lno1tips"))
+        .await
+        .unwrap();
+    // The second device takes the first's record, and its upkeep fails each time after:
+    // the payment method's list no longer fits. Its own ask was never set.
+    w.rail.set_endpoint_identifiers(oversized_capabilities());
+    assert!(second.receive(None).await.is_err());
+    assert_eq!(second.own_public_endpoints().unwrap().len(), 1);
+    // The renewal it takes signs the endpoint with Paykit's lifetime, not with no expiry.
+    let old = second.app().cert().clone();
+    let renewed = crate::certificate::renew(
+        &w,
+        second.app_id(),
+        &AppScopes::new().request().pay().build().unwrap(),
+        1_000,
+    );
+    crate::certificate::list(&w, second.app_id(), &old, &renewed);
+    w.clock.advance_ms(1_000);
+    assert!(second.receive(None).await.is_err());
+    let held = held(&second, w.alice_id());
+    assert_eq!(held.cert().hash(), renewed.hash());
+    assert_eq!(PaykitMember::read(&held).unwrap().public_endpoints.len(), 1);
+    assert!(held.expires_at().is_some());
 }
 
 #[tokio::test]
@@ -1783,8 +1897,8 @@ async fn test_own_record_member_another_device_changed_is_taken() {
         .await
         .unwrap();
     other.receive(None).await.unwrap();
-    assert_eq!(other.app().record(), shop.app().record());
     assert_eq!(other.own_public_endpoints().unwrap().len(), 2);
+    assert!(held(&other, w.bob_id()).expires_at().is_some());
     let events = other.app_mut().unacknowledged_events().await.unwrap();
     assert!(
         !events.iter().any(|event| matches!(

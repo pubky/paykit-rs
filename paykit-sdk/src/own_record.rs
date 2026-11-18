@@ -257,12 +257,20 @@ impl Paykit {
                 Some(publication) => publication,
                 None => return Ok(None),
             }
-        } else if !held.public_endpoints.is_empty() && self.renewal_due()? {
+        } else if !held.public_endpoints.is_empty()
+            && (self.expiry_ask_owed || self.renewal_due()?)
+        {
+            // Renewed when due, and after this device took another device's record that
+            // changed Paykit's member: asks are each device's own, so the member's endpoints
+            // may have come with none here, and an unchanged member leaves the ask as it is.
+            // The renewal sets Paykit's lifetime ask with the endpoints it signs.
             let lifetime = Some(self.record_lifetime());
             let renewed =
                 Box::pin(self.app.renew_record_with_lifetime(PROTOCOL_NAME, lifetime)).await;
             self.note_own_record_write(&renewed);
-            renewed?
+            let renewed = renewed?;
+            self.expiry_ask_owed = false;
+            renewed
         } else {
             // The member unchanged still goes to the client: a restored record the switch
             // never accepted, such as a withdrawal whose `app.put` failed before the backup,
@@ -490,30 +498,37 @@ pub(crate) fn member_under(
     member: Option<&serde_json::Map<String, serde_json::Value>>,
     ask: RecordExpiry,
     cert: &AppCert,
-    publishes_record: bool,
+    publishes_record: Option<bool>,
 ) -> (
     Option<serde_json::Map<String, serde_json::Value>>,
     RecordExpiry,
 ) {
+    // No member: no ask either, so an ask left over can't keep a later record from signing.
     let Some(member) = member else {
-        return (None, ask);
+        return (None, RecordExpiry::Never);
     };
     let mut out = member.clone();
-    if !holds_public_endpoints(cert, publishes_record) {
+    // The publishing setting strips endpoints only when Paykit was told the app doesn't
+    // publish; not told, the scopes alone decide.
+    if !holds_public_endpoints(cert, publishes_record.unwrap_or(true)) {
         out.remove("public_endpoints");
     }
     if !holds_capabilities(cert) {
         out.remove("capabilities");
     }
-    let endpoints_left = match out.get("public_endpoints") {
-        None | Some(serde_json::Value::Null) => false,
-        Some(serde_json::Value::Object(endpoints)) => !endpoints.is_empty(),
-        Some(_) => true,
-    };
-    let ask = if endpoints_left {
-        ask
-    } else {
-        RecordExpiry::Never
+    // Endpoints are left only as a non-empty object; anything else holds none.
+    let endpoints_left = matches!(
+        out.get("public_endpoints"),
+        Some(serde_json::Value::Object(endpoints)) if !endpoints.is_empty()
+    );
+    // Asks are each device's own: a member with endpoints this device took from another
+    // device's record may come with no ask here, so it gets Paykit's lifetime, never a
+    // record with endpoints and no `expires_at` (Paykit wire 3.2). The client caps it at the
+    // identity's record age limit.
+    let ask = match (endpoints_left, ask) {
+        (false, _) => RecordExpiry::Never,
+        (true, RecordExpiry::Never) => RecordExpiry::Lifetime(RECORD_LIFETIME_MS),
+        (true, ask) => ask,
     };
     if out.is_empty() {
         return (None, RecordExpiry::Never);
@@ -602,5 +617,65 @@ impl Signs for Measure {
 
     fn sign_fields(&self, _label: &str, _fields: &[&[u8]]) -> [u8; 64] {
         [0; 64]
+    }
+}
+
+#[cfg(test)]
+mod renewal_tests {
+    use pubky_switch_client::app::Protocol;
+    use serde_json::json;
+
+    use super::*;
+    use crate::testkit::{object, Party};
+
+    fn cert(scopes: &[&str]) -> AppCert {
+        Party::new("bob", "shop", scopes).record(&[]).cert().clone()
+    }
+
+    #[test]
+    fn test_member_under_without_a_member_asks_for_no_expiry() {
+        let cert = cert(&["paykit_request", "paykit_pay"]);
+        assert_eq!(
+            member_under(None, RecordExpiry::At(5_000), &cert, Some(true)),
+            (None, RecordExpiry::Never)
+        );
+    }
+
+    #[test]
+    fn test_member_under_endpoints_only_as_a_non_empty_object() {
+        let cert = cert(&["paykit_request", "paykit_pay"]);
+        for value in [json!([]), json!({}), json!(null), json!("lno1")] {
+            let member = object(json!({ "public_endpoints": value, "note": 1 }));
+            let (_, ask) = member_under(Some(&member), RecordExpiry::At(5_000), &cert, Some(true));
+            assert_eq!(ask, RecordExpiry::Never, "{member:?}");
+        }
+        let member = object(json!({ "public_endpoints": { "btc-lightning-bolt12": "lno1" } }));
+        assert_eq!(
+            member_under(Some(&member), RecordExpiry::At(5_000), &cert, Some(true)),
+            (Some(member.clone()), RecordExpiry::At(5_000))
+        );
+        // Endpoints with no ask of this device get Paykit's lifetime.
+        assert_eq!(
+            member_under(Some(&member), RecordExpiry::Never, &cert, Some(true)).1,
+            RecordExpiry::Lifetime(RECORD_LIFETIME_MS)
+        );
+    }
+
+    #[test]
+    fn test_member_for_of_a_host_built_protocol_keeps_an_endpoint_its_scopes_allow() {
+        let cert = cert(&["paykit_request", "paykit_pay"]);
+        let member = object(json!({ "public_endpoints": { "btc-lightning-bolt12": "lno1" } }));
+        let ask = RecordExpiry::Lifetime(RECORD_LIFETIME_MS);
+        // Not told whether the app publishes, the scopes alone decide.
+        let protocol = crate::protocol::PaykitProtocol::new();
+        assert_eq!(
+            protocol.member_for(Some(&member), ask, &cert),
+            (Some(member.clone()), ask)
+        );
+        // Told it doesn't, the endpoints go.
+        assert_eq!(
+            member_under(Some(&member), ask, &cert, Some(false)),
+            (None, RecordExpiry::Never)
+        );
     }
 }

@@ -129,12 +129,20 @@ struct Own {
 pub struct PaykitProtocol {
     own: RwLock<Option<Own>>,
     /// Whether the app publishes its record, which decides whether it holds public
-    /// endpoints (`crate::own_record`); set before the client runs the app.
-    publishes_record: std::sync::atomic::AtomicBool,
+    /// endpoints (`crate::own_record`): `PUBLISHES_UNKNOWN` until the SDK's constructors
+    /// set it, as for a protocol a host registers itself, when only the scopes decide.
+    publishes_record: std::sync::atomic::AtomicU8,
     /// The app's rail, which names a proof's settlement (Paykit wire 1.5); without one, the
     /// methods `paykit-lib` knows.
     rail: Option<Arc<dyn Rail>>,
 }
+
+/// [`PaykitProtocol`]'s publishing setting: not told yet.
+const PUBLISHES_UNKNOWN: u8 = 0;
+/// [`PaykitProtocol`]'s publishing setting: the app publishes its record.
+const PUBLISHES_YES: u8 = 1;
+/// [`PaykitProtocol`]'s publishing setting: the app doesn't publish its record.
+const PUBLISHES_NO: u8 = 2;
 
 impl std::fmt::Debug for PaykitProtocol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -153,7 +161,7 @@ impl PaykitProtocol {
     pub fn new() -> Self {
         Self {
             own: RwLock::new(None),
-            publishes_record: std::sync::atomic::AtomicBool::new(false),
+            publishes_record: std::sync::atomic::AtomicU8::new(PUBLISHES_UNKNOWN),
             rail: None,
         }
     }
@@ -161,8 +169,25 @@ impl PaykitProtocol {
     /// Set whether the app publishes its record, as its configuration says
     /// (`pubky_switch_client::app::AppConfig::publishes_record`).
     pub(crate) fn set_publishes_record(&self, publishes: bool) {
+        let value = if publishes {
+            PUBLISHES_YES
+        } else {
+            PUBLISHES_NO
+        };
         self.publishes_record
-            .store(publishes, std::sync::atomic::Ordering::SeqCst);
+            .store(value, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether the app publishes its record: `None` when Paykit wasn't told.
+    fn publishes_record(&self) -> Option<bool> {
+        match self
+            .publishes_record
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            PUBLISHES_YES => Some(true),
+            PUBLISHES_NO => Some(false),
+            _ => None,
+        }
     }
 
     /// The protocol of one app paying and paid through `rail`, which names the settlement of
@@ -911,13 +936,7 @@ impl Protocol for PaykitProtocol {
         ask: RecordExpiry,
         cert: &AppCert,
     ) -> (Option<Map<String, Value>>, RecordExpiry) {
-        crate::own_record::member_under(
-            member,
-            ask,
-            cert,
-            self.publishes_record
-                .load(std::sync::atomic::Ordering::SeqCst),
-        )
+        crate::own_record::member_under(member, ask, cert, self.publishes_record())
     }
 
     /// The kinds this SDK handles that the certificate's scopes receive (Switch spec 3.4):
