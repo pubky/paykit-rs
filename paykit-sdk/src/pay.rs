@@ -3337,7 +3337,6 @@ impl Paykit {
         proof: Option<&SignedMessage>,
         overwrite: bool,
     ) -> Result<OutcomeRecord> {
-        let own = self.identity();
         let key = self.activity_key(target)?;
         let held = self.app.shared_record(&key).await?;
         if crate::records::activity_base_changed(held.as_ref()) {
@@ -3372,7 +3371,7 @@ impl Paykit {
         }
         let read = match held.as_ref().map(|r| &r.content) {
             None | Some(RecordContent::Deleted) => None,
-            Some(content) => match activity::read(content.value(), &own, ActivitySide::Payer) {
+            Some(_) => match self.read_activity(target, held.as_ref()) {
                 Some(record) => Some(record),
                 None if paid && overwrite => None,
                 None if paid => return Ok(OutcomeRecord::Held),
@@ -3388,6 +3387,30 @@ impl Paykit {
         changed |= self.place_acceptance(&mut record, entry)?;
         if let Some(proof) = proof {
             changed |= activity::place(&mut record, Role::Proof, self.own_copy(proof)?);
+            if entry.billing_period.is_some() {
+                // The claim can expire. The payer must then be able to bind the
+                // period at this key and find the proof of the payment just recorded.
+                let value = record.to_json()?;
+                let bound = crate::records::bind_activity(
+                    &value,
+                    &self.identity(),
+                    ActivitySide::Payer,
+                    None,
+                    &key,
+                    |target| self.app.record_key(target).ok(),
+                    &|proof| self.rail.settlement_id(proof),
+                );
+                if !bound
+                    .as_ref()
+                    .and_then(|r| r.proof.as_ref())
+                    .is_some_and(|stored| stored.hash() == proof.hash())
+                {
+                    return Ok(OutcomeRecord::Held);
+                }
+                // Even when the same proof was already there, settle only while
+                // the checked record is still current.
+                changed = true;
+            }
         }
         // A payment made after `failed` was written on its claim: the record's informational
         // `status` shows it for display; no reader decides by it (Paykit wire 5.3).
