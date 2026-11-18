@@ -1,7 +1,7 @@
 //! Authenticated issues seen at a permanent publication key (Paykit wire 5.8).
 
 use super::{counter_unavailable, target};
-use crate::error::{Refusal, Result};
+use crate::error::Result;
 use crate::state::{self, key};
 use crate::Paykit;
 use paykit_lib::records::{ListPublicationRecord, UnknownMembers};
@@ -77,6 +77,10 @@ impl PublicationHistory {
             conflict: None,
             acknowledged: false,
         }
+    }
+
+    pub(super) fn qualified_issues(&self) -> impl Iterator<Item = &ListPublicationRecord> {
+        std::iter::once(&self.floor).chain(self.conflict.iter().map(|report| &report.held))
     }
 
     pub(crate) fn check_binding(
@@ -245,9 +249,6 @@ impl Paykit {
     ///
     /// A store failure or an invalid binding in retained state.
     pub async fn publication_conflicts(&self) -> Result<Vec<PublicationConflict>> {
-        if !self.holds(super::SCOPE) {
-            return Err(Refusal::ScopeMissing(super::SCOPE.into()).into());
-        }
         Ok(self
             .local_scan::<PublicationHistory>(key::PUBLICATION_HISTORY)
             .await?
@@ -265,9 +266,6 @@ impl Paykit {
         &mut self,
         report: &PublicationConflict,
     ) -> Result<()> {
-        if !self.holds(super::SCOPE) {
-            return Err(Refusal::ScopeMissing(super::SCOPE.into()).into());
-        }
         let issue = &report.held;
         let key = self.app.record_key(&target(
             &issue.publisher,
@@ -376,6 +374,107 @@ mod tests {
         let mut wrong = history;
         wrong.conflict.as_mut().unwrap().refused = held;
         assert!(check(&wrong, &at).is_err());
+    }
+
+    #[test]
+    fn test_history_restore_compares_applied_and_observed_issues_before_installation() {
+        use super::super::{ListReservation, RestoredPublications};
+
+        let publisher = crate::testkit::Party::new(
+            "merchant",
+            "publisher",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
+        let blind = |input: &[u8]| pubky_switch_core::enc::hash(input);
+        let binder = state::Binder::new(publisher.id(), &publisher.cert, &blind);
+        let mut actual = issue(9, false);
+        actual.publisher = publisher.cert.app_id();
+        let reservation = ListReservation {
+            recipient: actual.recipient,
+            choice: [7; 16],
+            revision: None,
+            generation: actual.generation,
+            counter: actual.counter,
+            id: actual.msg_id.clone(),
+            hash: actual.message_hash,
+        };
+        let reservation_at = key::list_reservation(&actual.recipient);
+        let reservation_bytes = state::encode(&reservation).unwrap();
+        let physical = binder
+            .record_key(&target(
+                &actual.publisher,
+                &actual.recipient,
+                actual.generation,
+            ))
+            .unwrap();
+        let history_at = key::publication_history(&physical);
+        let mut surprises = Vec::new();
+        for (case, refuse) in [
+            ("same", false),
+            ("id", true),
+            ("hash", true),
+            ("newer", false),
+        ] {
+            let mut observed = actual.clone();
+            match case {
+                "id" => observed.msg_id = issue(9, true).msg_id,
+                "hash" => observed.message_hash = [77; 32],
+                "newer" => {
+                    observed.counter += 1;
+                    observed.message_hash = [77; 32];
+                }
+                _ => {}
+            }
+            let history = state::encode(&PublicationHistory::new(observed)).unwrap();
+            for observed_first in [false, true] {
+                let mut restored = RestoredPublications::default();
+                let applied = |r: &mut RestoredPublications| {
+                    r.applied(reservation_at.as_bytes(), &reservation_bytes, &binder)
+                };
+                let seen = |r: &mut RestoredPublications| {
+                    r.observed(history_at.as_bytes(), &history, &binder)
+                };
+                let result = if observed_first {
+                    seen(&mut restored).and_then(|()| applied(&mut restored))
+                } else {
+                    applied(&mut restored).and_then(|()| seen(&mut restored))
+                }
+                .and_then(|()| restored.writes());
+                if result.is_err() != refuse {
+                    surprises.push((case, observed_first, result.is_err()));
+                }
+            }
+        }
+        assert!(
+            surprises.is_empty(),
+            "unexpected restore dispositions (case, observed first, refused): {surprises:?}"
+        );
+
+        // A higher applied reservation in the other installation still cannot erase
+        // what the earlier reservation establishes at its own pair.
+        let higher = ListReservation {
+            counter: actual.counter + 1,
+            id: issue(10, true).msg_id,
+            hash: [9; 32],
+            ..reservation
+        };
+        let mut alternate = actual;
+        alternate.message_hash = [77; 32];
+        let history = state::encode(&PublicationHistory::new(alternate)).unwrap();
+        let mut restored = RestoredPublications::default();
+        restored
+            .applied(reservation_at.as_bytes(), &reservation_bytes, &binder)
+            .unwrap();
+        restored
+            .applied(
+                reservation_at.as_bytes(),
+                &state::encode(&higher).unwrap(),
+                &binder,
+            )
+            .unwrap();
+        assert!(restored
+            .observed(history_at.as_bytes(), &history, &binder)
+            .is_err());
     }
 
     #[test]

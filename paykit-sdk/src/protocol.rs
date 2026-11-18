@@ -443,7 +443,7 @@ pub(crate) fn restore_paykit_layer(
                 key::LIST_RESERVATIONS => publications.applied(&key, &value, &binder),
                 _ => publications.observed(&key, &value, &binder),
             }
-            .map_err(|_| "invalid retained private list publication")?;
+            .map_err(|err| format!("invalid retained private list publication: {err}"))?;
         }
     }
     let mut history = crate::deletions::RestoredReceipts::default();
@@ -693,13 +693,13 @@ pub(crate) fn restore_paykit_layer(
             StateKey::PublicationHistory(_) => {
                 publications
                     .observed(&key, &value, &binder)
-                    .map_err(|_| unread())?;
+                    .map_err(|err| format!("invalid private list publication in backup: {err}"))?;
                 continue;
             }
             StateKey::ListReservation(_) => {
                 publications
                     .applied(&key, &value, &binder)
-                    .map_err(|_| unread())?;
+                    .map_err(|err| format!("invalid private list publication in backup: {err}"))?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }

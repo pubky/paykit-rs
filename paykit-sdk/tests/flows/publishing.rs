@@ -1209,3 +1209,95 @@ async fn test_publication_observed_by_a_second_installation_survives_selected_re
         .unwrap();
     assert_eq!(w.record_writes(&w.bob, &key), 2);
 }
+
+#[tokio::test]
+async fn test_publication_retained_report_remains_available_after_selling_scope_is_removed() {
+    use paykit_sdk::AppScopes;
+    use pubky_switch_client::app::LocalWrite;
+    use pubky_switch_core::enc::b64;
+
+    let w = World::new();
+    let mut app = w
+        .join(
+            &w.alice,
+            "wallet",
+            AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    let mut payer = w
+        .join(&w.bob, "payer", AppScopes::new().pay().build().unwrap())
+        .await;
+    payer.app_mut().invite(&w.alice_id()).await.unwrap();
+    let contact = w.bob_id();
+    let key = app.app().record_key(&target(&app, &contact, 1)).unwrap();
+    let at = format!("lhi/{}", b64(&key));
+    app.set_list_endpoints(offered("lno1first")).await.unwrap();
+    app.publish_list_to(contact).await.unwrap();
+    let first = app.app().shared_record(&key).await.unwrap().unwrap();
+    app.set_list_endpoints(offered("lno1second")).await.unwrap();
+    let second = app.app().shared_record(&key).await.unwrap().unwrap();
+    let first_value: serde_json::Value =
+        serde_json::from_slice(first.content.value().unwrap()).unwrap();
+    let second_value: serde_json::Value =
+        serde_json::from_slice(second.content.value().unwrap()).unwrap();
+    // Supply the existing owner-local warning about these two genuine issues. Reading or
+    // acknowledging it requires no shared-counter read and never changes their floor.
+    let mut state: serde_json::Value = serde_json::from_slice(
+        &app.app()
+            .protocol_get("paykit", at.as_bytes())
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    state["d"]["conflict"] = serde_json::json!({
+        "application_hash": b64(&[44;32]), "other_applications": false, "held": second_value, "refused": first_value,
+    });
+    app.app_mut()
+        .protocol_commit(
+            "paykit",
+            &[LocalWrite::Put {
+                key: at.as_bytes().to_vec(),
+                value: serde_json::to_vec(&state).unwrap(),
+            }],
+        )
+        .await
+        .unwrap();
+    let report = app.publication_conflicts().await.unwrap().pop().unwrap();
+    let old = app.app().cert().clone();
+    let narrowed = crate::certificate::renew(
+        &w,
+        app.app_id(),
+        &AppScopes::new().contacts().build().unwrap(),
+        1_000,
+    );
+    crate::certificate::list(&w, app.app_id(), &old, &narrowed);
+    w.clock.advance_ms(1_000);
+    app.receive(None).await.unwrap();
+    assert_eq!(app.app().cert().hash(), narrowed.hash());
+    assert!(!app.app().cert().holds_scope("paykit_request"));
+    assert_eq!(
+        app.publication_conflicts().await.unwrap(),
+        vec![report.clone()]
+    );
+    app.acknowledge_publication_conflict(&report).await.unwrap();
+    assert!(app.publication_conflicts().await.unwrap().is_empty());
+    let after: serde_json::Value = serde_json::from_slice(
+        &app.app()
+            .protocol_get("paykit", at.as_bytes())
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(after["d"]["floor"], state["d"]["floor"]);
+    let refusal = app
+        .set_list_endpoints(offered("lno1withoutauthority"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refusal.refusal(), Some(paykit_sdk::Refusal::ScopeMissing(scope)) if scope == "paykit_request"),
+        "{refusal}"
+    );
+    assert_eq!(w.record_writes(&w.alice, &key), 2);
+}

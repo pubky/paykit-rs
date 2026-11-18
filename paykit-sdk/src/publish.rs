@@ -165,12 +165,40 @@ impl ListReservation {
 pub(crate) struct RestoredPublications {
     batches: BTreeMap<PublicationKey, PublicationIds>,
     applied: BTreeSet<PublicationKey>,
+    issues: BTreeMap<([u8; 32], ListVersion), (String, [u8; 32])>,
     floors: BTreeMap<[u8; 32], ListReservation>,
     observed: BTreeMap<Vec<u8>, PublicationHistory>,
     recipients: BTreeSet<[u8; 32]>,
 }
 
 impl RestoredPublications {
+    /// Compare every qualified issue before coalescing either source's per-recipient floor.
+    fn remember_issue(
+        &mut self,
+        recipient: [u8; 32],
+        generation: u64,
+        counter: u64,
+        id: &str,
+        hash: [u8; 32],
+    ) -> Result<()> {
+        let version = ListVersion::new(generation, counter)?;
+        match self.issues.entry((recipient, version)) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert((id.to_owned(), hash));
+            }
+            std::collections::btree_map::Entry::Occupied(entry)
+                if entry.get().0 != id || entry.get().1 != hash =>
+            {
+                return Err(Refusal::NotNow(format!(
+                    "Paykit wire 5.8: different signed lists at generation {generation} counter {counter} for recipient {}",
+                    pubky_switch_core::enc::zbase32_encode(&recipient),
+                )).into());
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     pub(crate) fn pending(
         &mut self,
         key: &[u8],
@@ -190,14 +218,18 @@ impl RestoredPublications {
         binder: &state::Binder<'_>,
     ) -> Result<()> {
         let issue = state::restored::<ListReservation>(key, value, binder)?;
+        self.remember_issue(
+            issue.recipient,
+            issue.generation,
+            issue.counter,
+            &issue.id,
+            issue.hash,
+        )?;
         self.recipients.insert(issue.recipient);
         self.applied.insert(issue.original());
         if let Some(held) = self.floors.get(&issue.recipient) {
             let prior = (held.generation, held.counter);
             let next = (issue.generation, issue.counter);
-            if prior == next && (held.id != issue.id || held.hash != issue.hash) {
-                return Err(counter_unavailable().into());
-            }
             if next <= prior {
                 return Ok(());
             }
@@ -213,6 +245,15 @@ impl RestoredPublications {
         binder: &state::Binder<'_>,
     ) -> Result<()> {
         let history = state::restored::<PublicationHistory>(key, bytes, binder)?;
+        for issue in history.qualified_issues() {
+            self.remember_issue(
+                issue.recipient,
+                issue.generation,
+                issue.counter,
+                &issue.msg_id,
+                issue.message_hash,
+            )?;
+        }
         self.recipients.insert(history.floor.recipient);
         if let Some(held) = self.observed.get_mut(key) {
             held.merge(history)?;
