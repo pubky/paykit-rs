@@ -58,6 +58,7 @@
 
 use paykit_lib::app_record::PaykitMember;
 use paykit_lib::{PaymentEndpointIdentifier, PaymentEndpointPayload};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use pubky_switch_client::app::{Initiator, UserConfirmed};
@@ -277,11 +278,9 @@ type RecordReads = Vec<(
     std::result::Result<Option<Vec<u8>>, TransportError>,
 )>;
 
-/// How many records of one payee app are kept for its comparison state. Each kept record is
-/// strictly later than the one before it, or conflicts with it once: at a renewal a fortnight,
-/// that is years of records. Past it the oldest is dropped, which can only lose an earlier
-/// record a long-lasting conflict would fall back to; the core's `RecordView` can't be kept
-/// in a store as it is, so it is rebuilt from these.
+/// How many records of one payee app are kept to rebuild its comparison state.
+/// At a renewal a fortnight this is years of records. The oldest timestamp groups are
+/// dropped together so compaction can only lose a fallback, never select half a conflict.
 const SEEN_RECORDS: usize = 64;
 
 /// The most bytes one payee app's kept records take, encoded: half the client store's cap
@@ -301,56 +300,38 @@ pub(crate) struct SeenRecords {
 }
 
 impl SeenRecords {
-    /// Keep `record`, which took part, after `held`, the records kept, verified in order.
-    /// Past [`SEEN_RECORDS`] the oldest are dropped, but never one at the newest `updated_at`:
-    /// those are the newest record and, during a conflict, every side of it, so a conflict
-    /// is never forgotten and neither side becomes usable by compaction (Switch spec 4.2).
-    /// Dropping an older record can only lose the earlier record a conflict falls back to,
-    /// which leaves no record used rather than a wrong one. Past [`SEEN_RECORDS_BYTES`] the
-    /// oldest are dropped the same way; `false` when the records at the newest `updated_at`
-    /// alone are over it, and so can't be kept. Records go by whole `updated_at`: both sides
-    /// of an older conflict go together, never one alone.
-    fn keep(&mut self, record: &AppRecord, held: &[AppRecord]) -> bool {
-        self.records.push(record.signed().clone());
-        let times: Vec<u64> = held
-            .iter()
-            .map(AppRecord::updated_at)
-            .chain(std::iter::once(record.updated_at()))
-            .collect();
-        let newest = times.iter().copied().max().unwrap_or(0);
-        let droppable = times.iter().take_while(|t| **t < newest).count();
-        // Each record's encoded length, with its separator in the list.
-        let sizes: Vec<usize> = self
-            .records
-            .iter()
-            .map(|signed| serde_json::to_vec(signed).map_or(usize::MAX, |b| b.len() + 1))
-            .collect();
-        let mut bytes = sizes.iter().fold(0usize, |sum, n| sum.saturating_add(*n));
-        let mut drop = self.records.len().saturating_sub(SEEN_RECORDS);
-        for size in &sizes[..drop.min(droppable)] {
-            bytes = bytes.saturating_sub(*size);
+    /// Insert into timestamp order and keep the newest complete groups within both bounds.
+    /// Return their view, or `None` if the served record itself would have to be dropped.
+    fn keep(
+        &mut self,
+        record: &AppRecord,
+        mut held: Vec<AppRecord>,
+        now: u64,
+    ) -> Option<RecordView> {
+        let at = held.partition_point(|r| r.updated_at() <= record.updated_at());
+        held.insert(at, record.clone());
+        let mut count = 0;
+        let mut bytes = 0usize;
+        let mut start = held.len();
+        // Keep the newest complete timestamp groups that fit. Keeping just one side of a
+        // conflict could make it the fallback for a later conflict (Switch spec 4.2).
+        for group in held.chunk_by(|a, b| a.updated_at() == b.updated_at()).rev() {
+            count += group.len();
+            for item in group {
+                let size = serde_json::to_vec(item.signed()).map_or(usize::MAX, |b| b.len() + 1);
+                bytes = bytes.saturating_add(size);
+            }
+            if count > SEEN_RECORDS || bytes > SEEN_RECORDS_BYTES {
+                break;
+            }
+            start -= group.len();
         }
-        while drop < droppable && bytes > SEEN_RECORDS_BYTES {
-            bytes = bytes.saturating_sub(sizes[drop]);
-            drop += 1;
+        if at < start {
+            return None;
         }
-        // A whole `updated_at` goes or none of it: one side of an older conflict, kept
-        // without the other, would replay as a record no conflict touched and could become
-        // the earlier record a later conflict falls back to (Switch spec 4.2). The times
-        // dropped are all older than the newest, which is never dropped.
-        let gone: Vec<u64> = times[..drop.min(droppable)].to_vec();
-        let mut at = 0;
-        self.records.retain(|_| {
-            let keep = !gone.contains(&times[at]);
-            at += 1;
-            keep
-        });
-        let bytes = self
-            .records
-            .iter()
-            .map(|signed| serde_json::to_vec(signed).map_or(usize::MAX, |b| b.len() + 1))
-            .fold(0usize, usize::saturating_add);
-        bytes <= SEEN_RECORDS_BYTES
+        let view = Self::replay(&held[start..], now);
+        self.records = held.into_iter().skip(start).map(SignedDoc::from).collect();
+        Some(view)
     }
 
     /// Whether the kept records are nonempty and each is `payee`'s, verified as its signer
@@ -367,14 +348,21 @@ impl SeenRecords {
     /// The view the records give, at the reader's clock `now`. A kept record that no longer
     /// verifies is a corrupt store.
     fn view(&self, payee: &[u8; 32], now: u64) -> Result<(RecordView, Vec<AppRecord>)> {
-        let mut view = RecordView::new();
         let mut records = Vec::with_capacity(self.records.len());
         for signed in &self.records {
             let record = AppRecord::verify(signed, payee).map_err(|_| PaykitError::corrupt())?;
-            view.see(&record, now);
             records.push(record);
         }
-        Ok((view, records))
+        records.sort_by_key(AppRecord::updated_at);
+        Ok((Self::replay(&records, now), records))
+    }
+
+    fn replay(records: &[AppRecord], now: u64) -> RecordView {
+        let mut view = RecordView::new();
+        for record in records {
+            view.see(record, now);
+        }
+        view
     }
 }
 
@@ -439,62 +427,52 @@ impl Paykit {
         let (identity, reads) = self
             .payee_identity_with(payee, Need::SwitchCopy, by, confirmed, start)
             .await?;
-        let identity = match identity {
+        let mut identity = match identity {
             Ok(identity) => identity,
             Err(refusal) => return Ok(Err(refusal)),
         };
-        let fresh_until = identity.fresh_until_ms();
-        let mut doc = identity.doc;
-        // The reads start with the first copy taken, so they ran.
-        let Some(mut reads) = reads else {
+        let Some(reads) = reads else {
             return Ok(Ok(Vec::new()));
         };
-        // Only the apps the copy acted on lists, in its order (Paykit spec 4). A newer copy
-        // the switch gave may list apps the first didn't: their records are read now, all of
-        // them before any app is judged.
-        let mut fetched = Vec::new();
-        for listed in &doc.body().apps {
-            let app_id = listed.app_id;
-            if app.is_some_and(|a| a != app_id) {
-                continue;
+        let mut reads: BTreeMap<_, _> = reads.into_iter().collect();
+        // Reconcile records in the current document's order. A newly listed app can itself
+        // take long enough to expire that document. Bound directory churn within one call.
+        const MAX_REFRESHES: usize = 3;
+        let mut refreshes = 0;
+        let (fetched, now) = loop {
+            let mut fetched = Vec::new();
+            for listed in &identity.doc.body().apps {
+                let id = listed.app_id;
+                if app.is_some_and(|a| a != id) {
+                    continue;
+                }
+                let bytes = match reads.remove(&id) {
+                    Some(bytes) => bytes,
+                    None => self.homeserver.get(*payee, app_record_path(&id)).await,
+                };
+                fetched.push((id, bytes));
             }
-            let bytes = match reads.iter().position(|(id, _)| *id == app_id) {
-                Some(at) => reads.swap_remove(at).1,
-                None => self.homeserver.get(*payee, app_record_path(&app_id)).await,
-            };
-            fetched.push((app_id, bytes));
-        }
-        // One time judges every app of the read, taken once every record is in: no app
-        // expires while another's record is read, and the read's bound goes, in the order of
-        // identity.json, to the apps usable at that time. A copy of identity.json that went
-        // stale while the records were read is looked up again at that time, as any copy
-        // over 10 minutes old is before it is acted on (Switch spec 4.3), and only the apps
-        // the fresh copy lists are judged, in its order: an app it no longer lists offers
-        // nothing, and one it newly lists is read now.
-        let mut now = self.now();
-        if now >= fresh_until {
-            doc = match self
+            let now = self.now();
+            if now < identity.fresh_until_ms() {
+                break (fetched, now);
+            }
+            if refreshes == MAX_REFRESHES {
+                return Ok(Err(Refusal::IdentityUnavailable(
+                    "Switch spec 4.3: the payee's identity expired during its app record reads"
+                        .into(),
+                )));
+            }
+            refreshes += 1;
+            identity = match self
                 .payee_identity(payee, Need::SwitchCopy, by, confirmed)
                 .await?
             {
-                Ok(identity) => identity.doc,
+                Ok(identity) => identity,
                 Err(refusal) => return Ok(Err(refusal)),
             };
-            let mut reconciled = Vec::with_capacity(fetched.len());
-            for listed in &doc.body().apps {
-                let app_id = listed.app_id;
-                if app.is_some_and(|a| a != app_id) {
-                    continue;
-                }
-                let bytes = match fetched.iter().position(|(id, _)| *id == app_id) {
-                    Some(at) => fetched.swap_remove(at).1,
-                    None => self.homeserver.get(*payee, app_record_path(&app_id)).await,
-                };
-                reconciled.push((app_id, bytes));
-            }
-            fetched = reconciled;
-            now = self.now();
-        }
+            reads = fetched.into_iter().collect();
+        };
+        let doc = identity.doc;
         let mut usable_records = Vec::new();
         let mut room = Room::new();
         for (app_id, bytes) in fetched {
@@ -535,14 +513,14 @@ impl Paykit {
                     // A record the reader can't keep for the comparison is never used, nor
                     // is an earlier one in its place, which it may withdraw: the app's
                     // failure, and the other apps' reads go on (Paykit spec 4, below).
-                    if !seen.keep(&record, &held) {
+                    let Some(kept) = seen.keep(&record, held, now) else {
                         failures.push(fail(PublicAppFailureReason::Refused(format!(
-                            "Paykit spec 4: the app's newest records are over the \
-                             {SEEN_RECORDS_BYTES} bytes a reader keeps of them"
+                            "Paykit spec 4: keeping the app's served record would exceed \
+                             {SEEN_RECORDS} records or {SEEN_RECORDS_BYTES} bytes"
                         ))));
                         continue;
-                    }
-                    view.see(&record, now);
+                    };
+                    view = kept;
                     self.local_put(&seen_key, &seen).await?;
                 }
             }
@@ -619,7 +597,8 @@ impl Paykit {
     /// # Errors
     ///
     /// [`Refusal::IdentityUnavailable`] or [`Refusal::IdentityUnconfirmed`] for the payee's
-    /// `identity.json`; [`Refusal::CertificateRefused`] under a certificate Paykit refuses.
+    /// `identity.json`, including when repeated record reads outlast each fresh identity;
+    /// [`Refusal::CertificateRefused`] under a certificate Paykit refuses.
     pub async fn public_endpoints(
         &mut self,
         payee: &[u8; 32],
@@ -834,8 +813,51 @@ mod tests {
         let record =
             AppRecord::verify(&serde_json::from_slice(&bytes).unwrap(), &bob.id()).unwrap();
         let mut records = SeenRecords::default();
-        records.keep(&record, &[]);
+        records.keep(&record, Vec::new(), NOW).unwrap();
         (bob, records)
+    }
+
+    #[test]
+    fn test_app_records_replay_timestamp_groups_from_stored_observations() {
+        let (bob, _) = discovery_records();
+        let signed = |ms, member| {
+            serde_json::from_slice::<SignedDoc>(&record_bytes(
+                &bob,
+                member,
+                NOW + ms,
+                Some(NOW + DAY_MS),
+            ))
+            .unwrap()
+        };
+        let records = SeenRecords {
+            records: vec![
+                signed(0, tip_jar()),
+                signed(2, tip_jar()),
+                signed(1, json!({})),
+                signed(2, json!({})),
+            ],
+        };
+        let (view, _) = records.view(&bob.id(), NOW + 2).unwrap();
+        assert!(view.in_conflict());
+        assert_eq!(view.used().unwrap().updated_at(), NOW + 1);
+    }
+
+    #[test]
+    fn test_app_records_compaction_drops_whole_conflicting_timestamp() {
+        let (bob, mut seen) = discovery_records();
+        let make = |i, member| {
+            let bytes = record_bytes(&bob, member, NOW + i, Some(NOW + DAY_MS));
+            read_record(&bob.id(), &bob.app_id(), &bytes).unwrap()
+        };
+        let mut held = vec![make(0, tip_jar()), make(0, json!({}))];
+        for i in 1..(SEEN_RECORDS - 1) {
+            held.push(make(i as u64, tip_jar()));
+        }
+        seen.keep(&make(SEEN_RECORDS as u64, tip_jar()), held, NOW + DAY_MS)
+            .unwrap();
+        let (_, kept) = seen.view(&bob.id(), NOW + DAY_MS).unwrap();
+        assert_eq!(kept.len(), SEEN_RECORDS - 1);
+        assert_eq!(kept.first().unwrap().updated_at(), NOW + 1);
     }
 
     #[test]

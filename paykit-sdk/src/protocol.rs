@@ -505,9 +505,9 @@ pub(crate) fn restore_paykit_layer(
                 }
                 continue;
             }
-            // A withdrawal's clean-up owed goes with the record it was owed for: the restored
-            // app runs it after its confirmed first read, as any upkeep (`own_record.rs`).
-            StateKey::WithdrawalCleanupOwed => {
+            // A restored app applies the owed expiry policy to its current member after
+            // its confirmed first read (`own_record.rs`).
+            StateKey::RecordExpiryOwed => {
                 state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
