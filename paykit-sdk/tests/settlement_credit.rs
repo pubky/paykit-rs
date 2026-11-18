@@ -43,22 +43,25 @@ async fn setup_identity(world: &World, name: &str, origin: &str) -> TestResult<S
 
 async fn join(
     world: &World,
-    signer: &mut Signer,
+    mut signer: Signer,
     identity: &str,
     name: &str,
     scopes: RequestedScopes,
     store: Arc<MemoryStore>,
     rail: &Arc<FakeRail>,
-) -> TestResult<Paykit> {
+) -> TestResult<(Paykit, Signer)> {
     let owner = world.identity(identity)?;
     let keys = world.app_keys(&owner, name)?;
     let auth = pubky_switch_core::enc::hash(name.as_bytes());
     let names: Vec<_> = scopes.scopes.iter().map(String::as_str).collect();
     let request = Asking::for_scopes_with_paths(keys, &names, &[], auth)?;
-    let approved = signer
-        .approve(signer.review(request.request.signed(), &request.auth)?)
-        .await?;
-    signer.claim_delivered(&approved.request).await?;
+    let review = signer.review(request.request.signed(), &request.auth)?;
+    let (signer, approved) = tokio::spawn(Box::pin(async move {
+        let approved = signer.approve(review).await?;
+        signer.claim_delivered(&approved.request).await?;
+        Ok::<_, pubky_switch_signer::SignerError>((signer, approved))
+    }))
+    .await??;
     let join = request.join_request(owner.public(), &approved)?;
     world.advance_ms(1000);
     let mut wallet = Paykit::join(
@@ -70,7 +73,7 @@ async fn join(
     )
     .await?;
     wallet.receive(None).await?;
-    Ok(wallet)
+    Ok((wallet, signer))
 }
 
 async fn paid_request(
@@ -142,14 +145,13 @@ struct Tills {
 }
 
 async fn enrolled_tills(world: &World) -> TestResult<Tills> {
-    let mut first = setup_identity(world, "buyer", "https://buyer.payment.test").await?;
-    let mut second =
-        setup_identity(world, "other-buyer", "https://other-buyer.payment.test").await?;
-    let mut shop = setup_identity(world, "shop", "https://shop.payment.test").await?;
+    let first = setup_identity(world, "buyer", "https://buyer.payment.test").await?;
+    let second = setup_identity(world, "other-buyer", "https://other-buyer.payment.test").await?;
+    let shop = setup_identity(world, "shop", "https://shop.payment.test").await?;
     let rail = Arc::new(FakeRail::with_clock(world.clock().clone()));
-    let mut buyer = join(
+    let (mut buyer, _) = join(
         world,
-        &mut first,
+        first,
         "buyer",
         "first-buyer",
         AppScopes::new().pay().manage_contacts().build()?,
@@ -157,9 +159,9 @@ async fn enrolled_tills(world: &World) -> TestResult<Tills> {
         &rail,
     )
     .await?;
-    let mut other = join(
+    let (mut other, _) = join(
         world,
-        &mut second,
+        second,
         "other-buyer",
         "second-buyer",
         AppScopes::new().pay().manage_contacts().build()?,
@@ -168,9 +170,9 @@ async fn enrolled_tills(world: &World) -> TestResult<Tills> {
     )
     .await?;
     let till_store = Arc::new(MemoryStore::new());
-    let mut till = join(
+    let (mut till, shop) = join(
         world,
-        &mut shop,
+        shop,
         "shop",
         "plain-till",
         AppScopes::new().request().manage_contacts().build()?,
@@ -179,9 +181,9 @@ async fn enrolled_tills(world: &World) -> TestResult<Tills> {
     )
     .await?;
     let labelled_store = Arc::new(MemoryStore::new());
-    let labelled = join(
+    let (labelled, _) = join(
         world,
-        &mut shop,
+        shop,
         "shop",
         "labelled-till",
         AppScopes::new()
