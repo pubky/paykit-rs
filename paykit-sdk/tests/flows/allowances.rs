@@ -5132,7 +5132,7 @@ async fn test_allowances_kept_answer_waits_through_a_renewal_without_keys_then_p
     let mut wallet = Box::pin(alice_app(
         &w,
         "wallet",
-        AppScopes::new().allowance().build().unwrap(),
+        AppScopes::new().allowance().contacts().build().unwrap(),
     ))
     .await;
     let me = wallet.app_id();
@@ -7923,4 +7923,123 @@ async fn test_consent_state_owed_end_body_discarded_restore_recovers_signed_end(
     assert_eq!(recovered.plaintext(), original.plaintext());
     restored.receive(None).await.unwrap();
     assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
+}
+
+#[tokio::test]
+async fn test_allowances_receive_only_app_can_read_a_proposal_and_cannot_send_or_answer() {
+    let w = World::new();
+    let mut viewer = Box::pin(alice_app(
+        &w,
+        "viewer",
+        AppScopes::new().allowance().build().unwrap(),
+    ))
+    .await;
+    let mut shop = Box::pin(shop(&w)).await;
+    let mut author = Box::pin(wallet(&w)).await;
+    let refused = viewer
+        .propose_allowance(w.bob_id(), AllowanceRole::Allower, terms())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::ScopeMissing(scope)) if scope == "paykit_contacts")
+    );
+    assert!(viewer
+        .app()
+        .records_of("allowances")
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(viewer
+        .app()
+        .queued_messages("paykit")
+        .await
+        .unwrap()
+        .is_empty());
+
+    let sent = shop
+        .propose_allowance(w.alice_id(), AllowanceRole::Allowee, terms())
+        .await
+        .unwrap();
+    let summary = viewer.receive(None).await.unwrap();
+    assert!(received(&summary, "paykit.allowance_proposal"));
+    let incoming = viewer
+        .allowances()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|a| a.allowance_id == sent.allowance_id)
+        .unwrap();
+    assert_eq!(incoming.status, AllowanceStatus::Proposed);
+    let refused = viewer.reject_allowance(&incoming.record).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::ScopeMissing(scope)) if scope == "paykit_contacts")
+    );
+    assert_eq!(
+        viewer.allowance(&incoming.record).await.unwrap().status,
+        AllowanceStatus::Proposed
+    );
+    assert!(viewer
+        .app()
+        .queued_messages("paykit")
+        .await
+        .unwrap()
+        .is_empty());
+
+    author.receive(None).await.unwrap();
+    let rejected = author.reject_allowance(&incoming.record).await.unwrap();
+    assert!(matches!(
+        author.app().delivery(&rejected).await.unwrap(),
+        Some(pubky_switch_client::app::Delivery::Accepted { .. })
+    ));
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        shop.allowance(&sent.record).await.unwrap().status,
+        AllowanceStatus::Rejected
+    );
+}
+
+#[tokio::test]
+async fn test_allowances_queued_rejection_waits_after_the_signer_loses_contacts() {
+    let w = World::new();
+    let mut payer = Box::pin(wallet(&w)).await;
+    let mut shop = Box::pin(shop(&w)).await;
+    let (theirs, ours) = Box::pin(proposed(&w, &mut shop, &mut payer)).await;
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/inbox".into(),
+            after: 0,
+        });
+    let rejection = payer.reject_allowance(&ours).await.unwrap();
+    assert!(matches!(
+        payer.app().delivery(&rejection).await.unwrap(),
+        Some(pubky_switch_client::app::Delivery::Queued { .. })
+    ));
+    assert!(payer
+        .app_mut()
+        .hold_message("paykit", &rejection)
+        .await
+        .unwrap());
+    let original = payer.app().cert().clone();
+    let id = payer.app_id();
+    let narrower = renew(&w, id, &AppScopes::new().allowance().build().unwrap(), 1000);
+    list(&w, id, &original, &narrower);
+    payer.receive(None).await.unwrap();
+    assert_eq!(payer.app().cert().hash(), narrower.hash());
+    payer
+        .app_mut()
+        .release_message("paykit", &rejection)
+        .await
+        .unwrap();
+    let retried = payer.app_mut().flush_message(&rejection).await.unwrap();
+    assert!(!matches!(
+        retried,
+        Some(pubky_switch_client::app::Delivery::Accepted { .. })
+    ));
+    let summary = shop.receive(None).await.unwrap();
+    assert!(!received(&summary, "paykit.allowance_rejection"));
+    assert_eq!(
+        shop.allowance(&theirs).await.unwrap().status,
+        AllowanceStatus::Proposed
+    );
 }

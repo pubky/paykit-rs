@@ -909,13 +909,17 @@ impl Protocol for PaykitProtocol {
     }
 
     /// Hold every attempt to deliver an Allowance acceptance, including a re-send or an
-    /// acceptance already in the outbox (Paykit spec 8.3.1). This gate allows every
-    /// other message kind through, subject to the Switch's own holds.
+    /// acceptance already in the outbox (Paykit spec 8.3.1). Proposals and rejections
+    /// require the sender's current contacts permission on every attempt (Paykit spec 3.3).
     fn may_send(
         &self,
         delivery: &pubky_switch_client::app::DeliveryView<'_>,
     ) -> Result<bool, StoreFailure> {
-        Ok(delivery.message().kind != Kind::AllowanceAcceptance.as_str())
+        Ok(match Kind::from_kind(&delivery.message().kind) {
+            Some(Kind::AllowanceAcceptance) => false,
+            Some(kind) => kind.has_allowance_sender_contacts(delivery.cert().scopes()),
+            None => true,
+        })
     }
 
     fn opaque_members(&self) -> Vec<OpaqueRule> {

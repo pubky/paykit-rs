@@ -1189,6 +1189,14 @@ impl Paykit {
         }
     }
 
+    fn require_allowance_send(&self, kind: Kind) -> Result<()> {
+        self.require_allowance()?;
+        if !kind.has_allowance_sender_contacts(self.app.cert().scopes()) {
+            return Err(Refusal::ScopeMissing("paykit_contacts".into()).into());
+        }
+        Ok(())
+    }
+
     /// The `allowances` record this app holds at `record`, bound to its key (Paykit wire
     /// 5.4); `None` when it holds none, or one that doesn't bind or isn't under the fixed
     /// policy.
@@ -1295,7 +1303,7 @@ impl Paykit {
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
-        self.require_allowance()?;
+        self.require_allowance_send(Kind::AllowanceProposal)?;
         Box::pin(self.refuse_while_sends_held(&to)).await?;
         let allowance_id = AllowanceId::generate()?;
         let proposer_role = match role {
@@ -1478,8 +1486,8 @@ impl Paykit {
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
+        self.require_allowance_send(kind)?;
         Box::pin(self.records_known()).await?;
-        self.require_allowance()?;
         // A record that can't be opened yet may hold a response or an end: nothing is
         // answered or ended over it until it opens (Paykit spec 8.3, one response).
         Box::pin(self.refuse_while_awaiting_key(record)).await?;
