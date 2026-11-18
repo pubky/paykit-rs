@@ -1166,6 +1166,7 @@ async fn test_unrequested_list_above_the_payees_generation_not_paid() {
         let refused = wallet
             .pay_without_request(to_bob(&w, "0.0015", id))
             .await
+            .outcome
             .unwrap_err();
         assert!(
             matches!(refused.refusal(), Some(Refusal::WaitingForList)),
@@ -1199,6 +1200,7 @@ async fn test_unrequested_list_above_the_payees_generation_not_paid() {
     let outcome = wallet
         .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     let paid = paid_destination(&wallet).await;
@@ -1240,12 +1242,14 @@ async fn test_unrequested_single_use_endpoint_used_consumes_the_whole_version() 
     let paid = wallet
         .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
         .await
+        .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     shop.receive(None).await.unwrap();
     let refused = wallet
         .pay_without_request(UnrequestedPayment::new(w.bob_id(), btc("0.0015")))
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::WaitingForList)),
@@ -1255,6 +1259,7 @@ async fn test_unrequested_single_use_endpoint_used_consumes_the_whole_version() 
     let refused = wallet
         .pay_without_request(to_bob(&w, "0.0015", "btc-lightning-bolt12"))
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::WaitingForList)),
@@ -1270,6 +1275,7 @@ async fn test_unrequested_single_use_endpoint_used_consumes_the_whole_version() 
     let paid = wallet
         .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
         .await
+        .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     assert_eq!(w.rail.all_executions().len(), 2);
@@ -1305,6 +1311,7 @@ async fn test_unrequested_list_of_the_held_pair_never_replaces_the_held_one() {
     let outcome = wallet
         .pay_without_request(to_bob(&w, "0.0015", "btc-lightning-bolt12"))
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     let handed: Vec<String> = w
@@ -1359,6 +1366,7 @@ async fn test_unrequested_reusable_endpoint_over_a_refused_marking_write_not_pai
         let refused = wallet
             .pay_without_request(to_bob(&w, "0.0015", id))
             .await
+            .outcome
             .unwrap_err();
         assert!(
             matches!(refused, paykit_sdk::PaykitError::Conflict(_)),
@@ -1389,12 +1397,14 @@ async fn test_unrequested_reusable_endpoint_of_a_version_used_elsewhere_not_paid
     let paid = wallet
         .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
         .await
+        .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
 
     let raced = phone
         .pay_without_request(to_bob(&w, "0.0015", "btc-lightning-bolt12"))
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(raced, paykit_sdk::PaykitError::Conflict(_)),
@@ -1404,6 +1414,7 @@ async fn test_unrequested_reusable_endpoint_of_a_version_used_elsewhere_not_paid
     let used = phone
         .pay_without_request(to_bob(&w, "0.0015", "btc-lightning-bolt12"))
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(used.refusal(), Some(Refusal::WaitingForList)),

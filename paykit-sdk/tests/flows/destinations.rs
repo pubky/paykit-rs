@@ -1699,6 +1699,7 @@ async fn used_up_list(w: &World) -> (paykit_sdk::Paykit, paykit_sdk::Paykit) {
             ),
         )
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
@@ -1721,6 +1722,7 @@ async fn test_destinations_used_up_list_asked_for_an_endpoint_it_lacks() {
             ),
         )
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::WaitingForList)),
@@ -1752,6 +1754,7 @@ async fn test_destinations_used_up_list_asked_for_a_request_accepting_what_it_la
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::WaitingForList)),
@@ -1815,6 +1818,7 @@ async fn test_destinations_used_up_list_beside_a_list_without_the_endpoint_asked
             ),
         )
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::WaitingForList)),
@@ -1841,6 +1845,7 @@ async fn test_destinations_used_up_and_expired_list_beside_a_list_without_the_en
             ),
         )
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::WaitingForList)),
@@ -1872,6 +1877,7 @@ async fn test_destinations_used_up_list_beside_a_list_the_method_doesnt_pay_aske
             crate::common::btc("1"),
         ))
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::WaitingForList)),

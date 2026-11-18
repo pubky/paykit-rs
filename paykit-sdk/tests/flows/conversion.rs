@@ -702,6 +702,7 @@ async fn test_conversion_unusable_list_endpoints_beside_a_used_up_list_ask_for_i
                 .with_options(PayOptions::default().with_endpoint(endpoint("btc-bitcoin-p2wpkh"))),
         )
         .await
+        .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     let mut till = w
@@ -742,6 +743,7 @@ async fn test_conversion_unusable_list_endpoints_beside_a_used_up_list_ask_for_i
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::WaitingForList)),

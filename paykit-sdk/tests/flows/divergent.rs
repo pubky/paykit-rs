@@ -4430,7 +4430,11 @@ async fn test_divergent_paused_list_above_the_payees_generation_pauses_nothing()
     set_divergent(&base, &wallet, &record, true);
     let payment = UnrequestedPayment::new(w.bob_id(), btc("1"))
         .with_options(PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")));
-    let refused = wallet.pay_without_request(payment).await.unwrap_err();
+    let refused = wallet
+        .pay_without_request(payment)
+        .await
+        .outcome
+        .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::WaitingForList)),
         "{refused:?}"
@@ -4469,7 +4473,11 @@ async fn test_divergent_request_to_an_app_whose_list_certificate_no_longer_count
             .with_endpoint(endpoint("btc-lightning-bolt12"))
             .with_list_app(shop_id),
     );
-    let refused = wallet.pay_without_request(payment).await.unwrap_err();
+    let refused = wallet
+        .pay_without_request(payment)
+        .await
+        .outcome
+        .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::WaitingForList)),
         "{refused:?}"
