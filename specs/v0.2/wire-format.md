@@ -592,7 +592,7 @@ A `list-version` is a JSON object with required `generation` and `counter`, each
 
 A received list is installed by its pair (below). A payer pays from a list only when the copy of the payee's `identity.json` it reads before paying (spec 8.4), verified and fresh, has a `generation` at least the list's: an app-signed number is no evidence of the identity's generation. A list of a higher generation than that copy plays no part in that payment; it may in a later one, once the verified generation has reached it. So an app that signs a list for a generation its identity has not reached makes every lower pair of its own ignored at that payer, also once the identity reaches that generation: catching up only makes the list it signed payable, and only a strictly greater pair replaces it, while an equal pair with another hash is an equivocation. For example, an app of an identity at generation 7 signs a nonempty `(8, 9)`; the app's first genuine list of generation 8, a withdrawal `(8, 1)`, is ignored, and once generation 8 is verified `(8, 9)`, while unexpired, becomes payable. The app recovers if it can validly reserve a greater pair and sends a list or withdrawal with it; at the maximum pair only another App ID can publish to that payer again. The payee's way out is to remove the app (a request whose `required_app_id` names that app then can't be paid, spec 8.1). Only that app's key can sign such a list, and only that app's lists are ordered against it: the lists of the payee's other apps, and of other payees, are ordered on their own. A legitimate list may have a lower generation than the current document: its ordinary certificate-at-acceptance and expiry checks still apply.
 
-For the same publisher identity, publisher App ID and recipient identity, a greater pair replaces the held list, a lower pair does not, and the same pair with the same message hash is a duplicate. The same pair with another message hash is an equivocation: reject it, report the authenticated writer, and retain the held message. An empty greater list leaves no payable endpoint. Keep its highest pair and message hash even when empty or expired, and keep every `used` entry when replacing it (5.4). Expiry permits a request for a newer list (spec 8.4); it does not erase ordering or consumption evidence. Existing record-loss/deletion holds still apply when that evidence is unavailable. The recipient does not read the publisher's private counter or origin receipt.
+For the same publisher identity, publisher App ID and recipient identity, a greater pair replaces the held list, a lower pair does not, and the same pair with the same message hash is a duplicate. The same pair with another message hash is an equivocation: reject it, report the authenticated writer, and retain the held message. An empty greater list leaves no payable endpoint. Keep its highest pair and message hash even when empty or expired, and keep every `used` entry when replacing it (5.4). Expiry permits a request for a newer list (spec 8.4); it does not erase ordering or consumption evidence. Existing record-loss/deletion holds still apply when that evidence is unavailable. The recipient orders the lists using the signed version and does not read the publisher's private counter.
 
 `created_at`, `expires_at`, accepted-at age and replay deadlines remain actual-time checks. A new UUID, changed expiry, renewal, changed endpoints or newly constructed withdrawal is a new publication and consumes another reservation; an unchanged retry keeps its pair and exact signed bytes. Pair fields impose no future-time exception. Of the payer's rules above, the Paykit SDK on `v0.2` implements the generation check when paying, the ordering by pair, and keeping the highest pair, its message hash and every `used` entry in the `payment_lists` record, where a list of the pair a readable record holds never replaces that record's list. It does not yet implement the equivocation rule (reject, report the authenticated writer, retain the held message): a list held or kept over a `payment_lists` record that doesn't read, is deleted or is paused as divergent is compared with another list by pair only. The record-loss/deletion holds remain as spec Section 18 states. The publishing side, spec 8.4.1, is not yet implemented.
 
@@ -785,7 +785,7 @@ Until an adopted Switch revision and its Paykit mapping and implementation provi
 | `payee_activity` | `paykit_request` | `["paykit_request"]` | |
 | `payee_activity`, a request sent under a label | `paykit_request:<label>` | `["paykit_request:<label>"]` | `identifiers.json` `policies` (`shop1`) |
 | `payment_lists` | `paykit_pay` | `["paykit_pay"]` | |
-| `private_list_publications` | `paykit_request` | `["paykit_request"]` | protected origin with `birth_generation` (5.8); vectors accompany implementation |
+| `private_list_publications` | `paykit_request` | `["paykit_request"]` | permanent, naming the key's generation (5.8); vectors come with the code that writes it |
 | `allowances` | `paykit_allowance` | `["paykit_allowance"]` | `identifiers.json` `policies` |
 | `allowance_ledgers` | `paykit_allowance` | `["paykit_allowance_execute"]` | `identifiers.json` `policies` |
 | `block_floor` | `paykit_pay` | `["paykit_pay"]` | |
@@ -1178,44 +1178,32 @@ Vectors: `sealed.json` `settlement_marks` covers bucket encodings, sealed values
 
 ### 5.8 `private_list_publications`
 
-The publisher's own current reservation authority for one App ID, recipient identity and verified publishing identity generation (spec 8.4.1). The origin slots, policy hash and lineage encodings throughout this section are those of Switch revision `f0bbddd1` (`spec/record-origins.md`). The current pin has no such wire format. Publication remains unavailable under spec 8.4.1.
-
-For App ID A (16 decoded bytes), recipient R (32 decoded bytes), and positive generation g:
+A publishing app's counter of the lists it sends one recipient in one generation of its identity (spec 8.4.1). For App ID A (16 decoded bytes), recipient R (32 decoded bytes) and generation g:
 
 ```text
 natural_key = lp(A, R, u64(g))
-blinded_key = blind(natural_key)
 policy = { read_scope: "paykit_request",
            write_scopes: ["paykit_request"],
-           protection: { kind: "origin", birth_generation: g } }
-collection_id = derive("pubky-switch/v1/collection",
-                       "private_list_publications", own_identity)
-record_key = derive("pubky-switch/v1/record", "private_list_publications",
-                    blinded_key, protected_policy_hash(policy))
-origin.binding = hash(lp("paykit/v1/private-list-publication",
-                         own_identity, collection_id, record_key,
-                         blinded_key, u64(g)))
-origin.child = null
+           permanent: { generation: g } }
 ```
 
-`protected_policy_hash` is the protected policy hash at Switch revision `f0bbddd1` (its wire 1.5 and `spec/record-origins.md` Section 1), and it and the origin/lineage encodings are exclusively the generic Switch contract's. Birth generation participates in that hash and must equal the actual first application generation. The naming key is the publisher identity's stable naming key. The collection, scopes, encoding and inputs are fixed: a fresh salt, alternate policy/collection or local epoch cannot create another namespace for this tuple. The service verifies `id_inputs`; Paykit also recomputes the natural key and every binding from the opened value. No recipient, natural key or unkeyed recipient hash is placed in cleartext policy or service metadata. The unlabelled `paykit_request` scope already authorizes publication; a labelled-only selling scope does not.
+Derive the record key as in Section 1.5 with the permanent policy above. The service accepts its creation only in generation g and refuses deletion until the account has passed g (Pubky Switch spec, Section 10.3.1). The natural key stays out of the cleartext policy and metadata.
 
 | Field | Type | Req | Notes |
 |---|---|---|---|
 | `v` | int | yes | 1 |
-| `publisher` | app-id | yes | this publishing App ID, also the authenticated writer |
-| `recipient` | pubky | yes | the message recipient and natural-key recipient |
-| `generation` | int | yes | positive through 9007199254740991; key/policy birth generation and prepared message generation |
-| `counter` | int | yes | positive through 9007199254740991; the exact reserved message counter |
-| `grant_id` | `b64(16) \| null` | yes | null for withdrawal; otherwise the per-recipient host authorization of spec 8.4.1 |
-| `message_id` | uuid | yes | the prepared message's UUID v4 |
-| `message_hash` | `b64(32)` | yes | `hash(exact prepared message JSON bytes)`, excluding its detached signature |
+| `publisher` | app-id | yes | A |
+| `recipient` | pubky | yes | R |
+| `generation` | int | yes | g, from 1 through 9007199254740991 |
+| `counter` | int | yes | the counter of the newest list reserved, from 1 through 9007199254740991: that list's `version` is `{g, counter}` (4.13) |
+| `msg_id` | uuid | yes | that list message's `msg_id` |
+| `message_hash` | `b64(32)` | yes | the message hash (1.5) of that list |
 
-Writers use this compact member order. Required null is meaningful here, not an omitted member. The prepared message's complete body, sender identity/App ID, recipient, pair, hash and grant/withdrawal intent must agree with this value. The publisher signs its original and every subsequent counter write with that App ID. Read-time authority requires the dated current operation's signature by that App ID and the complete generic evidence of spec 8.4.1, not a retained transcript of every earlier writer. Another scope-authorized current writer or retained contradictory writer evidence is a hold and is reported. Current service evidence authenticates the exact application, origin and lineage; a local value or equal counter supplies none of it. The receiver does not require access to this private record.
+**Binding** (Switch spec 8.2): the reader recomputes the record key with its own naming key and the policy above, and acts on the record only if the key is the one derived from `publisher`, `recipient` and `generation`. Unknown members follow Switch wire 1.1.
 
-The known fields occupy at most 321 compact JSON bytes. The complete preserved value, unknown members included, MUST fit 508 bytes; otherwise publication holds without truncation. Always seal it in the 512-byte padded plaintext bucket, 528 ciphertext bytes including its authentication tag. A shorter withdrawal uses the same bucket. Endpoints and full offer history do not belong here; they stay in their bounded local/journal stores.
+**Seen counters:** a reader that holds a write of the record ignores, and shows with its writer, a later write whose `counter` is lower than the one it holds, or equal with another `msg_id` or `message_hash` (spec 8.4.1).
 
-The original carries the binding above, `child: null`, `id_inputs`, zero ordinary expected version and its successful strict `record_absent` condition. Subsequent writes omit `origin` and carry unchanged policy, exact ordinary expected version and generic `record_current` condition on the exact current application/lineage. A no-op is never evidence that those conditions held. The protected origin slot is permanent and non-recycling in its uninterrupted account history, including after ordinary value deletion/forgetting and cooperative transfer. Retired, recovered, unknown, divergent, unreadable or deleted authority holds; absence never becomes permission to reset. Spec 8.4.1 defines durable preparation, application proof, signing, queueing and generation changes, and forbids same-generation repair from a backup. These are required formats and integration rules; their positive and rejection vectors accompany the implementing library/SDK.
+Vectors for this record come with the code that writes it.
 
 ### 5.9 Allowance origins and initial ledgers
 
