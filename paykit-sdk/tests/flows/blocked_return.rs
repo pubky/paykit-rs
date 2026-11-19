@@ -230,10 +230,11 @@ async fn test_blocked_return_own_unblock_unanswered_asks_nothing() {
                 current: serde_json::Value::Null,
             });
     }
-    wallet.unblock(&w.bob_id()).await.unwrap();
+    let error = wallet.unblock(&w.bob_id()).await.unwrap_err();
+    assert!(error.kept_batch().is_some());
     w.clock.advance_ms(11 * MINUTE_MS);
-    wallet.receive(None).await.unwrap();
-    // No ask queued, delivered or not.
+    let _ = wallet.receive(None).await;
+    // No ask queued, delivered or not: the unfinished raise didn't write the unblock.
     let mark = format!("bd/{}", pubky_switch_core::enc::b64(&w.bob_id()));
     let mark: serde_json::Value = serde_json::from_slice(
         &wallet
@@ -246,14 +247,21 @@ async fn test_blocked_return_own_unblock_unanswered_asks_nothing() {
     .unwrap();
     assert!(mark["d"]["queued"].is_null(), "{mark}");
     assert!(mark["d"]["asked_at_ms"].is_null(), "{mark}");
-    // Read after the message, the lists still show bob: the unblock is still owed.
+    // No unblock was submitted before the raise applied.
     let own_unblock = format!("bk/{}", pubky_switch_core::enc::b64(&w.bob_id()));
     assert!(wallet
         .app()
         .protocol_get("paykit", own_unblock.as_bytes())
         .await
         .unwrap()
-        .is_some());
+        .is_none());
+    assert!(wallet
+        .app_mut()
+        .allow_list()
+        .await
+        .unwrap()
+        .deny
+        .contains(&w.bob_id()));
     assert!(asked(&wallet, &w.bob_id()).await.is_empty());
 }
 
@@ -317,6 +325,10 @@ async fn test_blocked_return_restore_marks_every_blocked_counterparty() {
     crate::common::restore_with_unknown_cursor(&mut restored).await;
     restored.receive(None).await.unwrap();
     assert_eq!(block_marks(&restored).await, 1);
+    assert_eq!(
+        shared_floor(&restored).await,
+        restored.app().highest_service_time()
+    );
 }
 
 #[tokio::test]
@@ -332,12 +344,15 @@ async fn test_blocked_return_missed_window_marks_every_blocked_counterparty() {
     // The inbox lost entries in a window while bob was blocked: any may have been his, so
     // he is marked over that window.
     let now = w.clock.now_ms();
-    w.alice.switch().push_missed(1, now - 1_000, now);
+    w.alice
+        .switch()
+        .push_missed(1, now - 1_000, now + MINUTE_MS);
     wallet.receive(None).await.unwrap();
     // The window is kept, and applied at the next read of the lists.
     w.clock.advance_ms(11 * MINUTE_MS);
     wallet.receive(None).await.unwrap();
     assert_eq!(block_marks(&wallet).await, 1);
+    assert_eq!(shared_floor(&wallet).await, Some(now));
     // Still blocked, nothing is asked; unblocked, he is asked over that window.
     assert!(asked(&wallet, &w.bob_id()).await.is_empty());
     wallet.unblock(&w.bob_id()).await.unwrap();
@@ -348,6 +363,31 @@ async fn test_blocked_return_missed_window_marks_every_blocked_counterparty() {
     let (from, until) = asks[0];
     assert!(from.is_some_and(|from| from <= now - 1_000), "{asks:?}");
     assert!(until.is_some_and(|until| until >= now), "{asks:?}");
+}
+
+#[tokio::test]
+async fn test_blocked_return_missed_floor_uses_the_window_end_only_when_a_sender_is_marked() {
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    wallet.receive(None).await.unwrap();
+    let start = w.clock.now_ms();
+    w.clock.advance_ms(MINUTE_MS);
+    w.alice.switch().push_missed(1, start, start + 1_000);
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(block_marks(&wallet).await, 0);
+    assert_eq!(shared_floor(&wallet).await, None);
+
+    wallet.block(&w.bob_id()).await.unwrap();
+    let end = w.clock.now_ms();
+    w.clock.advance_ms(MINUTE_MS);
+    w.alice.switch().push_missed(1, start, end);
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(block_marks(&wallet).await, 1);
+    assert_eq!(shared_floor(&wallet).await, Some(end));
 }
 
 #[tokio::test]
@@ -1344,13 +1384,17 @@ async fn test_blocked_return_marks_and_widenings_dated_past_the_backup_bounded_a
     let mut wallet = contacts_wallet(&w, store()).await;
     let ahead = w.clock.now_ms() + 2 * 24 * 60 * MINUTE_MS;
     crate::common::seed_marks(&mut wallet, "bd/", 1, ahead).await;
-    let widening = serde_json::json!({ "v": 1, "d": { "from_ms": ahead, "until_ms": u64::MAX } });
+    let id = pubky_switch_core::enc::b64(&[19; 16]);
+    let widening = serde_json::json!({ "v": 1, "d": {
+        "id": id, "deny": null,
+        "windows": [{ "from_ms": ahead, "until_ms": ahead, "floor_ms": ahead }]
+    } });
     wallet
         .app_mut()
         .protocol_commit(
             "paykit",
             &[pubky_switch_client::app::LocalWrite::Put {
-                key: format!("bw/{ahead:020}").into_bytes(),
+                key: format!("bw/{id}").into_bytes(),
                 value: serde_json::to_vec(&widening).unwrap(),
             }],
         )
@@ -1382,12 +1426,12 @@ async fn test_blocked_return_marks_and_widenings_dated_past_the_backup_bounded_a
         .await
         .unwrap()
     {
-        let window: serde_json::Value = serde_json::from_slice(&value).unwrap();
-        assert!(
-            window["d"]["from_ms"].as_u64().unwrap() <= bound,
-            "{window}"
-        );
-        assert!(String::from_utf8(key).unwrap() <= format!("bw/{bound:020}"));
+        let group: serde_json::Value = serde_json::from_slice(&value).unwrap();
+        assert_eq!(String::from_utf8(key).unwrap(), format!("bw/{id}"));
+        let window = &group["d"]["windows"][0];
+        assert_eq!(window["from_ms"], bound);
+        assert_eq!(window["until_ms"], bound);
+        assert_eq!(window["floor_ms"], bound);
     }
 }
 
@@ -1699,6 +1743,336 @@ async fn shared_floor(app: &Paykit) -> Option<u64> {
         })
 }
 
+#[tokio::test]
+async fn test_blocked_return_payer_records_another_apps_unblock_with_the_floor() {
+    let w = World::new();
+    let mut payer = contacts_wallet(&w, store()).await;
+    let mut contacts = w
+        .join(
+            &w.alice,
+            "contacts",
+            AppScopes::new().manage_contacts().build().unwrap(),
+        )
+        .await;
+    contacts.block(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    payer.receive(None).await.unwrap();
+    assert_eq!(shared_floor(&payer).await, None);
+
+    contacts.unblock(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    payer.receive(None).await.unwrap();
+    let expected = payer
+        .app()
+        .highest_service_time()
+        .unwrap()
+        .saturating_add(pubky_switch_core::records::CLOCK_TOLERANCE_MS);
+    assert_eq!(shared_floor(&payer).await, Some(expected));
+
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    payer.receive(None).await.unwrap();
+    assert_eq!(shared_floor(&payer).await, Some(expected));
+}
+
+#[tokio::test]
+async fn test_blocked_return_observed_unblock_retries_its_original_cutoff_after_reload() {
+    let w = World::new();
+    let storage = store();
+    let mut payer = contacts_wallet(&w, Arc::clone(&storage)).await;
+    let mut contacts = w
+        .join(
+            &w.alice,
+            "contacts",
+            AppScopes::new().manage_contacts().build().unwrap(),
+        )
+        .await;
+    contacts.block(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    payer.receive(None).await.unwrap();
+    contacts.unblock(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    let expected = w.clock.now_ms() + pubky_switch_core::records::CLOCK_TOLERANCE_MS;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/ops".into(),
+            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            current: serde_json::Value::Null,
+        });
+    assert!(payer.receive(None).await.is_err());
+    assert!(asked(&payer, &w.bob_id()).await.is_empty());
+    assert_eq!(shared_floor(&payer).await, None);
+    let app_id = payer.app_id();
+    drop(payer);
+
+    w.clock.advance_ms(MINUTE_MS);
+    let mut payer = w
+        .load_on_clock(&w.alice, storage, app_id, w.clock.clone())
+        .await;
+    payer.receive(None).await.unwrap();
+    assert_eq!(shared_floor(&payer).await, Some(expected));
+}
+
+#[tokio::test]
+async fn test_blocked_return_observed_unblock_and_a_later_own_block_survive_a_lost_answer() {
+    let w = World::new();
+    let mut payer = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    dropped_for_the_block(&w, &mut payer, &mut shop).await;
+    let mut contacts = w
+        .join(
+            &w.alice,
+            "contacts",
+            AppScopes::new().manage_contacts().build().unwrap(),
+        )
+        .await;
+    contacts.unblock(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    let expected = w.clock.now_ms() + pubky_switch_core::records::CLOCK_TOLERANCE_MS;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+            path: "/ops".into(),
+        });
+    let result = payer.receive(None).await;
+    assert!(result.unwrap_err().kept_batch().is_some());
+    assert!(asked(&payer, &w.bob_id()).await.is_empty());
+
+    payer.block(&w.carol_id()).await.unwrap();
+    w.clock.advance_ms(MINUTE_MS);
+    payer.receive(None).await.unwrap();
+    assert_eq!(shared_floor(&payer).await, Some(expected));
+    assert!(payer
+        .app_mut()
+        .allow_list()
+        .await
+        .unwrap()
+        .deny
+        .contains(&w.carol_id()));
+    assert_eq!(asked(&payer, &w.bob_id()).await.len(), 1);
+    shop.receive(None).await.unwrap();
+    payer.receive(None).await.unwrap();
+    assert!(payer.requests().await.unwrap()[0].manual_only);
+    assert_eq!(asked(&payer, &w.bob_id()).await.len(), 1);
+}
+
+#[tokio::test]
+async fn test_blocked_return_own_unblock_raises_once_without_a_dropped_message() {
+    let w = World::new();
+    let base = store();
+    let mut wallet = contacts_wallet(&w, Arc::clone(&base)).await;
+    wallet.block(&w.bob_id()).await.unwrap();
+    let app_id = wallet.app_id();
+    drop(wallet);
+    let ahead = Arc::new(pubky_switch_client::clock::TestClock::new(
+        w.clock.now_ms() + crate::common::HOUR_MS,
+    ));
+    let mut wallet = w.load_on_clock(&w.alice, base, app_id, ahead).await;
+    assert_eq!(shared_floor(&wallet).await, None);
+    assert_eq!(block_marks(&wallet).await, 0);
+    let at = w.clock.now_ms();
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    let floor = Some(at + pubky_switch_core::records::CLOCK_TOLERANCE_MS);
+    assert_eq!(shared_floor(&wallet).await, floor);
+    assert!(!wallet
+        .app_mut()
+        .allow_list()
+        .await
+        .unwrap()
+        .deny
+        .contains(&w.bob_id()));
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    assert_eq!(shared_floor(&wallet).await, floor);
+    assert!(asked(&wallet, &w.bob_id()).await.is_empty());
+}
+
+#[tokio::test]
+async fn test_blocked_return_own_unblock_waits_for_a_refused_raise() {
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    wallet.block(&w.bob_id()).await.unwrap();
+    crate::common::refuse_writes(&w.alice, 1);
+    let result = wallet.unblock(&w.bob_id()).await;
+    assert!(wallet
+        .app_mut()
+        .allow_list()
+        .await
+        .unwrap()
+        .deny
+        .contains(&w.bob_id()));
+    assert!(result.is_err());
+    assert_eq!(shared_floor(&wallet).await, None);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    assert!(!wallet
+        .app_mut()
+        .allow_list()
+        .await
+        .unwrap()
+        .deny
+        .contains(&w.bob_id()));
+    assert_eq!(
+        shared_floor(&wallet).await,
+        Some(w.clock.now_ms() + pubky_switch_core::records::CLOCK_TOLERANCE_MS)
+    );
+}
+
+#[tokio::test]
+async fn test_blocked_return_own_unblock_waits_for_applied_evidence_after_a_lost_answer() {
+    let w = World::new();
+    let base = store();
+    let mut wallet = contacts_wallet(&w, Arc::clone(&base)).await;
+    let app_id = wallet.app_id();
+    wallet.block(&w.bob_id()).await.unwrap();
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+            path: "/ops".into(),
+        });
+    let result = wallet.unblock(&w.bob_id()).await;
+    assert!(wallet
+        .app_mut()
+        .allow_list()
+        .await
+        .unwrap()
+        .deny
+        .contains(&w.bob_id()));
+    assert!(result.unwrap_err().kept_batch().is_some());
+    drop(wallet);
+    let mut wallet = w
+        .load_on_clock(&w.alice, base, app_id, Arc::clone(&w.clock))
+        .await;
+    wallet.receive(None).await.unwrap();
+    assert!(wallet
+        .app_mut()
+        .allow_list()
+        .await
+        .unwrap()
+        .deny
+        .contains(&w.bob_id()));
+    let floor = shared_floor(&wallet).await;
+    assert_eq!(
+        floor,
+        Some(w.clock.now_ms() + pubky_switch_core::records::CLOCK_TOLERANCE_MS)
+    );
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    assert_eq!(shared_floor(&wallet).await, floor);
+    assert!(!wallet
+        .app_mut()
+        .allow_list()
+        .await
+        .unwrap()
+        .deny
+        .contains(&w.bob_id()));
+}
+
+#[tokio::test]
+async fn test_blocked_return_contacts_only_unblock_needs_no_floor() {
+    let w = World::new();
+    let mut contacts = w
+        .join(
+            &w.alice,
+            "contacts",
+            AppScopes::new().manage_contacts().build().unwrap(),
+        )
+        .await;
+    contacts.block(&w.bob_id()).await.unwrap();
+    contacts.unblock(&w.bob_id()).await.unwrap();
+    assert!(!contacts
+        .app_mut()
+        .allow_list()
+        .await
+        .unwrap()
+        .deny
+        .contains(&w.bob_id()));
+    assert_eq!(shared_floor(&contacts).await, None);
+    contacts.receive(None).await.unwrap();
+    assert_eq!(shared_floor(&contacts).await, None);
+}
+
+#[tokio::test]
+async fn test_blocked_return_own_unblock_rebuilds_on_a_concurrent_floor() {
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    wallet.block(&w.bob_id()).await.unwrap();
+    let mut phone = payer_app(&w, "phone").await;
+    let higher = w.clock.now_ms() + crate::common::HOUR_MS;
+    phone
+        .app_mut()
+        .put_record(
+            &floor_record(&w),
+            &paykit_lib::records::BlockFloorRecord::new(higher)
+                .to_json()
+                .unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(shared_floor(&wallet).await, None);
+    let error = wallet.unblock(&w.bob_id()).await.unwrap_err();
+    assert_eq!(
+        error.code(),
+        Some(pubky_switch_core::http::ErrorCode::Conflict)
+    );
+    assert!(wallet
+        .app_mut()
+        .allow_list()
+        .await
+        .unwrap()
+        .deny
+        .contains(&w.bob_id()));
+    assert_eq!(shared_floor(&wallet).await, Some(higher));
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    assert_eq!(shared_floor(&wallet).await, Some(higher));
+    assert!(!wallet
+        .app_mut()
+        .allow_list()
+        .await
+        .unwrap()
+        .deny
+        .contains(&w.bob_id()));
+}
+
+#[tokio::test]
+async fn test_blocked_return_own_unblock_waits_for_an_unreadable_floor() {
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    wallet
+        .app_mut()
+        .put_record(&floor_record(&w), br#"{"v":1}"#, Vec::new())
+        .await
+        .unwrap();
+    wallet.block(&w.bob_id()).await.unwrap();
+    assert!(matches!(
+        wallet.unblock(&w.bob_id()).await.unwrap_err().refusal(),
+        Some(paykit_sdk::Refusal::NotNow(_))
+    ));
+    assert!(wallet
+        .app_mut()
+        .allow_list()
+        .await
+        .unwrap()
+        .deny
+        .contains(&w.bob_id()));
+    wallet
+        .app_mut()
+        .put_record(
+            &floor_record(&w),
+            &paykit_lib::records::BlockFloorRecord::new(1)
+                .to_json()
+                .unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    assert_eq!(
+        shared_floor(&wallet).await,
+        Some(w.clock.now_ms() + pubky_switch_core::records::CLOCK_TOLERANCE_MS)
+    );
+}
+
 /// Alice's second payer app, `name`, joined now.
 async fn payer_app(w: &World, name: &str) -> Paykit {
     w.join_with(
@@ -1865,10 +2239,8 @@ async fn floor_value(app: &Paykit) -> serde_json::Value {
     serde_json::from_slice(value).unwrap()
 }
 
-/// The wallet takes a floor with a member it doesn't know, written by another payer app;
-/// `spoil` then leaves the record without a value that reads, which the wallet takes too.
-/// Its next raise is built on the value it saw: the unknown member is written back as read.
-async fn raise_after_the_floor_stopped_reading(spoil: Spoil) {
+#[tokio::test]
+async fn test_blocked_return_floor_raised_over_a_value_that_does_not_read_keeps_unknown_members() {
     let w = World::new();
     let mut wallet = contacts_wallet(&w, store()).await;
     let mut phone = payer_app(&w, "phone").await;
@@ -1889,26 +2261,13 @@ async fn raise_after_the_floor_stopped_reading(spoil: Spoil) {
         .unwrap();
     wallet.receive(None).await.unwrap();
     assert_eq!(shared_floor(&wallet).await, Some(1));
-    match &spoil {
-        Spoil::Malformed => phone
-            .app_mut()
-            .put_record(&target, br#"{"v":1}"#, Vec::new())
-            .await
-            .unwrap(),
-        Spoil::Deleted => phone
-            .app_mut()
-            .delete_record(&target, Vec::new())
-            .await
-            .unwrap(),
-    };
+    phone
+        .app_mut()
+        .put_record(&target, br#"{"v":1}"#, Vec::new())
+        .await
+        .unwrap();
     wallet.receive(None).await.unwrap();
-    // A later write that doesn't read is ignored while the value seen reads, so the copy
-    // keeps the value seen; a delete is taken, and leaves only the mark of the value seen.
-    let held = match spoil {
-        Spoil::Malformed => Some(1),
-        Spoil::Deleted => None,
-    };
-    assert_eq!(shared_floor(&wallet).await, held);
+    assert_eq!(shared_floor(&wallet).await, Some(1));
     wallet_raises_the_floor(&w, &mut wallet, &mut shop).await;
     let raised = floor_value(&wallet).await;
     assert_eq!(raised["later_member"], unknown, "{raised}");
@@ -1919,20 +2278,98 @@ async fn raise_after_the_floor_stopped_reading(spoil: Spoil) {
     assert_eq!(raised, expected);
 }
 
-/// How the floor record stops holding a value that reads.
-enum Spoil {
-    Malformed,
-    Deleted,
-}
-
 #[tokio::test]
-async fn test_blocked_return_floor_raised_over_a_value_that_does_not_read_keeps_unknown_members() {
-    raise_after_the_floor_stopped_reading(Spoil::Malformed).await;
-}
+async fn test_blocked_return_deleted_floor_holds_the_unblock_and_one_time_requests() {
+    let w = World::new();
+    let storage = store();
+    let mut wallet = contacts_wallet(&w, Arc::clone(&storage)).await;
+    let mut phone = payer_app(&w, "phone").await;
+    let mut shop = w.shop().await;
+    let target = floor_record(&w);
+    let value = paykit_lib::records::BlockFloorRecord::new(1)
+        .to_json()
+        .unwrap();
+    phone
+        .app_mut()
+        .put_record(&target, &value, Vec::new())
+        .await
+        .unwrap();
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(shared_floor(&wallet).await, Some(1));
+    assert!(!wallet.request(&request).await.unwrap().manual_only);
+    wallet.block(&w.carol_id()).await.unwrap();
+    let before = wallet.backup().await.unwrap();
 
-#[tokio::test]
-async fn test_blocked_return_floor_raised_over_a_deleted_record_keeps_unknown_members() {
-    raise_after_the_floor_stopped_reading(Spoil::Deleted).await;
+    phone
+        .app_mut()
+        .delete_record(&target, Vec::new())
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let deletion = wallet
+        .app()
+        .records_of("block_floor")
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(
+        deletion.content,
+        pubky_switch_client::app::RecordContent::Deleted
+    );
+    let cursor = wallet.app().service_cursor();
+    assert!(cursor < wallet.app().cursor());
+    for _ in 0..2 {
+        assert!(matches!(
+            wallet.unblock(&w.carol_id()).await.unwrap_err().refusal(),
+            Some(paykit_sdk::Refusal::NotNow(_))
+        ));
+        assert!(wallet
+            .app_mut()
+            .allow_list()
+            .await
+            .unwrap()
+            .deny
+            .contains(&w.carol_id()));
+        assert!(wallet.request(&request).await.unwrap().manual_only);
+        assert_eq!(
+            wallet.app().records_of("block_floor").await.unwrap(),
+            vec![deletion.clone()]
+        );
+        wallet.receive(None).await.unwrap();
+        assert_eq!(wallet.app().service_cursor(), cursor);
+    }
+
+    // A backup from before the deletion cannot clear the installation's hold.
+    drop(wallet);
+    let mut restored = Box::pin(Paykit::restore(
+        w.env(&w.alice, storage),
+        PaykitConfig::default(),
+        &before,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    assert!(restored
+        .app()
+        .protocol_get("paykit", b"fd")
+        .await
+        .unwrap()
+        .is_some());
+    restored.receive(None).await.unwrap();
+    assert!(matches!(
+        restored.unblock(&w.carol_id()).await.unwrap_err().refusal(),
+        Some(paykit_sdk::Refusal::NotNow(_))
+    ));
+    assert!(restored
+        .app_mut()
+        .allow_list()
+        .await
+        .unwrap()
+        .deny
+        .contains(&w.carol_id()));
 }
 
 #[tokio::test]
@@ -2165,14 +2602,12 @@ impl PayingStore {
     }
 }
 
-/// The wallet drops bob's request for the block and unblocks him: its next receive, once
-/// the lists are read again, asks for the request and raises the floor past carol's.
+/// The wallet drops bob's request and keeps him blocked until the timed unblock.
 async fn wallet_about_to_raise_the_floor(w: &World, wallet: &mut Paykit, shop: &mut Paykit) {
     request_from(shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.app_mut().deny(&w.bob_id()).await.unwrap();
     wallet.receive(None).await.unwrap();
     assert_eq!(block_marks(wallet).await, 1);
-    wallet.unblock(&w.bob_id()).await.unwrap();
     w.clock.advance_ms(11 * MINUTE_MS);
 }
 
@@ -2232,6 +2667,7 @@ async fn test_blocked_return_floor_raised_during_the_paying_commit_holds_a_first
                 .build()
                 .unwrap()
                 .block_on(async {
+                    wallet.unblock(&bob).await.unwrap();
                     wallet.receive(None).await.unwrap();
                     assert_eq!(asked(&wallet, &bob).await.len(), 1);
                     shared_floor(&wallet).await
@@ -2271,8 +2707,8 @@ async fn test_blocked_return_floor_read_that_fails_after_the_paying_commit_holds
 #[tokio::test]
 async fn test_blocked_return_request_back_by_a_live_mark_not_paid_automatically() {
     // Bob's request is dropped for the block and he is unblocked; whether he is flagged
-    // isn't known, so nothing asks him and no app raises the floor. He sends a request again
-    // on his own: the live block mark marks its record `manual_only`. An automatic first
+    // isn't known, so nothing asks him. The unblock has already raised the floor. He sends
+    // a request again on his own: its record is `manual_only`. An automatic first
     // dispatch reads the record and holds: the method isn't called. The user pays it by
     // hand.
     let w = World::new();
@@ -2285,7 +2721,7 @@ async fn test_blocked_return_request_back_by_a_live_mark_not_paid_automatically(
     let again = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     assert!(asked(&wallet, &w.bob_id()).await.is_empty());
-    assert_eq!(shared_floor(&wallet).await, None);
+    assert!(shared_floor(&wallet).await.is_some());
     assert!(wallet.request(&again).await.unwrap().manual_only);
     assert!(held_for_the_user(&wallet).await);
     let outcome = wallet
@@ -2586,6 +3022,7 @@ impl LandsAfter {
                         Self::DenyList => wallet.app_mut().deny(&carol).await.unwrap(),
                         Self::Record => OwnWrite::ManualOnly.run(&mut wallet, &carol).await,
                         Self::Floor => {
+                            wallet.unblock(&bob).await.unwrap();
                             wallet.receive(None).await.unwrap();
                             assert_eq!(asked(&wallet, &bob).await.len(), 1);
                             assert!(shared_floor(&wallet).await.is_some());
@@ -2857,6 +3294,44 @@ async fn paid_in_flight(
 }
 
 #[tokio::test]
+async fn test_blocked_return_deleted_floor_holds_an_automatic_repeat() {
+    let w = World::new();
+    let (mut wallet, mut phone, _shop, request) = phone_paying_carol(&w).await;
+    let target = floor_record(&w);
+    let value = paykit_lib::records::BlockFloorRecord::new(1)
+        .to_json()
+        .unwrap();
+    wallet
+        .app_mut()
+        .put_record(&target, &value, Vec::new())
+        .await
+        .unwrap();
+    phone.receive(None).await.unwrap();
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let outcome = phone
+        .pay_request_automatically(&request, paykit_sdk::PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = outcome else {
+        panic!("expected a pending automatic payment, got {outcome:?}");
+    };
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+
+    wallet
+        .app_mut()
+        .delete_record(&target, Vec::new())
+        .await
+        .unwrap();
+    w.clock.advance_ms(MINUTE_MS);
+    phone.resume_payments().await.unwrap();
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    phone.receive(None).await.unwrap();
+    phone.resume_payments().await.unwrap();
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}
+
+#[tokio::test]
 async fn test_blocked_return_floor_raised_before_the_attempt_read_again_at_the_repeat() {
     // The wallet raises the floor past carol's request before the phone's attempt on it is
     // committed; the phone's copy doesn't hold the raise. At the resume, the floor read
@@ -2910,67 +3385,69 @@ async fn test_blocked_return_floor_read_that_fails_at_the_repeat_holds_it() {
 
 #[tokio::test]
 async fn test_blocked_return_floor_write_kept_by_the_client_names_its_batch() {
-    // Bob is unblocked, and the host asks him for his messages again. The answer to the batch
-    // that raises the floor and queues the ask is lost, so the client keeps the batch: the
-    // call's error names it, and never reads as a floor to wait for with nothing queued. The
-    // batch settles at the next read: the floor is raised and the ask is sent, with no
-    // second call.
+    // A dropped-message window closes only after the unanswered raise has applied.
     let w = World::new();
     let mut wallet = contacts_wallet(&w, store()).await;
     let mut shop = w.shop().await;
     dropped_for_the_block(&w, &mut wallet, &mut shop).await;
-    wallet.unblock(&w.bob_id()).await.unwrap();
     w.alice
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
-    let error = wallet
+    let error = wallet.unblock(&w.bob_id()).await.unwrap_err();
+    assert!(error.kept_batch().is_some(), "{error}");
+    assert!(error.refusal().is_none(), "{error}");
+    assert!(asked(&wallet, &w.bob_id()).await.is_empty());
+    wallet.receive(None).await.unwrap();
+    assert!(asked(&wallet, &w.bob_id()).await.is_empty());
+    assert!(shared_floor(&wallet).await.is_some());
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    wallet
         .request_resend(
             w.bob_id(),
             paykit_sdk::ResendSelection::default().with_accepted_from_ms(0),
         )
         .await
-        .unwrap_err();
-    assert!(error.kept_batch().is_some(), "{error}");
-    assert!(error.refusal().is_none(), "{error}");
-    assert!(asked(&wallet, &w.bob_id()).await.is_empty());
-    wallet.receive(None).await.unwrap();
+        .unwrap();
     assert_eq!(asked(&wallet, &w.bob_id()).await.len(), 1);
-    assert!(shared_floor(&wallet).await.is_some());
 }
 
 #[tokio::test]
-async fn test_blocked_return_floor_write_kept_at_a_receive_is_asked_once() {
-    // Bob is unblocked and his mark asks, and the answer to the batch that raises the floor
-    // and queues the ask is lost: the client keeps the batch, the read doesn't fail, and the
-    // mark names the batch. The batch settles at the next read, and no later pass asks anew:
-    // one request, with its raise.
+async fn test_blocked_return_floor_write_kept_at_unblock_is_asked_once_after_success() {
     let w = World::new();
     let mut wallet = contacts_wallet(&w, store()).await;
     let mut shop = w.shop().await;
     dropped_for_the_block(&w, &mut wallet, &mut shop).await;
-    wallet.unblock(&w.bob_id()).await.unwrap();
-    w.clock.advance_ms(11 * MINUTE_MS);
     w.alice
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
-    wallet.receive(None).await.unwrap();
+    assert!(wallet
+        .unblock(&w.bob_id())
+        .await
+        .unwrap_err()
+        .kept_batch()
+        .is_some());
     let marks = wallet.app().protocol_scan("paykit", b"bd/").await.unwrap();
     let mark: serde_json::Value = serde_json::from_slice(&marks[0].1).unwrap();
-    assert!(mark["d"]["queued"]["kept_batch"].is_array(), "{mark}");
+    assert!(mark["d"]["queued"].is_null(), "{mark}");
+    wallet.receive(None).await.unwrap();
+    assert!(asked(&wallet, &w.bob_id()).await.is_empty());
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    let floor = shared_floor(&wallet).await;
+    w.clock.advance_ms(11 * MINUTE_MS);
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
     assert_eq!(asked(&wallet, &w.bob_id()).await.len(), 1);
-    assert!(shared_floor(&wallet).await.is_some());
+    assert_eq!(shared_floor(&wallet).await, floor);
     assert_eq!(block_marks(&wallet).await, 1);
 }
 
 /// Alice's wallet with bob's request dropped for the block and bob unblocked; whether he is
-/// flagged isn't known, so his mark asks nothing, while it still needs the floor raised
-/// before any ask of him goes. Returns the wallet's store.
+/// flagged isn't known, so his mark asks nothing. The unblock has already raised the
+/// floor. Returns the wallet's store.
 async fn wallet_with_a_quiet_mark(w: &World) -> (Paykit, Paykit, Arc<ListsStore>) {
     let lists = Arc::new(ListsStore::default());
     let mut wallet = contacts_wallet(w, Arc::clone(&lists) as Arc<dyn StateStore>).await;
@@ -2980,7 +3457,7 @@ async fn wallet_with_a_quiet_mark(w: &World) -> (Paykit, Paykit, Arc<ListsStore>
     wallet.unblock(&w.bob_id()).await.unwrap();
     wallet.receive(None).await.unwrap();
     assert!(asked(&wallet, &w.bob_id()).await.is_empty());
-    assert_eq!(shared_floor(&wallet).await, None);
+    assert!(shared_floor(&wallet).await.is_some());
     (wallet, shop, lists)
 }
 
@@ -3011,17 +3488,15 @@ async fn keep_ask(app: &mut Paykit, sender: &[u8; 32], from_ms: u64) {
 
 #[tokio::test]
 async fn test_blocked_return_ask_whose_answer_is_lost_asked_once_after_a_restart() {
-    // An ask of bob needs the floor raised first: the batch that raises it and queues the
-    // request is applied, but its answer is lost, and the client keeps the batch. The app
-    // restarts; the batch settles at the next read, and the ask is not asked anew: one
-    // request.
+    // The unblock already raised the floor. Bob accepts the ask but its answer is lost.
+    // Reload and delivery retry retain the same queued identity: one accepted request.
     let w = World::new();
     let (mut wallet, _shop, lists) = Box::pin(wallet_with_a_quiet_mark(&w)).await;
     keep_ask(&mut wallet, &w.bob_id(), 5).await;
-    w.alice
+    w.bob
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
-            path: "/ops".into(),
+            path: "/inbox".into(),
         });
     let _ = wallet.receive(None).await;
     let wallet_id = wallet.app_id();
@@ -3049,14 +3524,11 @@ async fn test_blocked_return_ask_whose_answer_is_lost_asked_once_after_a_restart
 }
 
 #[tokio::test]
-async fn test_blocked_return_ask_whose_raise_conflicts_leaves_the_others_going() {
-    // Two asks of bob, each needing the floor raised first. The first raise meets a
-    // `409 conflict`: the floor is read again, that ask waits for the next pass, and the
-    // pass goes on: the second ask raises the floor and goes. The next pass asks the first.
+async fn test_blocked_return_conflicting_unblock_raise_retries_before_any_ask() {
     let w = World::new();
-    let (mut wallet, _shop, _lists) = Box::pin(wallet_with_a_quiet_mark(&w)).await;
-    keep_ask(&mut wallet, &w.bob_id(), 5).await;
-    keep_ask(&mut wallet, &w.bob_id(), 6).await;
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    dropped_for_the_block(&w, &mut wallet, &mut shop).await;
     w.alice
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Error {
@@ -3064,91 +3536,84 @@ async fn test_blocked_return_ask_whose_raise_conflicts_leaves_the_others_going()
             code: pubky_switch_core::http::ErrorCode::Conflict,
             current: serde_json::Value::Null,
         });
-    wallet.receive(None).await.unwrap();
-    assert_eq!(asked(&wallet, &w.bob_id()).await, vec![(Some(6), None)]);
     assert_eq!(
-        wallet
-            .app()
-            .protocol_scan("paykit", b"ask/")
-            .await
-            .unwrap()
-            .len(),
-        1
+        wallet.unblock(&w.bob_id()).await.unwrap_err().code(),
+        Some(pubky_switch_core::http::ErrorCode::Conflict)
     );
-    wallet.receive(None).await.unwrap();
-    let mut asks = asked(&wallet, &w.bob_id()).await;
-    asks.sort();
-    assert_eq!(asks, vec![(Some(5), None), (Some(6), None)]);
     assert!(wallet
-        .app()
-        .protocol_scan("paykit", b"ask/")
+        .app_mut()
+        .allow_list()
         .await
         .unwrap()
-        .is_empty());
+        .deny
+        .contains(&w.bob_id()));
+    assert_eq!(shared_floor(&wallet).await, None);
+    wallet.receive(None).await.unwrap();
+    assert!(asked(&wallet, &w.bob_id()).await.is_empty());
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    let floor = shared_floor(&wallet).await;
+    assert!(floor.is_some());
+    keep_ask(&mut wallet, &w.bob_id(), 5).await;
+    keep_ask(&mut wallet, &w.bob_id(), 6).await;
+    wallet.receive(None).await.unwrap();
+    let asks = asked(&wallet, &w.bob_id()).await;
+    assert!(asks.contains(&(Some(5), None)));
+    assert!(asks.contains(&(Some(6), None)));
+    assert_eq!(shared_floor(&wallet).await, floor);
 }
 
 #[tokio::test]
-async fn test_blocked_return_floor_write_that_fails_keeps_the_ask_waiting() {
-    // Bob is unblocked and his mark asks, but the batch that raises the floor and queues the
-    // ask is refused: nothing is queued, the read doesn't fail, and the ask waits. The next
-    // receive raises the floor and asks.
+async fn test_blocked_return_floor_write_that_fails_keeps_the_unblock_and_ask_waiting() {
     let w = World::new();
     let mut wallet = contacts_wallet(&w, store()).await;
     let mut shop = w.shop().await;
     dropped_for_the_block(&w, &mut wallet, &mut shop).await;
-    wallet.unblock(&w.bob_id()).await.unwrap();
+    crate::common::refuse_writes(&w.alice, 1);
+    assert!(wallet.unblock(&w.bob_id()).await.is_err());
     w.clock.advance_ms(11 * MINUTE_MS);
-    w.alice
-        .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
-            path: "/ops".into(),
-            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
-            current: serde_json::Value::Null,
-        });
     wallet.receive(None).await.unwrap();
     assert!(asked(&wallet, &w.bob_id()).await.is_empty());
     assert_eq!(shared_floor(&wallet).await, None);
     assert_eq!(block_marks(&wallet).await, 1);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    let floor = shared_floor(&wallet).await;
     wallet.receive(None).await.unwrap();
     assert_eq!(asked(&wallet, &w.bob_id()).await.len(), 1);
-    assert!(shared_floor(&wallet).await.is_some());
+    assert_eq!(shared_floor(&wallet).await, floor);
 }
 
 #[tokio::test]
 async fn test_blocked_return_floor_write_refused_for_good_returns_the_refusal() {
-    // Bob is unblocked, and the host asks him for his messages again. The switch refuses the
-    // batch that raises the floor with an answer the same request won't change: the call
-    // returns the switch's refusal, never a floor to wait for. Nothing is queued and the
-    // raise stays owed: a later call raises the floor and asks.
     let w = World::new();
     let mut wallet = contacts_wallet(&w, store()).await;
     let mut shop = w.shop().await;
     dropped_for_the_block(&w, &mut wallet, &mut shop).await;
-    wallet.unblock(&w.bob_id()).await.unwrap();
-    let selection = || paykit_sdk::ResendSelection::default().with_accepted_from_ms(0);
     let code = pubky_switch_core::http::ErrorCode::PermissionMissing;
-    w.alice
-        .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
-            path: "/ops".into(),
-            code,
-            current: serde_json::Value::Null,
-        });
-    let error = wallet
-        .request_resend(w.bob_id(), selection())
-        .await
-        .unwrap_err();
+    crate::common::refuse_writes(&w.alice, 1);
+    let error = wallet.unblock(&w.bob_id()).await.unwrap_err();
     assert!(error.refusal().is_none(), "{error}");
     assert!(error.kept_batch().is_none(), "{error}");
     assert_eq!(error.code(), Some(code), "{error}");
+    assert!(wallet
+        .app_mut()
+        .allow_list()
+        .await
+        .unwrap()
+        .deny
+        .contains(&w.bob_id()));
     assert!(asked(&wallet, &w.bob_id()).await.is_empty());
     assert_eq!(shared_floor(&wallet).await, None);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    let floor = shared_floor(&wallet).await;
     wallet
-        .request_resend(w.bob_id(), selection())
+        .request_resend(
+            w.bob_id(),
+            paykit_sdk::ResendSelection::default().with_accepted_from_ms(0),
+        )
         .await
         .unwrap();
     assert_eq!(asked(&wallet, &w.bob_id()).await.len(), 1);
-    assert!(shared_floor(&wallet).await.is_some());
+    assert_eq!(shared_floor(&wallet).await, floor);
 }
 
 #[tokio::test]

@@ -16,9 +16,8 @@
 use paykit_lib::bodies::ResendRequest;
 use paykit_lib::kinds::{holds_role, targets_app, Kind, Side, OPAQUE_MEMBERS};
 use paykit_lib::scopes::verify_certificate;
-use pubky_switch_client::app::{Delivery, KeptBatchStatus, SENT_RETENTION_MS};
+use pubky_switch_client::app::{Delivery, SENT_RETENTION_MS};
 use pubky_switch_core::enc::unb64_array;
-use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::message::Message;
 use pubky_switch_core::records::DAY_MS;
 use pubky_switch_core::sig::SignedDoc;
@@ -32,7 +31,7 @@ use crate::state::{key, Tx};
 
 /// What became of the request signed for an ask ([`Paykit::queued_ask`]).
 enum QueuedAskState {
-    /// In a batch the client keeps, to send again.
+    /// The client is still resolving the original delivery.
     Waiting,
     /// In the outbox, or delivered.
     Queued,
@@ -104,23 +103,14 @@ impl Paykit {
     /// counterparty can't be made to answer. Returns the request's `msg_id`. Nothing is queued
     /// while sends to `counterparty` are held: while the copy of the deny list holds it, or, at an
     /// app holding `paykit_contacts`, while that copy isn't known, which a read of the lists is
-    /// tried for first (Paykit spec 8.1, "Blocked counterparties"). The ask goes in one batch with
-    /// the raise of the block floor it needs (`crate::floor`).
+    /// tried for first (Paykit spec 8.1, "Blocked counterparties").
     ///
     /// # Errors
     ///
-    /// [`crate::Refusal::ScopeMissing`] without `paykit_contacts`;
-    /// [`crate::Refusal::NotNow`] while sends to `counterparty` are held, while the selection
-    /// overlaps a dropped-reply request whose first delivery is unresolved, or while the app
-    /// can't read the block floor it must raise first (Paykit wire 5.6: when `counterparty`
-    /// has a live block mark here, or the app owes a raise), with nothing queued;
-    /// [`paykit_lib::Error::Validation`] for a selection that selects nothing; the client's
-    /// errors, a `409 conflict` on the block floor after it is read again, and the switch's
-    /// refusal of the raise that the same request won't change, such as `403
-    /// permission_missing`, as it is, with nothing queued. When the client
-    /// kept the batch that raises the floor and queues the ask
-    /// ([`crate::PaykitError::kept_batch`]), both go, the same bytes, at the app's next write
-    /// or read: the call isn't made again.
+    /// [`crate::Refusal::ScopeMissing`] without `paykit_contacts`. Sends wait while the
+    /// recipient is blocked, the deny list is unknown, or a prior overlapping request
+    /// has an unresolved delivery. An empty selection fails validation. Client errors
+    /// from queuing and sending are returned to the caller.
     pub async fn request_resend(
         &mut self,
         counterparty: [u8; 32],
@@ -140,7 +130,8 @@ impl Paykit {
             .into());
         }
         let signed = self.resend_request_message(counterparty, selection)?;
-        let msg_id = self.queue_resend_request(signed, &counterparty).await?;
+        let msg_id = signed.msg_id().to_owned();
+        self.app.queue_signed(signed).await?;
         self.send_message(&msg_id).await?;
         Ok(msg_id)
     }
@@ -255,42 +246,15 @@ impl Paykit {
             let signed = self.resend_request_message(ask.sender, selection)?;
             let msg_id = signed.msg_id().to_owned();
             let hash = signed.hash();
-            // Kept before it is queued: a crash between the two, or a write that queues it
-            // with the raise of the block floor and isn't answered, finds the request here
-            // at the next pass, which reads what became of it before asking anew.
             ask.queued = Some(QueuedRequest {
                 msg_id: msg_id.clone(),
                 hash,
-                kept_batch: None,
             });
-            self.local_put(&ask_key, &ask).await?;
-            match self.queue_resend_request(signed, &ask.sender).await {
-                Ok(_) => {}
-                // The client kept the batch to send again: the raise and the request go
-                // together at the app's next write or read. The ask names the batch, so the
-                // next pass waits while the client keeps it, and reads the request's
-                // delivery once it doesn't.
-                Err(error) if error.kept_batch().is_some() => {
-                    ask.queued = Some(QueuedRequest {
-                        msg_id,
-                        hash,
-                        kept_batch: error.kept_batch(),
-                    });
-                    self.local_put(&ask_key, &ask).await?;
-                    continue;
-                }
-                // An ask that must raise the block floor stays while the floor can't be read,
-                // the switch refuses the raise, or the raise meets a `409 conflict`, after
-                // which the floor was read again: the next pass builds on it (`crate::floor`).
-                // Nothing was queued, and the rest of the asks go on.
-                Err(error)
-                    if crate::floor::floor_write_waits(&error)
-                        || error.code() == Some(ErrorCode::Conflict) =>
-                {
-                    continue
-                }
-                Err(error) => return Err(error),
-            }
+            let mut tx = Tx::default();
+            tx.put(&ask_key, &ask)?;
+            self.app
+                .queue_signed_with(crate::protocol::BACKUP_NAME, signed, &tx.into_writes())
+                .await?;
             self.local_delete(&ask_key).await?;
             self.send_message(&msg_id).await?;
             sent = sent.saturating_add(1);
@@ -312,14 +276,6 @@ impl Paykit {
         sender: &[u8; 32],
         queued: &QueuedRequest,
     ) -> Result<QueuedAskState> {
-        if let Some(batch) = queued.kept_batch {
-            if matches!(
-                self.app.kept_batch(batch).await?,
-                Some(KeptBatchStatus::Kept { .. })
-            ) {
-                return Ok(QueuedAskState::Waiting);
-            }
-        }
         Ok(match self.app.delivery(&queued.msg_id).await? {
             Some(Delivery::Kept { .. }) => QueuedAskState::Waiting,
             Some(Delivery::Queued { .. }) => QueuedAskState::Queued,

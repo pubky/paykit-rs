@@ -163,6 +163,19 @@ pub(crate) fn effect(
     let sender = stored.sender();
     let scopes = cx.cert().scopes().to_vec();
     let pay = scopes.iter().any(|s| s == "paykit_pay");
+    if pay
+        && (state::cx_get::<crate::floor::PendingUnblocks>(cx, key::BLOCK_FLOOR)?
+            .is_some_and(|pending| pending.senders.binary_search(&sender).is_ok())
+            || (state::cx_get::<Vec<[u8; 32]>>(cx, key::DENIED)?
+                .is_some_and(|deny| deny.contains(&sender))
+                && !cx.sender_disposition(&sender)?.blocked
+                && !state::cx_get::<OwnBlockMark>(cx, &key::own_block(&sender))?
+                    .is_some_and(|mark| mark.blocked())))
+    {
+        return Err(Fail::Store(StoreFailure::unavailable(
+            StoreError::Unavailable,
+        )));
+    }
     let payee = paykit_lib::scopes::acts_as_payee(&scopes);
     note_cursor_time(cx, stored)?;
     match stored.body() {
@@ -305,10 +318,9 @@ pub(crate) fn effect(
         Body::ExecutorNotice(notice) if scopes.iter().any(|s| s == "paykit_allowance_execute") => {
             crate::allowances::notice_effect(cx, notice)?;
         }
-        // A publishing app answers a request naming a used version with its current list
-        // (Paykit spec 8.4, "Publishing"). This SDK publishes no list at all yet, so the
-        // request is taken with no effect; the answer comes with list publishing.
-        Body::PrivatePaymentListRequest(_) => {}
+        Body::PrivatePaymentListRequest(request) => {
+            crate::publish::answers::note(cx, stored, &scopes, request, seq)?;
+        }
         _ => {}
     }
     Ok(())
@@ -462,9 +474,6 @@ fn mark_blocked(
                     _ => crate::marks::tell_lost_if_unasked(&mut tx, &gone, raised)
                         .map_err(|_| Fail::corrupt())?,
                 }
-                let floor = state::cx_get::<u64>(cx, key::BLOCK_FLOOR)?;
-                crate::marks::fold_into_floor(&mut tx, floor, gone.latest_ms)
-                    .map_err(|_| Fail::corrupt())?;
                 tx.delete(&family.key(&gone.sender));
                 for write in tx.into_writes() {
                     keep_local(cx, write);
@@ -494,11 +503,17 @@ fn came_back_from_block(
     stored: &StoredMessage,
 ) -> Result<bool, Fail> {
     let mark = state::cx_get::<crate::marks::DropMark>(cx, &MarkFamily::Blocked.key(sender))?;
-    let owed = state::cx_get::<u64>(cx, key::BLOCK_FLOOR)?;
+    let owed = state::cx_get::<crate::floor::PendingUnblocks>(cx, key::BLOCK_FLOOR)?
+        .map(|pending| pending.to_ms);
     let target = crate::floor::floor_target(&cx.identity());
     let held = cx.record(&target)?;
     let seen = cx.record_seen(&cx.record_key(&target)?)?;
-    let shared = crate::floor::shared_floor_of(held.as_ref(), seen.as_deref());
+    let deleted = state::cx_get::<bool>(cx, key::FLOOR_DELETED)?.is_some();
+    let shared = crate::floor::shared_floor_of(
+        held.as_ref().map(|record| &record.content),
+        seen.as_deref(),
+        deleted,
+    );
     Ok(came_back_by(
         stored,
         mark.map(|mark| mark.latest_ms),
@@ -2840,15 +2855,14 @@ impl Paykit {
         if last.is_some_and(|read| lists_read_is_fresh(read, now)) {
             return Ok(());
         }
+        if self.floor_write_is_kept().await? {
+            return Ok(());
+        }
         match self.app.allow_list().await {
-            Ok(lists) => {
-                let (deny, mut tx) = self.judged_deny(lists.deny).await?;
-                tx.put(key::LISTS_READ, &now)?.put(key::DENIED, &deny)?;
-                put_flagged(&mut tx, &lists.flagged)?;
-                self.local_commit(tx).await?;
-                // On the heap, as the other passes of a receive are: it nests deep.
-                Box::pin(self.apply_block_widenings(&deny)).await
-            }
+            Ok(lists) => match self.record_lists(lists, now).await {
+                Err(error) if crate::floor::is_unreadable_floor(&error) => Ok(()),
+                result => result.map(|_| ()),
+            },
             Err(error @ (AppError::Alarm(_) | AppError::Store(_))) => Err(error.into()),
             Err(_) if last.is_some() => self.local_delete(key::LISTS_READ).await,
             Err(_) => Ok(()),
@@ -2869,15 +2883,14 @@ impl Paykit {
             return Ok(false);
         }
         let now = self.now();
+        if self.floor_write_is_kept().await? {
+            return Ok(false);
+        }
         match self.app.allow_list().await {
-            Ok(lists) => {
-                let (deny, mut tx) = self.judged_deny(lists.deny).await?;
-                tx.put(key::LISTS_READ, &now)?.put(key::DENIED, &deny)?;
-                put_flagged(&mut tx, &lists.flagged)?;
-                self.local_commit(tx).await?;
-                Box::pin(self.apply_block_widenings(&deny)).await?;
-                Ok(true)
-            }
+            Ok(lists) => match self.record_lists(lists, now).await {
+                Err(error) if crate::floor::is_unreadable_floor(&error) => Ok(false),
+                result => result.map(|_| true),
+            },
             Err(error @ (AppError::Alarm(_) | AppError::Store(_))) => Err(error.into()),
             Err(_) => {
                 self.local_delete(key::LISTS_READ).await?;
@@ -2906,6 +2919,9 @@ impl Paykit {
     ///
     /// As [`Paykit::denied`].
     pub(crate) async fn deny_list_now(&mut self) -> crate::error::Result<Vec<[u8; 32]>> {
+        if self.floor_write_is_kept().await? {
+            return Err(crate::floor::unreadable_floor());
+        }
         let lists = self.app.allow_list().await.map_err(|error| {
             if crate::pay::switch_unavailable(&error) {
                 crate::error::Refusal::SwitchUnavailable(error.to_string()).into()
@@ -2913,15 +2929,72 @@ impl Paykit {
                 crate::error::PaykitError::from(error)
             }
         })?;
-        let (deny, mut tx) = self.judged_deny(lists.deny).await?;
-        tx.put(key::LISTS_READ, &self.now())?
-            .put(key::DENIED, &deny)?;
-        put_flagged(&mut tx, &lists.flagged)?;
-        self.local_commit(tx).await?;
-        Box::pin(self.apply_block_widenings(&deny)).await?;
-        let mut deny = deny;
+        self.record_lists(lists, self.now()).await
+    }
+
+    /// Record a payer's observed unblock together with the shared floor it requires.
+    async fn record_lists(
+        &mut self,
+        lists: pubky_switch_client::client::answers::AllowList,
+        read_at: u64,
+    ) -> crate::error::Result<Vec<[u8; 32]>> {
+        let (mut deny, mut tx) = self.judged_deny(lists.deny).await?;
         deny.sort_unstable();
         deny.dedup();
+        let verified = self.service_time();
+        self.keep_missed_list(&deny).await?;
+        let previous = self
+            .local_get::<Vec<[u8; 32]>>(key::DENIED)
+            .await?
+            .unwrap_or_default();
+        let mut owed = self
+            .local_get::<crate::floor::PendingUnblocks>(key::BLOCK_FLOOR)
+            .await?;
+        if self.holds("paykit_pay") {
+            let closed: Vec<_> = previous
+                .into_iter()
+                .filter(|peer| deny.binary_search(peer).is_err())
+                .collect();
+            if !closed.is_empty() {
+                let cutoff = self.unblock_floor()?;
+                let pending = owed.get_or_insert_with(|| crate::floor::PendingUnblocks {
+                    to_ms: cutoff,
+                    senders: Vec::new(),
+                });
+                pending.to_ms = pending.to_ms.max(cutoff);
+                pending.senders.extend(closed);
+                pending.senders.sort_unstable();
+                pending.senders.dedup();
+            }
+            if let Some(pending) = &owed {
+                // The timestamp and affected senders survive failed writes and reloads.
+                // Freshness is restored only in the commit covered by the shared floor.
+                let mut stage = std::mem::take(&mut tx);
+                put_flagged(&mut stage, &lists.flagged)?;
+                stage
+                    .delete(key::LISTS_READ)
+                    .put(key::DENIED, &deny)?
+                    .put(key::BLOCK_FLOOR, pending)?;
+                self.local_commit(stage).await?;
+            }
+        }
+        // A widening must finish before this view becomes usable for asks. Its first
+        // verified time belongs to the list read, even if a floor write later advances it.
+        Box::pin(self.apply_block_widenings(&deny, verified)).await?;
+        if let Some(pending) = owed.filter(|_| self.holds("paykit_pay")) {
+            tx.delete(key::BLOCK_FLOOR);
+            if self.first_read_pending() {
+                return Err(crate::floor::unreadable_floor());
+            }
+            // Only the pending hold clears with the raise. A late answer cannot replace
+            // a newer deny list or delete a block the user has made since this read.
+            Box::pin(self.commit_with_floor(pending.to_ms, tx)).await?;
+            self.local_put(key::LISTS_READ, &read_at).await?;
+        } else {
+            tx.put(key::LISTS_READ, &read_at)?.put(key::DENIED, &deny)?;
+            put_flagged(&mut tx, &lists.flagged)?;
+            self.local_commit(tx).await?;
+        }
         Ok(deny)
     }
 
@@ -3058,6 +3131,9 @@ impl Paykit {
     /// (Paykit wire 4.1). An unblock made through the client directly is seen at the next
     /// read of the lists.
     ///
+    /// A payer applies the shared block floor before removing a sender. A refused or
+    /// unanswered raise leaves the sender blocked until the caller retries.
+    ///
     /// # Errors
     ///
     /// As [`Paykit::block`].
@@ -3065,6 +3141,12 @@ impl Paykit {
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
+        if self.holds("paykit_pay") && self.app.cert().has_permission(Permission::ListsManage) {
+            if !Box::pin(self.deny_list_now()).await?.contains(pubky) {
+                return Ok(());
+            }
+            Box::pin(self.apply_floor_before_unblock()).await?;
+        }
         self.list_own(pubky, false).await
     }
 
