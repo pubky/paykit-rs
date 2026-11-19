@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["paykit-lib", "paykit-sdk", "paykit-ffi"]
+members = ["paykit-lib", "paykit-sdk", "paykit-ffi", "paykit-browser"]
 
 [workspace.package]
 version = "0.2.0-alpha.0"
@@ -19,7 +19,7 @@ thiserror = "2"
 # The Pubky Dispatch crates, as git dependencies pinned to one commit of pubky/pubky-dispatch.
 # Moving the pin is its own change, which says what changed in the crates Paykit uses.
 pubky-dispatch-core = { git = "https://github.com/pubky/pubky-dispatch", rev = "c2b19c95f5f60937df3995efda13e477e9b1ff47" }
-pubky-dispatch-client = { git = "https://github.com/pubky/pubky-dispatch", rev = "c2b19c95f5f60937df3995efda13e477e9b1ff47" }
+pubky-dispatch-client = { git = "https://github.com/pubky/pubky-dispatch", rev = "c2b19c95f5f60937df3995efda13e477e9b1ff47", default-features = false }
 pubky-dispatch-signer = { git = "https://github.com/pubky/pubky-dispatch", rev = "c2b19c95f5f60937df3995efda13e477e9b1ff47" }
 pubky-dispatch-harness = { git = "https://github.com/pubky/pubky-dispatch", rev = "c2b19c95f5f60937df3995efda13e477e9b1ff47" }
 
