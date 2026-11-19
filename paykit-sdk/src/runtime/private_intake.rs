@@ -42,7 +42,8 @@ const MAX_AUDIT_ACQUISITIONS_PER_PEER: usize =
 pub struct PrivateIntakeConfig {
     /// Maximum homeserver stream connections reserved for this supervisor (1..=1024).
     pub stream_capacity: usize,
-    /// Maximum SSE frame size accepted from a homeserver (2048..=65536 bytes).
+    /// Maximum size of one homeserver event's data payload, its `data` lines
+    /// joined by newlines (2048..=65536 bytes).
     ///
     /// A limit below the largest homeserver event would end the stream on
     /// that event, so values below 2048 are rejected.
