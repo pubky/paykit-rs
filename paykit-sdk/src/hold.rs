@@ -1324,7 +1324,7 @@ impl Paykit {
     }
 
     /// Queue `stored`, a message this app signed that a record stores, again with its signed
-    /// plaintext, and try to deliver it now ([`Paykit::queue_own_again`]). One the client
+    /// plaintext, and try to deliver it now ([`Paykit::send_owed_ends`]). One the client
     /// refuses for good, or as not this app's own, is neither queued nor told, and isn't
     /// asked for again; a store failure is the call's error.
     pub(crate) async fn queue_stored_again(
@@ -1352,14 +1352,12 @@ impl Paykit {
         self.now().max(self.service_time().unwrap_or(0))
     }
 
-    /// Whether 30 days have passed, on [`Paykit::window_now`], since `since_ms`, the restore's
-    /// time or a later one: every message an activity record stores to be sent again was
-    /// signed before the backup, so none could still go by then.
+    /// Whether the restored-record scan has reached its bound for unreadable records.
     fn past_restore_window(&self, since_ms: u64) -> bool {
         self.window_now() > since_ms.saturating_add(pubky_switch_client::app::SENT_RETENTION_MS)
     }
 
-    /// Write the restore's time into the restore's re-send mark, right after the client's
+    /// Write the restore time into the restored-record scan mark after the client's
     /// restore commit ([`OwnResendOwed::restored_at_ms`]): the restore's own step reads no
     /// clock. A mark that has one keeps it.
     pub(crate) async fn stamp_restore_time(&mut self) -> Result<()> {

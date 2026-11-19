@@ -521,11 +521,21 @@ async fn current_reload_restore_and_resend(family: Family) {
         Some(value.bytes.clone())
     );
     value.reload(&w).await;
-    let before = value.entries(&w);
     value.app.receive(None).await.unwrap();
     value.ask().await;
     value.app.receive(None).await.unwrap();
-    assert_eq!(value.entries(&w), before);
+    // The fresh wallet can ask for missing messages while reconciling. Its peer's
+    // request must not recreate the original in this installation's sent history.
+    let sent = value
+        .app
+        .app()
+        .sent_to(&value.peer.identity(), 0, u64::MAX)
+        .await
+        .unwrap();
+    assert!(
+        sent.iter().all(|message| message.msg_id != value.sent_id),
+        "the restored wallet sent the original"
+    );
     assert!(value
         .app
         .message_delivery(&value.sent_id)
