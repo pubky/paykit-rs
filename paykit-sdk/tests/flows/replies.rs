@@ -293,12 +293,26 @@ async fn kept_then_unmatched(
     shop: &mut Paykit,
     n: usize,
 ) -> (SignedMessage, u64) {
+    let (request, at) = unmatched_after_payment(w, wallet, shop, n).await;
+    let received = shop.receive(None).await.unwrap();
+    assert_eq!(
+        received.resends,
+        u64::from(n + 2 > paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER)
+    );
+    (request, at)
+}
+
+async fn unmatched_after_payment(
+    w: &World,
+    wallet: &mut Paykit,
+    shop: &mut Paykit,
+    n: usize,
+) -> (SignedMessage, u64) {
     let at = w.clock.now_ms();
     let request = paid_before_recorded(w, wallet, shop).await;
     // Accepted after the paid request's replies.
     w.clock.advance_ms(1);
     unmatched_replies(w, shop, n);
-    shop.receive(None).await.unwrap();
     (request, at)
 }
 
@@ -336,13 +350,16 @@ async fn recorded_after_unmatched(w: &World, n: usize) -> (Paykit, [u8; 32], u64
     let dropped = n + 2 > paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
     let before = mark_values(&shop).await;
     assert_eq!(before.len(), usize::from(dropped));
+    assert_eq!(
+        asked(&shop, &w.alice_id()).await.len(),
+        usize::from(dropped)
+    );
     record_request(w, &mut shop, &request).await;
     let summary = shop.receive(None).await.unwrap();
     let record = shop.payee_activity().await.unwrap()[0].record;
     assert_eq!(
-        summary.resends,
-        u64::from(dropped),
-        "asked once only for a dropped reply"
+        summary.resends, 0,
+        "receiving the record does not repeat the ask within the day"
     );
     // Asking doesn't change the mark's times.
     let after = mark_values(&shop).await;
@@ -404,7 +421,7 @@ async fn test_replies_dropped_mark_goes_30_days_after_its_latest_time() {
     w.clock.set_ms(at + paykit_sdk::KEPT_MESSAGE_MS);
     record_request(&w, &mut shop, &request).await;
     assert_eq!(shop.receive(None).await.unwrap().resends, 1);
-    assert_eq!(asked(&shop, &w.alice_id()).await, vec![(Some(at), None)]);
+    assert_eq!(asked(&shop, &w.alice_id()).await, vec![(Some(at), None); 4]);
     // 30 days after its latest, it goes, and asks nothing more.
     w.clock
         .set_ms(at + 10 * DAY_MS + paykit_sdk::KEPT_MESSAGE_MS + DAY_MS);
@@ -482,11 +499,11 @@ async fn test_replies_dropped_ask_not_delivered_tried_again_its_day_counted_from
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     let n = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
-    let (request, at) = kept_then_unmatched(&w, &mut wallet, &mut shop, n).await;
+    let (request, at) = unmatched_after_payment(&w, &mut wallet, &mut shop, n).await;
     // The request isn't delivered now: it stays queued.
     refuse_next_delivery(&w, ErrorCode::Unavailable);
-    record_request(&w, &mut shop, &request).await;
     assert_eq!(shop.receive(None).await.unwrap().resends, 1);
+    record_request(&w, &mut shop, &request).await;
     assert!(asked(&shop, &w.alice_id()).await.is_empty());
     // Tried again at the next receive, as the same request.
     w.clock.advance_ms(12 * 3_600_000);
@@ -506,10 +523,10 @@ async fn test_replies_dropped_ask_refused_for_good_asked_anew_at_the_next_receiv
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     let n = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
-    let (request, at) = kept_then_unmatched(&w, &mut wallet, &mut shop, n).await;
+    let (request, at) = unmatched_after_payment(&w, &mut wallet, &mut shop, n).await;
     refuse_next_delivery(&w, ErrorCode::PermissionMissing);
-    record_request(&w, &mut shop, &request).await;
     assert_eq!(shop.receive(None).await.unwrap().resends, 1);
+    record_request(&w, &mut shop, &request).await;
     assert!(asked(&shop, &w.alice_id()).await.is_empty());
     // Refused, it counts as not sent: asked anew, within the day.
     assert_eq!(shop.receive(None).await.unwrap().resends, 1);
@@ -561,7 +578,7 @@ async fn test_replies_dropped_asked_for_from_the_marks_time() {
     w.clock.advance_ms(60_000);
     let n = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
     let (request, _) = kept_then_unmatched(&w, &mut wallet, &mut shop, n).await;
-    // The shop holds the earlier request's record, alice's: her mark asks at once.
+    // The mark asks from the paid request's replies, which came after the earlier payment.
     assert_eq!(asked(&shop, &w.alice_id()).await.len(), 1);
     record_request(&w, &mut shop, &request).await;
     assert_eq!(shop.receive(None).await.unwrap().resends, 0);
@@ -588,7 +605,7 @@ async fn test_replies_dropped_asked_for_from_the_marks_time() {
 async fn test_replies_dropped_for_the_bound_taken_again_from_a_resend_and_placed() {
     // The paid request's acceptance and proof, alice's earliest kept replies, are dropped
     // for the bound by her 64 replies naming records bob never sent, and counted in her
-    // mark. Once the record opens the shop asks her to re-send; the same two messages come
+    // mark. The shop asks her to re-send before the record opens. The same two messages come
     // again, are taken as never processed, and are placed in the record (Paykit spec 8.1,
     // "Replies before their record").
     let w = World::new();
@@ -605,8 +622,9 @@ async fn test_replies_dropped_for_the_bound_taken_again_from_a_resend_and_placed
         n
     );
     assert_eq!(marks(&shop).await, vec![(at, at)]);
+    assert_eq!(asked(&shop, &w.alice_id()).await, vec![(Some(at), None)]);
     record_request(&w, &mut shop, &request).await;
-    assert_eq!(shop.receive(None).await.unwrap().resends, 1);
+    assert_eq!(shop.receive(None).await.unwrap().resends, 0);
     let record = shop.payee_activity().await.unwrap()[0].record;
     assert_eq!(replies_held(&shop, &record).await, 0);
     wallet.receive(None).await.unwrap();
@@ -1925,4 +1943,85 @@ async fn test_replies_stored_of_one_millisecond_placed_in_acceptance_order() {
     let sales = shop.payee_activity().await.unwrap();
     assert_eq!(sales.len(), 1);
     assert_eq!(sales[0].status, PayeeStatus::Rejected);
+}
+
+#[tokio::test]
+async fn test_replies_dropped_before_their_record_are_asked_after_a_restored_block_ends() {
+    dropped_before_record_after_unblock(false).await;
+}
+
+#[tokio::test]
+async fn test_replies_dropped_with_a_stored_mark_that_had_no_parent_still_ask_after_unblock() {
+    dropped_before_record_after_unblock(true).await;
+}
+
+async fn dropped_before_record_after_unblock(mark_waited_for_parent: bool) {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            paykit_sdk::AppScopes::new()
+                .request()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+            PaykitConfig::default(),
+            store(),
+        )
+        .await;
+    let payer = w.alice_id();
+    let accepted = w.clock.now_ms();
+    let request = paid_before_recorded(&w, &mut wallet, &mut shop).await;
+    w.clock.advance_ms(1);
+    unmatched_replies(&w, &shop, paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER);
+    // Process the drop, then block before the SDK first tries to ask.
+    shop.app_mut().receive(None).await.unwrap();
+    assert_eq!(marks(&shop).await, vec![(accepted, accepted)]);
+    shop.block(&payer).await.unwrap();
+    let mut backup = shop.backup().await.unwrap();
+    if mark_waited_for_parent {
+        // A sender mark kept before its parent was known can have this readiness value.
+        let saved = serde_json::from_slice(&backup.to_bytes().unwrap()).unwrap();
+        let mut layer = crate::restore::layer_of(&saved);
+        let mut marks = layer.iter_mut().filter(|(key, _)| key.starts_with(b"pd/"));
+        let (_, value) = marks.next().unwrap();
+        assert_eq!(value["d"]["due"], true);
+        value["d"]["due"] = false.into();
+        assert!(marks.next().is_none());
+        let saved = crate::restore::with_layer(&saved, layer);
+        backup =
+            paykit_sdk::PaykitBackup::from_bytes(&serde_json::to_vec(&saved).unwrap()).unwrap();
+    }
+    drop(shop);
+    let mut shop = Paykit::restore(
+        w.env(&w.bob, store()),
+        PaykitConfig::default(),
+        &backup,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    shop.receive(None).await.unwrap();
+    shop.app_mut().flush_outbox().await.unwrap();
+    assert!(asked(&shop, &payer).await.is_empty());
+    assert!(shop.payee_activity().await.unwrap().is_empty());
+    shop.unblock(&payer).await.unwrap();
+    shop.receive(None).await.unwrap();
+    let reply_asks = asked(&shop, &payer)
+        .await
+        .into_iter()
+        .filter(|(_, until)| until.is_none())
+        .collect::<Vec<_>>();
+    assert_eq!(reply_asks, vec![(Some(accepted), None)]);
+    wallet.receive(None).await.unwrap();
+    record_request(&w, &mut shop, &request).await;
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        shop.payee_activity().await.unwrap()[0].status,
+        PayeeStatus::ProofReceived
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
 }

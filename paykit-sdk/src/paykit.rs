@@ -224,6 +224,9 @@ pub struct ReceiveSummary {
     pub applied: Vec<String>,
     /// The `resend_request`s answered and asked.
     pub resends: u64,
+    /// A recovery ask waits because its sender certificate lacks `paykit_contacts`.
+    /// The host can offer to request the scope from the signer.
+    pub resend_refused: Option<Refusal>,
     /// The app's certificate fails Paykit's checks, as [`Paykit::certificate_refused`]
     /// gives it: the read went on, holding Paykit's entries unprocessed, and none of the
     /// Paykit steps after it ran.
@@ -1122,16 +1125,16 @@ impl Paykit {
         if !Box::pin(self.payer_waits(keys)).await? {
             Box::pin(self.place_kept_cancellations()).await?;
         }
-        // The senders of messages dropped before they were taken: of replies dropped for the
-        // bounds once the app holds the record of a request, of either side, naming them, of
-        // entries dropped unverified at once, then again at most once a day while the mark
-        // lives. The pairs a block's marks counted are forgotten first, so their asks may go
+        // Ask for replies dropped for a bound and entries dropped unverified as soon as
+        // the sender's holds and mark cadence allow. Forget the pairs a block's marks
+        // counted first, so their asks may go
         // (`marks.rs`). Before them, the notices of lost messages owed on block marks the
         // receive steps dropped for the bound are settled from the outbox's answer, which
         // only this side of the read can make (`marks::LostOwed`).
         Box::pin(self.settle_lost_owed()).await?;
         Box::pin(self.forget_blocked_pairs()).await?;
-        let marked = Box::pin(self.ask_on_marks()).await?;
+        let mut resend_refused = None;
+        let marked = Box::pin(self.ask_on_marks(&mut resend_refused)).await?;
         // The payer's records opened before this app held the block floor they fall under
         // carry `manual_only` from now on (`crate::floor`), unless the payer's side waits.
         if !Box::pin(self.payer_waits(keys)).await? {
@@ -1177,7 +1180,7 @@ impl Paykit {
             Box::pin(self.queue_restore_asks()).await?;
             Box::pin(self.queue_own_again()).await?;
         }
-        let asked = Box::pin(self.send_asks()).await?;
+        let asked = Box::pin(self.send_asks(&mut resend_refused)).await?;
         // A confirmed mark goes once its record's view isn't divergent any more, after this
         // read's events were taken.
         Box::pin(self.end_confirmed_marks()).await?;
@@ -1186,6 +1189,7 @@ impl Paykit {
             report,
             applied,
             resends: answered.saturating_add(asked).saturating_add(marked),
+            resend_refused,
             certificate_refused: None,
             records_unlisted,
             scope_keys_awaited: keys.is_some() || !key_epochs_awaited.is_empty(),
