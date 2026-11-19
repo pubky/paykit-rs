@@ -520,6 +520,24 @@ pub(crate) fn reflects(record: &AllowanceRecord, msg_id: &str) -> bool {
 /// taking; never its `msg_id`, which its sender chooses, nor the store that keeps it.
 pub(crate) type AnswerOrder = crate::records::KeptOrder;
 
+struct HeldAnswer {
+    message: StoredMessage,
+    order: AnswerOrder,
+    position: Option<pubky_switch_client::app::FeedPosition>,
+    source: Option<crate::divergent::SeenVersion>,
+}
+
+impl HeldAnswer {
+    fn new(message: StoredMessage, kept: &KeptMessage) -> Result<Self> {
+        Ok(Self {
+            message,
+            order: kept.order()?,
+            position: kept.position(),
+            source: kept.pending_source,
+        })
+    }
+}
+
 /// Whether the response of `record` belongs to another answer than `stored`: one of `kept`,
 /// the answers the app keeps to write, is a different response to `record`'s proposal that
 /// the inbox accepted before `stored`, at `order`. The later answer conflicts with the
@@ -529,7 +547,7 @@ fn answered_before(
     record: &AllowanceRecord,
     stored: &StoredMessage,
     order: AnswerOrder,
-    kept: &[(StoredMessage, AnswerOrder)],
+    kept: &[HeldAnswer],
 ) -> bool {
     let response = |m: &StoredMessage| {
         is_allowance_response(m.body())
@@ -537,9 +555,9 @@ fn answered_before(
             && !misreferenced(record, m)
     };
     response(stored)
-        && kept
-            .iter()
-            .any(|(other, at)| *at < order && other.hash() != stored.hash() && response(other))
+        && kept.iter().any(|other| {
+            other.order < order && other.message.hash() != stored.hash() && response(&other.message)
+        })
 }
 
 /// The order of `stored`, read from the feed at `seq`, whose acceptance time a message the
@@ -698,14 +716,18 @@ pub(crate) fn receive_effect(
             allowance_record_target(Collection::AllowanceProposals, &sender, &allowance_id);
         let held = cx.record(&pending)?;
         if cx.record(&target)?.is_none() {
-            if replies::before_retirement(cx, held.as_ref(), &pending, stored, position)? {
+            if replies::before_retirement(cx, &pending, position)? {
                 return receive::note_peer(cx, &sender, stored);
             }
             if let Some(held) = held {
-                match replies::observe(cx, &held, stored, seq)? {
+                match replies::observe(cx, &held, stored, position)? {
+                    replies::PendingReply::Undecided => {
+                        keep_answer(cx, &target, stored, position, true, None)?;
+                        return receive::note_peer(cx, &sender, stored);
+                    }
                     replies::PendingReply::Unrelated => {}
                     replies::PendingReply::Waits(version) => {
-                        keep_answer(cx, &target, stored, seq, true, Some(version))?;
+                        keep_answer(cx, &target, stored, position, true, Some(version))?;
                         return receive::note_peer(cx, &sender, stored);
                     }
                     replies::PendingReply::Stopped => {
@@ -741,7 +763,7 @@ pub(crate) fn receive_effect(
             // none. Dropping it loses nothing: nothing is paid under a deleted record.
             Held::None if deleted => {
                 if receive::admits_new_state(cx, &sender, scopes, stored)? {
-                    keep_conflict(cx, &target, stored, seq, scopes)?;
+                    keep_conflict(cx, &target, stored, position, scopes)?;
                 }
                 Ok(())
             }
@@ -756,7 +778,7 @@ pub(crate) fn receive_effect(
                 }
                 Ok(())
             }
-            Held::Record(record) => put_placed(cx, &target, *record, stored, seq, scopes),
+            Held::Record(record) => put_placed(cx, &target, *record, stored, position, scopes),
             Held::Unreadable => stored_entry(cx, stored),
         },
         _ => match held {
@@ -768,11 +790,11 @@ pub(crate) fn receive_effect(
             // held ([`keep_answer`]).
             Held::None => {
                 if receive::admits_new_state(cx, &sender, scopes, stored)? {
-                    keep_answer(cx, &target, stored, seq, deleted, None)?;
+                    keep_answer(cx, &target, stored, position, deleted, None)?;
                 }
                 Ok(())
             }
-            Held::Record(record) => put_placed(cx, &target, *record, stored, seq, scopes),
+            Held::Record(record) => put_placed(cx, &target, *record, stored, position, scopes),
             Held::Unreadable => stored_entry(cx, stored),
         },
     }
@@ -794,7 +816,7 @@ fn keep_answer(
     cx: &mut ReceiveContext<'_>,
     target: &RecordTarget,
     stored: &StoredMessage,
-    seq: u64,
+    position: pubky_switch_client::app::FeedPosition,
     over_held: bool,
     source: Option<crate::divergent::SeenVersion>,
 ) -> std::result::Result<(), Fail> {
@@ -802,7 +824,10 @@ fn keep_answer(
     let record = cx.record_key(target)?;
     let kept = key::kept_reply(&sender, &record, &stored.message().msg_id);
     if state::cx_get::<KeptMessage>(cx, &kept)?.is_none() {
-        let order = (stored.accepted_at().ok_or_else(Fail::corrupt)?, seq);
+        let order = (
+            stored.accepted_at().ok_or_else(Fail::corrupt)?,
+            position.seq,
+        );
         let earliest = over_held && {
             let mut earlier = false;
             for (_, other) in
@@ -817,7 +842,7 @@ fn keep_answer(
         if !earliest {
             receive::make_room_for_reply(cx, &sender, order)?;
         }
-        let mut message = KeptMessage::taken(stored, seq);
+        let mut message = KeptMessage::taken_at(stored, position);
         message.pending_source = source;
         receive::keep_local(cx, receive::local(&kept, &message)?);
     }
@@ -875,9 +900,10 @@ fn put_placed(
     target: &RecordTarget,
     mut record: AllowanceRecord,
     stored: &StoredMessage,
-    seq: u64,
+    position: pubky_switch_client::app::FeedPosition,
     scopes: &[String],
 ) -> std::result::Result<(), Fail> {
+    let seq = position.seq;
     if misreferenced(&record, stored) && !reflects(&record, &stored.message().msg_id) {
         return Err(Fail::Drop(
             "Paykit wire 4.16: a response refers to its Allowance's proposal alone".into(),
@@ -887,7 +913,7 @@ fn put_placed(
         && !reflects(&record, &stored.message().msg_id)
         && conflicts(&record, stored)
     {
-        return keep_conflict(cx, target, stored, seq, scopes);
+        return keep_conflict(cx, target, stored, position, scopes);
     }
     // An answer never takes the response while a different one its inbox accepted earlier
     // is still kept to write: it conflicts with that one, so it is kept as the stop at once,
@@ -901,7 +927,7 @@ fn put_placed(
             &step_answers_kept(cx, target, stored)?,
         )
     {
-        return keep_conflict(cx, target, stored, seq, scopes);
+        return keep_conflict(cx, target, stored, position, scopes);
     }
     // The step never writes an answer into the record's empty response. The answer is kept
     // with the replies kept to place (`pr/`), with its place in the inbox's order, and a
@@ -919,7 +945,7 @@ fn put_placed(
         && record.response.is_none()
         && !reflects(&record, &stored.message().msg_id)
     {
-        keep_answer(cx, target, stored, seq, true, None)?;
+        keep_answer(cx, target, stored, position, true, None)?;
         if matches!(stored.body(), Body::AllowanceRejection(_))
             && scopes.iter().any(|s| s == "paykit_allowance_execute")
         {
@@ -944,7 +970,7 @@ fn put_placed(
             if crate::divergent::step_write_waits(cx, &held, stored, seq, &|_| None)? {
                 return match stored.body() {
                     Body::AllowanceProposal(_) => stored_entry(cx, stored),
-                    _ => keep_answer(cx, target, stored, seq, false, None),
+                    _ => keep_answer(cx, target, stored, position, false, None),
                 };
             }
         }
@@ -962,7 +988,7 @@ fn step_answers_kept(
     cx: &ReceiveContext<'_>,
     target: &RecordTarget,
     stored: &StoredMessage,
-) -> std::result::Result<Vec<(StoredMessage, AnswerOrder)>, Fail> {
+) -> std::result::Result<Vec<HeldAnswer>, Fail> {
     let own = cx.identity();
     let sender = stored.sender();
     let record = cx.record_key(target)?;
@@ -989,18 +1015,18 @@ fn answers_kept(
     before: Vec<KeptMessage>,
     notes: Vec<(String, StoredNote)>,
     stop: Option<KeptMessage>,
-) -> Result<Vec<(StoredMessage, AnswerOrder)>> {
+) -> Result<Vec<HeldAnswer>> {
     let mut kept = Vec::new();
     if let Some(stop) = stop {
         let answer = stop.stored(own)?;
         if is_allowance_response(answer.body()) {
-            kept.push((answer, stop.order()?));
+            kept.push(HeldAnswer::new(answer, &stop)?);
         }
     }
     for message in before {
         let answer = message.stored(own)?;
         if is_allowance_response(answer.body()) {
-            kept.push((answer, message.order()?));
+            kept.push(HeldAnswer::new(answer, &message)?);
         }
     }
     for (note_key, note) in notes {
@@ -1009,7 +1035,7 @@ fn answers_kept(
             && is_allowance_response(answer.body())
             && named_allowance(answer.body()) == allowance_id
         {
-            kept.push((answer, note.message.order()?));
+            kept.push(HeldAnswer::new(answer, &note.message)?);
         }
     }
     Ok(kept)
@@ -1029,15 +1055,22 @@ fn keep_conflict(
     cx: &mut ReceiveContext<'_>,
     target: &RecordTarget,
     stored: &StoredMessage,
-    seq: u64,
+    position: pubky_switch_client::app::FeedPosition,
     scopes: &[String],
 ) -> std::result::Result<(), Fail> {
     let record_key = cx.record_key(target)?;
     let kept = state::cx_get::<KeptMessage>(cx, &key::conflict(&record_key))?.is_some();
     let consent = state::cx_get::<ConsentEntry>(cx, &key::consent(&record_key))?;
     let executes = scopes.iter().any(|s| s == "paykit_allowance_execute");
-    for write in conflict_writes(&record_key, stored, seq, kept, consent.as_ref(), executes)
-        .map_err(|_| Fail::corrupt())?
+    for write in conflict_writes(
+        &record_key,
+        stored,
+        &KeptMessage::taken_at(stored, position),
+        kept,
+        consent.as_ref(),
+        executes,
+    )
+    .map_err(|_| Fail::corrupt())?
     {
         receive::keep_local(cx, write);
     }
@@ -1051,17 +1084,14 @@ fn keep_conflict(
 fn conflict_writes(
     record_key: &[u8; 32],
     stored: &StoredMessage,
-    seq: u64,
+    evidence: &KeptMessage,
     kept: bool,
     consent: Option<&ConsentEntry>,
     executes: bool,
 ) -> Result<Vec<LocalWrite>> {
     let mut writes = Vec::new();
     if !kept {
-        writes.push(state::local_put(
-            &key::conflict(record_key),
-            &KeptMessage::taken(stored, seq),
-        )?);
+        writes.push(state::local_put(&key::conflict(record_key), evidence)?);
     }
     let removed = matches!(
         consent,
@@ -2511,13 +2541,13 @@ impl Paykit {
             // corrupt store, so the receive fails rather than drop, give up or place it.
             let answer = message.stored(&own)?;
             if is_allowance_response(answer.body()) {
-                kept.push((message.order()?, rest, answer));
+                kept.push((message.order()?, rest, answer, message));
             }
         }
         kept.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
-        for (order, rest, answer) in kept {
+        for (_, rest, answer, message) in kept {
             let kept_key = format!("{}{rest}", key::KEPT_REPLIES);
-            Box::pin(self.place_kept_allowance_response(&kept_key, answer, order)).await?;
+            Box::pin(self.place_kept_allowance_response(&kept_key, answer, &message)).await?;
         }
         Ok(())
     }
@@ -2542,7 +2572,7 @@ impl Paykit {
         &mut self,
         kept_key: &str,
         reply: StoredMessage,
-        order: AnswerOrder,
+        evidence: &KeptMessage,
     ) -> Result<()> {
         if Box::pin(self.side_unlisted(RecordSide::Allowances)).await? {
             return Ok(());
@@ -2560,13 +2590,14 @@ impl Paykit {
             .await?
             .map(|held| held.content);
         if !receive::holds_record(content.as_ref()) {
-            match Box::pin(self.pending_reply_later(&record, &reply, order)).await? {
+            match Box::pin(self.pending_reply_later(&record, &reply, evidence)).await? {
                 replies::PendingReply::Stopped => return self.local_delete(kept_key).await,
+                replies::PendingReply::Undecided => return Ok(()),
                 replies::PendingReply::Waits(version) => {
                     if crate::stored::past_window(accepted_at, self.service_time()) {
                         self.give_up(kept_key, &reply).await?;
                     } else if let Some(mut kept) = self.local_get::<KeptMessage>(kept_key).await? {
-                        if kept.pending_source.is_none() {
+                        if kept.pending_source.is_none_or(|source| source < version) {
                             kept.pending_source = Some(version);
                             self.local_put(kept_key, &kept).await?;
                         }
@@ -2584,7 +2615,7 @@ impl Paykit {
             key: kept_key.as_bytes().to_vec(),
         };
         let placed = self
-            .place_allowance_later(reply.clone(), order, vec![drop_kept])
+            .place_allowance_later(reply.clone(), evidence, vec![drop_kept])
             .await?;
         if crate::stored::later_write(placed, accepted_at, self.service_time())
             == crate::stored::LaterWrite::GiveUp
@@ -2600,7 +2631,7 @@ impl Paykit {
         &mut self,
         record: &[u8; 32],
         stored: &StoredMessage,
-        order: AnswerOrder,
+        evidence: &KeptMessage,
         mut locals: Vec<LocalWrite>,
     ) -> Result<()> {
         let kept = Box::pin(self.conflict_kept(record)).await?;
@@ -2610,7 +2641,7 @@ impl Paykit {
         locals.extend(conflict_writes(
             record,
             stored,
-            order.1,
+            evidence,
             kept,
             consent.as_ref(),
             self.holds("paykit_allowance_execute"),
@@ -2628,9 +2659,9 @@ impl Paykit {
     pub(crate) async fn place_allowance_note(
         &mut self,
         stored: StoredMessage,
-        order: AnswerOrder,
+        evidence: &KeptMessage,
     ) -> Result<Placed> {
-        Box::pin(self.place_allowance_later(stored, order, Vec::new())).await
+        Box::pin(self.place_allowance_later(stored, evidence, Vec::new())).await
     }
 
     /// The answers of the Allowance record at `record` that the app keeps to write, from
@@ -2639,7 +2670,7 @@ impl Paykit {
         &self,
         record: &[u8; 32],
         stored: &StoredMessage,
-    ) -> Result<Vec<(StoredMessage, AnswerOrder)>> {
+    ) -> Result<Vec<HeldAnswer>> {
         let own = self.identity();
         let sender = stored.sender();
         let before =
@@ -2686,9 +2717,10 @@ impl Paykit {
     async fn place_allowance_later(
         &mut self,
         stored: StoredMessage,
-        order: AnswerOrder,
+        evidence: &KeptMessage,
         locals: Vec<LocalWrite>,
     ) -> Result<Placed> {
+        let order = evidence.order()?;
         let Some(allowance_id) = named_allowance(stored.body()).cloned() else {
             return Err(PaykitError::corrupt());
         };
@@ -2712,13 +2744,14 @@ impl Paykit {
             .map(|held| held.content)
         {
             None if is_allowance_response(stored.body()) => {
-                match Box::pin(self.pending_reply_later(&record, &stored, order)).await? {
+                match Box::pin(self.pending_reply_later(&record, &stored, evidence)).await? {
                     replies::PendingReply::Stopped => {
                         self.app
                             .protocol_commit(crate::protocol::BACKUP_NAME, &locals)
                             .await?;
                         return Ok(Placed::Done);
                     }
+                    replies::PendingReply::Undecided => return Ok(Placed::Waits),
                     replies::PendingReply::Waits(_) | replies::PendingReply::Unrelated => None,
                 }
             }
@@ -2733,7 +2766,7 @@ impl Paykit {
             // for a record.
             Some(RecordContent::Deleted) => match stored.body() {
                 Body::AllowanceProposal(_) => {
-                    Box::pin(self.keep_conflict_later(&record, &stored, order, locals)).await?;
+                    Box::pin(self.keep_conflict_later(&record, &stored, evidence, locals)).await?;
                     return Ok(Placed::Done);
                 }
                 _ => None,
@@ -2753,7 +2786,7 @@ impl Paykit {
                     return Ok(Placed::Done);
                 }
                 Some(held) if held.conflicted.is_none() && conflicts(&held, &stored) => {
-                    Box::pin(self.keep_conflict_later(&record, &stored, order, locals)).await?;
+                    Box::pin(self.keep_conflict_later(&record, &stored, evidence, locals)).await?;
                     return Ok(Placed::Done);
                 }
                 // An answer never takes the response while a different one its inbox
@@ -2769,7 +2802,7 @@ impl Paykit {
                             &Box::pin(self.answers_kept(&record, &stored)).await?,
                         ) =>
                 {
-                    Box::pin(self.keep_conflict_later(&record, &stored, order, locals)).await?;
+                    Box::pin(self.keep_conflict_later(&record, &stored, evidence, locals)).await?;
                     return Ok(Placed::Done);
                 }
                 // Allowance acceptance is unavailable in this revision (Paykit spec 8.3.1).

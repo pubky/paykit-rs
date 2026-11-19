@@ -218,6 +218,11 @@ impl StoredNote {
             return Err(PaykitError::corrupt());
         };
         let stored = self.message.stored(own)?;
+        if crate::allowances::is_allowance_response(stored.body())
+            && self.message.position().is_none()
+        {
+            return Err(PaykitError::corrupt());
+        }
         if self.sender != sender
             || self.msg_id != msg_id
             || stored.sender() != sender
@@ -541,7 +546,22 @@ impl Paykit {
             hash: stored.hash(),
             sender: entry.sender,
             msg_id: stored.message().msg_id.clone(),
-            message: KeptMessage::taken(&stored, entry.seq),
+            message: if matches!(
+                stored.body(),
+                Body::AllowanceProposal(_)
+                    | Body::AllowanceAcceptance(_)
+                    | Body::AllowanceRejection(_)
+            ) {
+                KeptMessage::taken_at(
+                    &stored,
+                    pubky_switch_client::app::FeedPosition {
+                        generation: entry.generation,
+                        seq: entry.seq,
+                    },
+                )
+            } else {
+                KeptMessage::taken(&stored, entry.seq)
+            },
             placed: false,
         };
         tx.put(&note_key, &note)?;
@@ -815,7 +835,7 @@ impl Paykit {
                         Placed::Done
                     }
                     Some(Place::Allowance) => {
-                        Box::pin(self.place_allowance_note(stored.clone(), order)).await?
+                        Box::pin(self.place_allowance_note(stored.clone(), &note.message)).await?
                     }
                     Some(Place::Record {
                         target,

@@ -2638,7 +2638,11 @@ mod receive_tests {
             panic!("an acceptance");
         };
         let record = fake_key(&allowance_target(&alice.id(), &body.allowance_id));
-        let value = state::encode(&KeptMessage::taken(&answer, 0)).unwrap();
+        let at = pubky_switch_client::app::FeedPosition {
+            generation: 1,
+            seq: 1,
+        };
+        let value = state::encode(&KeptMessage::taken_at(&answer, at)).unwrap();
         (answer, value, record)
     }
 
@@ -2715,6 +2719,12 @@ mod receive_tests {
         let at = key::kept_reply(&alice.id(), &record, &answer.message().msg_id);
         let unordered = state::encode(&KeptMessage::of(&answer)).unwrap();
         assert!(!restores::<KeptMessage>(&bob, at.as_bytes(), &unordered));
+        let missing_generation = state::encode(&KeptMessage::taken(&answer, 1)).unwrap();
+        assert!(!restores::<KeptMessage>(
+            &bob,
+            at.as_bytes(),
+            &missing_generation
+        ));
         let (reply, _, record) = kept_reply(&alice, &bob);
         let at = key::kept_reply(&alice.id(), &record, &reply.message().msg_id);
         let unordered = state::encode(&KeptMessage::of(&reply)).unwrap();
@@ -2825,7 +2835,11 @@ mod receive_tests {
             object(json!({ "allowance_id": body.allowance_id.as_str() })),
         );
         for conflict in [&proposal, &response] {
-            let value = state::encode(&KeptMessage::taken(conflict, 1)).unwrap();
+            let position = pubky_switch_client::app::FeedPosition {
+                generation: 1,
+                seq: 1,
+            };
+            let value = state::encode(&KeptMessage::taken_at(conflict, position)).unwrap();
             assert!(restores::<KeptMessage>(&alice, at.as_bytes(), &value));
             assert!(!restores::<KeptMessage>(
                 &alice,

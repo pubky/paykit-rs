@@ -723,6 +723,12 @@ impl Stored for KeptMessage {
             return corrupt();
         }
         let message = self.stored(&binder.own)?;
+        if matches!(family, StateKey::KeptReply { .. } | StateKey::Conflict(_))
+            && crate::allowances::is_allowance_response(message.body())
+            && self.position().is_none()
+        {
+            return corrupt();
+        }
         let first = || {
             message
                 .message()
@@ -1410,7 +1416,7 @@ pub(crate) mod key {
 
     pub(crate) const PENDING_RETIREMENTS: &str = "pce/";
 
-    /// The verified end of an earlier conflict at this physical pending key.
+    /// The latest verified deletion of this physical pending key.
     pub(crate) fn pending_retirement(record: &[u8; 32]) -> String {
         format!("{PENDING_RETIREMENTS}{}", b64(record))
     }

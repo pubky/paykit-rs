@@ -28,8 +28,13 @@ const LATER_SECRET: [u8; 32] = [0x4f; 32];
 /// service recovering the account at the next generation, routed at [`SWITCH_ORIGIN`], the
 /// next `identity.json` naming it with `recovery_from`, delivered there and published; then
 /// the old service is unreachable.
-pub(super) fn declare_loss(w: &World) {
-    declare_loss_of(w, ALICE_ORIGIN, NEXT_SECRET);
+pub(super) fn declare_loss(w: &World) -> Arc<ScriptedSwitch> {
+    declare_loss_of(w, ALICE_ORIGIN, NEXT_SECRET)
+}
+
+/// The signer replaces the first recovery service after a second declared loss.
+pub(super) fn declare_second_loss(w: &World) -> Arc<ScriptedSwitch> {
+    declare_loss_of(w, SWITCH_ORIGIN, LATER_SECRET)
 }
 
 /// [`declare_loss`] of the service at `lost_origin`, the new one under `secret`.
@@ -61,10 +66,8 @@ fn declare_loss_of(w: &World, lost_origin: &str, secret: [u8; 32]) -> Arc<Script
     next
 }
 
-/// `app` follows the loss: its own `identity.json` from the Homeserver, then reads at the new
-/// service until its steps of the recovery have run, and its reconciliation ends. Returns the
-/// end of the loss's residual window.
-pub(super) async fn follow_loss(app: &mut Paykit) -> u64 {
+/// Follow the new identity and finish the native recovery reads.
+pub(super) async fn follow_generation(app: &mut Paykit) -> u64 {
     app.app_mut().refresh_identity().await.unwrap();
     for _ in 0..4 {
         app.receive(None).await.unwrap();
@@ -72,9 +75,15 @@ pub(super) async fn follow_loss(app: &mut Paykit) -> u64 {
     let info = app.app().recovery_info().await.unwrap().unwrap();
     assert!(info.steps_done, "{info:?}");
     assert!(info.loss.uncertain_until_ms > info.loss.declared_at_ms);
+    info.loss.uncertain_until_ms
+}
+
+/// Recover at the new service and complete payment reconciliation.
+pub(super) async fn follow_loss(app: &mut Paykit) -> u64 {
+    let until = follow_generation(app).await;
     app.reconcile().await.unwrap();
     app.end_reconcile(UserConfirmed::new()).await.unwrap();
-    info.loss.uncertain_until_ms
+    until
 }
 
 /// The payer's activity for this request, as both of Alice's apps address it.
@@ -2119,7 +2128,7 @@ async fn test_provider_loss_newer_loss_puts_a_stated_obligation_in_doubt_again()
     assert_eq!(status(&wallet, &request).await, RequestStatus::Open);
     // The new service is lost too: what the user stated was about the first loss.
     w.clock.advance_ms(60_000);
-    declare_loss_of(&w, SWITCH_ORIGIN, LATER_SECRET);
+    declare_second_loss(&w);
     follow_loss(&mut wallet).await;
     let loss = wallet.app().recovery_info().await.unwrap().unwrap().loss;
     let kept: serde_json::Value = serde_json::from_slice(
@@ -2313,7 +2322,7 @@ async fn test_provider_loss_reconcile_lists_a_stated_obligation_again_after_a_ne
         .unwrap();
     assert_eq!(loss_doubts(&mut wallet).await.len(), 1);
     w.clock.advance_ms(60_000);
-    declare_loss_of(&w, SWITCH_ORIGIN, LATER_SECRET);
+    declare_second_loss(&w);
     follow_loss(&mut wallet).await;
     let listed = loss_doubts(&mut wallet).await;
     assert_eq!(listed.len(), 2, "{listed:?}");
@@ -2345,7 +2354,7 @@ async fn shown_then_newer_loss(
             .outcome,
     );
     w.clock.advance_ms(60_000);
-    let next = declare_loss_of(w, SWITCH_ORIGIN, LATER_SECRET);
+    let next = declare_second_loss(w);
     if step_run {
         follow_loss(wallet).await;
     } else {
@@ -2613,7 +2622,7 @@ async fn loss_commit_reload(applied: bool) {
     assert_eq!(statement.len(), 1);
     let id = wallet.app_id();
     w.clock.advance_ms(60_000);
-    declare_loss_of(&w, SWITCH_ORIGIN, LATER_SECRET);
+    declare_second_loss(&w);
     storage.mode.store(if applied { 2 } else { 1 }, SeqCst);
     let _ = wallet.app_mut().refresh_identity().await;
     for _ in 0..4 {
