@@ -815,7 +815,8 @@ impl Paykit {
                         Placed::Done
                     }
                     Some(Place::Allowance) => {
-                        Box::pin(self.place_allowance_note(stored.clone(), order)).await?
+                        Box::pin(self.place_allowance_note(stored.clone(), order, note.stored_id))
+                            .await?
                     }
                     Some(Place::Record {
                         target,

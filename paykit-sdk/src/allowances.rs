@@ -88,6 +88,7 @@ use crate::stored::{Placed, StoredNote};
 
 pub(crate) use replies::holds_delivery as pending_conflict_holds_delivery;
 pub(crate) use replies::{lifetime_ended, restore_conflicts, PendingConflict, PendingRetirement};
+mod pending;
 mod replies;
 
 /// How many times a write of this app's is built again after its record changed meanwhile.
@@ -692,6 +693,19 @@ pub(crate) fn receive_effect(
     let target = allowance_target(&sender, &allowance_id);
     if let Body::AllowanceEnd(_) = stored.body() {
         return keep_end(cx, &target, &allowance_id, stored, seq, scopes);
+    }
+    if matches!(stored.body(), Body::AllowanceProposal(_)) {
+        let pending =
+            allowance_record_target(Collection::AllowanceProposals, &sender, &allowance_id);
+        if let Some(held) = cx.record(&pending)? {
+            if !matches!(held.content, RecordContent::Deleted) && cx.record(&target)?.is_none() {
+                receive::hold_while_unlisted(cx, RecordSide::Allowances)?;
+                if !replies::before_retirement(cx, Some(&held), &pending, stored, position)? {
+                    replies::observe_second(cx, &pending, &held, stored, position)?;
+                }
+                return receive::note_peer(cx, &sender, stored);
+            }
+        }
     }
     if is_allowance_response(stored.body()) {
         let pending =
@@ -1959,6 +1973,7 @@ impl Paykit {
                 out.push(view);
             }
         }
+        out.extend(Box::pin(self.pending_conflicts(None)).await?);
         Ok(out)
     }
 
@@ -1977,16 +1992,16 @@ impl Paykit {
         if let Some(held) = Box::pin(self.held_allowance(record)).await? {
             return Box::pin(self.allowance_view(*record, &held)).await;
         }
-        let content = self
-            .app
-            .shared_record(record)
+        if let Some(held) = self.app.shared_record(record).await? {
+            return self
+                .deleted_conflict_view(record, &held.content)
+                .await?
+                .ok_or_else(|| Refusal::NotFound.into());
+        }
+        Box::pin(self.pending_conflicts(Some(record)))
             .await?
-            .map(|held| held.content)
-            .ok_or(Refusal::NotFound)?;
-        Ok(self
-            .deleted_conflict_view(record, &content)
-            .await?
-            .ok_or(Refusal::NotFound)?)
+            .pop()
+            .ok_or_else(|| Refusal::NotFound.into())
     }
 
     /// The Allowance whose record this app holds as deleted and over which it keeps a
@@ -2051,11 +2066,34 @@ impl Paykit {
         record: [u8; 32],
         held: &AllowanceRecord,
     ) -> Result<AllowanceView> {
-        let own = self.identity();
-        let Body::AllowanceProposal(proposal) = held.proposal.body() else {
+        let status = status(
+            held,
+            Box::pin(self.allowance_stopped(&record)).await?,
+            Box::pin(self.conflict_kept(&record)).await?,
+        );
+        let mut view = Box::pin(self.proposal_view(record, &held.proposal, status)).await?;
+        view.executor_app_id = held
+            .current_grant(&self.identity())
+            .map(|(grant, _)| grant.app_id);
+        view.consented = Box::pin(self.consents(&record)).await?;
+        Ok(view)
+    }
+
+    async fn proposal_view(
+        &self,
+        record: [u8; 32],
+        signed: &StoredMessage,
+        status: AllowanceStatus,
+    ) -> Result<AllowanceView> {
+        let Body::AllowanceProposal(proposal) = signed.body() else {
             return Err(PaykitError::corrupt());
         };
-        let proposed_here = held.proposal.sender() == own;
+        let proposed_here = signed.sender() == self.identity();
+        let counterparty = if proposed_here {
+            signed.message().to
+        } else {
+            signed.sender()
+        };
         let role = match (proposal.proposer_role, proposed_here) {
             (ProposerRole::Allower, true) | (ProposerRole::Allowee, false) => {
                 AllowanceRole::Allower
@@ -2064,19 +2102,15 @@ impl Paykit {
         };
         Ok(AllowanceView {
             record,
-            counterparty: held.counterparty,
-            allowance_id: held.allowance_id.clone(),
+            counterparty,
+            allowance_id: proposal.allowance_id.clone(),
             role: Some(role),
             proposed_here,
             terms: Some(proposal.terms.clone()),
-            status: status(
-                held,
-                Box::pin(self.allowance_stopped(&record)).await?,
-                Box::pin(self.conflict_kept(&record)).await?,
-            ),
-            executor_app_id: held.current_grant(&own).map(|(grant, _)| grant.app_id),
-            consented: Box::pin(self.consents(&record)).await?,
-            blocked: Box::pin(self.blocked_as_known(&held.counterparty)).await?,
+            status,
+            executor_app_id: None,
+            consented: false,
+            blocked: Box::pin(self.blocked_as_known(&counterparty)).await?,
         })
     }
 
@@ -2272,6 +2306,7 @@ impl Paykit {
         {
             return Ok(());
         }
+        Box::pin(self.place_pending_seconds()).await?;
         let own = self.identity();
         // Read bound to its key (`state::Stored`). The ends of one Allowance go in the order
         // their inbox accepted them (`records::KeptOrder`): once one ends it, the later ones
@@ -2629,7 +2664,15 @@ impl Paykit {
         &mut self,
         stored: StoredMessage,
         order: AnswerOrder,
+        stored_id: u64,
     ) -> Result<Placed> {
+        if matches!(stored.body(), Body::AllowanceProposal(_)) {
+            if let Some(placed) =
+                Box::pin(self.place_stored_second(&stored, order.1, stored_id)).await?
+            {
+                return Ok(placed);
+            }
+        }
         Box::pin(self.place_allowance_later(stored, order, Vec::new())).await
     }
 
