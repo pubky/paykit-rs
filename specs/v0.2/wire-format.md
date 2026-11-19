@@ -1181,17 +1181,38 @@ The published `v0.2` vector set still needs the recovery report signature case.
 
 The identity-signed opening of the recovered generation supplies the account, its original App IDs, the lost generation (`recovery_from`), the recovered generation and its opening service key. Use the opening document’s authenticated hash for the record address in Section 1 and the ordinary fixed policy in 5.1. Count an explicit identity-signed removal only for the loss it covers.
 
-The sealed JSON value has five required members.
+The sealed JSON object has six required members. Read `v` as an unsigned JSON integer and require the value `1` before interpreting the record.
 
 | Member | Value |
 |---|---|
-| `cutoff` | Base64url of the 32-byte BLAKE3 commitment to the original app’s historical inventory cutoff |
-| `inventory` | Base64url of the 32-byte BLAKE3 commitment to its inventory at that cutoff |
-| `dispositions` | Base64url of the 32-byte BLAKE3 commitment to the dispositions of the items in that inventory |
+| `v` | `1`, the record schema version |
+| `cutoff` | Base64url of the 32-byte cutoff digest below |
+| `inventory` | Base64url of the 32-byte inventory digest below |
+| `dispositions` | Base64url of the 32-byte dispositions digest below |
 | `signature` | Base64url of the 64-byte Ed25519 signature made by the original app |
 | `author_certificate` | The original app’s identity-signed Switch App Certificate, in its signed-document form |
 
-The app signs under `paykit/v1/recovery-upload` with **one field**. That field is `lp(identity, original App ID, u64(lost generation), u64(recovered generation), opening service key, opening identity document hash, cutoff, inventory, dispositions)`. The identity, service key, document hash and commitments are raw 32-byte strings. The App ID is 16 bytes. Encoding and signature framing follow Section 1 and Switch wire 2.1. The original app signs commitments only to historical evidence it can substantiate. It can give the report to a different app for publication. The three commitments are opaque to a reader without the underlying evidence.
+**Disclosed evidence.** Use `lp` from Switch wire 1.4, with a four-byte unsigned big-endian length before each field, and `H` from Switch wire 1.5 (unkeyed BLAKE3, 32 output bytes). Quoted literals are their exact ASCII bytes. `u64` is eight unsigned big-endian bytes. An identifier or hash contributes its decoded bytes. `set(rows)` is `lp` of the complete encoded rows sorted in unsigned bytewise lexicographic order. The empty set is zero bytes. Reject duplicate rows. To check an encoded disclosure, require this ordering and consume every byte. To build one from typed inputs, sort before encoding. Use the exact disclosed bytes for signed bodies and local values. Re-serializing a parsed JSON value can change those bytes.
+
+A witness is one of these encoded rows. Select the tag from the underlying evidence type.
+
+| Evidence | Encoded row |
+|---|---|
+| Identity document, app certificate, signed operation, or service transition proof | `lp(tag, doc_bytes)` with tag `"identity"`, `"certificate"`, `"operation"`, or `"proof"` respectively. Switch wire 2.2 defines `doc_bytes = lp(exact signed body bytes, raw 64-byte signature)`. |
+| Signed service head | `lp("head", u64(chain_version), u64(generation), u64(seq), chain_hash, sig)` using the 32-byte hash and 64-byte signature from Switch wire 6.7. |
+| Local checkpoint or retained local evidence | `lp("local", scheme, key, value)`. `scheme` names the author’s format as `name/version`. The name is one or more lowercase ASCII letters, digits, dots or hyphens and the version is a positive decimal integer without leading zeroes (for example, `org.example.wallet/1`). `key` is the nonempty raw locator in that format and `value` is the exact retained byte string. A verifier can match these bytes across implementations. Interpreting their contents requires the named format. |
+
+The subject of an inventory entry is `lp(kind, key)` for `"record"` (32-byte Switch record key), `"claim"` (32-byte Paykit obligation ID) or `"settlement"` (full 32-byte settlement tag from Section 1.5). A duty with only a local locator uses `lp("local", scheme, key)` with the same rules as a local witness. Use the same subject bytes in its disposition.
+
+| Digest | Typed preimage for `H` |
+|---|---|
+| `cutoff` | `lp("paykit/v1/recovery-cutoff", set(anchors))`. Include the identity documents, verified old service heads or local checkpoints that delimit this original’s scan. Require at least one anchor. A local checkpoint used to claim an uninterrupted scan must have the same value before and after enumeration. |
+| `inventory` | `lp("paykit/v1/recovery-inventory", cutoff, set(items))`. Each item is `lp(subject, set(witnesses))` for the records, claims, settlements and local duties the scan found. Keep a subject with incomplete evidence in the inventory. |
+| `dispositions` | `lp("paykit/v1/recovery-dispositions", inventory, set(decisions))`. Each decision is `lp(subject, state, set(witnesses))`. `state` is `"held"` for unresolved work, `"represented"` for evidence the original found at the recovered service, `"transferred"` for protective custody accepted by another holder, or `"terminal"` for a final outcome supported by the witnesses. Require supporting witnesses for every state except `"held"`. |
+
+Require distinct subjects in each set of items or decisions and exactly one decision for every inventory subject. Recompute the digests in table order and compare all three to the report. An empty inventory has an empty set of decisions. A digest match establishes which evidence and decisions the original signed. Verifying an operation, its historical authority, the completeness of the scan or the claimed outcome requires the underlying evidence and the rules for that item. An omission, a declared terminal state or a later relay cannot by itself release a payment or credit.
+
+The app signs under `paykit/v1/recovery-upload` with **one field**. That field is `lp(u64(1), identity, original App ID, u64(lost generation), u64(recovered generation), opening service key, opening identity document hash, cutoff, inventory, dispositions)`. The first integer is the checked outer `v`. The identity, service key, document hash and commitments are raw 32-byte strings. The App ID is 16 bytes. Signature framing follows Section 1 and Switch wire 2.1. The original can give its report to a different app for publication. The inner signature covers this version, loss context and these three digests. The authenticated service write covers the sealed value, including the presented certificate and any other members. A reader holding only the report can check the origin and the committed digests. Disclosed inputs let it recompute those digests.
 
 The reader needs a current recovery grant, its scope key, and the verified opening for the loss it follows. It verifies the current applied write at the derived key, the fixed policy, and the publishing app’s signing certificate and `paykit_recovery` grant. Independently it verifies `author_certificate` under the opening’s identity, checks that its App ID is the addressed opening member, and verifies `signature` under that certificate’s signing key. Each certificate must count in the authenticated identity directory at the write’s accepted time and be valid at that time. These checks also apply when the publisher is the original. Readers ignore unknown members. Rewriting a value preserves unknown members as in Section 5.
 
