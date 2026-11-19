@@ -415,8 +415,7 @@ pub(crate) fn observe_payee_deletion(
         receipt: None,
     };
     let local_key = observation.key();
-    let previous =
-        state::cx_get::<PayeeDeletion>(cx, &local_key).map_err(Fail::into_store_failure)?;
+    let previous = state::cx_get::<PayeeDeletion>(cx, &local_key).map_err(step_failure)?;
     let label = match deletion.policy {
         Some(policy) => {
             let Some(label) = Collection::PayeeActivity.policy_label(policy) else {
@@ -450,9 +449,9 @@ pub(crate) fn observe_payee_deletion(
             if exact
                 && record.receipt.is_none()
                 && record.lost_to_delete.is_none()
-                && !held_on_receive(cx, deletion.key).map_err(Fail::into_store_failure)?
+                && !held_on_receive(cx, deletion.key).map_err(step_failure)?
                 && !state::cx_scan::<ReceiptEvidence>(cx, key::RETAINED_RECEIPTS)
-                    .map_err(Fail::into_store_failure)?
+                    .map_err(step_failure)?
                     .iter()
                     .any(|(_, r)| r.source.bound() == Some(*deletion.key))
             {
@@ -504,8 +503,8 @@ pub(crate) fn observe_payee_deletion(
                 if protected != ReceiptBinding::Invalid {
                     observation.receipt = Some(evidence.hash);
                     let k = evidence.key();
-                    let existing = state::cx_get::<ReceiptEvidence>(cx, &k)
-                        .map_err(Fail::into_store_failure)?;
+                    let existing =
+                        state::cx_get::<ReceiptEvidence>(cx, &k).map_err(step_failure)?;
                     if existing.as_ref().is_none_or(|e| {
                         e.source.bound() != evidence.source.bound()
                             || (e.parent.is_empty() && !evidence.parent.is_empty())
