@@ -2,9 +2,11 @@
 
 use std::collections::HashMap;
 
-use paykit_lib::allowances::{check_successor, usage, AllowanceTerms, Ledger, LedgerEntry, Usage};
+use paykit_lib::allowances::{
+    check_successor, usage, AllowanceTerms, CompactedFailed, Ledger, LedgerEntry, Usage,
+};
 use paykit_lib::records::bind_ledger;
-use paykit_lib::{AllowanceId, Body};
+use paykit_lib::{AllowanceId, Asset, Body, PaymentAmount};
 use pubky_switch_client::app::{KeptOp, KeptReason, RecordRead};
 use pubky_switch_core::ops::Condition;
 use pubky_switch_core::shared::ApplicationRef;
@@ -31,6 +33,21 @@ pub(super) struct ReconciledLedger {
     pub(super) at: u64,
     pub(super) compaction: Option<LedgerCompaction>,
     pub(super) at_initial_ledger: bool,
+}
+
+fn compacted_transfer_matches(
+    obligation: [u8; 32],
+    amount: &PaymentAmount,
+    retired: Option<&LedgerEntry>,
+    failed: Option<&CompactedFailed>,
+    grant_asset: &Asset,
+) -> bool {
+    let saved = match (retired, failed) {
+        (Some(entry), None) => (entry.obligation, &entry.asset, &entry.value),
+        (None, Some(entry)) => (entry.obligation, grant_asset, &entry.value),
+        _ => return false,
+    };
+    saved == (obligation, &amount.asset, &amount.value)
 }
 
 /// How this executor established the application it is about to incorporate.
@@ -447,52 +464,67 @@ impl Paykit {
                 if !dated {
                     return Ok(None);
                 }
-                let signed_amount = match &activity.request {
-                    Some(request) => match request.body() {
-                        Body::PaymentRequest(request)
-                            if request.conversion.is_none() && request.recurrence.is_none() =>
-                        {
-                            Some(&request.amount)
-                        }
-                        _ => None,
-                    },
-                    None => paid.amount.as_ref(),
+                let request = activity.request.as_ref().filter(|request| {
+                    paid.billing_period.is_none()
+                        && matches!(request.body(), Body::PaymentRequest(body) if body.recurrence.is_none())
+                });
+                let obligation =
+                    request.map(|r| self.obligation(&activity.counterparty, &r.hash(), 0));
+                let signed_amount = match (request.map(|r| r.body()), &activity.request) {
+                    (Some(Body::PaymentRequest(body)), _) if body.conversion.is_none() => {
+                        Some(&body.amount)
+                    }
+                    (None, None) => paid.amount.as_ref(),
+                    _ => None,
                 };
-                if signed_amount != Some(&dispatch.amount) {
-                    return Ok(None);
-                }
-                let compacted_failure = ledger
+                let this_allowance = activity.counterparty == checkpoint.counterparty
+                    && paid.allowance_id.as_ref() == Some(&id);
+                let failed = ledger
                     .failed
                     .iter()
-                    .find(|f| f.attempt_id == dispatch.attempt_id);
-                if activity.counterparty != checkpoint.counterparty
-                    || paid.allowance_id.as_ref() != Some(&id)
-                {
-                    if compacted_failure.is_some() {
+                    .find(|entry| entry.attempt_id == dispatch.attempt_id);
+                let compacted = retired.get(&dispatch.attempt_id);
+                if compacted.is_some() || failed.is_some() {
+                    if !this_allowance
+                        || signed_amount
+                            .is_none_or(|nominal| nominal.asset != dispatch.amount.asset)
+                        || !obligation.is_some_and(|obligation| {
+                            compacted_transfer_matches(
+                                obligation,
+                                &dispatch.amount,
+                                compacted,
+                                failed,
+                                &proposed.terms.asset,
+                            )
+                        })
+                    {
                         return Ok(None);
                     }
+                    retired.remove(&dispatch.attempt_id);
                     continue;
                 }
-                let Some(request) = &activity.request else {
-                    return Ok(None);
-                };
-                if paid.billing_period.is_none() {
-                    let obligation = self.obligation(&activity.counterparty, &request.hash(), 0);
-                    if let Some(failed) = compacted_failure {
-                        if failed.obligation != obligation {
-                            return Ok(None);
-                        }
-                        continue;
+                if signed_amount != Some(&dispatch.amount) {
+                    let Some(obligation) = obligation.filter(|_| !this_allowance) else {
+                        return Ok(None);
+                    };
+                    // The method and the dated original proof identify the dispatch. Use
+                    // its retained transfer when the request alone cannot give the amount.
+                    let Some(entry) = self
+                        .journal_entry_on(&dispatch.attempt_id, &obligation)
+                        .await?
+                    else {
+                        return Ok(None);
+                    };
+                    if entry.paid_amount()?.as_ref() != Some(&dispatch.amount)
+                        || !self.journal_matches_paid_proof(&entry, proof)?
+                    {
+                        return Ok(None);
                     }
-                    if let Some(entry) = retired.remove(&dispatch.attempt_id) {
-                        if entry.obligation != obligation
-                            || entry.value != dispatch.amount.value
-                            || entry.asset != dispatch.amount.asset
-                        {
-                            return Ok(None);
-                        }
-                        continue;
-                    }
+                }
+                if !this_allowance {
+                    continue;
+                }
+                if let Some(obligation) = obligation {
                     // The opening after the accepted ledger excludes lawful compaction
                     // before that checkpoint. A direct reservation successor only
                     // compacts existing final entries by the ordinary ledger rule.
@@ -528,6 +560,81 @@ mod tests {
     use super::*;
     use paykit_lib::allowances::EntryOutcome;
     use paykit_lib::{Asset, AttemptId, Decimal};
+
+    #[test]
+    fn test_compacted_reservation_uses_its_original_transfer_amount() {
+        let asset = Asset::new("btc").unwrap();
+        let failed = CompactedFailed {
+            obligation: [6; 32],
+            attempt_id: AttemptId::from_bytes([5; 16]),
+            value: Decimal::new("0.00000002").unwrap(),
+        };
+        let transferred = PaymentAmount {
+            asset: asset.clone(),
+            value: failed.value.clone(),
+        };
+        let nominal = PaymentAmount {
+            asset: asset.clone(),
+            value: Decimal::new("0.000000015").unwrap(),
+        };
+        let settled = LedgerEntry {
+            obligation: failed.obligation,
+            attempt_id: failed.attempt_id,
+            value: transferred.value.clone(),
+            asset: asset.clone(),
+            at: 1_000,
+            outcome: Some(EntryOutcome::Done),
+        };
+        assert!(compacted_transfer_matches(
+            settled.obligation,
+            &transferred,
+            Some(&settled),
+            None,
+            &asset,
+        ));
+        assert!(!compacted_transfer_matches(
+            settled.obligation,
+            &nominal,
+            Some(&settled),
+            None,
+            &asset,
+        ));
+        assert!(compacted_transfer_matches(
+            failed.obligation,
+            &transferred,
+            None,
+            Some(&failed),
+            &asset
+        ));
+        assert!(!compacted_transfer_matches(
+            [7; 32],
+            &transferred,
+            None,
+            Some(&failed),
+            &asset
+        ));
+        assert!(!compacted_transfer_matches(
+            failed.obligation,
+            &nominal,
+            None,
+            Some(&failed),
+            &asset
+        ));
+        assert!(!compacted_transfer_matches(
+            failed.obligation,
+            &transferred,
+            None,
+            Some(&failed),
+            &Asset::new("usd").unwrap()
+        ));
+        assert!(!compacted_transfer_matches(
+            failed.obligation,
+            &transferred,
+            None,
+            None,
+            &asset
+        ));
+    }
 
     #[test]
     fn test_applied_reservation_compacts_old_entries_into_the_exact_totals() {
