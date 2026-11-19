@@ -1,0 +1,77 @@
+name: Browser
+
+on:
+  push:
+    branches: [v0.2]
+  pull_request:
+    # Stacked v0.2 PRs target a feature branch; they get the same checks.
+    branches: [v0.2, "feat/**"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+
+  wasm-check:
+    name: wasm32 check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo clippy --locked --target wasm32-unknown-unknown -p paykit-browser --all-targets -- -D warnings
+      - name: No native-only networking or TLS crates in the wasm32 graph
+        run: paykit-browser/rig/check-wasm-deps.sh
+
+  browser-tests:
+    name: Tests (${{ matrix.engine }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [chromium, firefox, webkit]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # The CLI must be the exact wasm-bindgen version in Cargo.lock, so the lock sets both the
+      # version that is installed and the cache key.
+      - name: Read the wasm-bindgen version from Cargo.lock
+        id: wasm-bindgen
+        run: |
+          version=$(paykit-browser/rig/wasm-bindgen-version.sh)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - id: wasm-bindgen-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/wasm-bindgen-cli
+          key: wasm-bindgen-cli-${{ runner.os }}-${{ steps.wasm-bindgen.outputs.version }}
+      - name: Install wasm-bindgen-cli
+        if: steps.wasm-bindgen-cache.outputs.cache-hit != 'true'
+        env:
+          VERSION: ${{ steps.wasm-bindgen.outputs.version }}
+        run: cargo install --locked --root ~/wasm-bindgen-cli wasm-bindgen-cli --version "$VERSION"
+      - run: echo "$HOME/wasm-bindgen-cli/bin" >> "$GITHUB_PATH"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: paykit-browser/rig/package-lock.json
+      - run: npm ci --ignore-scripts
+        working-directory: paykit-browser/rig
+      - run: npx playwright install --with-deps ${{ matrix.engine }}
+        working-directory: paykit-browser/rig
+      - run: paykit-browser/rig/test.sh ${{ matrix.engine }} both
