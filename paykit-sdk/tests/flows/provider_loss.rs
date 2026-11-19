@@ -69,6 +69,7 @@ pub(super) async fn follow_loss(app: &mut Paykit) -> u64 {
     for _ in 0..4 {
         app.receive(None).await.unwrap();
     }
+    crate::common::finish_listing(app).await;
     let info = app.app().recovery_info().await.unwrap().unwrap();
     assert!(info.steps_done, "{info:?}");
     assert!(info.loss.uncertain_until_ms > info.loss.declared_at_ms);
@@ -957,8 +958,19 @@ async fn test_provider_loss_credit_uses_the_signed_payer_of_a_disputed_period() 
                 "{verified:?}"
             );
         } else {
-            assert!(verified.unwrap().is_some());
-            assert!(shop.confirm_payment(&credit).await.unwrap().is_some());
+            // The other payer's disputed period doesn't withhold this purchase. Its
+            // original method payment predates the provider loss and needs confirmation.
+            assert!(matches!(
+                verified.unwrap_err().refusal(),
+                Some(Refusal::MaybeCredited)
+            ));
+            let details = paykit_sdk::ReceiptDetails::default()
+                .with_maybe_credited_confirmed(UserConfirmed::new());
+            assert!(shop
+                .confirm_payment_with(&credit, details)
+                .await
+                .unwrap()
+                .is_some());
         }
         for (target, _) in targets {
             let reason = if target == &parent {
@@ -1346,8 +1358,16 @@ async fn test_provider_loss_missing_record_epoch_holds_the_original_request_proo
         .await
         .outcome
         .unwrap();
-    let bought = request_from(&mut seller, w.alice_id(), draft("2", now)).await;
-    writer.receive(None).await.unwrap();
+    let sent = seller
+        .send_request(w.alice_id(), draft("2", now))
+        .await
+        .unwrap();
+    assert!(matches!(
+        sent.delivery,
+        paykit_sdk::MessageDelivery::Accepted { .. }
+    ));
+    let bought = sent.request.unwrap();
+    crate::common::receive_message(&mut writer, &sent.msg_id).await;
     writer
         .pay_request(&bought, PayOptions::default())
         .await

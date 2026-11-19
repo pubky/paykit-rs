@@ -274,7 +274,7 @@ async fn test_blocked_return_mark_past_its_30_days_told_lost() {
         .filter(|n| n.kind == NoticeKind::BlockedMessagesLost)
         .collect();
     assert_eq!(lost.len(), 1, "{notices:?}");
-    assert_eq!(lost[0].counterparty, w.bob_id());
+    assert_eq!(lost[0].counterparty, Some(w.bob_id()));
     assert!(lost[0].lost_from_ms.is_some() && lost[0].lost_until_ms.is_some());
     // Unblocked then, bob is asked nothing.
     wallet.unblock(&w.bob_id()).await.unwrap();
@@ -472,7 +472,7 @@ async fn test_blocked_return_mark_evicted_at_the_bound_told_lost() {
         .filter(|n| n.kind == NoticeKind::BlockedMessagesLost)
         .collect();
     assert_eq!(lost.len(), 1, "{lost:?}");
-    assert_eq!(lost[0].counterparty, seeded[0]);
+    assert_eq!(lost[0].counterparty, Some(seeded[0]));
     let senders = crate::common::mark_senders(&wallet, "bd/").await;
     assert!(senders.contains(&w.bob_id()));
     assert!(!senders.contains(&seeded[0]));
@@ -792,7 +792,9 @@ async fn lost_for(app: &Paykit, counterparty: &[u8; 32]) -> usize {
         .await
         .unwrap()
         .iter()
-        .filter(|n| n.kind == NoticeKind::BlockedMessagesLost && n.counterparty == *counterparty)
+        .filter(|n| {
+            n.kind == NoticeKind::BlockedMessagesLost && n.counterparty == Some(*counterparty)
+        })
         .count()
 }
 

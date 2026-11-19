@@ -1545,6 +1545,7 @@ async fn test_own_record_restored_changes_wait_for_confirmed_first_read() {
             on_homeserver(&w, &restored).unwrap().signed(),
             published.signed()
         );
+        crate::common::finish_listing(&mut restored).await;
         change_record(&mut restored, change).await.unwrap();
         assert!(restored.app().restore_held_cursor().is_some(), "{change:?}");
         assert_ne!(restored.app().record(), &before, "{change:?}");

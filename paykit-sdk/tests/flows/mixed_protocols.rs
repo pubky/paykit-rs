@@ -182,7 +182,7 @@ async fn test_mixed_protocols_attach_to_host_loaded_app() {
     assert_eq!(wallet.app_id(), id);
     assert!(Arc::ptr_eq(&clock, &wallet.app().clock()));
     assert!(Arc::ptr_eq(&homeserver, &wallet.app().homeserver_reader()));
-    wallet.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut wallet).await;
     let _shop = w.shop().await;
     let keys = w.bob.identity().app_keys("chat");
     w.bob.register_app(&keys, &AppSpec::new(&["chat"])).unwrap();

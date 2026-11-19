@@ -590,7 +590,7 @@ async fn test_certificate_renewal_bringing_pay_back_drops_the_held_payment_notic
     let again = renew(&w, me, &AppScopes::new().pay().build().unwrap(), 2_000);
     let _ = wallet.receive(None).await;
     list(&w, me, &reduced, &again);
-    wallet.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut wallet).await;
     assert_eq!(wallet.app().cert().hash(), again.hash());
     w.rail.settle(&attempt_id, true);
     let resumed = wallet.resume_payments().await.unwrap();
@@ -663,7 +663,7 @@ async fn test_certificate_renewal_dropping_pay_keeps_a_dispatched_payment() {
     let regranted = renew(&w, me, &AppScopes::new().pay().build().unwrap(), 2_000);
     let _ = wallet.receive(None).await;
     list(&w, me, &reduced, &regranted);
-    wallet.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut wallet).await;
     assert_eq!(wallet.app().cert().hash(), regranted.hash());
     wallet.resume_payments().await.unwrap();
     assert_eq!(
@@ -808,7 +808,7 @@ async fn test_certificate_restored_lost_acceptance_not_signed_again_without_pay(
     let regranted = renew(&w, me, &AppScopes::new().pay().build().unwrap(), 2_000);
     let _ = restored.receive(None).await;
     list(&w, me, &reduced, &regranted);
-    restored.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut restored).await;
     assert_eq!(restored.app().cert().hash(), regranted.hash());
     let paid = restored.resume_payments().await.unwrap();
     assert!(
@@ -1031,7 +1031,7 @@ async fn test_certificate_renewal_dropping_pay_rechecks_no_failed_payment() {
     let regranted = renew(&w, me, &AppScopes::new().pay().build().unwrap(), 2_000);
     let _ = wallet.receive(None).await;
     list(&w, me, &reduced, &regranted);
-    wallet.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut wallet).await;
     let resumed = wallet.resume_payments().await.unwrap();
     assert!(
         matches!(resumed.as_slice(), [paykit_sdk::PayOutcome::Paid { .. }]),
@@ -1106,7 +1106,7 @@ async fn test_certificate_restore_without_pay_attempts_nothing_until_a_reconcile
     let regranted = renew(&w, me, &AppScopes::new().pay().build().unwrap(), 2_000);
     let _ = restored.receive(None).await;
     list(&w, me, &reduced, &regranted);
-    restored.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut restored).await;
     assert_eq!(restored.app().cert().hash(), regranted.hash());
     for request in [&paid, &other] {
         let refused = restored
@@ -1326,7 +1326,7 @@ pub(crate) fn is_not_now(error: &PaykitError) -> bool {
 
 /// How many listing requests the client makes for `cert`: one per collection it reads,
 /// each of one page here.
-pub(crate) fn client_listing_requests(cert: &AppCert) -> usize {
+pub(super) fn client_listing_requests(cert: &AppCert) -> usize {
     use pubky_switch_client::app::Protocol as _;
     paykit_sdk::PaykitProtocol::new()
         .collections()
@@ -1335,15 +1335,16 @@ pub(crate) fn client_listing_requests(cert: &AppCert) -> usize {
         .count()
 }
 
-async fn read_payee_pages(wallet: &mut Paykit, cert: &AppCert) {
-    let pages = client_listing_requests(cert);
-    for _ in 0..pages.div_ceil(pubky_switch_client::app::LISTING_PAGES_PER_READ as usize) {
+async fn read_payee_pages(wallet: &mut Paykit) {
+    for _ in 0..8 {
         let summary = wallet.receive(None).await.unwrap();
-        if summary.records_unlisted.is_none() {
-            break;
+        if summary.records_unlisted.is_some() {
+            assert!(is_not_now(&wallet.payee_activity().await.unwrap_err()));
+        } else if !summary.report.more && !wallet.app().listing_owed().await.unwrap() {
+            return;
         }
-        assert!(is_not_now(&wallet.payee_activity().await.unwrap_err()));
     }
+    panic!("the wallet's payee records are still unlisted");
 }
 
 #[tokio::test]
@@ -1374,10 +1375,20 @@ async fn test_certificate_renewal_reading_more_lists_its_records_first() {
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Unreachable {
             path: "/records".into(),
-            after: client_listing_requests(&wider)
-                .min(pubky_switch_client::app::LISTING_PAGES_PER_READ as usize),
+            after: client_listing_requests(&wider),
         });
-    let summary = wallet.receive(None).await.unwrap();
+    let mut summary = wallet.receive(None).await.unwrap();
+    for _ in 0..8 {
+        if !summary
+            .records_unlisted
+            .as_deref()
+            .is_some_and(|why| why.contains("Call receive again"))
+        {
+            break;
+        }
+        assert!(is_not_now(&wallet.payee_activity().await.unwrap_err()));
+        summary = wallet.receive(None).await.unwrap();
+    }
     assert!(
         summary
             .records_unlisted
@@ -1388,7 +1399,7 @@ async fn test_certificate_renewal_reading_more_lists_its_records_first() {
     let refused = wallet.payee_activity().await.unwrap_err();
     assert!(is_not_now(&refused), "{refused:?}");
     // The next reads finish the remaining pages before the till's request can be shown.
-    read_payee_pages(&mut wallet, &wider).await;
+    read_payee_pages(&mut wallet).await;
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
 }
 
@@ -1412,7 +1423,7 @@ async fn test_certificate_renewal_reading_more_taken_by_a_failed_read_holds_read
         matches!(refused.refusal(), Some(Refusal::NotNow(_))),
         "{refused:?}"
     );
-    wallet.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut wallet).await;
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
 }
 
@@ -1432,7 +1443,7 @@ async fn test_certificate_renewal_reading_more_listed_after_a_reload() {
     let w = World::new();
     let base = store();
     let mut wallet = reloaded_after_a_failed_read(&w, &base).await;
-    wallet.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut wallet).await;
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
 }
 
@@ -1443,7 +1454,7 @@ async fn test_certificate_renewal_reading_more_listing_lost_before_its_note_list
     // unlisted again, and the next read lists them once more.
     let w = World::new();
     let base = store();
-    let (mut wallet, wider) = renewed_to_read_more_on(&w, Arc::clone(&base)).await;
+    let (mut wallet, _wider) = renewed_to_read_more_on(&w, Arc::clone(&base)).await;
     let me = wallet.app_id();
     let held = wallet
         .app()
@@ -1452,7 +1463,7 @@ async fn test_certificate_renewal_reading_more_listing_lost_before_its_note_list
         .unwrap()
         .unwrap();
     wallet.receive(None).await.unwrap();
-    wallet.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut wallet).await;
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
     wallet
         .app_mut()
@@ -1471,7 +1482,7 @@ async fn test_certificate_renewal_reading_more_listing_lost_before_its_note_list
         .await;
     let refused = wallet.payee_activity().await.unwrap_err();
     assert!(is_not_now(&refused), "{refused:?}");
-    read_payee_pages(&mut wallet, &wider).await;
+    read_payee_pages(&mut wallet).await;
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
 }
 
@@ -1606,8 +1617,23 @@ async fn test_certificate_renewal_reading_more_listing_refused_holds_reads_until
     assert_eq!(wallet.app().cert().hash(), wider.hash());
     let refused = wallet.payee_activity().await.unwrap_err();
     assert!(is_not_now(&refused), "{refused:?}");
+    // While Switch still owes this certificate its own listing, receive must go first.
+    assert!(wallet.app().listing_owed().await.unwrap());
+    let waiting = wallet.reconcile().await.unwrap_err();
+    assert!(
+        matches!(waiting.refusal(), Some(Refusal::NotNow(reason)) if reason.contains("Call receive again")),
+        "{waiting:?}"
+    );
     let summary = wallet.receive(None).await.unwrap();
-    assert!(summary.records_unlisted.is_none(), "{summary:?}");
+    assert!(
+        summary
+            .records_unlisted
+            .as_deref()
+            .is_some_and(|why| why.contains("continue the listing")),
+        "{summary:?}"
+    );
+    assert!(is_not_now(&wallet.payee_activity().await.unwrap_err()));
+    crate::common::finish_listing(&mut wallet).await;
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
 }
 
@@ -2061,7 +2087,7 @@ async fn test_certificate_narrowed_then_widened_lists_again() {
     let (mut wallet, wider) = renewed_to_read_more(&w).await;
     let me = wallet.app_id();
     wallet.receive(None).await.unwrap();
-    wallet.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut wallet).await;
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
     let narrow = renew(&w, me, &AppScopes::new().pay().build().unwrap(), 2_000);
     wallet.receive(None).await.unwrap();
@@ -2089,7 +2115,7 @@ async fn test_certificate_narrowed_then_widened_lists_again() {
     wallet.receive(None).await.unwrap();
     list(&w, me, &narrow, &again);
     wallet.receive(None).await.unwrap();
-    read_payee_pages(&mut wallet, &again).await;
+    read_payee_pages(&mut wallet).await;
     assert_eq!(wallet.app().cert().hash(), again.hash());
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 2);
 }
@@ -2122,7 +2148,7 @@ async fn narrowed_then_renewed_back(narrowed: Narrowed) {
         renewed_to_read_more_on(&w, Arc::clone(&fault) as Arc<dyn StateStore>).await;
     let me = wallet.app_id();
     wallet.receive(None).await.unwrap();
-    wallet.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut wallet).await;
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
     let mut payer = w
         .join(&w.bob, "bwallet", AppScopes::new().pay().build().unwrap())
@@ -2331,7 +2357,7 @@ async fn test_certificate_reconcile_waits_for_the_scope_keys_then_lists() {
     assert_eq!(wallet.app().cert().hash(), wider.hash());
     let refused = wallet.reconcile().await.unwrap_err();
     assert!(waits_for_keys(&refused), "{refused:?}");
-    wallet.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut wallet).await;
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
 }
 
@@ -3398,6 +3424,7 @@ async fn restored_queued_reply_before_wider_keys(keys_present: bool) {
             Some(paykit_sdk::MessageDelivery::Queued { .. })
         ));
         assert!(!shop.receive(None).await.unwrap().applied.contains(&msg_id));
+        crate::common::finish_listing(&mut restored).await;
         result = restored.flush().await;
     }
     let verdict = restored.app().restore_held_cursor();
@@ -3491,9 +3518,17 @@ async fn test_reconcile_waits_for_the_last_collection_of_the_wallet() {
         .count();
     assert!(matches!(
         result.unwrap_err().refusal(),
-        Some(Refusal::NotNow(_))
+        Some(Refusal::NotNow(reason)) if reason.contains("Call reconcile again")
     ));
     assert_eq!(pages, budget);
+
+    // This scan was opened by reconcile. A feed read has no owed listing to finish.
+    let before = w.router.log().len();
+    let read = wallet.receive(None).await.unwrap();
+    assert!(read.records_unlisted.is_none(), "{read:?}");
+    assert!(w.router.log()[before..]
+        .iter()
+        .all(|route| !route.contains("records?collection")));
 
     let id = wallet.app_id();
     drop(wallet);
