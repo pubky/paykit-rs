@@ -8635,7 +8635,7 @@ async fn test_pending_proposal_conflict_discard_reads_the_current_proposal_after
     use pubky_switch_client::app::{Collection, RecordContent, RecordTarget};
 
     let w = World::new();
-    let wallet = Box::pin(wallet(&w)).await;
+    let mut wallet = Box::pin(wallet(&w)).await;
     let mut phone = Box::pin(alice_app(
         &w,
         "phone",
