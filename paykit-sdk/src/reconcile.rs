@@ -757,6 +757,9 @@ impl Paykit {
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
+        if self.floor_write_is_kept().await? {
+            return Err(crate::floor::unreadable_floor());
+        }
         Box::pin(self.restore_verdict_not_known_holds()).await?;
         let asks_owed = self
             .local_get::<RestoreHold>(key::RESTORE_HOLD)

@@ -66,7 +66,7 @@
 //! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`); at most `MAX_DROPPED_MARKS` in each family of marks (`pd/`, `ud/`, `kw/`, `bd/`), and a restore refuses a backup holding more | |
 //! | `bd/<sender>` | a mark of a sender's messages dropped for the user's block, each as one never processed (its pair forgotten), as `pd/` holds; it asks that sender once it is neither blocked nor flagged (`marks.rs`, Paykit spec 8.1) | |
 //! | `bl/<sender>/<msg_id>` | a notice of lost messages owed on a block's mark the receive step dropped for the bound while it named a request as queued: the mark's window, when the notice was raised, and the request's `msg_id` and hash; settled in the pass after the read from the outbox's answer on that request, told or dropped (`marks.rs`, `Paykit::settle_lost_owed`); at most `MAX_LOST_OWED`, the receive step holding the next entry that would owe one more; restored, and a restore refuses a backup holding more | |
-//! | `bw/<from_ms>` | a widening of the block marks, from `from_ms` to the time it holds, owed to every counterparty the deny list holds at the next read of the lists: written by a `missed` item (`marks.rs`) | |
+//! | `bw/<hold epoch>` | a widening of the block marks, over the missed acceptance times, owed to every counterparty the deny list holds at the next read of the lists: written by a `missed` item (`marks.rs`) | |
 //! | `ud/<sender>` | a mark of a sender's entries dropped unverified, as `pd/` holds (`marks.rs`) | |
 //! | `kw/<sender>` | a mark of a sender's entries the client dropped while they waited for a scope key, as `pd/` holds, with the data epochs they waited for; it asks only while the app holds every key of those epochs (`marks.rs`) | |
 //! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply, or a payee's period details, for a request the app holds no record of yet, or whose record it holds but can't open, read or bind, kept until it does, placed only once the record names its sender, a proof of a payment without a request for the payee's record of its settlement that the app holds but can't read, placed once it reads naming its sender and removed if it names another, or a receipt for a payer record the app holds but can't read and that isn't paused as divergent, kept until it reads, and moved to `dw/` if it reads paused (`receive.rs`), or a counterparty's Allowance answer the receive step took, which it never writes into the record's response itself: a rejection placed after the read, or kept before the app holds its Allowance record, or waiting over a record seen divergent for the user's confirmation; an acceptance kept unplaced if it would fill the record's empty `response` (Paykit spec 8.3.1; `allowances.rs`); each with the feed `seq` its entry was read at, which orders it (`records::KeptOrder`) | |
@@ -448,10 +448,23 @@ impl Stored for [u8; 16] {
 
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
-            StateKey::OfflineBatch(_)
-            | StateKey::EndBatch(_)
-            | StateKey::ReplyFloorBatch { .. } => Ok(()),
+            StateKey::OfflineBatch(_) | StateKey::EndBatch(_) | StateKey::FloorBatch => Ok(()),
             _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for crate::floor::PendingUnblocks {}
+
+impl Stored for crate::floor::PendingUnblocks {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        if matches!(family, StateKey::BlockFloor)
+            && !self.senders.is_empty()
+            && self.senders.windows(2).all(|pair| pair[0] < pair[1])
+        {
+            Ok(())
+        } else {
+            corrupt()
         }
     }
 }
@@ -496,8 +509,7 @@ impl Stored for u64 {
             | StateKey::Spam(_)
             | StateKey::Resent { .. }
             | StateKey::ResentDay { .. }
-            | StateKey::ListsRead
-            | StateKey::BlockFloor => Ok(()),
+            | StateKey::ListsRead => Ok(()),
             _ => corrupt(),
         }
     }
@@ -1083,19 +1095,24 @@ impl Stored for DropMark {
     }
 }
 
-impl sealed::Sealed for crate::marks::BlockedWindow {}
+impl sealed::Sealed for crate::marks::MissedWidening {}
 
-/// A widening of the block marks owed (`bw/<from_ms>`): from the time its key names, its
-/// times not crossed.
-impl Stored for crate::marks::BlockedWindow {
+impl Stored for crate::marks::MissedWidening {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
-        match family {
-            StateKey::BlockedWidening { from_ms }
-                if self.from_ms == *from_ms && self.from_ms <= self.until_ms =>
-            {
-                Ok(())
-            }
-            _ => corrupt(),
+        if matches!(family, StateKey::BlockedWidening(id) if id == self.id.as_bytes())
+            && !self.windows.is_empty()
+            && self
+                .windows
+                .iter()
+                .all(|w| w.from_ms <= w.until_ms && w.floor_ms <= w.until_ms)
+            && self.deny.as_ref().map_or_else(
+                || self.windows.len() == 1,
+                |deny| deny.windows(2).all(|p| p[0] < p[1]),
+            )
+        {
+            Ok(())
+        } else {
+            corrupt()
         }
     }
 }
@@ -1406,11 +1423,6 @@ pub(crate) mod key {
     pub(crate) const STORED_NOTES: &str = "se/";
     pub(crate) const KEPT_REPLIES: &str = "pr/";
     pub(crate) const REPLY_ASKS: &str = "ra/";
-    pub(crate) const REPLY_FLOOR_BATCHES: &str = "rb/";
-
-    pub(crate) fn reply_floor_batch(hash: &[u8; 32]) -> String {
-        format!("{REPLY_FLOOR_BATCHES}{}", b64(hash))
-    }
     pub(crate) const DROPPED_REPLIES: &str = "pd/";
     pub(crate) const DROPPED_UNVERIFIED: &str = "ud/";
     pub(crate) const DROPPED_BLOCKED: &str = "bd/";
@@ -1420,6 +1432,7 @@ pub(crate) mod key {
     pub(crate) const LOST_OWED: &str = "bl/";
     pub(crate) const FLAGGED: &str = "fg";
     /// The raise of the block floor this app owes (`crate::floor`).
+    pub(crate) const FLOOR_BATCH: &str = "fb";
     pub(crate) const BLOCK_FLOOR: &str = "bf";
     /// The request records this read opened without `manual_only`, to check against the
     /// block floor once it is done (`crate::floor`).
@@ -1534,8 +1547,8 @@ pub(crate) mod key {
 
     /// A widening of the block marks from `from_ms`, owed to every counterparty the deny
     /// list holds at the next read of the lists.
-    pub(crate) fn blocked_widening(from_ms: u64) -> String {
-        format!("{BLOCKED_WIDENINGS}{from_ms:020}")
+    pub(crate) fn blocked_widening(id: &[u8; 16]) -> String {
+        format!("{BLOCKED_WIDENINGS}{}", b64(id))
     }
 
     /// The notice of lost messages owed on `sender`'s block mark, dropped for the bound while
@@ -1822,13 +1835,12 @@ pub(crate) enum StateKey {
     /// Outstanding and last settled requests for a sender's dropped replies.
     ReplyAsks { sender: [u8; 32] },
     /// The original floor batch for the signed recovery request of this hash.
-    ReplyFloorBatch { hash: [u8; 32] },
     /// `ud/<sender>`: the mark of a sender's entries dropped unverified.
     DroppedUnverified { sender: [u8; 32] },
     /// `bd/<sender>`: the mark of a sender's messages dropped for the user's block.
     DroppedBlocked { sender: [u8; 32] },
-    /// `bw/<from_ms>`: a widening of the block marks owed at the next read of the lists.
-    BlockedWidening { from_ms: u64 },
+    /// `bw/<hold epoch>`: a widening of the block marks owed at the next read of the lists.
+    BlockedWidening([u8; 16]),
     /// `bl/<sender>/<msg_id>`: the notice of lost messages owed on a sender's block mark the
     /// receive step dropped for the bound, naming `msg_id` as queued.
     LostOwed { sender: [u8; 32], msg_id: String },
@@ -1836,6 +1848,8 @@ pub(crate) enum StateKey {
     Flagged,
     /// `bf`: the raise of the block floor this app owes.
     BlockFloor,
+    /// The local identifier of an unanswered floor write.
+    FloorBatch,
     /// `fo/<record key>`: a request record a read opened without `manual_only`, to check
     /// against the block floor once the read is done.
     FloorOpened([u8; 32]),
@@ -1945,6 +1959,7 @@ impl StateKey {
             "dl" => Self::Denied,
             "fg" => Self::Flagged,
             "bf" => Self::BlockFloor,
+            "fb" => Self::FloorBatch,
             _ => {
                 let (family, rest) = text.split_once('/')?;
                 match family {
@@ -2083,9 +2098,6 @@ impl StateKey {
                     "ra" => Self::ReplyAsks {
                         sender: b64_32(rest)?,
                     },
-                    "rb" => Self::ReplyFloorBatch {
-                        hash: b64_32(rest)?,
-                    },
                     "pd" => Self::DroppedReplies {
                         sender: b64_32(rest)?,
                     },
@@ -2095,9 +2107,9 @@ impl StateKey {
                     "bd" => Self::DroppedBlocked {
                         sender: b64_32(rest)?,
                     },
-                    "bw" => Self::BlockedWidening {
-                        from_ms: number(rest)?,
-                    },
+                    "bw" => {
+                        Self::BlockedWidening(pubky_switch_core::enc::unb64_array::<16>(rest).ok()?)
+                    }
                     "bl" => {
                         let (sender, id) = rest.split_once('/')?;
                         Self::LostOwed {
@@ -2991,8 +3003,8 @@ mod tests {
                 StateKey::DroppedBlocked { sender: pubky },
             ),
             (
-                key::blocked_widening(7),
-                StateKey::BlockedWidening { from_ms: 7 },
+                key::blocked_widening(&[7; 16]),
+                StateKey::BlockedWidening([7; 16]),
             ),
             (
                 key::lost_owed(&pubky, id),
@@ -3007,10 +3019,6 @@ mod tests {
                 StateKey::ReplyAsks { sender: pubky },
             ),
             (
-                key::reply_floor_batch(&pubky),
-                StateKey::ReplyFloorBatch { hash: pubky },
-            ),
-            (
                 key::dropped_lost(&pubky, "pd", 7),
                 StateKey::DroppedLost {
                     counterparty: pubky,
@@ -3019,6 +3027,7 @@ mod tests {
                 },
             ),
             (key::BLOCK_FLOOR.into(), StateKey::BlockFloor),
+            (key::FLOOR_BATCH.into(), StateKey::FloorBatch),
             (key::floor_opened(&pubky), StateKey::FloorOpened(pubky)),
             (
                 key::blocked_lost(&pubky, 9),

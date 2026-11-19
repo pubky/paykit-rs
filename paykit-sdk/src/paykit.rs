@@ -1063,7 +1063,10 @@ impl Paykit {
             });
         }
         self.refresh_own()?;
-        if self.first_read_pending() {
+        // The client retries kept batches before the feed. Until a floor batch settles,
+        // its local mark and restore updates still belong to that batch. Hand the host
+        // the read normally and leave those updates and outgoing asks for the next pass.
+        if self.first_read_pending() || self.floor_write_is_kept().await? {
             let applied = report
                 .events
                 .iter()

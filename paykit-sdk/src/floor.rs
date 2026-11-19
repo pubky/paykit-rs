@@ -10,16 +10,10 @@
 //! lower one, and it never expires. A request created now is dated above every floor, so nothing
 //! fresh is held by it.
 //!
-//! - **Raised before the ask.** Every `resend_request` this app sends goes through
-//!   [`Paykit::queue_resend_request`]: when its counterparty holds a live block mark here, or
-//!   the app owes a raise (`p/bf`, below), the raise to the mark's latest time, and to the raise owed, goes
-//!   in the same batch as the queued ask, so the ask goes only once the raise is applied, and
-//!   the raise is in the identity's chain before any entry the ask brings back (Switch spec
-//!   8.3: one order per generation). While the app can't read the floor, the ask waits.
-//! - **The raise owed** (`p/bf`): a mark that goes for the bound or its expiry, and a restore's
-//!   first read of the lists (`marks.rs`), fold their time into it, in the commit that makes
-//!   them; it is written at the next ask, or before the block marks ask, and deleted in the
-//!   batch that writes it. This app applies it as a floor meanwhile.
+//! A payer raises the shared floor before it removes a sender from the deny list.
+//! When its list read shows another app's unblock, it records the change with the
+//! shared raise. A restore that widens the blocked window applies its marks with the floor.
+//!
 //! - **Applied by every payer app at record creation:** a one-time request whose signed
 //!   `created_at` is earlier than the floor plus the clock tolerance opens its record with
 //!   `manual_only`, in the receive step and in a later write. The floor an app holds at an
@@ -45,7 +39,7 @@ use paykit_lib::derive::natural_key;
 use paykit_lib::records::{BlockFloorRecord, StoredMessage};
 use paykit_lib::Body;
 use pubky_switch_client::app::{
-    KeptReason, OpBatch, RecordContent, RecordRead, RecordTarget, SharedRecord, SignedMessage,
+    KeptReason, OpBatch, RecordContent, RecordRead, RecordTarget, SharedRecord,
 };
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::records::CLOCK_TOLERANCE_MS;
@@ -53,10 +47,17 @@ use pubky_switch_core::records::CLOCK_TOLERANCE_MS;
 use crate::activity;
 use crate::error::{Refusal, Result};
 use crate::hold::RecordSide;
-use crate::marks::{DropMark, MarkFamily};
 use crate::paykit::Paykit;
 use crate::state::{key, Tx};
 use paykit_lib::collections::Collection;
+
+/// Senders whose unblock this app observed, held until the shared raise applies.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PendingUnblocks {
+    pub(crate) to_ms: u64,
+    pub(crate) senders: Vec<[u8; 32]>,
+}
 
 /// The client's target of the identity's `block_floor` record.
 pub(crate) fn floor_target(own: &[u8; 32]) -> RecordTarget {
@@ -155,7 +156,10 @@ impl Paykit {
         if !matches!(stored.body(), Body::PaymentRequest(r) if !r.is_recurring()) {
             return Ok(false);
         }
-        let owed = self.local_get::<u64>(key::BLOCK_FLOOR).await?;
+        let owed = self
+            .local_get::<PendingUnblocks>(key::BLOCK_FLOOR)
+            .await?
+            .map(|pending| pending.to_ms);
         Ok(dated_before(stored, self.shared_floor().await?, owed))
     }
 
@@ -196,7 +200,10 @@ impl Paykit {
         if !floor_applies(stored) {
             return Ok(false);
         }
-        let owed = self.local_get::<u64>(key::BLOCK_FLOOR).await?;
+        let owed = self
+            .local_get::<PendingUnblocks>(key::BLOCK_FLOOR)
+            .await?
+            .map(|pending| pending.to_ms);
         let key = self.app.record_key(&floor_target(&self.identity()))?;
         let seen = self.app.record_seen(&key).await?;
         Ok(dated_before(
@@ -204,24 +211,6 @@ impl Paykit {
             shared_floor_of(read, seen.as_deref()),
             owed,
         ))
-    }
-
-    /// The time the floor must reach before an ask to `to` goes: its live block mark's latest
-    /// time and the raise owed, the higher; `None` when neither is kept, or the app doesn't
-    /// hold `paykit_pay`: it opens no payer record, so its marks raise nothing (`crate::floor`).
-    async fn floor_owed_for(&self, to: Option<&[u8; 32]>) -> Result<Option<u64>> {
-        if !self.holds("paykit_pay") {
-            return Ok(None);
-        }
-        let owed = self.local_get::<u64>(key::BLOCK_FLOOR).await?;
-        let mark = match to {
-            Some(to) => self
-                .local_get::<DropMark>(&MarkFamily::Blocked.key(to))
-                .await?
-                .map(|mark| mark.latest_ms),
-            None => None,
-        };
-        Ok(owed.max(mark))
     }
 
     /// The shared floor for a write: the copy's, or, while the payer's records aren't listed
@@ -246,9 +235,8 @@ impl Paykit {
         Ok(shared_floor_of(read.as_ref(), seen.as_deref()))
     }
 
-    /// The batch that raises the floor to `to_ms` and deletes the raise owed, with nothing
-    /// else yet; `None` when the floor is at `to_ms` already, after the raise owed is
-    /// deleted if one is kept.
+    /// Prepare a conditional raise to `to_ms`. An applied floor at least as high
+    /// already covers this window.
     ///
     /// # Errors
     ///
@@ -260,21 +248,7 @@ impl Paykit {
         let target = floor_target(&self.identity());
         let key = self.app.record_key(&target)?;
         let held = self.app.shared_record(&key).await?;
-        let mut owed = Tx::default();
-        if self
-            .local_get::<u64>(key::BLOCK_FLOOR)
-            .await?
-            .is_some_and(|o| o <= to_ms)
-        {
-            owed.delete(key::BLOCK_FLOOR);
-        }
         if floor.is_some_and(|floor| floor >= to_ms) {
-            let writes = owed.into_writes();
-            if !writes.is_empty() {
-                self.app
-                    .protocol_commit(crate::protocol::BACKUP_NAME, &writes)
-                    .await?;
-            }
             return Ok(None);
         }
         let seen = self.app.record_seen(&key).await?;
@@ -291,9 +265,7 @@ impl Paykit {
             .record_op(&target, Some(&raised.to_json()?), Vec::new())
             .await?;
         Ok(Some(
-            OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
-                .entry(entry)
-                .locals(owed.into_writes()),
+            OpBatch::for_protocol(crate::protocol::BACKUP_NAME).entry(entry),
         ))
     }
 
@@ -312,62 +284,74 @@ impl Paykit {
         }
     }
 
-    /// Queue `signed`, a `resend_request` to `to`, the one way this app queues one (module
-    /// docs, "Raised before the ask"): with the raise of the floor that its live block mark
-    /// of `to` and the raise owed need, in one batch, so the ask is queued only if the raise
-    /// is applied. Returns the `msg_id`. Nothing is sent: the caller flushes.
-    ///
-    /// # Errors
-    ///
-    /// [`Refusal::NotNow`] while a raise is needed and the floor can't be read, or the own
-    /// switch refuses its write with an answer it may change or doesn't answer it, or the
-    /// client refuses the batch for now, with nothing queued and the raise still owed; a `409 conflict` after the floor is read again; the
-    /// switch's refusal, as it is, for an answer the same request won't change, with nothing
-    /// queued and the raise still owed; the client's error, as it is, when the client kept the batch
-    /// ([`crate::PaykitError::kept_batch`]: the raise and the ask go together, the same bytes,
-    /// at the app's next write or read, so the ask isn't made again), and for a failure of
-    /// the app itself (its store, an alarm, an app stopped), which no later try gets past by
-    /// itself; the client's errors queuing an ask that needs no raise.
-    pub(crate) async fn queue_resend_request(
-        &mut self,
-        signed: SignedMessage,
-        to: &[u8; 32],
-    ) -> Result<String> {
-        let msg_id = signed.msg_id().to_owned();
-        match self.resend_floor_batch(to).await? {
-            Some(batch) => self
-                .submit_floor(batch.queue(signed))
-                .await
-                .map_err(floor_write_error)?,
-            None => {
-                self.app.queue_signed(signed).await?;
+    /// A payer uses the latest verified service time for a closed block window.
+    pub(crate) fn unblock_floor(&self) -> Result<u64> {
+        self.service_time()
+            .map(|at| at.saturating_add(CLOCK_TOLERANCE_MS))
+            .ok_or_else(unreadable_floor)
+    }
+
+    /// An unanswered raise still owns its applied-only local writes. A new list read
+    /// waits for the client to settle them before preparing another snapshot.
+    pub(crate) async fn floor_write_is_kept(&mut self) -> Result<bool> {
+        let Some(id) = self.local_get::<[u8; 16]>(key::FLOOR_BATCH).await? else {
+            return Ok(false);
+        };
+        if matches!(
+            self.app.kept_batch(id).await?,
+            Some(pubky_switch_client::app::KeptBatchStatus::Kept { .. })
+        ) {
+            return Ok(true);
+        }
+        self.local_delete(key::FLOOR_BATCH).await?;
+        Ok(false)
+    }
+
+    /// Apply local effects with the shared raise, or directly if a sufficient floor
+    /// already applied. An unanswered batch keeps its local effects with it.
+    pub(crate) async fn commit_with_floor(&mut self, to_ms: u64, tx: Tx) -> Result<()> {
+        if !self.holds("paykit_pay") {
+            return self.local_commit(tx).await;
+        }
+        let Some(batch) = self.floor_batch(to_ms).await? else {
+            return self.local_commit(tx).await;
+        };
+        let writes = tx.into_writes();
+        let with_writes = |batch: OpBatch| {
+            let marker = key::FLOOR_BATCH.as_bytes().to_vec();
+            batch
+                .keep_id_at(marker.clone())
+                .locals(writes.iter().cloned())
+                .local(pubky_switch_client::app::LocalWrite::Delete { key: marker })
+        };
+        match self.submit_floor(with_writes(batch)).await {
+            Err(error) if error.code() == Some(ErrorCode::Conflict) => {
+                // A competing payer can close the same window first. submit_floor refreshed
+                // the record, so retry once on that version, keeping the original cutoff.
+                if self.floor_write_is_kept().await? {
+                    return Err(error);
+                }
+                if let Some(batch) = self.floor_batch(to_ms).await? {
+                    self.submit_floor(with_writes(batch))
+                        .await
+                        .map_err(floor_write_error)
+                } else {
+                    self.app
+                        .protocol_commit(crate::protocol::BACKUP_NAME, &writes)
+                        .await?;
+                    Ok(())
+                }
             }
-        }
-        Ok(msg_id)
-    }
-
-    /// The conditional floor raise which must apply before a recovery request can leave.
-    pub(crate) async fn resend_floor_batch(&mut self, to: &[u8; 32]) -> Result<Option<OpBatch>> {
-        match self.floor_owed_for(Some(to)).await? {
-            Some(to_ms) => self.floor_batch(to_ms).await,
-            None => Ok(None),
+            result => result.map_err(floor_write_error),
         }
     }
 
-    /// Write the raise owed, when one is kept and the floor can be read, before the block
-    /// marks ask (module docs, "The raise owed"). One that can't be written now, for any
-    /// reason, stays owed, for the next pass or the next ask, which waits for it: this pass
-    /// marks nothing done.
-    pub(crate) async fn write_floor_owed(&mut self) -> Result<()> {
-        let Some(owed) = self.floor_owed_for(None).await? else {
-            return Ok(());
-        };
-        // A raise that can't be built or written now stays owed: every ask waits for it
-        // (`Paykit::queue_resend_request`), so nothing the floor must cover goes first.
-        let Ok(Some(batch)) = self.floor_batch(owed).await else {
-            return Ok(());
-        };
-        let _ = self.submit_floor(batch).await;
+    /// A user's unblock returns an unanswered or conflicting write directly. The sender
+    /// stays denied, and the next user call starts from the current list.
+    pub(crate) async fn apply_floor_before_unblock(&mut self) -> Result<()> {
+        if let Some(batch) = self.floor_batch(self.unblock_floor()?).await? {
+            self.submit_floor(batch).await.map_err(floor_write_error)?;
+        }
         Ok(())
     }
 }
@@ -390,7 +374,10 @@ impl Paykit {
         if floor == SharedFloor::Unknown {
             return Ok(());
         }
-        let owed = self.local_get::<u64>(key::BLOCK_FLOOR).await?;
+        let owed = self
+            .local_get::<PendingUnblocks>(key::BLOCK_FLOOR)
+            .await?
+            .map(|pending| pending.to_ms);
         let own = self.identity();
         for (rest, _) in notes {
             let note = format!("{}{rest}", key::FLOOR_OPENED);
@@ -444,27 +431,12 @@ impl Paykit {
 const UNREADABLE_FLOOR: &str = "Paykit wire 5.6: the block floor can't be read now";
 
 /// The refusal while the floor a raise builds on can't be read.
-fn unreadable_floor() -> crate::error::PaykitError {
+pub(crate) fn unreadable_floor() -> crate::error::PaykitError {
     Refusal::NotNow(UNREADABLE_FLOOR.into()).into()
 }
 
-/// The error of a raise's batch that wasn't applied, as its caller gets it:
-///
-/// - the client kept the batch ([`crate::PaykitError::kept_batch`]): the error as it is. The
-///   raise, and an ask queued with it, go at the app's next write or read, so something was
-///   queued, and the caller must not take it for a floor that can't be read;
-/// - a `409 conflict`: as it is, the floor read again ([`Paykit::submit_floor`]);
-/// - an answer of the own switch that the same request won't change (the Retry column of
-///   Switch spec 6.4 saying "No", such as `403 permission_missing`), with nothing kept: as
-///   it is, so the caller sees the switch's refusal, never a floor to wait for. Nothing was
-///   queued and the raise stays owed;
-/// - any other answer of the own switch, or none, with nothing kept, and a batch the client
-///   refuses for now and keeps nothing of (its `Refusal::NotNow`: one it may submit again
-///   later): [`unreadable_floor`]. Nothing was queued, the ask waits and the raise stays
-///   owed;
-/// - a failure of the app itself (its store, the protocol's store, an alarm, an app stopped
-///   or gone): as it is. A later try doesn't get past it by itself, and it is never reported
-///   as a floor to wait for.
+/// Report an unavailable floor for retryable service failures. Preserve definite refusals,
+/// conflicts, kept batch identities and errors that require action by the host.
 pub(crate) fn floor_write_error(error: crate::error::PaykitError) -> crate::error::PaykitError {
     use pubky_switch_client::app::{AppError, Refusal as ClientRefusal};
     use pubky_switch_core::http::Retry;
@@ -487,24 +459,9 @@ pub(crate) fn floor_write_error(error: crate::error::PaykitError) -> crate::erro
     }
 }
 
-/// Whether `error` is [`unreadable_floor`]'s: the ask that needs the raise waits.
+/// Whether the floor is temporarily unavailable.
 pub(crate) fn is_unreadable_floor(error: &crate::error::PaykitError) -> bool {
     matches!(error.refusal(), Some(Refusal::NotNow(why)) if why == UNREADABLE_FLOOR)
-}
-
-/// Whether `error`, of an ask queued with its raise ([`Paykit::queue_resend_request`]),
-/// leaves a pass's ask waiting with nothing queued: [`unreadable_floor`]'s, or the own
-/// switch's refusal that the same request won't change, which only the raise's write meets
-/// (queuing an ask alone doesn't reach the switch). The pass marks nothing done and doesn't
-/// fail its read; the raise stays owed, and a later pass writes it once the switch takes it.
-pub(crate) fn floor_write_waits(error: &crate::error::PaykitError) -> bool {
-    use pubky_switch_client::app::AppError;
-    is_unreadable_floor(error)
-        || matches!(
-            error,
-            crate::error::PaykitError::Client(AppError::Switch(answer))
-                if answer.retry() == Some(pubky_switch_core::http::Retry::No)
-        )
 }
 
 #[cfg(test)]

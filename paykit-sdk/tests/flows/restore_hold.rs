@@ -1537,6 +1537,12 @@ async fn test_restore_clean_resumes_without_a_hold() {
     let mut app = restored_read_first(&w, &backup, store()).await;
     assert_eq!(app.app().restore_held_cursor(), Some(HeldCursor::Clean));
     reconciled(&mut app).await;
+    assert!(app
+        .app()
+        .records_of("block_floor")
+        .await
+        .unwrap()
+        .is_empty());
     // Neither request is held or paid only by hand, nor does its record carry the mark.
     for request in [&first, &second] {
         let view = app.request(request).await.unwrap();

@@ -583,9 +583,7 @@ pub(crate) fn restore_paykit_layer(
         let unread = || String::from("Paykit's local state in the backup doesn't read");
         bounded.count(&family)?;
         let attempt = match family {
-            StateKey::ReplyAsks { .. }
-            | StateKey::ReplyFloorBatch { .. }
-            | StateKey::DroppedLost { .. } => continue, // Merged and bounded together above.
+            StateKey::ReplyAsks { .. } | StateKey::DroppedLost { .. } => continue, // Merged and bounded together above.
             StateKey::RestoreHold => continue, // Validated above before reading its confirmations.
             StateKey::MissedHold => {
                 state::restored::<crate::hold::MissedHold>(&key, &value, &binder)
@@ -711,9 +709,14 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::Peer(_)
             | StateKey::Spam(_)
             | StateKey::Resent { .. }
-            | StateKey::ResentDay { .. }
-            | StateKey::BlockFloor => {
+            | StateKey::ResentDay { .. } => {
                 state::restored::<u64>(&key, &value, &binder).map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::BlockFloor => {
+                state::restored::<crate::floor::PendingUnblocks>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -803,6 +806,12 @@ pub(crate) fn restore_paykit_layer(
                 }
                 let value = state::encode(&entry.with(again)).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::FloorBatch => {
+                // The client omits unresolved batches on restore. The pending window and its
+                // original cutoff survive in the protocol layer and are rechecked on read.
+                state::restored::<[u8; 16]>(&key, &value, &binder).map_err(|_| unread())?;
                 continue;
             }
             StateKey::EndBatch(_) => {
@@ -903,16 +912,15 @@ pub(crate) fn restore_paykit_layer(
             // restore writes back the outbox's records the backup carries, under the same
             // `msg_id`s, and no sent messages: the pass after the read settles the notice from
             // the restored outbox's answer on its request (`Paykit::settle_lost_owed`). Its
-            // times aren't bounded as a mark's are: it asks nothing, and its latest time is
-            // already in the raise owed, which is. Their number is (`BoundedFamilies`).
+            // times identify the original window. The number of notices remains bounded.
             StateKey::LostOwed { .. } => {
                 state::restored::<crate::marks::LostOwed>(&key, &value, &binder)
                     .map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::BlockedWidening { .. } => {
-                state::restored::<crate::marks::BlockedWindow>(&key, &value, &binder)
+            StateKey::BlockedWidening(_) => {
+                state::restored::<crate::marks::MissedWidening>(&key, &value, &binder)
                     .map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
@@ -1400,10 +1408,19 @@ impl Protocol for PaykitProtocol {
             // for once it is unblocked: every counterparty the deny list holds at the next
             // read of the lists is marked for the item's times (`marks.rs`).
             local_write(
-                &key::blocked_widening(missed.accepted_from_ms),
-                &crate::marks::BlockedWindow {
-                    from_ms: missed.accepted_from_ms,
-                    until_ms: missed.accepted_until_ms,
+                &key::blocked_widening(epoch.as_bytes()),
+                &crate::marks::MissedWidening {
+                    id: epoch,
+                    windows: vec![crate::marks::BlockedWindow {
+                        from_ms: missed.accepted_from_ms,
+                        until_ms: if missed.accepted_until_ms == u64::MAX {
+                            missed.read_at_ms.max(missed.accepted_from_ms)
+                        } else {
+                            missed.accepted_until_ms
+                        },
+                        floor_ms: missed.accepted_until_ms.min(missed.read_at_ms),
+                    }],
+                    deny: None,
                 },
             )?,
             local_write(key::MISSED_CONSENTS, &true)?,
@@ -1874,13 +1891,15 @@ mod receive_tests {
     #[test]
     fn test_missed_widening_keeps_the_items_times() {
         let missed = MissedEntries {
+            read_at_ms: 0,
             seq: 1,
             entries: 1,
             accepted_from_ms: 10,
             accepted_until_ms: 20,
         };
-        assert_eq!(widening(&missed)["d"]["from_ms"], 10);
-        assert_eq!(widening(&missed)["d"]["until_ms"], 20);
+        assert_eq!(widening(&missed)["d"]["windows"][0]["from_ms"], 10);
+        assert_eq!(widening(&missed)["d"]["windows"][0]["until_ms"], 20);
+        assert_eq!(widening(&missed)["d"]["windows"][0]["floor_ms"], 0);
     }
 
     /// The keys `missed()` puts, with their values as JSON.
@@ -1904,6 +1923,7 @@ mod receive_tests {
         // `u64::MAX` is the client's "no end known": the hold's end is set as not known,
         // and no bound is written over an earlier item's.
         let missed = MissedEntries {
+            read_at_ms: 0,
             seq: 1,
             entries: 0,
             accepted_from_ms: 10,
