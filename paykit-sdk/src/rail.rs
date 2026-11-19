@@ -143,6 +143,18 @@ impl RailDeclaration {
     }
 }
 
+/// A payment submitted or possibly submitted through the payer's wallet.
+/// The wallet includes its manual and automatic paths and reuses the original attempt ID.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AllowanceDispatch {
+    /// The original idempotency key used to pay.
+    pub attempt_id: AttemptId,
+    /// The amount transferred, or durably bound to the dispatch, excluding fees.
+    pub amount: PaymentAmount,
+    /// The method's outcome, including a payment whose result is still unknown.
+    pub outcome: RailOutcome,
+}
+
 /// What the method would transfer to a destination, reported before any write (Paykit spec
 /// 7.2 step 1).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -508,6 +520,26 @@ pub trait Rail: Send + Sync {
         &self,
         idempotency_key: AttemptId,
     ) -> BoxFuture<'_, Result<Option<RailOutcome>, RailError>>;
+
+    /// Read the complete history of this payer's wallet accounts, across installations,
+    /// methods and manual or automatic paths (Paykit spec 8.3). Start at the accounts'
+    /// creation and include closed accounts, unresolved handoffs and later corrections
+    /// through one consistent current wallet snapshot. The wallet establishes coverage
+    /// using its own history. A Switch timestamp cannot date a wallet dispatch.
+    ///
+    /// Return `None` when any account, path, original attempt ID, transfer amount or part
+    /// of that history cannot be accounted for. Only a complete scan may return `Some`,
+    /// including `Some(vec![])` for an account that has never submitted a payment.
+    ///
+    /// # Errors
+    ///
+    /// A [`RailError`] when the wallet cannot read its payment history.
+    fn allowance_history(
+        &self,
+        _payer: [u8; 32],
+    ) -> BoxFuture<'_, Result<Option<Vec<AllowanceDispatch>>, RailError>> {
+        Box::pin(async { Ok(None) })
+    }
 
     /// The payee's own check of a proof (Paykit spec 8.1 step 4): the verified payment time
     /// when the method confirms the payment reached the endpoint for the amount; `None` when

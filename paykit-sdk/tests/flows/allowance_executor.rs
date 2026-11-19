@@ -11,7 +11,8 @@ use pubky_switch_core::ops::{Condition, OpKind, RecordVersion, SignedOp};
 use pubky_switch_core::shared::ApplicationRef;
 use serde_json::json;
 
-use crate::common::World;
+use crate::common::{draft, request_from, World};
+use pubky_switch_client::clock::Clock;
 
 async fn applied_put(
     app: &App,
@@ -197,6 +198,95 @@ async fn first_grant() -> (World, paykit_sdk::Paykit, paykit_sdk::Paykit, [u8; 3
 #[tokio::test]
 async fn test_first_grant_requires_the_accepted_record_and_repeats_once() {
     Box::pin(first_grant()).await;
+}
+
+#[tokio::test]
+async fn test_original_grant_and_ledger_require_the_payers_complete_history() {
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    // This hand payment shares the wallet account but spends none of the Allowance.
+    Box::pin(hand_payment(&world, &mut payer, &mut shop)).await;
+    world.rail.set_history_payer(shop.identity());
+    assert!(Box::pin(payer.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .is_none());
+    world.rail.set_history_payer(payer.identity());
+    let usage = Box::pin(payer.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(usage.lifetime().as_str(), "0");
+    let before = payer.app().cert().clone();
+    let scopes = AppScopes::new().allowance_execute().build().unwrap();
+    let renewed = crate::certificate::renew(&world, payer.app_id(), &scopes, 1_000);
+    world.clock.advance_ms(1_001);
+    crate::certificate::list(&world, payer.app_id(), &before, &renewed);
+    Box::pin(payer.receive(None)).await.unwrap();
+    assert_eq!(payer.app().cert().hash(), renewed.hash());
+    assert_eq!(
+        Box::pin(payer.reconcile_allowance(&key))
+            .await
+            .unwrap()
+            .unwrap()
+            .lifetime()
+            .as_str(),
+        "0"
+    );
+
+    let mut second = Box::pin(world.join(
+        &world.alice,
+        "travel wallet",
+        AppScopes::new().pay().build().unwrap(),
+    ))
+    .await;
+    assert_ne!(second.app_id(), payer.app_id());
+    second.app_mut().invite(&shop.identity()).await.unwrap();
+    Box::pin(hand_payment(&world, &mut second, &mut shop)).await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    assert_eq!(
+        Box::pin(payer.reconcile_allowance(&key))
+            .await
+            .unwrap()
+            .unwrap()
+            .lifetime()
+            .as_str(),
+        "0"
+    );
+    // A complete wallet scan also includes this dispatch made outside Paykit. No signed
+    // Paykit proof establishes why it was sent, so the reader withholds usage.
+    world
+        .rail
+        .pay_outside(
+            crate::common::endpoint("btc-lightning-bolt11"),
+            paykit_lib::PaymentEndpointPayload::new("ln-other").unwrap(),
+            crate::common::btc("2"),
+            paykit_lib::AttemptId::from_bytes([8; 16]),
+        )
+        .await
+        .unwrap();
+    assert!(Box::pin(payer.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .is_none());
+}
+
+async fn hand_payment(
+    world: &World,
+    payer: &mut paykit_sdk::Paykit,
+    shop: &mut paykit_sdk::Paykit,
+) {
+    let request = Box::pin(request_from(
+        shop,
+        world.alice_id(),
+        draft("3", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    let paid = Box::pin(payer.pay_request(&request, paykit_sdk::PayOptions::default()))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, paykit_sdk::PayOutcome::Paid { .. }));
 }
 
 #[tokio::test]
