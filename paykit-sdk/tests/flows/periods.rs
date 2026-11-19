@@ -4498,16 +4498,9 @@ enum RecordWhile {
     Unreadable,
 }
 
-/// Bob's shop sends January's details while alice's wallet holds no record of the
-/// subscription that binds (`record_while`), so they are kept before their record, and then `more`
-/// details of bob's naming a period that isn't the request's are kept after them. Past the
-/// 64 kept per sender the earliest, the shop's, is dropped and marked, and the mark isn't
-/// due. Once the phone writes the record back, the wallet asks bob to send again, once,
-/// from the mark's earliest time, after he is unblocked when `blocked`, and the copy the
-/// shop sends again is stored; with nothing dropped, nothing is asked and the kept details
-/// are stored. With `february`, the wallet holds February's period record of bob's
-/// throughout, which reads and makes no mark due: only a request's record does (Paykit
-/// spec 8.1, "Replies before their record"; Paykit spec 9).
+/// The wallet asks for January's dropped details before their request record reads.
+/// When the payee is blocked before that ask, it waits until the unblock. Once the
+/// request record reads, the wallet can place the re-sent details.
 async fn details_dropped_for_the_bounds(
     record_while: RecordWhile,
     more: usize,
@@ -4590,8 +4583,15 @@ async fn details_dropped_for_the_bounds(
     for _ in 0..more {
         inject_details(&w, &[wallet.app_id()], request.request_hash, off);
     }
-    wallet.receive(None).await.unwrap();
+    if blocked {
+        wallet.app_mut().receive(None).await.unwrap();
+        wallet.block(&w.bob_id()).await.unwrap();
+    }
     let dropped = more + 1 > paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
+    assert_eq!(
+        wallet.receive(None).await.unwrap().resends,
+        u64::from(dropped && !blocked)
+    );
     let marks: Vec<serde_json::Value> = wallet
         .app()
         .protocol_scan("paykit", b"pd/")
@@ -4606,15 +4606,10 @@ async fn details_dropped_for_the_bounds(
         "{record_while:?}: {marks:?}"
     );
     if dropped {
-        assert_eq!(marks[0]["due"], json!(false), "{record_while:?}");
+        assert_eq!(marks[0]["due"], json!(true), "{record_while:?}");
         assert_eq!(marks[0]["earliest_ms"], json!(first_at), "{record_while:?}");
     }
-    // No record of the request reads yet, a period record of bob's included: nothing is
-    // asked.
     assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
-    if blocked {
-        wallet.block(&w.bob_id()).await.unwrap();
-    }
     match record_while {
         RecordWhile::Gone => {
             let op = phone
@@ -4643,7 +4638,11 @@ async fn details_dropped_for_the_bounds(
         wallet.unblock(&w.bob_id()).await.unwrap();
         summary = wallet.receive(None).await.unwrap();
     }
-    assert_eq!(summary.resends, u64::from(dropped), "{record_while:?}");
+    assert_eq!(
+        summary.resends,
+        u64::from(dropped && blocked),
+        "{record_while:?}"
+    );
     shop.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
     // Once: a later receive asks nothing more.
@@ -4719,10 +4718,8 @@ async fn test_periods_details_dropped_for_the_bounds_of_a_blocked_payee_asked_on
 }
 
 #[tokio::test]
-async fn test_periods_details_dropped_for_the_bounds_not_asked_on_a_period_record_alone() {
-    // The wallet holds February's period record of bob's, which reads, while its record of
-    // the request doesn't: only a request's record makes the mark due, so nothing is asked
-    // until that record reads.
+async fn test_periods_details_dropped_for_the_bounds_asked_with_only_a_period_record() {
+    // February's record reads while the request record for the dropped details does not.
     Box::pin(details_dropped_for_the_bounds(
         RecordWhile::Gone,
         64,

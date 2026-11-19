@@ -236,6 +236,7 @@ shared record.
 | `NoticeKind::SettlementMarksChanged` | Show the bucket and the own app that signed its current value. The wallet checks the current write again and restores the retained marks that fit. |
 | `NoticeKind::SettlementCreditedTwice` | Show the conflicting occurrence marks. Acknowledging the notice records that the user saw it. Every retained mark continues to prevent another credit. |
 | `NoticeKind::CreditNeedsUser` | Show the user which settlement or requested proof needs a credit decision. Acknowledging the warning leaves the credit decision open. |
+| `NoticeKind::DroppedMessagesLost` | Show the counterparty and the acceptance-time range for which the wallet stopped requesting dropped replies. Check the payment method for any payment whose outcome is still unknown. Acknowledge the notice after showing it. With 64 distinct loss windows retained, an input that would add another waits for space. |
 | `PaykitError::Client` | Handle the enclosed Switch outcome. Preserve any kept batch and its ID. |
 | `PaykitError::Lib` | Use the rule error to distinguish invalid input from invalid network or shared data. |
 | `PaykitError::Rail` | Preserve any unresolved attempt unless the method established definitive refusal. |
