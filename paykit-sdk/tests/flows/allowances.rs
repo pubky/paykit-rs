@@ -4151,9 +4151,7 @@ async fn test_allowances_restore_keeps_the_recorded_crossing_end() {
     let previous = shop.allowance(&theirs).await.unwrap().status;
     drop(wallet);
     let mut restored = Box::pin(restored_unreceived(&w, &backup)).await;
-    for _ in 0..2 {
-        restored.receive(None).await.unwrap();
-    }
+    Box::pin(read_restored_records(&mut restored)).await;
     assert!(restored
         .app()
         .protocol_scan("paykit", b"eo/")
@@ -4237,7 +4235,7 @@ async fn test_allowances_crossing_end_after_an_unanswered_write_reports_its_unkn
         .await
         .unwrap()
         .is_some());
-    restored.receive(None).await.unwrap();
+    Box::pin(read_restored_records(&mut restored)).await;
     assert!(Box::pin(ends_naming_both(&restored, &mine)).await);
     assert!(restored
         .app()
@@ -4423,7 +4421,12 @@ async fn backed_up_with_its_answer_unqueued(
 
 /// Finish the client's owed listing and Paykit's listing under the certificate now held.
 async fn read_listed_records(wallet: &mut Paykit) {
+    Box::pin(read_listed_records_while(wallet, || {})).await;
+}
+
+async fn read_listed_records_while(wallet: &mut Paykit, before_read: impl Fn()) {
     for _ in 0..4 {
+        before_read();
         let summary = wallet.receive(None).await.unwrap();
         if summary.records_unlisted.is_some() || wallet.app().listing_owed().await.unwrap() {
             continue;
@@ -4533,7 +4536,7 @@ async fn restored_rejection_stays_uncertain(how: SendsHeld) {
     let mut shop = Box::pin(shop(&w)).await;
     let mut wallet = Box::pin(keeper(&w)).await;
     let kind = "paykit.allowance_rejection";
-    let (_, theirs, backup) = Box::pin(backed_up_with_its_answer_unqueued(
+    let (mine, theirs, backup) = Box::pin(backed_up_with_its_answer_unqueued(
         &w,
         &mut wallet,
         &mut shop,
@@ -4543,14 +4546,20 @@ async fn restored_rejection_stays_uncertain(how: SendsHeld) {
     let previous = shop.allowance(&theirs).await.unwrap().status;
     drop(wallet);
     let mut wallet = Box::pin(restored_unreceived(&w, &backup)).await;
-    match how {
-        SendsHeld::Blocked => Box::pin(block_during_restore(&mut wallet, &w.bob_id())).await,
-        SendsHeld::Unknown => fail_list_read(&w),
-    }
-    wallet.receive(None).await.unwrap();
     if let SendsHeld::Blocked = how {
-        wallet.receive(None).await.unwrap();
+        Box::pin(block_during_restore(&mut wallet, &w.bob_id())).await;
     }
+    Box::pin(read_listed_records_while(&mut wallet, || {
+        if let SendsHeld::Unknown = how {
+            fail_list_read(&w);
+        }
+    }))
+    .await;
+    let blocked = match how {
+        SendsHeld::Blocked => Some(true),
+        SendsHeld::Unknown => None,
+    };
+    assert_eq!(wallet.allowance(&mine).await.unwrap().blocked, blocked);
     assert_eq!(Box::pin(taken(&mut shop, kind)).await, 0, "{how:?}");
     assert!(wallet
         .app()
@@ -8755,7 +8764,7 @@ async fn test_allowances_an_owed_end_without_its_origin_stays_held_after_restore
     let backup = payer.backup().await.unwrap();
     drop(payer);
     let mut payer = Box::pin(restored_unreceived(&w, &backup)).await;
-    payer.receive(None).await.unwrap();
+    Box::pin(read_restored_records(&mut payer)).await;
     payer.app_mut().release_queued(&w.bob_id()).await.unwrap();
     payer.app_mut().flush_outbox().await.unwrap();
     assert_eq!(
