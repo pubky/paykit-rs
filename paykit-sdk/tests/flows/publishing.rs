@@ -2001,6 +2001,114 @@ async fn repeat_across_generations(second_installation_withdraws: bool) {
 }
 
 #[tokio::test]
+async fn test_publication_waits_for_an_unknown_counter_key_before_repeating_an_older_list() {
+    use crate::common::{ALICE_ORIGIN, HOUR_MS};
+    use crate::unrequested::store_bundle_at;
+    use paykit_sdk::AppScopes;
+    use pubky_switch_client::app::{RecordContent, Unopened};
+    use pubky_switch_client::testing::ScriptedSwitch;
+    use pubky_switch_core::records::Inbox;
+
+    let w = World::new();
+    let scopes = AppScopes::new().request().build().unwrap();
+    let mut shop = w.join(&w.alice, "shop", scopes.clone()).await;
+    let mut other = w.join(&w.alice, "other shop", scopes).await;
+    let mut wallet = w
+        .join(&w.bob, "wallet", AppScopes::new().pay().build().unwrap())
+        .await;
+    let recipient = wallet.identity();
+    let publisher = shop.app_id();
+    shop.app_mut().invite(&recipient).await.unwrap();
+    wallet.app_mut().invite(&w.alice_id()).await.unwrap();
+    shop.set_list_endpoints(offered("lno1original"))
+        .await
+        .unwrap();
+    shop.publish_list_to(recipient).await.unwrap();
+    let first = published(&shop, &wallet).await[0].version;
+    request_list(&mut wallet, &mut shop, publisher, Some(first)).await;
+    let mut expected = published(&shop, &wallet).await;
+    assert_eq!(expected.len(), 2);
+
+    let move_to = |previous: &ScriptedSwitch, generation, secret| {
+        let service = previous.change_key_into(secret);
+        w.router.add_switch(ALICE_ORIGIN, &service);
+        let doc = w
+            .alice
+            .sign_next(|body| {
+                body.generation = generation;
+                body.data_epoch = generation;
+                body.inbox = Inbox::new(ALICE_ORIGIN, service.service_key());
+            })
+            .unwrap();
+        service.deliver_identity(&doc).unwrap();
+        service
+    };
+    let middle = move_to(w.alice.switch(), 2, [74; 32]);
+    store_bundle_at(&w, &middle, other.app_id(), other.app().cert(), 1);
+    other.app_mut().refresh_identity().await.unwrap();
+    other.app_mut().follow_provider().await.unwrap();
+    other.receive(None).await.unwrap();
+    other.receive(None).await.unwrap();
+    other.app_mut().invite(&recipient).await.unwrap();
+    other
+        .set_list_endpoints(offered("lno1other"))
+        .await
+        .unwrap();
+    other.publish_list_to(recipient).await.unwrap();
+    let opaque = other
+        .app()
+        .record_key(&target(&other, &recipient, 2))
+        .unwrap();
+    let issued = other.app().shared_record(&opaque).await.unwrap().unwrap();
+    let counter = ListPublicationRecord::read(issued.content.value().unwrap()).unwrap();
+    assert_eq!(
+        (counter.publisher, counter.generation, counter.counter),
+        (other.app_id(), 2, 1)
+    );
+
+    let latest = move_to(&middle, 3, [75; 32]);
+    store_bundle_at(&w, &latest, publisher, shop.app().cert(), 3);
+    shop.app_mut().refresh_identity().await.unwrap();
+    shop.app_mut().follow_provider().await.unwrap();
+    let family = Collection::with_permanent_generations(
+        "private_list_publications",
+        "paykit_request",
+        &["paykit_request"],
+    );
+    let mut observed = None;
+    for _ in 0..3 {
+        let read = shop.receive(None).await.unwrap();
+        observed = shop
+            .app_mut()
+            .current_collection(&family, &read.report)
+            .await
+            .unwrap();
+        if observed.is_some() {
+            break;
+        }
+    }
+    assert!(observed.unwrap().uncertain_keys.contains(&opaque));
+    let held = shop.app().shared_record(&opaque).await.unwrap().unwrap();
+    assert_eq!(
+        held.content,
+        RecordContent::Unreadable(Unopened::KeyNotHeld { data_epoch: 2 })
+    );
+    assert!(shop.app().scope_key(3, "paykit_request").is_some());
+    w.clock.advance_ms(HOUR_MS);
+    request_list(&mut wallet, &mut shop, publisher, Some(first)).await;
+    shop.receive(None).await.unwrap();
+    assert_eq!(published(&shop, &wallet).await, expected);
+
+    // The missing key identifies the counter as another app's publication.
+    store_bundle_at(&w, &latest, publisher, shop.app().cert(), 1);
+    for _ in 0..3 {
+        shop.receive(None).await.unwrap();
+    }
+    expected[1].repeats += 1;
+    assert_eq!(published(&shop, &wallet).await, expected);
+}
+
+#[tokio::test]
 async fn test_publication_restored_answers_use_the_retained_request_and_current_sharing_choice() {
     use crate::common::{store, BOB_ORIGIN};
     use paykit_sdk::{AppScopes, PaykitConfig};
