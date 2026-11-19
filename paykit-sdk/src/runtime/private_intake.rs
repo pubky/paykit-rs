@@ -703,6 +703,11 @@ struct SeededPrivateIntakeSubscription {
     cursors: Vec<(pubky::PublicKey, Option<pubky::EventCursor>)>,
     /// `None` when no peer is seeded.
     seeds: Option<PrivateIntakeSeeds>,
+    /// The seed query's error when the homeserver rejected it as an
+    /// unsupported event stream (see [`is_unsupported_event_stream`]). The
+    /// query doubles as the support probe, so the caller then skips the live
+    /// subscribe and reports this error as the subscribe failure.
+    unsupported: Option<pubky::Error>,
 }
 
 /// The group's newest private event from an earlier successful seed query,
@@ -718,16 +723,15 @@ struct KnownPrivateIntakeNewest {
 /// the newest private event among them and each gets a pending seed.
 /// `known_newest` holds the group's newest event from an earlier successful
 /// query: when that query covered every seedless peer, it is reused without
-/// calling `query_newest`. Otherwise, when `query_allowed`, the seedless
-/// peers share one `query_newest` call and a successful result replaces
-/// `known_newest`. A failed, empty, or skipped query leaves them without a
-/// cursor, replaying from the beginning, and the next allowed call queries
-/// again.
+/// calling `query_newest`. Otherwise the seedless peers share one
+/// `query_newest` call and a successful result replaces `known_newest`. A
+/// failed or empty query leaves them without a cursor, replaying from the
+/// beginning, and the next call queries again. A failure that
+/// [`is_unsupported_event_stream`] matches is also returned as `unsupported`.
 async fn private_intake_subscription_cursors<F, Fut>(
     stored: Vec<StoredPrivateIntakeCursor>,
     homeserver_name: &str,
     known_newest: &mut Option<KnownPrivateIntakeNewest>,
-    query_allowed: bool,
     query_newest: F,
 ) -> SeededPrivateIntakeSubscription
 where
@@ -746,18 +750,24 @@ where
             .iter()
             .all(|stored| known.covered.contains(&stored.peer))
     });
+    let mut unsupported = None;
     let newest = if seedless.is_empty() {
         None
     } else if let Some(known) = reusable {
         Some(known.event_id)
-    } else if !query_allowed {
-        None
     } else {
-        let newest = query_newest(seedless.iter().map(|stored| stored.key.clone()).collect())
-            .await
-            .ok()
-            .flatten()
-            .map(|cursor| cursor.id());
+        // Other failures stay a silent fallback to a full replay; the live
+        // subscribe reports them if they persist.
+        let newest =
+            match query_newest(seedless.iter().map(|stored| stored.key.clone()).collect()).await {
+                Ok(newest) => newest.map(|cursor| cursor.id()),
+                Err(error) => {
+                    if is_unsupported_event_stream(&error) {
+                        unsupported = Some(error);
+                    }
+                    None
+                }
+            };
         if let Some(event_id) = newest {
             *known_newest = Some(KnownPrivateIntakeNewest {
                 event_id,
@@ -778,7 +788,29 @@ where
             (stored.key, cursor)
         })
         .collect();
-    SeededPrivateIntakeSubscription { cursors, seeds }
+    SeededPrivateIntakeSubscription {
+        cursors,
+        seeds,
+        unsupported,
+    }
+}
+
+/// Subscribes the live stream with `subscribe` unless the seed query was
+/// already rejected as unsupported. That rejection then stands in for the
+/// subscribe error, so a homeserver without SSE costs one failing request per
+/// retry and is reported `Unsupported` exactly as a failed live subscribe is.
+async fn subscribe_live_private_intake_stream<S, F, Fut>(
+    seed_query_unsupported: Option<pubky::Error>,
+    subscribe: F,
+) -> std::result::Result<S, pubky::Error>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = std::result::Result<S, pubky::Error>>,
+{
+    match seed_query_unsupported {
+        Some(error) => Err(error),
+        None => subscribe().await,
+    }
 }
 
 /// Runs `future` unless the stop signal fires first; `None` means stopped.
@@ -1544,12 +1576,6 @@ where
         // subscribing, and an event at or below it that commits later is
         // fetched by a later audit.
         let mut known_newest = None;
-        // Set while the last live subscribe was rejected as `Unsupported`. A
-        // homeserver without SSE fails the seed query the same way, so each
-        // retry would send two failing requests; skipping the query keeps one,
-        // and seedless peers no remembered query covers subscribe from the
-        // beginning as before. A later successful subscribe clears it.
-        let mut event_stream_unsupported = false;
         loop {
             if *stop.borrow() {
                 break;
@@ -1648,32 +1674,38 @@ where
                 }
             };
             // A stalled seed query must not delay stop or an epoch restart.
-            let Some(SeededPrivateIntakeSubscription { cursors, seeds }) =
-                run_until_private_intake_stop(
-                    &mut stop,
-                    private_intake_subscription_cursors(
-                        stored_cursors,
-                        &active_group.homeserver_name,
-                        &mut known_newest,
-                        !event_stream_unsupported,
-                        |seedless| {
-                            let query = private_intake_event_query(
-                                client.clone(),
-                                &active_group.homeserver,
-                                seedless.iter().map(|key| (key, None)),
-                                config.max_event_bytes,
-                            );
-                            // A one-shot, non-live query: `reverse` with `live` is
-                            // rejected, and the newest event among the listed users
-                            // ends the stream.
-                            async move {
-                                let stream = query?.reverse().limit(1).subscribe().await?;
-                                newest_private_intake_event_cursor(stream).await
-                            }
-                        },
-                    ),
-                )
-                .await
+            // The seed query doubles as the event-stream support probe: when
+            // it is rejected as unsupported, the live subscribe below is not
+            // attempted, so a homeserver without SSE sees one failing request
+            // per retry.
+            let Some(SeededPrivateIntakeSubscription {
+                cursors,
+                seeds,
+                unsupported,
+            }) = run_until_private_intake_stop(
+                &mut stop,
+                private_intake_subscription_cursors(
+                    stored_cursors,
+                    &active_group.homeserver_name,
+                    &mut known_newest,
+                    |seedless| {
+                        let query = private_intake_event_query(
+                            client.clone(),
+                            &active_group.homeserver,
+                            seedless.iter().map(|key| (key, None)),
+                            config.max_event_bytes,
+                        );
+                        // A one-shot, non-live query: `reverse` with `live` is
+                        // rejected, and the newest event among the listed users
+                        // ends the stream.
+                        async move {
+                            let stream = query?.reverse().limit(1).subscribe().await?;
+                            newest_private_intake_event_cursor(stream).await
+                        }
+                    },
+                ),
+            )
+            .await
             else {
                 break;
             };
@@ -1695,15 +1727,13 @@ where
                     break;
                 }
             };
-            let stream = match builder.live().subscribe().await {
-                Ok(stream) => {
-                    event_stream_unsupported = false;
-                    stream
-                }
+            let stream = match subscribe_live_private_intake_stream(unsupported, || {
+                builder.live().subscribe()
+            })
+            .await
+            {
+                Ok(stream) => stream,
                 Err(error) => {
-                    if is_unsupported_event_stream(&error) {
-                        event_stream_unsupported = true;
-                    }
                     // Deliberately conservative: committing the seed here would
                     // also be safe, because this audit runs after the seed read.
                     // Without a stream no event is skipped, so the seed is left
@@ -4875,7 +4905,7 @@ mod tests {
         let requested = Arc::new(StdMutex::new(Vec::new()));
         let mut known_newest = None;
 
-        let SeededPrivateIntakeSubscription { cursors, seeds } =
+        let SeededPrivateIntakeSubscription { cursors, seeds, .. } =
             private_intake_subscription_cursors(
                 with_keys(vec![
                     (peers[0].clone(), None),
@@ -4884,7 +4914,6 @@ mod tests {
                 ]),
                 "homeserver-a",
                 &mut known_newest,
-                true,
                 {
                     let requested = Arc::clone(&requested);
                     move |seedless: Vec<pubky::PublicKey>| {
@@ -4932,12 +4961,11 @@ mod tests {
         let queries = Arc::new(AtomicUsize::new(0));
         let mut known_newest = known(42, &[&peers[0]]);
 
-        let SeededPrivateIntakeSubscription { cursors, seeds } =
+        let SeededPrivateIntakeSubscription { cursors, seeds, .. } =
             private_intake_subscription_cursors(
                 with_keys(vec![(peers[0].clone(), None), (peers[1].clone(), Some(5))]),
                 "homeserver-a",
                 &mut known_newest,
-                true,
                 {
                     let queries = Arc::clone(&queries);
                     move |_| {
@@ -4971,12 +4999,11 @@ mod tests {
         // subscribable later in the same epoch.
         let mut known_newest = known(42, &[&peers[0]]);
 
-        let SeededPrivateIntakeSubscription { cursors, seeds } =
+        let SeededPrivateIntakeSubscription { cursors, seeds, .. } =
             private_intake_subscription_cursors(
                 with_keys(vec![(peers[0].clone(), None), (peers[1].clone(), None)]),
                 "homeserver-a",
                 &mut known_newest,
-                true,
                 {
                     let requested = Arc::clone(&requested);
                     move |seedless: Vec<pubky::PublicKey>| {
@@ -5014,35 +5041,108 @@ mod tests {
         );
     }
 
+    fn unsupported_event_stream_error() -> pubky::Error {
+        pubky::Error::Request(pubky::errors::RequestError::Server {
+            status: pubky::StatusCode::NOT_FOUND,
+            message: "event stream is unavailable".into(),
+        })
+    }
+
     #[tokio::test]
-    async fn test_private_intake_seed_query_skipped_after_unsupported_stream() {
+    async fn test_private_intake_seed_query_reports_unsupported_event_stream() {
         let peers = users(2);
-        let queries = Arc::new(AtomicUsize::new(0));
-        let mut known_newest = None;
+        let mut known_newest = known(42, &[&peers[1]]);
 
-        let SeededPrivateIntakeSubscription { cursors, seeds } =
-            private_intake_subscription_cursors(
-                with_keys(vec![(peers[0].clone(), None), (peers[1].clone(), Some(5))]),
-                "homeserver-a",
-                &mut known_newest,
-                false,
-                {
-                    let queries = Arc::clone(&queries);
-                    move |_| {
-                        queries.fetch_add(1, Ordering::SeqCst);
-                        async { Ok(Some(pubky::EventCursor::new(42))) }
-                    }
-                },
-            )
-            .await;
+        let SeededPrivateIntakeSubscription {
+            cursors,
+            seeds,
+            unsupported,
+        } = private_intake_subscription_cursors(
+            with_keys(vec![(peers[0].clone(), None), (peers[1].clone(), Some(5))]),
+            "homeserver-a",
+            &mut known_newest,
+            |_| async { Err(unsupported_event_stream_error()) },
+        )
+        .await;
 
-        assert_eq!(queries.load(Ordering::SeqCst), 0);
+        assert!(unsupported
+            .as_ref()
+            .is_some_and(is_unsupported_event_stream));
         assert_eq!(
             stored_cursor_ids(&cursors),
             vec![(peers[0].clone(), None), (peers[1].clone(), Some(5))]
         );
         assert!(seeds.is_none());
-        assert!(known_newest.is_none());
+        assert_eq!(
+            known_parts(&known_newest),
+            Some((42, HashSet::from([peers[1].clone()])))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_seed_query_seeds_after_earlier_unsupported() {
+        let peers = users(1);
+        let mut known_newest = None;
+        let stored = || with_keys(vec![(peers[0].clone(), None)]);
+
+        let first = private_intake_subscription_cursors(
+            stored(),
+            "homeserver-a",
+            &mut known_newest,
+            |_| async { Err(unsupported_event_stream_error()) },
+        )
+        .await;
+        assert!(first.unsupported.is_some());
+
+        let SeededPrivateIntakeSubscription {
+            cursors,
+            seeds,
+            unsupported,
+        } = private_intake_subscription_cursors(
+            stored(),
+            "homeserver-a",
+            &mut known_newest,
+            |_| async { Ok(Some(pubky::EventCursor::new(42))) },
+        )
+        .await;
+
+        assert!(unsupported.is_none());
+        assert_eq!(
+            stored_cursor_ids(&cursors),
+            vec![(peers[0].clone(), Some(42))]
+        );
+        assert_eq!(
+            seed_parts(&seeds),
+            Some(("homeserver-a".into(), 42, HashSet::from([peers[0].clone()])))
+        );
+        assert_eq!(
+            known_parts(&known_newest),
+            Some((42, HashSet::from([peers[0].clone()])))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_live_subscribe_skipped_after_unsupported_seed_query() {
+        let subscribes = AtomicUsize::new(0);
+
+        let skipped = subscribe_live_private_intake_stream::<(), _, _>(
+            Some(unsupported_event_stream_error()),
+            || {
+                subscribes.fetch_add(1, Ordering::SeqCst);
+                async { Ok(()) }
+            },
+        )
+        .await;
+        assert!(skipped.as_ref().is_err_and(is_unsupported_event_stream));
+        assert_eq!(subscribes.load(Ordering::SeqCst), 0);
+
+        let subscribed = subscribe_live_private_intake_stream(None, || {
+            subscribes.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        })
+        .await;
+        assert!(subscribed.is_ok());
+        assert_eq!(subscribes.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -5057,7 +5157,6 @@ mod tests {
                 with_keys(vec![(peers[0].clone(), None)]),
                 "homeserver-a",
                 &mut known_newest,
-                true,
                 |_| std::future::pending(),
             ),
         );
@@ -5089,12 +5188,11 @@ mod tests {
         let queries = Arc::new(AtomicUsize::new(0));
         let stored = vec![(peers[0].clone(), Some(3)), (peers[1].clone(), Some(9))];
 
-        let SeededPrivateIntakeSubscription { cursors, seeds } =
+        let SeededPrivateIntakeSubscription { cursors, seeds, .. } =
             private_intake_subscription_cursors(
                 with_keys(stored.clone()),
                 "homeserver-a",
                 &mut None,
-                true,
                 {
                     let queries = Arc::clone(&queries);
                     move |_| {
@@ -5115,21 +5213,25 @@ mod tests {
     ) {
         let peers = users(2);
         let mut known_newest = None;
-        let SeededPrivateIntakeSubscription { cursors, seeds } =
-            private_intake_subscription_cursors(
-                with_keys(vec![(peers[0].clone(), None), (peers[1].clone(), Some(7))]),
-                "homeserver-a",
-                &mut known_newest,
-                true,
-                move |_| async move { newest },
-            )
-            .await;
+        let SeededPrivateIntakeSubscription {
+            cursors,
+            seeds,
+            unsupported,
+        } = private_intake_subscription_cursors(
+            with_keys(vec![(peers[0].clone(), None), (peers[1].clone(), Some(7))]),
+            "homeserver-a",
+            &mut known_newest,
+            move |_| async move { newest },
+        )
+        .await;
 
         assert_eq!(
             stored_cursor_ids(&cursors),
             vec![(peers[0].clone(), None), (peers[1].clone(), Some(7))]
         );
         assert!(seeds.is_none());
+        // A transient failure is a silent fallback; the live subscribe runs.
+        assert!(unsupported.is_none());
         // Only a successful result is remembered, so the next connect retries.
         assert!(known_newest.is_none());
     }

@@ -1443,9 +1443,11 @@ without a cursor; a peer it did not cover makes them request again. A new
 epoch makes the request again. This stays safe because each connection runs
 its startup audit after subscribing. If the request fails or returns no event,
 those peers subscribe from the beginning as before, and the next connect
-requests again. After a live subscription fails as `Unsupported`, later
-connects in the epoch make no new request until a live subscription succeeds
-again; peers without a reusable event subscribe from the beginning. Seeding deliberately
+requests again. The newest-event request doubles as the event-stream support
+probe: when the homeserver rejects it with HTTP 404, 405, or 501, the live
+subscription is not attempted for that connect and the peers are reported
+`Unsupported` and retried exactly as after a rejected live subscription, so a
+homeserver without SSE costs one failing request per retry. Seeding deliberately
 covers only peers without a stored cursor for the current homeserver; a peer
 with a stored cursor resumes from it as before.
 Stopping the supervisor or restarting the subscription topology abandons a
