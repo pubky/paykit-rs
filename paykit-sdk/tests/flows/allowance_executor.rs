@@ -204,7 +204,7 @@ async fn test_first_grant_requires_the_accepted_record_and_repeats_once() {
 async fn test_original_grant_and_ledger_require_the_payers_complete_history() {
     let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
     // This hand payment shares the wallet account but spends none of the Allowance.
-    Box::pin(hand_payment(&world, &mut payer, &mut shop)).await;
+    Box::pin(hand_payment(&world, &mut payer, &mut shop, "0.4999999991")).await;
     world.rail.set_history_payer(shop.identity());
     assert!(Box::pin(payer.reconcile_allowance(&key))
         .await
@@ -241,7 +241,7 @@ async fn test_original_grant_and_ledger_require_the_payers_complete_history() {
     .await;
     assert_ne!(second.app_id(), payer.app_id());
     second.app_mut().invite(&shop.identity()).await.unwrap();
-    Box::pin(hand_payment(&world, &mut second, &mut shop)).await;
+    Box::pin(hand_payment(&world, &mut second, &mut shop, "3")).await;
     Box::pin(payer.receive(None)).await.unwrap();
     assert_eq!(
         Box::pin(payer.reconcile_allowance(&key))
@@ -274,11 +274,12 @@ async fn hand_payment(
     world: &World,
     payer: &mut paykit_sdk::Paykit,
     shop: &mut paykit_sdk::Paykit,
+    amount: &str,
 ) {
     let request = Box::pin(request_from(
         shop,
         world.alice_id(),
-        draft("3", world.clock.now_ms()),
+        draft(amount, world.clock.now_ms()),
     ))
     .await;
     Box::pin(payer.receive(None)).await.unwrap();
