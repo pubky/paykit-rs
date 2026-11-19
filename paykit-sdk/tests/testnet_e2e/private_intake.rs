@@ -84,8 +84,9 @@ impl StorageAdapter for RejectSecondBufferedDrainCommit {
 }
 
 /// Counts transactions that move `peer`'s private intake cursor without
-/// changing its buffered packet count. That is the only durable trace of a
-/// stream event that routed to `peer` and found the expected slot absent.
+/// changing its buffered packet count. That is the durable trace of a stream
+/// event that routed to `peer` and found the expected slot absent, and of an
+/// in-stream audit committing `peer`'s ignored events' cursors.
 #[derive(Clone)]
 struct CountCursorOnlyAdvances {
     inner: InMemoryStorage,
@@ -1043,7 +1044,8 @@ async fn test_private_intake_buffers_new_packet_from_live_event_stream() {
 /// expected slot (paths outside any link folder, a transport slot in another
 /// link folder, and deletes) must not start an acquisition. Each acquisition
 /// would find the slot absent and only move the cursor, so the count of
-/// cursor-only advances must not change. Bob's real packet then arrives
+/// cursor-only advances may grow by at most the one batch commit of ignored
+/// cursors after an in-stream audit. Bob's real packet then arrives
 /// through the same ordered stream, so once it is buffered every earlier
 /// unrelated event has been handled.
 #[tokio::test]
@@ -1116,10 +1118,14 @@ async fn test_private_intake_stream_ignores_unrelated_private_events() {
         buffered[0].source_cursor.is_some(),
         "packet must arrive through the live event stream, not an audit"
     );
-    assert_eq!(
-        cursor_only_advances.load(Ordering::SeqCst) - advances_before,
-        0,
-        "unrelated private events must not start an acquisition"
+    // The one legitimate cursor-only advance is the batch commit of Bob's
+    // highest ignored cursor after an in-stream audit, which can land in this
+    // window when an SSE reconnect restarts the audit timer. A per-event
+    // acquisition would add one advance per unrelated event (11 here).
+    let advances = cursor_only_advances.load(Ordering::SeqCst) - advances_before;
+    assert!(
+        advances <= 1,
+        "unrelated private events must not start an acquisition, got {advances} cursor-only advances"
     );
     assert_ne!(
         supervisor.health().await.peers.get(&pair.bob.public_key),

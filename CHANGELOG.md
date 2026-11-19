@@ -158,7 +158,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   packets and `stop()`, and an unrelated fetch error could mark the peer
   `Stale`. Each acquisition refreshes the peer's read folder, so a recovered
   link's new folder is followed from its next acquisition. Ignored events
-  advance the replay cursor after the next successful audit of that peer.
+  advance the replay cursor after an audit that finds the peer's next expected
+  slot absent.
 
 ### Integration
 

@@ -665,16 +665,18 @@ fn record_ignored_private_intake_event(
 }
 
 /// Run one in-stream audit, then commit, in one batch, the ignored cursors
-/// seen before it for every peer the audit completed.
+/// seen before it for every peer whose audit found its next expected slot
+/// absent.
 ///
 /// Safety argument: the stream delivers a homeserver's events in cursor
-/// order, and the audit fetched each completed peer's expected slot after
-/// every event seen before it started. An ignored event either cannot
-/// announce a packet the expected-slot fetch would find, or, when the read
-/// folder was stale, announced one that this audit fetched. Moving the stored
-/// cursor past those events only skips replaying them on reconnect. Ignored
-/// events seen after the audit starts wait for the next audit, and peers whose
-/// audit failed keep theirs.
+/// order, and for each such peer the audit fetched the expected slot after
+/// every event seen before it started and found it absent. An ignored event
+/// either cannot announce a packet the expected-slot fetch would find, or,
+/// when the read folder was stale, announced one that this audit fetched.
+/// Moving the stored cursor past those events only skips replaying them on
+/// reconnect. Ignored events seen after the audit starts wait for the next
+/// audit, and peers whose audit failed or stopped before finding an absent
+/// slot (pending handshake, capacity, acquisition cap) keep theirs.
 async fn audit_private_intake_stream(
     audit_group: &PrivateIntakeAudit,
     ignored: &mut PrivateIntakeIgnoredCursors,
@@ -814,7 +816,11 @@ async fn audit_private_intake_group<S: StorageAdapter, C: Clock>(
                 if matches!(&outcome, PrivatePacketAcquisition::PendingHandshake) {
                     work.notify_waiters();
                 }
-                audit.audited_peers.insert(peer.clone());
+                // Only an absent expected slot proves the audit read past
+                // every earlier event; other outcomes stopped short of it.
+                if matches!(&outcome, PrivatePacketAcquisition::Absent) {
+                    audit.audited_peers.insert(peer.clone());
+                }
                 set_peer_audit_outcome(health, peer.clone(), outcome, clock.now()).await;
             }
             Err(_) => {
@@ -919,7 +925,7 @@ where
 struct PrivateIntakeAuditOutcome {
     handshake_pending: bool,
     backpressured: bool,
-    /// Peers whose audit returned an outcome rather than an error.
+    /// Peers whose audit found their next expected slot absent.
     audited_peers: HashSet<PubkyPublicKey>,
 }
 
@@ -4322,6 +4328,90 @@ mod tests {
             Some(&fixture.read_folder)
         );
         assert!(!scopes.read_folders.contains_key(&failing));
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_audit_commits_ignored_cursors_only_after_absent_slot() {
+        let peers = users(4);
+        let (absent, pending, capacity, inserting) = (
+            peers[0].clone(),
+            peers[1].clone(),
+            peers[2].clone(),
+            peers[3].clone(),
+        );
+        let group = SubscriptionGroup {
+            homeserver: pubky::Keypair::random().public_key(),
+            homeserver_name: "homeserver-a".into(),
+            peers: peers.clone(),
+        };
+        let acquire: PrivateIntakeAcquire = Arc::new({
+            let (absent, pending, capacity) = (absent.clone(), pending.clone(), capacity.clone());
+            move |requested, _| {
+                let outcome = if requested == absent {
+                    PrivatePacketAcquisition::Absent
+                } else if requested == pending {
+                    PrivatePacketAcquisition::PendingHandshake
+                } else if requested == capacity {
+                    PrivatePacketAcquisition::CapacityReached
+                } else {
+                    // Every fetch finds another packet, so the audit stops at
+                    // the per-peer acquisition cap.
+                    PrivatePacketAcquisition::Inserted
+                };
+                Box::pin(async move { Ok(outcome) })
+            }
+        });
+        let audit: PrivateIntakeAudit = Arc::new(move || {
+            let group = group.clone();
+            let acquire = Arc::clone(&acquire);
+            Box::pin(async move {
+                audit_private_intake_group(
+                    &crate::storage::InMemoryStorage::new(),
+                    &MutableClock::new(Utc::now()),
+                    &group,
+                    &Arc::new(AsyncRwLock::new(PrivateIntakeHealth::default())),
+                    &Arc::new(Notify::new()),
+                    &acquire,
+                )
+                .await
+            })
+        });
+        let cursor = |peer: &PubkyPublicKey, event_id| PrivateIntakeCursorRecord {
+            subscribed_user: peer.clone(),
+            homeserver: "homeserver-a".into(),
+            event_id,
+        };
+        let mut ignored = PrivateIntakeIgnoredCursors::new();
+        for (peer, event_id) in peers.iter().zip([10, 20, 30, 40]) {
+            record_ignored_private_intake_event(&mut ignored, cursor(peer, event_id));
+        }
+        let batches = Arc::new(StdMutex::new(Vec::new()));
+        let commit_cursors: PrivateIntakeCommitCursors = Arc::new({
+            let batches = Arc::clone(&batches);
+            move |cursors| {
+                batches.lock().unwrap().push(cursors);
+                Box::pin(async {})
+            }
+        });
+
+        let outcome = audit_private_intake_stream(&audit, &mut ignored, &commit_cursors).await;
+
+        // Only the peer whose expected slot was absent counts as audited;
+        // a pending handshake, full capacity or the acquisition cap keep
+        // the ignored cursor for a later audit.
+        assert_eq!(outcome.audited_peers, HashSet::from([absent.clone()]));
+        assert_eq!(
+            std::mem::take(&mut *batches.lock().unwrap()),
+            vec![vec![cursor(&absent, 10)]]
+        );
+        assert_eq!(
+            ignored,
+            HashMap::from([
+                (pending.clone(), cursor(&pending, 20)),
+                (capacity.clone(), cursor(&capacity, 30)),
+                (inserting.clone(), cursor(&inserting, 40)),
+            ])
+        );
     }
 
     /// Drives a stream loop whose audits block until released.

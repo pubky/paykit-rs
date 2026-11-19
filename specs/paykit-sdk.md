@@ -1380,25 +1380,28 @@ event or an audit, records the read folder of the Encrypted Link snapshot it
 used, which is the folder that holds that expected slot. While a peer has a
 recorded read folder, intake ignores DELETEs and every PUT that is neither
 under that folder nor at an Encrypted Link Handshake slot. An ignored event
-triggers no fetch and does not change health. A peer is unfiltered until an
-acquisition records its folder, and becomes unfiltered again once an
-acquisition sees a pending Encrypted Link Handshake or fails before it derives
-the expected slot. Until then, the previously recorded folder and the
-handshake-slot rule apply. A link that moves to a new folder, for example
-through a recovery or a relink finished outside intake, is followed from its
-next acquisition, at the latest the next audit.
+triggers no fetch and does not change health, so a `Stale` state set by a
+failed fetch for a relevant event clears only on the next relevant event or
+audit. A peer is unfiltered until an acquisition records its folder, and
+becomes unfiltered again once an acquisition sees a pending Encrypted Link
+Handshake or fails before it derives the expected slot. Until then, the
+previously recorded folder and the handshake-slot rule apply. A link that moves
+to a new folder, for example through a recovery or a relink finished outside
+intake, is followed from its next acquisition, at the latest the next audit.
 
-The stream remembers the highest ignored event per peer in memory. After the
-next successful audit of that peer, it advances the stored per-user cursor to
-that event unless the cursor is already past it, so a reconnect does not
-replay it. This is safe because the stream delivers a homeserver's events in
-cursor order and the audit fetched the peer's expected slot after every event
-seen before the audit started: an ignored event either cannot announce a
-packet the expected-slot fetch would find or, when the recorded folder was
-stale, announced one that the audit fetched. Ignored events seen during an
-audit wait for the next one. Audits remain the delivery guarantee, so a hint
-dropped through a stale read folder only adds latency, up to the audit
-interval.
+The stream remembers the highest ignored event per peer in memory. After an
+audit that finds the peer's next expected slot absent, it advances the stored
+per-user cursor to that event unless the cursor is already past it, so a
+reconnect does not replay it. An audit that stops at a pending Encrypted Link
+Handshake, at capacity, or at the per-peer acquisition limit, or that fails,
+keeps the ignored event for a later audit. This is safe because the stream
+delivers a homeserver's events in cursor order and the audit fetched the peer's
+expected slot after every event seen before the audit started and found it
+absent: an ignored event either cannot announce a packet the expected-slot
+fetch would find or, when the recorded folder was stale, announced one that the
+audit fetched. Ignored events seen during an audit wait for the next one.
+Audits remain the delivery guarantee, so a hint dropped through a stale read
+folder only adds latency, up to the audit interval.
 
 For a relevant event, the SDK still derives the expected immutable Noise
 resource independently of the event path, fetches only that resource, and

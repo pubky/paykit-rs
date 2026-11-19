@@ -148,10 +148,12 @@ ignores deletes and files outside that link's read folder, such as Receipts or
 other links' messages, except Encrypted Link Handshake slots. Each acquisition
 refreshes the read folder from the stored link, so a link that moves to a new
 folder is followed from its next acquisition. Ignored events trigger no fetch
-and move the replay cursor only after the next successful audit of that peer.
-A healthy stream still audits expected slots about every 60 seconds by
-default, so a skipped, missed, or ignored event does not become permanent
-message loss.
+and move the replay cursor only after an audit that finds the peer's next
+expected slot absent. Ignored events do not change health either, so a `Stale`
+state set by a failed fetch for a relevant event clears on the next relevant
+event or audit. A healthy stream still audits expected slots about every 60
+seconds by default, so a skipped, missed, or ignored event does not become
+permanent message loss.
 
 ```rust,no_run
 use std::sync::Arc;
