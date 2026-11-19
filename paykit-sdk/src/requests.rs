@@ -1064,38 +1064,26 @@ impl Paykit {
                     payee: self.identity(),
                     request_hash: stored_request.hash(),
                 };
-                let period_rates = named_details.and_then(|(stored, details)| {
-                    details.rates.as_deref().map(|rates| (stored, rates))
-                });
-                let pricing = match (request.conversion.as_ref(), period_rates) {
-                    (Some(Conversion::PerPeriod), Some((stored, rates))) => {
-                        crate::pay::Pricing::by_rates(
-                            &request.amount,
-                            request_ref,
-                            crate::conversion::RateSource::PeriodDetails {
-                                msg_id: stored.message().msg_id.clone(),
-                            },
-                            rates,
-                            pubky_switch_client::app::Initiator::User,
-                        )
-                    }
-                    _ => crate::pay::Pricing::of_request(
-                        &request.amount,
-                        request_ref,
-                        request.conversion.as_ref(),
-                        pubky_switch_client::app::Initiator::User,
-                    ),
-                };
-                // A request without conversion terms paid to an endpoint of another asset
-                // promises no rate: the payee judges what it received by its own payment
-                // method's check of the requested amount, as in v0.1 (Paykit spec 7.2 step 1).
-                let (amount, rate_window) = match pricing.price(&*self.rail, id) {
+                let mut pricing = crate::pay::Pricing::of_request(
+                    &request.amount,
+                    request_ref,
+                    request.conversion.as_ref(),
+                    pubky_switch_client::app::Initiator::User,
+                );
+                if let (Some(Conversion::PerPeriod), Some((stored, _))) =
+                    (request.conversion.as_ref(), named_details)
+                {
+                    pricing = pricing.with_period_rates(vec![stored]);
+                }
+                // The payee checks the method's verified payment time below, even when
+                // the proof arrives after the period rate expired.
+                let (price, source) = pricing.price(&*self.rail, id, |_| true);
+                let (amount, rate_window) = match price {
                     crate::conversion::Priced::Plain(amount)
                     | crate::conversion::Priced::ByHand(amount) => (amount, None),
-                    crate::conversion::Priced::ByRate { amount, .. } => (
-                        amount,
-                        period_rates.and_then(|(stored, _)| crate::periods::rate_window(stored)),
-                    ),
+                    crate::conversion::Priced::ByRate { amount, .. } => {
+                        (amount, source.and_then(crate::periods::rate_window))
+                    }
                     crate::conversion::Priced::Unusable(_) => return Ok(None),
                 };
                 let period_deadline = match binding {
