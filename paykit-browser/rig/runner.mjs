@@ -18,9 +18,13 @@
 // wasm-bindgen-test-runner runs with NO_HEADLESS=1, so it only generates the bindings and
 // serves the test page on a free loopback port. This script opens that page in the engine,
 // relays console output and errors, waits for the harness's "test result:" line, and exits 0
-// only when at least one test ran and none failed. The runner and the browser are always
-// stopped, on timeout and on SIGINT or SIGTERM too. Given `--list`, it runs only
-// wasm-bindgen-test-runner, which prints the test names, and exits with its exit code.
+// only when at least one test ran and none failed. When a test name filter or `--skip` given to
+// `cargo test` leaves no test of a test target to run, wasm-bindgen-test-runner says "no tests
+// to run!" and exits without serving; given a filter, this script then exits 0 as well, so the
+// filter can pick tests of one target (`test.sh` still fails a run in which no target ran a
+// test). The runner and the browser are always stopped, on timeout and on SIGINT or SIGTERM
+// too. Given `--list`, it runs only wasm-bindgen-test-runner, which prints the test names, and
+// exits with its exit code.
 
 import { spawn } from "node:child_process";
 import { chromium, firefox, webkit } from "playwright";
@@ -48,6 +52,8 @@ const MODE_VARIABLES = [
   "WASM_BINDGEN_USE_NODE_EXPERIMENTAL",
 ];
 const RESULT_LINE = /test result: (ok|FAILED)\. (\d+) passed; (\d+) failed;/g;
+// wasm-bindgen-test-runner prints this, and exits 0, when no test matches the filter.
+const NO_TESTS_LINE = /^no tests to run!\r?$/m;
 // Matches only a complete line, so a URL split across output chunks is never taken early.
 const SERVING_LINE = /available at (http:\/\/\S+)\r?\n/;
 
@@ -108,12 +114,27 @@ setTimeout(
   timeoutSecs * 1000,
 );
 
+// Whether the arguments after the module path narrow the tests to run: a FILTER (a positional
+// argument) or `--skip`. The value of `--format`, the runner's other option with a value, is
+// not a filter.
+function hasTestFilter(args) {
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "--format") i += 1;
+    else if (arg === "--skip" || arg.startsWith("--skip=") || !arg.startsWith("-")) return true;
+  }
+  return false;
+}
+
 // Start wasm-bindgen-test-runner in serve-only mode, and resolve with the page URL.
 function serveTests(args) {
   const env = { ...process.env, NO_HEADLESS: "1", WASM_BINDGEN_TEST_ADDRESS: "127.0.0.1:0" };
   // The runner refuses more than one mode variable: set exactly the one asked for.
   for (const name of MODE_VARIABLES) delete env[name];
   env[CONTEXTS[contextName]] = "1";
+
+  // Without a test name filter, a test target with no test to run still fails.
+  const filtered = hasTestFilter(args.slice(1));
 
   return new Promise((resolve, reject) => {
     child = spawn(runnerBin, args, { env, stdio: ["ignore", "pipe", "pipe"] });
@@ -139,6 +160,14 @@ function serveTests(args) {
     child.on("exit", (code, signal) => {
       if (served) {
         finish(1, `${runnerBin} exited while serving (code ${code}, signal ${signal})`);
+      }
+    });
+    // An exit before serving is judged on "close", which comes after both output streams have
+    // ended: on "exit" the last chunk, with "no tests to run!", may not have arrived yet.
+    child.on("close", (code, signal) => {
+      if (served) return;
+      if (code === 0 && filtered && NO_TESTS_LINE.test(output)) {
+        finish(0, "no test matched the filter");
         return;
       }
       reject(new Error(`${runnerBin} exited before serving (code ${code}, signal ${signal})`));

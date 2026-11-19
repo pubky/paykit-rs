@@ -35,6 +35,17 @@ getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 # 0.3.4 is the minimum.
 getrandom03 = { package = "getrandom", version = "0.3.4", features = ["wasm_js"] }
 
+# The browser host pieces (`src/clock.rs`, `src/send.rs`, `src/timer.rs`, `src/panic.rs`): the
+# JavaScript bindings (`wasm-bindgen`, `js-sys`), the browser's microtask queue as the executor
+# of local futures (`wasm-bindgen-futures`), and the one-shot channel that carries a local
+# future's output to a `Send` future (`futures-channel`). Only `wasm32-unknown-unknown` has a
+# JavaScript host for them; other wasm32 targets, such as WASI, do not get them.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+futures-channel = "0.3.34"
+js-sys = "0.3.107"
+wasm-bindgen = "0.2.130"
+wasm-bindgen-futures = "0.4.80"
+
 [dev-dependencies]
 serde_json.workspace = true
 

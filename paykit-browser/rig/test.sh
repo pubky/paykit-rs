@@ -59,6 +59,12 @@ if [[ "$rig" =~ [[:space:]] ]]; then
 fi
 export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="node $rig/runner.mjs"
 
+# Each run's output, kept to check that some test target ran a test: a test target passes when
+# a test name filter leaves it no test to run (runner.mjs), so a mistyped filter would
+# otherwise pass every run without running anything.
+log=$(mktemp)
+trap 'rm -f "$log"' EXIT
+
 failed=()
 for engine in "${engines[@]}"; do
   for context in "${contexts[@]}"; do
@@ -67,7 +73,10 @@ for engine in "${engines[@]}"; do
     # binary too, despite its `test = false`, and that binary has no browser tests.
     if ! PAYKIT_BROWSER_ENGINE=$engine PAYKIT_BROWSER_CONTEXT=$context \
       cargo test --locked --manifest-path "$root/Cargo.toml" -p paykit-browser \
-      --target wasm32-unknown-unknown --tests "$@"; then
+      --target wasm32-unknown-unknown --tests "$@" 2>&1 | tee "$log"; then
+      failed+=("$engine/$context")
+    elif ! grep -q '^\[runner\] PASS ' "$log"; then
+      echo "error: no test ran in $engine/$context; check the test name filter" >&2
       failed+=("$engine/$context")
     fi
   done

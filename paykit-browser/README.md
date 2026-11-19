@@ -1,11 +1,33 @@
 # paykit-browser
 
 `paykit-browser` holds the browser (`wasm32-unknown-unknown`) build support for the Paykit SDK,
-and the tests that run Paykit v0.2 code in browser engines.
+the first host pieces a browser host gives the SDK and the Switch client, and the tests that
+run Paykit v0.2 code in browser engines.
 
 Depending on this crate selects the browser random number backends (`crypto.getRandomValues`)
 for every getrandom version in a `wasm32-unknown-unknown` build of Paykit. On any other target
 it builds as an empty crate, so workspace-wide commands keep working.
+
+## Host pieces
+
+On `wasm32-unknown-unknown` the crate holds these Rust items for a host written in Rust. Each
+works in a page and in a dedicated worker. None is exported to JavaScript. Other wasm32 targets,
+such as WASI, have no JavaScript host, and do not get them.
+
+- `clock::JsClock`: the Switch client's `Clock`, on `Date.now()`. It is the browser's wall
+  clock, which can jump when the time is changed. Use it instead of the Switch client's
+  `SystemClock`, which panics on `wasm32-unknown-unknown`.
+- `timer::JsTimer`: the SDK's `Timer`, on `setTimeout`. A sleep's delay counts from its first
+  poll. It never ends before its delay as `performance.now()`, not the wall clock, reads it;
+  where a browser coarsens that clock, it can end up to one step of it early in real time.
+  Browsers can also fire timers late, most of all in hidden pages. A delay
+  above `setTimeout`'s limit of `2^31 - 1` ms takes several timeouts, and dropping a sleep
+  clears its timeout.
+- `send::run_local`: starts a future that waits on the browser, which is not `Send`, on this
+  thread's event loop, and returns a `Send` future for its output, as the host traits require.
+  Dropping the returned future cancels the local one. The module docs say why this is sound.
+- `panic::install_panic_hook`: reports a Rust panic, with its message and source location, to
+  `console.error`, and then runs the panic hook installed before it.
 
 ## Target
 
@@ -17,6 +39,7 @@ target feature) is refused at compile time.
 - The `wasm32-unknown-unknown` dependency graph of `paykit-lib` and `paykit-sdk` builds.
 - The tests listed under [Tests](#tests) run in a page and in a dedicated worker, in Chromium,
   Firefox and WebKit.
+- The host pieces above are tested on their own. No Paykit flow uses them in these tests yet.
 - The SDK's flows are not run in a browser by this crate yet.
 - Only a page and a dedicated worker are tested. Service workers and shared workers are not.
 
@@ -37,6 +60,8 @@ no clock and `std::time::Instant::now()` panics:
 
 ## Tests
 
+There are three test targets.
+
 The tests in `tests/conformance/` build for both the host and wasm32, with the same test
 bodies, so a browser result is compared with the native result by construction. They cover:
 
@@ -45,6 +70,21 @@ bodies, so a browser result is compared with the native result by construction. 
 - the operating system random generator, through both getrandom versions in the graph;
 - signing and verifying, sealing and opening record values, and sealing and opening
   envelopes.
+
+The tests in `tests/host/` cover the host pieces, so they run only in a browser; natively the
+target is empty. They check that:
+
+- `JsClock` agrees with `Date.now()`;
+- a `JsTimer` sleep lasts at least its delay, counted from its first poll, `sleep(0)` is ready
+  at once, a sleep outlasts timers that fire early, and a dropped sleep clears its timeout;
+- the steps of a sleep longer than `setTimeout`'s limit stay within it;
+- `run_local` returns the output, starts the local future without a poll, cancels and drops
+  the local future when the returned future is dropped, and its returned future is `Send`.
+
+The test in `tests/panic_report.rs` checks that `install_panic_hook` writes a panic, with its
+message and source location, to `console.error`, and then runs the panic hook installed before
+it, also when it is called twice. It is a target of its own, so that its call is the first in
+its WebAssembly instance, and so that the panic ends an instance no other test shares.
 
 ### Run the tests natively
 
@@ -82,7 +122,8 @@ paykit-browser/rig/test.sh all both
 
 The first argument is the engine: `chromium`, `firefox`, `webkit`, `chrome` or `all`. The second
 is the context: `page`, `worker` (a dedicated worker) or `both`, which is the default. Further
-arguments go to `cargo test`, for example a test name filter.
+arguments go to `cargo test`, for example a test name filter. A test target with no test that
+matches the filter passes, but a run in which no test target runs a test fails.
 
 To run one engine and context without `test.sh`, set `rig/runner.mjs` as Cargo's wasm32 runner
 as its header comment shows; that comment also lists the runner's environment variables and
@@ -99,8 +140,10 @@ Playwright's Chromium support. `all` runs the three Playwright builds.
 
 The `Browser` workflow (`.github/workflows/browser.yml`) runs on the same pushes and pull
 requests as `CI`. Its `wasm-check` job runs `cargo clippy` for `wasm32-unknown-unknown`, which
-also type-checks the build, then `rig/check-wasm-deps.sh`, which fails when the wasm32
-dependency graph contains a native networking or TLS crate such as `mio`, `ring` or `tokio`.
+also type-checks the build; `cargo check` of the library alone, without the test-only features
+of the dev-dependencies; `cargo doc` for wasm32, where the host pieces are; and then
+`rig/check-wasm-deps.sh`, which fails when the wasm32 dependency graph contains a native
+networking or TLS crate such as `mio`, `ring` or `tokio`.
 Its `browser-tests` job runs once per engine (`chromium`, `firefox`, `webkit`), as three jobs;
 each runs `rig/test.sh` in a page and then in a dedicated worker, with `wasm-bindgen-cli`
 installed at the version in `Cargo.lock`.
