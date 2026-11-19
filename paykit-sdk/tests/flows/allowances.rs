@@ -863,14 +863,6 @@ async fn test_allowances_withdrawal_crossing_the_acceptance_ends_it_on_both_side
         original.content.value().unwrap(),
         Ledger::initial_value(&w.bob_id(), pending.allowance_id(), &q.hash())
     );
-    let ledger = wallet
-        .app()
-        .shared_record(&original.key)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(ledger.version, original.version);
-    assert_eq!(ledger.content, original.content);
     let end = record.end.as_ref().unwrap();
     assert_eq!(end.message().from.app_id, wallet.app_id());
     assert_eq!(end.message().refs, [record.proposal.hash(), q.hash()]);
@@ -883,6 +875,25 @@ async fn test_allowances_withdrawal_crossing_the_acceptance_ends_it_on_both_side
         Some(Refusal::NotFound)
     ));
     assert!(shop.allowances().await.unwrap().is_empty());
+    let refused = Box::pin(crate::allowance_executor::attempt_after_withdrawal(
+        &w,
+        &mut wallet,
+        &mut shop,
+        &mine,
+    ))
+    .await;
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotNow(reason)) if reason.contains("accepted executor grant")),
+        "{refused:?}"
+    );
+    let ledger = wallet
+        .app()
+        .shared_record(&original.key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ledger.version, original.version);
+    assert_eq!(ledger.content, original.content);
     assert!(w.rail.all_executions().is_empty());
 }
 
@@ -903,6 +914,14 @@ async fn test_allowances_withdrawal_read_before_approval_leaves_the_ledger_unope
         .await
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::NotFound));
+    let payment = Box::pin(crate::allowance_executor::attempt_after_withdrawal(
+        &w,
+        &mut wallet,
+        &mut shop,
+        &mine,
+    ))
+    .await;
+    assert_eq!(payment.refusal(), Some(&Refusal::NotFound));
     assert!(wallet.app().shared_record(&mine).await.unwrap().is_none());
     assert!(wallet
         .app()
@@ -1362,7 +1381,7 @@ async fn test_allowances_restore_asks_nothing_for_an_ended_one() {
 
 /// An `executor_notice` with `reason` naming `record`, from `signer`'s app `from` to alice's
 /// app `to`.
-fn notice(
+pub(super) fn notice(
     w: &World,
     signer: &pubky_switch_client::testing::TestSigner,
     from: &str,
@@ -3638,7 +3657,7 @@ async fn write_record(
 }
 
 /// The target of `owner`'s record of `counterparty`'s Allowance `id`.
-fn allowances_target(
+pub(super) fn allowances_target(
     counterparty: &[u8; 32],
     id: &paykit_lib::AllowanceId,
 ) -> pubky_switch_client::app::RecordTarget {

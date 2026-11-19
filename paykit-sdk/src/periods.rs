@@ -1130,7 +1130,7 @@ impl Paykit {
             self.obligation(&request.payee, &request.request_hash, period.start_secs());
         let restored = self.restored_attempts(&obligation).await?;
         let step = self
-            .claim_step(
+            .payable_claim(
                 &obligation,
                 &stored,
                 Some(period),
@@ -1139,7 +1139,8 @@ impl Paykit {
                 &options,
                 by,
             )
-            .await?;
+            .await?
+            .map_or(0, |claim| claim.step);
         if self.deadline_passed(deadline) {
             return Err(self.past_deadline(&target, None).await?);
         }
@@ -1221,6 +1222,7 @@ impl Paykit {
         }
         let entry = JournalEntry {
             user_started: by == Initiator::User,
+            allowance: None,
             attempt_id: AttemptId::generate()?.to_text(),
             obligation,
             payee: request.payee,
@@ -1265,6 +1267,7 @@ impl Paykit {
             reserve,
             create: None,
             on_record: true,
+            allowance: None,
             by,
             unconfirmed: options.unconfirmed_identity_confirmed,
             blocked_confirmed: options.blocked_confirmed,

@@ -1098,6 +1098,11 @@ impl Stored for JournalEntry {
         let StateKey::Journal(attempt) = family else {
             return corrupt();
         };
+        if let Some(under) = &self.allowance {
+            if self.user_started || self.request_hash()?.is_none() || !under.valid() {
+                return corrupt();
+            }
+        }
         if self.attempt()? != *attempt {
             return corrupt();
         }

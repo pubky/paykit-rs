@@ -2,11 +2,12 @@
 
 use std::collections::HashMap;
 
-use paykit_lib::allowances::{check_successor, AllowanceTerms, Ledger, LedgerEntry, Usage};
+use paykit_lib::allowances::{check_successor, usage, AllowanceTerms, Ledger, LedgerEntry, Usage};
 use paykit_lib::records::bind_ledger;
 use paykit_lib::{AllowanceId, Body};
 use pubky_switch_client::app::{KeptOp, KeptReason, RecordRead};
 use pubky_switch_core::ops::Condition;
+use pubky_switch_core::shared::ApplicationRef;
 
 use super::approval::ApprovedOpening;
 use super::checkpoint::{ledger_target, ExecutorCheckpoint};
@@ -21,11 +22,23 @@ use crate::{Paykit, Result};
 /// The SDK keeps the authenticated application it accepted. The spending batch must still
 /// condition on both current records and atomically open the new attempt and reservation.
 pub(super) struct ReconciledLedger {
+    pub(super) ledger: Ledger,
     pub(super) usage: Usage,
     pub(super) evidence: KeptOp,
+    pub(super) grant: Condition,
     pub(super) current: Condition,
+    pub(super) terms: AllowanceTerms,
+    pub(super) at: u64,
     pub(super) compaction: Option<LedgerCompaction>,
     pub(super) at_initial_ledger: bool,
+}
+
+/// How this executor established the application it is about to incorporate.
+#[derive(Clone, Copy)]
+pub(super) enum LedgerRead {
+    Inventory,
+    Outcome,
+    Applied(ApplicationRef),
 }
 
 #[derive(Clone, Copy)]
@@ -76,31 +89,42 @@ impl Paykit {
     /// or the service or storage operation fails. A successful reconciliation durably
     /// accepts the complete current ledger before reporting its usage.
     pub async fn reconcile_allowance(&mut self, record: &[u8; 32]) -> Result<Option<Usage>> {
-        let Some(history) = self
-            .local_get::<ExecutorHistory>(&key::executor_checkpoint(record))
+        Ok(Box::pin(self.executor_base(record, LedgerRead::Inventory))
             .await?
-        else {
+            .map(|checked| checked.usage))
+    }
+
+    pub(super) async fn executor_base(
+        &mut self,
+        record: &[u8; 32],
+        source_kind: LedgerRead,
+    ) -> Result<Option<ReconciledLedger>> {
+        let local = key::executor_checkpoint(record);
+        let Some(history) = self.local_get::<ExecutorHistory>(&local).await? else {
             return Ok(None);
         };
         let Some(opening) = Box::pin(self.approved_opening(record)).await? else {
             return Ok(None);
         };
-        let Some(checkpoint) = history.selected(&self.app, record, &opening) else {
+        let Some(source) = history.selected(&self.app, record, &opening) else {
             return Ok(None);
         };
-        let mut checkpoint =
-            Box::pin(self.finish_executor_grant(record, checkpoint, &opening)).await?;
+        let mut checkpoint = Box::pin(self.finish_executor_grant(record, source, &opening)).await?;
         let Some(checked) =
-            Box::pin(self.restore_executor_ledger(record, &checkpoint, &opening)).await?
+            Box::pin(self.restore_executor_ledger(record, &checkpoint, &opening, source_kind))
+                .await?
         else {
             return Ok(None);
         };
-        self.keep_executor_checkpoint(record, &mut checkpoint, &checked)
-            .await?;
-        Ok(Some(checked.usage))
+        if history.0.len() > 1
+            || (!checked.at_initial_ledger && checkpoint.later.as_ref() != Some(&checked.evidence))
+        {
+            Box::pin(self.keep_executor_checkpoint(record, &mut checkpoint, &checked)).await?;
+        }
+        Ok(Some(checked))
     }
 
-    pub(super) async fn keep_executor_checkpoint(
+    async fn keep_executor_checkpoint(
         &mut self,
         record: &[u8; 32],
         checkpoint: &mut ExecutorCheckpoint,
@@ -123,11 +147,12 @@ impl Paykit {
         self.local_commit(tx).await
     }
 
-    pub(super) async fn restore_executor_ledger(
+    async fn restore_executor_ledger(
         &mut self,
         permanent_key: &[u8; 32],
         checkpoint: &ExecutorCheckpoint,
         approval: &ApprovedOpening,
+        source: LedgerRead,
     ) -> Result<Option<ReconciledLedger>> {
         let Some(accepted) = checkpoint.accepted(&self.app, permanent_key, approval) else {
             return Ok(None);
@@ -272,6 +297,35 @@ impl Paykit {
         let Some(at) = self.service_time() else {
             return Ok(None);
         };
+        let needs_inventory = match source {
+            LedgerRead::Inventory => true,
+            LedgerRead::Outcome => {
+                checkpoint.restored || current.revision != accepted.application.revision
+            }
+            LedgerRead::Applied(revision) if revision == current.revision => false,
+            LedgerRead::Applied(_) => return Ok(None),
+        };
+        let result = |usage, ledger, grant, compaction| ReconciledLedger {
+            compaction,
+            at_initial_ledger: current.revision == approval.ledger.revision,
+            at,
+            terms: proposed.terms.clone(),
+            ledger,
+            usage,
+            evidence: evidence.clone(),
+            grant,
+            current: Condition::RecordCurrent {
+                key: ledger_key,
+                revision: current.revision,
+                deleted: false,
+            },
+        };
+        if !needs_inventory {
+            let Ok(counted) = usage(&proposed.terms, &ledger, &HashMap::new(), at) else {
+                return Ok(None);
+            };
+            return Ok(Some(result(counted, ledger, exact_grant, compaction)));
+        }
         let Some(inventory) = wallet_inventory(&*self.rail, self.identity()).await else {
             return Ok(None);
         };
@@ -465,17 +519,7 @@ impl Paykit {
         if !retired.is_empty() {
             return Ok(None);
         }
-        Ok(Some(ReconciledLedger {
-            usage: counted,
-            evidence: evidence.clone(),
-            current: Condition::RecordCurrent {
-                key: ledger_key,
-                revision: current.revision,
-                deleted: false,
-            },
-            compaction,
-            at_initial_ledger: current.revision == approval.ledger.revision,
-        }))
+        Ok(Some(result(counted, ledger, exact_grant, compaction)))
     }
 }
 
@@ -532,6 +576,19 @@ mod tests {
             removed.iter().map(|e| e.value.scaled()).sum::<u128>(),
             applied.spent.as_ref().unwrap().scaled()
         );
+        let failed = &held.entries[0];
+        let belongs = super::super::spend::accounts_for_attempt;
+        assert!(belongs(
+            &held,
+            failed.obligation,
+            failed.attempt_id.to_bytes()
+        ));
+        assert!(belongs(
+            &applied,
+            failed.obligation,
+            failed.attempt_id.to_bytes()
+        ));
+        assert!(!belongs(&applied, [9; 32], failed.attempt_id.to_bytes()));
         assert!(
             matches!(ledger_change(&held, &applied, &terms).unwrap(), Some(LedgerChange::Reservation(e)) if e == &next)
         );

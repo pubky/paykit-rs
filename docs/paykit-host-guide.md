@@ -260,6 +260,13 @@ wallet account, including other installations and previous certificate lifetimes
 Return `None` when that history is incomplete. When reconciliation returns
 `None`, show usage as unknown and keep automatic payment on hold.
 
+To pay an eligible one-time request, call `Paykit::pay_under_allowance`
+with the same permanent Allowance handle. The wallet reserves the transfer
+amount under the grant before calling the payment method. A refused limit or
+incomplete wallet history leaves the request unpaid. Use the request and
+receipt views to show a completed payment. The user can still choose to pay
+a request by hand with `Paykit::pay_request`.
+
 | Case | What to show or do |
 |---|---|
 | `RequestStatus::Open` | Show the request and the current conditions for acting on it. |

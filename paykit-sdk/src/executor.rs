@@ -7,8 +7,10 @@ mod evidence;
 mod grant;
 mod ledger;
 mod restore;
+mod spend;
 pub(crate) use checkpoint::ExecutorHistory;
 pub(crate) use compaction::LedgerCompaction;
+pub(crate) use spend::{AllowanceReservation, JournalAllowance};
 
 use std::collections::{HashMap, HashSet};
 
