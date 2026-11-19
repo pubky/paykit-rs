@@ -156,8 +156,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   Health returns to `CaughtUp`, and packets written back to back are buffered
   together. Previously health reported the Linked Peer as `Replaying` until
   the next healthy audit. An intake fetch that fails because the app's drain
-  advanced the Encrypted Link meanwhile is now retried instead of marking the
-  Linked Peer `Stale`.
+  committed a new Encrypted Link generation meanwhile is now retried instead
+  of marking the Linked Peer `Stale`.
 
 ### Integration
 
