@@ -1596,6 +1596,87 @@ async fn test_period_payments_priced_first_dispatch_rechecks_selected_rate_expir
 }
 
 #[tokio::test]
+async fn test_period_payments_recorded_attempt_rechecks_the_period_rate_issuer() {
+    let base = Arc::new(StageStore::default());
+    let (w, shop, mut wallet, request, _) =
+        Box::pin(priced_period_on(false, base.clone(), None)).await;
+    let w = Arc::new(w);
+    let mut quotes = w
+        .join(
+            &w.bob,
+            "quotes",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    quotes.receive(None).await.unwrap();
+    let sale = quotes.payee_activity().await.unwrap()[0].record;
+    let quote = PeriodDetails {
+        billing_period: january(),
+        payment_endpoints: None,
+        rates: Some(vec![paykit_lib::Rate::new(
+            paykit_lib::Asset::new("btc").unwrap(),
+            paykit_lib::Decimal::new("0.00002000").unwrap(),
+        )
+        .unwrap()]),
+        expires_at: START_MS + HOUR_MS,
+    };
+    let id = quotes
+        .send_period_details(&sale, quote)
+        .await
+        .unwrap()
+        .msg_id;
+    wallet.receive(None).await.unwrap();
+    let shown = crate::conversion::priced_of(
+        &by_user(
+            &mut wallet,
+            &request,
+            january(),
+            PayOptions::default().with_period_details(&id),
+        )
+        .await
+        .unwrap_err(),
+    );
+    assert_eq!(
+        shown.source,
+        paykit_sdk::RateSource::PeriodDetails { msg_id: id }
+    );
+    assert_eq!(shown.app_id, shop.app_id());
+
+    // After planning, the wallet has recorded its confirmed choice. Its next
+    // payee lookup sees the rate issuer removed while the endpoint app stays listed.
+    let reader = Arc::clone(&w);
+    let issuer = quotes.app_id();
+    base.on_stage("recorded", move || {
+        let now = reader.clock.now_ms();
+        reader
+            .bob
+            .next_doc(|doc| {
+                doc.apps.retain(|app| app.app_id != issuer);
+                doc.removed.push(pubky_switch_core::records::RemovedApp {
+                    app_id: issuer,
+                    distrust_from: now,
+                });
+            })
+            .unwrap();
+        reader.clock.advance_ms(11 * 60_000);
+    });
+    let error = by_user(
+        &mut wallet,
+        &request,
+        january(),
+        PayOptions::default().with_rate_confirmed(shown),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(refusal(&error), Refusal::AttemptFailed(reason)
+        if matches!(reason.as_ref(), Refusal::Destination(why) if why.contains("sending app isn't current"))),
+        "{error:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
 async fn test_period_payments_priced_repeat_preserves_selected_rate_and_amount() {
     let (w, _shop, mut wallet, request, _) = Box::pin(priced_period_on(false, store(), None)).await;
     w.rail.set_declaration(

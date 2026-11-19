@@ -1295,7 +1295,21 @@ impl Paykit {
                     )
                     .into());
                 }
-                self.choose(payee, gathered, pricing, options)?
+                let identity = if matches!(&pricing.rates, Rates::Period(details) if !details.is_empty())
+                {
+                    Some(
+                        self.payee_identity(
+                            payee,
+                            Need::FreshCopy,
+                            pricing.by,
+                            options.unconfirmed_identity_confirmed,
+                        )
+                        .await??,
+                    )
+                } else {
+                    None
+                };
+                self.choose(payee, gathered, pricing, options, identity.as_ref())?
                     .ok_or_else(|| unsupported("the request's endpoints"))?
             }
             // The request's accepted identifiers restrict a destination from the payee's lists
@@ -1819,7 +1833,7 @@ impl Paykit {
         if let PaymentMode::Public(_) = options.mode {
             // The failures go into the call's list as each app is judged, so an error later in
             // the read still returns those found before it ([`PayResult`]).
-            let (_, mut records) = self
+            let (identity, mut records) = self
                 .public_records(
                     payee,
                     app,
@@ -1859,7 +1873,7 @@ impl Paykit {
                 return Err(Refusal::NoDestination(text).into());
             }
             return self
-                .choose(payee, gathered, pricing, options)?
+                .choose(payee, gathered, pricing, options, Some(&identity))?
                 .ok_or_else(|| unsupported("the payee's public endpoints"));
         }
         let read = self.lists_read_of(payee).await?;
@@ -2031,14 +2045,15 @@ impl Paykit {
         // Endpoints the conversion terms leave unusable refuse the payment for that, unless a
         // list has expired or is used up: a newer list may serve then, and the payee is asked
         // for it as below.
-        let unusable_by_terms = match self.choose(payee, gathered, pricing, options) {
-            Ok(Some(chosen)) => return Ok(chosen),
-            Ok(None) => None,
-            Err(error) if matches!(error.refusal(), Some(Refusal::UnsupportedEndpoint(_))) => {
-                Some(error)
-            }
-            Err(error) => return Err(error),
-        };
+        let unusable_by_terms =
+            match self.choose(payee, gathered, pricing, options, identity.as_ref()) {
+                Ok(Some(chosen)) => return Ok(chosen),
+                Ok(None) => None,
+                Err(error) if matches!(error.refusal(), Some(Refusal::UnsupportedEndpoint(_))) => {
+                    Some(error)
+                }
+                Err(error) => return Err(error),
+            };
         if let Some(error) = unusable_by_terms {
             if !expired && !used_up {
                 return Err(error);
@@ -2146,6 +2161,7 @@ impl Paykit {
         gathered: Vec<Choice>,
         pricing: &Pricing<'_>,
         options: &PayOptions,
+        identity: Option<&PeerIdentity>,
     ) -> Result<Option<Chosen>> {
         if gathered.is_empty() {
             return Ok(None);
@@ -2159,7 +2175,7 @@ impl Paykit {
                 continue;
             };
             let (amount, price, by_hand) =
-                match self.price_choice(&choice.destination, pricing, options) {
+                match self.price_choice(&choice.destination, pricing, options, identity) {
                     Ok(Taken::Pay(amount, price)) => (amount, price, false),
                     Ok(Taken::ByHand(amount)) => (amount, None, true),
                     Ok(Taken::Unusable(why)) => {
@@ -2231,13 +2247,18 @@ impl Paykit {
         destination: &Destination,
         pricing: &Pricing<'_>,
         options: &PayOptions,
+        identity: Option<&PeerIdentity>,
     ) -> Result<Taken> {
         let Some(request) = pricing.request else {
             return Ok(Taken::Pay(pricing.requested.clone(), None));
         };
         let endpoint_id = destination.endpoint_id()?;
         let (priced, details) = pricing.price(&*self.rail, &endpoint_id, |signed| {
-            crate::periods::rates_current(signed, self.now(), self.service_time())
+            let now = self.now();
+            crate::periods::rates_current(signed, now, self.service_time())
+                && identity.is_some_and(|peer| {
+                    crate::destination::current_rate_source(&peer.doc, signed, now).is_ok()
+                })
         });
         let (rate, amount) = match priced {
             Priced::Plain(_)
@@ -2446,9 +2467,10 @@ impl Paykit {
     fn transfer_holds(
         &self,
         entry: &JournalEntry,
+        payee: &PeerIdentity,
         automatic_first: bool,
     ) -> Result<std::result::Result<(), Refusal>> {
-        let by_hand = match self.amount_holds(entry, automatic_first)? {
+        let by_hand = match self.amount_holds(entry, payee, automatic_first)? {
             Ok(by_hand) => by_hand,
             Err(refusal) => return Ok(Err(refusal)),
         };
@@ -2515,6 +2537,7 @@ impl Paykit {
     fn amount_holds(
         &self,
         entry: &JournalEntry,
+        payee: &PeerIdentity,
         automatic_first: bool,
     ) -> Result<std::result::Result<bool, Refusal>> {
         if entry.request_hash()?.is_none() {
@@ -2566,7 +2589,10 @@ impl Paykit {
             }
             Priced::Plain(_) | Priced::ByHand(_) | Priced::Unusable(_) => false,
         };
-        let selected = entry.selected_rate_details(&self.identity())?;
+        let selected = match self.current_rate_details(entry, payee)? {
+            Ok(details) => details,
+            Err(refusal) => return Ok(Err(refusal)),
+        };
         if holds
             && rates_usable(
                 Some(&shown.source),
@@ -2620,7 +2646,6 @@ impl Paykit {
         crate::paykit::check_orphan_window(&self.config, self.rail.as_ref())?;
         // The carrier is journaled with the entry, for the checks before any repeat.
         entry.keep_carrier(&carrier);
-        entry.selected_rate_details(&self.identity())?;
         // The own identity.json, read again and confirmed, before any write: no attempt
         // without a copy revalidated in the last 60 s (Paykit spec 4, Switch spec 12.6).
         self.own_identity_confirmed(true).await?;
@@ -2628,7 +2653,7 @@ impl Paykit {
         // payee's switch couldn't confirm it needs the user's confirmation first, and an
         // automatic one isn't made (Paykit spec 7.2 step 1, Switch spec 4.3).
         let request_hash = entry.request_hash()?;
-        if let Err(refusal) = self
+        let identity = self
             .check_destination(
                 &entry.payee,
                 &entry.destination,
@@ -2637,10 +2662,8 @@ impl Paykit {
                 by,
                 unconfirmed,
             )
-            .await?
-        {
-            return Err(refusal.into());
-        }
+            .await??;
+        self.current_rate_details(&entry, &identity)??;
         self.activity_write_base(&self.activity_key(&record)?)
             .await?;
         let op = ClaimOp::attempt(
@@ -4736,6 +4759,24 @@ impl Paykit {
             && payee_copy_usable(now, payee, Need::of(carrier), by, confirmed)
     }
 
+    /// Check the independent rate signer's certificate against the destination's current
+    /// payee identity. The journal retains the signed message and its certificate.
+    fn current_rate_details(
+        &self,
+        entry: &JournalEntry,
+        payee: &PeerIdentity,
+    ) -> Result<std::result::Result<Option<StoredMessage>, Refusal>> {
+        let selected = entry.selected_rate_details(&self.identity())?;
+        if let Some(details) = &selected {
+            if let Err(reason) =
+                crate::destination::current_rate_source(&payee.doc, details, self.now())
+            {
+                return Ok(Err(Refusal::Destination(reason)));
+            }
+        }
+        Ok(Ok(selected))
+    }
+
     /// Checks 2 to 6 of the final payment check, with no await, on the clock now and the
     /// payee's copy `payee`, and for a first dispatch the pre-dispatch budget
     /// ([`Paykit::within_budget`]).
@@ -4751,7 +4792,7 @@ impl Paykit {
             return Ok(FinalCheck::Hold);
         }
         let automatic_first = by == Initiator::Automatic && matches!(kind, Dispatch::First { .. });
-        if let Err(refusal) = self.transfer_holds(entry, automatic_first)? {
+        if let Err(refusal) = self.transfer_holds(entry, payee, automatic_first)? {
             return Ok(FinalCheck::Refused(refusal));
         }
         let may_attempt = self.app.may_attempt(by == Initiator::Automatic).is_ok();
@@ -4937,6 +4978,9 @@ impl Paykit {
             &doc.doc,
             self.now(),
         ) {
+            return Ok(Err(Held::Check(refusal)));
+        }
+        if let Err(refusal) = self.current_rate_details(entry, &doc)? {
             return Ok(Err(Held::Check(refusal)));
         }
         if let Err(why) = self.own_identity_authorizes(entry, self.now()) {
