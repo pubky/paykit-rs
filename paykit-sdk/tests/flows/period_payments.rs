@@ -2438,7 +2438,7 @@ async fn test_period_payments_by_policy_resume_honors_a_new_manual_only_mark() {
 
 #[tokio::test]
 async fn test_period_payments_by_policy_stops_at_the_earlier_attempt_deadline() {
-    for remaining_ms in [1, 0] {
+    for after_deadline_ms in [0, 1] {
         let w = World::new();
         let mut shop = w.shop().await;
         let mut wallet = w.wallet("wallet").await;
@@ -2449,14 +2449,12 @@ async fn test_period_payments_by_policy_stops_at_the_earlier_attempt_deadline() 
             monthly().with_period_deadline_s(60),
         )
         .await;
-        w.clock.set_ms(january().starts_at + 60_000 - remaining_ms);
+        w.clock
+            .set_ms(january().starts_at + 60_000 + after_deadline_ms);
         let payment = by_policy(&mut wallet, &request, january()).await;
-        if remaining_ms == 0 {
+        if after_deadline_ms == 1 {
             let error = payment.unwrap_err();
-            assert!(
-                matches!(refusal(&error), Refusal::NotAutomatic(_)),
-                "{error:?}"
-            );
+            assert_eq!(refusal(&error), Refusal::DeadlinePassed);
             assert!(w.rail.all_executions().is_empty());
         } else {
             let outcome = payment.unwrap();
