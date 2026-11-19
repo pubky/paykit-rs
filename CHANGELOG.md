@@ -137,6 +137,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   supervisor's peer set while marking every stream `Stale`. That peer reserves
   no stream, is reported `Stale` in health, and is retried on each topology
   refresh.
+- In the Rust-only SSE-assisted private intake API (`start_private_intake` and
+  `PrivateIntakeSupervisor`), new Private Application Messages from a Linked
+  Peer now arrive through the homeserver event stream. Intake subscribed with
+  a path filter that the homeserver treats as one exact file, so the stream
+  matched no private message, and new messages waited for the healthy audit
+  (60 seconds by default).
 
 ### Integration
 
