@@ -43,8 +43,20 @@ impl Paykit {
     /// with its next receive; durable duty events remain the client's (Switch spec 12.4).
     pub(crate) async fn first_read_before_writing(&mut self) -> Result<()> {
         if self.first_read_pending() {
-            let summary = Box::pin(self.receive(None)).await?;
-            self.first_read_summary = Some(Box::new(summary));
+            // Allow one listing page per registered Paykit collection. A larger listing
+            // keeps its continuation; an unavailable key, identity or feed still holds.
+            let reads = crate::hold::RecordSide::All
+                .collections()
+                .len()
+                .div_ceil(pubky_switch_client::app::LISTING_PAGES_PER_READ as usize);
+            for _ in 0..reads {
+                let summary = Box::pin(self.receive(None)).await?;
+                let more = summary.report.more && !summary.report.stopped;
+                self.first_read_summary = Some(Box::new(summary));
+                if !self.first_read_pending() || !more || !self.app.listing_owed().await? {
+                    break;
+                }
+            }
         }
         self.require_first_read()?;
         // A host can read through the App, or reload between its commit and Paykit's.

@@ -219,7 +219,7 @@ current store.
 The `record` returned by `propose_allowance`, `allowance` and `allowances`
 is the account’s permanent Allowance key. The pending proposal lives at its
 own ordinary key until answered or withdrawn. Pass the returned key to
-`reject_allowance` or `end_allowance`.
+`reject_allowance`, `end_allowance` or `discard_pending_allowance`.
 
 Before creating a proposal, the wallet checks the current proposals for that
 counterparty. Sent and received proposals have separate counts. A wallet that

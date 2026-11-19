@@ -3357,7 +3357,15 @@ async fn test_certificate_refused_before_any_listing_of_paykit_reads_nothing() {
     assert!(is_not_now(&error), "{error:?}");
 }
 
-async fn restored_queued_reply_before_wider_keys(keys_present: bool) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RestoreListing {
+    MissingKeys,
+    DelayedPage,
+    Current,
+}
+
+async fn restored_queued_reply_before_wider_keys(listing: RestoreListing) {
+    let keys_present = listing != RestoreListing::MissingKeys;
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -3384,6 +3392,7 @@ async fn restored_queued_reply_before_wider_keys(keys_present: bool) {
     ));
     let me = wallet.app_id();
     let backup = wallet.backup().await.unwrap();
+    let earlier = w.alice.switch().tip_seq();
     let old = wallet.app().cert().clone();
     let wider = renew(
         &w,
@@ -3408,10 +3417,14 @@ async fn restored_queued_reply_before_wider_keys(keys_present: bool) {
     .await
     .unwrap();
     assert_eq!(restored.app().restore_held_cursor(), None);
+    if listing == RestoreListing::DelayedPage {
+        crate::common::delay_listing_pages(&w.alice, earlier);
+    }
+    let before = w.router.log().len();
     let mut result = restored.flush().await;
     assert_eq!(restored.app().cert().hash(), wider.hash());
-    if keys_present {
-        // This certificate reads more collections than fit in one native read.
+    if listing == RestoreListing::DelayedPage {
+        // The delayed page does not cover the reader in the current directory.
         assert!(matches!(
             result,
             Err(PaykitError::Client(AppError::Refused(
@@ -3419,6 +3432,7 @@ async fn restored_queued_reply_before_wider_keys(keys_present: bool) {
             )))
         ));
         assert_eq!(restored.app().restore_held_cursor(), None);
+        assert!(restored.app().listing_owed().await.unwrap());
         assert!(matches!(
             restored.message_delivery(&msg_id).await.unwrap(),
             Some(paykit_sdk::MessageDelivery::Queued { .. })
@@ -3429,7 +3443,24 @@ async fn restored_queued_reply_before_wider_keys(keys_present: bool) {
     }
     let verdict = restored.app().restore_held_cursor();
     if keys_present {
-        assert!(verdict.is_some(), "{result:?}");
+        result.as_ref().unwrap();
+        assert_eq!(verdict, Some(pubky_switch_client::app::HeldCursor::Clean));
+        assert!(!restored.app().listing_owed().await.unwrap());
+        // Every collection the renewed certificate reads and the first feed verdict
+        // precede delivery, including when the first flush completes the whole listing.
+        let requests = w.router.log();
+        let mut delivery =
+            requests[before..].split(|path| path.starts_with("POST ") && path.contains("/inbox?"));
+        let before_delivery = delivery.next().unwrap();
+        assert!(delivery.next().is_some());
+        assert!(delivery.next().is_none());
+        let listed: std::collections::BTreeSet<_> = before_delivery
+            .iter()
+            .filter(|path| path.contains(crate::common::ALICE_ORIGIN))
+            .filter_map(|path| path.split_once("records?collection=").map(|(_, id)| id))
+            .collect();
+        assert_eq!(listed.len(), client_listing_requests(&wider));
+        assert!(before_delivery.iter().any(|path| path.contains("/feed?")));
     } else {
         assert_eq!(verdict, None, "expected the actual client key/listing wait");
     }
@@ -3463,12 +3494,26 @@ async fn restored_queued_reply_before_wider_keys(keys_present: bool) {
 
 #[tokio::test]
 async fn test_restore_first_read_listing_key_wait_holds_the_queued_reply() {
-    Box::pin(restored_queued_reply_before_wider_keys(false)).await;
+    Box::pin(restored_queued_reply_before_wider_keys(
+        RestoreListing::MissingKeys,
+    ))
+    .await;
 }
 
 #[tokio::test]
 async fn test_restore_first_read_listing_with_keys_sends_the_queued_reply() {
-    Box::pin(restored_queued_reply_before_wider_keys(true)).await;
+    Box::pin(restored_queued_reply_before_wider_keys(
+        RestoreListing::DelayedPage,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn test_restore_first_flush_with_complete_listing_delivers_the_queued_reply() {
+    Box::pin(restored_queued_reply_before_wider_keys(
+        RestoreListing::Current,
+    ))
+    .await;
 }
 
 async fn wallet_with_multiple_listing_pages(w: &World, storage: Arc<dyn StateStore>) -> Paykit {

@@ -1537,6 +1537,8 @@ async fn test_own_record_restored_changes_wait_for_confirmed_first_read() {
             .await
             .unwrap();
         let backup = shop.backup().await.unwrap();
+        let earlier = w.bob.switch().tip_seq();
+        shop.app_mut().invite(&w.carol_id()).await.unwrap();
         let reads = Arc::new(ScriptedIdentityReads::new(
             Arc::clone(&w.homeserver),
             Arc::clone(&w.clock),
@@ -1571,7 +1573,8 @@ async fn test_own_record_restored_changes_wait_for_confirmed_first_read() {
             "{change:?}"
         );
         assert_eq!(restored.app().restore_held_cursor(), None);
-        // The app still needs the last collection page before it can publish.
+        // Collection pages from before the invitation cannot confirm the first read.
+        crate::common::delay_listing_pages(&w.bob, earlier);
         let pending = change_record(&mut restored, change).await.unwrap_err();
         assert!(
             matches!(
@@ -1583,6 +1586,7 @@ async fn test_own_record_restored_changes_wait_for_confirmed_first_read() {
             "{pending:?}"
         );
         assert_eq!(restored.app().restore_held_cursor(), None);
+        assert!(restored.app().listing_owed().await.unwrap());
         assert_eq!(restored.app().record(), &before);
         assert_eq!(
             on_homeserver(&w, &restored).unwrap().signed(),
