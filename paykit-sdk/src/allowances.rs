@@ -1701,7 +1701,10 @@ impl Paykit {
                 continue;
             }
             if self
-                .local_get::<PreparedPendingReply>(&key::pending_reply(&origin.record))
+                .local_get::<PreparedPendingReply>(&key::pending_reply(
+                    &origin.record,
+                    &origin.message_hash,
+                ))
                 .await?
                 .is_some_and(|prepared| {
                     prepared

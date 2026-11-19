@@ -73,7 +73,7 @@ async fn subscription_through_cancellation(world: &World, restore: bool) -> Test
         .into_iter()
         .map(PeriodRef::from)
         .collect();
-    let request = Box::pin(subscribe(world, &mut buyer, &mut shop, recurrence)).await?;
+    let request = Box::pin(subscribe(world, &mut buyer, &mut shop, recurrence, false)).await?;
     let sale = shop
         .payee_activity()
         .await?

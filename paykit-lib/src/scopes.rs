@@ -84,15 +84,6 @@ pub fn is_paykit_root(root: &str) -> bool {
     }
 }
 
-/// The Paykit Profile's path on the Homeserver (Paykit spec 3.4, 4): an app's grant covers it,
-/// read and write, only when the user allows that app to edit the Paykit Profile.
-pub const PAYKIT_PROFILE_PATH: &str = "/pub/paykit/profile.json";
-
-/// The folder of the Paykit Profile's files on the Homeserver, such as an image its
-/// `image_uri` names, as in v0.1 (Paykit spec 3.4): an app's grant covers it, read and write,
-/// with the Paykit Profile.
-pub const PAYKIT_PROFILE_BLOBS_PATH: &str = "/pub/paykit/blobs/";
-
 /// A label of a labelled selling scope `paykit_request:<label>` (Paykit spec 3.1): 1 to 32
 /// characters of `a-z`, `0-9` and `-`, starting with a letter or digit, the syntax of the
 /// Switch's sub-scope. `paykit` is a label like any other.

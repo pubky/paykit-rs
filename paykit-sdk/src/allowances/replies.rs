@@ -61,6 +61,10 @@ struct ReopenedProposal {
 }
 
 impl PendingRetirement {
+    pub(super) fn retires(&self, source: SeenVersion) -> bool {
+        source < self.version
+    }
+
     pub(crate) fn bind(&self, key: &[u8; 32], binder: &Binder<'_>) -> Result<()> {
         if self.key != *key
             || self.account != *binder.identity()
@@ -81,7 +85,7 @@ impl PendingRetirement {
         position: Option<FeedPosition>,
         order: impl Fn(FeedPosition, FeedPosition) -> Option<Ordering>,
     ) -> Option<Ordering> {
-        if source.is_some_and(|at| at < self.version) {
+        if source.is_some_and(|at| self.retires(at)) {
             return Some(Ordering::Less);
         }
         let end = self.version.record_version();
@@ -1264,6 +1268,7 @@ pub(crate) fn restore_conflicts(
     restoring: &pubky_switch_client::app::RestoreContext<'_>,
     binder: &Binder<'_>,
     mut imported: BTreeMap<[u8; 32], PendingConflict>,
+    mut prepared: BTreeMap<([u8; 32], [u8; 32]), super::PreparedPendingReply>,
     mut retirements: BTreeMap<[u8; 32], PendingRetirement>,
     mut replies: BTreeMap<String, KeptMessage>,
     writes: &mut Vec<LocalWrite>,
@@ -1281,8 +1286,55 @@ pub(crate) fn restore_conflicts(
         }
     }
     let retired = |key: &[u8; 32], source: SeenVersion| {
-        retirements.get(key).is_some_and(|r| source < r.version)
+        retirements.get(key).is_some_and(|r| r.retires(source))
     };
+    for (at, value) in restoring.previous_local_scan(key::PENDING_REPLIES.as_bytes())? {
+        let kept = state::restored::<super::PreparedPendingReply>(&at, &value, binder)?;
+        let Some(StateKey::PendingReply { record, reply }) = StateKey::parse(&at) else {
+            return Err(PaykitError::corrupt());
+        };
+        let signed = kept.message.stored(&kept.peer)?;
+        if prepared.get(&(record, reply)).is_some_and(|older| {
+            older.delete != kept.delete
+                || older.source != kept.source
+                || older.sealed_delete != kept.sealed_delete
+        }) {
+            return Err(PaykitError::corrupt());
+        }
+        if matches!(signed.body(), Body::AllowanceEnd(_)) {
+            let origin = key::end_origin(&signed.message().msg_id);
+            let previous = restoring.previous_local_scan(origin.as_bytes())?;
+            let (_, value) = previous
+                .into_iter()
+                .find(|(at, _)| at == origin.as_bytes())
+                .ok_or_else(PaykitError::corrupt)?;
+            let end = state::restored::<super::EndOrigin>(origin.as_bytes(), &value, binder)?;
+            if !end.matches(signed.message(), signed.hash()) || end.cause != super::EndCause::User {
+                return Err(PaykitError::corrupt());
+            }
+            writes.push(LocalWrite::Put {
+                key: origin.into_bytes(),
+                value,
+            });
+        }
+        prepared.insert((record, reply), kept);
+    }
+    let mut live = std::collections::BTreeSet::new();
+    for ((record, hash), answer) in prepared {
+        let signed = answer.message.stored(&answer.peer)?;
+        let id = named_allowance(signed.body()).ok_or_else(PaykitError::corrupt)?;
+        let target = allowance_record_target(Collection::AllowanceProposals, &answer.peer, id);
+        let pending = binder.record_key(&target)?;
+        // A later lifetime can have its own answer while the earlier one still awaits
+        // its exact deletion proof. Two different choices for one live lifetime cannot.
+        if !retired(&pending, answer.source) && !live.insert(record) {
+            return Err(PaykitError::corrupt());
+        }
+        writes.push(state::local_put(
+            &key::pending_reply(&record, &hash),
+            &answer,
+        )?);
+    }
     // A matched Q may still be owed before the first opposing reply arrives.
     for (at, bytes) in restoring.previous_local_scan(key::KEPT_REPLIES.as_bytes())? {
         let held = state::restored::<KeptMessage>(&at, &bytes, binder)?;

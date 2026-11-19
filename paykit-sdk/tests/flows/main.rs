@@ -18,6 +18,7 @@ mod destinations;
 mod discovery_state;
 mod divergent;
 mod erasure;
+mod extensions;
 mod final_check;
 mod hold_confirmation;
 mod labels;

@@ -62,8 +62,7 @@ use crate::conversion::{self, Priced, PricedPayment, RateSource};
 use crate::destination::{payee_copy_usable, Carrier, Need};
 use crate::error::{PaykitError, Refusal, Result};
 use crate::journal::{
-    Destination, JournalEntry, KeptAmount, KeptPrice, KeptRateSource, PaymentView, Stage,
-    TransferBound,
+    Destination, JournalEntry, KeptAmount, KeptPrice, PaymentView, Stage, TransferBound,
 };
 use crate::notices::NoticeKind;
 use crate::paykit::Paykit;
@@ -129,8 +128,12 @@ pub struct PayOptions {
     ///
     /// A destination no rate prices, of the requested asset, is paid the request's amount
     /// without it, on a call carrying a confirmation too, as [`Self::transfer_confirmed`]
-    /// says: the confirmed payment is then not used.
+    /// says. A Billing Period previously confirmed at its signed period rate waits for a
+    /// new choice if that rate becomes unusable (Paykit spec 8.2).
     pub rate_confirmed: Option<PricedPayment>,
+    /// The signed rate details to use for a Billing Period, identified by their message ID.
+    /// By default the latest usable details that price the chosen endpoint are used.
+    pub period_details: Option<String>,
     /// The user has seen that the payee's switch couldn't confirm the payee's apps, and pays
     /// anyway ([`Refusal::IdentityUnconfirmed`]; Switch spec 4.3, Paykit spec 7.2).
     pub unconfirmed_identity_confirmed: Option<UserConfirmed>,
@@ -196,6 +199,23 @@ impl PayOptions {
     pub fn with_rate_confirmed(mut self, payment: PricedPayment) -> Self {
         self.rate_confirmed = Some(payment);
         self
+    }
+
+    /// Select the signed rate details of this Billing Period (Paykit spec 8.2).
+    #[must_use]
+    pub fn with_period_details(mut self, msg_id: impl Into<String>) -> Self {
+        self.period_details = Some(msg_id.into());
+        self
+    }
+
+    /// An explicit choice, or the still-valid signed details whose amount the user accepted.
+    pub(crate) fn selected_period_rate(&self) -> Option<&str> {
+        self.period_details
+            .as_deref()
+            .or_else(|| match &self.rate_confirmed.as_ref()?.source {
+                RateSource::PeriodDetails { msg_id } => Some(msg_id.as_str()),
+                RateSource::Request => None,
+            })
     }
 
     /// The user has seen that the payee's switch couldn't confirm the payee's apps, and pays
@@ -593,79 +613,92 @@ pub(crate) struct Pricing<'a> {
     requested: &'a PaymentAmount,
     /// The request paid; `None` for a payment without a request, which pays its own amount.
     request: Option<RequestRef>,
-    /// Where the rates come from, and the rates; `None` for a payment no rate prices.
-    rates: Option<(RateSource, &'a [Rate])>,
-    /// Whether conversion terms constrain an endpoint whose rates are unavailable.
-    conversion: bool,
-    /// Who starts the payment: an automatic payment pays nothing a rate prices.
+    rates: Rates<'a>,
     by: Initiator,
 }
 
+/// The signed sources of prices for the endpoints of a payment (Paykit wire 4.4, 4.9).
+enum Rates<'a> {
+    None,
+    Fixed(&'a [Rate]),
+    /// Usable details of the selected occurrence, latest first.
+    Period(Vec<&'a StoredMessage>),
+}
+
 impl<'a> Pricing<'a> {
-    /// A payment without a request, of its own amount `amount` (Paykit spec 8.4).
     pub(crate) fn unrequested(amount: &'a PaymentAmount) -> Self {
         Self {
             requested: amount,
             request: None,
-            rates: None,
-            conversion: false,
+            rates: Rates::None,
             by: Initiator::User,
         }
     }
 
-    /// A payment of `request`, for `requested`, under its conversion terms. Until a
-    /// period's rates are selected, only an endpoint of the requested asset is usable.
     pub(crate) fn of_request(
         requested: &'a PaymentAmount,
         request: RequestRef,
         conversion: Option<&'a paykit_lib::bodies::Conversion>,
         by: Initiator,
     ) -> Self {
-        if let Some(rates) = conversion::fixed_rates(conversion) {
-            return Self::by_rates(requested, request, RateSource::Request, rates, by);
-        }
+        let rates = match conversion::fixed_rates(conversion) {
+            Some(rates) => Rates::Fixed(rates),
+            None if conversion.is_some() => Rates::Period(Vec::new()),
+            None => Rates::None,
+        };
         Self {
             requested,
             request: Some(request),
-            rates: None,
-            conversion: conversion.is_some(),
+            rates,
             by,
         }
     }
 
-    /// A payment of `request`, for `requested`, priced by `rates` from `source`: the
-    /// request's fixed rates, or a Billing Period's period details'.
-    pub(crate) fn by_rates(
-        requested: &'a PaymentAmount,
-        request: RequestRef,
-        source: RateSource,
-        rates: &'a [Rate],
-        by: Initiator,
-    ) -> Self {
-        Self {
-            requested,
-            request: Some(request),
-            rates: Some((source, rates)),
-            conversion: true,
-            by,
-        }
+    pub(crate) fn with_period_rates(mut self, details: Vec<&'a StoredMessage>) -> Self {
+        self.rates = Rates::Period(details);
+        self
     }
 
+    /// Price this endpoint and retain the exact signed details supplying its rate.
     pub(crate) fn price(
         &self,
         rail: &dyn crate::Rail,
         endpoint: &PaymentEndpointIdentifier,
-    ) -> Priced {
-        let price = conversion::price(
-            rail,
-            self.requested,
-            self.rates.as_ref().map(|(_, rates)| *rates),
-            endpoint,
-        );
-        if self.conversion && self.rates.is_none() && matches!(price, Priced::ByHand(_)) {
-            return Priced::Unusable("Paykit spec 8.2: no period details price this endpoint");
+        usable: impl Fn(&StoredMessage) -> bool,
+    ) -> (Priced, Option<&'a StoredMessage>) {
+        let (rates, source) = match &self.rates {
+            Rates::None => (None, None),
+            Rates::Fixed(rates) => (Some(*rates), None),
+            Rates::Period(details) => {
+                let selected = details
+                    .iter()
+                    .copied()
+                    .filter(|signed| usable(signed))
+                    .find_map(|signed| {
+                        let Body::PaymentPeriodDetails(body) = signed.body() else {
+                            return None;
+                        };
+                        let rates = body.rates.as_deref()?;
+                        matches!(paykit_lib::rate_for_endpoint(rates, endpoint), Ok(Some(_)))
+                            .then_some((rates, signed))
+                    });
+                match selected {
+                    Some((rates, signed)) => (Some(rates), Some(signed)),
+                    None => (None, None),
+                }
+            }
+        };
+        let price = conversion::price(rail, self.requested, rates, endpoint);
+        if matches!(self.rates, Rates::Period(_))
+            && source.is_none()
+            && matches!(price, Priced::ByHand(_))
+        {
+            return (
+                Priced::Unusable("Paykit spec 8.2: no period details price this endpoint"),
+                None,
+            );
         }
-        price
+        (price, source)
     }
 }
 
@@ -711,15 +744,25 @@ fn transfer_refused(
         .then_some("a fee above the app's cap")
 }
 
-/// Whether the rates a payment priced by `price` was confirmed by are still usable, at the
-/// final payment check just before each call (Paykit spec 7.2, 8.2); a payment no rate
-/// prices, `None`, always passes. The request's fixed rates stay usable for as long as the
-/// request may be paid. The rates of period details are usable only while the device clock
-/// and the latest service time verified are within their validity, which the payment of a
-/// Billing Period checks; this check takes none of them. `automatic_first` is a first
-/// dispatch of an automatic payment, which never pays one priced by a rate (Paykit spec 8.3).
-fn rates_usable(price: Option<&KeptPrice>, automatic_first: bool) -> bool {
-    price.is_none_or(|price| !automatic_first && price.source == KeptRateSource::Request)
+/// Whether the confirmed rate can be used at dispatch (Paykit spec 7.2, 8.2).
+/// A fixed rate lasts as long as its request. A period rate needs both clocks.
+fn rates_usable(
+    price: Option<&RateSource>,
+    automatic_first: bool,
+    selected: Option<&StoredMessage>,
+    device: u64,
+    service: Option<u64>,
+) -> bool {
+    price.is_none_or(|source| {
+        !automatic_first
+            && match source {
+                RateSource::Request => true,
+                RateSource::PeriodDetails { msg_id } => selected.is_some_and(|details| {
+                    &details.message().msg_id == msg_id
+                        && crate::periods::rates_current(details, device, service)
+                }),
+            }
+    })
 }
 
 /// The amount a payment of a request that no rate prices pays now, `priced` without rates,
@@ -1036,6 +1079,18 @@ impl Paykit {
         by: Initiator,
         public_failures: &mut Vec<PublicAppFailure>,
     ) -> Result<PayOutcome> {
+        // Finish the request reads before polling the payment and its outgoing messages.
+        let plan = Box::pin(self.plan_request(request, options, by, public_failures)).await?;
+        Box::pin(self.execute(plan)).await
+    }
+
+    async fn plan_request(
+        &mut self,
+        request: &RequestRef,
+        options: PayOptions,
+        by: Initiator,
+        public_failures: &mut Vec<PublicAppFailure>,
+    ) -> Result<Plan> {
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
@@ -1178,7 +1233,7 @@ impl Paykit {
             failed_on_claim: false,
             billing_period: None,
         };
-        self.execute(Plan {
+        Ok(Plan {
             entry,
             record: target,
             carrier,
@@ -1193,7 +1248,6 @@ impl Paykit {
             conditions: Vec::new(),
             record_writes: Vec::new(),
         })
-        .await
     }
 
     /// Choose the request's destination under its accepted identifiers and pricing
@@ -1252,7 +1306,21 @@ impl Paykit {
                     )
                     .into());
                 }
-                self.choose(payee, gathered, pricing, options)?
+                let identity = if matches!(&pricing.rates, Rates::Period(details) if !details.is_empty())
+                {
+                    Some(
+                        self.payee_identity(
+                            payee,
+                            Need::FreshCopy,
+                            pricing.by,
+                            options.unconfirmed_identity_confirmed,
+                        )
+                        .await??,
+                    )
+                } else {
+                    None
+                };
+                self.choose(payee, gathered, pricing, options, identity.as_ref())?
                     .ok_or_else(|| unsupported("the request's endpoints"))?
             }
             // The request's accepted identifiers restrict a destination from the payee's lists
@@ -1776,7 +1844,7 @@ impl Paykit {
         if let PaymentMode::Public(_) = options.mode {
             // The failures go into the call's list as each app is judged, so an error later in
             // the read still returns those found before it ([`PayResult`]).
-            let (_, mut records) = self
+            let (identity, mut records) = self
                 .public_records(
                     payee,
                     app,
@@ -1816,7 +1884,7 @@ impl Paykit {
                 return Err(Refusal::NoDestination(text).into());
             }
             return self
-                .choose(payee, gathered, pricing, options)?
+                .choose(payee, gathered, pricing, options, Some(&identity))?
                 .ok_or_else(|| unsupported("the payee's public endpoints"));
         }
         let read = self.lists_read_of(payee).await?;
@@ -1988,14 +2056,15 @@ impl Paykit {
         // Endpoints the conversion terms leave unusable refuse the payment for that, unless a
         // list has expired or is used up: a newer list may serve then, and the payee is asked
         // for it as below.
-        let unusable_by_terms = match self.choose(payee, gathered, pricing, options) {
-            Ok(Some(chosen)) => return Ok(chosen),
-            Ok(None) => None,
-            Err(error) if matches!(error.refusal(), Some(Refusal::UnsupportedEndpoint(_))) => {
-                Some(error)
-            }
-            Err(error) => return Err(error),
-        };
+        let unusable_by_terms =
+            match self.choose(payee, gathered, pricing, options, identity.as_ref()) {
+                Ok(Some(chosen)) => return Ok(chosen),
+                Ok(None) => None,
+                Err(error) if matches!(error.refusal(), Some(Refusal::UnsupportedEndpoint(_))) => {
+                    Some(error)
+                }
+                Err(error) => return Err(error),
+            };
         if let Some(error) = unusable_by_terms {
             if !expired && !used_up {
                 return Err(error);
@@ -2103,6 +2172,7 @@ impl Paykit {
         gathered: Vec<Choice>,
         pricing: &Pricing<'_>,
         options: &PayOptions,
+        identity: Option<&PeerIdentity>,
     ) -> Result<Option<Chosen>> {
         if gathered.is_empty() {
             return Ok(None);
@@ -2116,7 +2186,7 @@ impl Paykit {
                 continue;
             };
             let (amount, price, by_hand) =
-                match self.price_choice(&choice.destination, pricing, options) {
+                match self.price_choice(&choice.destination, pricing, options, identity) {
                     Ok(Taken::Pay(amount, price)) => (amount, price, false),
                     Ok(Taken::ByHand(amount)) => (amount, None, true),
                     Ok(Taken::Unusable(why)) => {
@@ -2188,13 +2258,28 @@ impl Paykit {
         destination: &Destination,
         pricing: &Pricing<'_>,
         options: &PayOptions,
+        identity: Option<&PeerIdentity>,
     ) -> Result<Taken> {
         let Some(request) = pricing.request else {
             return Ok(Taken::Pay(pricing.requested.clone(), None));
         };
         let endpoint_id = destination.endpoint_id()?;
-        let priced = pricing.price(&*self.rail, &endpoint_id);
+        let (priced, details) = pricing.price(&*self.rail, &endpoint_id, |signed| {
+            let now = self.now();
+            crate::periods::rates_current(signed, now, self.service_time())
+                && identity.is_some_and(|peer| {
+                    crate::destination::current_rate_source(&peer.doc, signed, now).is_ok()
+                })
+        });
         let (rate, amount) = match priced {
+            Priced::Plain(_)
+                if matches!(pricing.rates, Rates::Period(_))
+                    && options.selected_period_rate().is_some() =>
+            {
+                return Ok(Taken::Unusable(
+                    "Paykit spec 8.2: the selected period rate does not price this endpoint",
+                ));
+            }
             Priced::Plain(amount) => return Ok(Taken::Pay(amount, None)),
             // Never paid automatically, whatever the method would transfer (Paykit spec 7.2
             // step 1): a method that converts by itself would report the requested amount.
@@ -2205,9 +2290,9 @@ impl Paykit {
             Priced::Unusable(why) => return Ok(Taken::Unusable(why)),
             Priced::ByRate { rate, amount } => (rate, amount),
         };
-        let Some((source, _)) = &pricing.rates else {
-            return Err(PaykitError::corrupt());
-        };
+        let source = details.map_or(RateSource::Request, |signed| RateSource::PeriodDetails {
+            msg_id: signed.message().msg_id.clone(),
+        });
         let payload = destination.payload()?;
         let shown = PricedPayment {
             request,
@@ -2215,7 +2300,7 @@ impl Paykit {
             endpoint_id,
             payload_hash: pubky_switch_core::enc::hash(payload.as_str().as_bytes()),
             requested: pricing.requested.clone(),
-            source: source.clone(),
+            source,
             rate,
             amount,
         };
@@ -2223,7 +2308,7 @@ impl Paykit {
         if pricing.by == Initiator::User && options.rate_confirmed.as_ref() == Some(&shown) {
             return Ok(Taken::Pay(
                 shown.amount.clone(),
-                Some(KeptPrice::of(&shown)),
+                Some(KeptPrice::of(&shown, details)),
             ));
         }
         Err(Refusal::PricedByRate {
@@ -2393,9 +2478,10 @@ impl Paykit {
     fn transfer_holds(
         &self,
         entry: &JournalEntry,
+        payee: &PeerIdentity,
         automatic_first: bool,
     ) -> Result<std::result::Result<(), Refusal>> {
-        let by_hand = match self.amount_holds(entry, automatic_first)? {
+        let by_hand = match self.amount_holds(entry, payee, automatic_first)? {
             Ok(by_hand) => by_hand,
             Err(refusal) => return Ok(Err(refusal)),
         };
@@ -2462,6 +2548,7 @@ impl Paykit {
     fn amount_holds(
         &self,
         entry: &JournalEntry,
+        payee: &PeerIdentity,
         automatic_first: bool,
     ) -> Result<std::result::Result<bool, Refusal>> {
         if entry.request_hash()?.is_none() {
@@ -2513,7 +2600,19 @@ impl Paykit {
             }
             Priced::Plain(_) | Priced::ByHand(_) | Priced::Unusable(_) => false,
         };
-        if holds && rates_usable(Some(price), automatic_first) {
+        let selected = match self.current_rate_details(entry, payee)? {
+            Ok(details) => details,
+            Err(refusal) => return Ok(Err(refusal)),
+        };
+        if holds
+            && rates_usable(
+                Some(&shown.source),
+                automatic_first,
+                selected.as_ref(),
+                self.now(),
+                self.service_time(),
+            )
+        {
             return Ok(Ok(false));
         }
         Ok(Err(Refusal::PricedByRate {
@@ -2565,7 +2664,7 @@ impl Paykit {
         // payee's switch couldn't confirm it needs the user's confirmation first, and an
         // automatic one isn't made (Paykit spec 7.2 step 1, Switch spec 4.3).
         let request_hash = entry.request_hash()?;
-        if let Err(refusal) = self
+        let identity = self
             .check_destination(
                 &entry.payee,
                 &entry.destination,
@@ -2574,10 +2673,8 @@ impl Paykit {
                 by,
                 unconfirmed,
             )
-            .await?
-        {
-            return Err(refusal.into());
-        }
+            .await??;
+        self.current_rate_details(&entry, &identity)??;
         self.activity_write_base(&self.activity_key(&record)?)
             .await?;
         let op = ClaimOp::attempt(
@@ -3546,7 +3643,17 @@ impl Paykit {
         changed |= self.place_acceptance(&mut record, entry)?;
         if let Some(proof) = proof {
             if let PaidProof::New(proof) = proof {
-                changed |= activity::place(&mut record, Role::Proof, self.own_copy(proof)?);
+                let proof = self.own_copy(proof)?;
+                if activity::names_details_not_held(&record, &proof) {
+                    let details = entry
+                        .selected_rate_details(&self.identity())?
+                        .ok_or_else(PaykitError::corrupt)?;
+                    changed |= activity::place(&mut record, Role::PeriodDetails, details);
+                    if activity::names_details_not_held(&record, &proof) {
+                        return Ok(OutcomeRecord::Held);
+                    }
+                }
+                changed |= activity::place(&mut record, Role::Proof, proof);
             }
             if entry.billing_period.is_some() {
                 // The claim can expire. The payer must then be able to bind the
@@ -3709,7 +3816,12 @@ impl Paykit {
             payment_reference: None,
             proof: entry.rail_proof.clone().ok_or_else(PaykitError::corrupt)?,
         };
-        let refs: Vec<[u8; 32]> = request_hash.into_iter().collect();
+        let mut refs: Vec<[u8; 32]> = request_hash.into_iter().collect();
+        refs.extend(
+            entry
+                .selected_rate_details(&self.identity())?
+                .map(|signed| signed.hash()),
+        );
         if entry.billing_period.is_some() {
             if let Some(record) = self.held_activity(target).await? {
                 if let Some(original) = record.proof {
@@ -4658,6 +4770,24 @@ impl Paykit {
             && payee_copy_usable(now, payee, Need::of(carrier), by, confirmed)
     }
 
+    /// Check the independent rate signer's certificate against the destination's current
+    /// payee identity. The journal retains the signed message and its certificate.
+    fn current_rate_details(
+        &self,
+        entry: &JournalEntry,
+        payee: &PeerIdentity,
+    ) -> Result<std::result::Result<Option<StoredMessage>, Refusal>> {
+        let selected = entry.selected_rate_details(&self.identity())?;
+        if let Some(details) = &selected {
+            if let Err(reason) =
+                crate::destination::current_rate_source(&payee.doc, details, self.now())
+            {
+                return Ok(Err(Refusal::Destination(reason)));
+            }
+        }
+        Ok(Ok(selected))
+    }
+
     /// Checks 2 to 6 of the final payment check, with no await, on the clock now and the
     /// payee's copy `payee`, and for a first dispatch the pre-dispatch budget
     /// ([`Paykit::within_budget`]).
@@ -4673,7 +4803,7 @@ impl Paykit {
             return Ok(FinalCheck::Hold);
         }
         let automatic_first = by == Initiator::Automatic && matches!(kind, Dispatch::First { .. });
-        if let Err(refusal) = self.transfer_holds(entry, automatic_first)? {
+        if let Err(refusal) = self.transfer_holds(entry, payee, automatic_first)? {
             return Ok(FinalCheck::Refused(refusal));
         }
         let may_attempt = self.app.may_attempt(by == Initiator::Automatic).is_ok();
@@ -4859,6 +4989,9 @@ impl Paykit {
             &doc.doc,
             self.now(),
         ) {
+            return Ok(Err(Held::Check(refusal)));
+        }
+        if let Err(refusal) = self.current_rate_details(entry, &doc)? {
             return Ok(Err(Held::Check(refusal)));
         }
         if let Err(why) = self.own_identity_authorizes(entry, self.now()) {
@@ -5063,13 +5196,19 @@ mod tests {
         let rail = crate::rail::FakeRail::new();
         let own = PaymentEndpointIdentifier::new("usd-ach-account").unwrap();
         let other = PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
-        let Priced::Plain(amount) = pricing.price(&rail, &own) else {
+        let Priced::Plain(amount) = pricing.price(&rail, &own, |_| true).0 else {
             panic!("unpriced requested asset")
         };
         assert_eq!(amount.value, paykit_lib::Decimal::new("1.01").unwrap());
-        assert!(matches!(pricing.price(&rail, &other), Priced::Unusable(_)));
+        assert!(matches!(
+            pricing.price(&rail, &other, |_| true).0,
+            Priced::Unusable(_)
+        ));
         let plain = Pricing::of_request(&requested, request, None, Initiator::User);
-        assert!(matches!(plain.price(&rail, &other), Priced::ByHand(_)));
+        assert!(matches!(
+            plain.price(&rail, &other, |_| true).0,
+            Priced::ByHand(_)
+        ));
     }
 
     #[test]
@@ -5113,23 +5252,26 @@ mod tests {
     }
 
     #[test]
-    fn test_rates_usable_only_for_the_requests_rates_by_hand() {
-        let price = |source: KeptRateSource| KeptPrice {
-            rate_asset: "btc".into(),
-            rate_value: "0.00001".into(),
-            source,
-        };
-        let fixed = price(KeptRateSource::Request);
-        let details = price(KeptRateSource::PeriodDetails {
+    fn test_dispatch_rates_require_a_manual_payment_and_the_signed_source() {
+        assert!(rates_usable(None, true, None, 0, None));
+        assert!(rates_usable(
+            Some(&RateSource::Request),
+            false,
+            None,
+            0,
+            None
+        ));
+        assert!(!rates_usable(
+            Some(&RateSource::Request),
+            true,
+            None,
+            0,
+            None
+        ));
+        let details = RateSource::PeriodDetails {
             msg_id: "details".into(),
-        });
-        // A payment no rate prices always passes; the request's fixed rates pass by hand.
-        assert!(rates_usable(None, true));
-        assert!(rates_usable(Some(&fixed), false));
-        // An automatic first dispatch never pays one priced by a rate.
-        assert!(!rates_usable(Some(&fixed), true));
-        // Period details' rates aren't taken here.
-        assert!(!rates_usable(Some(&details), false));
+        };
+        assert!(!rates_usable(Some(&details), false, None, 0, None));
     }
 
     #[test]

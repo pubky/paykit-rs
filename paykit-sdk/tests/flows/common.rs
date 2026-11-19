@@ -586,6 +586,7 @@ pub struct ListsStore {
     flagged_unknown: std::sync::atomic::AtomicBool,
     unknown: std::sync::atomic::AtomicBool,
     deny_fails: std::sync::atomic::AtomicBool,
+    pending_unblocks_unreadable: std::sync::atomic::AtomicBool,
 }
 
 impl ListsStore {
@@ -624,6 +625,11 @@ impl ListsStore {
         self.deny_fails
             .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
+
+    pub fn pending_unblocks_unreadable(&self, unreadable: bool) {
+        self.pending_unblocks_unreadable
+            .store(unreadable, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl StateStore for ListsStore {
@@ -634,6 +640,13 @@ impl StateStore for ListsStore {
     ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
         if self.unknown.load(std::sync::atomic::Ordering::SeqCst) && key == b"lc/lists_at" {
             return Ok(None);
+        }
+        if key == b"p/paykit/bf"
+            && self
+                .pending_unblocks_unreadable
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(pubky_switch_client::error::StoreError::Unavailable);
         }
         if self.deny_fails.load(std::sync::atomic::Ordering::SeqCst) && key.starts_with(b"lc/deny/")
         {

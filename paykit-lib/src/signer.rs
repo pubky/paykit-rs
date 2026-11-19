@@ -25,12 +25,9 @@
 //! hand-over judges the same certificates the same way.
 
 use pubky_switch_core::scopes::Permission;
-use pubky_switch_signer::{GrantPath, Protocol, ScopeDef};
+use pubky_switch_signer::{Protocol, ScopeDef};
 
-use crate::scopes::{
-    check_requested_scopes, holds_paykit_scope, permissions_for, PAYKIT_PREFIX,
-    PAYKIT_PROFILE_BLOBS_PATH, PAYKIT_PROFILE_PATH, PAYKIT_SCOPE_NAMES,
-};
+use crate::scopes::{check_requested_scopes, permissions_for, PAYKIT_PREFIX, PAYKIT_SCOPE_NAMES};
 
 /// Paykit's protocol on the Switch, for the signer's `Protocols` set.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -39,12 +36,6 @@ pub struct PaykitProtocol;
 /// The one of Paykit's scope names without keys (Paykit spec 3.5): `paykit_ext`, whose
 /// extension scopes `paykit_ext:<prefix>` have none.
 const UNKEYED_ROOT: &str = crate::scopes::EXTENSION;
-
-/// What the host shows the user for the Paykit Profile's grant path.
-const PROFILE_PURPOSE: &str = "Edit the Paykit Profile, the identity's public payment profile";
-
-/// What the host shows the user for the grant path of the Paykit Profile's files.
-const BLOBS_PURPOSE: &str = "Store the Paykit Profile's files, such as its image";
 
 fn owned(scopes: &[&str]) -> Vec<String> {
     scopes.iter().map(|s| (*s).to_owned()).collect()
@@ -93,26 +84,6 @@ impl Protocol for PaykitProtocol {
     fn permissions(&self, scopes: &[&str]) -> Vec<Permission> {
         permissions_for(&owned(scopes))
     }
-
-    /// The Paykit Profile, `/pub/paykit/profile.json`, and its files, `/pub/paykit/blobs/`,
-    /// offered to every app holding a Paykit scope: the user allows them or not at approval,
-    /// and only an app the user allows edits them (Paykit spec 3.4).
-    fn grant_paths(&self, app_id: &[u8; 16], scopes: &[&str]) -> Vec<GrantPath> {
-        let _ = app_id;
-        if !holds_paykit_scope(&owned(scopes)) {
-            return Vec::new();
-        }
-        vec![
-            GrantPath {
-                path: PAYKIT_PROFILE_PATH.to_owned(),
-                purpose: PROFILE_PURPOSE.to_owned(),
-            },
-            GrantPath {
-                path: PAYKIT_PROFILE_BLOBS_PATH.to_owned(),
-                purpose: BLOBS_PURPOSE.to_owned(),
-            },
-        ]
-    }
 }
 
 #[cfg(test)]
@@ -121,7 +92,7 @@ mod tests {
 
     use pubky_switch_core::keys::{AppKeys, IdentityKey};
     use pubky_switch_core::records::{AppCert, AppCertBody};
-    use pubky_switch_signer::{Protocols, Refusal, ScopeTerms, SignerError};
+    use pubky_switch_signer::{GrantPath, Protocols, Refusal, ScopeTerms, SignerError};
 
     use super::*;
     use crate::scopes::{check_certificate, keyed_scopes};
@@ -141,6 +112,12 @@ mod tests {
         }
         fn permissions(&self, _: &[&str]) -> Vec<Permission> {
             vec![Permission::ConversationAdd, Permission::ListsRead]
+        }
+        fn grant_paths(&self, _: &[u8; 16], _: &[&str]) -> Vec<GrantPath> {
+            vec![GrantPath {
+                path: "/pub/chat/status".into(),
+                purpose: "Publish chat status".into(),
+            }]
         }
     }
 
@@ -343,33 +320,46 @@ mod tests {
     }
 
     #[test]
-    fn test_signer_protocol_offers_the_paykit_profile_and_its_files() {
+    fn test_signer_protocol_adds_no_homeserver_paths() {
+        let protocols = paykit();
+        for scopes in [
+            &["paykit_pay", "paykit_contacts"][..],
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+            &EXECUTOR,
+        ] {
+            let scopes = names(scopes);
+            protocols.terms(&scopes).unwrap();
+            assert!(protocols.grant_paths(&[3; 16], &scopes).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn test_signer_protocol_accepts_the_apps_record_and_backup_and_protects_the_signers_paths() {
+        use pubky_switch_core::records::{
+            app_backup_path, app_record_path, check_caps, IDENTITY_PATH, SIGNER_BACKUP_PATH,
+        };
+
+        let app_id = [7; 16];
+        let paths = paykit().grant_paths(&app_id, &names(&EXECUTOR)).unwrap();
+        let extra: Vec<_> = paths.iter().map(|path| path.path.as_str()).collect();
+        let record = format!("{}:rw", app_record_path(&app_id));
+        check_caps(&record, &app_id, &extra).unwrap();
+        let backup = app_backup_path(&app_id);
+        check_caps(&format!("{record},{backup}:rw"), &app_id, &extra).unwrap();
+        for path in [IDENTITY_PATH, SIGNER_BACKUP_PATH, "/pub/"] {
+            assert!(check_caps(&format!("{record},{path}:rw"), &app_id, &extra).is_err());
+        }
+    }
+
+    #[test]
+    fn test_signer_protocol_preserves_another_protocols_grant_path() {
         let protocols = Protocols::new(vec![Arc::new(PaykitProtocol), Arc::new(Chat)]).unwrap();
-        let paths = protocols
-            .grant_paths(
-                &[3; 16],
-                &names(&[
-                    "paykit_request:shop1",
-                    "paykit_settlements",
-                    "paykit_contacts",
-                    "chat",
-                ]),
-            )
-            .unwrap();
-        assert_eq!(paths.len(), 2);
-        assert_eq!(paths[0].path, "/pub/paykit/profile.json");
-        assert_eq!(paths[1].path, "/pub/paykit/blobs/");
-        assert!(protocols
-            .grant_paths(&[3; 16], &names(&["chat"]))
-            .unwrap()
-            .is_empty());
-        // A paying app's request holds the `paykit_contacts` that `paykit_pay` requires, and is
-        // offered the Paykit Profile too.
-        let wallet = names(&["paykit_pay", "paykit_contacts"]);
-        protocols.terms(&wallet).unwrap();
-        let paths = protocols.grant_paths(&[3; 16], &wallet).unwrap();
-        assert_eq!(paths.len(), 2);
-        assert_eq!(paths[0].path, "/pub/paykit/profile.json");
+        let scopes = names(&["paykit_pay", "paykit_contacts", "chat"]);
+        protocols.terms(&scopes).unwrap();
+        let paths = protocols.grant_paths(&[3; 16], &scopes).unwrap();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].path, "/pub/chat/status");
+        assert_eq!(paths[0].purpose, "Publish chat status");
     }
 
     #[test]
@@ -472,28 +462,5 @@ mod tests {
                 "{scopes:?}"
             );
         }
-    }
-
-    #[test]
-    fn test_signer_protocol_grant_paths_cover_neither_identity_json_nor_the_backup() {
-        // The signer refuses a capability covering the Switch's `identity.json` or its
-        // backup, which only it writes (Switch spec 3.4, 12.8): no grant path Paykit offers
-        // is one, or a folder holding one.
-        use pubky_switch_core::records::{IDENTITY_PATH, SIGNER_BACKUP_PATH};
-        let covers = |path: &str, file: &str| {
-            path == file || (path.ends_with('/') && file.starts_with(path))
-        };
-        let paths = PaykitProtocol.grant_paths(&[7; 16], &EXECUTOR);
-        assert!(!paths.is_empty());
-        for granted in &paths {
-            for file in [IDENTITY_PATH, SIGNER_BACKUP_PATH] {
-                assert!(
-                    !covers(&granted.path, file),
-                    "{} covers {file}",
-                    granted.path
-                );
-            }
-        }
-        assert!(covers("/pub/", IDENTITY_PATH), "a folder holding it would");
     }
 }

@@ -94,16 +94,31 @@ async fn test_two_payee_wallets_reopen_the_same_manual_period_receipt() -> TestR
         let Some(world) = World::start(backend)? else {
             continue;
         };
-        let result = Box::pin(manual_period(&world)).await;
+        let result = Box::pin(manual_period(&world, false)).await;
         world.close().await?;
         result?;
     }
     Ok(())
 }
 
-async fn manual_period(world: &World) -> TestResult {
-    use paykit_lib::periods::{AnchoredRule, Recurrence, Unit};
+#[tokio::test]
+async fn test_two_wallets_settle_a_period_at_its_signed_rate() -> TestResult {
+    for backend in [Backend::Scripted, Backend::Service] {
+        let Some(world) = World::start(backend)? else {
+            continue;
+        };
+        let result = Box::pin(manual_period(&world, true)).await;
+        world.close().await?;
+        result?;
+    }
+    Ok(())
+}
 
+async fn period_wallets(
+    world: &World,
+    buyer_store: Arc<MemoryStore>,
+    rail: &Arc<FakeRail>,
+) -> TestResult<(Paykit, Paykit, Signer)> {
     let mut buyer_signer = Box::pin(setup_identity(
         world,
         "subscriber",
@@ -112,15 +127,14 @@ async fn manual_period(world: &World) -> TestResult {
     .await?;
     let mut shop_signer =
         Box::pin(setup_identity(world, "shop", "https://shop.payment.test")).await?;
-    let rail = Arc::new(FakeRail::with_clock(world.clock().clone()));
     let mut buyer = Box::pin(join(
         world,
         &mut buyer_signer,
         "subscriber",
         "subscriber-app",
         AppScopes::new().pay().manage_contacts().build()?,
-        Arc::new(MemoryStore::new()),
-        &rail,
+        buyer_store,
+        rail,
     ))
     .await?;
     let mut shop = Box::pin(join(
@@ -130,20 +144,70 @@ async fn manual_period(world: &World) -> TestResult {
         "period-till",
         AppScopes::new().request().manage_contacts().build()?,
         Arc::new(MemoryStore::new()),
-        &rail,
+        rail,
     ))
     .await?;
     buyer.app_mut().invite(&shop.identity()).await?;
     shop.app_mut().invite(&buyer.identity()).await?;
+    Ok((buyer, shop, shop_signer))
+}
+
+async fn manual_period(world: &World, priced: bool) -> TestResult {
+    use paykit_lib::periods::{AnchoredRule, Recurrence, Unit};
+
+    let rail = Arc::new(FakeRail::with_clock(world.clock().clone()));
+    let (mut buyer, mut shop, mut shop_signer) =
+        Box::pin(period_wallets(world, Arc::new(MemoryStore::new()), &rail)).await?;
     let start = world.now_ms() / 1000 * 1000;
     let recurrence = Recurrence::new(AnchoredRule::new(start, 1, Unit::Month)?, start, None)?;
     let period = PeriodRef::from(recurrence.first()?);
-    let request = Box::pin(subscribe(world, &mut buyer, &mut shop, recurrence)).await?;
-    let (mut buyer, payment) = tokio::spawn(Box::pin(async move {
-        let payment = buyer
-            .pay_period(&request, &period, PayOptions::default())
-            .await;
-        (buyer, payment)
+    let request = Box::pin(subscribe(world, &mut buyer, &mut shop, recurrence, priced)).await?;
+    let rate_source = if priced {
+        let id = Box::pin(issue_period_rate(
+            &mut shop,
+            &request,
+            period,
+            start + 600_000,
+        ))
+        .await?;
+        buyer.receive(None).await?;
+        Some((
+            id,
+            PaymentAmount {
+                asset: Asset::new("btc")?,
+                value: Decimal::new("0.00012346")?,
+            },
+        ))
+    } else {
+        None
+    };
+    let payer_rail = Arc::clone(&rail);
+    let (mut buyer, payment, rate_source) = tokio::spawn(Box::pin(async move {
+        let mut options = PayOptions::default();
+        if let Some((id, expected)) = &rate_source {
+            let automatic = Box::pin(buyer.pay_period_automatically(&request, &period)).await;
+            assert!(automatic.public_failures.is_empty());
+            let automatic_refusal = automatic.outcome.unwrap_err();
+            let quote = buyer
+                .pay_period(&request, &period, PayOptions::default())
+                .await;
+            assert!(quote.public_failures.is_empty());
+            let refusal = quote.outcome.unwrap_err();
+            assert_eq!(automatic_refusal.refusal(), refusal.refusal());
+            assert!(buyer.payments().await.unwrap().is_empty());
+            let Some(paykit_sdk::Refusal::PricedByRate { payment }) = refusal.refusal() else {
+                panic!("expected confirmation of the signed period price: {refusal:?}");
+            };
+            assert_eq!(
+                payment.source,
+                paykit_sdk::RateSource::PeriodDetails { msg_id: id.clone() }
+            );
+            assert_eq!(&payment.amount, expected);
+            assert!(payer_rail.all_executions().is_empty());
+            options = options.with_rate_confirmed((**payment).clone());
+        }
+        let payment = buyer.pay_period(&request, &period, options).await;
+        (buyer, payment, rate_source)
     }))
     .await?;
     assert!(payment.public_failures.is_empty());
@@ -173,6 +237,27 @@ async fn manual_period(world: &World) -> TestResult {
         .shared_record(&period_record.record)
         .await?
         .ok_or("missing shared credit")?;
+    if let Some((id, expected)) = rate_source {
+        let record = paykit_lib::records::ActivityRecord::read(
+            issued
+                .content
+                .value()
+                .ok_or("missing period record value")?,
+            &shop.identity(),
+            paykit_lib::records::ActivitySide::Payee,
+        )?;
+        let details = record
+            .period_details
+            .as_ref()
+            .ok_or("missing signed rate")?;
+        let proof = record.proof.as_ref().ok_or("missing signed proof")?;
+        let credit = record.receipt.as_ref().ok_or("missing signed receipt")?;
+        assert_eq!(details.message().msg_id, id);
+        assert_eq!(proof.message().refs, [request.request_hash, details.hash()]);
+        assert_eq!(credit.message().refs, [proof.hash(), request.request_hash]);
+        assert_eq!(rail.paid_amount(&attempt_id), Some(expected));
+    }
+
     buyer.receive(None).await?;
     let received = buyer.receipts(ReceiptsOf::Period(request, period)).await?;
     assert_eq!(received.len(), 1);
@@ -259,26 +344,213 @@ async fn manual_period(world: &World) -> TestResult {
     Ok(())
 }
 
+async fn issue_period_rate(
+    shop: &mut Paykit,
+    request: &RequestRef,
+    period: PeriodRef,
+    expires_at: u64,
+) -> TestResult<String> {
+    let sale = shop
+        .payee_activity()
+        .await?
+        .into_iter()
+        .find(|sale| sale.request_hash == Some(request.request_hash))
+        .ok_or("missing subscription")?;
+    let rate = paykit_lib::Rate::new(Asset::new("btc")?, Decimal::new("0.0000123456")?)?;
+    let details = paykit_lib::bodies::PeriodDetails {
+        billing_period: period,
+        payment_endpoints: None,
+        rates: Some(vec![rate]),
+        expires_at,
+    };
+    Ok(Box::pin(shop.send_period_details(&sale.record, details))
+        .await?
+        .msg_id)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QuoteIssuer {
+    Current,
+    RemovedBeforeSelection,
+    RemovedAfterConfirmation,
+    RemovedBeforeResume,
+}
+
+#[tokio::test]
+async fn test_period_rate_from_a_second_payee_app_requires_its_current_authority() -> TestResult {
+    for backend in [Backend::Scripted, Backend::Service] {
+        for issuer in [
+            QuoteIssuer::Current,
+            QuoteIssuer::RemovedBeforeSelection,
+            QuoteIssuer::RemovedAfterConfirmation,
+            QuoteIssuer::RemovedBeforeResume,
+        ] {
+            let Some(world) = World::start(backend)? else {
+                continue;
+            };
+            let result = Box::pin(second_app_rate(&world, issuer)).await;
+            world.close().await?;
+            result?;
+        }
+    }
+    Ok(())
+}
+
+async fn second_app_rate(world: &World, issuer: QuoteIssuer) -> TestResult {
+    use paykit_lib::periods::{AnchoredRule, Recurrence, Unit};
+    use paykit_sdk::rail::Behaviour;
+    use pubky_switch_signer::UserConfirmed;
+
+    let rail = Arc::new(FakeRail::with_clock(world.clock().clone()));
+    rail.set_declaration(
+        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true),
+    );
+    let buyer_store = Arc::new(MemoryStore::new());
+    let (mut buyer, mut shop, mut payee) =
+        Box::pin(period_wallets(world, buyer_store.clone(), &rail)).await?;
+    let mut quotes = Box::pin(join(
+        world,
+        &mut payee,
+        "shop",
+        "quotes",
+        AppScopes::new().request().build()?,
+        Arc::new(MemoryStore::new()),
+        &rail,
+    ))
+    .await?;
+    assert_ne!(shop.app_id(), quotes.app_id());
+    let start = world.now_ms() / 1000 * 1000;
+    let recurrence = Recurrence::new(AnchoredRule::new(start, 1, Unit::Month)?, start, None)?;
+    let period = PeriodRef::from(recurrence.first()?);
+    let request = Box::pin(subscribe(world, &mut buyer, &mut shop, recurrence, true)).await?;
+    quotes.receive(None).await?;
+    let id = Box::pin(issue_period_rate(
+        &mut quotes,
+        &request,
+        period,
+        start + 3_600_000,
+    ))
+    .await?;
+    buyer.receive(None).await?;
+    let mut confirmation = None;
+    let mut attempt = None;
+    if issuer != QuoteIssuer::RemovedBeforeSelection {
+        let error = Box::pin(buyer.pay_period(&request, &period, PayOptions::default()))
+            .await
+            .outcome
+            .unwrap_err();
+        let Some(paykit_sdk::Refusal::PricedByRate { payment }) = error.refusal() else {
+            return Err(format!("{error:?}").into());
+        };
+        assert_eq!(
+            payment.source,
+            paykit_sdk::RateSource::PeriodDetails { msg_id: id }
+        );
+        assert_eq!(payment.app_id, shop.app_id());
+        let options = PayOptions::default().with_rate_confirmed((**payment).clone());
+        assert!(buyer.payments().await?.is_empty());
+        assert!(rail.all_executions().is_empty());
+        if issuer == QuoteIssuer::RemovedBeforeResume {
+            rail.next(Behaviour::Hang);
+            let outcome = Box::pin(buyer.pay_period(&request, &period, options))
+                .await
+                .outcome?;
+            let PayOutcome::Pending { attempt_id, .. } = outcome else {
+                return Err(format!("{outcome:?}").into());
+            };
+            assert_eq!(rail.pay_calls(&attempt_id), 1);
+            attempt = Some(attempt_id);
+        } else {
+            confirmation = Some(options);
+        }
+    }
+    if issuer != QuoteIssuer::Current {
+        let doc =
+            Box::pin(payee.revoke(quotes.app_id(), None, UserConfirmed::shown_and_confirmed()))
+                .await?;
+        assert!(doc.lists_removed(&quotes.app_id()));
+        assert!(doc.listed_cert(&shop.app_id()).is_some());
+        world.advance_ms(11 * 60_000);
+    }
+    let buyer_id = buyer.app_id();
+    if let Some(id) = attempt {
+        drop(buyer);
+        let mut buyer = Paykit::load(
+            world.app_env(buyer_store),
+            Default::default(),
+            buyer_id,
+            rail.clone(),
+            Arc::new(TestTimer),
+        )
+        .await?;
+        let outcomes = Box::pin(buyer.resume_payments()).await?;
+        assert!(
+            matches!(outcomes.as_slice(), [PayOutcome::Uncertain { attempt_id, .. }] if *attempt_id == id),
+            "{outcomes:?}"
+        );
+        assert_eq!(rail.pay_calls(&id), 1);
+        assert_eq!(rail.executions(&id), 1);
+    } else {
+        let outcome =
+            Box::pin(buyer.pay_period(&request, &period, confirmation.unwrap_or_default()))
+                .await
+                .outcome;
+        if issuer == QuoteIssuer::Current {
+            let PayOutcome::Paid { attempt_id, .. } = outcome? else {
+                return Err("expected a paid period".into());
+            };
+            assert_eq!(rail.pay_calls(&attempt_id), 1);
+            assert_eq!(rail.executions(&attempt_id), 1);
+        } else {
+            let error = outcome.unwrap_err();
+            assert!(
+                matches!(
+                    error.refusal(),
+                    Some(paykit_sdk::Refusal::UnsupportedEndpoint(why))
+                        if why.contains("no period details price this endpoint")
+                ),
+                "{issuer:?}: {error:?}"
+            );
+            assert!(buyer.payments().await?.is_empty());
+            assert!(rail.all_executions().is_empty());
+        }
+    }
+    Ok(())
+}
+
 async fn subscribe(
     world: &World,
     buyer: &mut Paykit,
     shop: &mut Paykit,
     recurrence: paykit_lib::periods::Recurrence,
+    priced: bool,
 ) -> TestResult<RequestRef> {
     let endpoints = BTreeMap::from([(
         PaymentEndpointIdentifier::new("btc-lightning-bolt11")?,
         PaymentEndpointPayload::new("ln-manual-period")?,
     )]);
-    let draft = RequestDraft::new(
+    let requested = if priced {
+        PaymentAmount {
+            asset: Asset::new("usd")?,
+            value: Decimal::new("10")?,
+        }
+    } else {
         PaymentAmount {
             asset: Asset::new("btc")?,
             value: Decimal::new("0.00025")?,
-        },
+        }
+    };
+    let mut draft = RequestDraft::new(
+        requested,
         PaymentReference::new("monthly-plan")?,
         RequestDestination::Endpoints(endpoints),
     )
     .with_proposal_expires_at_ms(world.now_ms() / 1000 * 1000 + 86_400_000)
     .with_recurrence(recurrence);
+    if priced {
+        draft = draft.with_conversion(paykit_lib::bodies::Conversion::PerPeriod);
+    }
     let request = Box::pin(shop.send_request(buyer.identity(), draft))
         .await?
         .request
@@ -424,7 +696,7 @@ async fn reconcile_fractional_periods(world: &World) -> TestResult {
     );
     let mut occurrences = Vec::new();
     for (listed, recorded) in [(first, next), (next, first)] {
-        let request = Box::pin(subscribe(world, &mut buyer, &mut shop, recurrence)).await?;
+        let request = Box::pin(subscribe(world, &mut buyer, &mut shop, recurrence, false)).await?;
         let target = |natural: Vec<u8>| {
             RecordTarget::new(
                 SwitchCollection::new(
@@ -613,7 +885,7 @@ async fn early_paid_period_after_loss(world: &World) -> TestResult {
         .lookup(recurrence.first()?.ends_at)?
         .ok_or("second period missing")?;
     let period = PeriodRef::from(next);
-    let request = Box::pin(subscribe(world, &mut buyer, &mut shop, recurrence))
+    let request = Box::pin(subscribe(world, &mut buyer, &mut shop, recurrence, false))
         .await
         .map_err(|e| format!("initial subscription: {e}"))?;
     tablet
@@ -751,7 +1023,7 @@ async fn early_paid_period_after_loss(world: &World) -> TestResult {
     let later = loss.uncertain_until_ms + pubky_switch_core::records::CLOCK_TOLERANCE_MS + 1;
     world.advance_ms(later.saturating_sub(world.now_ms()));
     shop.receive(None).await?;
-    let fresh = Box::pin(subscribe(world, &mut paid, &mut shop, schedule()?))
+    let fresh = Box::pin(subscribe(world, &mut paid, &mut shop, schedule()?, false))
         .await
         .map_err(|e| format!("post-window subscription: {e}"))?;
     assert_ne!(fresh, request);

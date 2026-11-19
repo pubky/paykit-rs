@@ -71,11 +71,6 @@
 - **NOT**: A Paykit payment message kind.
 - **Related terms**: Extension scope, Paykit message kind
 
-### Paykit Profile
-- **Definition**: Optional public display metadata of an identity at `/pub/paykit/profile.json` on the Homeserver, with v0.1 semantics, written by the signer or an app the user authorizes (Paykit spec 4).
-- **NOT**: A Pubky app profile, an app record, or a Payment Endpoint.
-- **Related terms**: Identity, Homeserver
-
 ## Messages and Shared Records
 
 ### Paykit message kind
@@ -392,7 +387,8 @@ These terms must not be used for new Paykit v0.2 names:
 - **Paykit App Registry**, **Noise Key Authorization**, **Public Contact Marker** -> removed in v0.2; use **`identity.json`**, **App record** and **Contact**.
 - **Paykit Signer**, **`paykit-signer`**, **`pubky-switch-paykit`** -> these crates don't exist; identity management is **`pubky-switch-signer`**.
 - **Paykit Switch**, **Paykit identity**, **Paykit certificate**, **Paykit envelope** -> these are the Switch's: use **Pubky Switch**, **Identity**, **App certificate** and **Envelope**.
-- **Paykit Blob**, **shared-state blob**, **lease**, **lock** -> use **Shared record** and **Claim**.
+- **Paykit Profile**, **Paykit Blob** -> removed in v0.2. Each app chooses how to display identities.
+- **shared-state blob**, **lease**, **lock** -> use **Shared record** and **Claim**.
 - **Inbox Service** -> use **Pubky Switch**.
 - **Delivery Confirmation** -> not mandatory in v0.2; use **Payment Receipt** for a payee's confirmation of payment.
 - **Receipt Access**, **Receipt Location**, **Encrypted Receipt**, **Receipt Decryption Key** -> removed in v0.2; use **Payment Receipt**.
@@ -422,7 +418,7 @@ Services:
 - Push relay
 
 Paykit's terms:
-- Paykit App, Paykit scope, Permission table, Labelled selling scope, Extension scope, Extension kind, Paykit Profile
+- Paykit App, Paykit scope, Permission table, Labelled selling scope, Extension scope, Extension kind
 - Paykit message kind, Resend request, Paykit collection, Activity record, Stored message, Obligation ID, Paying order, Reconciliation
 - Payment List, Payment Endpoint, Payment Endpoint Identifier, Payment Endpoint Payload, Payment Method, Asset, Payment Amount, Rail, Settlement ID
 - Payer, Payee, Counterparty

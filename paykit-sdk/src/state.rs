@@ -45,6 +45,7 @@
 //! | `mu` | set by a `missed` item whose end isn't known: every open request is held, as after a restore, until a read that completes bounds the hold by the service time verified then, into `mh`, and clears it (`hold.rs`) | |
 //! | `ml` | set by a `missed` item: the shared records aren't listed by Paykit since, so a record's absence means nothing yet; cleared by Paykit's next listing (`hold.rs`); never restored | |
 //! | `lp/<recipient>/<generation>/<message hash>` | outstanding original publication batch IDs, kept atomically before submission and retained across restore | yes |
+//! | `lres/<recipient>` | the applied list, its publisher and original signed message, first non-delivery, prior offers' latest possible expiry, and the interval of an outstanding withdrawal | yes |
 //! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read: never written over it, which could drop its single-use marks, until the record reads | |
 //! | `kc/<record key>` | a payee's cancellation of a request, kept until it is placed in the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
@@ -60,16 +61,18 @@
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
 //! | `nt/outgoing/<recipient>/<msg_id>/<hash>` | the disposition of an exact original delivery is unknown after restore. Acknowledgment is retained for repeated imports | |
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
+//! | `xm/<sender>/<msg_id>` | an extension message from `sender` of a kind the host registered, kept from its receive step until the host takes it (`extensions.rs`, Paykit spec 3.3); at most 64 per sender and 128 in all | yes |
 //! | `dl` | the deny list as the app last read it, with this app's blocks kept unanswered (`bk/`), for the views and a payment the user starts (Paykit spec 8.1) | |
 //! | `fg` | the flagged senders as the app last read them, at most `MAX_FLAGGED_COPY`; absent while not known, which holds the asks of block marks (`marks.rs`); never restored | |
 //! | `bf` | the raise of the identity's block floor this app owes: the latest of the latest times of the block marks gone for the bound or their own expiry, and of a restore's first read of the lists; written to the shared `block_floor` record before the block marks ask and with any ask, and deleted in that batch; applied as a floor meanwhile (`crate::floor`) | yes |
+//! | `fd` | unresolved deletion of the identity's block floor (Paykit wire 5.6) | yes |
 //! | `fo/<record key>` | a request record a read opened without `manual_only`, checked against the block floor once the read is done and marked if dated before it (`crate::floor`); never restored | |
 //! | `bk/<pubky>` | this app's block or unblock of `pubky` not yet shown by the list (`OwnBlockMark`): a block from before the switch is asked, an unblock only with the batch the client keeps; a block counts until a read of the list shows it, and is written again at a receive while the client neither keeps nor applied its batch, a restored one too, since the kept batch stays with the device that kept it; an unblock counts for payments and held sends only while the client still keeps its batch, never for the spam rule, and isn't restored (Paykit spec 8.1) | |
 //! | `ra/<sender>` | signed recovery requests for dropped replies, their first-delivery outcomes and any unresolved original missing from a restore | |
 //! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`); at most `MAX_DROPPED_MARKS` in each family of marks (`pd/`, `ud/`, `kw/`, `bd/`), and a restore refuses a backup holding more | |
 //! | `bd/<sender>` | a mark of a sender's messages dropped for the user's block, each as one never processed (its pair forgotten), as `pd/` holds; it asks that sender once it is neither blocked nor flagged (`marks.rs`, Paykit spec 8.1) | |
 //! | `bl/<sender>/<msg_id>` | a notice of lost messages owed on a block's mark the receive step dropped for the bound while it named a request as queued: the mark's window, when the notice was raised, and the request's `msg_id` and hash; settled in the pass after the read from the outbox's answer on that request, told or dropped (`marks.rs`, `Paykit::settle_lost_owed`); at most `MAX_LOST_OWED`, the receive step holding the next entry that would owe one more; restored, and a restore refuses a backup holding more | |
-//! | `bw/<from_ms>` | a widening of the block marks, from `from_ms` to the time it holds, owed to every counterparty the deny list holds at the next read of the lists: written by a `missed` item (`marks.rs`) | |
+//! | `bw/<hold epoch>` | a widening of the block marks, over the missed acceptance times, owed to every counterparty the deny list holds at the next read of the lists: written by a `missed` item (`marks.rs`) | |
 //! | `ud/<sender>` | a mark of a sender's entries dropped unverified, as `pd/` holds (`marks.rs`) | |
 //! | `kw/<sender>` | a mark of a sender's entries the client dropped while they waited for a scope key, as `pd/` holds, with the data epochs they waited for; it asks only while the app holds every key of those epochs (`marks.rs`) | |
 //! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply, or a payee's period details, for a request the app holds no record of yet, or whose record it holds but can't open, read or bind, kept until it does, placed only once the record names its sender, a proof of a payment without a request for the payee's record of its settlement that the app holds but can't read, placed once it reads naming its sender and removed if it names another, or a receipt for a payer record the app holds but can't read and that isn't paused as divergent, kept until it reads, and moved to `dw/` if it reads paused (`receive.rs`), or a counterparty's Allowance answer the receive step took, which it never writes into the record's response itself: a rejection placed after the read, or kept before the app holds its Allowance record, or waiting over a record seen divergent for the user's confirmation; an acceptance kept unplaced if it would fill the record's empty `response` (Paykit spec 8.3.1; `allowances.rs`); each with the feed `seq` its entry was read at, which orders it (`records::KeptOrder`) | |
@@ -373,7 +376,7 @@ mod sealed {
 /// Paykit's state is read anywhere without its binding.
 pub(crate) trait Stored: sealed::Sealed + DeserializeOwned {
     /// Decode the bytes written by the owner of this state family.
-    fn read_bytes(bytes: &[u8]) -> Result<Self> {
+    fn read_bytes(bytes: &[u8], _: &Binder<'_>) -> Result<Self> {
         decode(bytes)
     }
 
@@ -386,7 +389,7 @@ pub(crate) trait Stored: sealed::Sealed + DeserializeOwned {
 fn bound<T: Stored>(key: &[u8], bytes: &[u8], binder: &Binder<'_>) -> Result<T> {
     let text = std::str::from_utf8(key).map_err(|_| PaykitError::corrupt())?;
     let family = StateKey::parse(key).ok_or_else(PaykitError::corrupt)?;
-    let value = T::read_bytes(bytes)?;
+    let value = T::read_bytes(bytes, binder)?;
     value.bind(text, &family, binder)?;
     Ok(value)
 }
@@ -482,16 +485,29 @@ impl sealed::Sealed for [u8; 16] {}
 
 /// The original batch ID is written by the Switch client as exactly sixteen bytes.
 impl Stored for [u8; 16] {
-    fn read_bytes(bytes: &[u8]) -> Result<Self> {
+    fn read_bytes(bytes: &[u8], _: &Binder<'_>) -> Result<Self> {
         bytes.try_into().map_err(|_| PaykitError::corrupt())
     }
 
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
-            StateKey::OfflineBatch(_)
-            | StateKey::EndBatch(_)
-            | StateKey::ReplyFloorBatch { .. } => Ok(()),
+            StateKey::OfflineBatch(_) | StateKey::EndBatch(_) | StateKey::FloorBatch => Ok(()),
             _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for crate::floor::PendingUnblocks {}
+
+impl Stored for crate::floor::PendingUnblocks {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        if matches!(family, StateKey::BlockFloor)
+            && !self.senders.is_empty()
+            && self.senders.windows(2).all(|pair| pair[0] < pair[1])
+        {
+            Ok(())
+        } else {
+            corrupt()
         }
     }
 }
@@ -499,7 +515,7 @@ impl Stored for [u8; 16] {
 impl sealed::Sealed for crate::receipt_delivery::ReceiptBatch {}
 
 impl Stored for crate::receipt_delivery::ReceiptBatch {
-    fn read_bytes(bytes: &[u8]) -> Result<Self> {
+    fn read_bytes(bytes: &[u8], _: &Binder<'_>) -> Result<Self> {
         match bytes.try_into() {
             Ok(id) => Ok(Self::Awaiting(id)),
             Err(_) => Ok(Self::Applied(decode(bytes)?)),
@@ -536,8 +552,7 @@ impl Stored for u64 {
             | StateKey::Spam(_)
             | StateKey::Resent { .. }
             | StateKey::ResentDay { .. }
-            | StateKey::ListsRead
-            | StateKey::BlockFloor => Ok(()),
+            | StateKey::ListsRead => Ok(()),
             _ => corrupt(),
         }
     }
@@ -591,6 +606,27 @@ impl OwnBlockMark {
     }
 }
 
+impl sealed::Sealed for crate::extensions::ExtensionMessage {}
+
+/// An extension message kept for the host (`xm/<sender>/<msg_id>`): from the sender and of
+/// the `msg_id` its key names, of an extension kind (Paykit wire 4.3).
+impl Stored for crate::extensions::ExtensionMessage {
+    fn read_bytes(bytes: &[u8], binder: &Binder<'_>) -> Result<Self> {
+        decode::<crate::extensions::KeptExtension>(bytes)?.open(binder.identity())
+    }
+
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::Extension { sender, msg_id }
+                if *sender == self.sender && msg_id == &self.msg_id =>
+            {
+                Ok(())
+            }
+            _ => corrupt(),
+        }
+    }
+}
+
 impl sealed::Sealed for OwnBlockMark {}
 
 /// Every form a run writes; an unblock with no batch is no such form: an unblock is marked
@@ -628,6 +664,7 @@ impl Stored for bool {
             | StateKey::HoldConfirmedBefore(_)
             | StateKey::RestoreConsent(_)
             | StateKey::NotPaidBeforeLoss(_)
+            | StateKey::FloorDeleted
             | StateKey::FloorOpened(_)
             | StateKey::Taken(_)
                 if *self =>
@@ -763,7 +800,7 @@ impl Stored for crate::publish::ListRecipient {
     fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
         match family {
             StateKey::ListRecipient(id) if self.recipient == *id && id != binder.identity() => {
-                Ok(())
+                self.check()
             }
             _ => corrupt(),
         }
@@ -774,7 +811,11 @@ impl sealed::Sealed for crate::publish::ListReservation {}
 impl Stored for crate::publish::ListReservation {
     fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
         match family {
-            StateKey::ListReservation(id) if self.recipient == *id && id != binder.identity() => {
+            StateKey::ListReservation(id)
+                if self.recipient == *id
+                    && id != binder.identity()
+                    && binder.app_id().is_none_or(|app| self.publisher == app) =>
+            {
                 self.check()
             }
             _ => corrupt(),
@@ -1216,19 +1257,24 @@ impl Stored for DropMark {
     }
 }
 
-impl sealed::Sealed for crate::marks::BlockedWindow {}
+impl sealed::Sealed for crate::marks::MissedWidening {}
 
-/// A widening of the block marks owed (`bw/<from_ms>`): from the time its key names, its
-/// times not crossed.
-impl Stored for crate::marks::BlockedWindow {
+impl Stored for crate::marks::MissedWidening {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
-        match family {
-            StateKey::BlockedWidening { from_ms }
-                if self.from_ms == *from_ms && self.from_ms <= self.until_ms =>
-            {
-                Ok(())
-            }
-            _ => corrupt(),
+        if matches!(family, StateKey::BlockedWidening(id) if id == self.id.as_bytes())
+            && !self.windows.is_empty()
+            && self
+                .windows
+                .iter()
+                .all(|w| w.from_ms <= w.until_ms && w.floor_ms <= w.until_ms)
+            && self.deny.as_ref().map_or_else(
+                || self.windows.len() == 1,
+                |deny| deny.windows(2).all(|p| p[0] < p[1]),
+            )
+        {
+            Ok(())
+        } else {
+            corrupt()
         }
     }
 }
@@ -1426,14 +1472,29 @@ impl sealed::Sealed for crate::allowances::PreparedPendingReply {}
 
 impl Stored for crate::allowances::PreparedPendingReply {
     fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
-        let StateKey::PendingReply(key) = family else {
+        let StateKey::PendingReply {
+            record,
+            reply: hash,
+        } = family
+        else {
             return corrupt();
         };
         let reply = self.message.stored(&self.peer)?;
         let id =
             crate::allowances::named_allowance(reply.body()).ok_or_else(PaykitError::corrupt)?;
         let target = crate::allowances::allowance_target(&self.peer, id);
-        if reply.sender() != binder.own
+        if self.source.record_version().is_none()
+            || reply.hash() != *hash
+            || !self.sealed_delete.looks_like_delete()
+            || self
+                .sealed_delete
+                .check_shape(
+                    &paykit_lib::collections::Collection::AllowanceProposals
+                        .fixed_policy()
+                        .read_scope,
+                )
+                .is_err()
+            || reply.sender() != binder.own
             || binder
                 .cert
                 .is_none_or(|cert| reply.message().from.app_id != cert.app_id())
@@ -1443,7 +1504,7 @@ impl Stored for crate::allowances::PreparedPendingReply {
                 reply.body(),
                 Body::AllowanceRejection(_) | Body::AllowanceEnd(_)
             )
-            || binder.record_key(&target)? != *key
+            || binder.record_key(&target)? != *record
         {
             return corrupt();
         }
@@ -1636,14 +1697,10 @@ pub(crate) mod key {
     pub(crate) const LISTED_CERT: &str = "lc";
     pub(crate) const NOTICES: &str = "nt/";
     pub(crate) const RESTORED_DELIVERIES: &str = "nt/outgoing/";
+    pub(crate) const EXTENSIONS: &str = "xm/";
     pub(crate) const STORED_NOTES: &str = "se/";
     pub(crate) const KEPT_REPLIES: &str = "pr/";
     pub(crate) const REPLY_ASKS: &str = "ra/";
-    pub(crate) const REPLY_FLOOR_BATCHES: &str = "rb/";
-
-    pub(crate) fn reply_floor_batch(hash: &[u8; 32]) -> String {
-        format!("{REPLY_FLOOR_BATCHES}{}", b64(hash))
-    }
     pub(crate) const DROPPED_REPLIES: &str = "pd/";
     pub(crate) const DROPPED_UNVERIFIED: &str = "ud/";
     pub(crate) const DROPPED_BLOCKED: &str = "bd/";
@@ -1653,6 +1710,8 @@ pub(crate) mod key {
     pub(crate) const LOST_OWED: &str = "bl/";
     pub(crate) const FLAGGED: &str = "fg";
     /// The raise of the block floor this app owes (`crate::floor`).
+    pub(crate) const FLOOR_BATCH: &str = "fb";
+    pub(crate) const FLOOR_DELETED: &str = "fd";
     pub(crate) const BLOCK_FLOOR: &str = "bf";
     /// The request records this read opened without `manual_only`, to check against the
     /// block floor once it is done (`crate::floor`).
@@ -1734,8 +1793,12 @@ pub(crate) mod key {
     pub(crate) const PENDING_REPLIES: &str = "ap/";
     pub(crate) const APPLIED_REPLIES: &str = "aq/";
 
-    pub(crate) fn pending_reply(record: &[u8; 32]) -> String {
-        format!("{PENDING_REPLIES}{}", b64(record))
+    pub(crate) fn pending_replies(record: &[u8; 32]) -> String {
+        format!("{PENDING_REPLIES}{}/", b64(record))
+    }
+
+    pub(crate) fn pending_reply(record: &[u8; 32], reply: &[u8; 32]) -> String {
+        format!("{}{}", pending_replies(record), b64(reply))
     }
 
     pub(crate) fn applied_reply(hash: &[u8; 32]) -> String {
@@ -1792,8 +1855,8 @@ pub(crate) mod key {
 
     /// A widening of the block marks from `from_ms`, owed to every counterparty the deny
     /// list holds at the next read of the lists.
-    pub(crate) fn blocked_widening(from_ms: u64) -> String {
-        format!("{BLOCKED_WIDENINGS}{from_ms:020}")
+    pub(crate) fn blocked_widening(id: &[u8; 16]) -> String {
+        format!("{BLOCKED_WIDENINGS}{}", b64(id))
     }
 
     /// The notice of lost messages owed on `sender`'s block mark, dropped for the bound while
@@ -1857,6 +1920,11 @@ pub(crate) mod key {
     /// A restored outgoing message, bound to its recipient, ID and signed JSON hash.
     pub(crate) fn restored_delivery(to: &[u8; 32], id: &str, hash: &[u8; 32]) -> String {
         format!("{RESTORED_DELIVERIES}{}/{id}/{}", b64(to), b64(hash))
+    }
+
+    /// The extension message `msg_id` from `sender`, kept until the host takes it.
+    pub(crate) fn extension(sender: &[u8; 32], msg_id: &str) -> String {
+        format!("{EXTENSIONS}{}/{msg_id}", b64(sender))
     }
 
     /// The notice of `kind` about `attempt`.
@@ -2130,10 +2198,6 @@ pub(crate) enum StateKey {
     ReplyAsks {
         sender: [u8; 32],
     },
-    /// The original floor batch for the signed recovery request of this hash.
-    ReplyFloorBatch {
-        hash: [u8; 32],
-    },
     /// `ud/<sender>`: the mark of a sender's entries dropped unverified.
     DroppedUnverified {
         sender: [u8; 32],
@@ -2142,10 +2206,8 @@ pub(crate) enum StateKey {
     DroppedBlocked {
         sender: [u8; 32],
     },
-    /// `bw/<from_ms>`: a widening of the block marks owed at the next read of the lists.
-    BlockedWidening {
-        from_ms: u64,
-    },
+    /// `bw/<hold epoch>`: a widening of the block marks owed at the next read of the lists.
+    BlockedWidening([u8; 16]),
     /// `bl/<sender>/<msg_id>`: the notice of lost messages owed on a sender's block mark the
     /// receive step dropped for the bound, naming `msg_id` as queued.
     LostOwed {
@@ -2156,6 +2218,10 @@ pub(crate) enum StateKey {
     Flagged,
     /// `bf`: the raise of the block floor this app owes.
     BlockFloor,
+    /// A deletion of the identity's block floor still needs a verified protective write.
+    FloorDeleted,
+    /// The local identifier of an unanswered floor write.
+    FloorBatch,
     /// `fo/<record key>`: a request record a read opened without `manual_only`, to check
     /// against the block floor once the read is done.
     FloorOpened([u8; 32]),
@@ -2197,6 +2263,11 @@ pub(crate) enum StateKey {
         sender: [u8; 32],
         msg_id: String,
     },
+    /// `xm/<sender>/<msg_id>`: an extension message kept until the host takes it.
+    Extension {
+        sender: [u8; 32],
+        msg_id: String,
+    },
     /// `dv/<record key>`: the pause mark of a divergent record.
     Divergent([u8; 32]),
     /// `dw/<record key>/<role>/<sender>/<msg_id>`: a message kept to write over a divergent
@@ -2222,7 +2293,10 @@ pub(crate) enum StateKey {
     /// `pc/<record key>`: a conflict kept for one pending Allowance lifetime.
     PendingConflict([u8; 32]),
     /// An original reply prepared for this canonical Allowance key.
-    PendingReply([u8; 32]),
+    PendingReply {
+        record: [u8; 32],
+        reply: [u8; 32],
+    },
     /// A signed reply whose exact proposal deletion was applied.
     AppliedReply([u8; 32]),
     /// The latest verified end of a conflict at the named pending key.
@@ -2285,7 +2359,9 @@ impl StateKey {
             "lr" => Self::ListsRead,
             "dl" => Self::Denied,
             "fg" => Self::Flagged,
+            "fd" => Self::FloorDeleted,
             "bf" => Self::BlockFloor,
+            "fb" => Self::FloorBatch,
             _ => {
                 let (family, rest) = text.split_once('/')?;
                 match family {
@@ -2403,7 +2479,13 @@ impl StateKey {
                     }
                     "ac" => Self::Consent(b64_32(rest)?),
                     "pc" => Self::PendingConflict(b64_32(rest)?),
-                    "ap" => Self::PendingReply(b64_32(rest)?),
+                    "ap" => {
+                        let (record, reply) = rest.split_once('/')?;
+                        Self::PendingReply {
+                            record: b64_32(record)?,
+                            reply: b64_32(reply)?,
+                        }
+                    }
                     "aq" => Self::AppliedReply(b64_32(rest)?),
                     "pce" => Self::PendingRetirement(b64_32(rest)?),
                     "cf" => Self::Conflict(b64_32(rest)?),
@@ -2442,9 +2524,6 @@ impl StateKey {
                     "ra" => Self::ReplyAsks {
                         sender: b64_32(rest)?,
                     },
-                    "rb" => Self::ReplyFloorBatch {
-                        hash: b64_32(rest)?,
-                    },
                     "pd" => Self::DroppedReplies {
                         sender: b64_32(rest)?,
                     },
@@ -2454,9 +2533,9 @@ impl StateKey {
                     "bd" => Self::DroppedBlocked {
                         sender: b64_32(rest)?,
                     },
-                    "bw" => Self::BlockedWidening {
-                        from_ms: number(rest)?,
-                    },
+                    "bw" => {
+                        Self::BlockedWidening(pubky_switch_core::enc::unb64_array::<16>(rest).ok()?)
+                    }
                     "bl" => {
                         let (sender, id) = rest.split_once('/')?;
                         Self::LostOwed {
@@ -2484,6 +2563,13 @@ impl StateKey {
                         Self::DivergentWrite {
                             record: b64_32(record)?,
                             role: crate::divergent::WriteRole::from_tag(role)?,
+                            sender: b64_32(sender)?,
+                            msg_id: msg_id(id)?,
+                        }
+                    }
+                    "xm" => {
+                        let (sender, id) = rest.split_once('/')?;
+                        Self::Extension {
                             sender: b64_32(sender)?,
                             msg_id: msg_id(id)?,
                         }
@@ -3398,8 +3484,8 @@ mod tests {
                 StateKey::DroppedBlocked { sender: pubky },
             ),
             (
-                key::blocked_widening(7),
-                StateKey::BlockedWidening { from_ms: 7 },
+                key::blocked_widening(&[7; 16]),
+                StateKey::BlockedWidening([7; 16]),
             ),
             (
                 key::lost_owed(&pubky, id),
@@ -3414,10 +3500,6 @@ mod tests {
                 StateKey::ReplyAsks { sender: pubky },
             ),
             (
-                key::reply_floor_batch(&pubky),
-                StateKey::ReplyFloorBatch { hash: pubky },
-            ),
-            (
                 key::dropped_lost(&pubky, "pd", 7),
                 StateKey::DroppedLost {
                     counterparty: pubky,
@@ -3425,7 +3507,9 @@ mod tests {
                     from_ms: 7,
                 },
             ),
+            (key::FLOOR_DELETED.into(), StateKey::FloorDeleted),
             (key::BLOCK_FLOOR.into(), StateKey::BlockFloor),
+            (key::FLOOR_BATCH.into(), StateKey::FloorBatch),
             (key::floor_opened(&pubky), StateKey::FloorOpened(pubky)),
             (
                 key::blocked_lost(&pubky, 9),
@@ -3466,6 +3550,13 @@ mod tests {
                 },
             ),
             (
+                key::extension(&pubky, id),
+                StateKey::Extension {
+                    sender: pubky,
+                    msg_id: id.into(),
+                },
+            ),
+            (
                 key::notice(&attempt, crate::notices::NoticeKind::HeldWithoutPay),
                 StateKey::Notice {
                     attempt,
@@ -3488,7 +3579,13 @@ mod tests {
                 key::pending_retirement(&pubky),
                 StateKey::PendingRetirement(pubky),
             ),
-            (key::pending_reply(&pubky), StateKey::PendingReply(pubky)),
+            (
+                key::pending_reply(&pubky, &pubky),
+                StateKey::PendingReply {
+                    record: pubky,
+                    reply: pubky,
+                },
+            ),
             (key::applied_reply(&pubky), StateKey::AppliedReply(pubky)),
             (key::conflict(&pubky), StateKey::Conflict(pubky)),
             (key::notice_target(id), StateKey::NoticeTarget(id.into())),

@@ -28,7 +28,8 @@ use std::sync::{Arc, PoisonError, RwLock};
 use paykit_lib::bodies::check_body;
 use paykit_lib::collections::Collection;
 use paykit_lib::kinds::{
-    check_sender_scopes, holds_role, targets_app, Kind, MessageKind, Side, OPAQUE_MEMBERS,
+    check_sender_scopes, holds_role, targets_app, ExtensionKind, Kind, MessageKind, Side,
+    OPAQUE_MEMBERS,
 };
 use paykit_lib::records::{
     ActivitySide, AllowanceRecord, BlockFloorRecord, PaymentListRecord, PendingAllowanceRecord,
@@ -65,10 +66,10 @@ use crate::records::KeptMessage;
 use crate::state::{self, key, StateKey};
 
 /// The kinds this SDK handles (Paykit wire 4.3): the one-time request flow, recurring
-/// requests' acceptance and period details, payments without a request, the payer's side of
-/// Private Payment Lists, re-sends, and the Allowance messages with `executor_notice`.
-/// Chosen recipients get reusable Private Payment Lists. An incoming
-/// `private_payment_list_request` currently has no effect.
+/// requests' acceptance and period details, payments without a request, Private Payment Lists,
+/// re-sends, and the Allowance messages with `executor_notice`. A publisher answers
+/// `private_payment_list_request` from chosen contacts for reusable lists within the hourly
+/// and rolling 24-hour limits (Paykit spec 8.4.1).
 pub const HANDLED_KINDS: [Kind; 15] = [
     Kind::PaymentRequest,
     Kind::PaymentRequestAcceptance,
@@ -137,6 +138,8 @@ pub struct PaykitProtocol {
     /// The app's rail, which names a proof's settlement (Paykit wire 1.5); without one, the
     /// methods `paykit-lib` knows.
     rail: Option<Arc<dyn Rail>>,
+    /// The extension kinds the host's extension handles (Paykit spec 3.3).
+    extensions: Vec<ExtensionKind>,
 }
 
 /// [`PaykitProtocol`]'s publishing setting: not told yet.
@@ -165,6 +168,7 @@ impl PaykitProtocol {
             own: RwLock::new(None),
             publishes_record: std::sync::atomic::AtomicU8::new(PUBLISHES_UNKNOWN),
             rail: None,
+            extensions: Vec::new(),
         }
     }
 
@@ -190,6 +194,26 @@ impl PaykitProtocol {
             PUBLISHES_NO => Some(false),
             _ => None,
         }
+    }
+
+    /// The protocol, handling the extension kinds `kinds` besides Paykit's (Paykit spec 3.3):
+    /// they pass check 10 as they arrived and the receive step keeps them for the host
+    /// (`crate::extensions`).
+    #[must_use]
+    pub fn with_extension_kinds(mut self, kinds: Vec<ExtensionKind>) -> Self {
+        self.extensions = kinds;
+        self
+    }
+
+    pub(crate) fn has_extension_kinds(&self, kinds: &[ExtensionKind]) -> bool {
+        use std::collections::HashSet;
+
+        self.extensions.iter().collect::<HashSet<_>>() == kinds.iter().collect::<HashSet<_>>()
+    }
+
+    /// Whether `kind` is an extension kind the host registered.
+    fn handles_extension(&self, kind: &str) -> bool {
+        self.extensions.iter().any(|ext| ext.as_string() == kind)
     }
 
     /// The protocol of one app paying and paid through `rail`, which names the settlement of
@@ -381,6 +405,8 @@ pub(crate) fn may_deliver_to_contact(
 /// ([`restore_paykit_layer`]).
 #[derive(Default)]
 struct BoundedFamilies {
+    extensions: usize,
+    extensions_of: std::collections::BTreeMap<[u8; 32], usize>,
     lost_owed: usize,
     dropped_replies: usize,
     dropped_unverified: usize,
@@ -417,6 +443,21 @@ impl BoundedFamilies {
                 crate::marks::MAX_DROPPED_MARKS,
                 "marks of blocked messages",
             ),
+            StateKey::Extension { sender, .. } => {
+                // Bounded per sender as well as in all (`crate::extensions`).
+                let of_sender = self.extensions_of.entry(*sender).or_default();
+                *of_sender += 1;
+                if *of_sender > crate::extensions::MAX_EXTENSION_MESSAGES_PER_SENDER {
+                    return Err("Paykit's local state in the backup holds more extension \
+                                messages of one sender than the SDK keeps"
+                        .into());
+                }
+                (
+                    &mut self.extensions,
+                    crate::extensions::MAX_EXTENSION_MESSAGES,
+                    "extension messages",
+                )
+            }
             _ => return Ok(()),
         };
         *count += 1;
@@ -480,6 +521,7 @@ pub(crate) fn restore_paykit_layer(
         key::PUBLICATIONS,
         key::LIST_RESERVATIONS,
         key::PUBLICATION_HISTORY,
+        key::LIST_RECIPIENTS,
     ] {
         for (key, value) in restoring
             .previous_local_scan(prefix.as_bytes())
@@ -488,6 +530,10 @@ pub(crate) fn restore_paykit_layer(
             match prefix {
                 key::PUBLICATIONS => publications.pending(&key, &value, &binder),
                 key::LIST_RESERVATIONS => publications.applied(&key, &value, &binder),
+                key::LIST_RECIPIENTS => {
+                    state::restored::<crate::publish::ListRecipient>(&key, &value, &binder)
+                        .and_then(|recipient| publications.recipient(recipient))
+                }
                 _ => publications.observed(&key, &value, &binder),
             }
             .map_err(|err| format!("invalid retained private list publication: {err}"))?;
@@ -525,6 +571,7 @@ pub(crate) fn restore_paykit_layer(
     // and unresolved ones first observed since the backup (Paykit spec 7.2).
     let mut delivery_notices = std::collections::BTreeMap::new();
     let mut pending_conflicts = std::collections::BTreeMap::new();
+    let mut prepared_replies = std::collections::BTreeMap::new();
     let mut retirements = std::collections::BTreeMap::new();
     let mut sourced_replies = std::collections::BTreeMap::new();
     for (key, value) in restoring
@@ -577,6 +624,17 @@ pub(crate) fn restore_paykit_layer(
     let mut journaled = std::collections::BTreeSet::new();
     let mut acknowledged = Vec::new();
     let mut writes = crate::reply_asks::restore(restoring, &binder, &state)?;
+    // A backup taken before the floor was deleted cannot discharge the installation's hold.
+    let mut floor_deleted = false;
+    for (k, value) in restoring
+        .previous_local_scan(key::FLOOR_DELETED.as_bytes())
+        .map_err(|_| "the installation's block floor hold cannot be read")?
+    {
+        if k == key::FLOOR_DELETED.as_bytes() {
+            floor_deleted = state::restored::<bool>(&k, &value, &binder)
+                .map_err(|_| "invalid retained block floor hold")?;
+        }
+    }
     let mut cursor_time_ms = 0;
     let mut bounded = BoundedFamilies::default();
     for (key, value) in state {
@@ -590,9 +648,7 @@ pub(crate) fn restore_paykit_layer(
         let unread = || String::from("Paykit's local state in the backup doesn't read");
         bounded.count(&family)?;
         let attempt = match family {
-            StateKey::ReplyAsks { .. }
-            | StateKey::ReplyFloorBatch { .. }
-            | StateKey::DroppedLost { .. } => continue, // Merged and bounded together above.
+            StateKey::ReplyAsks { .. } | StateKey::DroppedLost { .. } => continue, // Merged and bounded together above.
             StateKey::RestoreHold => continue, // Validated above before reading its confirmations.
             StateKey::MissedHold => {
                 state::restored::<crate::hold::MissedHold>(&key, &value, &binder)
@@ -718,9 +774,19 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::Peer(_)
             | StateKey::Spam(_)
             | StateKey::Resent { .. }
-            | StateKey::ResentDay { .. }
-            | StateKey::BlockFloor => {
+            | StateKey::ResentDay { .. } => {
                 state::restored::<u64>(&key, &value, &binder).map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::FloorDeleted => {
+                floor_deleted =
+                    state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
+                continue;
+            }
+            StateKey::BlockFloor => {
+                state::restored::<crate::floor::PendingUnblocks>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -826,16 +892,27 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::PendingReply(_) => {
-                state::restored::<crate::allowances::PreparedPendingReply>(&key, &value, &binder)
-                    .map_err(|_| unread())?;
-                writes.push(LocalWrite::Put { key, value });
+            StateKey::PendingReply {
+                record,
+                reply: hash,
+            } => {
+                let reply = state::restored::<crate::allowances::PreparedPendingReply>(
+                    &key, &value, &binder,
+                )
+                .map_err(|_| unread())?;
+                prepared_replies.insert((record, hash), reply);
                 continue;
             }
             StateKey::AppliedReply(_) => {
                 state::restored::<crate::allowances::AppliedReply>(&key, &value, &binder)
                     .map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::FloorBatch => {
+                // The client omits unresolved batches on restore. The pending window and its
+                // original cutoff survive in the protocol layer and are rechecked on read.
+                state::restored::<[u8; 16]>(&key, &value, &binder).map_err(|_| unread())?;
                 continue;
             }
             StateKey::EndBatch(_) => {
@@ -873,7 +950,9 @@ pub(crate) fn restore_paykit_layer(
                 let recipient =
                     state::restored::<crate::publish::ListRecipient>(&key, &value, &binder)
                         .map_err(|_| unread())?;
-                publications.recipient(recipient);
+                publications
+                    .recipient(recipient)
+                    .map_err(|err| err.to_string())?;
                 continue;
             }
             StateKey::Publication(_) => {
@@ -968,21 +1047,28 @@ pub(crate) fn restore_paykit_layer(
                 }
                 continue;
             }
+            StateKey::Extension { .. } => {
+                state::restored::<crate::extensions::ExtensionMessage>(&key, &value, &binder)
+                    .map_err(|_| {
+                        "Paykit wire 4.3: a kept extension message in the backup doesn't verify"
+                    })?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
             // A notice of lost messages owed is carried as the marks and the notices are: the
             // mark it stands for is gone, so a backup without it would lose the notice. The
             // restore writes back the outbox's records the backup carries, under the same
             // `msg_id`s, and no sent messages: the pass after the read settles the notice from
             // the restored outbox's answer on its request (`Paykit::settle_lost_owed`). Its
-            // times aren't bounded as a mark's are: it asks nothing, and its latest time is
-            // already in the raise owed, which is. Their number is (`BoundedFamilies`).
+            // times identify the original window. The number of notices remains bounded.
             StateKey::LostOwed { .. } => {
                 state::restored::<crate::marks::LostOwed>(&key, &value, &binder)
                     .map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::BlockedWidening { .. } => {
-                state::restored::<crate::marks::BlockedWindow>(&key, &value, &binder)
+            StateKey::BlockedWidening(_) => {
+                state::restored::<crate::marks::MissedWidening>(&key, &value, &binder)
                     .map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
@@ -1058,11 +1144,18 @@ pub(crate) fn restore_paykit_layer(
         restoring,
         &binder,
         pending_conflicts,
+        prepared_replies,
         retirements,
         sourced_replies,
         &mut writes,
     )
     .map_err(|_| "the pending Allowance replies cannot be retained")?;
+    if floor_deleted {
+        writes.push(
+            state::local_put(key::FLOOR_DELETED, &true)
+                .map_err(|_| "the block floor hold cannot be written")?,
+        );
+    }
     for (key, notice) in delivery_notices {
         let value = state::encode(&notice).map_err(|_| "a delivery notice cannot be written")?;
         writes.push(LocalWrite::Put { key, value });
@@ -1355,11 +1448,20 @@ impl Protocol for PaykitProtocol {
         if check_certificate(cert).is_err() {
             return Vec::new();
         }
-        HANDLED_KINDS
+        let mut kinds: Vec<String> = HANDLED_KINDS
             .iter()
             .filter(|kind| holds_role(cert.scopes(), kind.recipients()))
             .map(|kind| kind.as_str().to_owned())
-            .collect()
+            .collect();
+        // The registered extension kinds whose `ext:<prefix>` the certificate holds (Paykit
+        // wire 4.3): never wider than what its scopes receive (Switch spec 3.4).
+        for ext in &self.extensions {
+            let kind = ext.as_string();
+            if cert.scopes().contains(&ext.prefix().scope()) && !kinds.contains(&kind) {
+                kinds.push(kind);
+            }
+        }
+        kinds
     }
 
     /// Whether another app's scopes receive `kind` by Paykit's table (Paykit spec 3.3), which
@@ -1368,8 +1470,15 @@ impl Protocol for PaykitProtocol {
     /// verifiers refuse (Paykit wire 3.1) receives none: the Switch takes such a
     /// certificate, Paykit doesn't.
     fn receives(&self, kind: &str, cert: &AppCert) -> bool {
-        check_certificate(cert).is_ok()
-            && Kind::from_kind(kind).is_some_and(|k| holds_role(cert.scopes(), k.recipients()))
+        if check_certificate(cert).is_err() {
+            return false;
+        }
+        // An extension kind goes to an app whose certificate holds its `ext:<prefix>`; the
+        // client also asks that its record accept the kind (Paykit wire 4.3).
+        if let Ok(ext) = ExtensionKind::parse(kind) {
+            return cert.scopes().contains(&ext.prefix().scope());
+        }
+        Kind::from_kind(kind).is_some_and(|k| holds_role(cert.scopes(), k.recipients()))
     }
 
     /// The label narrowing of Paykit spec 3.4: a payer's acceptance, rejection,
@@ -1400,6 +1509,11 @@ impl Protocol for PaykitProtocol {
     /// Check 10 (Paykit wire 4.1), with no effect: a kind this SDK handles ([`HANDLED_KINDS`])
     /// and a body that parses for it, within the size of a recorded kind.
     fn check_body(&self, message: &ReceivedMessage) -> Result<(), String> {
+        // An extension kind the host registered passes as it arrived: its body is the
+        // extension's (Paykit wire 4.3).
+        if self.handles_extension(&message.message.kind) {
+            return Ok(());
+        }
         check_message(message)
     }
 
@@ -1439,16 +1553,21 @@ impl Protocol for PaykitProtocol {
             Err(Fail::Store(failure)) => return Outcome::Retry(failure),
             Err(_) => return Outcome::Retry(StoreFailure::of_entry(StoreError::Corrupt)),
         }
-        let stored = match stored_copy(message) {
-            Ok(stored) => stored,
-            Err(reason) => return Outcome::Drop { reason },
-        };
-        match receive::effect(cx, &stored, message.position(), &|proof| {
-            self.settlement_id(proof)
-        }) {
+        let effect = receive::check_before_effect(cx, &message.sender).and_then(|()| {
+            if self.handles_extension(&message.message.kind) {
+                return crate::extensions::extension_effect(cx, message);
+            }
+            let stored = stored_copy(message).map_err(Fail::Drop)?;
+            receive::effect(cx, &stored, message.position(), &|proof| {
+                self.settlement_id(proof)
+            })
+            .map(|()| Outcome::Apply(Effect::default()))
+        });
+        match effect {
+            Ok(outcome) => outcome,
             // A write the context couldn't build for want of a key: the context holds the
             // entry itself, whatever is returned (Switch spec 3.5).
-            Ok(()) | Err(Fail::NotNow) => Outcome::Apply(Effect::default()),
+            Err(Fail::NotNow) => Outcome::Apply(Effect::default()),
             Err(Fail::Need(needs)) => Outcome::Need(needs),
             Err(Fail::Consume) => Outcome::Consume,
             Err(Fail::AwaitAdmission) => Outcome::AwaitAdmission,
@@ -1523,10 +1642,19 @@ impl Protocol for PaykitProtocol {
             // for once it is unblocked: every counterparty the deny list holds at the next
             // read of the lists is marked for the item's times (`marks.rs`).
             local_write(
-                &key::blocked_widening(missed.accepted_from_ms),
-                &crate::marks::BlockedWindow {
-                    from_ms: missed.accepted_from_ms,
-                    until_ms: missed.accepted_until_ms,
+                &key::blocked_widening(epoch.as_bytes()),
+                &crate::marks::MissedWidening {
+                    id: epoch,
+                    windows: vec![crate::marks::BlockedWindow {
+                        from_ms: missed.accepted_from_ms,
+                        until_ms: if missed.accepted_until_ms == u64::MAX {
+                            missed.read_at_ms.max(missed.accepted_from_ms)
+                        } else {
+                            missed.accepted_until_ms
+                        },
+                        floor_ms: missed.accepted_until_ms.min(missed.read_at_ms),
+                    }],
+                    deny: None,
                 },
             )?,
             local_write(key::MISSED_CONSENTS, &true)?,
@@ -1665,6 +1793,17 @@ impl Protocol for PaykitProtocol {
         deletion: &RecordDeletion<'_>,
         cx: &ReceiveContext<'_>,
     ) -> Result<Option<PutBack>, StoreFailure> {
+        if deletion.collection == Collection::BlockFloor.name() {
+            let target = crate::floor::floor_target(&cx.identity());
+            if cx.record_key(&target).map_err(store_failure)? != *deletion.key {
+                return Ok(None);
+            }
+            // Paykit wire 5 and 5.6: this revision cannot verify a protective floor
+            // publication. Keep the service cursor and the payment hold together.
+            return Ok(Some(PutBack::Prepare {
+                observed: vec![local_write(key::FLOOR_DELETED, &true)?],
+            }));
+        }
         crate::deletions::observe_payee_deletion(deletion, cx, &|proof| self.settlement_id(proof))
     }
 
@@ -2049,8 +2188,9 @@ mod receive_tests {
             accepted_from_ms: 10,
             accepted_until_ms: 20,
         };
-        assert_eq!(widening(&missed)["d"]["from_ms"], 10);
-        assert_eq!(widening(&missed)["d"]["until_ms"], 20);
+        assert_eq!(widening(&missed)["d"]["windows"][0]["from_ms"], 10);
+        assert_eq!(widening(&missed)["d"]["windows"][0]["until_ms"], 20);
+        assert_eq!(widening(&missed)["d"]["windows"][0]["floor_ms"], 0);
     }
 
     /// The keys `missed()` puts, with their values as JSON.

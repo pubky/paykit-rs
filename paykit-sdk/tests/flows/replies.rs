@@ -602,71 +602,19 @@ async fn test_replies_dropped_first_ask_reopens_after_its_outbox_commit_failed()
 }
 
 #[tokio::test]
-async fn test_replies_dropped_floor_first_keep_can_retry_only_on_the_original_store() {
-    for restore in [false, true] {
-        let w = World::new();
-        let (mut shop, store, from) = dropped_reply_behind_floor(&w).await;
-        let app_id = shop.app_id();
-        store.fail_put_once(b"p/paykit/rb/");
-        shop.receive(None).await.unwrap_err();
-        assert!(shop
-            .app()
-            .protocol_scan("paykit", b"rb/")
-            .await
-            .unwrap()
-            .is_empty());
-        let selected = shop.backup().await.unwrap();
-        drop(shop);
-        let mut shop = if restore {
-            Paykit::restore(
-                w.env(&w.bob, crate::common::store()),
-                PaykitConfig::default(),
-                &selected,
-                w.rail.clone(),
-                w.timer(),
-            )
-            .await
-            .unwrap()
-        } else {
-            w.load_on_clock(&w.bob, store.inner(), app_id, w.clock.clone())
-                .await
-        };
-        shop.receive(None).await.unwrap();
-        shop.receive(None).await.unwrap();
-        let asks: Vec<_> = asked(&shop, &w.alice_id())
-            .await
-            .into_iter()
-            .filter(|(_, until)| until.is_none())
-            .collect();
-        if restore {
-            assert!(asks.is_empty());
-        } else {
-            assert_eq!(asks, [(Some(from), None)]);
-            assert!(!shop
-                .app()
-                .records_of("block_floor")
-                .await
-                .unwrap()
-                .is_empty());
-        }
-    }
-}
-
-#[tokio::test]
-async fn test_replies_dropped_applied_floor_reopens_the_same_original() {
+async fn test_replies_dropped_queue_after_the_applied_unblock_floor() {
     let w = World::new();
-    let (mut shop, store, from) = dropped_reply_behind_floor(&w).await;
+    let (mut shop, store, from) = dropped_reply_after_unblock(&w).await;
+    let floor = shop.app().records_of("block_floor").await.unwrap();
+    assert_eq!(floor.len(), 1);
     let app_id = shop.app_id();
+    // The signed ask and both pieces of its local custody are one outbox commit.
     store.fail_put_once(b"out/");
-    // The native batch is kept, although this pass failed to commit its applied outbox item.
-    assert_eq!(shop.receive(None).await.unwrap().resends, 1);
-    let mark = mark_values(&shop).await.pop().unwrap();
-    let original = mark["queued"]["msg_id"].as_str().unwrap();
-    let marker = shop.app().protocol_scan("paykit", b"rb/").await.unwrap();
-    assert_eq!(marker.len(), 1);
-    assert_eq!(marker[0].1.len(), 16);
+    shop.receive(None).await.unwrap_err();
     assert!(asked(&shop, &w.alice_id()).await.is_empty());
+    assert!(mark_values(&shop).await[0]["queued"].is_null());
     drop(shop);
+
     let mut shop = w
         .load_on_clock(&w.bob, store.inner(), app_id, w.clock.clone())
         .await;
@@ -678,73 +626,15 @@ async fn test_replies_dropped_applied_floor_reopens_the_same_original() {
         .filter(|(_, until)| until.is_none())
         .collect();
     assert_eq!(asks, [(Some(from), None)]);
-    assert!(matches!(
-        shop.app().delivery(original).await.unwrap(),
-        Some(pubky_switch_client::app::Delivery::Accepted { .. })
-    ));
-    assert!(!shop
-        .app()
-        .records_of("block_floor")
-        .await
-        .unwrap()
-        .is_empty());
-    assert!(shop
-        .app()
-        .protocol_scan("paykit", b"rb/")
-        .await
-        .unwrap()
-        .is_empty());
+    assert_eq!(
+        shop.app().records_of("block_floor").await.unwrap()[0].version,
+        floor[0].version
+    );
 }
 
-#[tokio::test]
-async fn test_replies_dropped_refused_original_floor_permits_a_new_ask() {
-    let w = World::new();
-    let (mut shop, store, from) = dropped_reply_behind_floor(&w).await;
-    w.bob.switch().fail_next(Fault::Error {
-        path: "/ops".into(),
-        code: ErrorCode::Conflict,
-        current: serde_json::Value::Null,
-    });
-    shop.receive(None).await.unwrap();
-    assert!(asked(&shop, &w.alice_id()).await.is_empty());
-    let mark = mark_values(&shop).await.pop().unwrap();
-    let first = mark["queued"]["msg_id"].as_str().unwrap();
-    let marker = shop.app().protocol_scan("paykit", b"rb/").await.unwrap();
-    let batch = marker.first().unwrap().1.as_slice().try_into().unwrap();
-    assert!(matches!(
-        shop.app().kept_batch(batch).await.unwrap(),
-        Some(pubky_switch_client::app::KeptBatchStatus::Dropped {
-            reason: pubky_switch_client::app::KeptBatchDrop::Refused { .. },
-            ..
-        })
-    ));
-    let id = shop.app_id();
-    drop(shop);
-    let mut shop = w
-        .load_on_clock(&w.bob, store.inner(), id, w.clock.clone())
-        .await;
-    shop.receive(None).await.unwrap();
-    assert!(matches!(
-        shop.app().delivery(first).await.unwrap(),
-        Some(pubky_switch_client::app::Delivery::Failed { .. })
-    ));
-    let asks: Vec<_> = asked(&shop, &w.alice_id())
-        .await
-        .into_iter()
-        .filter(|(_, until)| until.is_none())
-        .collect();
-    assert_eq!(asks, [(Some(from), None)]);
-    assert!(shop
-        .app()
-        .protocol_scan("paykit", b"rb/")
-        .await
-        .unwrap()
-        .is_empty());
-}
-
-/// The seller has dropped a paid reply and separately dropped a later entry for a block.
-/// Its first ask after the unblock must carry the floor raise.
-async fn dropped_reply_behind_floor(
+/// The seller dropped a paid reply before blocking its sender. The unblock applies
+/// its floor while the signed request for the reply is still owed.
+async fn dropped_reply_after_unblock(
     w: &World,
 ) -> (Paykit, Arc<pubky_switch_client::store::FaultStore>, u64) {
     use pubky_switch_client::store::{Fault as StoreFault, FaultStore};
@@ -2775,7 +2665,11 @@ async fn test_replies_dropped_restore_in_place_uses_the_identified_first_deliver
     }
 }
 
-fn loss_notice(sender: &[u8; 32], from: u64, until: u64) -> (Vec<u8>, serde_json::Value) {
+pub(super) fn loss_notice(
+    sender: &[u8; 32],
+    from: u64,
+    until: u64,
+) -> (Vec<u8>, serde_json::Value) {
     let sender = pubky_switch_core::enc::b64(sender);
     (
         format!("nt/{sender}/dropped-pd-{from:020}").into_bytes(),
@@ -2799,7 +2693,7 @@ fn retired_windows(
     )
 }
 
-async fn keep_loss_fixture(app: &mut Paykit, keys: Vec<(Vec<u8>, serde_json::Value)>) {
+pub(super) async fn keep_loss_fixture(app: &mut Paykit, keys: Vec<(Vec<u8>, serde_json::Value)>) {
     let writes = keys
         .into_iter()
         .map(|(key, value)| pubky_switch_client::app::LocalWrite::Put {
