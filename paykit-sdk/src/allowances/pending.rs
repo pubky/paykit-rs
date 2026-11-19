@@ -796,18 +796,8 @@ impl Paykit {
                 _ => return Ok(Some(Placed::Waits)),
             }
         }
-        if let Some(value) = p {
-            let existing = PendingAllowanceRecord::read(value, &own)?;
-            if existing.counterparty() != &peer || existing.allowance_id() != id {
-                return Ok(Some(Placed::Waits));
-            }
-            let reflected = existing.conflicted().is_some()
-                || (held.pending_source.is_none() && existing.proposal().hash() == message.hash());
-            return Ok(Some(if reflected {
-                Placed::Done
-            } else {
-                Placed::Waits
-            }));
+        if p.is_some() {
+            return self.place_received_second(message, &held, stored_id).await;
         }
         let retained_delete = match &p_read {
             RecordRead::Fresh(record)
@@ -1011,5 +1001,68 @@ impl Paykit {
                 key: kept_key.as_bytes().to_vec(),
             });
         Ok(Some(submitted(self.submit(batch).await)?))
+    }
+
+    /// Discard a conflicted pending proposal or one received from a blocked counterparty.
+    /// This removes exactly the selected pending write and sends no message (Paykit spec 8.3.1).
+    ///
+    /// # Errors
+    ///
+    /// A changed proposal or an uncertain read leaves the pending record in place.
+    pub async fn discard_pending_allowance(&mut self, record: &[u8; 32]) -> Result<()> {
+        self.refresh_own()?;
+        self.first_read_before_writing().await?;
+        self.refresh_own()?;
+        self.require_allowance()?;
+        self.records_known().await?;
+        let (selected, target) = Box::pin(self.pending_by_allowance_key(record))
+            .await?
+            .ok_or(Refusal::NotFound)?;
+        let condition = self.app.record_condition(&selected.key).await?;
+        let RecordRead::Fresh(held) = self.app.read_record_fresh(&target).await? else {
+            return Err(not_current());
+        };
+        let (current, _) = self.selected_pending(&held)?;
+        if held.content != selected.content
+            || self.app.record_condition(&held.key).await? != condition
+        {
+            return Err(not_current());
+        }
+        let peer = current.counterparty();
+        let a = allowance_target(peer, current.allowance_id());
+        if !matches!(
+            self.app.read_record_fresh(&a).await?,
+            RecordRead::Kept {
+                reason: KeptReason::NotFound,
+                record: None
+            }
+        ) {
+            return Err(not_current());
+        }
+        let stop = self
+            .local_get::<PendingConflict>(&key::pending_conflict(&held.key))
+            .await?;
+        let local_conflict = stop
+            .as_ref()
+            .map(|s| s.stops(&self.identity(), &current))
+            .transpose()?
+            .unwrap_or(false);
+        if current.conflicted().is_none()
+            && !local_conflict
+            && (current.proposal().sender() != *peer || !self.denied(peer).await?)
+        {
+            return Err(Refusal::Usage("only a conflicted proposal or a blocked counterparty's received proposal may be discarded".into()).into());
+        }
+        let conditions = vec![
+            condition,
+            Condition::RecordVersion {
+                key: *record,
+                version: RecordVersion::NONE,
+            },
+        ];
+        let delete = self.app.record_op(&target, None, conditions).await?;
+        self.submit(OpBatch::for_protocol(crate::protocol::BACKUP_NAME).entry(delete))
+            .await?;
+        Ok(())
     }
 }
