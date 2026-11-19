@@ -708,10 +708,12 @@ async fn audit_private_intake_stream(
 /// Commit ignored events' replay cursors in one storage transaction, best
 /// effort.
 ///
-/// `advance_private_intake_cursor` rejects a cursor that would regress (a
-/// later event already moved it) or that names another homeserver before it
-/// writes anything, so such a cursor is skipped without aborting the others.
-/// A failed transaction only leaves irrelevant events to replay.
+/// `StorageTransaction::advance_private_intake_cursor` rejects a cursor that
+/// would regress (a later event already moved it) or that names another or an
+/// empty homeserver, and its contract is that an error never changes state.
+/// Skipping any error, a rejection or a fault, therefore cannot commit half a
+/// write, and the other cursors still commit. A failed transaction only leaves
+/// irrelevant events to replay.
 async fn commit_ignored_private_intake_cursors<S: StorageAdapter>(
     storage: &S,
     cursors: Vec<PrivateIntakeCursorRecord>,
