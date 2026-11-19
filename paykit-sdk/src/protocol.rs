@@ -27,7 +27,9 @@ use std::sync::{Arc, PoisonError, RwLock};
 
 use paykit_lib::bodies::check_body;
 use paykit_lib::collections::Collection;
-use paykit_lib::kinds::{targets_app, ExtensionKind, Kind, Role as KindRole, Side, OPAQUE_MEMBERS};
+use paykit_lib::kinds::{
+    check_sender_scopes, targets_app, Kind, MessageKind, Role as KindRole, Side, OPAQUE_MEMBERS,
+};
 use paykit_lib::records::{
     ActivitySide, AllowanceRecord, BlockFloorRecord, PaymentListRecord, StoredMessage,
 };
@@ -346,40 +348,38 @@ pub(crate) fn view_failure(error: crate::PaykitError) -> StoreFailure {
     }
 }
 
-/// Recheck the current certificate and deny copy before a queued delivery or re-send.
-fn may_deliver_to_contact(
+/// Recheck this message's sender and the current deny copy before its delivery or re-send.
+pub(crate) fn may_deliver_to_contact(
     delivery: &pubky_switch_client::app::DeliveryView<'_>,
-    extension: Option<&ExtensionKind>,
-) -> Result<bool, StoreFailure> {
+) -> crate::error::Result<bool> {
     use pubky_switch_client::app::KeptBatchStatus;
 
     let cert = delivery.cert();
-    if paykit_lib::scopes::check_certificate(cert).is_err()
+    if check_certificate(cert).is_err()
         || !receive::reads_lists(cert.scopes())
-        || extension.is_some_and(|kind| !cert.scopes().contains(&kind.prefix().scope()))
+        || check_sender_scopes(delivery.message(), cert.scopes()).is_err()
     {
         return Ok(false);
     }
-    let view = delivery.local();
-    let read = state::view_get::<u64>(view, key::LISTS_READ).map_err(view_failure)?;
+    let read = state::delivery_get::<u64>(delivery, key::LISTS_READ)?;
     if !read.is_some_and(|at| receive::lists_read_is_fresh(at, delivery.now_ms())) {
         return Ok(false);
     }
+    let Some(denied) = state::delivery_get::<Vec<[u8; 32]>>(delivery, key::DENIED)? else {
+        return Ok(false);
+    };
     let to = &delivery.message().to;
-    if let Some(mark) =
-        state::view_get::<state::OwnBlockMark>(view, &key::own_block(to)).map_err(view_failure)?
-    {
+    if let Some(mark) = state::delivery_get::<state::OwnBlockMark>(delivery, &key::own_block(to))? {
         let kept = match mark.unblock_batch() {
             Some(batch) => matches!(
-                delivery.kept_batch(batch).map_err(store_failure)?,
+                delivery.kept_batch(batch)?,
                 Some(KeptBatchStatus::Kept { .. })
             ),
             None => false,
         };
         return Ok(mark.counts(kept) == Some(false));
     }
-    let denied = state::view_get::<Vec<[u8; 32]>>(view, key::DENIED).map_err(view_failure)?;
-    Ok(!denied.is_some_and(|peers| peers.contains(to)))
+    Ok(!denied.contains(to))
 }
 
 /// How many keys of each family whose size the runtime bounds a restored layer holds
@@ -741,6 +741,18 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
+            StateKey::EndBatch(_) => {
+                // A backup omits the unresolved Switch batch. Its signed end's origin
+                // can survive independently of the outcome of its counterparty delivery.
+                state::restored::<[u8; 16]>(&key, &value, &binder).map_err(|_| unread())?;
+                continue;
+            }
+            StateKey::EndOrigin(_) => {
+                state::restored::<crate::allowances::EndOrigin>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
             StateKey::NoticeTarget(_) => {
                 state::restored::<crate::allowances::NoticeTarget>(&key, &value, &binder)
                     .map_err(|_| unread())?;
@@ -1022,18 +1034,26 @@ impl Protocol for PaykitProtocol {
     }
 
     /// Hold every attempt to deliver an Allowance acceptance, including a re-send or an
-    /// acceptance already in the outbox (Paykit spec 8.3.1). Re-send requests and
-    /// extensions require their current sender scopes and a permitting deny copy.
+    /// acceptance already in the outbox (Paykit spec 8.3.1). Proposals, rejections,
+    /// re-send requests and extensions require current sender scopes and a permitting
+    /// deny copy. An original user end has its own delivery rule (Paykit spec 3.1).
     fn may_send(
         &self,
         delivery: &pubky_switch_client::app::DeliveryView<'_>,
     ) -> Result<bool, StoreFailure> {
-        let kind = &delivery.message().kind;
-        let extension = ExtensionKind::parse(kind).ok();
-        if kind == Kind::ResendRequest.as_str() || extension.is_some() {
-            return may_deliver_to_contact(delivery, extension.as_ref());
+        match MessageKind::parse(&delivery.message().kind) {
+            Ok(MessageKind::Paykit(Kind::AllowanceAcceptance)) => Ok(false),
+            Ok(MessageKind::Paykit(Kind::AllowanceEnd)) => {
+                crate::allowances::may_deliver_end(delivery).map_err(view_failure)
+            }
+            Ok(
+                MessageKind::Paykit(
+                    Kind::AllowanceProposal | Kind::AllowanceRejection | Kind::ResendRequest,
+                )
+                | MessageKind::Extension(_),
+            ) => may_deliver_to_contact(delivery).map_err(view_failure),
+            _ => Ok(true),
         }
-        Ok(kind != Kind::AllowanceAcceptance.as_str())
     }
 
     fn opaque_members(&self) -> Vec<OpaqueRule> {

@@ -1092,11 +1092,9 @@ impl Paykit {
                     continue;
                 };
                 let counterparty = record.counterparty;
-                let restore_owes = owed.as_ref().is_some_and(|owed| {
-                    owed.waiting
-                        .as_ref()
-                        .is_none_or(|waiting| waiting.binary_search(&counterparty).is_ok())
-                });
+                let restore_owes = owed
+                    .as_ref()
+                    .is_some_and(|owed| owed.includes(&counterparty));
                 // Only open period details can raise a delivery notice. If the request
                 // record cannot establish whether they are open, check again while an
                 // original is still within its replay window.
@@ -1174,11 +1172,7 @@ impl Paykit {
                     continue;
                 };
                 let counterparty = record.counterparty;
-                if restore
-                    .waiting
-                    .as_ref()
-                    .is_some_and(|waiting| waiting.binary_search(&counterparty).is_err())
-                {
+                if !restore.includes(&counterparty) {
                     continue;
                 }
                 // Nothing is sent for a conflicted Allowance, nor under a counterparty's end
@@ -1401,7 +1395,7 @@ impl Paykit {
     /// Whether the client refuses to queue `stored` again by now: past 30 days from its
     /// `created_at`, less the clock tolerance, by the later of the device clock and the
     /// service time verified (Switch spec 11, `App::queue_stored`).
-    fn past_replay_window(&self, stored: &paykit_lib::records::StoredMessage) -> bool {
+    pub(crate) fn past_replay_window(&self, stored: &paykit_lib::records::StoredMessage) -> bool {
         let until = stored
             .message()
             .created_at_ms
@@ -1588,6 +1582,14 @@ pub(crate) struct OwnResendOwed {
     /// written takes the time of the first pass that needs the bound.
     #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) restored_at_ms: Option<u64>,
+}
+
+impl OwnResendOwed {
+    pub(crate) fn includes(&self, peer: &[u8; 32]) -> bool {
+        self.waiting
+            .as_ref()
+            .is_none_or(|waiting| waiting.binary_search(peer).is_ok())
+    }
 }
 
 /// Whether a later stop covers the period details a payee period record keeps, for the
