@@ -972,12 +972,14 @@ async fn test_private_intake_buffers_new_packet_from_live_event_stream() {
 }
 
 /// Build a path under the private directory with the homeserver's maximum
-/// storage path length (972 bytes, pubky-common `MAX_STORAGE_PATH_TOTAL_LENGTH`),
-/// split into segments of at most 255 bytes. Its PUT event is the largest event
-/// a homeserver can send for this directory.
+/// storage path length (pubky-common `MAX_STORAGE_PATH_TOTAL_LENGTH`), split
+/// into segments of at most `MAX_STORAGE_PATH_SEGMENT_LENGTH` bytes. Its PUT
+/// event is the largest event a homeserver can send for this directory.
 fn max_length_private_path() -> String {
-    const MAX_STORAGE_PATH_BYTES: usize = 972;
-    const MAX_SEGMENT_BYTES: usize = 255;
+    use pubky_common::storage_path::{
+        MAX_STORAGE_PATH_SEGMENT_LENGTH as MAX_SEGMENT_BYTES,
+        MAX_STORAGE_PATH_TOTAL_LENGTH as MAX_STORAGE_PATH_BYTES,
+    };
     let mut path = format!("{}/", paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX);
     loop {
         let remaining = MAX_STORAGE_PATH_BYTES - path.len();

@@ -9,11 +9,21 @@ use tokio::sync::{watch, Mutex as AsyncMutex, Notify, RwLock as AsyncRwLock};
 
 const MAX_EVENT_STREAM_USERS: usize = crate::storage::PRIVATE_INTAKE_MAX_EVENT_STREAM_USERS;
 const DEFAULT_MAX_EVENT_BYTES: usize = 4096;
-// The limit applies to an event's joined `data` lines. The largest homeserver
-// event is a PUT: `pubky://` + 52-char z32 key + 972-byte max storage path,
-// then `cursor: <u64>` and `content_hash: <44-char base64>`, about 1.1 KB.
-// 2048 leaves headroom above that.
+// The limit applies to an event's joined `data` lines. `MIN_EVENT_BYTES`
+// leaves headroom above `LARGEST_EVENT_DATA_BYTES`, and the assertion below
+// fails the build if a pubky-common path limit change outgrows it.
 const MIN_EVENT_BYTES: usize = 2048;
+// The largest `data` payload a homeserver event can carry: a PUT event,
+// rendered by pubky-homeserver's `EventEntity::to_sse_data` as
+// `pubky://<z32 key><path>\ncursor: <u64>\ncontent_hash: <base64 hash>`.
+const LARGEST_EVENT_DATA_BYTES: usize = "pubky://".len()
+    + 52 // z32-encoded Ed25519 public key
+    + pubky_common::storage_path::MAX_STORAGE_PATH_TOTAL_LENGTH
+    + "\ncursor: ".len()
+    + 20 // decimal digits of u64::MAX
+    + "\ncontent_hash: ".len()
+    + 44; // padded base64 of a 32-byte hash
+const _: () = assert!(MIN_EVENT_BYTES >= LARGEST_EVENT_DATA_BYTES);
 const MAX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_STREAM_CAPACITY: usize = 1024;
 const DEFAULT_HEALTHY_AUDIT_INTERVAL: Duration = Duration::from_secs(60);
@@ -2363,6 +2373,24 @@ mod tests {
             !filter.ends_with("//"),
             "the filter must end in exactly one slash, got {filter:?}"
         );
+
+        // The homeserver parses each `path` filter with `StoragePath::normalize`
+        // and treats only a directory-shaped path as a prefix of event paths.
+        use pubky_common::storage_path::StoragePath;
+        let slot_path = StoragePath::new(&format!(
+            "{}/{}/0",
+            paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX,
+            "ab".repeat(32)
+        ))
+        .unwrap();
+        let filter_path = StoragePath::normalize(&filter).unwrap();
+        assert!(filter_path.is_directory());
+        assert!(filter_path.covers_path(&slot_path));
+
+        // Without the trailing slash the homeserver matches one exact file.
+        let file_path = StoragePath::normalize(paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX).unwrap();
+        assert!(!file_path.is_directory());
+        assert!(!file_path.covers_path(&slot_path));
     }
 
     #[test]
