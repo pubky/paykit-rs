@@ -10576,6 +10576,112 @@ async fn test_queued_withdrawal_after_reload_keeps_identical_recreated_proposals
 }
 
 #[tokio::test]
+async fn test_kept_rejection_delivers_after_its_delete_applies_at_the_recovered_service() {
+    use pubky_switch_client::app::{Delivery, KeptBatchStatus, RecordContent, RecordRead};
+    use pubky_switch_client::store::MemoryStore;
+    use std::sync::Arc;
+
+    let w = World::new();
+    let store = Arc::new(MemoryStore::new());
+    let scopes = AppScopes::new()
+        .pay()
+        .allowance()
+        .manage_contacts()
+        .build()
+        .unwrap();
+    let mut payer = Box::pin(w.join_with(
+        &w.alice,
+        "wallet",
+        scopes.clone(),
+        Default::default(),
+        store.clone(),
+    ))
+    .await;
+    let mut sibling = Box::pin(alice_app(&w, "phone", scopes)).await;
+    let mut seller = Box::pin(shop(&w)).await;
+    payer.app_mut().invite(&w.bob_id()).await.unwrap();
+    let offer = seller
+        .propose_allowance(w.alice_id(), AllowanceRole::Allowee, terms())
+        .await
+        .unwrap();
+    payer.receive(None).await.unwrap();
+    let target = pending_target(&w.bob_id(), &offer.allowance_id);
+    let canonical = payer
+        .app()
+        .record_key(&allowances_target(&w.bob_id(), &offer.allowance_id))
+        .unwrap();
+    let RecordRead::Fresh(proposal) = sibling.app_mut().read_record_fresh(&target).await.unwrap()
+    else {
+        panic!("the sibling must hold the authenticated proposal before recovery");
+    };
+    assert!(proposal.authenticated && proposal.content.value().is_some());
+
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "ops".into(),
+            after: 0,
+        });
+    let id = payer.reject_allowance(&canonical).await.unwrap();
+    let Some(Delivery::Kept { batch_id }) = payer.app().delivery(&id).await.unwrap() else {
+        panic!("the original rejection must still be in its unanswered batch");
+    };
+    let app_id = payer.app_id();
+    drop(payer);
+    crate::provider_loss::declare_loss(&w);
+    Box::pin(crate::provider_loss::follow_generation(&mut sibling)).await;
+    // A sibling uploads the selected signed record before the original wallet can
+    // retry its guarded deletion at the replacement service.
+    let RecordRead::Fresh(uploaded) = sibling.app_mut().read_record_fresh(&target).await.unwrap()
+    else {
+        panic!("the replacement must have the proposal the payer actually selected");
+    };
+    assert!(uploaded.authenticated);
+    assert_eq!(
+        (uploaded.version, &uploaded.content),
+        (proposal.version, &proposal.content)
+    );
+
+    let mut payer = Box::pin(Paykit::load(
+        w.env(&w.alice, store),
+        Default::default(),
+        app_id,
+        w.rail.clone(),
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    Box::pin(crate::provider_loss::follow_generation(&mut payer)).await;
+    let current_generation = payer.app().own_identity().generation();
+    assert!(current_generation > proposal.version.generation);
+    assert!(matches!(
+        payer.app().kept_batch(batch_id).await.unwrap(),
+        Some(KeptBatchStatus::Applied { .. })
+    ));
+    let closed = payer
+        .app()
+        .shared_record(&proposal.key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(closed.authenticated && closed.version.generation == current_generation);
+    assert_eq!(closed.content, RecordContent::Deleted);
+    payer.flush().await.unwrap();
+    assert!(matches!(
+        payer.app().delivery(&id).await.unwrap(),
+        Some(Delivery::Accepted { .. })
+    ));
+    assert_eq!(
+        Box::pin(received_originals(&mut seller, &[&id])).await,
+        [id.clone()]
+    );
+    assert!(Box::pin(received_originals(&mut seller, &[&id]))
+        .await
+        .is_empty());
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
 async fn test_queued_withdrawal_after_provider_loss_preserves_the_peers_proposal() {
     use pubky_switch_client::app::Delivery;
 

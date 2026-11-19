@@ -28,24 +28,17 @@ pub(crate) struct AppliedReply {
     pub(crate) reply: [u8; 32],
     #[serde(with = "serde_b64")]
     pub(crate) proposal: [u8; 32],
-    generation: u64,
-    #[serde(deserialize_with = "Option::deserialize")]
-    retirement_seq: Option<u64>,
+    retirement: SeenVersion,
 }
 
 impl AppliedReply {
-    pub(super) fn new(reply: &StoredMessage, generation: u64, retirement_seq: Option<u64>) -> Self {
+    pub(super) fn new(reply: &StoredMessage, version: RecordVersion) -> Self {
         Self {
             created_at_ms: reply.message().created_at_ms,
             reply: reply.hash(),
             proposal: reply.message().refs[0],
-            generation,
-            retirement_seq,
+            retirement: version.into(),
         }
-    }
-
-    fn retirement(&self) -> Option<SeenVersion> {
-        Some(RecordVersion::new(self.generation, self.retirement_seq?).into())
     }
 }
 
@@ -199,7 +192,7 @@ pub(crate) fn judge_append(
         let retired =
             state::delivery_get::<super::PendingRetirement>(d, &key::pending_retirement(&p_key))
                 .map_err(view_failure)?;
-        return Ok(match (applied()?.and_then(|r| r.retirement()), retired) {
+        return Ok(match (applied()?.map(|r| r.retirement), retired) {
             (Some(original), Some(current)) => {
                 current.withdrawal_after(original, d.recovery_from())
             }
@@ -243,7 +236,12 @@ pub(crate) fn judge_append(
         return Ok(Withdraw);
     }
     if kind == Some(Kind::AllowanceRejection)
-        && !applied()?.is_some_and(|reply| deletion_continues(reply.generation, d.recovery_from()))
+        && !applied()?.is_some_and(|reply| {
+            deletion_continues(
+                reply.retirement.record_version().generation,
+                d.recovery_from(),
+            )
+        })
     {
         return Ok(Hold);
     }

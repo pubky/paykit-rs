@@ -17,7 +17,7 @@ use pubky_switch_client::app::{
     AppError, KeptReason, LocalWrite, OpBatch, RecordContent, RecordRead, RecordTarget,
     SharedRecord,
 };
-use pubky_switch_core::chain::bind_answer;
+use pubky_switch_core::chain::{bind_answer, TransitionProof};
 use pubky_switch_core::enc::{hash, serde_b64};
 use pubky_switch_core::ops::{BatchRef, Condition, OpBody, OpKind, RecordVersion, SignedOp};
 use serde::{Deserialize, Serialize};
@@ -35,11 +35,14 @@ pub(crate) struct PreparedPendingReply {
     #[serde(with = "serde_b64")]
     pub(crate) delete: [u8; 32],
     pub(crate) source: crate::divergent::SeenVersion,
+    /// Only the Switch may carry an unanswered submission across a provider change.
+    pub(crate) prepared_in: u64,
     pub(crate) sealed_delete: pubky_switch_core::sealed::SealedValue,
 }
 
-/// The Switch chooses the batch ID during submission. All other signed members, including
-/// the random seal and conditions, identify the exact record write this app prepared.
+/// The native client chooses the batch ID and may re-sign a kept deletion for a new
+/// generation. Its exact sealed value, source version and conditions stay unchanged.
+/// A create remains tied to the generation in which it was prepared.
 fn prepared_write(
     identity: [u8; 32],
     app_id: [u8; 16],
@@ -47,6 +50,12 @@ fn prepared_write(
     conditions: &[Condition],
     kind: &OpKind,
 ) -> Result<[u8; 32]> {
+    let generation = match kind {
+        OpKind::RecordPut(put) if put.value_sealed.looks_like_delete() => {
+            put.expected_version.generation
+        }
+        _ => generation,
+    };
     let body = OpBody {
         identity,
         app_id: Some(app_id),
@@ -92,6 +101,11 @@ pub(super) fn awaits_competing_proposal(
         }
     }
     Ok(false)
+}
+
+fn applied_version(proof: &TransitionProof) -> Option<RecordVersion> {
+    let at = proof.record_revision().ok()?;
+    Some(RecordVersion::new(at.generation, at.seq))
 }
 
 struct ConfirmedWrite {
@@ -345,14 +359,14 @@ impl Paykit {
                 .any(|scope| cert.holds_scope(scope))
                 && certificate_in_force_at_write(doc, &cert, proof.envelope().server_time)
             {
-                if let Some(version) = proof.body().version {
+                if let Some(version) = applied_version(proof) {
                     let operation =
                         prepared_write(own, app_id, generation, &body.conditions, &body.kind)?;
                     confirmed.insert(
                         (put.key, operation),
                         ConfirmedWrite {
                             signing_key: cert.signing_key(),
-                            version: RecordVersion::new(generation, version),
+                            version,
                         },
                     );
                 }
@@ -433,7 +447,7 @@ impl Paykit {
             };
             writes.push(state::local_put(
                 &key::applied_reply(&msg.hash()),
-                &AppliedReply::new(&msg, version.generation, Some(version.version)),
+                &AppliedReply::new(&msg, version),
             )?);
             self.app
                 .protocol_commit(crate::protocol::BACKUP_NAME, &writes)
@@ -531,6 +545,7 @@ impl Paykit {
             Box::pin(self.checked_pending_answer(&selected, original.body().kind())).await?;
         let own = self.identity();
         if permanent != *key
+            || self.app.own_identity().generation() != intent.prepared_in
             || selected.version != intent.source.record_version()
             || original.message().refs != [pending.proposal().hash()]
             || original.cert().signing_key() != self.app.cert().signing_key()
@@ -656,7 +671,6 @@ impl Paykit {
         let reply = self.sign(*peer, kind, vec![p.hash()], body)?;
         let q = self.own_copy(&reply)?;
         let intent_key = key::pending_reply(&permanent_key, &q.hash());
-        let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME);
         // Guard the very version the user answered. A recovery upload also gets the
         // client's exact application condition; a concurrent change refuses the batch.
         let generation = self.app.own_identity().generation();
@@ -665,11 +679,7 @@ impl Paykit {
             return Err(PaykitError::corrupt());
         };
         let sealed_delete = put.value_sealed.clone();
-        batch = batch.entry(delete);
-        batch = batch.local(state::local_put(
-            &key::applied_reply(&q.hash()),
-            &AppliedReply::new(&q, generation, None),
-        )?);
+        let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME).entry(delete);
         let msg_id = reply.msg_id().to_owned();
         let mut prepare = state::Tx::default();
         prepare.put(
@@ -679,6 +689,7 @@ impl Paykit {
                 message: KeptMessage::of(&q),
                 delete: delete_hash,
                 source: selected.version.into(),
+                prepared_in: generation,
                 sealed_delete,
             },
         )?;
@@ -689,30 +700,21 @@ impl Paykit {
             )?;
         }
         self.local_commit(prepare).await?;
-        if kind != Kind::AllowanceEnd {
-            batch = batch.local(LocalWrite::Delete {
-                key: intent_key.as_bytes().to_vec(),
-            });
-        }
         match self.submit(batch.queue(reply)).await {
             Ok(submitted) => {
-                if kind == Kind::AllowanceEnd {
-                    // The client checked this one deletion's proof before settling the batch.
-                    // Keep the prepared input until its authenticated version is durable.
-                    let [proof] = submitted.proofs.as_slice() else {
-                        return Err(PaykitError::corrupt());
-                    };
-                    let at = proof
-                        .record_revision()
-                        .map_err(|_| PaykitError::corrupt())?;
-                    let mut writes = state::Tx::default();
-                    writes.put(
-                        &key::applied_reply(&q.hash()),
-                        &AppliedReply::new(&q, at.generation, Some(at.seq)),
-                    )?;
-                    writes.delete(&intent_key);
-                    self.local_commit(writes).await?;
-                }
+                // Settlement may follow a provider change. Release the prepared reply
+                // only with the authenticated application of this exact guarded deletion.
+                let [proof] = submitted.proofs.as_slice() else {
+                    return Err(PaykitError::corrupt());
+                };
+                let version = applied_version(proof).ok_or_else(PaykitError::corrupt)?;
+                let mut writes = state::Tx::default();
+                writes.put(
+                    &key::applied_reply(&q.hash()),
+                    &AppliedReply::new(&q, version),
+                )?;
+                writes.delete(&intent_key);
+                self.local_commit(writes).await?;
                 self.delivered(&msg_id).await?;
             }
             Err(error) if error.kept_batch().is_some() => (),
