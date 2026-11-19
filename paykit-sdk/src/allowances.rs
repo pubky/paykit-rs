@@ -1774,15 +1774,17 @@ impl Paykit {
             .to_body(kind)?;
             let signed = self.sign(held.counterparty, kind, refs, body)?;
             let msg_id = signed.msg_id().to_owned();
+            let stored = self.own_copy(&signed)?;
+            let origin = (kind == Kind::AllowanceEnd)
+                .then(|| EndOrigin::of(*record, &held, &stored, EndCause::User))
+                .transpose()?;
             let mut next = held.clone();
-            place(&mut next, self.own_copy(&signed)?);
+            place(&mut next, stored);
             if !reflects_stored(&next, &msg_id) {
                 return Err(PaykitError::corrupt());
             }
             let mut locals = Vec::new();
-            if kind == Kind::AllowanceEnd {
-                let origin =
-                    EndOrigin::of(*record, &held, &self.own_copy(&signed)?, EndCause::User)?;
+            if let Some(origin) = origin {
                 // A backup omits unresolved batches. Keep the producer's exact intent before
                 // the service can apply the record write and its answer can be lost.
                 Box::pin(self.local_put(&key::end_origin(&msg_id), &origin)).await?;
@@ -2434,15 +2436,11 @@ impl Paykit {
                         vec![proposal, accepted.hash()],
                         body,
                     )?;
-                    let origin = EndOrigin::of(
-                        record,
-                        &held,
-                        &self.own_copy(&own_end)?,
-                        EndCause::Automatic,
-                    )?;
+                    let stored = self.own_copy(&own_end)?;
+                    let origin = EndOrigin::of(record, &held, &stored, EndCause::Automatic)?;
                     Box::pin(self.local_put(&key::end_origin(own_end.msg_id()), &origin)).await?;
                     next = held.clone();
-                    place(&mut next, self.own_copy(&own_end)?);
+                    place(&mut next, stored);
                     place(&mut next, end.clone());
                     // While sends to the counterparty are held (Paykit spec 8.1, "Blocked
                     // counterparties"), the end is recorded all the same, with its executor
