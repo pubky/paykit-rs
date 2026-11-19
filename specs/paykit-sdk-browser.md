@@ -36,7 +36,7 @@ each.
 | [D0](#d0-which-protocol-version-the-first-browser-release-targets) | Protocol version to target | Paykit | Target v0.1 as implemented; keep browser-specific code out of protocol logic |
 | [D1](#d1-how-a-browser-app-gets-its-identity) | Identity in the browser | Paykit, Pubky | Support root-holding hosts first; do not define a delegation carrier on v0.1 |
 | [D2](#d2-secret-custody-and-threat-model) | Secret custody and threat model | Paykit | Same-origin script is trusted; sealed storage is the minimum; the host may supply the wrapping key |
-| [D3](#d3-state-backing) | Where SDK state lives | Paykit, Pubky | IndexedDB for an identity that lives in one browser profile; Pubky shared state only on vetted homeservers; ship one reference store |
+| [D3](#d3-state-backing) | Where SDK state lives | Paykit, Pubky | IndexedDB for an identity that lives in one browser profile; Pubky shared state only on vetted homeservers, after the cache fix and a clock review; ship one reference store |
 | [D4](#d4-transport-trust) | Transport trust | Pubky, Paykit | Accept WebPKI for browsers; document what it exposes; add a relay list setting |
 | [D5](#d5-several-tabs-and-one-grant) | Several tabs, one grant | Paykit, Pubky | One SDK runtime per origin, identity, and browser profile; adopt Pubky's shared bearer when it is stable |
 | [D6](#d6-private-intake) | Private intake | Paykit | Legacy polling first, as on Swift and Kotlin; supervised intake later |
@@ -44,7 +44,7 @@ each.
 | [D8](#d8-where-the-sdk-runs) | Execution context | Paykit | Dedicated worker or page; service worker only after its own test run |
 | [D9](#d9-binding-toolchain-and-package) | Binding toolchain and package | Paykit | Generated TypeScript on UniFFI 0.31 and ubrn `wasm2`; separate npm package |
 | [D10](#d10-async-host-callbacks) | Async host callbacks | Paykit | Async storage, session, and payment callbacks; decide the shape before the UniFFI upgrade |
-| [D11](#d11-supported-browsers-and-unsupported-environments) | Supported browsers | Paykit, Pubky | A version window per engine; Lockdown Mode unsupported |
+| [D11](#d11-supported-browsers-and-unsupported-environments) | Supported browsers | Paykit, Pubky | A version window per engine; Lockdown Mode unsupported; fixing cached reads blocks the first release |
 
 ## Scope
 
@@ -89,10 +89,11 @@ request that implements the decision updates that passage:
   store callbacks as synchronous.
 
 One existing passage is already out of date and is not caused by this
-document. The Backup And Restore section of the SDK specification says that a
-stale snapshot makes the next send reuse a transport key and nonce. Commit
-`59ae3049` changed that behavior (see Rollback in D3). The passage needs its
-own correction.
+document. The Backup And Restore section of the SDK specification, and the
+matching rustdoc in `paykit-sdk/src/runtime/backup.rs`, say that a stale
+snapshot makes the next send reuse a transport key and nonce. Commit
+`59ae3049` changed that behavior (see Rollback in D3). Both need their own
+correction.
 
 ## Evidence
 
@@ -185,9 +186,13 @@ These are the platform facts that drive the decisions.
 - **Several contexts share one origin, and some do not.** Tabs, workers, and
   a service worker in one browser profile can each start an SDK runtime over
   the same storage and the same grant. The same origin in another browser,
-  another browser profile, a private window, or a web app added to the Home
-  Screen has separate storage and shares no IndexedDB, Web Locks, or
-  `BroadcastChannel`. Those contexts behave like separate devices.
+  another browser profile, or a private window has separate storage and
+  shares no IndexedDB, Web Locks, or `BroadcastChannel`. Those contexts
+  behave like separate devices. A web app added to the Home Screen (iOS and
+  iPadOS) or the Dock (macOS Safari) is also separate, because WebKit
+  isolates its storage. An installed Chromium web app (Chrome or Edge, on
+  desktop or Android) is not: it shares the browser profile's storage, locks,
+  and service worker with ordinary tabs, so it is another tab for D5.
 - **A secure context is required.** WebCrypto, Web Locks, persistent storage,
   and service workers need HTTPS, or `localhost` during development.
 
@@ -220,13 +225,13 @@ wait for v0.2. Each keeps native behavior unchanged.
 
 | Area | Change |
 | --- | --- |
-| Dependencies | Browser randomness for `getrandom` and `uuid`; `chrono` `wasmbind`; all as `wasm32` target dependencies |
+| Dependencies | Browser randomness for `getrandom` and `uuid`; `chrono` `wasmbind`; all as `wasm32` target dependencies. The spike also set `--cfg getrandom_backend="wasm_js"` in `.cargo/config.toml`; check whether `getrandom` 0.3.4 and 0.4 still need it. `reqwest` on wasm has no `Error::is_connect()`, so the lock error categorization in `pubky_routing/locks.rs` needs a native-only branch |
 | `ring` | `snow` 0.10.0 enables `ring` by mistake (`ring/std` should be `ring?/std`). Fix upstream; no C toolchain is needed after that |
 | Bounded reads | `reqwest` on wasm has no `Response::chunk()`. Read with `bytes_stream()` and keep the size bound. Six sites in Paykit, two in `pubky-noise` |
 | Runtime | One internal module that re-exports Tokio on native and uses `spawn_local`, browser timers, and `web_time` on wasm |
 | `Send` bounds | Relax `Send` on wasm only for boxed futures and for the storage, session, and payment traits. Add `compile_error!` for wasm with `atomics` |
-| Hash maps | `std` hash maps are seeded from memory addresses on wasm, which is predictable. Either seed from `getrandom` through a shared alias and fail if it is unavailable, or use ordered maps where keys come from the network. This is a choice, and the first option was a large diff in the spike |
-| CI | `cargo check --target wasm32-unknown-unknown` for each crate on its own, because workspace dev-dependencies hide missing browser features |
+| Hash maps | `std` hash maps are seeded from memory addresses on wasm, which is predictable. Either seed from `getrandom` through a shared alias and fail if it is unavailable, or use ordered maps where keys come from the network. This is a choice, and the first option was a large diff in the spike. Public types must not expose the alias: the spike changed the type of public fields such as `PaymentList::payment_endpoints` and `PrivatePaymentList::payment_endpoints`. Public fields keep `std::collections::HashMap` or move to `BTreeMap`, and the seeded alias stays internal |
+| CI | `cargo check --target wasm32-unknown-unknown` for each crate on its own, because workspace dev-dependencies hide missing browser features. A check does not catch every missing feature: without `chrono/wasmbind`, `Utc::now()` compiles and panics at run time. CI also needs a `cargo tree` feature assertion or a wasm test run |
 
 These helpers must not become public API. The runtime module, the bounded-read
 helper, and the hash-map aliases are used by more than one crate, so
@@ -246,11 +251,27 @@ freeze date. It replaces v0.1 "with no migration". It changes the parts this
 document spends the most time on: the shared locked state file, the Noise
 handshakes over homeserver files, and the identity model.
 
-Some decisions here are about the browser and survive a protocol change:
-D2, D4, D7, D8, D9, D10, and D11. D5 also survives unless v0.2 stops using one
-homeserver bearer session per grant. Others are about v0.1 mechanisms and may
-not survive: D1 (the Paykit Identity Secret), D3 (the state blob), and D6 (the
-intake supervisor lease).
+Some decisions here are about the browser and mostly survive a protocol
+change: D2, D7, D8, D9, D10, and D11. The others change in substance under
+v0.2 (*read* from the v0.2 specification; details that live in the Pubky
+Switch specification were not checked here):
+
+- **D1, identity.** In v0.2 a signer issues each app its own certificate and
+  keys, so a browser app does not need the Pubky identity secret. That is the
+  delegation path v0.1 lacks.
+- **D3, state.** v0.2 has no homeserver write lock and no single shared-state
+  blob. The Pubky Switch client keeps local state per protocol, so the v0.1
+  blob store and the shared-state risks in D3 are replaced, not carried over.
+- **D4, transport trust.** v0.2 public endpoints live in app records that the
+  app key signs, chained to the identity's signed `identity.json`. A party in
+  front of the homeserver can no longer substitute Payment Endpoints, which
+  is the largest WebPKI exposure listed in D4.
+- **D5, tabs.** Single ownership still matters in v0.2, but for the Switch
+  client's local state and cursors, not for homeserver bearer replacement.
+- **D6, intake.** The supervisor lease is a v0.1 mechanism.
+
+A browser binding on v0.1 therefore carries risks (D1, D3, D4) that v0.2 is
+designed to remove.
 
 **Options.**
 
@@ -265,7 +286,8 @@ replaceable, and rollout step 3 can mark which deliverables are v0.1-only.
 
 This choice rests on two facts that maintainers must confirm: the date by
 which the first integrator needs a working SDK, and that v0.2 will not be
-frozen and implemented before that date.
+frozen and implemented before that date. If v0.2 is close, option 3 avoids
+shipping the v0.1 risks above to browser users.
 
 **Decision needed (Owner: Paykit).** Confirm the target, or say when v0.2
 would make option 3 the better choice.
@@ -329,13 +351,18 @@ with it (*verified*). It never signed in through an external signer.
   holder of the Pubky identity secret.
 - Limit that exposure. The SDK uses the Pubky identity secret only to sign a
   grant at sign-up or sign-in, to publish the Paykit Noise Key Authorization,
-  and to rotate (*read*). The binding documentation should tell root-holding
-  hosts to unlock it only for those steps. For normal operation the host
+  to rotate, to recover shared state from a backup
+  (`recover_shared_state_from_backup`), and to approve another app's auth
+  request (`approve_auth`, `approve_auth_with_companion_claim`) (*read*). The
+  binding documentation should tell root-holding hosts to unlock it only for
+  those steps. For normal operation the host
   derives the Paykit Identity Secret, signs in for a separate grant limited
   to `/pub/paykit/:rw`, exports that session secret, and runs the SDK with
   those two values and no Pubky identity secret, as a delegated app does.
-  This mode is *untested* in the browser, and the browser end-to-end test
-  must cover it.
+  A grant limited to `/pub/paykit/:rw` cannot publish a Pubky Profile or
+  avatar, which needs `/pub/pubky.app/:rw`; a host that offers those adds the
+  capability or does them in the unlocked step. This mode is *untested* in
+  the browser, and the browser end-to-end test must cover it.
 - Do not define an option 2 carrier on v0.1. It is a protocol addition that
   v0.2 would replace. State in the binding documentation that delegated
   browser sign-in gives public workflows only.
@@ -487,9 +514,10 @@ These two backings are not interchangeable (*read*):
 
 - An IndexedDB blob exists in one origin of one browser profile. It is a
   valid backing only while no other runtime uses the identity: no mobile app,
-  no second browser or profile, no Home Screen copy of the same web app, and
-  no second origin. If the identity also runs anywhere else, every runtime
-  must use the same logical state, which today means Pubky shared state.
+  no second browser or profile, no WebKit Home Screen copy of the same web
+  app, and no second origin. If the identity also runs anywhere else, every
+  runtime must use the same logical state, which today means Pubky shared
+  state, and in a browser that waits for the cache fix below.
 - Shared state is in contract only on a homeserver that the app has verified
   runs 0.16.2 or newer with GCS storage on every serving instance. The SDK
   does not check this, the homeserver's `/info` response does not report it,
@@ -514,7 +542,13 @@ Risks that are specific to the browser (*read* or *untested*):
   are already stored on its homeserver before it encrypts. A rolled-back link
   therefore does not reuse a Noise key and nonce, under two conditions: the
   homeserver reports its slots truthfully, and none of the link's stored
-  slots has been deleted, because the search stops at a gap. Receiving has no
+  slots has been deleted. The search assumes stored slots are contiguous: it
+  probes ahead in doubling steps, then bisects back to the first free slot
+  (`first_free_slot` in `encrypted_link/link.rs`). With a deleted slot in the
+  range it can return that slot, which reuses its key and nonce, or step over
+  it. A rolled-back sender can also publish an older Private Payment List in
+  a new, higher slot, which then supersedes a newer list that it published
+  before the rollback. Receiving has no
   equivalent check: the SDK reads again every peer message after the
   rolled-back position and accepts it as new, because the deduplication
   records rolled back too. Rollback also loses Allowance usage and Payment
@@ -528,10 +562,28 @@ Risks that are specific to the browser (*read* or *untested*):
   extends to every party listed in D4.
 - **The write-lock clock.** The shared-state write lock needs a clock that
   keeps counting while the context is suspended. Native builds have one.
-  Browsers do not guarantee one. The spike combined `performance.now()` and
-  `Date.now()` and marked the result as needing security review. The
-  homeserver also rejects an expired lock token (*verified* in three engines,
-  HTTP 412).
+  Browsers do not guarantee one. The spike took the larger of the
+  `performance.now()` and `Date.now()` steps and marked the result as needing
+  security review. It undercounts when `performance.now()` pauses during
+  operating-system sleep and the wall clock is also set back, so a woken
+  context can believe it still holds an expired lock. The homeserver rejects
+  a locked write with an expired token (*verified* in three engines, HTTP
+  412), but not every write in the lock scope is locked: the SDK writes a
+  pending-write marker with a plain `put` before the locked state write
+  (*read*). A stale marker only forces one extra reconciliation write, and
+  encrypted message slots are written under the SDK's own peer link lease,
+  not inside this lock scope (*read*). No unlocked write found so far causes
+  harm, but the search was not exhaustive.
+- **Cached reads overwrite shared state.** The shared-state read is a plain
+  GET, and the revision is a hash of the bytes received. The locked write
+  that follows has no precondition on what was read (*read*,
+  `pubky_shared.rs`). If the browser serves a cached older blob (D11), the
+  transaction runs on old state and its write silently replaces the newer
+  state of another device: Allowance usage, Payment Request claims, and link
+  state are lost. `put_resource_if_revision`, used for the Paykit App
+  Registry, re-reads under its lock and is fooled the same way when both
+  reads come from the cache. Native clients have no HTTP cache and are not
+  affected. Not reproduced.
 - **A backup is a partial answer to eviction.** Restore needs an empty state
   backing and an explicit restored link policy. The SDK also sends on its
   own, so a backup is usually older than the last send or receive. Such a
@@ -563,21 +615,29 @@ Risks that are specific to the browser (*read* or *untested*):
   storage as an app-provided integration point, although it does allow a
   "built-in platform storage adapter".
 - Require of any IndexedDB store: one transaction per compare-and-swap, strict
-  durability, a revision that is never reused, authenticated data that binds
-  the row to its revision and database, and atomic creation of the sealing
-  key.
+  durability, a revision that is never reused, and atomic creation of the
+  sealing key. The authenticated data binds each row to its purpose (state
+  blob, Paykit Identity Secret, or session secret), the identity's public
+  key, the database, and the revision, so a ciphertext cannot be moved to
+  another row or identity sealed with the same key. Every transaction
+  rejects its promise on `abort` as well as `error`: quota exhaustion and
+  browser aborts can fire `abort` alone, and the spike's store handled only
+  `error`, which would leave the call pending forever.
 - Call `navigator.storage.persist()` after a user action such as creating or
   restoring an identity, not on page load: Firefox shows a permission prompt,
   and Chrome and Safari decide silently. Treat a refusal as normal. A grant
   protects against eviction under storage pressure. It is not documented to
   stop Safari's 7-day deletion, and it does not replace backups.
-- Before shared state is recommended in Firefox, answer the open question on
-  stale cached reads (D11).
+- Shared state is not supported in any browser until cached reads are fixed
+  (D11). This is a blocker, not a Firefox caveat: Safari's behavior is
+  unconfirmed, Chromium's fresh reads rest on an engine heuristic rather than
+  a guarantee, and the failure is silent data loss.
+- Review the client lease clock before shared state ships in browsers. The
+  homeserver's 412 protects locked writes only.
 
 **Decision needed (Owner: Paykit).** Should Paykit ship a reference store?
-Which backing is the documented default? Is the homeserver's check of the
-write lock enough, or must the client clock be reviewed before shared state
-ships in browsers?
+Which backing is the documented default? Do you agree that shared state
+waits for both the cache fix and a review of the client lease clock?
 
 **Decision needed (Owner: Pubky).** Can a client learn at run time that a
 homeserver meets the shared-state requirements? Does shared state need replay
@@ -617,7 +677,7 @@ proxy. What that party can do (*read*):
 - **Redirect payments.** Public Payment Endpoints and the Paykit App Registry
   are not signed; only the Paykit Noise Key Authorization is. A party in
   front of a payee's homeserver can serve its own Payment Endpoints to a
-  browser payer.
+  browser payer. v0.2 signs public endpoints, which removes this (D0).
 - **Use the user's session.** The session bearer is sent with every
   authenticated request and is valid for up to one hour. It can write
   everything under `/pub/paykit/`. With it the party can replace the user's
@@ -715,29 +775,51 @@ source.
 
 The rule is not enforced. A host that runs two runtimes on one grant sees HTTP
 401 in the older one, and concurrent saves surface as revision conflicts.
-Another browser profile, or a Home Screen copy of the web app, is a separate
-device for this rule and needs its own grant.
+Another browser profile, or a WebKit Home Screen copy of the web app, is a
+separate device for this rule and needs its own grant. An installed Chromium
+web app is not; it is one more tab in the same profile.
 
 The owner helper must define what a relayed call means when the owner goes
 away. `BroadcastChannel` gives no delivery guarantee, so a caller whose owner
 closed cannot tell "not run" from "run, reply lost". The helper must report
 such a call as having an uncertain outcome and must not resend a call that
-changes state. Every same-origin context can post to the channel and read its
-replies, so secrets must not be call arguments or results. A frozen owner may
-keep its Web Lock. That case is *untested* and must be covered before the
-helper ships.
+changes state.
+
+Every same-origin context can post to the channel and read its replies, so
+secrets must not be call arguments or results. Several SDK calls carry
+secrets: backup export and restore (the backup is unencrypted), sign-up,
+sign-in, auth completion, and session import. The helper does not relay
+them. They run only in the owner context, or go over a dedicated
+`MessageChannel` port to the owner.
+
+A frozen owner may keep its Web Lock while its channel goes silent, which
+would block every other tab. Moving the owner into a dedicated worker does not
+help, because a dedicated worker is frozen with its page. The helper needs a
+liveness check: a follower that gets no answer within a timeout reports the
+call as uncertain, and the owner gives up the lock when the page is hidden or
+frozen (`visibilitychange`, `freeze`, `pagehide`). Whether Chrome exempts
+pages that hold a Web Lock from freezing is unknown here. The case is
+*untested* and must be covered before the helper ships. Option 3 avoids it,
+because no tab relays calls for another.
 
 A related change for every binding: report a session that the homeserver
 rejects with 401 as an error that the host can act on, not only as a failed
 count. Under the one-owner rule, an unexplained 401 can mean that a copy of
 the session secret is in use elsewhere, and the host should offer to revoke
 the grant. This changes results on Swift, Kotlin, and React Native as well, so
-it needs its own issue.
+it needs its own issue. One existing mapping already gets 401 wrong: Pubky
+Profile publishing reports 401 as "Pubky session lacks the Pubky app profile
+capabilities" (`is_forbidden` in `runtime/pubky_app_profile.rs`), so a
+replaced bearer looks like a missing capability.
+
+Revoking the grant from the browser needs `PubkyGrantLogout`, which master
+compiles only for native targets today.
 
 **Decision needed (Owner: Paykit).** Is "one runtime per origin, identity,
 and profile" acceptable as a browser rule? The bindings specification allows
 several runtimes elsewhere. Should a rejected session (HTTP 401) become an SDK
-error on all bindings?
+error on all bindings? Does grant logout ship on wasm in the first release,
+or is it left out and documented?
 
 **Decision needed (Owner: Pubky).** Will the grant session coordinator and
 the delegated proof-of-possession signer (D2) become stable APIs?
@@ -904,7 +986,9 @@ to the no-deadline policy?
 - Recommend the worker because a panic can be recovered by replacing the
   worker, and because SDK work stays off the main thread.
 - Install a panic hook that reports the panic to the host, so the host can
-  replace the runtime.
+  replace the runtime. `console_error_panic_hook` only logs; this needs a
+  `std::panic::set_hook` callback into JavaScript, and it must also fire for
+  a panic in a `spawn_local` task, which has no calling promise.
 - Document an interrupted call as crash recovery: the host inspects durable
   records, then retries after the lease expires. The bindings rule that a
   cancelled call still finishes or fails consistently cannot apply when the
@@ -1072,7 +1156,10 @@ added on every platform, or one async shape for every platform?
   5 seconds later (*verified*). WebKit's source has the same heuristic, but
   Playwright WebKit returned fresh reads in the same probe (*verified*), so
   Safari itself is unconfirmed. Chromium skips the heuristic when
-  `must-revalidate` is present and returned fresh reads (*verified*).
+  `must-revalidate` is present and returned fresh reads (*verified*). A
+  browser's private cache may also store authenticated reads, so this
+  reaches Pubky shared state and lock-guarded updates, where a stale read
+  silently overwrites newer data (D3).
 - Firefox resolves the event-stream request only when the first bytes
   arrive, and the homeserver sends its first keep-alive after 15 seconds
   (*verified*).
@@ -1098,21 +1185,23 @@ added on every platform, or one async shape for every platform?
   WebCrypto, IndexedDB, and Web Locks, and reports which one is missing, so a
   host can explain why Paykit is unavailable. Lockdown Mode is unsupported.
 - Document the Content Security Policy requirements.
-- Ask Pubky to fix stale reads at the source, with `Cache-Control: no-cache`
-  on homeserver public reads or a cache mode in the Pubky client. `reqwest`
-  on wasm already has a per-request `fetch_cache_no_store()`. Until then the
-  only workaround is to replace the global `fetch`, as the spike did, because
-  the Pubky client and `pubky-noise` build the requests, not Paykit. In a
-  dedicated worker that the SDK owns this is contained. On the page it
-  changes `fetch` for the whole host app, so the package must not do it there
-  without the host's consent. It can share the opt-in wrapper in D7.
+- Treat the stale-read fix as a blocker for the first release. Ask Pubky to
+  fix it at the source, with `Cache-Control: no-cache` on homeserver reads or
+  a cache mode in the Pubky client and `pubky-noise`. `reqwest` on wasm
+  already has a per-request `fetch_cache_no_store()`. An opt-in `fetch`
+  wrapper is not enough, because a host that does not opt in loses data
+  silently (D3). If the source fix is late, the package replaces the global
+  `fetch` in the dedicated worker it owns, as the spike did, and refuses
+  shared state and lock-guarded updates on the page unless the host installs
+  the wrapper.
 - Ask Pubky for an initial comment on the event stream, which removes the
   15-second delay.
 
 **Decision needed (Owner: Paykit).** Confirm the support policy.
 
-**Decision needed (Owner: Pubky).** Where should the stale-read fix go, and
-can it ship before the first browser release?
+**Decision needed (Owner: Pubky).** Where should the stale-read fix go
+(homeserver headers, the Pubky client, `pubky-noise`, or all three), and can
+it ship before the first browser release?
 
 ## Rollout
 
@@ -1132,8 +1221,8 @@ can it ship before the first browser release?
 
 Step 1 depends only on D0: options 1 and 3 land it now, option 2 does not.
 Step 2 depends on D9, and D10 must be settled before step 2 starts. Step 3
-depends on every Paykit decision, and on Paykit's side of D4 (the relay list
-setting) and D7 (the stopgap deadline).
+depends on every Paykit decision, on Paykit's side of D4 (the relay list
+setting) and D7 (the stopgap deadline), and on the stale-read fix (D11).
 
 ## Open questions
 
@@ -1147,9 +1236,9 @@ These are not decisions yet, because the facts are missing.
   Safari?
 - Does cancelling a generated-binding call with an `AbortSignal` abort the
   `fetch` underneath?
-- Does a stale cached read in Firefox (seen in the spike) or Safari (not seen
-  in Playwright WebKit) break the compare-and-swap of Pubky shared state?
-  This comes from reading the code and was not reproduced.
+- Does Safari itself serve cached homeserver reads, as Firefox does? The
+  code shows what a stale read does to shared state (D3); reproduce it in
+  Firefox to confirm.
 - How does a delegated app learn the new Paykit Identity Secret after a key
   rotation? This is unanswered on every platform.
 - How long is a peer or Paykit App blocked after a reload in the middle of a
