@@ -52,6 +52,42 @@ impl StorageAdapter for RejectBufferedDrainCommit {
     }
 }
 
+/// Counts transactions whose callback changes the stored private intake
+/// cursor event ID of `watched_peer`.
+#[derive(Clone)]
+struct CountCursorAdvances {
+    inner: InMemoryStorage,
+    watched_peer: PubkyPublicKey,
+    advances: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl StorageAdapter for CountCursorAdvances {
+    async fn transaction_erased<'a>(
+        &self,
+        callback: StorageTransactionCallback<'a>,
+    ) -> Result<Box<dyn Any + Send>> {
+        let watched_peer = self.watched_peer.clone();
+        let advances = Arc::clone(&self.advances);
+        self.inner
+            .transaction_erased(Box::new(move |tx| {
+                let cursor_event_id = |tx: &dyn paykit_sdk::storage::StorageTransaction| {
+                    tx.export_storage_state()
+                        .private_intake_cursors
+                        .get(&watched_peer)
+                        .map(|cursor| cursor.event_id)
+                };
+                let before = cursor_event_id(&*tx);
+                let result = callback(tx)?;
+                if cursor_event_id(&*tx) != before {
+                    advances.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(result)
+            }))
+            .await
+    }
+}
+
 #[derive(Clone)]
 struct RejectSecondBufferedDrainCommit {
     inner: InMemoryStorage,
@@ -912,10 +948,9 @@ async fn test_buffered_receive_retention_refusal_keeps_packet_and_checkpoint() {
 /// have moved it to `Stale` or `Unsupported`. Only stream delivery records an
 /// event cursor on the buffered packet, and that cursor must be newer than the
 /// last event intake handled before the publish. That baseline cursor must
-/// exist: the first subscribe has no cursor, so it replays Bob's Encrypted Link
-/// Handshake files under the private directory, and intake stores the cursor of
-/// those events. So the fetch was triggered by a stream event recorded after
-/// that point, not by an audit or by a replayed earlier event.
+/// exist: startup reconciliation stores a cursor for Bob's private directory
+/// before the publish. So the fetch was triggered by a stream event recorded
+/// after that point, not by an audit or by a replayed earlier event.
 #[tokio::test]
 async fn test_private_intake_buffers_new_packet_from_live_event_stream() {
     let pair = linked_two_party().await;
@@ -950,7 +985,7 @@ async fn test_private_intake_buffers_new_packet_from_live_event_stream() {
         .private_intake_cursors
         .get(&pair.bob.public_key)
         .cloned()
-        .expect("startup replay should have advanced the private intake cursor before the publish");
+        .expect("startup reconciliation should have stored the private intake cursor before the publish");
 
     publish_private_lists(&pair.bob, &pair.alice, 1).await;
 
@@ -1035,7 +1070,7 @@ async fn test_private_intake_stream_survives_largest_private_event() {
             .cloned()
     };
     let baseline_cursor = intake_cursor(&pair.alice.storage)
-        .expect("startup replay should have advanced the private intake cursor");
+        .expect("startup reconciliation should have stored the private intake cursor");
 
     pair.bob
         .access
@@ -1085,5 +1120,132 @@ async fn test_private_intake_stream_survives_largest_private_event() {
         Some(&PrivateIntakeTransportState::Stale),
         "private intake stream must not fall back to audits"
     );
+    supervisor.stop().await;
+}
+
+/// Return the newest homeserver event ID `user` has under the private
+/// directory, read with a one-shot newest-first query.
+async fn newest_private_event_id(pair: &TwoParty, user: &TestUser) -> u64 {
+    use futures_util::StreamExt;
+
+    let user_key = user.public_key.to_public_key().unwrap();
+    let mut events = pubky::EventStreamBuilder::for_homeserver(
+        pair.alice.access.outbox_client.client().clone(),
+        &pair._testnet.homeserver_app().public_key(),
+    )
+    .add_users([(&user_key, None)])
+    .unwrap()
+    .path(format!("{}/", paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX))
+    .reverse()
+    .limit(1)
+    .subscribe()
+    .await
+    .unwrap();
+    events
+        .next()
+        .await
+        .expect("user should have at least one private-directory event")
+        .unwrap()
+        .cursor
+        .id()
+}
+
+/// Guards first-subscribe cursor seeding: a Linked Peer with no stored intake
+/// cursor must not have its whole private-directory history replayed, one
+/// expected-slot acquisition per historical event. Bob leaves 48 unrelated
+/// files plus a packet under the private directory before intake starts. The
+/// startup audit buffers the packet, intake stores a cursor at or past Bob's
+/// newest private event without advancing it once per historical event, and
+/// the next packet still arrives through the live event stream.
+#[tokio::test]
+async fn test_private_intake_seeds_cursor_without_replaying_history() {
+    const HISTORY_FILES: usize = 48;
+    let pair = linked_two_party().await;
+    let bob = &pair.bob.public_key;
+    for i in 0..HISTORY_FILES {
+        pair.bob
+            .access
+            .session
+            .storage()
+            .put(
+                format!(
+                    "{}/history-seed/{i}",
+                    paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX
+                ),
+                b"x".to_vec(),
+            )
+            .await
+            .unwrap();
+    }
+    publish_private_lists(&pair.bob, &pair.alice, 1).await;
+    let newest_event_id = newest_private_event_id(&pair, &pair.bob).await;
+
+    let advances = Arc::new(AtomicUsize::new(0));
+    let sdk = Arc::new(PaykitSdk::new(
+        CountCursorAdvances {
+            inner: pair.alice.storage.clone(),
+            watched_peer: bob.clone(),
+            advances: Arc::clone(&advances),
+        },
+        TestnetSessionProvider::new(pair.alice.access.clone()),
+        pair.alice.adapter.clone(),
+        PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+    ));
+    let mut config = PrivateIntakeConfig::new(1).unwrap();
+    config.healthy_audit_interval = Duration::from_secs(60 * 60);
+    let supervisor = sdk.start_private_intake(config).await.unwrap();
+
+    wait_for_buffered(&pair.alice.storage, bob, 1).await;
+    let state = pair.alice.storage.snapshot().unwrap();
+    assert!(
+        state.private_intake_peers[bob].buffered_packets[0]
+            .source_cursor
+            .is_none(),
+        "the pre-start packet must be buffered by the startup audit"
+    );
+
+    let intake_cursor = || {
+        pair.alice
+            .storage
+            .snapshot()
+            .unwrap()
+            .private_intake_cursors
+            .get(bob)
+            .cloned()
+    };
+    let seeded_cursor = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            if let Some(cursor) = intake_cursor() {
+                if cursor.event_id >= newest_event_id {
+                    return cursor;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("private intake should store a cursor at or past Bob's newest private event");
+    let counted = advances.load(Ordering::SeqCst);
+    assert!(
+        counted <= 2,
+        "history must not be replayed one acquisition per event: {counted} cursor advances"
+    );
+
+    publish_private_lists(&pair.bob, &pair.alice, 1).await;
+
+    wait_for_buffered(&pair.alice.storage, bob, 2).await;
+    let state = pair.alice.storage.snapshot().unwrap();
+    let source_cursor = state.private_intake_peers[bob]
+        .buffered_packets
+        .last()
+        .unwrap()
+        .source_cursor
+        .as_ref()
+        .expect("packet must arrive through the live event stream, not an audit");
+    assert!(
+        source_cursor.event_id > newest_event_id,
+        "packet must come from a stream event newer than the pre-start history"
+    );
+    assert_eq!(source_cursor.homeserver, seeded_cursor.homeserver);
     supervisor.stop().await;
 }
