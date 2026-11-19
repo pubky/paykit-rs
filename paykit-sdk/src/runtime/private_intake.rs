@@ -516,10 +516,11 @@ fn private_intake_event_path_filter() -> String {
 /// A read folder ties a pseudorandom storage path to one counterparty, so it
 /// must never be logged or exposed through health or errors. That is why this
 /// type does not derive `Debug`. A peer without an entry is unfiltered: every
-/// event under its private tree is a hint. Every acquisition replaces its
-/// peer's entry with the read folder of the snapshot it used, or removes it
-/// when the peer is pending an Encrypted Link Handshake or the acquisition
-/// failed before deriving the folder.
+/// event under its private tree is a hint. Every acquisition that derives
+/// the expected slot replaces its peer's entry with the read folder of the
+/// snapshot it used. An acquisition that finds the peer pending an Encrypted
+/// Link Handshake removes the entry, and one that fails before deriving the
+/// folder keeps it (see `scoped_private_intake_acquire`).
 #[derive(Default)]
 struct PrivateIntakeEventScopes {
     read_folders: HashMap<PubkyPublicKey, String>,
@@ -647,58 +648,63 @@ fn route_private_intake_event(
     })
 }
 
-/// Highest ignored event cursor per peer since that peer's last successful
-/// in-stream audit. Held only in memory by one connected stream.
-type PrivateIntakeIgnoredCursors = HashMap<PubkyPublicKey, PrivateIntakeCursorRecord>;
+/// Highest ignored event ID per peer since that peer's last successful
+/// in-stream audit. Held only in memory by one connected stream, whose
+/// subscription group names the homeserver these IDs belong to.
+type PrivateIntakeIgnoredCursors = HashMap<PubkyPublicKey, u64>;
 
 fn record_ignored_private_intake_event(
     ignored: &mut PrivateIntakeIgnoredCursors,
-    cursor: PrivateIntakeCursorRecord,
+    peer: PubkyPublicKey,
+    event_id: u64,
 ) {
-    match ignored.get_mut(&cursor.subscribed_user) {
-        Some(highest) if highest.event_id >= cursor.event_id => {}
-        Some(highest) => *highest = cursor,
-        None => {
-            ignored.insert(cursor.subscribed_user.clone(), cursor);
-        }
-    }
+    ignored
+        .entry(peer)
+        .and_modify(|highest| *highest = (*highest).max(event_id))
+        .or_insert(event_id);
 }
 
 /// Run one in-stream audit, then commit, in one batch, the ignored cursors
-/// seen before it for every peer whose audit found its next expected slot
-/// absent.
+/// of every peer whose audit found its next expected slot absent.
+///
+/// The caller holds `ignored` for the whole audit, so no event is recorded
+/// while it runs and every entry was seen before the audit started.
 ///
 /// Safety argument: the stream delivers a homeserver's events in cursor
 /// order, and for each such peer the audit fetched the expected slot after
-/// every event seen before it started and found it absent. An ignored event
-/// either cannot announce a packet the expected-slot fetch would find, or,
-/// when the read folder was stale, announced one that this audit fetched.
-/// Moving the stored cursor past those events only skips replaying them on
-/// reconnect. Ignored events seen after the audit starts wait for the next
-/// audit, and peers whose audit failed or stopped before finding an absent
-/// slot (pending handshake, capacity, acquisition cap) stay in `ignored`.
+/// every event in `ignored` and found it absent. An ignored event either
+/// cannot announce a packet the expected-slot fetch would find, or, when the
+/// read folder was stale, announced one that this audit fetched. Moving the
+/// stored cursor, on `homeserver_name`, past those events only skips
+/// replaying them on reconnect.
 ///
-/// `ignored` lives only as long as the connected stream. A pending handshake,
-/// the acquisition cap or a failed audit keeps the cursor for the next audit
-/// on that stream. An audit that stops at capacity makes the caller exit with
+/// `ignored` lives only as long as the connected stream. Any audit outcome
+/// other than an absent expected slot (a pending handshake, an already
+/// buffered packet, capacity, the acquisition cap or a failure) keeps the
+/// peer's ignored cursor for the next in-stream audit while the stream stays
+/// connected. An audit that stops at capacity makes the caller exit with
 /// backpressure, which drops `ignored` like any other disconnect; the
 /// homeserver then replays those events after reconnect and they are filtered
 /// again.
 async fn audit_private_intake_stream(
     audit_group: &PrivateIntakeAudit,
+    homeserver_name: &str,
     ignored: &mut PrivateIntakeIgnoredCursors,
     commit_cursors: &PrivateIntakeCommitCursors,
 ) -> PrivateIntakeAuditOutcome {
-    let seen_before_audit = std::mem::take(ignored);
     let outcome = audit_group().await;
     let mut audited = Vec::new();
-    for (peer, cursor) in seen_before_audit {
-        if outcome.audited_peers.contains(&peer) {
-            audited.push(cursor);
-        } else {
-            record_ignored_private_intake_event(ignored, cursor);
+    ignored.retain(|peer, event_id| {
+        if !outcome.audited_peers.contains(peer) {
+            return true;
         }
-    }
+        audited.push(PrivateIntakeCursorRecord {
+            subscribed_user: peer.clone(),
+            homeserver: homeserver_name.to_owned(),
+            event_id: *event_id,
+        });
+        false
+    });
     if !audited.is_empty() {
         commit_cursors(audited).await;
     }
@@ -893,10 +899,12 @@ type PrivateIntakeCommitCursorsFuture = Pin<Box<dyn Future<Output = ()> + Send>>
 type PrivateIntakeCommitCursors =
     Arc<dyn Fn(Vec<PrivateIntakeCursorRecord>) -> PrivateIntakeCommitCursorsFuture + Send + Sync>;
 
-/// Wrap a scoped acquisition so every outcome refreshes its peer's event
-/// scope: a derived read folder replaces the entry and `None` removes it,
-/// which leaves the peer unfiltered. Stream events and audits share the
-/// returned closure, so the scope always follows the latest snapshot read.
+/// Wrap a scoped acquisition so its outcome refreshes its peer's event
+/// scope. A derived read folder replaces the entry. Without a folder, a
+/// successful outcome (a pending Encrypted Link Handshake) removes the entry,
+/// which leaves the peer unfiltered, and an error keeps it unchanged. Stream
+/// events and audits share the returned closure, so the scope follows the
+/// latest snapshot from which a slot was derived.
 fn scoped_private_intake_acquire<F>(
     scopes: Arc<std::sync::Mutex<PrivateIntakeEventScopes>>,
     acquire: F,
@@ -916,13 +924,28 @@ where
         Box::pin(async move {
             let (read_folder, outcome) = acquisition.await;
             if let Ok(mut scopes) = scopes.lock() {
-                match read_folder {
-                    Some(read_folder) => {
+                match (read_folder, &outcome) {
+                    (Some(read_folder), _) => {
                         scopes.read_folders.insert(peer, read_folder);
                     }
-                    None => {
+                    // A pending Encrypted Link Handshake has no read folder
+                    // yet. A slot whose path lacks the derived folder shape
+                    // also lands here.
+                    (None, Ok(_)) => {
                         scopes.read_folders.remove(&peer);
                     }
+                    // The acquisition failed before deriving the slot: a
+                    // storage, handshake, authorization, marker or
+                    // observation error, or the peer has no private intake
+                    // checkpoint or no Encrypted Link snapshot (both are
+                    // `RecoveryRequired` errors). Keep the previous entry,
+                    // or none, so a flaky homeserver does not turn the
+                    // filter off and re-enable a fetch per unrelated event.
+                    // A stale folder only delays a packet: handshake slots
+                    // in any folder still pass, audits still fetch the
+                    // expected slot, and every audit or acquisition that
+                    // derives the slot replaces the entry.
+                    (None, Err(_)) => {}
                 }
             }
             outcome
@@ -959,7 +982,7 @@ where
             Some((peer, outcome))
         }
         PrivateIntakeEventRoute::Ignored(cursor) => {
-            record_ignored_private_intake_event(ignored, cursor);
+            record_ignored_private_intake_event(ignored, cursor.subscribed_user, cursor.event_id);
             None
         }
     }
@@ -1095,7 +1118,13 @@ async fn run_connected_private_intake_stream(
             }
             _ = audit.tick() => {
                 let outcome =
-                    audit_private_intake_stream(&audit_group, &mut ignored, &commit_cursors).await;
+                    audit_private_intake_stream(
+                        &audit_group,
+                        &group.homeserver_name,
+                        &mut ignored,
+                        &commit_cursors,
+                    )
+                    .await;
                 if outcome.backpressured {
                     return PrivateIntakeEventLoopExit::Backpressured;
                 }
@@ -1103,7 +1132,13 @@ async fn run_connected_private_intake_stream(
             }
             _ = handshake_retry.tick(), if handshake_pending => {
                 let outcome =
-                    audit_private_intake_stream(&audit_group, &mut ignored, &commit_cursors).await;
+                    audit_private_intake_stream(
+                        &audit_group,
+                        &group.homeserver_name,
+                        &mut ignored,
+                        &commit_cursors,
+                    )
+                    .await;
                 if outcome.backpressured {
                     return PrivateIntakeEventLoopExit::Backpressured;
                 }
@@ -4253,32 +4288,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_private_intake_failed_or_pending_acquisition_leaves_peer_unfiltered() {
+    async fn test_private_intake_pending_acquisition_leaves_peer_unfiltered() {
+        let fixture = scoped_intake_fixture();
+        let peer = PubkyPublicKey::from_public_key(&fixture.remote);
+        let scopes = Arc::new(StdMutex::new(PrivateIntakeEventScopes {
+            read_folders: HashMap::from([(peer.clone(), fixture.read_folder.clone())]),
+        }));
+        let acquire = scoped_private_intake_acquire(Arc::clone(&scopes), |_, _| {
+            Box::pin(async { (None, Ok(PrivatePacketAcquisition::PendingHandshake)) })
+        });
+
+        let outcome = acquire(peer.clone(), None).await;
+
+        assert!(matches!(
+            outcome,
+            Ok(PrivatePacketAcquisition::PendingHandshake)
+        ));
+        assert!(!scopes.lock().unwrap().read_folders.contains_key(&peer));
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_failed_acquisition_keeps_read_folder() {
         let fixture = scoped_intake_fixture();
         let peer = PubkyPublicKey::from_public_key(&fixture.remote);
         let scopes = Arc::new(StdMutex::new(PrivateIntakeEventScopes::default()));
-        let outcomes = Arc::new(StdMutex::new(VecDeque::from([
-            (None, Err(recovery_required())),
-            (None, Ok(PrivatePacketAcquisition::PendingHandshake)),
-        ])));
-        let acquire = scoped_private_intake_acquire(Arc::clone(&scopes), {
-            let outcomes = Arc::clone(&outcomes);
-            move |_, _| {
-                let outcome = outcomes.lock().unwrap().pop_front().unwrap();
-                Box::pin(async move { outcome })
-            }
+        let acquire = scoped_private_intake_acquire(Arc::clone(&scopes), |_, _| {
+            Box::pin(async { (None, Err(recovery_required())) })
         });
 
-        for expect_error in [true, false] {
-            scopes
-                .lock()
-                .unwrap()
-                .read_folders
-                .insert(peer.clone(), fixture.read_folder.clone());
-            let outcome = acquire(peer.clone(), None).await;
-            assert_eq!(outcome.is_err(), expect_error);
-            assert!(!scopes.lock().unwrap().read_folders.contains_key(&peer));
-        }
+        // Without a previous folder the peer stays unfiltered.
+        assert!(acquire(peer.clone(), None).await.is_err());
+        assert!(!scopes.lock().unwrap().read_folders.contains_key(&peer));
+
+        // A previous folder survives the error.
+        scopes
+            .lock()
+            .unwrap()
+            .read_folders
+            .insert(peer.clone(), fixture.read_folder.clone());
+        assert!(acquire(peer.clone(), None).await.is_err());
+        assert_eq!(
+            scopes.lock().unwrap().read_folders.get(&peer),
+            Some(&fixture.read_folder)
+        );
     }
 
     #[tokio::test]
@@ -4330,7 +4382,11 @@ mod tests {
             scopes.read_folders.get(&established),
             Some(&fixture.read_folder)
         );
-        assert!(!scopes.read_folders.contains_key(&failing));
+        // A failure before slot derivation keeps the previous folder.
+        assert_eq!(
+            scopes.read_folders.get(&failing),
+            Some(&other_link_folder(&fixture.read_folder))
+        );
     }
 
     #[tokio::test]
@@ -4386,7 +4442,7 @@ mod tests {
         };
         let mut ignored = PrivateIntakeIgnoredCursors::new();
         for (peer, event_id) in peers.iter().zip([10, 20, 30, 40]) {
-            record_ignored_private_intake_event(&mut ignored, cursor(peer, event_id));
+            record_ignored_private_intake_event(&mut ignored, peer.clone(), event_id);
         }
         let batches = Arc::new(StdMutex::new(Vec::new()));
         let commit_cursors: PrivateIntakeCommitCursors = Arc::new({
@@ -4397,7 +4453,9 @@ mod tests {
             }
         });
 
-        let outcome = audit_private_intake_stream(&audit, &mut ignored, &commit_cursors).await;
+        let outcome =
+            audit_private_intake_stream(&audit, "homeserver-a", &mut ignored, &commit_cursors)
+                .await;
 
         // Only the peer whose expected slot was absent counts as audited;
         // a pending handshake, full capacity or the acquisition cap leave
@@ -4411,9 +4469,9 @@ mod tests {
         assert_eq!(
             ignored,
             HashMap::from([
-                (pending.clone(), cursor(&pending, 20)),
-                (capacity.clone(), cursor(&capacity, 30)),
-                (inserting.clone(), cursor(&inserting, 40)),
+                (pending.clone(), 20),
+                (capacity.clone(), 30),
+                (inserting, 40)
             ])
         );
     }
@@ -4427,21 +4485,20 @@ mod tests {
     }
 
     impl IgnoredCursorScript {
-        /// Wait for the next audit, send `during` while it runs, then
-        /// release it with `outcome`.
-        async fn audit(&mut self, during: Vec<pubky::Event>, outcome: PrivateIntakeAuditOutcome) {
+        /// Wait for the next audit and release it with `outcome`.
+        async fn audit(&mut self, outcome: PrivateIntakeAuditOutcome) {
             self.started_rx.recv().await.unwrap();
-            for event in during {
-                self.events_tx.send(event).unwrap();
-            }
             self.release_tx.send(outcome).unwrap();
         }
 
-        /// Send `hint` and wait until it is acquired, so the loop has
-        /// handled every earlier event and committed what earlier audits
-        /// allowed. Audits that start meanwhile fail, which keeps every
-        /// ignored cursor.
-        async fn sync(&mut self, hint: pubky::Event) {
+        /// Send `events`, then `hint`, and wait until the hint is acquired,
+        /// so the loop has handled every earlier event and committed what
+        /// earlier audits allowed. Audits that start meanwhile fail, which
+        /// keeps every ignored cursor.
+        async fn send(&mut self, events: Vec<pubky::Event>, hint: pubky::Event) {
+            for event in events {
+                self.events_tx.send(event).unwrap();
+            }
             let event_id = hint.cursor.id();
             self.events_tx.send(hint).unwrap();
             loop {
@@ -4557,32 +4614,30 @@ mod tests {
             release_tx,
         };
         let script_run = async {
-            // Ignored events that arrive during an audit are not committed
-            // by it, and an audit with no ignored events commits nothing.
-            script
-                .audit(vec![ignored(10), ignored(11)], audited.clone())
-                .await;
-            script.sync(hint(12)).await;
+            // An audit with no ignored events commits nothing.
+            script.audit(audited.clone()).await;
+            script.send(Vec::new(), hint(9)).await;
             assert!(committed_ids().is_empty());
 
             // A completed audit commits the highest ignored cursor seen
-            // before it started, once.
-            script.audit(vec![ignored(13)], audited.clone()).await;
-            script.sync(hint(14)).await;
+            // before it, once.
+            script.send(vec![ignored(10), ignored(11)], hint(12)).await;
+            assert!(committed_ids().is_empty());
+            script.audit(audited.clone()).await;
+            script.send(vec![ignored(13)], hint(14)).await;
             assert_eq!(committed_ids(), vec![vec![11]]);
 
-            // A failed audit keeps the ignored cursor for the next one.
-            script
-                .audit(Vec::new(), PrivateIntakeAuditOutcome::default())
-                .await;
-            script.sync(hint(15)).await;
+            // Ignored events after an audit wait for the next one, and a
+            // failed audit keeps them.
+            script.audit(PrivateIntakeAuditOutcome::default()).await;
+            script.send(Vec::new(), hint(15)).await;
             assert_eq!(committed_ids(), vec![vec![11]]);
-            script.audit(Vec::new(), audited.clone()).await;
-            script.sync(hint(16)).await;
+            script.audit(audited.clone()).await;
+            script.send(Vec::new(), hint(16)).await;
             assert_eq!(committed_ids(), vec![vec![11], vec![13]]);
 
-            script.audit(Vec::new(), audited.clone()).await;
-            script.sync(hint(17)).await;
+            script.audit(audited.clone()).await;
+            script.send(Vec::new(), hint(17)).await;
             assert_eq!(committed_ids(), vec![vec![11], vec![13]]);
         };
 
@@ -4622,7 +4677,7 @@ mod tests {
         };
         let mut ignored = PrivateIntakeIgnoredCursors::new();
         for (peer, event_id) in peers.iter().zip([10, 20, 30]) {
-            record_ignored_private_intake_event(&mut ignored, cursor(peer, event_id));
+            record_ignored_private_intake_event(&mut ignored, peer.clone(), event_id);
         }
         let audit: PrivateIntakeAudit = Arc::new({
             let audited_peers = HashSet::from([peers[0].clone(), peers[1].clone()]);
@@ -4645,7 +4700,7 @@ mod tests {
             }
         });
 
-        audit_private_intake_stream(&audit, &mut ignored, &commit_cursors).await;
+        audit_private_intake_stream(&audit, "homeserver-a", &mut ignored, &commit_cursors).await;
 
         // Both audited peers' cursors go to storage in one batch; the peer
         // the audit did not complete keeps its ignored cursor.
@@ -4656,10 +4711,7 @@ mod tests {
             batches[0],
             vec![cursor(&peers[0], 10), cursor(&peers[1], 20)]
         );
-        assert_eq!(
-            ignored,
-            HashMap::from([(peers[2].clone(), cursor(&peers[2], 30))])
-        );
+        assert_eq!(ignored, HashMap::from([(peers[2].clone(), 30)]));
     }
 
     #[tokio::test]
