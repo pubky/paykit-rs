@@ -1326,7 +1326,7 @@ pub(crate) fn is_not_now(error: &PaykitError) -> bool {
 
 /// How many listing requests the client makes for `cert`: one per collection it reads,
 /// each of one page here.
-fn client_listing_requests(cert: &AppCert) -> usize {
+pub(super) fn client_listing_requests(cert: &AppCert) -> usize {
     use pubky_switch_client::app::Protocol as _;
     paykit_sdk::PaykitProtocol::new()
         .collections()
@@ -1365,12 +1365,15 @@ async fn test_certificate_renewal_reading_more_lists_its_records_first() {
             path: "/records".into(),
             after: client_listing_requests(&wider),
         });
-    let summary = wallet.receive(None).await.unwrap();
+    let mut summary = wallet.receive(None).await.unwrap();
+    while summary.report.more && summary.records_unlisted.is_none() {
+        summary = wallet.receive(None).await.unwrap();
+    }
     assert!(summary.records_unlisted.is_some(), "{summary:?}");
     let refused = wallet.payee_activity().await.unwrap_err();
     assert!(is_not_now(&refused), "{refused:?}");
     // The next read lists them: the till's request shows.
-    wallet.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut wallet).await;
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
 }
 
@@ -1434,7 +1437,7 @@ async fn test_certificate_renewal_reading_more_listing_lost_before_its_note_list
         .unwrap()
         .unwrap();
     wallet.receive(None).await.unwrap();
-    wallet.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut wallet).await;
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
     wallet
         .app_mut()
@@ -1453,7 +1456,7 @@ async fn test_certificate_renewal_reading_more_listing_lost_before_its_note_list
         .await;
     let refused = wallet.payee_activity().await.unwrap_err();
     assert!(is_not_now(&refused), "{refused:?}");
-    wallet.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut wallet).await;
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
 }
 
@@ -2043,7 +2046,7 @@ async fn test_certificate_narrowed_then_widened_lists_again() {
     let (mut wallet, wider) = renewed_to_read_more(&w).await;
     let me = wallet.app_id();
     wallet.receive(None).await.unwrap();
-    wallet.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut wallet).await;
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
     let narrow = renew(&w, me, &AppScopes::new().pay().build().unwrap(), 2_000);
     wallet.receive(None).await.unwrap();
@@ -2071,7 +2074,7 @@ async fn test_certificate_narrowed_then_widened_lists_again() {
     wallet.receive(None).await.unwrap();
     list(&w, me, &narrow, &again);
     wallet.receive(None).await.unwrap();
-    wallet.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut wallet).await;
     assert_eq!(wallet.app().cert().hash(), again.hash());
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 2);
 }
@@ -2104,7 +2107,7 @@ async fn narrowed_then_renewed_back(narrowed: Narrowed) {
         renewed_to_read_more_on(&w, Arc::clone(&fault) as Arc<dyn StateStore>).await;
     let me = wallet.app_id();
     wallet.receive(None).await.unwrap();
-    wallet.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut wallet).await;
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
     let mut payer = w
         .join(&w.bob, "bwallet", AppScopes::new().pay().build().unwrap())
@@ -2742,8 +2745,15 @@ async fn test_certificate_duty_event_raised_by_the_sdks_listing_reaches_a_report
         .load_with_transport(&w.alice, Arc::clone(&base), me, transport)
         .await;
     let mut events = Vec::new();
-    for _ in 0..3 {
-        events.extend(wallet.receive(None).await.unwrap().report.events);
+    for _ in 0..8 {
+        let read = wallet.receive(None).await.unwrap();
+        events.extend(read.report.events);
+        if events
+            .iter()
+            .any(|e| matches!(e, AppEvent::RecordUncheckable { .. }))
+        {
+            break;
+        }
     }
     assert_eq!(wallet.app().cert().hash(), wider.hash());
     assert!(
@@ -3355,7 +3365,11 @@ async fn restored_queued_reply_before_wider_keys(keys_present: bool) {
     .await
     .unwrap();
     assert_eq!(restored.app().restore_held_cursor(), None);
-    let result = restored.flush().await;
+    let mut result = restored.flush().await;
+    if keys_present && restored.app().listing_owed().await.unwrap() {
+        crate::common::finish_listing(&mut restored).await;
+        result = restored.flush().await;
+    }
     assert_eq!(restored.app().cert().hash(), wider.hash());
     let verdict = restored.app().restore_held_cursor();
     if keys_present {

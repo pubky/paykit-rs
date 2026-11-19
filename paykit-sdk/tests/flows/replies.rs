@@ -845,11 +845,11 @@ async fn test_replies_kept_past_30_days_stay_while_the_records_are_not_listed() 
     w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS + DAY_MS);
     let now = w.clock.now_ms();
     w.bob.switch().push_missed(1, now - 1_000, now);
-    // The client lists the shop's collection right after the item; Paykit's own listing at
+    // The client lists the shop's collections right after the item; Paykit's own listing at
     // the end of the receive fails.
     w.bob.switch().fail_next(Fault::Unreachable {
         path: "records?collection".into(),
-        after: 1,
+        after: crate::certificate::client_listing_requests(shop.app().cert()),
     });
     let got = shop.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_some(), "{got:?}");
