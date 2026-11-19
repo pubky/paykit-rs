@@ -2805,7 +2805,7 @@ impl Paykit {
     /// Whether the own `identity.json` was confirmed less than [`REVALIDATION_MS`] before the
     /// device clock now. A confirmation the clock puts in the future is no evidence of a
     /// recent one: the clock went back.
-    fn own_identity_fresh(&self) -> bool {
+    pub(crate) fn own_identity_fresh(&self) -> bool {
         self.app
             .identity_confirmation_age_ms()
             .is_some_and(|age| age < REVALIDATION_MS)

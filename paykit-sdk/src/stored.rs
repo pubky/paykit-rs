@@ -454,7 +454,7 @@ impl Paykit {
                 tx.put(key::RECORD_EXPIRY_OWED, &true)?;
                 true
             }
-            _ => false,
+            _ => self.take_reply_ask_duty(&mut tx, event).await?,
         };
         if taken {
             tx.put(mark, &true)?;

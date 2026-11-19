@@ -79,6 +79,8 @@ pub(crate) enum Fail {
     /// The effect needs these claims read from the switch first (Switch spec 10.2): the
     /// client reads them and calls the step again.
     Need(Vec<Need>),
+    /// Intake waits for space to retain the loss caused by its required eviction.
+    AwaitAdmission,
     /// The store failed, or holds data of the SDK's own that doesn't read: the entry is
     /// held, or parked, never consumed (Switch spec 8.2).
     Store(StoreFailure),
@@ -1207,10 +1209,7 @@ pub(crate) fn make_room_for_stop(
         let times = dropped.entry(from).or_insert((at, at));
         *times = (times.0.min(at), times.1.max(at));
     }
-    for (from, times) in dropped {
-        mark_dropped(cx, from, times, true)?;
-    }
-    Ok(())
+    mark_dropped(cx, dropped)
 }
 
 /// A payee's period details, at the payer (Paykit spec 8.2, Paykit wire 4.9, 5.3): stored in
@@ -2227,9 +2226,9 @@ pub(crate) fn kept_reply_evicted(
 /// Make room for a new reply from `sender`, accepted at `new`, among the kept replies, in
 /// the step: the one the bounds drop ([`kept_reply_evicted`]) goes, and counts in its sender's mark
 /// (`pd/<sender>`, `marks.rs`) with its acceptance time, so the sender is asked to send it
-/// again once the record of a request, of either side, naming it as counterparty reads. It
-/// is dropped as one never processed (Paykit spec 8.1, "Replies before their record"): the
-/// client marked it processed when it was kept, so the step forgets its pair
+/// again as soon as sends to it are permitted. The reply is dropped as one never processed
+/// (Paykit spec 8.1, "Replies before their record"). The client marked it processed when
+/// it was kept, so the step forgets its pair
 /// ([`ReceiveContext::forget_processed`]), in the commit that drops it and writes the mark,
 /// and a re-sent copy is taken as a new message. This is the one pair a Paykit App forgets
 /// (Switch spec 11); a reply a later copy brings again is never applied twice, since a
@@ -2304,47 +2303,59 @@ pub(crate) fn make_room_for_reply(
             key: names.swap_remove(index),
         },
     );
-    mark_dropped(cx, from, (at, at), false)
+    mark_dropped(cx, [(from, (at, at))])
 }
 
-/// Count messages from `from` dropped for the bounds, accepted between `times` (the
-/// earliest and the latest), in the sender's mark of dropped replies (`pd/<sender>`,
-/// `marks.rs`), in the step: the sender is asked to send them again, from the mark's
-/// earliest time. A mark is due at once when `due`, as for a stop dropped for the bounds,
-/// whose request may come at any time; otherwise, as for a reply, once the app holds the
-/// record of a request, of either side, that reads and names the sender as its
-/// counterparty: a payee's request record for a payer's reply, a payer's for a receipt or
-/// period details (`Paykit::ask_on_marks`). A record of a Billing Period or of a payment
-/// without a request makes no mark due.
+/// Count the drops from one receive effect together. Each victim is selected against the
+/// marks left by earlier drops in this effect. The receive context itself exposes only
+/// preceding effects until this one commits.
 fn mark_dropped(
     cx: &mut ReceiveContext<'_>,
-    from: [u8; 32],
-    times: (u64, u64),
-    due: bool,
+    dropped: impl IntoIterator<Item = ([u8; 32], (u64, u64))>,
 ) -> Result<(), Fail> {
-    let (earliest, latest) = times;
+    let mut dropped = dropped.into_iter().peekable();
+    if dropped.peek().is_none() {
+        return Ok(());
+    }
     let family = MarkFamily::Replies;
-    let mark_key = family.key(&from);
-    let held = state::cx_get::<crate::marks::DropMark>(cx, &mark_key)?;
-    let mut others = Vec::new();
-    if held.is_none() {
-        for (_, mark) in state::cx_scan::<crate::marks::DropMark>(cx, family.prefix())? {
-            others.push((mark.sender, mark.latest_ms));
+    let mut held: std::collections::BTreeMap<_, _> =
+        state::cx_scan::<crate::marks::DropMark>(cx, family.prefix())?
+            .into_iter()
+            .map(|(_, mark)| (mark.sender, mark))
+            .collect();
+    let mut changed = std::collections::BTreeSet::new();
+    let mut retired = Vec::new();
+    for (sender, (earliest, latest)) in dropped {
+        let prior = held.remove(&sender);
+        let others = if prior.is_none() {
+            held.values().map(|m| (m.sender, m.latest_ms)).collect()
+        } else {
+            Vec::new()
+        };
+        let counted = count_dropped(prior, &others, sender, earliest, true);
+        if let Some(gone) = counted.evicted {
+            let old = held.remove(&gone).ok_or_else(Fail::corrupt)?;
+            retired.push((gone, old.earliest_ms, old.latest_ms));
+            changed.insert(gone);
+        } else if counted.put.is_none() {
+            retired.push((sender, earliest, latest));
+        }
+        if let Some(mut mark) = counted.put {
+            mark.latest_ms = mark.latest_ms.max(latest);
+            held.insert(sender, mark);
+            changed.insert(sender);
         }
     }
-    let counted = count_dropped(held, &others, from, earliest, due);
-    if let Some(gone) = counted.evicted {
-        keep_local(
-            cx,
-            LocalWrite::Delete {
-                key: family.key(&gone).into_bytes(),
+    crate::reply_asks::retire_in_receive(cx, &retired)?;
+    for sender in changed {
+        let key = family.key(&sender);
+        let write = match held.get(&sender) {
+            Some(mark) => local(&key, mark)?,
+            None => LocalWrite::Delete {
+                key: key.into_bytes(),
             },
-        );
-    }
-    if let Some(mut mark) = counted.put {
-        mark.latest_ms = mark.latest_ms.max(latest);
-        mark.due |= due;
-        keep_local(cx, local(&mark_key, &mark)?);
+        };
+        keep_local(cx, write);
     }
     Ok(())
 }

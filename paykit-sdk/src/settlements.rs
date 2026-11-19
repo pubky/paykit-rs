@@ -250,11 +250,14 @@ impl Paykit {
     ) -> Result<()> {
         use pubky_switch_client::app::{KeptBatchDrop, KeptBatchStatus};
         let Some(key) = marker else { return Ok(()) };
-        let Some(id) = self.local_get::<[u8; 16]>(key).await? else {
+        let Some(state) = self
+            .local_get::<crate::receipt_delivery::ReceiptBatch>(key)
+            .await?
+        else {
             return Ok(());
         };
         if matches!(
-            self.app.kept_batch(id).await?,
+            self.app.kept_batch(state.id()).await?,
             Some(KeptBatchStatus::Dropped {
                 reason: KeptBatchDrop::Unsent | KeptBatchDrop::Refused { .. },
                 ..
