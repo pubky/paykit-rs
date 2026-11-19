@@ -2803,10 +2803,24 @@ async fn test_an_unanswered_receipt_keeps_its_batch_id_when_saving_the_applicati
     let pending = shop.app().protocol_scan("paykit", b"ri/").await.unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].1, batch);
+    let app_id = shop.app_id();
+    drop(shop);
+    store.refuse_puts_as_too_large_over(None, 0);
+    let shop = Box::pin(Paykit::load(
+        w.env(&w.bob, store),
+        PaykitConfig::default(),
+        app_id,
+        w.rail.clone(),
+        w.timer(),
+    ))
+    .await
+    .unwrap();
     let queued = shop.app().queued_messages("paykit").await.unwrap();
-    assert!(queued.iter().any(
-        |m| m.kept_batch == Some(batch) && m.kind == paykit_lib::Kind::PaymentReceipt.as_str()
-    ));
+    let receipt = queued.iter().find(|m| m.kept_batch == Some(batch)).unwrap();
+    assert_eq!(receipt.kind, paykit_lib::Kind::PaymentReceipt.as_str());
+    assert_eq!(receipt.to, w.alice_id());
+    assert!(pending[0].0.ends_with(receipt.msg_id.as_bytes()));
+    assert!(buyer.request(&request).await.unwrap().receipt.is_none());
     buyer.receive(None).await.unwrap();
     assert!(buyer.request(&request).await.unwrap().receipt.is_none());
 }
