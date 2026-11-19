@@ -128,12 +128,16 @@ where
 
     /// Delete this identity's Pubky app profile at the revision it was read at.
     ///
-    /// An absent profile is already deleted. A profile that changed since
-    /// `expected_revision` returns [`PaykitSdkError::ConcurrentUpdate`]. A
+    /// The whole delete holds the homeserver locks of both profile paths,
+    /// pubky.app (v0) first, so a profile write that takes the lock on either
+    /// layout waits for it; an unlocked write already in flight can still
+    /// land. An absent profile is already deleted. A profile whose bytes
+    /// changed since `expected_revision` returns
+    /// [`PaykitSdkError::ConcurrentUpdate`] before anything is deleted. A
     /// social v1 identity's pubky.app (v0) copy is deleted first and its social
-    /// v1 profile after it, in the order of the spec's `deletionPaths`, so a
-    /// stale revision leaves the v0 copy already deleted. The session must
-    /// hold [`PUBKY_APP_PROFILE_SESSION_CAPABILITIES`].
+    /// v1 profile after it, in the order of the spec's `deletionPaths`. The
+    /// avatar is left in place, since other files may share its content. The
+    /// session must hold [`PUBKY_APP_PROFILE_SESSION_CAPABILITIES`].
     pub async fn delete_pubky_profile(&self, expected_revision: String) -> Result<()> {
         let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
         let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
@@ -141,27 +145,53 @@ where
             source: None,
         })?;
         let version = own_social_version(&session_access).await?;
-        if version == SocialVersion::V1 {
-            match session_access
-                .session
-                .storage()
-                .delete(PUBKY_PROFILE_PATH)
-                .await
-            {
-                Ok(_) => {}
-                Err(err) if is_pubky_not_found(&err) => {}
-                Err(err) => return Err(put_error("delete Pubky app (v0) profile", err)),
-            }
-        }
-        paykit_lib::delete_resource_if_revision(
-            &session_access.session,
-            version.profile_path(),
-            &expected_revision,
-            MAX_PUBKY_PROFILE_BYTES,
-        )
+        let session = &session_access.session;
+        let storage = session.storage();
+        let (storage, expected_revision) = (&storage, &expected_revision);
+        paykit_lib::with_write_lock(session, PUBKY_PROFILE_PATH, |v0_lock| async move {
+            let v0_lock = &v0_lock;
+            paykit_lib::with_write_lock(session, SOCIAL_V1_PROFILE_PATH, |v1_lock| async move {
+                let (profile_lock, copy_lock) = match version {
+                    SocialVersion::V1 => (&v1_lock, Some(v0_lock)),
+                    SocialVersion::V0 => (v0_lock, None),
+                };
+                let current = match storage.get(version.profile_path()).await {
+                    Ok(response) => {
+                        read_public_response(
+                            response,
+                            MAX_PUBKY_PROFILE_BYTES,
+                            "read Pubky profile",
+                        )
+                        .await?
+                    }
+                    Err(err) if is_pubky_not_found(&err) => None,
+                    Err(err) => return Err(put_error("read Pubky profile", err)),
+                };
+                if let Some(raw) = &current {
+                    if paykit_lib::content_revision(raw) != *expected_revision {
+                        return Err(pubky_profile_changed());
+                    }
+                }
+                if let Some(copy_lock) = copy_lock {
+                    match storage.delete_locked(copy_lock).await {
+                        Ok(_) => {}
+                        Err(err) if is_pubky_not_found(&err) => {}
+                        Err(err) => {
+                            return Err(locked_delete_error("delete Pubky app (v0) profile", err))
+                        }
+                    }
+                }
+                if current.is_some() {
+                    storage
+                        .delete_locked(profile_lock)
+                        .await
+                        .map_err(|err| locked_delete_error("delete Pubky profile", err))?;
+                }
+                Ok(())
+            })
+            .await
+        })
         .await
-        .map_err(scope_error)?;
-        Ok(())
     }
 
     /// Upload avatar bytes and return the file URI to set as the profile `image`.
@@ -381,6 +411,26 @@ fn put_error(context: &'static str, err: PubkyError) -> PaykitSdkError {
     }
 }
 
+/// A locked delete the homeserver refuses because the lock or the resource moved on
+/// (409, 412 or 423) is a concurrent update the app reloads and retries.
+fn locked_delete_error(context: &'static str, err: PubkyError) -> PaykitSdkError {
+    match &err {
+        PubkyError::Request(RequestError::Server { status, .. })
+            if *status == StatusCode::CONFLICT
+                || *status == StatusCode::PRECONDITION_FAILED
+                || *status == StatusCode::LOCKED =>
+        {
+            PaykitSdkError::ConcurrentUpdate {
+                context: format!(
+                    "{context}: Pubky profile is locked or changed; reload it and retry"
+                ),
+                source: Some(err.into()),
+            }
+        }
+        _ => put_error(context, err),
+    }
+}
+
 fn scope_error(err: paykit_lib::PaykitError) -> PaykitSdkError {
     match &err {
         paykit_lib::PaykitError::Transport { source, .. }
@@ -398,5 +448,40 @@ fn pubky_profile_changed() -> PaykitSdkError {
     PaykitSdkError::ConcurrentUpdate {
         context: "Pubky profile changed since it was read; reload it and retry".into(),
         source: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn server_error(status: StatusCode) -> PubkyError {
+        PubkyError::Request(RequestError::Server {
+            status,
+            message: String::new(),
+        })
+    }
+
+    #[test]
+    fn locked_delete_conflicts_are_concurrent_updates() {
+        for status in [
+            StatusCode::CONFLICT,
+            StatusCode::PRECONDITION_FAILED,
+            StatusCode::LOCKED,
+        ] {
+            let error = locked_delete_error("delete Pubky profile", server_error(status));
+            assert!(error.is_concurrent_update(), "{status}: {error:?}");
+        }
+        assert!(matches!(
+            locked_delete_error("delete Pubky profile", server_error(StatusCode::FORBIDDEN)),
+            PaykitSdkError::Identity { .. }
+        ));
+        assert!(matches!(
+            locked_delete_error(
+                "delete Pubky profile",
+                server_error(StatusCode::INTERNAL_SERVER_ERROR)
+            ),
+            PaykitSdkError::Transport { .. }
+        ));
     }
 }

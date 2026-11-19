@@ -876,3 +876,71 @@ async fn test_new_identity_creates_its_profile_on_social_v1_without_the_flag() {
         .await
         .unwrap());
 }
+
+#[tokio::test]
+async fn test_pubky_profile_delete_checks_the_revision_before_deleting() {
+    let testnet = crate::harness::build_testnet().await;
+    let capabilities = format!(
+        "{},{}",
+        paykit_sdk::PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
+        paykit_sdk::PUBKY_APP_PROFILE_SESSION_CAPABILITIES
+    );
+    let frank = crate::harness::TestUser::sign_up_with_capabilities(
+        &testnet,
+        crate::harness::app_id("bitkit"),
+        &capabilities,
+    )
+    .await;
+    let storage = frank.access.session.storage();
+    storage
+        .put(paykit_sdk::PUBKY_PROFILE_PATH, r#"{"name":"Frank"}"#)
+        .await
+        .unwrap();
+    storage
+        .put(paykit_sdk::SOCIAL_V1_PROFILE_PATH, r#"{"name":"Frank"}"#)
+        .await
+        .unwrap();
+    let current = frank
+        .sdk
+        .fetch_pubky_profile_with_revision(frank.public_key.clone())
+        .await
+        .unwrap()
+        .unwrap();
+
+    // A social v1 profile replaced since it was read, even by bytes that are not
+    // UTF-8, deletes nothing, its pubky.app (v0) copy included.
+    storage
+        .put(paykit_sdk::SOCIAL_V1_PROFILE_PATH, vec![0xff, 0xfe])
+        .await
+        .unwrap();
+    let error = frank
+        .sdk
+        .delete_pubky_profile(current.revision.clone())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, paykit_sdk::PaykitSdkError::ConcurrentUpdate { .. }),
+        "{error:?}"
+    );
+    assert!(storage
+        .exists(paykit_sdk::PUBKY_PROFILE_PATH)
+        .await
+        .unwrap());
+
+    // At the current revision both copies go.
+    storage
+        .put(paykit_sdk::SOCIAL_V1_PROFILE_PATH, r#"{"name":"Frank"}"#)
+        .await
+        .unwrap();
+    frank
+        .sdk
+        .delete_pubky_profile(current.revision)
+        .await
+        .unwrap();
+    for path in [
+        paykit_sdk::PUBKY_PROFILE_PATH,
+        paykit_sdk::SOCIAL_V1_PROFILE_PATH,
+    ] {
+        assert!(!storage.exists(path).await.unwrap(), "{path}");
+    }
+}
