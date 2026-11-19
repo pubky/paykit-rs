@@ -388,6 +388,34 @@ async fn test_replies_dropped_leave_one_mark_per_sender_with_the_earliest_and_th
     assert_eq!(marks(&shop).await, vec![(at, at + 1)]);
 }
 
+#[tokio::test]
+async fn test_replies_dropped_restore_holds_a_window_widened_after_its_last_ask() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let n = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
+    let (_, at) = kept_then_unmatched(&w, &mut wallet, &mut shop, n).await;
+    assert_eq!(asked(&shop, &w.alice_id()).await, vec![(Some(at), None)]);
+    assert_eq!(marks(&shop).await, vec![(at, at)]);
+
+    // Another reply displaces one accepted after the original ask's covered drops.
+    w.clock.advance_ms(60_000);
+    unmatched_replies(&w, &shop, 1);
+    shop.receive(None).await.unwrap();
+    assert_eq!(marks(&shop).await, vec![(at, at + 1)]);
+    let mut shop = shop_restored(&w, shop).await;
+    w.clock.advance_ms(DAY_MS);
+    assert_eq!(shop.receive(None).await.unwrap().resends, 0);
+    let overlap = paykit_sdk::ResendSelection::default().with_accepted_from_ms(at);
+    assert!(matches!(
+        shop.request_resend(w.alice_id(), overlap)
+            .await
+            .unwrap_err()
+            .refusal(),
+        Some(paykit_sdk::Refusal::NotNow(_))
+    ));
+}
+
 /// Bob's shop holds the paid request's replies, accepted at the time returned, and drops them
 /// for the bound; then it drops alice's replies accepted 10 days later. Returns the request
 /// and that first time.
@@ -2073,8 +2101,10 @@ async fn dropped_before_record_after_unblock(restore: bool) {
             shop.app().delivery(&id).await.unwrap(),
             Some(pubky_switch_client::app::Delivery::Accepted { .. })
         ));
-        let mut body = paykit_lib::bodies::ResendRequest::default();
-        body.accepted_from = Some(accepted);
+        let body = paykit_lib::bodies::ResendRequest {
+            accepted_from: Some(accepted),
+            ..Default::default()
+        };
         let raw = shop
             .app()
             .sign_message(OutgoingMessage::new(

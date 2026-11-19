@@ -58,13 +58,20 @@ struct Original {
 }
 
 impl Original {
+    fn covers_window(&self, from: u64, until: u64) -> bool {
+        self.from_ms <= from && until <= self.latest_ms
+    }
+
     fn covers(&self, mark: &DropMark) -> bool {
-        self.from_ms <= mark.latest_ms
-            && mark.earliest_ms <= self.latest_ms
-            && match &mark.queued {
-                Some(q) => q.msg_id == self.id && q.hash == self.hash,
-                None => self.from_ms <= mark.earliest_ms,
+        match &mark.queued {
+            Some(q) => {
+                q.msg_id == self.id
+                    && q.hash == self.hash
+                    && self.from_ms <= mark.latest_ms
+                    && mark.earliest_ms <= self.latest_ms
             }
+            None => self.covers_window(mark.earliest_ms, mark.latest_ms),
+        }
     }
 }
 
@@ -128,8 +135,7 @@ impl ReplyAsks {
     /// when the sender accepted it while that window could still be recovered.
     fn delivered_in_time(&self, from: u64, until: u64) -> bool {
         self.originals.iter().any(|o| {
-            o.from_ms <= from
-                && o.latest_ms >= until
+            o.covers_window(from, until)
                 && matches!(o.outcome, Outcome::Accepted {accepted_at_ms, ..}
                     if accepted_at_ms < until.saturating_add(crate::KEPT_MESSAGE_MS))
         })
@@ -315,8 +321,7 @@ impl Paykit {
         // Retain the last positive coverage if another ask becomes uncertain.
         let covered = std::mem::take(&mut held.originals).into_iter().rfind(|o| {
             matches!(o.outcome, Outcome::Accepted { .. })
-                && o.from_ms <= mark.earliest_ms
-                && o.latest_ms >= mark.latest_ms
+                && o.covers_window(mark.earliest_ms, mark.latest_ms)
         });
         held.originals.extend(covered);
         held.originals.push(Original {
