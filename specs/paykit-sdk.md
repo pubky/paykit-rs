@@ -1413,22 +1413,50 @@ from its shared homeserver subscription while siblings continue. Its cursor is
 not advanced. After explicit drain releases capacity, it is subscribed again
 and catches up from durable state. No unbounded in-memory event queue is used.
 
-Startup, reconnect, replay, and healthy operation reconcile the next expected
-slot. Healthy streams audit at a validated 1-second to 1-hour cadence, with a
-60-second default plus bounded jitter. This repairs missing or parser-skipped
-events without turning an unavailable SSE endpoint into an always-on polling
-fallback. HTTP 404, 405, and 501 subscription failures are reported as
-`Unsupported`; other stream/fetch failures and homeserver resolution failures
-are `Stale` and retry. Neither state proves remote absence. Buffered work
-remains drainable during transport failure.
+Startup, reconnect, replay, healthy operation, and live inserts reconcile the
+next expected slot. Healthy streams audit at a validated 1-second to 1-hour
+cadence, with a 60-second default plus bounded jitter. This repairs missing or
+parser-skipped events without turning an unavailable SSE endpoint into an
+always-on polling fallback. After a live event buffers a packet, intake marks
+the Linked Peer `Replaying`, wakes consumers, and then probes the next expected
+slots by the healthy audit's rule, without a cursor, unless that packet fills
+the peer's capacity, in which case the Linked Peer is `Backpressured` and no
+probe runs. The probe reports
+`CaughtUp` when the next slot is absent and `Backpressured` when it fills
+capacity. A failed probe leaves the Linked Peer `Replaying` until the next
+event or healthy audit, and a probe never records the last successful audit.
+When the stream epoch stops before or during the probe, intake drops the
+probe's outcome without writing health, still wakes consumers for packets the
+probe buffered or a pending handshake it found, and leaves the next epoch's
+startup audit to settle the Linked Peer.
+HTTP 404, 405, and 501 subscription failures are reported as `Unsupported`;
+other stream/fetch failures, apart from that probe, and homeserver resolution
+failures are `Stale` and retry. Neither state proves remote absence. Buffered
+work remains drainable during transport failure.
+
+An expected-slot acquisition attempt keeps the Encrypted Link snapshot it
+reads after any handshake advance. Its generation-checked storage steps (the
+counter read, the buffer insert, and the absent-slot check, before any cursor
+advance or Absent report) first compare the stored Encrypted Link generation
+with that snapshot's in the same transaction. When any committed change moved
+it, whoever committed it (a consumer drain, an outbound private send, a
+handshake or observation transition, or the acquisition's own observation
+step that committed a replacement), the step neither buffers a packet,
+advances a cursor, nor reports the slot absent, and the acquisition is retried
+from fresh link state, up to 8 attempts. After the last attempt it fails like
+any other fetch failure. Other failures, including a failed observation,
+recovery, network, or handshake step, are not retried.
 
 `PrivateIntakeSupervisor::health` reports per-peer transport state and last
 successful absent-slot audit. `subscribe_work` is a coalesced local hint, not a
 durable queue: consumers register first, inspect/drain durable state, wait, then
 inspect again. Buffered receive returns the canonical intake report, remaining
-packet count, and freshness. Explicit `stop` waits for stream tasks and marks
-peer state `Stopped`; dropping the handle requests cancellation but callers that
-need an observed shutdown use `stop`. Synchronous `is_finished` is true only
+packet count, and freshness. That freshness is the peer's state when the drain
+started; `health` reports the current state, and a later change, such as a
+live-insert probe settling the peer `CaughtUp`, sends no further wakeup.
+Explicit `stop` waits for stream tasks and marks peer state `Stopped`; dropping
+the handle requests cancellation but callers that need an observed shutdown use
+`stop`. Synchronous `is_finished` is true only
 when every task owned by the supervisor has terminated, including after
 autonomous lease, topology, or admission failure and after explicit `stop` has
 emptied the task set. Transport health does not determine this liveness signal.

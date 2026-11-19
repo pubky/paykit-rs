@@ -150,6 +150,32 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   Intake subscribed with a path filter that the homeserver treats as one exact
   file, so the stream matched no private message, and new messages waited for
   the healthy audit (60 seconds by default).
+- In the Rust-only SSE-assisted private intake API (`start_private_intake` and
+  `PrivateIntakeSupervisor`), after a packet arrives through the homeserver
+  event stream, intake now checks the Linked Peer's next expected slot at once.
+  Health reports `Replaying` while that check runs, then `CaughtUp` when the
+  next slot is absent or `Backpressured` when the check fills capacity. If the
+  check fails, health stays `Replaying` until the next event or audit. If the
+  stream stops before or during the check, intake drops the check's result
+  without updating health, still wakes consumers for packets the check buffered
+  or a pending handshake, and the next stream's startup audit settles the Linked
+  Peer. A packet that itself fills the Linked Peer's capacity reports
+  `Backpressured` at once, and no check runs. Packets written back to back are
+  buffered together.
+  Previously health reported the Linked Peer as `Replaying` until the next
+  healthy audit. A drain woken by the packet can still report the `Replaying`
+  freshness it started with, and no further wakeup follows when the check
+  settles the Linked Peer, so read `PrivateIntakeSupervisor::health()` for the
+  current state.
+- In the Rust-only SSE-assisted private intake API, when the stored Encrypted
+  Link generation changes while intake fetches a Linked Peer's next expected
+  slot (for a live event, a healthy audit or the check after a live packet) and
+  buffers its packet or finds it absent, for example because the app drains a
+  packet, sends a private message, or advances a handshake, intake now retries
+  with the new generation, up to 8 attempts, before failing as before. An absent
+  slot no longer advances the cursor or reports `CaughtUp` after such a change.
+  Other failures, such as network errors or a packet that fails the buffer's
+  integrity checks, are not retried.
 
 ### Integration
 
