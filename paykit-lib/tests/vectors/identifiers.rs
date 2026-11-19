@@ -382,6 +382,7 @@ fn record_keys(keys: &Keys) -> Value {
         .collect();
     let mut cases = cases;
     cases.push(settlement_bucket_case(keys, txid));
+    cases.push(crate::sealed::publications::address(keys));
     json!({ "cases": cases, "description": RECORD_KEYS_DESCRIPTION })
 }
 

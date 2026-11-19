@@ -63,6 +63,7 @@ mod pay;
 mod paykit;
 mod periods;
 mod protocol;
+mod publish;
 pub mod rail;
 mod receipt_delivery;
 mod receipts;
@@ -112,6 +113,7 @@ pub use protocol::{PaykitProtocol, HANDLED_KINDS};
 pub use pubky_switch_client::app::{
     App, AppConfig, AppEnv, JoinRequest, ProtocolSet, UserConfirmed,
 };
+pub use publish::history::PublicationConflict;
 pub use rail::{
     CandidateError, CandidateId, EndpointSelection, PaymentEndpointCandidate, Rail,
     RailDeclaration, RailError, RailOutcome, RailPaid, RailPayment, Transfer,

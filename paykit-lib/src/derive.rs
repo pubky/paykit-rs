@@ -160,6 +160,17 @@ pub mod natural_key {
         lp(&[payee, app_id])
     }
 
+    /// A `private_list_publications` record: `lp(publishing app ID (16 bytes), recipient
+    /// identity, u64(generation))`, the counter of the lists that app sends that recipient
+    /// in one generation of its identity (Paykit wire 5.8).
+    pub fn list_publication(
+        publisher: &[u8; 16],
+        recipient: &[u8; 32],
+        generation: u64,
+    ) -> Vec<u8> {
+        lp(&[publisher, recipient, &u64be(generation)])
+    }
+
     /// The `block_floor` record: `lp(own identity)`, the one record of the collection.
     pub fn block_floor(own: &[u8; 32]) -> Vec<u8> {
         lp(&[own])

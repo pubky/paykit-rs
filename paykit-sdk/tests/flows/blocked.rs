@@ -1830,97 +1830,13 @@ async fn test_blocked_own_unblock_applied_in_the_read_keeps_the_resend_request_o
         .is_empty());
 }
 
-/// A store that, once armed, fails the client's next commit that keeps a batch
-/// (`opq/<batch_id>`), once, applying nothing.
-#[derive(Default)]
-struct FailNextKeep {
-    inner: pubky_switch_client::store::MemoryStore,
-    armed: std::sync::atomic::AtomicBool,
-}
-
-impl pubky_switch_client::store::StateStore for FailNextKeep {
-    fn get(
-        &self,
-        ns: &str,
-        key: &[u8],
-    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
-        self.inner.get(ns, key)
-    }
-
-    fn scan(
-        &self,
-        ns: &str,
-        prefix: &[u8],
-        after: Option<&[u8]>,
-        limit: u32,
-    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
-    {
-        self.inner.scan(ns, prefix, after, limit)
-    }
-
-    fn commit(
-        &self,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<(), pubky_switch_client::error::StoreError> {
-        self.commit_with(batch, |batch| {
-            self.inner
-                .commit(batch)
-                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
-        })
-        .map(|_| ())
-    }
-
-    fn acquire(
-        &self,
-        ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
-    {
-        self.inner.acquire(ns, owner)
-    }
-
-    fn commit_if(
-        &self,
-        ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
-    {
-        self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
-    }
-}
-impl FailNextKeep {
-    fn commit_with(
-        &self,
-        batch: pubky_switch_client::store::WriteBatch,
-        apply: impl FnOnce(
-            pubky_switch_client::store::WriteBatch,
-        ) -> Result<
-            pubky_switch_client::store::CommitOutcome,
-            pubky_switch_client::error::StoreError,
-        >,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
-    {
-        use pubky_switch_client::store::Write;
-        use std::sync::atomic::Ordering;
-        let keeps = batch
-            .writes()
-            .iter()
-            .any(|write| matches!(write, Write::Put { key, .. } if key.starts_with(b"opq/")));
-        if keeps && self.armed.swap(false, Ordering::SeqCst) {
-            return Err(pubky_switch_client::error::StoreError::Unavailable);
-        }
-        apply(batch)
-    }
-}
-
 #[tokio::test]
 async fn test_blocked_block_counted_but_never_kept_written_at_the_next_receive() {
     // The client's commit that keeps the wallet's block fails, so the block is neither sent
     // nor kept, though it counts here. The next receive writes it, and the identity's list
     // holds bob, so the other own apps pause for him too (Paykit spec 8.1).
     let w = World::new();
-    let target = std::sync::Arc::new(FailNextKeep::default());
+    let target = std::sync::Arc::new(crate::common::FailNextKeep::default());
     let mut wallet = w
         .join_with(
             &w.alice,
@@ -1935,9 +1851,7 @@ async fn test_blocked_block_counted_but_never_kept_written_at_the_next_receive()
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
-    target
-        .armed
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    target.fail_before_keep();
     assert!(wallet.block(&w.bob_id()).await.is_err());
     let lists = wallet.app_mut().allow_list().await.unwrap();
     assert!(!lists.deny.contains(&w.bob_id()));
@@ -2805,6 +2719,161 @@ fn fail_bobs_list_read(w: &World) {
         code: ErrorCode::Unavailable,
         current: serde_json::Value::Null,
     });
+}
+
+async fn hold_publication(w: &World, shop: &mut Paykit, held: Held) {
+    match held {
+        Held::Blocked => shop.block(&w.alice_id()).await.unwrap(),
+        Held::Unknown => {
+            w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+            fail_bobs_list_read(w);
+            shop.receive(None).await.unwrap();
+            fail_bobs_list_read(w);
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_blocked_first_private_list_share_requires_another_host_choice() {
+    for held in [Held::Blocked, Held::Unknown] {
+        for previously_withdrawn in [false, true] {
+            refused_first_share(held, previously_withdrawn).await;
+        }
+    }
+}
+
+async fn refused_first_share(held: Held, previously_withdrawn: bool) {
+    use crate::publishing::{offered, target};
+
+    let w = World::new();
+    let wallet = w.wallet("wallet").await;
+    let recipient = wallet.identity();
+    let storage = store();
+    let mut shop = contacts_till(&w, storage.clone()).await;
+    let app = shop.app_id();
+    shop.app_mut().invite(&recipient).await.unwrap();
+    shop.set_list_endpoints(offered("lno1chosen"))
+        .await
+        .unwrap();
+    let key = shop
+        .app()
+        .record_key(&target(&shop, &recipient, 1))
+        .unwrap();
+    if previously_withdrawn {
+        shop.publish_list_to(recipient).await.unwrap();
+        shop.withdraw_list_from(recipient).await.unwrap();
+    }
+    let prior = if previously_withdrawn { 2 } else { 0 };
+    assert_eq!(w.record_writes(&w.bob, &key), prior);
+    let delivered = w.alice.switch().entries_from(&w.bob_id());
+    hold_publication(&w, &mut shop, held).await;
+    let err = shop.publish_list_to(recipient).await.unwrap_err();
+    assert!(matches!(err.refusal(), Some(Refusal::NotNow(_))), "{err}");
+    assert_eq!(w.record_writes(&w.bob, &key), prior);
+    assert!(shop
+        .app()
+        .queued_messages("paykit")
+        .await
+        .unwrap()
+        .is_empty());
+    drop(shop);
+
+    let mut shop = Paykit::load(
+        w.env(&w.bob, storage),
+        PaykitConfig::default(),
+        app,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    if matches!(held, Held::Blocked) {
+        shop.unblock(&recipient).await.unwrap();
+    }
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        w.record_writes(&w.bob, &key),
+        prior,
+        "{held:?}, previously withdrawn {previously_withdrawn}"
+    );
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), delivered);
+    assert!(shop
+        .app()
+        .queued_messages("paykit")
+        .await
+        .unwrap()
+        .is_empty());
+    shop.publish_list_to(recipient).await.unwrap();
+    assert_eq!(w.record_writes(&w.bob, &key), prior + 1);
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), delivered + 1);
+}
+
+#[tokio::test]
+async fn test_blocked_chosen_list_keeps_its_update_and_can_withdraw_while_held() {
+    use crate::publishing::{offered, target};
+
+    for held in [Held::Blocked, Held::Unknown] {
+        let w = World::new();
+        let mut wallet = w.wallet("wallet").await;
+        let recipient = wallet.identity();
+        let storage = store();
+        let mut shop = contacts_till(&w, storage.clone()).await;
+        let app = shop.app_id();
+        shop.app_mut().invite(&recipient).await.unwrap();
+        shop.set_list_endpoints(offered("lno1old")).await.unwrap();
+        shop.publish_list_to(recipient).await.unwrap();
+        let key = shop
+            .app()
+            .record_key(&target(&shop, &recipient, 1))
+            .unwrap();
+        hold_publication(&w, &mut shop, held).await;
+        shop.set_list_endpoints(offered("lno1new")).await.unwrap();
+        assert_eq!(w.record_writes(&w.bob, &key), 1);
+        drop(shop);
+        let mut shop = Paykit::load(
+            w.env(&w.bob, storage),
+            PaykitConfig::default(),
+            app,
+            w.rail.clone(),
+            w.timer(),
+        )
+        .await
+        .unwrap();
+        if matches!(held, Held::Blocked) {
+            shop.unblock(&recipient).await.unwrap();
+        }
+        shop.receive(None).await.unwrap();
+        assert_eq!(w.record_writes(&w.bob, &key), 2);
+        wallet.receive(None).await.unwrap();
+        assert!(matches!(
+            wallet
+                .pay_without_request(UnrequestedPayment::new(shop.identity(), btc("0.001")))
+                .await
+                .outcome
+                .unwrap(),
+            PayOutcome::Paid { .. }
+        ));
+        assert_eq!(
+            w.rail.selections().last().unwrap().0[0].payload.as_str(),
+            "lno1new"
+        );
+
+        hold_publication(&w, &mut shop, held).await;
+        shop.withdraw_list_from(recipient).await.unwrap();
+        assert_eq!(w.record_writes(&w.bob, &key), 3);
+        let sent = shop.app().sent_to(&recipient, 0, u64::MAX).await.unwrap();
+        let withdrawal = sent
+            .iter()
+            .find(|m| {
+                let msg: serde_json::Value = serde_json::from_slice(m.plaintext.json()).unwrap();
+                msg["body"]["payment_endpoints"] == serde_json::json!({})
+            })
+            .expect("the empty withdrawal reached the payer");
+        assert!(matches!(
+            shop.app().delivery(&withdrawal.msg_id).await.unwrap(),
+            Some(pubky_switch_client::app::Delivery::Accepted { .. })
+        ));
+    }
 }
 
 /// Bob's till holds `paykit_contacts`, and its sends to alice are then `held`: a new request to

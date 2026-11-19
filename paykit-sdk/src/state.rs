@@ -2,11 +2,12 @@
 //! (`STATE.md` of `pubky-switch-client`).
 //!
 //! Paykit never writes the host store itself: every write is a client
-//! [`LocalWrite`], committed by the client in one of three ways, so it lands with what it
+//! [`LocalWrite`] or a kept native batch ID, committed by the client so it lands with what it
 //! belongs to:
 //!
 //! - with a received message's effect, its processed pair and its cursor move
 //!   ([`pubky_switch_client::app::ReceiveContext::local`]);
+//! - with the first keep of a batch, for its protocol-local ID ([`pubky_switch_client::app::OpBatch::keep_id_at`]);
 //! - with the answer of a batch of operations, never if the batch is refused
 //!   ([`pubky_switch_client::app::OpBatch::local`]);
 //! - on its own, in one store commit ([`pubky_switch_client::app::App::protocol_commit`]).
@@ -16,7 +17,8 @@
 //! protocol's other callbacks, a [`pubky_switch_client::app::LocalView`]. Only this module
 //! makes them, and it binds every value it reads to its key before any caller sees it
 //! ([`Stored`]), at a restore as at runtime.
-//! Every value is `{"v":1,"d":<record>}`; a reader refuses another `v` as corrupt.
+//! Paykit values are `{"v":1,"d":<record>}`. An outstanding list publication holds the
+//! client's raw 16-byte batch ID, or the distinct IDs retained together by a restore.
 //!
 //! The whole of it is Paykit's layer in the app's backups ([`crate::PaykitBackup`]), which a
 //! restore installs, the journal checked and marked restored, in the commit of the
@@ -42,6 +44,7 @@
 //! | `mh` | the hold a `missed` item set on the open requests, bounded by a time: the item's last acceptance time, or, for an item whose end isn't known, a service time verified after the read that handed it (`hold.rs`) | |
 //! | `mu` | set by a `missed` item whose end isn't known: every open request is held, as after a restore, until a read that completes bounds the hold by the service time verified then, into `mh`, and clears it (`hold.rs`) | |
 //! | `ml` | set by a `missed` item: the shared records aren't listed by Paykit since, so a record's absence means nothing yet; cleared by Paykit's next listing (`hold.rs`); never restored | |
+//! | `lp/<recipient>/<generation>/<message hash>` | outstanding original publication batch IDs, kept atomically before submission and retained across restore | yes |
 //! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read: never written over it, which could drop its single-use marks, until the record reads | |
 //! | `kc/<record key>` | a payee's cancellation of a request, kept until it is placed in the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
@@ -231,6 +234,35 @@ impl Paykit {
             }
             Ok(out)
         })
+    }
+
+    pub(crate) async fn publication_batches(
+        &self,
+        recipient: &[u8; 32],
+    ) -> Result<Vec<(PublicationKey, PublicationIds)>> {
+        let entries = self
+            .app
+            .protocol_scan(
+                crate::protocol::BACKUP_NAME,
+                key::publication_prefix(recipient).as_bytes(),
+            )
+            .await?;
+        entries
+            .into_iter()
+            .map(|(key, bytes)| publication_entry(&key, &bytes, &self.identity()))
+            .collect()
+    }
+
+    pub(crate) async fn retain_publication_ids(
+        &mut self,
+        key: &PublicationKey,
+        ids: &PublicationIds,
+    ) -> Result<()> {
+        let write = key.write(ids)?;
+        self.app
+            .protocol_commit(crate::protocol::BACKUP_NAME, &[write])
+            .await?;
+        Ok(())
     }
 
     /// Commit `tx` on its own, in one store commit.
@@ -589,7 +621,8 @@ impl sealed::Sealed for bool {}
 impl Stored for bool {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
-            StateKey::RecordsUnlisted
+            StateKey::ListDiscovery
+            | StateKey::RecordsUnlisted
             | StateKey::MissedUnlisted
             | StateKey::MissedEndUnknown
             | StateKey::MissedConsents
@@ -701,6 +734,53 @@ impl Stored for SeenRecords {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
             StateKey::SeenRecords { payee, app_id } if self.verifies(payee, app_id) => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for crate::publish::history::PublicationHistory {}
+impl Stored for crate::publish::history::PublicationHistory {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::PublicationHistory(key) => {
+                let cert = binder.cert.ok_or_else(PaykitError::corrupt)?;
+                self.check_binding(key, binder, cert.app_id())
+            }
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for crate::publish::ListSettings {}
+impl Stored for crate::publish::ListSettings {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        if !matches!(family, StateKey::ListSettings) {
+            return corrupt();
+        }
+        self.check()
+    }
+}
+
+impl sealed::Sealed for crate::publish::ListRecipient {}
+impl Stored for crate::publish::ListRecipient {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::ListRecipient(id) if self.recipient == *id && id != binder.identity() => {
+                Ok(())
+            }
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for crate::publish::ListReservation {}
+impl Stored for crate::publish::ListReservation {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::ListReservation(id) if self.recipient == *id && id != binder.identity() => {
+                self.check()
+            }
             _ => corrupt(),
         }
     }
@@ -1348,6 +1428,60 @@ impl Stored for NoticeTarget {
     }
 }
 
+/// Which signed private list a kept batch would publish.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct PublicationKey {
+    pub(crate) recipient: [u8; 32],
+    pub(crate) generation: u64,
+    pub(crate) hash: [u8; 32],
+}
+
+pub(crate) type PublicationIds = std::collections::BTreeSet<[u8; 16]>;
+
+impl PublicationKey {
+    pub(crate) fn key(&self) -> String {
+        format!(
+            "{}{}/{}",
+            key::publication_prefix(&self.recipient),
+            num(self.generation),
+            pubky_switch_core::enc::b64(&self.hash)
+        )
+    }
+
+    pub(crate) fn write(&self, ids: &PublicationIds) -> Result<LocalWrite> {
+        let key = self.key().into_bytes();
+        if ids.is_empty() {
+            return Ok(LocalWrite::Delete { key });
+        }
+        if ids.len() as u64 > pubky_switch_client::store::MAX_VALUE_BYTES / 16 {
+            return Err(PaykitError::corrupt());
+        }
+        Ok(LocalWrite::Put {
+            key,
+            value: ids.iter().flatten().copied().collect(),
+        })
+    }
+}
+
+pub(crate) fn publication_entry(
+    key: &[u8],
+    bytes: &[u8],
+    own: &[u8; 32],
+) -> Result<(PublicationKey, PublicationIds)> {
+    let Some(StateKey::Publication(original)) = StateKey::parse(key) else {
+        return Err(PaykitError::corrupt());
+    };
+    let (ids, tail) = bytes.as_chunks::<16>();
+    if &original.recipient == own
+        || ids.is_empty()
+        || !tail.is_empty()
+        || ids.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(PaykitError::corrupt());
+    }
+    Ok((original, ids.iter().copied().collect()))
+}
+
 /// A number in a key, zero-padded to 20 digits so keys sort numerically.
 pub(crate) fn num(n: u64) -> String {
     format!("{n:020}")
@@ -1408,6 +1542,12 @@ pub(crate) mod key {
     pub(crate) const HOLD_CONFIRMED: &str = "hc/";
     pub(crate) const HOLD_CONFIRMED_BEFORE: &str = "hb/";
     pub(crate) const RESTORE_CONSENTS: &str = "rsc/";
+    pub(crate) const LIST_SETTINGS: &str = "list";
+    pub(crate) const PUBLICATIONS: &str = "lp/";
+    pub(crate) const LIST_RESERVATIONS: &str = "lres/";
+    pub(crate) const PUBLICATION_HISTORY: &str = "lhi/";
+    pub(crate) const LIST_RECIPIENTS: &str = "lrec/";
+    pub(crate) const LIST_DISCOVERY: &str = "ld";
     pub(crate) const LISTS_READ: &str = "lr";
     pub(crate) const HELD_LISTS: &str = "lh/";
     pub(crate) const RECORDS_UNLISTED: &str = "nl";
@@ -1683,6 +1823,25 @@ pub(crate) mod key {
     /// the lists shows it, and until then a block whose batch the client neither keeps nor
     /// applied is written again at each receive. An unblock counts for payments and held
     /// sends only while the client keeps its batch, and never for the spam rule.
+    pub(crate) fn list_recipient(recipient: &[u8; 32]) -> String {
+        format!(
+            "{LIST_RECIPIENTS}{}",
+            pubky_switch_core::enc::b64(recipient)
+        )
+    }
+
+    pub(crate) fn publication_prefix(recipient: &[u8; 32]) -> String {
+        format!("{PUBLICATIONS}{}/", b64(recipient))
+    }
+
+    pub(crate) fn publication_history(record: &[u8; 32]) -> String {
+        format!("{PUBLICATION_HISTORY}{}", b64(record))
+    }
+
+    pub(crate) fn list_reservation(recipient: &[u8; 32]) -> String {
+        format!("{LIST_RESERVATIONS}{}", b64(recipient))
+    }
+
     pub(crate) fn own_block(pubky: &[u8; 32]) -> String {
         format!("{OWN_BLOCKS}{}", b64(pubky))
     }
@@ -1726,6 +1885,12 @@ pub(crate) mod key {
 /// every builder's key parses to its own family, so the two can't drift.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StateKey {
+    ListSettings,
+    ListRecipient([u8; 32]),
+    ListReservation([u8; 32]),
+    PublicationHistory([u8; 32]),
+    Publication(PublicationKey),
+    ListDiscovery,
     /// A warning once per bucket or settlement.
     SettlementNotice(SettlementSubject),
     /// The last verified physical application and its outstanding repair.
@@ -1758,13 +1923,23 @@ pub(crate) enum StateKey {
         imported: bool,
     },
     /// `ask/<sender>/<from>`: a `resend_request` to send.
-    Ask { sender: [u8; 32], from_ms: u64 },
+    Ask {
+        sender: [u8; 32],
+        from_ms: u64,
+    },
     /// `ans/<seq>/<msg_id>`: a `resend_request` received, to answer.
-    Answer { seq: u64, msg_id: String },
+    Answer {
+        seq: u64,
+        msg_id: String,
+    },
     /// `missed/<from>`: the re-sends to ask for after a provider loss.
-    Missed { from_ms: u64 },
+    Missed {
+        from_ms: u64,
+    },
     /// `mi/<from>`: a `missed` item's re-sends to ask for.
-    MissedItem { from_ms: u64 },
+    MissedItem {
+        from_ms: u64,
+    },
     /// `peer/<pubky>`: a counterparty with Paykit activity.
     Peer([u8; 32]),
     /// `kc/<record key>`: a payee's cancellation kept to place.
@@ -1798,7 +1973,10 @@ pub(crate) enum StateKey {
     /// `lc`: the certificate the shared records were last listed under.
     ListedCert,
     /// `ha/<payee>/<msg_id>`: an answer recorded while sends to its payee were held.
-    HeldAnswer { payee: [u8; 32], msg_id: String },
+    HeldAnswer {
+        payee: [u8; 32],
+        msg_id: String,
+    },
     /// `hc/<record key>`: the user's confirmation of a held request.
     HoldConfirmed([u8; 32]),
     /// A request confirmation carried from before the restore.
@@ -1812,13 +1990,22 @@ pub(crate) enum StateKey {
     /// `side/<msg_id>`: the side of a message the app sent.
     Side(String),
     /// `ar/<payee>/<app>`: a payee app's records a reader has seen.
-    SeenRecords { payee: [u8; 32], app_id: [u8; 16] },
+    SeenRecords {
+        payee: [u8; 32],
+        app_id: [u8; 16],
+    },
     /// `spam/<sender>`: the messages the spam rule only counted.
     Spam([u8; 32]),
     /// `rs/<requester>/<msg_id>`: when a message was re-sent to a requester.
-    Resent { requester: [u8; 32], msg_id: String },
+    Resent {
+        requester: [u8; 32],
+        msg_id: String,
+    },
     /// `rsd/<requester>/<day>`: how many messages were re-sent to a requester that day.
-    ResentDay { requester: [u8; 32], day: u64 },
+    ResentDay {
+        requester: [u8; 32],
+        day: u64,
+    },
     /// `lq/<payee>[/<app>]`: a list request asked of a payee, of one of its apps or none.
     ListAsk {
         payee: [u8; 32],
@@ -1831,19 +2018,29 @@ pub(crate) enum StateKey {
     /// `dt/<event ID>`: a duty event taken.
     Taken(String),
     /// `pd/<sender>`: the mark of a sender's replies dropped for the bounds.
-    DroppedReplies { sender: [u8; 32] },
+    DroppedReplies {
+        sender: [u8; 32],
+    },
     /// Outstanding and last settled requests for a sender's dropped replies.
-    ReplyAsks { sender: [u8; 32] },
-    /// The original floor batch for the signed recovery request of this hash.
+    ReplyAsks {
+        sender: [u8; 32],
+    },
     /// `ud/<sender>`: the mark of a sender's entries dropped unverified.
-    DroppedUnverified { sender: [u8; 32] },
+    DroppedUnverified {
+        sender: [u8; 32],
+    },
     /// `bd/<sender>`: the mark of a sender's messages dropped for the user's block.
-    DroppedBlocked { sender: [u8; 32] },
+    DroppedBlocked {
+        sender: [u8; 32],
+    },
     /// `bw/<hold epoch>`: a widening of the block marks owed at the next read of the lists.
     BlockedWidening([u8; 16]),
     /// `bl/<sender>/<msg_id>`: the notice of lost messages owed on a sender's block mark the
     /// receive step dropped for the bound, naming `msg_id` as queued.
-    LostOwed { sender: [u8; 32], msg_id: String },
+    LostOwed {
+        sender: [u8; 32],
+        msg_id: String,
+    },
     /// `fg`: the flagged senders as the app last read them.
     Flagged,
     /// `bf`: the raise of the block floor this app owes.
@@ -1866,7 +2063,9 @@ pub(crate) enum StateKey {
         from_ms: u64,
     },
     /// `kw/<sender>`: the mark of a sender's entries dropped while they waited for a key.
-    KeyWaits { sender: [u8; 32] },
+    KeyWaits {
+        sender: [u8; 32],
+    },
     /// `pr/<sender>/<record key>/<msg_id>`: a payer's reply kept for its record.
     KeptReply {
         sender: [u8; 32],
@@ -1874,7 +2073,10 @@ pub(crate) enum StateKey {
         msg_id: String,
     },
     /// `se/<sender>/<msg_id>`: a stored entry's message to write later.
-    StoredNote { sender: [u8; 32], msg_id: String },
+    StoredNote {
+        sender: [u8; 32],
+        msg_id: String,
+    },
     /// A notice of a possibly delivered outgoing message (Paykit spec 7.2).
     RestoredDelivery {
         to: [u8; 32],
@@ -1882,7 +2084,10 @@ pub(crate) enum StateKey {
         hash: [u8; 32],
     },
     /// `nt/<sender>/<msg_id>`: a notice for the host about a message given up.
-    MessageNotice { sender: [u8; 32], msg_id: String },
+    MessageNotice {
+        sender: [u8; 32],
+        msg_id: String,
+    },
     /// `dv/<record key>`: the pause mark of a divergent record.
     Divergent([u8; 32]),
     /// `dw/<record key>/<role>/<sender>/<msg_id>`: a message kept to write over a divergent
@@ -1899,7 +2104,10 @@ pub(crate) enum StateKey {
         kind: crate::notices::NoticeKind,
     },
     /// `ae/<record key>/<msg_id>`: a counterparty's Allowance end kept as the stop.
-    AllowanceEnd { record: [u8; 32], msg_id: String },
+    AllowanceEnd {
+        record: [u8; 32],
+        msg_id: String,
+    },
     /// `ac/<record key>`: an entry of the consent list.
     Consent([u8; 32]),
     /// `cf/<record key>`: a conflicting proposal or response kept as the stop.
@@ -1942,6 +2150,8 @@ impl StateKey {
                 .then(|| s.to_owned())
         };
         Some(match text {
+            "ld" => Self::ListDiscovery,
+            "list" => Self::ListSettings,
             "ct" => Self::CursorTime,
             "rh" => Self::RestoreHold,
             "he" => Self::HoldEpoch,
@@ -1963,6 +2173,20 @@ impl StateKey {
             _ => {
                 let (family, rest) = text.split_once('/')?;
                 match family {
+                    "lrec" => Self::ListRecipient(b64_32(rest)?),
+                    "lp" => {
+                        let (recipient, rest) = rest.split_once('/')?;
+                        let (generation, hash) = rest.split_once('/')?;
+                        let generation = number(generation)?;
+                        paykit_lib::ListVersion::new(generation, 1).ok()?;
+                        Self::Publication(PublicationKey {
+                            recipient: b64_32(recipient)?,
+                            generation,
+                            hash: b64_32(hash)?,
+                        })
+                    }
+                    "lres" => Self::ListReservation(b64_32(rest)?),
+                    "lhi" => Self::PublicationHistory(b64_32(rest)?),
                     "sb" => Self::SettlementBucket(b64_32(rest)?),
                     "sm" => {
                         let (record, mark) = rest.split_once('/')?;
@@ -2270,6 +2494,50 @@ mod tests {
             from = end.max(start);
         }
         out
+    }
+
+    #[test]
+    fn test_restored_publication_keeps_each_batch_of_each_original() {
+        let own = [8; 32];
+        let binder = Binder::unblinded(own);
+        let original = PublicationKey {
+            recipient: [2; 32],
+            generation: 3,
+            hash: [4; 32],
+        };
+        let other = PublicationKey {
+            hash: [5; 32],
+            ..original.clone()
+        };
+        let mut restored = crate::publish::RestoredPublications::default();
+        for (key, id) in [
+            (&original, [7; 16]),
+            (&other, [9; 16]),
+            (&original, [6; 16]),
+            (&original, [7; 16]),
+        ] {
+            restored
+                .pending(key.key().as_bytes(), &id, &binder)
+                .unwrap();
+        }
+        let entries: std::collections::BTreeMap<_, _> = restored
+            .writes()
+            .unwrap()
+            .into_iter()
+            .filter_map(|w| {
+                let LocalWrite::Put { key, value } = w else {
+                    return None;
+                };
+                key.starts_with(key::PUBLICATIONS.as_bytes())
+                    .then(|| publication_entry(&key, &value, &own).unwrap())
+            })
+            .collect();
+        assert_eq!(entries[&original], [[6; 16], [7; 16]].into());
+        assert_eq!(entries[&other], [[9; 16]].into());
+        let key = original.key();
+        assert!(publication_entry(key.as_bytes(), &[7; 15], &own).is_err());
+        assert!(publication_entry(key.as_bytes(), &[7; 32], &own).is_err());
+        assert!(publication_entry(key.as_bytes(), &[7; 16], &original.recipient).is_err());
     }
 
     #[test]
@@ -2877,6 +3145,10 @@ mod tests {
         let attempt = AttemptId::from_bytes([5; 16]);
         let id = "123e4567-e89b-42d3-a456-426614174000";
         let cases: Vec<(String, StateKey)> = vec![
+            (
+                key::publication_history(&pubky),
+                StateKey::PublicationHistory(pubky),
+            ),
             (key::journal(&attempt), StateKey::Journal(attempt)),
             (
                 key::offline_batch(&attempt),
