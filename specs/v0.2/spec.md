@@ -81,6 +81,7 @@ Paykit's scopes are names under the Switch's scope rule (Pubky Switch spec, Sect
 | `paykit_request` | Act as payee. Send requests, period details, payee cancellations, receipts, Private Payment Lists and resend requests. Receive acceptance, rejection, payer cancellations, proofs, Private Payment List requests and resend requests. Read and write `payee_activity` and `private_list_publications`. Publish, renew and withdraw Private Payment Lists | `paykit_settlements`, `paykit_contacts` |
 | `paykit_request:<label>` | Act as payee for requests under this label. Send requests, period details, payee cancellations and receipts for those sales. Receive the payer's replies and read and write `payee_activity` only for this label. Send and receive resend requests under Section 9 | `paykit_settlements`, `paykit_contacts` |
 | `paykit_settlements` | Read and write `settlements`, the marks of the settlements the identity's payee apps have credited (Section 6, Settlement marks) | - |
+| `paykit_recovery` | Read and publish the original apps’ recovery reports (wire 5.10) | - |
 | `paykit_allowance` | Receive `allowance_*` messages and resend requests for them; send `allowance_end`; send `executor_notice` to an own executor; with `paykit_contacts`, also send proposals, acceptances, rejections and resend requests (Outbound authorization, below); read and write `allowance_proposals` and `allowances`; read `allowance_ledgers` and claims | - |
 | `paykit_allowance_execute` | Act as an Allowance executor; receive `executor_notice`; write `allowance_ledgers` | `paykit_allowance`, `paykit_pay`, `paykit_contacts` |
 | `paykit_contacts` | Read the contacts, conversation entries and deny list at the switch | - |
@@ -147,6 +148,7 @@ Paykit follows the Switch's authorization rules (Pubky Switch spec, Section 3.4)
 
 - **Label keys.** A labelled selling scope `paykit_request:<label>` is a sub-scope of `paykit_request` (Pubky Switch spec, Section 3.5): its keys, the label keys, derive from the `paykit_request` key. Which scopes have keys is Paykit's: its scopes of Section 3.1 and their labels do, extension scopes don't, and nor does any other sub-scope of a Paykit scope (such as `paykit_pay:x`), which Paykit ignores (wire 3.1).
 - **`paykit_settlements`** has keys of its own, as every scope of Section 3.1 does. It isn't a sub-scope of `paykit_request`, so a labelled app holds its keys beside its label keys, and never the `paykit_request` key (Pubky Switch spec, Section 3.5).
+- **`paykit_recovery`** has its own scope key. The signer grants it on enrollment or ordinary certificate renewal. It adds no Switch permission. A contacts-only app can sign its own historical report and give the signed report to an authorized publisher. Reading the reports and publishing a report both require the recovery grant.
 - Extension scopes have no scope keys: no shared record holds an extension kind, so key bundles and the approval carry keys for the other scopes only (Switch wire 3.5 and 3.10).
 
 ## 4. App records
@@ -206,6 +208,7 @@ Kind strings are `paykit.` followed by the names below, or extension kinds `<pre
 | `payee_activity` | Request sent; for a recurring request also each Billing Period; or payment received without a request | The same, from the payee's side | `paykit_request`, or `paykit_request:<label>` for a request sent under that label | `paykit_request`, or `paykit_request:<label>` |
 | `payment_lists` | Payee and publishing app | The latest Private Payment List received and the single-use endpoints used | `paykit_pay` | `paykit_pay` |
 | `private_list_publications` | Publishing app, recipient identity and publishing identity generation | The permanent counter of the lists sent that recipient in that generation (Section 8.4.1; wire 5.8) | `paykit_request` | `paykit_request` |
+| `recovery_uploads` | Original App ID and opening identity document hash | The original app’s signed report for that provider loss (wire 5.10) |
 | `block_floor` | Identity: one record | The block floor: the time before which a one-time request is paid only by hand (Section 8.1, Blocked counterparties) | `paykit_pay` | `paykit_pay` |
 | `settlements` | Bucket of settlements: at most 1,024 records | The marks of the settlements any own payee app has credited in the bucket, each naming the occurrence it was credited to: a request, a Billing Period or a payment without a request (Section 8.1 step 4); never removed; permanent, never deleted | `paykit_settlements` | `paykit_settlements` |
 | `allowance_proposals` | Pending proposal, on either side | The original signed proposal and any conflicting proposal during this pending lifetime (Section 8.3.1) | `paykit_allowance` | `paykit_allowance` |
@@ -314,6 +317,8 @@ Every payment follows these steps, whether it pays a one-time request, a Billing
 - Features that account for payments, such as Allowance budgets (Section 8.3), derive their accounting from the outcome of each attempt.
 - **An app that isn't current can write nothing,** not even outcomes. Its attempts are reconciled through receipts or by other apps.
 - **Graceful removal:** the signer warns before revoking an app, or letting its certificate lapse (Pubky Switch spec, Section 3.2), while it still owns open attempts, which `GET /v1/{id}/apps` lists. Apps with `paykit_allowance` warn when an Allowance's executor stops being current (Section 8.3).
+
+An app with `paykit_recovery` can show which original apps are listed on the identity-signed opening, which have an explicit signed removal for that loss, and which have a verifiable report at the service (wire 5.10). A report identifies the historical evidence its author committed to. Roster completion, removal and republication do not establish that a particular obligation was unpaid or a settlement uncredited.
 
 ## 8. Payment flows and features
 
