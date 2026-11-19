@@ -39,7 +39,7 @@ const MAX_AUDIT_ACQUISITIONS_PER_PEER: usize =
 /// Maximum attempts of one expected-slot acquisition while the stored
 /// Encrypted Link generation keeps moving under it. See
 /// [`retry_while_link_generation_moves`] for why this bound suffices.
-const LINK_ADVANCE_RETRY_ATTEMPTS: usize = 8;
+const LINK_GENERATION_RETRY_ATTEMPTS: usize = 8;
 
 /// Error context when the buffered private intake's link generation is not
 /// the stored Encrypted Link generation.
@@ -612,12 +612,18 @@ impl From<paykit_lib::PaykitError> for LinkAttemptError {
     }
 }
 
-/// Whether the `stored` Encrypted Link generation is no longer the `used`
-/// one an attempt started from. No stored link state counts as moved. Each
-/// generation-checked step runs this first, inside its own transaction, see
-/// [`retry_while_link_generation_moves`].
-fn link_generation_moved(stored: Option<u64>, used: u64) -> bool {
-    stored != Some(used)
+/// Whether the stored Encrypted Link generation of `counterparty` is no
+/// longer the `used` one an attempt started from. No stored link state counts
+/// as moved. Each generation-checked step runs this first, inside its own
+/// transaction, see [`retry_while_link_generation_moves`].
+fn stored_link_generation_moved(
+    tx: &dyn StorageTransaction,
+    counterparty: &PubkyPublicKey,
+    used: u64,
+) -> bool {
+    tx.encrypted_link_state(counterparty)
+        .map(|link| link.generation)
+        != Some(used)
 }
 
 /// The counter read's and the absent check's error for a moved generation.
@@ -632,29 +638,31 @@ fn buffered_generation_moved() -> LinkAttemptError {
 /// Encrypted Link generation moves under it.
 ///
 /// Any committed change of the stored Encrypted Link generation makes the
-/// attempt retry: a consumer drain (one generation per packet), an outbound
-/// private send, or a handshake or observation transition. Drains and sends
-/// rebase the buffered intake to the new generation in the same transaction.
-/// An attempt reads the link state and its generation once, at its start, so
-/// a change committed after that leaves the attempt's snapshot and receive
+/// attempt retry, whoever committed it: another task's consumer drain (one
+/// generation per packet), outbound private send, or handshake or observation
+/// transition, or this attempt's own observation step when it committed a
+/// replacement and returned `Ok`. Drains and sends rebase the buffered intake
+/// to the new generation in the same transaction. An attempt reads the link
+/// state and its generation once, at its start, and keeps that snapshot, so a
+/// change committed after that leaves the attempt's snapshot and receive
 /// counter stale although nothing is wrong with the peer. The attempt's
 /// storage steps, the counter read, the buffer insert, and the absent check
 /// before the cursor advance, therefore first compare the stored Encrypted
 /// Link generation with the attempt's in the same transaction (see
-/// [`link_generation_moved`]). When it moved, the step does not run and the
-/// attempt reports [`LinkAttemptError::GenerationMoved`]. Only that outcome is
-/// retried, and the next attempt reads the link state afresh.
+/// [`stored_link_generation_moved`]). When it moved, the step does not run and
+/// the attempt reports [`LinkAttemptError::GenerationMoved`]. Only that outcome
+/// is retried, and the next attempt reads the link state afresh.
 ///
-/// Every other failure is returned after one attempt: network failures,
-/// observation and recovery transitions, handshake failures, contention for
-/// the peer link lease while a drain holds it but has not committed, and
-/// integrity failures of the steps themselves while the generation stands
-/// still, such as a receive slot whose ciphertext changed. The next event or
-/// audit tries again.
+/// Every other failure is returned after one attempt: an observation,
+/// recovery, network, or handshake step that fails, contention for the peer
+/// link lease while a drain holds it but has not committed, and integrity
+/// failures of the steps themselves while the generation stands still, such
+/// as a receive slot whose ciphertext changed. The next event or audit tries
+/// again.
 ///
 /// Each retry needs a committed generation change, so this does not spin while
 /// the generation stands still. The attempts are bounded by
-/// [`LINK_ADVANCE_RETRY_ATTEMPTS`] in case it keeps moving; eight attempts
+/// [`LINK_GENERATION_RETRY_ATTEMPTS`] in case it keeps moving; eight attempts
 /// cover a short burst of drains and sends committing during one acquisition.
 /// Past the bound, the last attempt's error is returned, the error that
 /// step's own generation mismatch check reports.
@@ -672,7 +680,7 @@ where
             Ok(acquisition) => return Ok(acquisition),
             Err(LinkAttemptError::Failed(error)) => return Err(error),
             Err(LinkAttemptError::GenerationMoved(error))
-                if attempts == LINK_ADVANCE_RETRY_ATTEMPTS =>
+                if attempts == LINK_GENERATION_RETRY_ATTEMPTS =>
             {
                 return Err(error)
             }
@@ -748,7 +756,9 @@ where
 }
 
 /// Fetches the next expected slot of `counterparty` at link `generation` and
-/// buffers the packet, or advances `cursor` when the slot is absent.
+/// buffers the packet, or reports the slot absent. When `cursor` is given,
+/// both advance it: a buffered insert atomically with the packet, through its
+/// `source_cursor`, and an absent slot in the absent check's transaction.
 ///
 /// The counter read, the buffer insert, and the absent check each first report
 /// [`LinkAttemptError::GenerationMoved`], without running, when the stored
@@ -782,16 +792,11 @@ where
     let counterparty_for_tail = counterparty.clone();
     let receive_counter = storage
         .transaction(move |tx| {
-            let state = tx.export_storage_state();
-            let stored_generation = state
-                .encrypted_link_states
-                .get(&counterparty_for_tail)
-                .map(|link| link.generation);
-            if link_generation_moved(stored_generation, generation) {
+            if stored_link_generation_moved(tx, &counterparty_for_tail, generation) {
                 return Ok(None);
             }
             next_private_intake_counter(
-                &state,
+                &tx.export_storage_state(),
                 &counterparty_for_tail,
                 generation,
                 snapshot_counter,
@@ -811,10 +816,7 @@ where
         let counterparty_for_absent = counterparty.clone();
         let moved = storage
             .transaction(move |tx| {
-                let stored_generation = tx
-                    .encrypted_link_state(&counterparty_for_absent)
-                    .map(|link| link.generation);
-                if link_generation_moved(stored_generation, generation) {
+                if stored_link_generation_moved(tx, &counterparty_for_absent, generation) {
                     return Ok(true);
                 }
                 if let Some(cursor) = cursor {
@@ -843,10 +845,7 @@ where
             // adapter's `buffer_private_intake_packet`, so that a mismatch is
             // reported as `GenerationMoved` before the adapter's untyped
             // error. Keep the two in sync.
-            let stored_generation = tx
-                .encrypted_link_state(&counterparty)
-                .map(|link| link.generation);
-            if link_generation_moved(stored_generation, packet.link_generation) {
+            if stored_link_generation_moved(tx, &counterparty, packet.link_generation) {
                 return Ok(None);
             }
             let outcome = tx.buffer_private_intake_packet(packet)?;
@@ -4464,7 +4463,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_generation_retry_stops_at_bound_while_generation_moves() {
-        let mut results: Vec<_> = (1..LINK_ADVANCE_RETRY_ATTEMPTS)
+        let mut results: Vec<_> = (1..LINK_GENERATION_RETRY_ATTEMPTS)
             .map(|_| Err(buffered_generation_moved()))
             .collect();
         results.push(Err(LinkAttemptError::GenerationMoved(
@@ -4484,7 +4483,7 @@ mod tests {
             ),
             "the last attempt's mismatch error must be returned"
         );
-        assert_eq!(attempts, LINK_ADVANCE_RETRY_ATTEMPTS);
+        assert_eq!(attempts, LINK_GENERATION_RETRY_ATTEMPTS);
     }
 
     #[tokio::test]
