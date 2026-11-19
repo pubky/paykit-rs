@@ -1199,7 +1199,7 @@ async fn test_period_payments_retained_delete_holds_the_period_after_claim_reten
             .unwrap_err();
         assert!(
             matches!(error.refusal(), Some(Refusal::RecordHeld(_))),
-            "{error:?}"
+            "visit {visit}: {error:?}"
         );
         let held = wallet
             .app()
@@ -1221,6 +1221,8 @@ async fn test_period_payments_retained_delete_holds_the_period_after_claim_reten
         } else if visit == 1 {
             drop(wallet);
             wallet = restored(&w, backup.as_ref().unwrap()).await;
+            wallet.reconcile().await.unwrap();
+            wallet.end_reconcile(UserConfirmed::new()).await.unwrap();
         }
     }
 }
