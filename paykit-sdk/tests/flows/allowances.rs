@@ -2574,13 +2574,15 @@ fn missed_and_listing_fails(w: &World, wallet: &Paykit) {
 
 /// Fail Paykit's own listing at the end of the next receive of `party`'s app after a
 /// `missed` item: the client's listing after the item, of the app's `collections`, goes
-/// through first. A listing that fails inside the client's read fails the read.
+/// through first, up to the client's page budget. Paykit then continues the same
+/// listing. A failure inside the client's read would instead fail the read.
 fn fail_paykit_listing(party: &pubky_switch_client::testing::TestSigner, app: &Paykit) {
     party
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Unreachable {
             path: "records?collection".into(),
-            after: crate::certificate::client_listing_requests(app.app().cert()),
+            after: crate::certificate::client_listing_requests(app.app().cert())
+                .min(pubky_switch_client::app::LISTING_PAGES_PER_READ as usize),
         });
 }
 
