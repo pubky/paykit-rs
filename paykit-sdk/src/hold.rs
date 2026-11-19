@@ -1134,11 +1134,9 @@ impl Paykit {
                     continue;
                 };
                 let counterparty = record.counterparty;
-                let restore_owes = owed.as_ref().is_some_and(|owed| {
-                    owed.waiting
-                        .as_ref()
-                        .is_none_or(|waiting| waiting.binary_search(&counterparty).is_ok())
-                });
+                let restore_owes = owed
+                    .as_ref()
+                    .is_some_and(|owed| owed.includes(&counterparty));
                 // Period details go again only while no later stop covers them: one their
                 // request record can't show yet holds them, unless the client would refuse
                 // them by now anyway.
@@ -1218,11 +1216,7 @@ impl Paykit {
                     continue;
                 };
                 let counterparty = record.counterparty;
-                if restore
-                    .waiting
-                    .as_ref()
-                    .is_some_and(|waiting| waiting.binary_search(&counterparty).is_err())
-                {
+                if !restore.includes(&counterparty) {
                     continue;
                 }
                 // Nothing is sent for a conflicted Allowance, nor under a counterparty's end
@@ -1234,14 +1228,21 @@ impl Paykit {
                 }
                 let messages =
                     crate::allowances::own_allowance_to_send_again(&record, &own, &app_id);
-                if messages.is_empty() {
-                    continue;
-                }
-                if Box::pin(self.sends_held(&counterparty)).await? {
-                    waiting.insert(counterparty);
-                    continue;
-                }
                 for stored in messages {
+                    let permitted =
+                        if matches!(stored.body(), paykit_lib::bodies::Body::AllowanceEnd(_)) {
+                            if self.past_replay_window(stored) {
+                                continue;
+                            }
+                            Box::pin(self.may_queue_stored_end(stored.message(), stored.hash()))
+                                .await?
+                        } else {
+                            !Box::pin(self.sends_held(&counterparty)).await?
+                        };
+                    if !permitted {
+                        waiting.insert(counterparty);
+                        continue;
+                    }
                     Box::pin(self.queue_stored_again(stored)).await?;
                 }
             }
@@ -1452,7 +1453,7 @@ impl Paykit {
     /// Whether the client refuses to queue `stored` again by now: past 30 days from its
     /// `created_at`, less the clock tolerance, by the later of the device clock and the
     /// service time verified (Switch spec 11, `App::queue_stored`).
-    fn past_replay_window(&self, stored: &paykit_lib::records::StoredMessage) -> bool {
+    pub(crate) fn past_replay_window(&self, stored: &paykit_lib::records::StoredMessage) -> bool {
         let until = stored
             .message()
             .created_at_ms
@@ -1649,6 +1650,14 @@ pub(crate) struct OwnResendOwed {
     /// its own time, which is later.
     #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) restored_at_ms: Option<u64>,
+}
+
+impl OwnResendOwed {
+    pub(crate) fn includes(&self, peer: &[u8; 32]) -> bool {
+        self.waiting
+            .as_ref()
+            .is_none_or(|waiting| waiting.binary_search(peer).is_ok())
+    }
 }
 
 /// Whether a later stop covers the period details a payee period record keeps, for the

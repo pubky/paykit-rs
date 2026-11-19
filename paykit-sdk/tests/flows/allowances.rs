@@ -8123,3 +8123,215 @@ async fn queued_allowance_after_renewal(
         );
     }
 }
+
+async fn recorded_end(app: &Paykit, record: &[u8; 32]) -> StoredMessage {
+    let raw = serde_json::to_vec(&Box::pin(value(app, record)).await).unwrap();
+    let end = AllowanceRecord::read(&raw, &app.identity())
+        .unwrap()
+        .end
+        .unwrap();
+    assert_eq!(end.sender(), app.identity());
+    assert_eq!(end.cert().app_id(), app.app_id());
+    end
+}
+
+/// The Allowance role alone can still stop a payment locally. Only its automatic
+/// message to the counterparty waits for a permitting contact read (Paykit spec 3.1, 8.3).
+#[tokio::test]
+async fn test_allowances_crossing_end_waits_for_contacts_after_renewal_and_reload() {
+    let w = World::new();
+    let store = crate::common::store();
+    let full = AppScopes::new()
+        .allowance()
+        .manage_contacts()
+        .build()
+        .unwrap();
+    let mut payer = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            full.clone(),
+            paykit_sdk::PaykitConfig::default(),
+            std::sync::Arc::clone(&store),
+        )
+        .await;
+    payer.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut shop = Box::pin(shop(&w)).await;
+    let (theirs, mine) = Box::pin(proposed(&w, &mut shop, &mut payer)).await;
+    Box::pin(own_acceptance_recorded(&mut payer, &mine)).await;
+    let app_id = payer.app_id();
+    let original = payer.app().cert().clone();
+    let narrow = renew(
+        &w,
+        app_id,
+        &AppScopes::new().allowance().build().unwrap(),
+        1000,
+    );
+    list(&w, app_id, &original, &narrow);
+    payer.receive(None).await.unwrap();
+    assert_eq!(payer.app().cert().hash(), narrow.hash());
+    shop.end_allowance(&theirs).await.unwrap();
+    payer.receive(None).await.unwrap();
+
+    assert!(Box::pin(ends_naming_both(&payer, &mine)).await);
+    let ended = Box::pin(recorded_end(&payer, &mine)).await;
+    assert_eq!(
+        payer
+            .app()
+            .protocol_scan("paykit", b"eo/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(payer
+        .app()
+        .delivery(&ended.message().msg_id)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
+    drop(payer);
+    let mut payer = w
+        .load_on_clock(&w.alice, store, app_id, std::sync::Arc::clone(&w.clock))
+        .await;
+    payer.receive(None).await.unwrap();
+    assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
+    assert!(payer
+        .app()
+        .delivery(&ended.message().msg_id)
+        .await
+        .unwrap()
+        .is_none());
+
+    let renewed = renew(&w, app_id, &full, 2000);
+    list(&w, app_id, &narrow, &renewed);
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    fail_list_read(&w);
+    payer.receive(None).await.unwrap();
+    assert_eq!(payer.app().cert().hash(), renewed.hash());
+    assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
+    payer.receive(None).await.unwrap();
+    let received = shop.receive(None).await.unwrap();
+    assert!(received.report.events.iter().any(|event| matches!(event,
+        AppEvent::MessageReceived { msg_id, kind, .. } if *msg_id == ended.message().msg_id && kind == "paykit.allowance_end"
+    )));
+    assert!(payer
+        .app()
+        .protocol_scan("paykit", b"eo/")
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn test_allowances_crossing_end_rechecks_renewal_and_the_deny_copy_at_flush() {
+    use pubky_switch_client::app::{Delivery, DeliveryOrigin};
+    let w = World::new();
+    let full = AppScopes::new()
+        .allowance()
+        .manage_contacts()
+        .build()
+        .unwrap();
+    let mut payer = Box::pin(alice_app(&w, "wallet", full.clone())).await;
+    let mut shop = Box::pin(shop(&w)).await;
+    let (theirs, mine) = Box::pin(proposed(&w, &mut shop, &mut payer)).await;
+    Box::pin(own_acceptance_recorded(&mut payer, &mine)).await;
+    payer.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    shop.end_allowance(&theirs).await.unwrap();
+    payer.receive(None).await.unwrap();
+    let ended = Box::pin(recorded_end(&payer, &mine)).await;
+    let msg_id = &ended.message().msg_id;
+    let queued = payer.app().queued_messages("paykit").await.unwrap();
+    let exact = queued.iter().find(|q| q.msg_id == *msg_id).unwrap();
+    assert_eq!(exact.origin, DeliveryOrigin::Original);
+    assert_eq!(exact.hash, ended.hash());
+    assert!(exact.may_send);
+    let original = payer.app().cert().clone();
+    let app_id = payer.app_id();
+    let narrow = renew(
+        &w,
+        app_id,
+        &AppScopes::new().allowance().build().unwrap(),
+        1000,
+    );
+    list(&w, app_id, &original, &narrow);
+    payer.receive(None).await.unwrap();
+    payer.app_mut().release_queued(&w.bob_id()).await.unwrap();
+    assert!(matches!(
+        payer.app_mut().flush_message(msg_id).await.unwrap(),
+        Some(Delivery::Queued { .. })
+    ));
+    assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
+
+    payer.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    let renewed = renew(&w, app_id, &full, 2000);
+    list(&w, app_id, &narrow, &renewed);
+    payer.receive(None).await.unwrap();
+    payer.block(&w.bob_id()).await.unwrap();
+    payer.app_mut().release_queued(&w.bob_id()).await.unwrap();
+    assert!(matches!(
+        payer.app_mut().flush_message(msg_id).await.unwrap(),
+        Some(Delivery::Queued { .. })
+    ));
+    assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
+    payer.unblock(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    assert!(matches!(
+        payer.app_mut().flush_message(msg_id).await.unwrap(),
+        Some(Delivery::Queued { .. })
+    ));
+    assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
+    payer.receive(None).await.unwrap();
+    payer.app_mut().flush_message(msg_id).await.unwrap();
+    assert!(matches!(
+        payer.app().delivery(msg_id).await.unwrap(),
+        Some(Delivery::Accepted { .. })
+    ));
+    assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 1);
+}
+
+#[tokio::test]
+async fn test_allowances_an_owed_end_without_its_origin_stays_held_after_restore() {
+    let w = World::new();
+    let mut payer = Box::pin(wallet(&w)).await;
+    let mut shop = Box::pin(shop(&w)).await;
+    let proposal = payer
+        .propose_allowance(w.bob_id(), AllowanceRole::Allower, terms())
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    payer.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    let end = payer.end_allowance(&proposal.record).await.unwrap();
+    let key = format!("end/{end}").into_bytes();
+    assert!(payer
+        .app()
+        .protocol_get("paykit", &key)
+        .await
+        .unwrap()
+        .is_some());
+    // Restore a store that retained the signed stop and its outbox but lost its origin.
+    payer
+        .app_mut()
+        .protocol_commit("paykit", &[LocalWrite::Delete { key }])
+        .await
+        .unwrap();
+    let backup = payer.backup().await.unwrap();
+    drop(payer);
+    let mut payer = Box::pin(restored_unreceived(&w, &backup)).await;
+    payer.receive(None).await.unwrap();
+    payer.app_mut().release_queued(&w.bob_id()).await.unwrap();
+    payer.app_mut().flush_outbox().await.unwrap();
+    assert_eq!(
+        payer.allowance(&proposal.record).await.unwrap().status,
+        AllowanceStatus::Ended
+    );
+    assert!(payer
+        .app()
+        .queued_messages("paykit")
+        .await
+        .unwrap()
+        .iter()
+        .any(|q| q.msg_id == end && !q.may_send));
+    assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
+}

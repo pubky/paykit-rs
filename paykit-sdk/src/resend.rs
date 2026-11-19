@@ -493,6 +493,11 @@ impl Paykit {
             if !self.requester_takes(&message, cert.scopes()).await? {
                 continue;
             }
+            if message.kind == Kind::AllowanceEnd.as_str()
+                && !Box::pin(self.may_queue_stored_end(&message, sent.plaintext.hash())).await?
+            {
+                continue;
+            }
             let last: Option<u64> = self
                 .local_get(&key::resent(requester, &sent.msg_id))
                 .await?;

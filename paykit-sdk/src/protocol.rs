@@ -697,6 +697,12 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
+            StateKey::EndOrigin(_) => {
+                state::restored::<crate::allowances::EndOrigin>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
             StateKey::NoticeTarget(_) => {
                 state::restored::<crate::allowances::NoticeTarget>(&key, &value, &binder)
                     .map_err(|_| unread())?;
@@ -965,15 +971,18 @@ impl Protocol for PaykitProtocol {
 
     /// Hold every attempt to deliver an Allowance acceptance, including a re-send or an
     /// acceptance already in the outbox (Paykit spec 8.3.1). Proposals and rejections
-    /// require both current sender scopes on each attempt. An end requires the current
-    /// Allowance scope (Paykit spec 3.3).
+    /// require both current sender scopes on each attempt. Only an original user end
+    /// can proceed with the Allowance scope alone (Paykit spec 3.1, 8.1).
     fn may_send(
         &self,
         delivery: &pubky_switch_client::app::DeliveryView<'_>,
     ) -> Result<bool, StoreFailure> {
         Ok(match Kind::from_kind(&delivery.message().kind) {
             Some(Kind::AllowanceAcceptance) => false,
-            Some(Kind::AllowanceProposal | Kind::AllowanceRejection | Kind::AllowanceEnd) => {
+            Some(Kind::AllowanceEnd) => {
+                crate::allowances::may_deliver_end(delivery).map_err(view_failure)?
+            }
+            Some(Kind::AllowanceProposal | Kind::AllowanceRejection) => {
                 check_sender_scopes(delivery.message(), delivery.cert().scopes()).is_ok()
             }
             _ => true,

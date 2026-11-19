@@ -79,6 +79,8 @@
 //! | `en/<msg_id>` | the executor app an `executor_notice` is wrapped to, kept with the batch that queues it | |
 //! | `eo/<record key>` | this app's own crossing end of an Allowance, recorded while sends to its counterparty were held, whose message is sent from the record once they aren't (`allowances.rs`, `Paykit::send_owed_ends`); never restored | |
 
+//! | `end/<msg_id>` | origin of the exact signed Allowance end and its target and references, written with the end and retained through its delivery lifetime | |
+
 use paykit_lib::bodies::ResendRequest;
 use paykit_lib::derive::{natural_key, request_obligation_blinded};
 use paykit_lib::scopes::verify_certificate;
@@ -91,7 +93,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::activity::{ActivityTarget, KeptSide};
-use crate::allowances::{allowance_target, ConsentEntry, NoticeTarget, OwedEnd};
+use crate::allowances::{
+    allowance_target, ConsentEntry, EndCause, EndOrigin, NoticeTarget, OwedEnd,
+};
 use crate::app_records::SeenRecords;
 use crate::error::{PaykitError, Result};
 use crate::hold::HeldAnswer;
@@ -372,6 +376,19 @@ pub(crate) fn cx_scan<T: Stored>(
         out.push((key, value));
     }
     Ok(out)
+}
+
+/// Read the owning protocol's exact value with the delivery's current certificate and naming key.
+pub(crate) fn delivery_get<T: Stored>(
+    delivery: &pubky_switch_client::app::DeliveryView<'_>,
+    key: &str,
+) -> Result<Option<T>> {
+    let Some(bytes) = delivery.local().local_get(key.as_bytes())? else {
+        return Ok(None);
+    };
+    let blind = |input: &[u8]| delivery.blind(input);
+    let binder = Binder::new(delivery.local().identity(), delivery.cert(), &blind);
+    bound(key.as_bytes(), &bytes, &binder).map(Some)
 }
 
 /// The value at `key`, read through a [`LocalView`] and bound to it.
@@ -1182,6 +1199,35 @@ impl Stored for OwedEnd {
 
 impl sealed::Sealed for NoticeTarget {}
 
+impl sealed::Sealed for EndOrigin {}
+
+/// An exact own end's origin: the key names its ID, and its identity, app and canonical
+/// Allowance tuple belong to this app. An automatic crossing always names an acceptance.
+/// Its hash and references must also match the signed message before they can be used as
+/// that message's evidence (Paykit spec 8.1, 8.3).
+impl Stored for EndOrigin {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let StateKey::EndOrigin(msg_id) = family else {
+            return corrupt();
+        };
+        let cert = binder.cert.ok_or_else(PaykitError::corrupt)?;
+        let allowance_id = paykit_lib::AllowanceId::parse(&self.allowance_id)
+            .map_err(|_| PaykitError::corrupt())?;
+        if self.msg_id != *msg_id
+            || self.own != binder.own
+            || self.app_id != cert.app_id()
+            || self.counterparty == self.own
+            || (self.cause == EndCause::Automatic && self.acceptance.is_none())
+            || self.acceptance == Some(self.proposal)
+            || binder.record_key(&allowance_target(&self.counterparty, &allowance_id))?
+                != self.record
+        {
+            return corrupt();
+        }
+        Ok(())
+    }
+}
+
 /// The executor app an `executor_notice` is wrapped to: of the notice's `msg_id` its key
 /// names, written in the batch that queues that notice (`allowances.rs`).
 impl Stored for NoticeTarget {
@@ -1306,6 +1352,12 @@ pub(crate) mod key {
     pub(crate) const CONFLICTS: &str = "cf/";
     pub(crate) const CONSENTS: &str = "ac/";
     pub(crate) const NOTICE_TARGETS: &str = "en/";
+    pub(crate) const END_ORIGINS: &str = "end/";
+
+    pub(crate) fn end_origin(msg_id: &str) -> String {
+        format!("{END_ORIGINS}{msg_id}")
+    }
+
     pub(crate) const OWED_ENDS: &str = "eo/";
 
     /// This app's own crossing end of the Allowance whose record is `record_key`, recorded
@@ -1675,6 +1727,8 @@ pub(crate) enum StateKey {
     /// `eo/<record key>`: this app's own crossing end, recorded while sends were held, whose
     /// message is owed.
     OwedEnd([u8; 32]),
+    /// The exact own signed end recorded by the producer.
+    EndOrigin(String),
 }
 
 impl StateKey {
@@ -1803,6 +1857,7 @@ impl StateKey {
                     "ac" => Self::Consent(b64_32(rest)?),
                     "cf" => Self::Conflict(b64_32(rest)?),
                     "en" => Self::NoticeTarget(msg_id(rest)?),
+                    "end" => Self::EndOrigin(msg_id(rest)?),
                     "eo" => Self::OwedEnd(b64_32(rest)?),
                     "rs" => {
                         let (requester, id) = rest.split_once('/')?;
@@ -2772,6 +2827,7 @@ mod tests {
             (key::consent(&pubky), StateKey::Consent(pubky)),
             (key::conflict(&pubky), StateKey::Conflict(pubky)),
             (key::notice_target(id), StateKey::NoticeTarget(id.into())),
+            (key::end_origin(id), StateKey::EndOrigin(id.into())),
         ];
         for (built, family) in cases {
             assert_eq!(StateKey::parse(built.as_bytes()), Some(family), "{built}");
