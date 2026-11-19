@@ -2468,6 +2468,12 @@ async fn test_publication_retry_after_a_move_requires_the_original_application()
 
 #[tokio::test]
 async fn test_publication_withdrawal_retry_respects_a_newer_issue_in_an_intervening_generation() {
+    for restored_withdraws in [false, true] {
+        retry_after_two_moves(restored_withdraws).await;
+    }
+}
+
+async fn retry_after_two_moves(restored_withdraws: bool) {
     use crate::common::{store, BOB_ORIGIN, HOUR_MS};
     use paykit_sdk::PaykitConfig;
     use pubky_switch_core::records::Inbox;
@@ -2497,7 +2503,7 @@ async fn test_publication_withdrawal_retry_respects_a_newer_issue_in_an_interven
         next.deliver_identity(&moved).unwrap();
         shop.app_mut().refresh_identity().await.unwrap();
         shop.app_mut().follow_provider().await.unwrap();
-        if generation == 2 {
+        if generation == 2 && restored_withdraws {
             let mut restored = Paykit::restore(
                 w.env(&w.bob, store()),
                 PaykitConfig::default(),
@@ -2517,15 +2523,32 @@ async fn test_publication_withdrawal_retry_respects_a_newer_issue_in_an_interven
     }
     w.clock.advance_ms(HOUR_MS);
     shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
     let current = target(&shop, &payer, 3);
-    assert!(matches!(
-        shop.app_mut().read_record_fresh(&current).await.unwrap(),
-        RecordRead::Kept {
-            record: None,
-            reason: KeptReason::NotFound
-        }
-    ));
-    assert_eq!(published(&shop, &buyer).await.len(), 1);
+    let read = shop.app_mut().read_record_fresh(&current).await.unwrap();
+    let delivered = published(&shop, &buyer).await;
+    if restored_withdraws {
+        assert!(matches!(
+            read,
+            RecordRead::Kept {
+                record: None,
+                reason: KeptReason::NotFound
+            }
+        ));
+        assert_eq!(delivered.len(), 1);
+    } else {
+        let RecordRead::Fresh(held) = read else {
+            panic!("missing withdrawal after two moves: {read:?}")
+        };
+        let issue = ListPublicationRecord::read(held.content.value().unwrap()).unwrap();
+        assert_eq!((issue.generation, issue.counter), (3, 1));
+        assert_eq!(delivered.len(), 2);
+        assert!(delivered[1].withdrawn);
+        assert_eq!(
+            (&issue.msg_id, issue.message_hash),
+            (&delivered[1].id, delivered[1].hash)
+        );
+    }
 }
 
 #[tokio::test]
