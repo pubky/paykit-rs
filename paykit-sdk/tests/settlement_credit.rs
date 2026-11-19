@@ -953,18 +953,18 @@ async fn repair_recovered_bucket(world: &World) -> TestResult {
 
 #[derive(Clone, Copy)]
 enum SettlementTime {
-    BeforeBoundary,
-    AtBoundary,
-    AfterBoundary,
+    Before,
+    At,
+    After,
 }
 
 #[tokio::test]
 async fn test_absent_bucket_after_loss_keeps_known_marks_and_uses_the_payment_time() -> TestResult {
     for backend in [Backend::Scripted, Backend::Service] {
         for when in [
-            SettlementTime::BeforeBoundary,
-            SettlementTime::AtBoundary,
-            SettlementTime::AfterBoundary,
+            SettlementTime::Before,
+            SettlementTime::At,
+            SettlementTime::After,
         ] {
             let Some(world) = World::start(backend)? else {
                 continue;
@@ -1071,9 +1071,9 @@ async fn credit_after_loss(world: &World, when: SettlementTime) -> TestResult {
         .loss
         .uncertain_until_ms;
     let paid_at = match when {
-        SettlementTime::BeforeBoundary => boundary - 1,
-        SettlementTime::AtBoundary => boundary,
-        SettlementTime::AfterBoundary => boundary + 1,
+        SettlementTime::Before => boundary - 1,
+        SettlementTime::At => boundary,
+        SettlementTime::After => boundary + 1,
     };
     world.advance_ms(
         paid_at
@@ -1088,7 +1088,7 @@ async fn credit_after_loss(world: &World, when: SettlementTime) -> TestResult {
         ADDRESS,
     ))
     .await?;
-    let receipt = if matches!(when, SettlementTime::AfterBoundary) {
+    let receipt = if matches!(when, SettlementTime::After) {
         seller.confirm_payment(&occurrence).await?
     } else {
         let refusal = seller.confirm_payment(&occurrence).await.unwrap_err();
@@ -1125,5 +1125,118 @@ async fn credit_after_loss(world: &World, when: SettlementTime) -> TestResult {
         .any(|mark| mark.settlement == paykit_lib::derive::mark_settlement_tag(&distinct.1)));
     assert_eq!(seller.confirm_payment(&occurrence).await?, Some(receipt));
     assert_eq!(tills.rail.all_executions().values().sum::<u64>(), 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_absent_settlement_bucket_without_a_loss_keeps_the_wallet_stopped() -> TestResult {
+    use pubky_switch_client::app::{
+        Alarm, AppError, Collection as SwitchCollection, KeptReason, RecordRead, RecordTarget,
+    };
+
+    let world = World::start(Backend::Scripted)?.ok_or("missing scripted switch")?;
+    let mut tills = Box::pin(enrolled_tills(&world)).await?;
+    let [credited, pending] = transactions_in_one_bucket(tills.till.app().naming_key())?;
+    let number = settlement_bucket(&credited.1);
+    let target = RecordTarget::new(
+        SwitchCollection::new(
+            Collection::Settlements.name(),
+            Collection::Settlements.fixed_policy(),
+        ),
+        &natural_key::settlement_bucket(number),
+    );
+    let key = tills.till.app().record_key(&target)?;
+    const ADDRESS: &str = "bcrt1qqyqszqgpqyqszqgpqyqszqgpqyqszqgpvxat9t";
+
+    // This backup has the pending proof but predates the other till's first credit.
+    tills.rail.next(Behaviour::InTransaction(pending.0));
+    let (mut buyer, pending_request, pending_record) = Box::pin(paid_request(
+        &mut tills.labelled,
+        tills.buyer,
+        "btc-bitcoin-p2wpkh",
+        ADDRESS,
+    ))
+    .await?;
+    let prior = tills.labelled.backup().await?;
+    tills.rail.next(Behaviour::InTransaction(credited.0));
+    let (_, _, first) = Box::pin(paid_request(
+        &mut tills.till,
+        tills.other,
+        "btc-bitcoin-p2wpkh",
+        ADDRESS,
+    ))
+    .await?;
+    assert!(tills.till.confirm_payment(&first).await?.is_some());
+    tills.labelled.receive(None).await?;
+    let known = tills.labelled.app().protocol_scan("paykit", b"sm/").await?;
+    assert_eq!(known.len(), 1);
+    drop((tills.till, tills.labelled));
+
+    // The faulty test service still hosts this same generation, but its answer omits the bucket.
+    world
+        .drop_record("https://shop.payment.test", &world.identity("shop")?, &key)
+        .await?;
+    let mut shop = Paykit::restore(
+        world.app_env(tills.labelled_store.clone()),
+        Default::default(),
+        &prior,
+        tills.rail.clone(),
+        Arc::new(TestTimer),
+    )
+    .await?;
+    assert!(shop.app().recovery_info().await?.is_none());
+    assert!(shop.app().shared_record(&key).await?.is_none());
+    assert_eq!(shop.app().protocol_scan("paykit", b"sm/").await?, known);
+    assert!(matches!(
+        shop.app_mut().read_record_fresh(&target).await?,
+        RecordRead::Kept {
+            record: None,
+            reason: KeptReason::NotFound
+        }
+    ));
+    assert!(shop.app().alarm().is_none());
+
+    let refusal = shop.confirm_payment(&pending_record).await.unwrap_err();
+    assert!(
+        matches!(refusal, paykit_sdk::PaykitError::Client(AppError::Alarm(Alarm::ProtocolRollback { ref protocol, ref reason }))
+        if protocol == "paykit" && reason.contains("permanent settlement bucket")),
+        "{refusal:?}"
+    );
+    let alarm = shop
+        .app()
+        .alarm()
+        .cloned()
+        .ok_or("missing rollback alarm")?;
+    let id = shop.app_id();
+    drop(shop);
+    let mut shop = Paykit::load(
+        world.app_env(tills.labelled_store),
+        Default::default(),
+        id,
+        tills.rail.clone(),
+        Arc::new(TestTimer),
+    )
+    .await?;
+    assert_eq!(shop.app().alarm(), Some(&alarm));
+    assert!(shop.confirm_payment(&pending_record).await.is_err());
+    let held = shop
+        .app()
+        .shared_record(&pending_record)
+        .await?
+        .ok_or("missing pending proof")?;
+    let sale = paykit_lib::records::ActivityRecord::read(
+        held.content.value().ok_or("unreadable pending sale")?,
+        &shop.identity(),
+        paykit_lib::records::ActivitySide::Payee,
+    )?;
+    assert!(sale.proof.is_some() && sale.receipt.is_none());
+    buyer.receive(None).await?;
+    assert!(buyer
+        .receipts(ReceiptsOf::Request(pending_request))
+        .await?
+        .is_empty());
+    assert_eq!(shop.app().protocol_scan("paykit", b"sm/").await?, known);
+    assert_eq!(tills.rail.all_executions().values().sum::<u64>(), 2);
+    world.close().await?;
     Ok(())
 }
