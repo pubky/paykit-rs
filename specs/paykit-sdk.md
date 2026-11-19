@@ -1422,6 +1422,38 @@ fallback. HTTP 404, 405, and 501 subscription failures are reported as
 are `Stale` and retry. Neither state proves remote absence. Buffered work
 remains drainable during transport failure.
 
+A supervised peer (a Linked Peer or a peer with a pending Encrypted Link
+Handshake) with no stored intake cursor for its current homeserver, such as on
+first start, after Paykit identity key rotation, or after a homeserver move,
+is not replayed from the beginning of its private-directory history. Before
+subscribing, the supervisor makes one non-live, newest-first request limited to
+one event for those peers and subscribes them from that event. The startup
+audit runs after the subscription and reconciles every slot announced by an
+event the request could see. Homeserver event ids come from a sequence
+assigned at insert, so an event at or before the returned one can commit
+after the request. The stream skips it, and the next audit fetches its slot: the
+jittered in-stream audit, then each healthy audit. Every audit on that
+connection runs after the request, so the first one that finds a peer's
+expected slot absent stores that peer's cursor, and no later audit on the
+connection writes it again. If no audit does, reconnects of the same
+subscription group within one topology epoch, which lasts until the
+subscription topology restarts, reuse the event from its last successful
+request instead of repeating it while that request covered every peer still
+without a cursor; a peer it did not cover makes them request again. A new
+epoch makes the request again. This stays safe because each connection runs
+its startup audit after subscribing. If the request fails or returns no event,
+those peers subscribe from the beginning as before, and the next connect
+requests again. The newest-event request doubles as the event-stream support
+probe: when the homeserver rejects it with HTTP 404, 405, or 501, the live
+subscription is not attempted for that connect and the peers are reported
+`Unsupported` and retried exactly as after a rejected live subscription, so a
+homeserver without SSE costs one failing request per retry. Seeding deliberately
+covers only peers without a stored cursor for the current homeserver; a peer
+with a stored cursor resumes from it as before.
+Stopping the supervisor or restarting the subscription topology abandons a
+pending request. Audits, not events, guarantee delivery: a packet whose event
+the stream skips is fetched by the next audit.
+
 `PrivateIntakeSupervisor::health` reports per-peer transport state and last
 successful absent-slot audit. `subscribe_work` is a coalesced local hint, not a
 durable queue: consumers register first, inspect/drain durable state, wait, then
