@@ -28,7 +28,7 @@ use pubky_switch_core::scopes::owns_root;
 use crate::destination::KeptLookup;
 use crate::error::{Refusal, Result};
 use crate::hold::OwnResendOwed;
-use crate::own_record::capabilities_for;
+use crate::own_record::{capabilities_for, check_join_capabilities, holds_capabilities};
 use crate::protocol::PaykitProtocol;
 use crate::rail::{Rail, RailDeclaration};
 use crate::state::{key, Tx};
@@ -548,12 +548,16 @@ impl Paykit {
                         }
                     }
                 }
-                let mut base = AppRecordBody::new(&approved.cert, accepts, 0);
-                base.label.clone_from(&config.app.label);
-                let pays = approved.cert.scopes().iter().any(|s| s == "paykit_pay");
+                // Wire timestamps have fixed width; the certificate supplies a checked one.
+                let base = AppRecordBody::new(&approved.cert, accepts, approved.cert.issued_at());
+                let pays = holds_capabilities(&approved.cert);
                 // One reading of what the payment method pays, checked here and signed by the
                 // update after the join: the method promises no two readings agree.
-                snapshot = Some(capabilities_for(rail.as_ref(), pays, &base)?);
+                let ids = capabilities_for(rail.as_ref(), pays);
+                if pays {
+                    check_join_capabilities(base, &ids, approved.identity.generation())?;
+                }
+                snapshot = Some(ids);
             }
             let app = App::join(env, protocols, config.app.clone(), request).await?;
             // No certificate is kept as listed under: the copy is empty until a listing has run
@@ -1315,7 +1319,7 @@ mod tests {
         assert_send(&wallet.receive(None));
         assert_send(&wallet.flush());
         assert_send(&wallet.public_endpoints(&key, Some(confirmed)));
-        assert_send(&wallet.set_public_endpoints(std::collections::BTreeMap::new()));
+        assert_send(&wallet.set_public_endpoints(std::collections::BTreeMap::new(), None));
         let endpoint = paykit_lib::PaymentEndpointIdentifier::new("btc-lightning-bolt12").unwrap();
         let payload = paykit_lib::PaymentEndpointPayload::new("lno1tips").unwrap();
         assert_send(&wallet.set_public_endpoint(endpoint.clone(), payload));

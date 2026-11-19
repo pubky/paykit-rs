@@ -4,8 +4,7 @@
 //! scope name's syntax (Switch wire 3.2). A Paykit reader then reads Paykit's member here: the
 //! Payment Endpoint Identifiers the app can pay to, and its public endpoints. It refuses a
 //! record whose member isn't of the form of Paykit wire 3.2, whose identifiers or payloads
-//! break Paykit wire 1.4, or that carries public endpoints without `expires_at`, as it refuses
-//! any invalid record, though the switch takes it.
+//! break Paykit wire 1.4. A public record may have a finite deadline or none.
 //!
 //! Security: public endpoints are destinations anyone can read from the Homeserver. This
 //! module reads only what a verified record says; before paying to one, a payer still checks
@@ -37,30 +36,25 @@ pub struct PaykitMember {
 }
 
 impl PaykitMember {
-    /// Read the Paykit member of a verified app record (Paykit wire 3.2), with the record's
-    /// signed `expires_at`.
+    /// Read the Paykit member of a verified app record (Paykit wire 3.2).
     ///
     /// # Errors
     ///
     /// [`crate::Error::Invalid`] naming the rule the member breaks; the message never repeats
     /// an identifier or a payload.
     pub fn read(record: &AppRecord) -> Result<Self> {
-        Self::from_member(record.body().protocol(PROTOCOL_NAME), record.expires_at())
+        Self::from_member(record.body().protocol(PROTOCOL_NAME))
     }
 
-    /// Read a Paykit member as an app record carries it, `None` when the record has none,
-    /// with the record's `expires_at` (Paykit wire 3.2).
+    /// Read the Paykit member of an app record, or `None` for an absent member (Paykit wire 3.2).
     ///
     /// # Errors
     ///
     /// [`crate::Error::Invalid`] for a `capabilities` or `public_endpoints` that isn't an
     /// object, an `endpoint_identifiers` that isn't an array of strings, an identifier that
     /// isn't a Payment Endpoint Identifier or a payload that isn't a non-empty string (Paykit
-    /// wire 1.4), and public endpoints without `expires_at`.
-    pub fn from_member(
-        member: Option<&Map<String, Value>>,
-        expires_at: Option<u64>,
-    ) -> Result<Self> {
+    /// wire 1.4).
+    pub fn from_member(member: Option<&Map<String, Value>>) -> Result<Self> {
         let Some(member) = member else {
             return Ok(Self::default());
         };
@@ -74,9 +68,6 @@ impl PaykitMember {
             Some(Value::Object(endpoints)) => read_public_endpoints(endpoints)?,
             Some(_) => return invalid("Paykit wire 3.2: public_endpoints isn't an object"),
         };
-        if !public_endpoints.is_empty() && expires_at.is_none() {
-            return invalid("Paykit wire 3.2: a record with public endpoints carries expires_at");
-        }
         Ok(Self {
             endpoint_identifiers,
             public_endpoints,
@@ -85,8 +76,7 @@ impl PaykitMember {
 
     /// The member as an app record carries it under `protocols.paykit` (Paykit wire 3.2),
     /// with both `capabilities.endpoint_identifiers` and `public_endpoints` written, empty
-    /// or not: what [`PaykitMember::from_member`] reads back as `self`. A record carrying
-    /// public endpoints also needs `expires_at`, which is the record's, not the member's.
+    /// or not. The signed record carries the expiry separately from this member.
     #[must_use]
     pub fn to_member(&self) -> Map<String, Value> {
         let identifiers = self
@@ -186,14 +176,12 @@ mod tests {
                 "public_endpoints": { "btc-lightning-bolt12": "lno1tips" },
             })
         );
-        let read = PaykitMember::from_member(Some(&member), Some(1)).unwrap();
+        let read = PaykitMember::from_member(Some(&member)).unwrap();
         assert_eq!(read, written);
-        // Without `expires_at` the record's reader refuses the endpoints it carries.
-        assert!(PaykitMember::from_member(Some(&member), None).is_err());
         // An empty member reads as no member.
         let empty = PaykitMember::default().to_member();
         assert_eq!(
-            PaykitMember::from_member(Some(&empty), None).unwrap(),
+            PaykitMember::from_member(Some(&empty)).unwrap(),
             PaykitMember::default()
         );
     }
@@ -205,8 +193,6 @@ mod tests {
         map
     }
 
-    const EXPIRES: Option<u64> = Some(1_767_225_600_000);
-
     #[test]
     fn test_app_record_member_reads_identifiers_and_endpoints() {
         let m = member(json!({
@@ -214,7 +200,7 @@ mod tests {
             "public_endpoints": { "btc-lightning-bolt12": "lno1" },
             "future": { "level": 1 }
         }));
-        let read = PaykitMember::from_member(Some(&m), EXPIRES).unwrap();
+        let read = PaykitMember::from_member(Some(&m)).unwrap();
         assert_eq!(
             read.endpoint_identifiers[0].as_str(),
             "btc-lightning-bolt11"
@@ -229,7 +215,7 @@ mod tests {
     #[test]
     fn test_app_record_member_missing_and_null_read_as_empty() {
         assert_eq!(
-            PaykitMember::from_member(None, None).unwrap(),
+            PaykitMember::from_member(None).unwrap(),
             PaykitMember::default()
         );
         for m in [
@@ -237,7 +223,7 @@ mod tests {
             json!({ "capabilities": null, "public_endpoints": null }),
             json!({ "capabilities": { "endpoint_identifiers": null }, "public_endpoints": {} }),
         ] {
-            let read = PaykitMember::from_member(Some(&member(m.clone())), None).unwrap();
+            let read = PaykitMember::from_member(Some(&member(m.clone()))).unwrap();
             assert_eq!(read, PaykitMember::default(), "{m}");
         }
     }
@@ -286,16 +272,11 @@ mod tests {
                 "payload is empty",
             ),
         ] {
-            let error = PaykitMember::from_member(Some(&member(m.clone())), EXPIRES)
+            let error = PaykitMember::from_member(Some(&member(m.clone())))
                 .unwrap_err()
                 .to_string();
             assert!(error.contains(rule), "{m}: {error}");
             assert!(!error.contains("lno1"), "{error}");
         }
-        let endpoints = member(json!({ "public_endpoints": { "btc-lightning-bolt12": "lno1" } }));
-        let error = PaykitMember::from_member(Some(&endpoints), None)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("carries expires_at"), "{error}");
     }
 }

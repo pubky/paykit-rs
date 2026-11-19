@@ -12,9 +12,8 @@
 //! - the app is current in the payee's `identity.json` with the certificate the record
 //!   carries, which allows `paykit_request`, and a listed certificate hasn't expired (Paykit spec
 //!   4);
-//! - its Paykit member reads ([`PaykitMember::read`]), a record with public endpoints
-//!   carrying `expires_at` (Paykit wire 3.2);
-//! - it is within its lifetime: before the earlier of its `expires_at` and its `updated_at`
+//! - its Paykit member reads ([`PaykitMember::read`], Paykit wire 3.2);
+//! - it is within its lifetime: before the earlier of any finite `expires_at` and its `updated_at`
 //!   plus the identity's `record_max_age`, and its `updated_at` isn't ahead of the payer's
 //!   clock (Paykit spec 4).
 //!
@@ -265,22 +264,11 @@ fn check_record_lifetime_and_certificate(
     doc: &IdentityDoc,
     now: u64,
 ) -> std::result::Result<(), PublicAppFailureReason> {
-    let expired = |limit: &str| PublicAppFailureReason::Expired(format!("Paykit spec 4: {limit}"));
-    if record.is_ahead(now) {
-        return Err(expired("the record was made ahead of the payer's clock"));
-    }
-    match record.expires_at() {
-        None => {
-            return Err(PublicAppFailureReason::Refused(
-                "Paykit wire 3.2: the record carries no expires_at".into(),
-            ))
-        }
-        Some(at) if at <= now => return Err(expired("the record is past its expires_at")),
-        Some(_) => {}
-    }
+    crate::destination::check_record_time(record, now)
+        .map_err(|reason| PublicAppFailureReason::Expired(reason.into()))?;
     if now >= record.trusted_until(doc.record_max_age_ms() / 1000) {
-        return Err(expired(
-            "the record is past the identity's record age limit",
+        return Err(PublicAppFailureReason::Expired(
+            "Paykit spec 4: the record is past the identity's record age limit".into(),
         ));
     }
     let carrier = Carrier::Record(Box::new(record.clone()));
@@ -806,19 +794,20 @@ mod tests {
             &["paykit_request", "paykit_settlements", "paykit_contacts"],
         );
         let doc = bob.doc(&[&bob]);
-        let bytes = record_bytes(&bob, tip_jar(), NOW, Some(NOW + 30 * DAY_MS));
-        let usable = usable_bytes(&bob.id(), &bob.app_id(), &bytes, &doc, NOW + 1).unwrap();
+        let when = NOW + 31 * DAY_MS;
+        let bytes = record_bytes(&bob, tip_jar(), NOW, None);
+        let usable = usable_bytes(&bob.id(), &bob.app_id(), &bytes, &doc, when).unwrap();
         let (id, payload) = usable.member.public_endpoints.iter().next().unwrap();
         let destination = usable.destination(id, payload);
         let carrier = Carrier::Record(Box::new(usable.record));
         assert_eq!(
-            carries(&bob.id(), &destination, &carrier, None, NOW + 1),
+            carries(&bob.id(), &destination, &carrier, None, when),
             Ok(())
         );
         // Another payload isn't carried.
         let mut other = destination.clone();
         other.payload = "lno1other".into();
-        assert!(carries(&bob.id(), &other, &carrier, None, NOW + 1).is_err());
+        assert!(carries(&bob.id(), &other, &carrier, None, when).is_err());
     }
 
     #[test]
@@ -830,8 +819,7 @@ mod tests {
         );
         let doc = bob.doc(&[&bob]);
         let later = NOW + 30 * DAY_MS;
-        // A payload that isn't a string, and public endpoints without expires_at (Paykit wire
-        // 3.2).
+        // A payload that isn't a string (Paykit wire 3.2).
         let bad = record_bytes(
             &bob,
             json!({ "public_endpoints": { "btc-lightning-bolt12": 7 } }),
@@ -839,8 +827,6 @@ mod tests {
             Some(later),
         );
         assert!(usable_bytes(&bob.id(), &bob.app_id(), &bad, &doc, NOW + 1).is_none());
-        let no_expiry = record_bytes(&bob, tip_jar(), NOW, None);
-        assert!(usable_bytes(&bob.id(), &bob.app_id(), &no_expiry, &doc, NOW + 1).is_none());
         // Bytes that aren't a signed record, and a record read from another app's path.
         assert!(usable_bytes(&bob.id(), &bob.app_id(), b"{}", &doc, NOW + 1).is_none());
         let good = record_bytes(&bob, tip_jar(), NOW, Some(later));
@@ -871,6 +857,10 @@ mod tests {
         let far = record_bytes(&bob, tip_jar(), NOW, Some(NOW + 365 * DAY_MS));
         assert!(usable_bytes(&bob.id(), &bob.app_id(), &far, &doc, NOW + 89 * DAY_MS).is_some());
         assert!(usable_bytes(&bob.id(), &bob.app_id(), &far, &doc, NOW + 90 * DAY_MS).is_none());
+        // The same identity limit also bounds a signed record with no deadline.
+        let open = record_bytes(&bob, tip_jar(), NOW, None);
+        assert!(usable_bytes(&bob.id(), &bob.app_id(), &open, &doc, NOW + 31 * DAY_MS).is_some());
+        assert!(usable_bytes(&bob.id(), &bob.app_id(), &open, &doc, NOW + 90 * DAY_MS).is_none());
         // Made more than 5 minutes ahead of the payer's clock.
         let ahead = record_bytes(&bob, tip_jar(), NOW + 10 * 60_000, Some(NOW + DAY_MS));
         assert!(usable_bytes(&bob.id(), &bob.app_id(), &ahead, &doc, NOW).is_none());

@@ -7,6 +7,13 @@ for store guarantees, approval and client outcomes. Keep app keys and backups in
 host-protected storage and serialize operations on the handle. A memory store
 cannot preserve unanswered writes or payments across a restart.
 
+The integrator chooses whether to enroll an App ID per installation or share one
+App ID and its keys. A separate App ID has its own signer approval and can be
+revoked independently. Installations sharing an App ID have the same grants.
+Synchronize receive keys, cursor, the public endpoint member and its deadline,
+payment journal and backend payment history across those installations and restores. The wallet owns payment-method
+idempotency and must prevent duplicate execution of an attempt.
+
 ## Open a wallet and pay a one-time request
 
 Use `Paykit::join` with a signer-approved `JoinRequest` at enrollment. On an
@@ -71,6 +78,23 @@ async fn payment_after_restart(wallet: &Paykit, attempt_id: &AttemptId) -> Resul
 `manual_only`, `held` and `divergent`. `PayResult` carries the outcome or error
 and any unavailable public endpoint apps. Keep an explicit conservative fallback
 for future variants in non-exhaustive enums.
+
+## Publish a public endpoint
+
+An app with plain `paykit_request` and record publication enabled can use
+`set_public_endpoint` to add a reusable destination. A new offer has no Paykit
+deadline by default. To choose a fixed cutoff for the whole offer, call
+`set_public_endpoints` with the complete endpoint map and `Some(timestamp_ms)`.
+Use `None` to offer the full set without a Paykit deadline. A different protocol on the same App ID may
+require an earlier deadline for the signed record. Receive renews the record
+within the identity age limit. Once the cutoff arrives, upkeep withdraws the
+endpoints. A fresh explicit offer may choose a new deadline.
+
+`own_public_endpoints` reads the latest locally signed offer. A successful
+`Publication::Published` confirms the Homeserver copy. If a sibling protocol
+delays signing, `PaykitError::PublicEndpointChangePending` means that the
+client retained the requested edit. Show the withdrawal as pending until the
+client signs the updated record and reports its publication.
 
 ## Use a Switch App built by the host
 
@@ -271,6 +295,7 @@ service. Acknowledging the deletion notice leaves the credit restriction in forc
 | `PaykitError::Client` | Handle the enclosed Switch outcome. Preserve any kept batch and its ID. |
 | `PaykitError::Lib` | Use the rule error to distinguish invalid input from invalid network or shared data. |
 | `PaykitError::Rail` | Preserve any unresolved attempt unless the method established definitive refusal. |
+| `PaykitError::PublicEndpointChangePending` | Keep the previously signed offer visible with a pending change. Resolve the reported signing refusal and check the resulting publication. |
 | `PaykitError::Homeserver` | Retry discovery when the Homeserver is available. If the user is waiting, explain that discovery could not finish. |
 | `PaykitError::Refused` | Follow the specific refusal below. |
 | `PaykitError::Conflict` | Read the current state and decide again. |
@@ -282,7 +307,7 @@ service. Acknowledging the deletion notice leaves the credit restriction in forc
 | `RailOutcome::Pending` | Leave the attempt open while its result is unknown. |
 | `PublicAppFailureReason::Homeserver` | Retry reading the affected app's Homeserver record. |
 | `PublicAppFailureReason::Refused` | Exclude the unusable record. Its rule failure can help diagnose the lookup. |
-| `PublicAppFailureReason::Expired` | Wait for a current record from that app. |
+| `PublicAppFailureReason::Expired` | Wait for a current record from that app. A public record reaches its limit at any finite signed deadline or at the maximum age in the payee's signed identity document (90 days by default). |
 | `PublicAppFailureReason::OverBound` | This app's endpoints did not fit within the lookup bounds. Use the reason when explaining an incomplete lookup. |
 
 ## Refusals
