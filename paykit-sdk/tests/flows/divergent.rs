@@ -1003,13 +1003,13 @@ async fn test_divergent_kept_write_waits_while_its_record_may_be_missing_from_th
     w.clock.advance_ms(31 * 24 * HOUR_MS);
     let now = w.clock.now_ms();
     w.bob.switch().push_missed(1, now - 1_000, now);
-    // The client lists the shop's collection right after the item; Paykit's own listing at
+    // The client lists the shop's collections right after the item; Paykit's own listing at
     // the end of the receive fails.
     w.bob
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Unreachable {
             path: "records?collection".into(),
-            after: 1,
+            after: crate::certificate::client_listing_requests(shop.app().cert()),
         });
     let got = shop.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_some(), "{got:?}");
@@ -1408,7 +1408,16 @@ async fn test_divergent_given_up_write_stays_given_up_through_a_restore_and_a_re
         .await
         .unwrap()
         .is_empty());
-    assert_eq!(restored.notices().await.unwrap().len(), 2);
+    assert_eq!(
+        restored
+            .notices()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|notice| notice.kind == paykit_sdk::NoticeKind::MessageGivenUp)
+            .count(),
+        2
+    );
     assert_eq!(
         sale(&restored, &request).await.status,
         PayeeStatus::Requested
@@ -4312,13 +4321,13 @@ async fn test_divergent_stored_entry_neither_written_nor_given_up_while_its_reco
     w.clock.advance_ms(31 * 24 * HOUR_MS);
     let now = w.clock.now_ms();
     w.bob.switch().push_missed(1, now - 1_000, now);
-    // The client lists the shop's collection right after the item; Paykit's own listing at
+    // The client lists the shop's collections right after the item; Paykit's own listing at
     // the end of the receive fails.
     w.bob
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Unreachable {
             path: "records?collection".into(),
-            after: 1,
+            after: crate::certificate::client_listing_requests(shop.app().cert()),
         });
     let got = shop.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_some(), "{got:?}");

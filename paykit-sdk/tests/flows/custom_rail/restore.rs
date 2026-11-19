@@ -51,6 +51,7 @@ async fn issue() -> Payment {
     let rail = Arc::new(LedgerRail {
         fake: w.rail.clone(),
         last: Mutex::new(None),
+        supplies_id: true,
         fee: None,
     });
     let mut wallet = joined(
@@ -344,12 +345,16 @@ async fn test_payee_deletion_a_misplaced_custom_receipt_does_not_count_as_credit
         .await
         .unwrap()
         .is_empty());
-    // The misplaced current record still triggers the ordinary uncertain-history check.
+    // The permanent mark belongs to the original credit. The misplaced receipt
+    // neither supplies its missing signed receipt nor authorizes another credit.
     let before = w.record_writes(&w.bob, &key);
-    let error = installed.confirm_payment(&key).await.unwrap_err();
-    assert!(matches!(
-        error.refusal(),
-        Some(paykit_sdk::Refusal::MaybeCredited)
-    ));
+    assert_eq!(installed.confirm_payment(&key).await.unwrap(), None);
+    let buckets = installed
+        .app()
+        .records_of(Collection::Settlements.name())
+        .await
+        .unwrap();
+    assert_eq!(buckets.len(), 1);
+    assert_eq!(buckets[0].policy, Collection::Settlements.fixed_policy());
     assert_eq!(w.record_writes(&w.bob, &key), before);
 }

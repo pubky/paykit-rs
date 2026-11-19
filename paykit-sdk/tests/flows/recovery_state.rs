@@ -429,16 +429,23 @@ async fn test_recovery_state_produced_values_reload_and_progress() {
 }
 
 #[tokio::test]
-async fn test_recovery_state_retained_values_restore_unchanged() {
+async fn test_recovery_state_restore_marks_imported_answers_and_preserves_missed_items() {
     for family in [Family::HeldAnswer, Family::MissedItem] {
         let w = World::new();
         let (mut wallet, _, key, good) = Box::pin(produced(&w, family)).await;
         let backup = wallet.backup().await.unwrap();
         let loaded = restore(&w, store(), &backup).await;
-        assert_eq!(
-            loaded.app().protocol_get("paykit", &key).await.unwrap(),
-            Some(good)
-        );
+        let mut expected: Value = serde_json::from_slice(&good).unwrap();
+        if matches!(family, Family::HeldAnswer) {
+            expected["d"]["restored"] = json!(true);
+        }
+        let actual = loaded
+            .app()
+            .protocol_get("paykit", &key)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&actual).unwrap(), expected);
     }
 }
 
@@ -620,7 +627,7 @@ async fn test_recovery_state_restore_commit_before_stamp_reloads() {
 }
 
 #[tokio::test]
-async fn test_recovery_state_restore_retains_sorted_waiting_counterparties() {
+async fn test_recovery_state_restored_answers_remain_uncertain_for_both_counterparties() {
     let w = World::new();
     let (mut wallet, _, _, _) = Box::pin(produced(&w, Family::HeldAnswer)).await;
     wallet.app_mut().invite(&w.carol_id()).await.unwrap();
@@ -648,25 +655,10 @@ async fn test_recovery_state_restore_retains_sorted_waiting_counterparties() {
     let storage = store();
     let mut restored = restore(&w, Arc::clone(&storage), &backup).await;
     restored.receive(None).await.unwrap();
-    let bytes = restored
-        .app()
-        .protocol_get("paykit", b"ro")
-        .await
-        .unwrap()
-        .unwrap();
-    let body: Value = serde_json::from_slice(&bytes).unwrap();
-    let mut waiting = vec![w.bob_id(), w.carol_id()];
-    waiting.sort();
-    assert_eq!(body["d"]["waiting"], json!(waiting));
-    assert!(body["d"]["restored_at_ms"].is_u64());
-    assert_eq!(
-        restored
-            .app()
-            .protocol_scan("paykit", b"ha/")
-            .await
-            .unwrap(),
-        held
-    );
+    let waiting = [w.bob_id(), w.carol_id()];
+    for msg_id in &messages {
+        assert!(crate::common::possibly_delivered(&restored, msg_id).await);
+    }
     drop(restored);
     let mut loaded = Paykit::load(
         w.env(&w.alice, storage),
@@ -679,7 +671,7 @@ async fn test_recovery_state_restore_retains_sorted_waiting_counterparties() {
     .unwrap();
     assert_eq!(
         loaded.app().protocol_get("paykit", b"ro").await.unwrap(),
-        Some(bytes)
+        None
     );
     loaded.receive(None).await.unwrap();
     for msg_id in &messages {
@@ -690,7 +682,7 @@ async fn test_recovery_state_restore_retains_sorted_waiting_counterparties() {
     }
     loaded.receive(None).await.unwrap();
     for msg_id in &messages {
-        assert!(loaded.app().delivery(msg_id).await.unwrap().is_some());
+        assert!(crate::common::possibly_delivered(&loaded, msg_id).await);
     }
     assert!(loaded
         .app()
@@ -833,10 +825,7 @@ async fn checkpoint_own_request(w: &World) -> (Paykit, Arc<dyn StateStore>, Stor
         .await
         .unwrap()
         .is_empty());
-    assert_eq!(
-        checkpoint_value(&shop, b"ro").await["d"]["waiting"],
-        json!([w.bob_id()])
-    );
+    assert!(crate::common::possibly_delivered(&shop, &original.message().msg_id).await);
     (shop, storage, original)
 }
 
@@ -844,8 +833,7 @@ async fn checkpoint_own_request(w: &World) -> (Paykit, Arc<dyn StateStore>, Stor
 async fn test_recovery_checkpoint_empty_waiting_after_reload_refused() {
     let w = World::new();
     let (mut shop, storage, original) = Box::pin(checkpoint_own_request(&w)).await;
-    let mut value = checkpoint_value(&shop, b"ro").await;
-    value["d"]["waiting"] = json!([]);
+    let value = json!({"v": 1, "d": {"waiting": [], "restored_at_ms": w.clock.now_ms()}});
     let bad = checkpoint_put(&mut shop, b"ro", &value).await;
     let mut shop = checkpoint_reload(&w, shop, storage).await;
     let error = shop
@@ -878,7 +866,7 @@ async fn test_recovery_checkpoint_empty_waiting_after_reload_refused() {
 }
 
 #[tokio::test]
-async fn test_recovery_checkpoint_own_request_resumes_same_signed_message() {
+async fn test_recovery_checkpoint_own_request_retains_its_signed_identity() {
     let w = World::new();
     let (shop, storage, original) = Box::pin(checkpoint_own_request(&w)).await;
     let mut shop = checkpoint_reload(&w, shop, storage).await;
@@ -891,12 +879,10 @@ async fn test_recovery_checkpoint_own_request_resumes_same_signed_message() {
         .is_none());
     shop.unblock(&w.bob_id()).await.unwrap();
     shop.receive(None).await.unwrap();
-    let sent = shop.app().sent_to(&w.bob_id(), 0, u64::MAX).await.unwrap();
-    let sent = sent
-        .iter()
-        .find(|sent| sent.msg_id == original.message().msg_id)
-        .unwrap();
-    assert_eq!(&sent.plaintext, original.plaintext());
+    assert!(crate::common::possibly_delivered(&shop, &original.message().msg_id).await);
+    let notices = shop.notices().await.unwrap();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].message_hash, Some(original.hash()));
     assert!(shop
         .app()
         .protocol_get("paykit", b"ro")

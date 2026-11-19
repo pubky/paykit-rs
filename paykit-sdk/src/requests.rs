@@ -47,6 +47,7 @@ use crate::receipts::{
 };
 use crate::receive::KEPT_MESSAGE_MS;
 use crate::records::{conflict, KeptMessage};
+use crate::settlements::{SettlementCredit, SettlementWrite};
 use crate::state::{key, Tx};
 
 /// How many times a payee's write is built again after its record changed meanwhile.
@@ -60,6 +61,7 @@ struct VerifiedCredit {
     activity: ActivityRecord,
     parent: Option<ActivityTarget>,
     conditions: Vec<Condition>,
+    settlement: Option<SettlementWrite>,
 }
 
 /// A request, by its payee and its request hash (Paykit wire 1.5).
@@ -909,7 +911,7 @@ impl Paykit {
         self.refresh_own()?;
         self.records_known().await?;
         // The check goes on the heap, as `receive`'s steps do: it nests deep.
-        Ok(Box::pin(self.verified(record, false))
+        Ok(Box::pin(self.verified(record, false, false))
             .await?
             .map(|credit| credit.paid_at))
     }
@@ -935,6 +937,7 @@ impl Paykit {
         &mut self,
         record: &[u8; 32],
         maybe_credited_confirmed: bool,
+        unmarked_credit_confirmed: bool,
     ) -> Result<Option<Box<VerifiedCredit>>> {
         if self.payee_deletion_held(record).await? {
             return Err(Refusal::CreditHistoryLost.into());
@@ -1129,21 +1132,27 @@ impl Paykit {
             None => return Err(Refusal::NotFound.into()),
         };
         let (amount, payload, destination_expires, rate_window, period_deadline) = payment;
-        if let Some(settlement) = self.rail.settlement_id(&proof.proof) {
+        let settlement_id = self.rail.settlement_id(&proof.proof);
+        let typed = proof.proof.get("type").filter(|value| !value.is_null());
+        let known_method = typed.and_then(Value::as_str) == Some("bitcoin-txid")
+            || (typed.is_none() && proof.proof.get("rail").and_then(Value::as_str) == Some("fake"));
+        if known_method && paykit_lib::derive::settlement_id(&proof.proof).is_none() {
+            return Ok(None);
+        }
+        let mut other_uncertain = false;
+        if let Some(settlement) = settlement_id.as_ref().filter(|_| bound.receipt.is_none()) {
             if self
-                .retained_credit(bound.receipt.as_ref().map(|r| r.hash()), &settlement)
+                .retained_credit(bound.receipt.as_ref().map(|r| r.hash()), settlement)
                 .await?
             {
                 return Ok(None);
             }
             match self
-                .other_credit(record, &bound.counterparty, &settlement)
+                .other_credit(record, &bound.counterparty, settlement)
                 .await?
             {
                 OtherCredit::Credited => return Ok(None),
-                OtherCredit::CantTell if !maybe_credited_confirmed => {
-                    return Err(Refusal::MaybeCredited.into());
-                }
+                OtherCredit::CantTell => other_uncertain = true,
                 _ => {}
             }
         }
@@ -1157,26 +1166,86 @@ impl Paykit {
         // The method's evidence dates the payment, never this proof's arrival. A details
         // destination must be unexpired; rates include both signed interval boundaries
         // (Paykit spec 8.2, Paykit wire 4.9). Same-asset payments use no rate interval.
-        Ok(self
-            .rail
-            .verify(check)
-            .await?
-            .filter(|paid_at| {
-                period_deadline.is_none_or(|deadline| *paid_at <= deadline)
-                    && destination_expires.is_none_or(|expires| *paid_at < expires)
-                    && rate_window.is_none_or(|(start, expires)| {
-                        paykit_lib::periods::rates_apply(start, expires, *paid_at)
-                    })
-            })
-            .map(|paid_at| {
-                Box::new(VerifiedCredit {
-                    paid_at,
-                    target,
-                    activity: bound,
-                    parent,
-                    conditions,
+        let verified = self.rail.verify(check).await?.filter(|paid_at| {
+            period_deadline.is_none_or(|deadline| *paid_at <= deadline)
+                && destination_expires.is_none_or(|expires| *paid_at < expires)
+                && rate_window.is_none_or(|(start, expires)| {
+                    paykit_lib::periods::rates_apply(start, expires, *paid_at)
                 })
-            }))
+        });
+        let Some(paid_at) = verified else {
+            return Ok(None);
+        };
+        let settlement = if bound.receipt.is_some() {
+            None
+        } else {
+            if settlement_id.is_none() && binding == RecordBinding::Unrequested {
+                return Ok(None);
+            }
+            let decision = if let Some(id) = &settlement_id {
+                match Box::pin(self.settlement_credit(
+                    id,
+                    &target,
+                    bound.counterparty,
+                    binding,
+                    maybe_credited_confirmed,
+                    unmarked_credit_confirmed,
+                ))
+                .await?
+                {
+                    SettlementCredit::SameOccurrence => {
+                        // A competing app stored the receipt in the same batch as this
+                        // mark. Read and verify the signed activity before returning it.
+                        let read = self.app.read_record_fresh(&target.record_target()).await?;
+                        let RecordRead::Fresh(current) = read else {
+                            return Ok(None);
+                        };
+                        if self.bound_payee_record(&current)?.1.receipt.is_some() {
+                            return Box::pin(self.verified(
+                                record,
+                                maybe_credited_confirmed,
+                                unmarked_credit_confirmed,
+                            ))
+                            .await;
+                        }
+                        return Ok(None);
+                    }
+                    SettlementCredit::AlreadyCredited => return Ok(None),
+                    SettlementCredit::Write(write) => Some(*write),
+                }
+            } else {
+                None
+            };
+            if other_uncertain
+                || self.settlement_uncertain_after_loss(paid_at).await?
+                || settlement_id.is_none()
+            {
+                let subject = match &settlement_id {
+                    Some(id) => crate::SettlementSubject::Tag(paykit_lib::derive::settlement_tag(
+                        self.app.naming_key(),
+                        id,
+                    )),
+                    None => crate::SettlementSubject::RequestedProof {
+                        record: *record,
+                        proof: proof_stored.hash(),
+                    },
+                };
+                self.raise_settlement_notice(subject, bound.counterparty)
+                    .await?;
+                if !maybe_credited_confirmed {
+                    return Err(Refusal::MaybeCredited.into());
+                }
+            }
+            decision
+        };
+        Ok(Some(Box::new(VerifiedCredit {
+            paid_at,
+            target,
+            activity: bound,
+            parent,
+            conditions,
+            settlement,
+        })))
     }
 
     /// Whether another `payee_activity` record than `record` credits `settlement` from
@@ -1338,7 +1407,13 @@ impl Paykit {
         let mut tries = 0;
         let msg_id = loop {
             // A failed conditional write can reveal a deletion or a changed proof.
-            let Some(credit) = Box::pin(self.verified(record, confirmed)).await? else {
+            let Some(credit) = Box::pin(self.verified(
+                record,
+                confirmed,
+                details.unmarked_credit_confirmed.is_some(),
+            ))
+            .await?
+            else {
                 return Ok(None);
             };
             let VerifiedCredit {
@@ -1346,6 +1421,7 @@ impl Paykit {
                 mut activity,
                 parent,
                 conditions,
+                settlement,
                 ..
             } = *credit;
             let bound = &activity;
@@ -1388,12 +1464,36 @@ impl Paykit {
                 .app
                 .record_op(&target, Some(&activity.to_json()?), conditions)
                 .await?;
-            let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
-                .entry(entry)
-                .queue(signed);
-            match self.submit(batch).await {
+            let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME).entry(entry);
+            let delivery_marker = (!details.store_only)
+                .then(|| key::receipt_batch(record, &signed.plaintext().hash(), &msg_id, false));
+            if let Some(marker) = &delivery_marker {
+                batch = batch.keep_id_at(marker.as_bytes().to_vec()).local(
+                    pubky_switch_client::app::LocalWrite::Delete {
+                        key: marker.as_bytes().to_vec(),
+                    },
+                );
+                batch = batch.queue(signed);
+            }
+            let submitted = match settlement {
+                Some(write) => {
+                    Box::pin(self.submit_settlement_credit(
+                        batch,
+                        write,
+                        details.unmarked_credit_confirmed.is_some(),
+                        delivery_marker.as_deref(),
+                    ))
+                    .await
+                }
+                None => self.submit(batch).await.map_err(PaykitError::from),
+            };
+            if submitted.is_err() {
+                self.retire_refused_receipt_batch(delivery_marker.as_deref())
+                    .await?;
+            }
+            match submitted {
                 Ok(_) => break msg_id,
-                Err(error) if error.code() == Some(ErrorCode::Conflict) => {
+                Err(PaykitError::Client(error)) if error.code() == Some(ErrorCode::Conflict) => {
                     self.app.read_record(&target).await?;
                     if let Some(parent) = &parent {
                         self.app.read_record(&parent.record_target()).await?;
@@ -1403,10 +1503,12 @@ impl Paykit {
                         return Err(conflict(error.into()));
                     }
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(error),
             }
         };
-        self.send_message(&msg_id).await?;
+        if !details.store_only {
+            self.send_message(&msg_id).await?;
+        }
         Ok(Some(msg_id))
     }
 

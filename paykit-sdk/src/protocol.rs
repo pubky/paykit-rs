@@ -27,7 +27,9 @@ use std::sync::{Arc, PoisonError, RwLock};
 
 use paykit_lib::bodies::check_body;
 use paykit_lib::collections::Collection;
-use paykit_lib::kinds::{targets_app, Kind, Role as KindRole, Side, OPAQUE_MEMBERS};
+use paykit_lib::kinds::{
+    check_sender_scopes, targets_app, Kind, MessageKind, Role as KindRole, Side, OPAQUE_MEMBERS,
+};
 use paykit_lib::records::{
     ActivitySide, AllowanceRecord, BlockFloorRecord, PaymentListRecord, StoredMessage,
 };
@@ -334,6 +336,14 @@ pub(crate) fn store_failure(error: pubky_switch_client::app::AppError) -> StoreF
     }
 }
 
+/// A receive effect exposes its storage failure to the record owner.
+pub(crate) fn step_failure(failure: Fail) -> StoreFailure {
+    match failure {
+        Fail::Store(error) => error,
+        _ => StoreFailure::unavailable(StoreError::Unavailable),
+    }
+}
+
 /// A local read failure keeps its real store error; malformed protocol state is corrupt.
 pub(crate) fn view_failure(error: crate::PaykitError) -> StoreFailure {
     match error {
@@ -344,6 +354,40 @@ pub(crate) fn view_failure(error: crate::PaykitError) -> StoreFailure {
         }
         _ => StoreFailure::of_entry(StoreError::Corrupt),
     }
+}
+
+/// Recheck this message's sender and the current deny copy before its delivery or re-send.
+pub(crate) fn may_deliver_to_contact(
+    delivery: &pubky_switch_client::app::DeliveryView<'_>,
+) -> crate::error::Result<bool> {
+    use pubky_switch_client::app::KeptBatchStatus;
+
+    let cert = delivery.cert();
+    if check_certificate(cert).is_err()
+        || !receive::reads_lists(cert.scopes())
+        || check_sender_scopes(delivery.message(), cert.scopes()).is_err()
+    {
+        return Ok(false);
+    }
+    let read = state::delivery_get::<u64>(delivery, key::LISTS_READ)?;
+    if !read.is_some_and(|at| receive::lists_read_is_fresh(at, delivery.now_ms())) {
+        return Ok(false);
+    }
+    let Some(denied) = state::delivery_get::<Vec<[u8; 32]>>(delivery, key::DENIED)? else {
+        return Ok(false);
+    };
+    let to = &delivery.message().to;
+    if let Some(mark) = state::delivery_get::<state::OwnBlockMark>(delivery, &key::own_block(to))? {
+        let kept = match mark.unblock_batch() {
+            Some(batch) => matches!(
+                delivery.kept_batch(batch)?,
+                Some(KeptBatchStatus::Kept { .. })
+            ),
+            None => false,
+        };
+        return Ok(mark.counts(kept) == Some(false));
+    }
+    Ok(!denied.contains(to))
 }
 
 /// How many keys of each family whose size the runtime bounds a restored layer holds
@@ -443,6 +487,35 @@ pub(crate) fn restore_paykit_layer(
     let own_cert = restoring.cert();
     let blind = |input: &[u8]| restoring.blind(input);
     let binder = state::Binder::new(own, own_cert, &blind);
+    let mut settlement_marks = std::collections::BTreeMap::new();
+    for (key, value) in restoring
+        .previous_local_scan(key::SETTLEMENT_MARKS.as_bytes())
+        .map_err(|_| "the installation's settlement marks cannot be read")?
+    {
+        state::restored::<crate::settlement_marks::ObservedMark>(&key, &value, &binder)
+            .map_err(|_| "invalid retained settlement mark")?;
+        settlement_marks.insert(key, value);
+    }
+    let mut settlement_notices = std::collections::BTreeMap::new();
+    for (key, value) in restoring
+        .previous_local_scan(key::SETTLEMENT_NOTICES.as_bytes())
+        .map_err(|_| "the installation's settlement notices cannot be read")?
+    {
+        let notice = state::restored::<KeptNotice>(&key, &value, &binder)
+            .map_err(|_| "invalid retained settlement notice")?;
+        settlement_notices.insert(key, notice);
+    }
+    // A repeated import on this installation preserves notices the host has already seen,
+    // and unresolved ones first observed since the backup (Paykit spec 7.2).
+    let mut delivery_notices = std::collections::BTreeMap::new();
+    for (key, value) in restoring
+        .previous_local_scan(key::RESTORED_DELIVERIES.as_bytes())
+        .map_err(|_| "the outgoing delivery notices cannot be read")?
+    {
+        let notice = state::restored::<KeptNotice>(&key, &value, &binder)
+            .map_err(|_| "an outgoing delivery notice is invalid")?;
+        delivery_notices.insert(key, notice);
+    }
     let mut history = crate::deletions::RestoredReceipts::default();
     for prefix in [
         key::PAYEE_DELETIONS,
@@ -480,6 +553,7 @@ pub(crate) fn restore_paykit_layer(
     let mut confirmed_before = std::collections::BTreeSet::new();
     let mut open = std::collections::BTreeSet::new();
     let mut recordings = std::collections::BTreeSet::new();
+    let mut receipt_batches = std::collections::BTreeMap::new();
     let mut awaiting_recording = std::collections::BTreeSet::new();
     let mut journaled = std::collections::BTreeSet::new();
     let mut acknowledged = Vec::new();
@@ -542,9 +616,8 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::Flagged
             | StateKey::StoredNote { .. }
             | StateKey::Taken(_) => continue,
-            // An own crossing end owed while sends were held isn't restored: the restore queues
-            // the record's own end again itself, under the same gate (`hold.rs`,
-            // `queue_own_again`).
+            // Only the original installation holds this duty. A restore reconciles its
+            // shared end through the outgoing delivery notices.
             StateKey::OwedEnd(_) => continue,
             // The time of the last read of the lists isn't restored: the copy of the deny
             // list the backup holds may be stale by any time, so the list is read again before
@@ -588,6 +661,27 @@ pub(crate) fn restore_paykit_layer(
                 state::restored::<[u8; 16]>(&key, &value, &binder).map_err(|_| unread())?;
                 recordings.insert(attempt);
                 writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::ReceiptBatch {
+                record,
+                hash,
+                msg_id,
+                ..
+            } => {
+                state::restored::<[u8; 16]>(&key, &value, &binder).map_err(|_| unread())?;
+                // The original batch may have finished after this snapshot.
+                let imported = key::receipt_batch(&record, &hash, &msg_id, true).into_bytes();
+                if let Some(previous) = receipt_batches.insert(imported.clone(), value.clone()) {
+                    if previous != value {
+                        return Err(unread());
+                    }
+                } else {
+                    writes.push(LocalWrite::Put {
+                        key: imported,
+                        value,
+                    });
+                }
                 continue;
             }
             StateKey::Journal(attempt) => attempt,
@@ -651,12 +745,12 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            // A held answer is restored: the record the backup's device wrote holds it, and the
-            // restored app queues it from there, or tells the host it was given up, once sends
-            // to its payee aren't held (`Paykit::queue_own_again`).
+            // The previous installation could have released this answer since the backup.
             StateKey::HeldAnswer { .. } => {
-                state::restored::<crate::hold::HeldAnswer>(&key, &value, &binder)
+                let mut answer = state::restored::<crate::hold::HeldAnswer>(&key, &value, &binder)
                     .map_err(|_| unread())?;
+                answer.restored = true;
+                let value = state::encode(&answer).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -695,6 +789,18 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
+            StateKey::EndBatch(_) => {
+                // A backup omits the unresolved Switch batch. Its signed end's origin
+                // can survive independently of the outcome of its counterparty delivery.
+                state::restored::<[u8; 16]>(&key, &value, &binder).map_err(|_| unread())?;
+                continue;
+            }
+            StateKey::EndOrigin(_) => {
+                state::restored::<crate::allowances::EndOrigin>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
             StateKey::NoticeTarget(_) => {
                 state::restored::<crate::allowances::NoticeTarget>(&key, &value, &binder)
                     .map_err(|_| unread())?;
@@ -711,6 +817,27 @@ pub(crate) fn restore_paykit_layer(
             StateKey::ListAsk { .. } => {
                 state::restored::<ListAsk>(&key, &value, &binder).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::SettlementNotice(_) => {
+                let restored = state::restored::<KeptNotice>(&key, &value, &binder)
+                    .map_err(|_| "invalid restored settlement notice")?;
+                settlement_notices
+                    .entry(key)
+                    .and_modify(|current| {
+                        let acknowledged = current.acknowledged || restored.acknowledged;
+                        if restored.raised_at_ms < current.raised_at_ms {
+                            *current = restored.clone();
+                        }
+                        current.acknowledged = acknowledged;
+                    })
+                    .or_insert(restored);
+                continue;
+            }
+            StateKey::SettlementMark { .. } => {
+                state::restored::<crate::settlement_marks::ObservedMark>(&key, &value, &binder)
+                    .map_err(|_| "invalid restored settlement mark")?;
+                settlement_marks.insert(key, value);
                 continue;
             }
             family @ (StateKey::PayeeDeletion { .. }
@@ -781,6 +908,18 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
+            StateKey::RestoredDelivery { .. } => {
+                let incoming =
+                    state::restored::<KeptNotice>(&key, &value, &binder).map_err(|_| unread())?;
+                delivery_notices
+                    .entry(key)
+                    .and_modify(|kept| {
+                        kept.acknowledged |= incoming.acknowledged;
+                        kept.raised_at_ms = kept.raised_at_ms.min(incoming.raised_at_ms);
+                    })
+                    .or_insert(incoming);
+                continue;
+            }
             StateKey::MessageNotice { .. }
             | StateKey::Notice { .. }
             | StateKey::BlockedLost { .. } => {
@@ -816,6 +955,10 @@ pub(crate) fn restore_paykit_layer(
         journaled.insert(attempt);
         entry.restored = true;
         let value = state::encode(&entry).map_err(|_| bad())?;
+        writes.push(LocalWrite::Put { key, value });
+    }
+    for (key, notice) in delivery_notices {
+        let value = state::encode(&notice).map_err(|_| "a delivery notice cannot be written")?;
         writes.push(LocalWrite::Put { key, value });
     }
     if !recordings.is_subset(&awaiting_recording) {
@@ -856,13 +999,20 @@ pub(crate) fn restore_paykit_layer(
     let owed = state::local_put(key::PAYER_PASS_OWED, &true)
         .map_err(|_| String::from("the restore's payer pass mark can't be written"))?;
     writes.push(owed);
-    // The messages this app signed that a batch the backup kept unanswered queued are in no
-    // outbox: they are queued again from the records once they are listed
-    // (`Paykit::queue_own_again`). This step reads no clock: `Paykit::restore` writes the
-    // restore's time into the mark right after this commit (`Paykit::stamp_restore_time`).
+    // Check the restored records for original deliveries whose disposition the host must
+    // reconcile. The records cannot authorize another delivery (Paykit spec 7.2).
     let resend = state::local_put(key::OWN_RESEND_OWED, &crate::hold::OwnResendOwed::default())
-        .map_err(|_| String::from("the restore's re-send mark can't be written"))?;
+        .map_err(|_| String::from("the restored-record scan mark can't be written"))?;
     writes.push(resend);
+    for (key, notice) in settlement_notices {
+        let value = state::encode(&notice).map_err(|_| "invalid saved settlement notice")?;
+        writes.push(LocalWrite::Put { key, value });
+    }
+    writes.extend(
+        settlement_marks
+            .into_iter()
+            .map(|(key, value)| LocalWrite::Put { key, value }),
+    );
     writes.extend(
         history
             .writes()
@@ -962,13 +1112,26 @@ impl Protocol for PaykitProtocol {
     }
 
     /// Hold every attempt to deliver an Allowance acceptance, including a re-send or an
-    /// acceptance already in the outbox (Paykit spec 8.3.1). This gate allows every
-    /// other message kind through, subject to the Switch's own holds.
+    /// acceptance already in the outbox (Paykit spec 8.3.1). Proposals, rejections,
+    /// re-send requests and extensions require current sender scopes and a permitting
+    /// deny copy. An original user end has its own delivery rule (Paykit spec 3.1).
     fn may_send(
         &self,
         delivery: &pubky_switch_client::app::DeliveryView<'_>,
     ) -> Result<bool, StoreFailure> {
-        Ok(delivery.message().kind != Kind::AllowanceAcceptance.as_str())
+        match MessageKind::parse(&delivery.message().kind) {
+            Ok(MessageKind::Paykit(Kind::AllowanceAcceptance)) => Ok(false),
+            Ok(MessageKind::Paykit(Kind::AllowanceEnd)) => {
+                crate::allowances::may_deliver_end(delivery).map_err(view_failure)
+            }
+            Ok(
+                MessageKind::Paykit(
+                    Kind::AllowanceProposal | Kind::AllowanceRejection | Kind::ResendRequest,
+                )
+                | MessageKind::Extension(_),
+            ) => may_deliver_to_contact(delivery).map_err(view_failure),
+            _ => Ok(true),
+        }
     }
 
     fn opaque_members(&self) -> Vec<OpaqueRule> {
@@ -1253,6 +1416,14 @@ impl Protocol for PaykitProtocol {
     /// takes every label's records, and one holding `paykit_request:<label>` its label's.
     fn collections(&self) -> Vec<SwitchCollection> {
         crate::hold::RecordSide::All.collections()
+    }
+
+    fn observe_record(
+        &self,
+        observation: &pubky_switch_client::app::RecordObservation<'_>,
+        context: &ReceiveContext<'_>,
+    ) -> Result<Vec<LocalWrite>, StoreFailure> {
+        crate::settlement_marks::observe(observation, context)
     }
 
     /// The mark of what the app has seen in a record: the newest value it took that reads
@@ -2895,10 +3066,7 @@ mod receive_tests {
     }
 
     #[test]
-    fn test_protocol_own_receipt_sent_again_after_a_restore() {
-        // A restore queues again a payee's own receipt and cancellation from its record: this
-        // app stores its own receipt only in the batch that queues it, so the record holds
-        // one it sent (Paykit spec 7.2); never a message another app signed.
+    fn test_protocol_stored_receipt_does_not_imply_delivery_intent() {
         let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
         let bob = Party::new(
             "bob",
@@ -2926,20 +3094,14 @@ mod receive_tests {
                 .map(|stored| stored.message().kind.clone())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(own(&record), ["paykit.payment_receipt"]);
+        assert!(own(&record).is_empty());
         record.cancellation = Some(bob.message(
             &alice,
             "paykit.payment_request_cancellation",
             vec![[4; 32]],
             object(json!({ "reason": null })),
         ));
-        assert_eq!(
-            own(&record),
-            [
-                "paykit.payment_request_cancellation",
-                "paykit.payment_receipt"
-            ]
-        );
+        assert_eq!(own(&record), ["paykit.payment_request_cancellation"]);
         record.cancellation = Some(till.message(
             &alice,
             "paykit.payment_request_cancellation",
@@ -2951,11 +3113,9 @@ mod receive_tests {
     }
 
     #[test]
-    fn test_protocol_own_period_details_each_sent_again_after_a_restore() {
-        // A period record keeps every details the payee sent for its period, the latest in
-        // `period_details` and the others in `earlier_details`: a restore queues again each
-        // this app signed, the earlier ones first, and none another app signed (Paykit spec
-        // 7.2, "What a restore loses").
+    fn test_protocol_restore_selects_each_period_detail_signed_by_this_app() {
+        // Reconciliation covers current and earlier details in signing order (Paykit
+        // spec 7.2). Another app can also have signed details in the same record.
         let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
         let bob = Party::new(
             "bob",
