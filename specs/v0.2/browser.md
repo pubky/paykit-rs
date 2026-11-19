@@ -34,9 +34,8 @@ proposes and who decides each item.
   becomes **Decided** with the outcome, or **Deferred** with an owner and a
   date. A line owned by anyone else becomes **Asked**, with a link, and keeps
   its fallback. The link points to its #537 item. Asks marked *not yet filed*
-  are raised on #537, or, for
-  [Pubky asks](#pubky-asks-that-do-not-wait-on-the-freeze), in a new Pubky
-  issue. This document records Paykit's position only.
+  are the [Pubky asks](#pubky-asks-that-do-not-wait-on-the-freeze), each
+  raised in a new Pubky issue. This document records Paykit's position only.
 - Items that wait on the v0.2 freeze are open notes N1 to N9
   ([Open notes and questions](#open-notes-and-questions)). They may stay open
   when this document merges.
@@ -113,19 +112,19 @@ decision N" is an item under its "Further team decisions" heading, and
 
 | ID | Decision | Owner | Proposal in one line | Waiting on | Blocks |
 | --- | --- | --- | --- | --- | --- |
-| [D1](#d1-identity-and-the-signer) | Identity and the signer | Paykit, Paykit v0.2, Pubky | First release: an app approved by a signer elsewhere; a web app as signer only if #537 item 4 allows it; each browser install its own app | #537 item 4 (N3); seed derivation and installs as apps (not yet filed) | Step 3 |
+| [D1](#d1-identity-and-the-signer) | Identity and the signer | Paykit, Paykit v0.2, Pubky | First release: an app approved by a signer elsewhere; a web app as signer only if #537 item 4 allows it; each browser install its own app | #537 items 4 and 6 (N3); seed derivation (#537 "can wait") | Step 3 |
 | [D2](#d2-secret-custody-and-threat-model) | Secret custody | Paykit, Pubky Switch | Same-origin script is trusted; sealed storage is the minimum; the host may supply the wrapping key; the backup key survives eviction | #537 item 1 | Step 3; a stable release (step 4) needs item 1 answered yes |
 | [D3](#d3-the-state-store) | Where app state lives | Paykit, Pubky Switch | One store per app and partition; a reference store on OPFS unless an async store seam lands | #537 items 1 and 3; N4, N5 | Step 3 |
 | [D4](#d4-tabs-and-store-ownership) | Several tabs | Paykit, Pubky Switch | One live owner context per store namespace and partition; ask for a safe release of store ownership | #537 item 3 | Step 3 |
 | [D5](#d5-transport-trust-and-cors) | Transport trust and CORS | Paykit, Pubky, Pubky Switch | WebPKI for Homeserver traffic; Switch traffic needs normative CORS and a browser address rule | #537 items 1 and 2 (N6); WebPKI (not yet filed) | Step 3; step 4 needs CORS deployed |
 | [D6](#d6-fresh-reads-and-http-caching) | Fresh reads | Paykit, Pubky | Homeserver and relay reads bypass the HTTP cache; a first-release blocker | `no-cache` on `/pub` and `NetworkOnly` (not yet filed) | Step 3 |
 | [D7](#d7-receiving-and-push) | Receiving | Paykit, Pubky Switch | Foreground long-poll first, no event stream; Web Push later | N7, N8 | Step 3; Web Push in step 5 |
-| [D8](#d8-clocks-timers-and-deadlines) | Clocks and deadlines | Paykit, Pubky Switch | A host monotonic clock in both repos; the binding's transport applies the reference timeouts | #537 "can wait" (`FirstSend`); `pay.rs` `Instant::now()` and "last cancellable handoff" (not yet filed) | Step 3 |
+| [D8](#d8-clocks-timers-and-deadlines) | Clocks and deadlines | Paykit, Pubky Switch | A host monotonic clock in both repos; the binding's transport applies the reference timeouts | #537 "can wait" (`FirstSend`); `pay.rs` `Instant::now()` (#537 "cheaper now"); "last cancellable handoff" (#537 item 1) | Step 3 |
 | [D9](#d9-where-the-sdk-runs) | Execution context | Paykit | Dedicated worker; service worker after the async store seam and its own test run | N1 | Step 3 |
 | [D10](#d10-host-interfaces-and-send) | Host interfaces and `Send` | Paykit, Pubky Switch | Store, clock, timer, transport, and reader in Rust; only `Rail` crosses to JavaScript | #537 "cheaper now" (`MaybeSend`) | Step 3 |
 | [D11](#d11-toolchain-and-package) | Toolchain and package | Paykit | Generator chosen with the v0.2 bindings workstream; separate npm package | N9 | Step 2 |
 | [D12](#d12-supported-browsers-and-environments) | Supported browsers | Paykit | A version window per engine; Lockdown Mode unsupported | None | Step 4 |
-| [Groundwork](#groundwork-on-the-v02-crates) | Groundwork placement | Paykit, Pubky Switch | Each fix lands in the crate that owns the code; no public helper API; browser code stays out of protocol logic | `pubky-switch-signer` forcing `http` (not yet filed) | Step 1 |
+| [Groundwork](#groundwork-on-the-v02-crates) | Groundwork placement | Paykit, Pubky Switch | Each fix lands in the crate that owns the code; no public helper API; browser code stays out of protocol logic | `pubky-switch-signer` forcing `http` (#537 "cheaper now") | Step 1 |
 | [Rollout](#rollout) | Real funds on the pre-release | Paykit | No, until step 4's security review is done | None | Step 3 |
 
 ## Scope
@@ -441,14 +440,14 @@ item 4 says yes, option 2 comes later with the costs above.
 web app be its identity's signer, and do `run_due` runs need the identity key
 unlocked? Fallback: no; the first release supports option 1 only.
 
-**Decision needed (Owner: Pubky; not yet filed).** A standard derivation of
+**Decision needed (Owner: Pubky; #537 "can wait").** A standard derivation of
 the identity key and app keys from a wallet seed (scheme, path, word count,
 index). Not on the browser critical path. Fallback: none. Until Pubky decides,
 the package gives the BIP85 proposal only as Paykit's recommendation to
 Pubky, not as host guidance, and warns hosts against the first-32-bytes
 convention.
 
-**Decision needed (Owner: Paykit v0.2, with Paykit; not yet filed).** Confirm
+**Decision needed (Owner: Paykit v0.2, with Paykit; #537 item 6).** Confirm
 that browser installs are separate apps, an exception to Paykit decision 18's
 seed-derived keys that make devices one app. Each install then needs its own
 approval, the cost decision 18 avoided. D3 explains why two partitions cannot
@@ -789,22 +788,21 @@ the restore flow above and the rollout step 3 backup-and-restore test.
   Firefox and Chromium cache a lock-holding page is unsettled. A dedicated
   worker freezes with its page, and `steal: true` does not stop the old
   holder's code.
-- So #537 item 3's premise, "a frozen tab keeps its locks", holds only in
-  part. The hazards are a live but throttled owner context, a resumed WebKit
-  page that believes it owns, and Chrome on Android, whose rules are unknown.
+- So "a frozen tab keeps its locks" holds only in part. The hazards are a
+  live but throttled owner context, a resumed WebKit page that believes it
+  owns, and Chrome on Android, whose rules are unknown.
 - *Verified (v0.1 spike)*: Web Lock election with calls relayed over
   `BroadcastChannel` worked; takeover was tested only after a close. The v0.1
   intake lease blocked a restarted context for about 116 seconds. An owner
   context that stops without dying is the same hazard for a `StoreLease`,
   open until #537 item 3 is answered.
-- #537's "what already fits" says bearer replacement is gone. That holds only
-  for Switch calls, which carry no session (`sw:spec/spec.md:357`). Two
-  contexts that restore one Pubky session still replace each other's
-  `HomeserverWriter` bearer (*verified (v0.1 spike)*, pubky 0.16.2). pubky
-  0.18.0 resends a replayable request once after a 401 and exchanges the
-  grant only with 150 seconds or less left, so an idle tab does not interfere
-  (*read*). Paykit v0.2 has no `pubky` dependency; the host's client version
-  decides.
+- Bearer replacement between tabs is gone only for Switch calls, which carry no
+  session (`sw:spec/spec.md:357`). Two contexts that restore one Pubky session
+  still replace each other's `HomeserverWriter` bearer (*verified (v0.1 spike)*,
+  pubky 0.16.2). pubky 0.18.0 resends a replayable request once after a 401 and
+  exchanges the grant only with 150 seconds or less left, so an idle tab does
+  not interfere (*read*). Paykit v0.2 has no `pubky` dependency; the host's
+  client version decides.
 - Pubky's grant-session coordinator can share one bearer across tabs under a
   lock, but is still `#[doc(hidden)]` in 0.18.0
   (`src/actors/auth/grant/shared_session.rs:36-50`). Low-priority Pubky ask:
@@ -1091,18 +1089,17 @@ owner. Blocks: Web Push and its push measurements in the service worker run
   - `paykit-sdk` calls `Instant::now()` before sending every attempt batch and
     before an idempotent repeat's claim read
     (`v02:paykit-sdk/src/pay.rs:2576`, `:3884`), so every payment attempt
-    would trap. #537 does not mention these calls.
+    would trap (#537 "cheaper now").
   - The Switch client's `FirstSend::new` (`transport/mod.rs:160`), reached
     when a batch has a first-send deadline, as Paykit's offline public payment
     does (`v02:paykit-sdk/src/pay/offline.rs:279`).
   - `SystemClock` (`clock.rs:71`).
-- **CI must run code.** #537 compiled nothing (it read v0.2 at `24c43f70`). At
-  `7aa75fe4`, `paykit-lib` and `paykit-sdk` pass `cargo check` for wasm32
-  with build edits only ([What was checked on v0.2](#what-was-checked-on-v02)),
-  yet the payment path would trap (*inferred*: the std probe traps, and
-  `paykit-sdk` itself did not run). So #537's "can wait" `cargo check` job
-  would not catch this; the CI job must run code in a browser (Groundwork, CI
-  row).
+- **CI must run code.** At `7aa75fe4`, `paykit-lib` and `paykit-sdk` pass
+  `cargo check` for wasm32 with build edits only
+  ([What was checked on v0.2](#what-was-checked-on-v02)), yet the payment path
+  would trap (*inferred*: the std probe traps, and `paykit-sdk` itself did not
+  run). So a `cargo check` job would not catch this; the CI job must run code
+  in a browser (Groundwork, CI row).
 - **Clocks.** `Clock` is wall time, and `Date.now()` can be set back. A
   browser's monotonic source, `performance.now()`, behaves differently across
   sleep by engine. v0.2 discards an identity observation when the clock moves
@@ -1168,7 +1165,7 @@ defaults (10 seconds, 40 seconds, and the wait plus 40 seconds), with host
 override? Is leaving out the offline payment path acceptable?
 
 **Decision needed (Owner: Pubky Switch; `FirstSend` in #537 "can wait"; the
-handoff not yet filed).** Take `FirstSend`'s monotonic time from the host, and
+handoff in #537 item 1).** Take `FirstSend`'s monotonic time from the host, and
 define "last cancellable handoff" over `fetch`? Fallback: the Paykit fix alone
 and no `send_before`.
 
@@ -1464,20 +1461,18 @@ implements a decision updates the passage it amends.
 
 | Ask | Owner | Passage it amends | See |
 | --- | --- | --- | --- |
-| #537 item 1: a browser clause for the address check (Switch wire 7.1 and 8.2), where keys live (Switch spec 3.1), and store guarantees 5 and 6; and moving "browser and WASM support" out of Switch spec 17's "Decided later" list | Pubky Switch | `sw:spec/spec.md:98`, `:367`, `:1251`; `sw:spec/wire-format.md:1593`, `:2509`; `sw:crates/pubky-switch-client/src/store/mod.rs:75-79` | D2, D3, D5 |
+| #537 item 1: a browser clause for the address check (Switch wire 7.1 and 8.2), where keys live (Switch spec 3.1), store guarantees 5 and 6, and "last cancellable handoff" over `fetch`; and moving "browser and WASM support" out of Switch spec 17's "Decided later" list | Pubky Switch | `sw:spec/spec.md:98`, `:367`, `:740`, `:1251`; `sw:spec/wire-format.md:1593`, `:2509`; `sw:crates/pubky-switch-client/src/store/mod.rs:75-79` | D2, D3, D5 |
 | #537 item 2: normative CORS | Pubky Switch (spec and service) | None yet | D5 |
-| #537 item 3: keep an async store possible behind `StoreHandle`, keep its inline mode, and keep new store access behind it. Also move existing raw `&dyn StateStore` access behind it: every protocol callback (`app/protocol.rs:910-915`), which #537 does not name, and every helper that takes one, not only the two #537 names (D3); safe loss of ownership and a host-initiated release of it. Its premise needs the D4 correction. Proposed contract text: "A host may revoke a `StoreLease`. After revocation, every `commit_if` under the old lease returns `NotOwner`, every `commit` to the namespace from the old holder returns `InUse`, and the client reloads state before acting on either." | Pubky Switch (client) | `store/mod.rs:116-127`; `app/protocol.rs:910-915`; `app/kept.rs:186`; `app/records/previous.rs:18` | D3, D4 |
+| #537 item 3: keep an async store possible behind `StoreHandle`, keep its inline mode, and keep new store access behind it. Also move existing raw `&dyn StateStore` access behind it: `StoreHandle::store()`, every protocol callback (`app/protocol.rs:910-915`), and every helper that takes one (D3); fence `App` writes with the lease, and allow a host-initiated release (D4). Proposed contract text: "A host may revoke a `StoreLease`. After revocation, every `commit_if` under the old lease returns `NotOwner`, every `commit` to the namespace from the old holder returns `InUse`, and the client reloads state before acting on either." | Pubky Switch (client) | `store/mod.rs:116-127`; `app/protocol.rs:910-915`; `app/kept.rs:186`; `app/records/previous.rs:18` | D3, D4 |
 | #537 item 4: may a web app be its identity's signer? The 2026-11-11 agreement does not settle it (D1) | Pubky, with Paykit v0.2 | `sw:spec/spec.md:1301` | D1 |
-| #537 item 5: one line in the v0.2 plan saying browser support follows v0.2, with items 1 to 4 open for it | Paykit v0.2 | `v02:specs/v0.2/spec.md:993`, `:995`, `:1000`; `v02:THESAURUS.md:37-38` | Rollout |
+| #537 item 5: one line in the v0.2 plan saying browser support follows v0.2, with the other items open for it | Paykit v0.2 | `v02:specs/v0.2/spec.md:993`, `:995`, `:1000`; `v02:THESAURUS.md:37-38` | Rollout |
 | #537 "cheaper now": `MaybeSend` | Pubky Switch | `sw:crates/pubky-switch-client/src/transport/mod.rs:24` | D10 |
-| #537 "what already fits": keep `paykit-sdk` free of a Tokio runtime, Tokio and `http` optional in `pubky-switch-client`, and `Clock`, `Transport`, and the store supplied by the host. Correction: #537's "bearer replacement between tabs is gone" holds for Switch calls only; two contexts that restore one Pubky session still replace each other's `HomeserverWriter` bearer (D4) | Paykit v0.2, Pubky Switch | None; keep as is | D3, D4, D10 |
-| #537 "can wait": `FirstSend`'s monotonic time (fine after the freeze; it is not API). The `cargo check` job that #537 also lists under "can wait" would not catch the `Instant::now()` traps; CI must run code in a browser (D8) | Pubky Switch | `sw:crates/pubky-switch-client/src/transport/mod.rs:160` | D8 |
-| Not yet filed: the two `Instant::now()` calls in `pay.rs` (before every attempt batch and before an idempotent repeat's claim read); every payment attempt would trap (*inferred*, D8). #537 does not mention them | Paykit v0.2 | `v02:paykit-sdk/src/pay.rs:2576`, `:3884` | D8 |
-| Not yet filed: define "last cancellable handoff" over `fetch` | Pubky Switch | `sw:spec/spec.md:740` | D8 |
-| Not yet filed: `pubky-switch-signer` forcing `http` | Pubky Switch | `sw:Cargo.toml:29` | Groundwork |
-| Not yet filed: a browser host in Paykit decision 20's mapping | Paykit v0.2 | `v02:specs/v0.2/spec.md:712` | N1 |
-| Not yet filed: browser installs as separate apps, not Paykit decision 18's one app across devices | Paykit v0.2 | `v02:specs/v0.2/spec.md:710` | D1, D3 |
-| Not yet filed: a standard seed derivation | Pubky | `sw:spec/spec.md:95-96` | D1 |
+| #537 "what already fits": keep `paykit-sdk` free of a Tokio runtime, Tokio and `http` optional in `pubky-switch-client`, and `Clock`, `Transport`, and the store supplied by the host. Bearer replacement is gone for Switch calls only; the `HomeserverWriter` bearer still needs one owner context (D4) | Paykit v0.2, Pubky Switch | None; keep as is | D3, D4, D10 |
+| #537 "can wait": `FirstSend`'s monotonic time (fine after the freeze; it is not API). Also a standard seed derivation (Pubky; D1) and a wasm32 CI job that runs code in a browser, since `cargo check` would not catch the `Instant::now()` traps (D8) | Pubky Switch; Pubky (derivation); Paykit v0.2 and Pubky Switch (CI) | `sw:crates/pubky-switch-client/src/transport/mod.rs:160`; `sw:spec/spec.md:95-96` | D1, D8 |
+| #537 "cheaper now": the two `Instant::now()` calls in `pay.rs` (before every attempt batch and before an idempotent repeat's claim read); every payment attempt would trap (*inferred*, D8) | Paykit v0.2 | `v02:paykit-sdk/src/pay.rs:2576`, `:3884` | D8 |
+| #537 "cheaper now": `pubky-switch-signer` forcing `http` | Pubky Switch | `sw:Cargo.toml:29` | Groundwork |
+| #537 item 7: a browser host in Paykit decision 20's mapping | Paykit v0.2 | `v02:specs/v0.2/spec.md:712` | N1 |
+| #537 item 6: browser installs as separate apps, not Paykit decision 18's one app across devices | Paykit v0.2 | `v02:specs/v0.2/spec.md:710` | D1, D3 |
 
 Push delivery names only APNs and FCM (`sw:spec/spec.md:80`, `:686-689`);
 that waits on open note N8.
