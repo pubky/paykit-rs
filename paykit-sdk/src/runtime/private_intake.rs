@@ -644,13 +644,13 @@ fn buffered_generation_moved() -> LinkAttemptError {
 /// generation per packet), outbound private send, or handshake or observation
 /// transition, or this attempt's own observation step when it committed a
 /// replacement and returned `Ok`. Drains and sends rebase the buffered intake
-/// to the new generation in the same transaction. An attempt reads the link
-/// state and its generation once, at its start, and keeps that snapshot, so a
-/// change committed after that leaves the attempt's snapshot and receive
+/// to the new generation in the same transaction. An attempt keeps the
+/// Encrypted Link snapshot it reads after any handshake advance, so a change
+/// committed after that read leaves the attempt's snapshot and receive
 /// counter stale although nothing is wrong with the peer. The attempt's
 /// storage steps, the counter read, the buffer insert, and the absent-slot
 /// check, before any cursor advance or `Absent` report, therefore first
-/// compare the stored Encrypted Link generation with the attempt's in the
+/// compare the stored Encrypted Link generation with that snapshot's in the
 /// same transaction (see [`stored_link_generation_moved`]). When it moved,
 /// the step does not run and the attempt reports
 /// [`LinkAttemptError::GenerationMoved`]. Only that outcome is retried, and

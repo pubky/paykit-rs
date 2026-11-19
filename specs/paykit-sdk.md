@@ -1425,23 +1425,27 @@ probe runs. The probe reports
 `CaughtUp` when the next slot is absent and `Backpressured` when it fills
 capacity. A failed probe leaves the Linked Peer `Replaying` until the next
 event or healthy audit, and a probe never records the last successful audit.
+When the stream epoch stops before or during the probe, intake drops the
+probe's outcome without writing health, still wakes consumers for packets the
+probe buffered or a pending handshake it found, and leaves the next epoch's
+startup audit to settle the Linked Peer.
 HTTP 404, 405, and 501 subscription failures are reported as `Unsupported`;
 other stream/fetch failures, apart from that probe, and homeserver resolution
 failures are `Stale` and retry. Neither state proves remote absence. Buffered
 work remains drainable during transport failure.
 
-An expected-slot acquisition reads the Encrypted Link state once, at its start.
-Its generation-checked storage steps (the counter read, the buffer insert, and
-the absent-slot check, before any cursor advance or Absent report) first
-compare the stored Encrypted Link generation with that one in the same
-transaction. When any committed change moved it, whoever committed it (a
-consumer drain, an outbound private send, a handshake or observation
-transition, or the acquisition's own observation step that committed a
-replacement), the step neither buffers a packet, advances a cursor, nor
-reports the slot absent, and the acquisition is retried from fresh link state,
-up to 8 attempts. After the last attempt it fails like any other fetch
-failure. Other failures, including a failed observation, recovery, network,
-or handshake step, are not retried.
+An expected-slot acquisition attempt keeps the Encrypted Link snapshot it
+reads after any handshake advance. Its generation-checked storage steps (the
+counter read, the buffer insert, and the absent-slot check, before any cursor
+advance or Absent report) first compare the stored Encrypted Link generation
+with that snapshot's in the same transaction. When any committed change moved
+it, whoever committed it (a consumer drain, an outbound private send, a
+handshake or observation transition, or the acquisition's own observation
+step that committed a replacement), the step neither buffers a packet,
+advances a cursor, nor reports the slot absent, and the acquisition is retried
+from fresh link state, up to 8 attempts. After the last attempt it fails like
+any other fetch failure. Other failures, including a failed observation,
+recovery, network, or handshake step, are not retried.
 
 `PrivateIntakeSupervisor::health` reports per-peer transport state and last
 successful absent-slot audit. `subscribe_work` is a coalesced local hint, not a
