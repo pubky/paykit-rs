@@ -622,7 +622,7 @@ pub(crate) fn wait_for_record_key(
     record_with_key(cx, target).map(|_| ())
 }
 
-fn record_with_key(
+pub(crate) fn record_with_key(
     cx: &ReceiveContext<'_>,
     target: &RecordTarget,
 ) -> Result<Option<SharedRecord>, Fail> {
@@ -1162,7 +1162,7 @@ pub(crate) fn make_room_for_stop(
             for (index, (order, name, end)) in group.into_iter().enumerate() {
                 if index == 0
                     && (!crate::allowances::end_bounded(cx, content.as_ref(), &end)?
-                        || crate::allowances::keeps_stored_message(cx, &record)?)
+                        || crate::allowances::keeps_stored_message(cx, &end.sender(), &record)?)
                 {
                     continue;
                 }

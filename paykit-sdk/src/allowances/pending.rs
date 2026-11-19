@@ -626,6 +626,13 @@ impl Paykit {
             self.local_commit(effects).await?;
             return Ok(Some(Placed::Done));
         }
+        if self
+            .app
+            .scope_key(self.app.data_epoch(), &pending.collection.policy.read_scope)
+            .is_none()
+        {
+            return Ok(Some(Placed::Not));
+        }
         let record = PendingAllowanceRecord::new(&own, message.clone())?;
         let mut conditions = vec![absent(a_key)];
         if retained_delete.is_some() {

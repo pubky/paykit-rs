@@ -1178,6 +1178,11 @@ impl Paykit {
         let Some(held) = self.app.shared_record(&key).await? else {
             return Ok(PendingReply::Unrelated);
         };
+        // A reply kept before this observation still has its ordinary deadline.
+        // The sealed record may hold the matching proposal (Paykit spec 8.1).
+        if crate::hold::awaits_key(&held.content) {
+            return Ok(PendingReply::Waits(None));
+        }
         let Some(pending) = original_for(&held, &target, &key, &own, message) else {
             return Ok(PendingReply::Unrelated);
         };

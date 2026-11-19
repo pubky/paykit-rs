@@ -708,28 +708,25 @@ pub(crate) fn receive_effect(
     if let Body::AllowanceEnd(_) = stored.body() {
         return keep_end(cx, &target, &allowance_id, stored, position, scopes);
     }
-    if matches!(stored.body(), Body::AllowanceProposal(_)) {
+    if cx.record(&target)?.is_none() {
         let pending =
             allowance_record_target(Collection::AllowanceProposals, &sender, &allowance_id);
-        if let Some(held) = cx.record(&pending)? {
-            if !matches!(held.content, RecordContent::Deleted) && cx.record(&target)?.is_none() {
+        let pending_record = receive::record_with_key(cx, &pending)?;
+        if matches!(stored.body(), Body::AllowanceProposal(_)) {
+            if let Some(held) =
+                pending_record.filter(|r| !matches!(r.content, RecordContent::Deleted))
+            {
                 receive::hold_while_unlisted(cx, RecordSide::Allowances)?;
                 if !replies::before_retirement(cx, &pending, position)? {
                     replies::observe_second(cx, &pending, &held, stored, position)?;
                 }
                 return receive::note_peer(cx, &sender, stored);
             }
-        }
-    }
-    if is_allowance_response(stored.body()) {
-        let pending =
-            allowance_record_target(Collection::AllowanceProposals, &sender, &allowance_id);
-        let held = cx.record(&pending)?;
-        if cx.record(&target)?.is_none() {
+        } else if is_allowance_response(stored.body()) {
             if replies::before_retirement(cx, &pending, position)? {
                 return receive::note_peer(cx, &sender, stored);
             }
-            if let Some(held) = held {
+            if let Some(held) = pending_record {
                 match replies::observe(cx, &held, stored, position)? {
                     replies::PendingReply::Undecided => {
                         keep_answer(cx, &target, stored, position, true, None)?;
@@ -1149,25 +1146,8 @@ fn keep_end(
     let sender = stored.sender();
     let refs = &stored.message().refs;
     let content = cx.record(target)?.map(|held| held.content);
-    let pending = allowance_record_target(Collection::AllowanceProposals, &sender, allowance_id);
-    let key = cx.record_key(&pending)?;
-    let known_withdrawal = if refs.len() == 1 {
-        cx.record(&pending)?
-            .as_ref()
-            .filter(|held| replies::qualified_at(held, &pending, &key))
-            .and_then(|held| {
-                PendingAllowanceRecord::read(held.content.value()?, &cx.identity()).ok()
-            })
-            .is_some_and(|proposal| {
-                proposal.counterparty() == &sender
-                    && proposal.allowance_id() == allowance_id
-                    && proposal.proposal().sender() == sender
-                    && refs.as_slice() == [proposal.proposal().hash()]
-            })
-    } else {
-        false
-    };
-    let held = receive::holds_record(content.as_ref()) || known_withdrawal;
+    let bounded = end_bounded(cx, content.as_ref(), stored)?;
+    let held = receive::holds_record(content.as_ref()) || !bounded;
     let record = content
         .as_ref()
         .and_then(RecordContent::value)
@@ -1207,10 +1187,7 @@ fn keep_end(
         // (`receive::make_room_for_stop`).
         let second =
             !state::cx_scan::<KeptMessage>(cx, &key::allowance_ends(&record_key))?.is_empty();
-        if second
-            || (end_bounded(cx, content.as_ref(), stored)?
-                && !keeps_stored_message(cx, &record_key)?)
-        {
+        if second || (bounded && !keeps_stored_message(cx, &sender, &record_key)?) {
             let order = (
                 stored.accepted_at().ok_or_else(Fail::corrupt)?,
                 position.seq,
@@ -1240,12 +1217,40 @@ pub(crate) fn end_bounded(
     content: Option<&RecordContent>,
     end: &StoredMessage,
 ) -> std::result::Result<bool, Fail> {
-    if !receive::holds_record(content) {
-        return Ok(true);
-    }
     let Body::AllowanceEnd(body) = end.body() else {
         return Err(Fail::corrupt());
     };
+    if !receive::holds_record(content) {
+        let refs = &end.message().refs;
+        if refs.len() != 1 {
+            return Ok(true);
+        }
+        let peer = end.sender();
+        let target =
+            allowance_record_target(Collection::AllowanceProposals, &peer, &body.allowance_id);
+        let key = cx.record_key(&target)?;
+        let Some(held) = cx.record(&target)? else {
+            return Ok(true);
+        };
+        if !receive::holds_record(Some(&held.content)) {
+            return Ok(true);
+        }
+        // A live value without qualified roles can protect the earliest end from eviction.
+        // Removing the proposal still requires the exact signed original and a current read.
+        let Some(proposal) = held
+            .content
+            .value()
+            .filter(|_| replies::qualified_at(&held, &target, &key))
+            .and_then(|value| PendingAllowanceRecord::read(value, &cx.identity()).ok())
+        else {
+            return Ok(false);
+        };
+        let matched = proposal.counterparty() == &peer
+            && proposal.allowance_id() == &body.allowance_id
+            && proposal.proposal().sender() == peer
+            && refs.as_slice() == [proposal.proposal().hash()];
+        return Ok(!matched);
+    }
     let Some(record) = content
         .and_then(RecordContent::value)
         .and_then(|value| bind_at(value, &cx.identity(), &end.sender(), &body.allowance_id))
@@ -1340,16 +1345,33 @@ fn note_target(key: &[u8], note: &StoredNote, own: &[u8; 32]) -> Result<Option<R
     Ok(named_allowance(stored.body()).map(|id| allowance_target(&stored.sender(), id)))
 }
 
-/// Whether the app keeps a stored entry's message of the Allowance whose record is `record`,
-/// still to write into it (`se/`, `stored.rs`), read in the receive step. Such a message can
+/// A first proposal is kept until its bounded admission and conditional create complete.
+fn keeps_proposal(messages: Vec<(String, KeptMessage)>, own: &[u8; 32]) -> Result<bool> {
+    for (_, message) in messages {
+        if matches!(message.stored(own)?.body(), Body::AllowanceProposal(_)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether this app still owes the first pending proposal or a stored inbox message for
+/// the same Allowance. Both are bound to the permanent `record` key. Such a message can
 /// open the record or give it the response an end names, so the end's stop is neither
 /// dropped by the bounds ([`receive::make_room_for_stop`]) nor given up while it is kept
 /// (Paykit spec 8.1, 8.3).
 pub(crate) fn keeps_stored_message(
     cx: &ReceiveContext<'_>,
+    peer: &[u8; 32],
     record: &[u8; 32],
 ) -> std::result::Result<bool, Fail> {
     let own = cx.identity();
+    let prefix = key::kept_reply(peer, record, "");
+    if keeps_proposal(state::cx_scan::<KeptMessage>(cx, &prefix)?, &own)
+        .map_err(|_| Fail::corrupt())?
+    {
+        return Ok(true);
+    }
     for (name, note) in state::cx_scan::<StoredNote>(cx, key::STORED_NOTES)? {
         if let Some(target) =
             note_target(name.as_bytes(), &note, &own).map_err(|_| Fail::corrupt())?
@@ -1448,8 +1470,12 @@ impl Paykit {
     }
 
     /// [`keeps_stored_message`], outside the receive step.
-    async fn keeps_stored_message(&self, record: &[u8; 32]) -> Result<bool> {
+    async fn keeps_stored_message(&self, peer: &[u8; 32], record: &[u8; 32]) -> Result<bool> {
         let own = self.identity();
+        let prefix = key::kept_reply(peer, record, "");
+        if keeps_proposal(self.local_scan::<KeptMessage>(&prefix).await?, &own)? {
+            return Ok(true);
+        }
         for (rest, note) in Box::pin(self.local_scan::<StoredNote>(key::STORED_NOTES)).await? {
             let key = format!("{}{rest}", key::STORED_NOTES);
             if let Some(target) = note_target(key.as_bytes(), &note, &own)? {
@@ -2397,7 +2423,7 @@ impl Paykit {
                         }
                     }
                     if stale(&end, self.service_time())?
-                        && !Box::pin(self.keeps_stored_message(&record)).await?
+                        && !Box::pin(self.keeps_stored_message(&end.sender(), &record)).await?
                     {
                         Box::pin(self.local_delete(&stop)).await?;
                     }
@@ -2576,7 +2602,7 @@ impl Paykit {
                         && accepted.is_none_or(|a| refs.get(1) != Some(&a.hash())) =>
                 {
                     if stale(&end, self.service_time())?
-                        && !Box::pin(self.keeps_stored_message(&record)).await?
+                        && !Box::pin(self.keeps_stored_message(&end.sender(), &record)).await?
                     {
                         Box::pin(self.local_delete(stop)).await?;
                     }
