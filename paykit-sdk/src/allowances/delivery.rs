@@ -17,8 +17,7 @@ use pubky_switch_client::error::StoreError;
 use pubky_switch_core::{enc::serde_b64, message::Message, ops::RecordVersion};
 use serde::{Deserialize, Serialize};
 
-/// The applied delete of the exact proposal this signed answer names. A withdrawal
-/// also binds its release to that deletion's authenticated generation and version.
+/// The authenticated deletion that retired the exact proposal this signed reply names.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AppliedReply {

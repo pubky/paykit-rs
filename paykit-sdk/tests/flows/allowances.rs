@@ -10576,7 +10576,16 @@ async fn test_queued_withdrawal_after_reload_keeps_identical_recreated_proposals
 }
 
 #[tokio::test]
-async fn test_kept_rejection_delivers_after_its_delete_applies_at_the_recovered_service() {
+async fn test_kept_rejection_delivers_after_a_service_key_change_preserves_its_selected_proposal() {
+    Box::pin(kept_rejection_across_generations(false)).await;
+}
+
+#[tokio::test]
+async fn test_kept_rejection_refuses_the_pre_loss_condition_on_an_uploaded_proposal() {
+    Box::pin(kept_rejection_across_generations(true)).await;
+}
+
+async fn kept_rejection_across_generations(lost: bool) {
     use pubky_switch_client::app::{Delivery, KeptBatchStatus, RecordContent, RecordRead};
     use pubky_switch_client::store::MemoryStore;
     use std::sync::Arc;
@@ -10628,19 +10637,35 @@ async fn test_kept_rejection_delivers_after_its_delete_applies_at_the_recovered_
     };
     let app_id = payer.app_id();
     drop(payer);
-    crate::provider_loss::declare_loss(&w);
-    Box::pin(crate::provider_loss::follow_generation(&mut sibling)).await;
-    // A sibling uploads the selected signed record before the original wallet can
-    // retry its guarded deletion at the replacement service.
-    let RecordRead::Fresh(uploaded) = sibling.app_mut().read_record_fresh(&target).await.unwrap()
-    else {
-        panic!("the replacement must have the proposal the payer actually selected");
-    };
-    assert!(uploaded.authenticated);
-    assert_eq!(
-        (uploaded.version, &uploaded.content),
-        (proposal.version, &proposal.content)
-    );
+    if lost {
+        crate::provider_loss::declare_loss(&w);
+        Box::pin(crate::provider_loss::follow_generation(&mut sibling)).await;
+        // An upload preserves P's original version but acquires a new service revision.
+        let RecordRead::Fresh(uploaded) =
+            sibling.app_mut().read_record_fresh(&target).await.unwrap()
+        else {
+            panic!("the replacement must have the proposal the payer actually selected");
+        };
+        assert!(uploaded.authenticated);
+        assert_eq!(
+            (uploaded.version, &uploaded.content),
+            (proposal.version, &proposal.content)
+        );
+    } else {
+        use crate::common::ALICE_ORIGIN;
+        use pubky_switch_core::records::Inbox;
+        // Switch 12.5 retains the current signed write across a service key change.
+        let service = w.alice.switch().change_key_into([74; 32]);
+        w.router.add_switch(ALICE_ORIGIN, &service);
+        let doc = w
+            .alice
+            .sign_next(|body| {
+                body.generation += 1;
+                body.inbox = Inbox::new(ALICE_ORIGIN, service.service_key());
+            })
+            .unwrap();
+        service.deliver_identity(&doc).unwrap();
+    }
 
     let mut payer = Box::pin(Paykit::load(
         w.env(&w.alice, store),
@@ -10651,13 +10676,39 @@ async fn test_kept_rejection_delivers_after_its_delete_applies_at_the_recovered_
     ))
     .await
     .unwrap();
-    Box::pin(crate::provider_loss::follow_generation(&mut payer)).await;
+    payer.app_mut().refresh_identity().await.unwrap();
+    for _ in 0..6 {
+        payer.receive(None).await.unwrap();
+    }
     let current_generation = payer.app().own_identity().generation();
     assert!(current_generation > proposal.version.generation);
-    assert!(matches!(
-        payer.app().kept_batch(batch_id).await.unwrap(),
-        Some(KeptBatchStatus::Applied { .. })
-    ));
+    let outcome = payer.app().kept_batch(batch_id).await.unwrap();
+    if lost {
+        assert!(
+            matches!(outcome, Some(KeptBatchStatus::Dropped {
+            reason: pubky_switch_client::app::KeptBatchDrop::Refused { ref code }, ..
+        }) if code == "conflict"),
+            "{outcome:?}"
+        );
+        payer.flush().await.unwrap();
+        assert!(Box::pin(received_originals(&mut seller, &[&id]))
+            .await
+            .is_empty());
+        let RecordRead::Fresh(live) = payer.app_mut().read_record_fresh(&target).await.unwrap()
+        else {
+            panic!("the refused deletion must leave the re-uploaded P intact");
+        };
+        assert!(live.authenticated);
+        assert_eq!(
+            (live.version, live.content),
+            (proposal.version, proposal.content)
+        );
+        return;
+    }
+    assert!(
+        matches!(outcome, Some(KeptBatchStatus::Applied { .. })),
+        "the original guarded deletion must have applied after recovery: {outcome:?}"
+    );
     let closed = payer
         .app()
         .shared_record(&proposal.key)

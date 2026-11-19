@@ -1265,6 +1265,9 @@ impl Paykit {
         self.refresh_own()?;
         Box::pin(self.refresh_lists_when_due()).await?;
         self.send_outbox().await?;
+        // Flushing can settle a kept deletion. Its signed reply can leave only
+        // once Paykit has verified the applied operation and its service result.
+        Box::pin(self.recover_pending_deletes()).await?;
         Ok(())
     }
 }
