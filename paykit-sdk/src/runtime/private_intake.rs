@@ -2345,12 +2345,10 @@ mod tests {
 
     #[test]
     fn test_private_intake_event_path_filter_selects_private_directory() {
-        let filter = private_intake_event_path_filter();
         assert_eq!(
-            filter,
-            format!("{}/", paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX)
+            private_intake_event_path_filter(),
+            "/pub/paykit/v0/private/"
         );
-        assert!(format!("{}/abc/0", paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX).starts_with(&filter));
     }
 
     #[test]

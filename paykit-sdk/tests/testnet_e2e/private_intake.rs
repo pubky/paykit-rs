@@ -10,8 +10,8 @@ use std::{
 use async_trait::async_trait;
 use paykit_sdk::{
     load_encrypted_link_state, storage::StorageTransactionCallback, InMemoryStorage,
-    LinkedPeerState, PaykitSdk, PaykitSdkConfig, PrivateIntakeConfig, PrivateIntakeTransportState,
-    PubkyPublicKey, Result, StorageAdapter,
+    LinkedPeerState, PaykitSdk, PaykitSdkConfig, PrivateIntakeConfig, PrivateIntakeSupervisor,
+    PrivateIntakeTransportState, PubkyPublicKey, Result, StorageAdapter,
 };
 
 use crate::harness::{
@@ -128,6 +128,25 @@ async fn wait_for_buffered(
             .map_or(0, |state| state.buffered_packets.len());
         panic!("private intake should durably buffer expected packets: expected {count}, got {buffered}");
     }
+}
+
+async fn wait_for_caught_up(
+    supervisor: &PrivateIntakeSupervisor,
+    peer: &PubkyPublicKey,
+    expectation: &str,
+) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if supervisor.health().await.peers.get(peer)
+                == Some(&PrivateIntakeTransportState::CaughtUp)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect(expectation);
 }
 
 async fn advance_handshake_from_intake_after_restart(
@@ -600,18 +619,12 @@ async fn test_sign_out_and_stop_finish_with_healthy_private_intake_supervisor() 
         .start_private_intake(PrivateIntakeConfig::new(1).unwrap())
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if supervisor.health().await.peers.get(&pair.bob.public_key)
-                == Some(&PrivateIntakeTransportState::CaughtUp)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("private intake stream should become healthy");
+    wait_for_caught_up(
+        &supervisor,
+        &pair.bob.public_key,
+        "private intake stream should become healthy",
+    )
+    .await;
 
     tokio::time::timeout(Duration::from_secs(5), sdk.sign_out())
         .await
@@ -636,18 +649,12 @@ async fn test_new_link_re_resolves_running_private_intake_topology_immediately()
         .await
         .unwrap();
 
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if supervisor.health().await.peers.get(&pair.bob.public_key)
-                == Some(&PrivateIntakeTransportState::CaughtUp)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("initial private intake group should be running");
+    wait_for_caught_up(
+        &supervisor,
+        &pair.bob.public_key,
+        "initial private intake group should be running",
+    )
+    .await;
     let charlie = TestUser::sign_up_with_app(&pair._testnet, app_id("wallet")).await;
     sdk.initiate_link_with_peer(charlie.public_key.clone())
         .await
@@ -913,18 +920,12 @@ async fn test_private_intake_buffers_new_packet_from_live_event_stream() {
     let mut config = PrivateIntakeConfig::new(1).unwrap();
     config.healthy_audit_interval = Duration::from_secs(60 * 60);
     let supervisor = sdk.start_private_intake(config).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if supervisor.health().await.peers.get(&pair.bob.public_key)
-                == Some(&PrivateIntakeTransportState::CaughtUp)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("startup audit should catch up before the live packet is published");
+    wait_for_caught_up(
+        &supervisor,
+        &pair.bob.public_key,
+        "startup audit should catch up before the live packet is published",
+    )
+    .await;
     // Outlast the first in-stream audit, which fires after at most five
     // seconds of jitter.
     tokio::time::sleep(Duration::from_secs(7)).await;
