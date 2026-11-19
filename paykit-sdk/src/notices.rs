@@ -61,6 +61,10 @@ pub enum NoticeKind {
     /// confirmed write lacks it: it was never sent, the request may be paid or accepted
     /// again, and the user may answer it again.
     MessageGivenUp,
+    /// An original outgoing message found after restore may have reached its recipient.
+    /// Reconcile its outcome with the counterparty. Acknowledging it records that the host
+    /// has seen it, without authorizing delivery or a replacement (Paykit spec 7.2).
+    PossiblyDelivered,
     /// Messages a blocked counterparty's inbox accepted from
     /// [`Notice::lost_from_ms`] to [`Notice::lost_until_ms`], which the app dropped for the
     /// user's block to ask for again once the counterparty is unblocked, can no longer come
@@ -77,6 +81,7 @@ impl NoticeKind {
             Self::PaidAfterFailed => "paid_after_failed",
             Self::HeldWithoutPay => "held_without_pay",
             Self::MessageGivenUp => "given_up",
+            Self::PossiblyDelivered => "possibly_delivered",
             Self::BlockedMessagesLost => "blocked_lost",
         }
     }
@@ -106,10 +111,12 @@ pub struct Notice {
     /// The message it is about, by its `msg_id`; `None` for a notice about an attempt.
     pub msg_id: Option<String>,
     /// The counterparty: the payee of an attempt, the message's sender, or, for an own
-    /// answer given up, its payee.
+    /// answer given up, its payee. A possibly delivered message names its recipient.
     pub counterparty: [u8; 32],
     /// The request paid or named, `None` for none.
     pub request_hash: Option<[u8; 32]>,
+    /// The signed JSON hash of a possibly delivered outgoing message.
+    pub message_hash: Option<[u8; 32]>,
     /// When it was raised, in Unix milliseconds: the highest service time the app had
     /// verified then, 0 before any.
     pub raised_at_ms: u64,
@@ -132,6 +139,8 @@ pub(crate) struct KeptNotice {
     #[serde(with = "serde_b64")]
     pub(crate) counterparty: [u8; 32],
     pub(crate) request_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) message_hash: Option<String>,
     pub(crate) raised_at_ms: u64,
     pub(crate) acknowledged: bool,
     /// For a message given up: the entry the client keeps stored for it, which the
@@ -201,6 +210,7 @@ impl KeptNotice {
             msg_id: None,
             counterparty: entry.payee,
             request_hash: entry.request_hash.clone(),
+            message_hash: None,
             raised_at_ms: at,
             acknowledged: false,
             stored: None,
@@ -223,6 +233,7 @@ impl KeptNotice {
             msg_id: None,
             counterparty: payee,
             request_hash: request_hash.map(|hash| pubky_switch_core::enc::b64(hash)),
+            message_hash: None,
             raised_at_ms: at,
             acknowledged: false,
             stored: None,
@@ -250,10 +261,27 @@ impl KeptNotice {
             msg_id: Some(msg_id.to_owned()),
             counterparty: sender,
             request_hash: request_hash.map(|hash| pubky_switch_core::enc::b64(&hash)),
+            message_hash: None,
             raised_at_ms: at,
             acknowledged: false,
             stored,
             origin,
+            lost: None,
+        }
+    }
+
+    fn possibly_delivered(stored: &paykit_lib::records::StoredMessage, at: u64) -> Self {
+        Self {
+            kind: NoticeKind::PossiblyDelivered,
+            attempt_id: None,
+            msg_id: Some(stored.message().msg_id.clone()),
+            counterparty: stored.message().to,
+            request_hash: None,
+            message_hash: Some(pubky_switch_core::enc::b64(&stored.hash())),
+            raised_at_ms: at,
+            acknowledged: false,
+            stored: None,
+            origin: None,
             lost: None,
         }
     }
@@ -269,7 +297,10 @@ impl KeptNotice {
     /// corrupt store.
     pub(crate) fn check(&self, attempt: &AttemptId, kind: NoticeKind) -> Result<()> {
         if self.kind != kind
-            || kind == NoticeKind::MessageGivenUp
+            || matches!(
+                kind,
+                NoticeKind::MessageGivenUp | NoticeKind::PossiblyDelivered
+            )
             || self.attempt_id.as_deref() != Some(attempt.to_text().as_str())
             || self.msg_id.is_some()
             || self.stored.is_some()
@@ -290,6 +321,7 @@ impl KeptNotice {
             msg_id: None,
             counterparty,
             request_hash: None,
+            message_hash: None,
             raised_at_ms: at,
             acknowledged: false,
             stored: None,
@@ -367,6 +399,12 @@ impl KeptNotice {
             msg_id: self.msg_id.clone(),
             counterparty: self.counterparty,
             request_hash,
+            message_hash: self
+                .message_hash
+                .as_deref()
+                .map(unb64_array::<32>)
+                .transpose()
+                .map_err(|_| PaykitError::corrupt())?,
             raised_at_ms: self.raised_at_ms,
             lost_from_ms: self.lost.map(|(from, _)| from),
             lost_until_ms: self.lost.map(|(_, until)| until),
@@ -378,6 +416,22 @@ impl KeptNotice {
 /// a value at another notice's key, or under a key that names no notice, is a corrupt store.
 pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
     match StateKey::parse(key.as_bytes()) {
+        Some(StateKey::RestoredDelivery { to, msg_id, hash }) => {
+            if notice.kind != NoticeKind::PossiblyDelivered
+                || notice.counterparty != to
+                || notice.msg_id.as_ref() != Some(&msg_id)
+                || notice.message_hash.as_deref() != Some(&pubky_switch_core::enc::b64(&hash))
+                || notice.attempt_id.is_some()
+                || notice.request_hash.is_some()
+                || notice.stored.is_some()
+                || notice.origin.is_some()
+                || notice.lost.is_some()
+            {
+                return Err(PaykitError::corrupt());
+            }
+            Ok(())
+        }
+        _ if notice.message_hash.is_some() => Err(PaykitError::corrupt()),
         Some(StateKey::Notice { attempt, kind }) => notice.check(&attempt, kind),
         Some(StateKey::MessageNotice { sender, msg_id }) => notice.check_message(&sender, &msg_id),
         Some(StateKey::BlockedLost {
@@ -394,6 +448,31 @@ pub(crate) fn notice_id(attempt: &AttemptId, kind: NoticeKind) -> String {
 }
 
 impl Paykit {
+    /// An authenticated original from a restored record has no known delivery disposition.
+    pub(crate) async fn note_restored_delivery(
+        &mut self,
+        stored: &paykit_lib::records::StoredMessage,
+    ) -> Result<()> {
+        if stored.sender() != self.identity() || stored.cert().app_id() != self.app_id() {
+            return Err(PaykitError::corrupt());
+        }
+        let message = stored.message();
+        // A live outbox, an accepted delivery or a terminal client result already has a
+        // host-visible disposition (Switch spec 11). Preserve it.
+        if self.app.delivery(&message.msg_id).await?.is_some() {
+            return Ok(());
+        }
+        let key = key::restored_delivery(&message.to, &message.msg_id, &stored.hash());
+        if self.kept_notice(&key).await?.is_none() {
+            self.local_put(
+                &key,
+                &KeptNotice::possibly_delivered(stored, self.service_time().unwrap_or(0)),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     /// The notices the host hasn't acknowledged, oldest first.
     ///
     /// # Errors
@@ -425,6 +504,7 @@ impl Paykit {
             Some(
                 StateKey::Notice { .. }
                     | StateKey::MessageNotice { .. }
+                    | StateKey::RestoredDelivery { .. }
                     | StateKey::BlockedLost { .. }
             )
         ) {
@@ -452,7 +532,7 @@ impl Paykit {
         if let Some(stored) = &kept.stored {
             self.forget_stored(stored, &kept).await?;
         }
-        if !held {
+        if !held && kept.kind != NoticeKind::PossiblyDelivered {
             return self.local_delete(&key).await;
         }
         kept.acknowledged = true;
@@ -535,12 +615,47 @@ mod tests {
             msg_id: None,
             counterparty: [1; 32],
             request_hash: Some(pubky_switch_core::enc::b64(&[2; 32])),
+            message_hash: None,
             raised_at_ms: 3,
             acknowledged: false,
             stored: None,
             origin: None,
             lost: None,
         }
+    }
+
+    #[test]
+    fn test_restored_delivery_notice_binds_the_recipient_id_and_message_hash() {
+        let to = [2; 32];
+        let hash = [3; 32];
+        let id = "123e4567-e89b-42d3-a456-426614174000";
+        let mut notice = KeptNotice {
+            kind: NoticeKind::PossiblyDelivered,
+            attempt_id: None,
+            msg_id: Some(id.into()),
+            counterparty: to,
+            request_hash: None,
+            message_hash: Some(pubky_switch_core::enc::b64(&hash)),
+            raised_at_ms: 3,
+            acknowledged: false,
+            stored: None,
+            origin: None,
+            lost: None,
+        };
+        let key = key::restored_delivery(&to, id, &hash);
+        assert!(bind_notice(&key, &notice).is_ok());
+        notice.acknowledged = true;
+        assert!(bind_notice(&key, &notice).is_ok());
+        for different in [
+            key::restored_delivery(&[4; 32], id, &hash),
+            key::restored_delivery(&to, id, &[4; 32]),
+            key::restored_delivery(&to, "223e4567-e89b-42d3-a456-426614174000", &hash),
+            key::message_notice(&to, id),
+        ] {
+            assert!(bind_notice(&different, &notice).is_err());
+        }
+        notice.kind = NoticeKind::MessageGivenUp;
+        assert!(bind_notice(&key, &notice).is_err());
     }
 
     #[test]
