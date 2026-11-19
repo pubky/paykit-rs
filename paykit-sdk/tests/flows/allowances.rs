@@ -8899,3 +8899,263 @@ async fn test_allowances_user_end_and_resend_request_apply_their_own_delivery_ru
         .await
         .is_empty());
 }
+
+#[tokio::test]
+async fn test_pending_reply_stop_holds_the_original_resend_across_a_cold_load() {
+    Box::pin(held_pending_replies(PendingReplyCase::Retry)).await;
+}
+
+#[tokio::test]
+async fn test_pending_reply_stop_ends_with_the_verified_sibling_deletion() {
+    Box::pin(held_pending_replies(PendingReplyCase::DeletionSeen)).await;
+}
+
+#[tokio::test]
+async fn test_pending_reply_stop_waits_if_only_the_recreated_proposal_is_seen() {
+    Box::pin(held_pending_replies(PendingReplyCase::OnlyRecreationSeen)).await;
+}
+
+#[tokio::test]
+async fn test_pending_reply_stop_and_owed_acceptance_survive_an_older_in_place_restore() {
+    Box::pin(held_pending_replies(PendingReplyCase::Restore)).await;
+}
+
+#[tokio::test]
+async fn test_pending_reply_stop_stays_after_the_unplaced_acceptance_is_given_up() {
+    Box::pin(held_pending_replies(PendingReplyCase::GiveUp)).await;
+}
+
+#[tokio::test]
+async fn test_pending_reply_stop_requires_the_acceptance_to_come_first() {
+    Box::pin(held_pending_replies(PendingReplyCase::RejectionFirst)).await;
+}
+
+#[tokio::test]
+async fn test_pending_reply_stop_does_not_hide_the_give_up_of_a_lone_acceptance() {
+    Box::pin(held_pending_replies(PendingReplyCase::LoneAcceptance)).await;
+}
+
+enum PendingReplyCase {
+    Retry,
+    DeletionSeen,
+    OnlyRecreationSeen,
+    Restore,
+    GiveUp,
+    RejectionFirst,
+    LoneAcceptance,
+}
+
+async fn held_pending_replies(by: PendingReplyCase) {
+    use paykit_lib::records::PendingAllowanceRecord;
+
+    let w = World::new();
+    let mut shop = Box::pin(shop(&w)).await;
+    let mut till = w
+        .join(
+            &w.bob,
+            "till",
+            AppScopes::new().request().allowance().build().unwrap(),
+        )
+        .await;
+    let storage = crate::common::store();
+    let mut wallet = Box::pin(w.join_with(
+        &w.alice,
+        "wallet",
+        AppScopes::new().pay().allowance().build().unwrap(),
+        Default::default(),
+        storage.clone(),
+    ))
+    .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut phone = Box::pin(alice_app(
+        &w,
+        "phone",
+        AppScopes::new().pay().allowance().build().unwrap(),
+    ))
+    .await;
+    let id = paykit_lib::AllowanceId::generate().unwrap();
+    let p = signed_pending_proposal(&wallet, w.bob_id(), &id, "allower");
+    let family = paykit_lib::Collection::AllowanceProposals;
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(family.name(), family.fixed_policy()),
+        &paykit_lib::derive::natural_key::allowance(&w.bob_id(), &id),
+    );
+    let key = wallet.app().record_key(&target).unwrap();
+    let original = PendingAllowanceRecord::new(&w.alice_id(), p.clone())
+        .unwrap()
+        .to_json()
+        .unwrap();
+    Box::pin(write_record(&mut phone, &target, Some(&original))).await;
+    Box::pin(read_listed_records(&mut wallet)).await;
+    let selected = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    assert_eq!(selected.content.value(), Some(original.as_slice()));
+    // The shop receives the original envelope before either counterparty app responds.
+    let original_id = wallet.app_mut().queue_stored(p.plaintext()).await.unwrap();
+    assert_eq!(original_id, p.message().msg_id);
+    wallet.flush().await.unwrap();
+    for recipient in [&mut shop, &mut till] {
+        let first = recipient.receive(None).await.unwrap();
+        assert!(first.report.events.iter().any(|e| matches!(e,
+            AppEvent::MessageReceived { kind, msg_id, .. }
+                if kind == "paykit.allowance_proposal" && msg_id == &original_id)));
+    }
+    assert_ne!(shop.app_id(), till.app_id());
+    let early = if matches!(by, PendingReplyCase::Restore) {
+        Some(wallet.backup().await.unwrap())
+    } else {
+        None
+    };
+    let (first_kind, second_kind) = if matches!(by, PendingReplyCase::RejectionFirst) {
+        ("paykit.allowance_rejection", "paykit.allowance_acceptance")
+    } else {
+        ("paykit.allowance_acceptance", "paykit.allowance_rejection")
+    };
+    inject_with_id(
+        &w,
+        &w.bob,
+        "shop",
+        &[wallet.app_id(), phone.app_id()],
+        first_kind,
+        vec![p.hash()],
+        json!({"allowance_id":id.as_str()}),
+        SENT_FIRST,
+    );
+    let single = matches!(by, PendingReplyCase::LoneAcceptance);
+    if !single {
+        inject_with_id(
+            &w,
+            &w.bob,
+            "till",
+            &[wallet.app_id(), phone.app_id()],
+            second_kind,
+            vec![p.hash()],
+            json!({"allowance_id":id.as_str()}),
+            SENT_SECOND,
+        );
+    }
+    for app in [&mut wallet, &mut phone] {
+        app.receive(None).await.unwrap();
+        if matches!(by, PendingReplyCase::RejectionFirst) {
+            assert!(app
+                .app()
+                .protocol_scan("paykit", b"pc/")
+                .await
+                .unwrap()
+                .is_empty());
+            continue;
+        }
+        assert_eq!(
+            app.app()
+                .protocol_scan("paykit", b"pc/")
+                .await
+                .unwrap()
+                .len(),
+            usize::from(!single)
+        );
+        assert!(Box::pin(keeps(app, b"pr/", SENT_FIRST)).await);
+        assert!(!Box::pin(keeps(app, b"pr/", SENT_SECOND)).await);
+    }
+    if matches!(by, PendingReplyCase::RejectionFirst) {
+        assert!(w.rail.all_executions().is_empty());
+        return;
+    }
+    if let Some(backup) = early {
+        drop(wallet);
+        let wallet = Box::pin(Paykit::restore(
+            w.env(&w.alice, storage),
+            Default::default(),
+            &backup,
+            std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+            w.timer(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            wallet
+                .app()
+                .protocol_scan("paykit", b"pc/")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(Box::pin(keeps(&wallet, b"pr/", SENT_FIRST)).await);
+        assert!(w.rail.all_executions().is_empty());
+        return;
+    }
+    if single || matches!(by, PendingReplyCase::GiveUp) {
+        w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS + 1);
+        wallet.receive(None).await.unwrap();
+        assert!(!Box::pin(keeps(&wallet, b"pr/", SENT_FIRST)).await);
+        let notice = wallet
+            .notices()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|n| {
+                n.kind == paykit_sdk::NoticeKind::MessageGivenUp
+                    && n.msg_id.as_deref() == Some(SENT_FIRST)
+                    && n.counterparty == w.bob_id()
+            })
+            .unwrap();
+        wallet.acknowledge_notice(&notice.id).await.unwrap();
+        assert_eq!(
+            wallet
+                .app()
+                .protocol_scan("paykit", b"pc/")
+                .await
+                .unwrap()
+                .len(),
+            usize::from(!single)
+        );
+        assert!(w.rail.all_executions().is_empty());
+        return;
+    }
+    if matches!(by, PendingReplyCase::Retry) {
+        use pubky_switch_client::app::Delivery;
+        let delivery = wallet.app_mut().resend(&original_id).await.unwrap();
+        assert!(matches!(delivery, Delivery::Queued { .. }));
+        let app_id = wallet.app_id();
+        drop(wallet);
+        let mut wallet =
+            Box::pin(w.load_on_clock(&w.alice, storage, app_id, w.clock.clone())).await;
+        wallet.flush().await.unwrap();
+        let queued = wallet.app().queued_messages("paykit").await.unwrap();
+        assert!(queued.iter().any(|q| q.msg_id == original_id
+            && q.hash == p.hash()
+            && q.to == w.bob_id()
+            && q.resend));
+        assert!(Box::pin(keeps(&wallet, b"pr/", SENT_FIRST)).await);
+    } else {
+        // The user's other wallet deletes its selected pending write on the service.
+        Box::pin(write_record(&mut phone, &target, None)).await;
+        let seen = matches!(by, PendingReplyCase::DeletionSeen);
+        if seen {
+            wallet.app_mut().receive(None).await.unwrap();
+            let r = wallet.app().shared_record(&key).await.unwrap().unwrap();
+            assert!(r.authenticated && !r.not_taken && !r.doubtful);
+            assert_eq!(r.content, pubky_switch_client::app::RecordContent::Deleted);
+            assert!(wallet.app().record_seen(&key).await.unwrap().is_none());
+        }
+        let app_id = wallet.app_id();
+        drop(wallet);
+        let mut wallet =
+            Box::pin(w.load_on_clock(&w.alice, storage, app_id, w.clock.clone())).await;
+        phone.receive(None).await.unwrap();
+        Box::pin(write_record(&mut phone, &target, Some(&original))).await;
+        wallet.receive(None).await.unwrap();
+        let r = wallet.app().shared_record(&key).await.unwrap().unwrap();
+        assert_eq!(r.content.value(), Some(original.as_slice()));
+        assert_eq!(Box::pin(keeps(&wallet, b"pr/", SENT_FIRST)).await, !seen);
+        assert_eq!(
+            wallet
+                .app()
+                .protocol_scan("paykit", b"pc/")
+                .await
+                .unwrap()
+                .len(),
+            usize::from(!seen)
+        );
+    }
+    assert!(w.rail.all_executions().is_empty());
+}

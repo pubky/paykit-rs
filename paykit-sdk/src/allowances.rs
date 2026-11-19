@@ -86,6 +86,10 @@ use crate::requests::MessageDelivery;
 use crate::state::{self, key, Tx};
 use crate::stored::{Placed, StoredNote};
 
+pub(crate) use replies::holds_delivery as pending_conflict_holds_delivery;
+pub(crate) use replies::{lifetime_ended, restore_conflicts, PendingConflict};
+mod replies;
+
 /// How many times a write of this app's is built again after its record changed meanwhile.
 const WRITE_TRIES: usize = 3;
 
@@ -397,8 +401,16 @@ pub(crate) fn allowance_target(
     counterparty: &[u8; 32],
     allowance_id: &AllowanceId,
 ) -> RecordTarget {
+    allowance_record_target(Collection::Allowances, counterparty, allowance_id)
+}
+
+pub(crate) fn allowance_record_target(
+    collection: Collection,
+    counterparty: &[u8; 32],
+    allowance_id: &AllowanceId,
+) -> RecordTarget {
     RecordTarget::new(
-        crate::activity::switch_collection(Collection::Allowances, None),
+        crate::activity::family(collection),
         &natural_key::allowance(counterparty, allowance_id),
     )
 }
@@ -679,6 +691,24 @@ pub(crate) fn receive_effect(
     let target = allowance_target(&sender, &allowance_id);
     if let Body::AllowanceEnd(_) = stored.body() {
         return keep_end(cx, &target, &allowance_id, stored, seq, scopes);
+    }
+    if is_allowance_response(stored.body()) {
+        let pending =
+            allowance_record_target(Collection::AllowanceProposals, &sender, &allowance_id);
+        if let Some(held) = cx.record(&pending)? {
+            if cx.record(&target)?.is_none() {
+                match replies::observe(cx, &held, stored, seq)? {
+                    replies::PendingReply::Unrelated => {}
+                    replies::PendingReply::Waits => {
+                        keep_answer(cx, &target, stored, seq, true)?;
+                        return receive::note_peer(cx, &sender, stored);
+                    }
+                    replies::PendingReply::Stopped => {
+                        return receive::note_peer(cx, &sender, stored)
+                    }
+                }
+            }
+        }
     }
     // The request path's own read (`receive::held_or_unlisted_at`, which
     // `receive::held_or_unlisted` is): the entry waits for the record's scope key, and an
@@ -2522,6 +2552,16 @@ impl Paykit {
             .await?
             .map(|held| held.content);
         if !receive::holds_record(content.as_ref()) {
+            match Box::pin(self.pending_reply_later(&record, &reply, order)).await? {
+                replies::PendingReply::Stopped => return self.local_delete(kept_key).await,
+                replies::PendingReply::Waits => {
+                    if crate::stored::past_window(accepted_at, self.service_time()) {
+                        self.give_up(kept_key, &reply).await?;
+                    }
+                    return Ok(());
+                }
+                replies::PendingReply::Unrelated => {}
+            }
             if crate::stored::past_window(accepted_at, self.service_time()) {
                 Box::pin(self.local_delete(kept_key)).await?;
             }
@@ -2658,6 +2698,17 @@ impl Paykit {
             .await?
             .map(|held| held.content)
         {
+            None if is_allowance_response(stored.body()) => {
+                match Box::pin(self.pending_reply_later(&record, &stored, order)).await? {
+                    replies::PendingReply::Stopped => {
+                        self.app
+                            .protocol_commit(crate::protocol::BACKUP_NAME, &locals)
+                            .await?;
+                        return Ok(Placed::Done);
+                    }
+                    replies::PendingReply::Waits | replies::PendingReply::Unrelated => None,
+                }
+            }
             // A record absent is opened only by a message that may open it, a proposal, as
             // the request path's later write does (`Paykit::place_note`).
             None => match stored.body() {

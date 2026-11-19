@@ -10,7 +10,6 @@ use paykit_lib::collections::Collection;
 use paykit_lib::records::{ActivityRecord, ActivitySide, RecordBinding};
 use paykit_lib::{derive::natural_key, Label};
 use pubky_switch_client::app::{PutBack, ReceiveContext, RecordDeletion, StoreFailure};
-use pubky_switch_client::error::StoreError;
 use pubky_switch_core::enc::{b64, serde_b64, serde_b64_vec};
 use serde::{Deserialize, Serialize};
 
@@ -380,13 +379,6 @@ pub struct PayeeReceiptDeletion {
     pub page_time_ms: Option<u64>,
 }
 
-fn step_failure(failure: Fail) -> StoreFailure {
-    match failure {
-        Fail::Store(error) => error,
-        _ => StoreFailure::unavailable(StoreError::Unavailable),
-    }
-}
-
 fn period_parent(
     own: &[u8; 32],
     record: &ActivityRecord,
@@ -452,7 +444,8 @@ pub(crate) fn observe_payee_deletion(
         receipt: None,
     };
     let local_key = observation.key();
-    let previous = state::cx_get::<PayeeDeletion>(cx, &local_key).map_err(step_failure)?;
+    let previous =
+        state::cx_get::<PayeeDeletion>(cx, &local_key).map_err(Fail::into_store_failure)?;
     let label = match deletion.policy {
         Some(policy) => {
             let Some(label) = Collection::PayeeActivity.policy_label(policy) else {
@@ -486,9 +479,9 @@ pub(crate) fn observe_payee_deletion(
             if exact
                 && record.receipt.is_none()
                 && record.lost_to_delete.is_none()
-                && !held_on_receive(cx, deletion.key).map_err(step_failure)?
+                && !held_on_receive(cx, deletion.key).map_err(Fail::into_store_failure)?
                 && !state::cx_scan::<ReceiptEvidence>(cx, key::RETAINED_RECEIPTS)
-                    .map_err(step_failure)?
+                    .map_err(Fail::into_store_failure)?
                     .iter()
                     .any(|(_, r)| r.source.bound() == Some(*deletion.key))
             {
@@ -540,8 +533,8 @@ pub(crate) fn observe_payee_deletion(
                 if protected != ReceiptBinding::Invalid {
                     observation.receipt = Some(evidence.hash);
                     let k = evidence.key();
-                    let existing =
-                        state::cx_get::<ReceiptEvidence>(cx, &k).map_err(step_failure)?;
+                    let existing = state::cx_get::<ReceiptEvidence>(cx, &k)
+                        .map_err(Fail::into_store_failure)?;
                     if existing.as_ref().is_none_or(|e| {
                         e.source.bound() != evidence.source.bound()
                             || (e.parent.is_empty() && !evidence.parent.is_empty())

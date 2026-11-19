@@ -843,6 +843,17 @@ impl Stored for KeptMessage {
     }
 }
 
+impl sealed::Sealed for crate::allowances::PendingConflict {}
+
+impl Stored for crate::allowances::PendingConflict {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let StateKey::PendingConflict(key) = family else {
+            return corrupt();
+        };
+        self.bind(key, binder)
+    }
+}
+
 impl sealed::Sealed for KeptNotice {}
 
 /// A notice: of the attempt and kind, or the sender and `msg_id`, its key names
@@ -1384,6 +1395,13 @@ pub(crate) mod key {
         format!("{ALLOWANCE_ENDS}{}/", b64(record_key))
     }
 
+    pub(crate) const PENDING_CONFLICTS: &str = "pc/";
+
+    /// A conflict in this pending Allowance lifetime.
+    pub(crate) fn pending_conflict(record: &[u8; 32]) -> String {
+        format!("{PENDING_CONFLICTS}{}", b64(record))
+    }
+
     /// A conflicting proposal or response of the Allowance whose record is `record_key`,
     /// kept as the stop.
     pub(crate) fn conflict(record_key: &[u8; 32]) -> String {
@@ -1737,6 +1755,8 @@ pub(crate) enum StateKey {
     AllowanceEnd { record: [u8; 32], msg_id: String },
     /// `ac/<record key>`: an entry of the consent list.
     Consent([u8; 32]),
+    /// `pc/<record key>`: a conflict kept for one pending Allowance lifetime.
+    PendingConflict([u8; 32]),
     /// `cf/<record key>`: a conflicting proposal or response kept as the stop.
     Conflict([u8; 32]),
     /// `en/<msg_id>`: the executor app an `executor_notice` is wrapped to.
@@ -1874,6 +1894,7 @@ impl StateKey {
                         }
                     }
                     "ac" => Self::Consent(b64_32(rest)?),
+                    "pc" => Self::PendingConflict(b64_32(rest)?),
                     "cf" => Self::Conflict(b64_32(rest)?),
                     "en" => Self::NoticeTarget(msg_id(rest)?),
                     "end" => Self::EndOrigin(msg_id(rest)?),
@@ -2861,6 +2882,10 @@ mod tests {
                 },
             ),
             (key::consent(&pubky), StateKey::Consent(pubky)),
+            (
+                key::pending_conflict(&pubky),
+                StateKey::PendingConflict(pubky),
+            ),
             (key::conflict(&pubky), StateKey::Conflict(pubky)),
             (key::notice_target(id), StateKey::NoticeTarget(id.into())),
             (key::end_origin(id), StateKey::EndOrigin(id.into())),
