@@ -1003,13 +1003,13 @@ async fn test_divergent_kept_write_waits_while_its_record_may_be_missing_from_th
     w.clock.advance_ms(31 * 24 * HOUR_MS);
     let now = w.clock.now_ms();
     w.bob.switch().push_missed(1, now - 1_000, now);
-    // The client lists the shop's collection right after the item; Paykit's own listing at
+    // The client lists the shop's collections right after the item; Paykit's own listing at
     // the end of the receive fails.
     w.bob
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Unreachable {
             path: "records?collection".into(),
-            after: 1,
+            after: crate::certificate::client_listing_requests(shop.app().cert()),
         });
     let got = shop.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_some(), "{got:?}");
@@ -2897,7 +2897,7 @@ async fn held_answer_lacking_in_its_record(divergent: bool) {
     let notices = wallet.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, NoticeKind::MessageGivenUp);
-    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert_eq!(notices[0].counterparty, Some(w.bob_id()));
     assert_eq!(notices[0].msg_id.as_deref(), Some(rejection.as_str()));
     assert_eq!(sent(&w), 0);
     // The user rejects the request again: it goes.
@@ -4321,13 +4321,13 @@ async fn test_divergent_stored_entry_neither_written_nor_given_up_while_its_reco
     w.clock.advance_ms(31 * 24 * HOUR_MS);
     let now = w.clock.now_ms();
     w.bob.switch().push_missed(1, now - 1_000, now);
-    // The client lists the shop's collection right after the item; Paykit's own listing at
+    // The client lists the shop's collections right after the item; Paykit's own listing at
     // the end of the receive fails.
     w.bob
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Unreachable {
             path: "records?collection".into(),
-            after: 1,
+            after: crate::certificate::client_listing_requests(shop.app().cert()),
         });
     let got = shop.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_some(), "{got:?}");

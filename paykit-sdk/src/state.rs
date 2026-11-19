@@ -109,6 +109,7 @@ use crate::journal::JournalEntry;
 use crate::loss::LossBoundary;
 use crate::marks::{DropMark, KeyWaitMark};
 use crate::notices::KeptNotice;
+use crate::notices::SettlementSubject;
 use crate::pay::ListAsk;
 use crate::paykit::Paykit;
 use crate::protocol::{MissedItemMark, QueuedAsk};
@@ -452,6 +453,33 @@ impl Stored for [u8; 16] {
             | StateKey::ReplyFloorBatch { .. } => Ok(()),
             _ => corrupt(),
         }
+    }
+}
+
+impl sealed::Sealed for crate::receipt_delivery::ReceiptBatch {}
+
+impl Stored for crate::receipt_delivery::ReceiptBatch {
+    fn read_bytes(bytes: &[u8]) -> Result<Self> {
+        match bytes.try_into() {
+            Ok(id) => Ok(Self::Awaiting(id)),
+            Err(_) => Ok(Self::Applied(decode(bytes)?)),
+        }
+    }
+
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let StateKey::ReceiptBatch { record, .. } = family else {
+            return corrupt();
+        };
+        if let Self::Applied(applied) = self {
+            let cert = binder.cert.ok_or_else(PaykitError::corrupt)?;
+            if applied
+                .original(binder.identity(), &cert.app_id(), record)
+                .is_none()
+            {
+                return corrupt();
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1148,6 +1176,41 @@ impl Stored for KeyWaitMark {
     }
 }
 
+impl sealed::Sealed for crate::settlement_marks::BucketHistory {}
+
+impl Stored for crate::settlement_marks::BucketHistory {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let StateKey::SettlementBucket(record) = family else {
+            return corrupt();
+        };
+        if self.number >= paykit_lib::derive::SETTLEMENT_BUCKETS
+            || self.generation == 0
+            || binder.record_key(&crate::settlement_marks::target(self.number))? != *record
+        {
+            return corrupt();
+        }
+        Ok(())
+    }
+}
+
+impl sealed::Sealed for crate::settlement_marks::ObservedMark {}
+
+impl Stored for crate::settlement_marks::ObservedMark {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let StateKey::SettlementMark { record, mark } = family else {
+            return corrupt();
+        };
+        if self.bucket >= paykit_lib::derive::SETTLEMENT_BUCKETS
+            || self.mark != *mark
+            || paykit_lib::records::SettlementMark::from_bytes(mark).is_err()
+            || binder.record_key(&crate::settlement_marks::target(self.bucket))? != *record
+        {
+            return corrupt();
+        }
+        Ok(())
+    }
+}
+
 impl sealed::Sealed for crate::deletions::PayeeDeletion {}
 
 impl Stored for crate::deletions::PayeeDeletion {
@@ -1311,6 +1374,21 @@ pub(crate) mod key {
 
     pub(crate) const RETAINED_RECEIPTS: &str = "rc/";
     pub(crate) const CREDIT_HOLDS: &str = "ch/";
+    pub(crate) const SETTLEMENT_NOTICES: &str = "nt/settlement/";
+    pub(crate) const SETTLEMENT_MARKS: &str = "sm/";
+    pub(crate) const SETTLEMENT_BUCKETS: &str = "sb/";
+    pub(crate) fn settlement_bucket(key: &[u8; 32]) -> String {
+        format!("{SETTLEMENT_BUCKETS}{}", b64(key))
+    }
+    pub(crate) fn receipt_batch(
+        record: &[u8; 32],
+        hash: &[u8; 32],
+        id: &str,
+        imported: bool,
+    ) -> String {
+        let prefix = if imported { "ir" } else { "ri" };
+        format!("{prefix}/{}/{}/{id}", b64(record), b64(hash))
+    }
     pub(crate) fn retained_receipt(hash: &[u8; 32]) -> String {
         format!("{RETAINED_RECEIPTS}{}", b64(hash))
     }
@@ -1678,6 +1756,15 @@ pub(crate) mod key {
 /// every builder's key parses to its own family, so the two can't drift.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StateKey {
+    /// A warning once per bucket or settlement.
+    SettlementNotice(SettlementSubject),
+    /// The last verified physical application and its outstanding repair.
+    SettlementBucket([u8; 32]),
+    /// A complete mark observed at the permanently bound settlement bucket key.
+    SettlementMark {
+        record: [u8; 32],
+        mark: [u8; paykit_lib::records::SETTLEMENT_MARK_LEN],
+    },
     /// A signed receipt, bound to its record and signed receipt hash.
     RetainedReceipt([u8; 32]),
     /// A credit restriction on a record from the previous installation.
@@ -1693,6 +1780,13 @@ pub(crate) enum StateKey {
     Journal(AttemptId),
     /// The original Switch batch ID of a paid offline attempt.
     OfflineBatch(AttemptId),
+    /// A requested receipt delivery, awaiting its answer or holding its verified application.
+    ReceiptBatch {
+        record: [u8; 32],
+        hash: [u8; 32],
+        msg_id: String,
+        imported: bool,
+    },
     /// `ask/<sender>/<from>`: a `resend_request` to send.
     Ask { sender: [u8; 32], from_ms: u64 },
     /// `ans/<seq>/<msg_id>`: a `resend_request` received, to answer.
@@ -1901,7 +1995,29 @@ impl StateKey {
             _ => {
                 let (family, rest) = text.split_once('/')?;
                 match family {
+                    "sb" => Self::SettlementBucket(b64_32(rest)?),
+                    "sm" => {
+                        let (record, mark) = rest.split_once('/')?;
+                        let bytes = pubky_switch_core::enc::unb64_array(mark).ok()?;
+                        if pubky_switch_core::enc::b64(&bytes) != mark {
+                            return None;
+                        }
+                        Self::SettlementMark {
+                            record: b64_32(record)?,
+                            mark: bytes,
+                        }
+                    }
                     "rc" => Self::RetainedReceipt(b64_32(rest)?),
+                    "ri" | "ir" => {
+                        let (record, rest) = rest.split_once('/')?;
+                        let (hash, id) = rest.split_once('/')?;
+                        Self::ReceiptBatch {
+                            record: b64_32(record)?,
+                            hash: b64_32(hash)?,
+                            msg_id: msg_id(id)?,
+                            imported: text.starts_with("ir/"),
+                        }
+                    }
                     "ch" => Self::CreditHold(b64_32(rest)?),
                     "del" => {
                         let (record, rest) = rest.split_once('/')?;
@@ -2070,6 +2186,10 @@ impl StateKey {
                         }
                     }
                     "nt" => {
+                        if let Some(subject) = rest.strip_prefix("settlement/") {
+                            return crate::notices::SettlementSubject::parse(subject)
+                                .map(Self::SettlementNotice);
+                        }
                         let (attempt, tag) = rest.split_once('/')?;
                         if attempt == "outgoing" {
                             let (to, rest) = tag.split_once('/')?;
