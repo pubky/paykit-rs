@@ -53,8 +53,8 @@ serde_json.workspace = true
 # Each wasm-bindgen-test release requires one exact wasm-bindgen version, so Cargo.lock keeps the
 # two in step, and `rig/test.sh` checks that the installed CLI matches the lock.
 wasm-bindgen-test = "0.3.80"
-# The Payment Request flow in `tests/request_flow/`: the SDK's fake rail (`FakeRail`), and the
-# Switch client's scripted switch, signer, Homeserver and test clock (`testing`, `TestClock`).
+# The flows in `tests/request_flow/` and `tests/pay_flow/`: the SDK's fake rail (`FakeRail`), and
+# the Switch client's scripted switch, signer, Homeserver and test clock (`testing`, `TestClock`).
 # Both features are for tests only: under resolver 2, a dev-dependency's features are on only
 # when a target that needs them, such as this crate's tests, is built.
 paykit-sdk = { path = "../paykit-sdk", features = ["test-support"] }
