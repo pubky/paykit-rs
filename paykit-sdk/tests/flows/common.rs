@@ -1048,6 +1048,16 @@ impl World {
     }
 }
 
+/// An original message reported for reconciliation without a new local delivery.
+pub async fn possibly_delivered(app: &Paykit, msg_id: &str) -> bool {
+    app.message_delivery(msg_id).await.unwrap().is_none()
+        && app.notices().await.unwrap().iter().any(|notice| {
+            notice.kind == paykit_sdk::NoticeKind::PossiblyDelivered
+                && notice.msg_id.as_deref() == Some(msg_id)
+                && notice.message_hash.is_some()
+        })
+}
+
 /// The re-send requests `app` delivered to `to`, as their `accepted_from` and
 /// `accepted_until`, in the order delivered.
 pub async fn asked(app: &Paykit, to: &[u8; 32]) -> Vec<(Option<u64>, Option<u64>)> {

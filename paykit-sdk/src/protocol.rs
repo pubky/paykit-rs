@@ -461,6 +461,17 @@ pub(crate) fn restore_paykit_layer(
             .map_err(|_| "invalid retained settlement notice")?;
         settlement_notices.insert(key, notice);
     }
+    // A repeated import on this installation preserves notices the host has already seen,
+    // and unresolved ones first observed since the backup (Paykit spec 7.2).
+    let mut delivery_notices = std::collections::BTreeMap::new();
+    for (key, value) in restoring
+        .previous_local_scan(key::RESTORED_DELIVERIES.as_bytes())
+        .map_err(|_| "the outgoing delivery notices cannot be read")?
+    {
+        let notice = state::restored::<KeptNotice>(&key, &value, &binder)
+            .map_err(|_| "an outgoing delivery notice is invalid")?;
+        delivery_notices.insert(key, notice);
+    }
     let mut history = crate::deletions::RestoredReceipts::default();
     for prefix in [
         key::PAYEE_DELETIONS,
@@ -691,12 +702,12 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            // A held answer is restored: the record the backup's device wrote holds it, and the
-            // restored app queues it from there, or tells the host it was given up, once sends
-            // to its payee aren't held (`Paykit::queue_own_again`).
+            // The previous installation could have released this answer since the backup.
             StateKey::HeldAnswer { .. } => {
-                state::restored::<crate::hold::HeldAnswer>(&key, &value, &binder)
+                let mut answer = state::restored::<crate::hold::HeldAnswer>(&key, &value, &binder)
                     .map_err(|_| unread())?;
+                answer.restored = Some(true);
+                let value = state::encode(&answer).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -842,6 +853,18 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
+            StateKey::RestoredDelivery { .. } => {
+                let incoming =
+                    state::restored::<KeptNotice>(&key, &value, &binder).map_err(|_| unread())?;
+                delivery_notices
+                    .entry(key)
+                    .and_modify(|kept| {
+                        kept.acknowledged |= incoming.acknowledged;
+                        kept.raised_at_ms = kept.raised_at_ms.min(incoming.raised_at_ms);
+                    })
+                    .or_insert(incoming);
+                continue;
+            }
             StateKey::MessageNotice { .. }
             | StateKey::Notice { .. }
             | StateKey::BlockedLost { .. } => {
@@ -877,6 +900,10 @@ pub(crate) fn restore_paykit_layer(
         journaled.insert(attempt);
         entry.restored = true;
         let value = state::encode(&entry).map_err(|_| bad())?;
+        writes.push(LocalWrite::Put { key, value });
+    }
+    for (key, notice) in delivery_notices {
+        let value = state::encode(&notice).map_err(|_| "a delivery notice cannot be written")?;
         writes.push(LocalWrite::Put { key, value });
     }
     if !recordings.is_subset(&awaiting_recording) {
@@ -917,10 +944,8 @@ pub(crate) fn restore_paykit_layer(
     let owed = state::local_put(key::PAYER_PASS_OWED, &true)
         .map_err(|_| String::from("the restore's payer pass mark can't be written"))?;
     writes.push(owed);
-    // The messages this app signed that a batch the backup kept unanswered queued are in no
-    // outbox: they are queued again from the records once they are listed
-    // (`Paykit::queue_own_again`). This step reads no clock: `Paykit::restore` writes the
-    // restore's time into the mark right after this commit (`Paykit::stamp_restore_time`).
+    // Check the restored records for original deliveries whose disposition the host must
+    // reconcile. The records cannot authorize another delivery (Paykit spec 7.2).
     let resend = state::local_put(key::OWN_RESEND_OWED, &crate::hold::OwnResendOwed::default())
         .map_err(|_| String::from("the restore's re-send mark can't be written"))?;
     writes.push(resend);
@@ -2973,7 +2998,7 @@ mod receive_tests {
     }
 
     #[test]
-    fn test_protocol_receipt_in_activity_does_not_authorize_delivery_after_restore() {
+    fn test_protocol_stored_receipt_does_not_imply_delivery_intent() {
         let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
         let bob = Party::new(
             "bob",

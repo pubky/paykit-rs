@@ -426,6 +426,7 @@ impl Paykit {
         local.push(crate::state::local_put(
             &crate::state::key::held_answer(&payee, &msg_id),
             &crate::hold::HeldAnswer {
+                restored: Some(false),
                 payee,
                 msg_id: msg_id.clone(),
                 request_hash,

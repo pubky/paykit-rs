@@ -116,6 +116,11 @@ pending. Use `resume_payments` to progress outstanding work, then read
 After restoring, process `receive` and `reconcile`, show unresolved attempts
 using the report, and complete `end_reconcile` after user confirmation.
 A missing receipt or an unavailable provider can leave the outcome unresolved.
+Read `Paykit::notices()` after the first receive and on subsequent loads. A
+`PossiblyDelivered` notice identifies an outgoing message whose recipient may
+already have it. Reconcile it using the message ID, recipient and signed hash.
+The original wallet can resume an outstanding delivery when reopened from its
+current store.
 
 | Case | What to show or do |
 |---|---|
@@ -194,6 +199,7 @@ shared record.
 | `NoticeKind::PaidAfterFailed` | Show that a verified receipt arrived for an attempt previously shown as failed. |
 | `NoticeKind::HeldWithoutPay` | Show that the open attempt needs a wallet with `paykit_pay`. |
 | `NoticeKind::MessageGivenUp` | Show the message or request whose effect or delivery was given up. Acknowledgment can also retire the stored entry. |
+| `NoticeKind::PossiblyDelivered` | Reconcile the original message with its recipient using its ID and signed hash. Acknowledging the notice records that the host has seen it. It authorizes no send or replacement. |
 | `NoticeKind::BlockedMessagesLost` | Show the affected counterparty and acceptance-time range. Consult the payment method for payments that may have been among the lost messages. |
 | `NoticeKind::SettlementBucketFull` | Show that the payee cannot add a mark to this bucket. Explain that issuing a receipt without a mark can let another till credit the same settlement again. |
 | `NoticeKind::CreditNeedsUser` | Show the user which settlement or requested proof needs a credit decision. Acknowledging the warning leaves the credit decision open. |
