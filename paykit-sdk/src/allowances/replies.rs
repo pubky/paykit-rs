@@ -193,15 +193,10 @@ impl PendingConflict {
                     _ => return Opposed::Unknown,
                 }
             }
-            let Some(position) = reply.position else {
-                return Opposed::Unknown;
-            };
-            let source = reply
-                .source
-                .map_or(held.version, SeenVersion::record_version);
-            if (source != held.version && Some(source) != previous)
-                || (matches!(reply.message.body(), Body::AllowanceRejection(_))
-                    && !precedes_reply(source, position, &order))
+            if reply.position.is_none()
+                || reply.source.is_some_and(|s| {
+                    s.record_version() != held.version && Some(s.record_version()) != previous
+                })
             {
                 return Opposed::Unknown;
             }
@@ -221,7 +216,15 @@ impl PendingConflict {
         };
         let q = matching[index];
         if !matches!(q.message.body(), Body::AllowanceAcceptance(_)) {
-            return Opposed::Rejected(q.message.hash());
+            let source = q.source.map_or(held.version, SeenVersion::record_version);
+            // Unlike the two-reply delivery hold, a rejection-first deletion needs the
+            // pending application this reply can actually close (Paykit spec 8.3.1).
+            if q.position
+                .is_some_and(|position| precedes_reply(source, position, &order))
+            {
+                return Opposed::Rejected(q.message.hash());
+            }
+            return Opposed::Unknown;
         }
         let rejections: Vec<_> = matching
             .into_iter()
@@ -432,9 +435,6 @@ pub(super) fn observe(
     };
     let p = pending.proposal();
     let rejected = matches!(answer.body(), Body::AllowanceRejection(_));
-    if rejected && !precedes_reply(held.version, position, |a, b| cx.received_order(a, b)) {
-        return Ok(PendingReply::Undecided);
-    }
     let a = super::allowance_target(&peer, id);
     let kept = super::step_answers_kept(cx, &a, answer)?;
     let current = HeldAnswer::new(answer.clone(), &KeptMessage::taken_at(answer, position))
@@ -451,6 +451,9 @@ pub(super) fn observe(
         } else {
             PendingReply::Waits(Some(held.version.into()))
         });
+    }
+    if rejected && !precedes_reply(held.version, position, |a, b| cx.received_order(a, b)) {
+        return Ok(PendingReply::Undecided);
     }
     Ok(PendingReply::Waits(Some(held.version.into())))
 }
