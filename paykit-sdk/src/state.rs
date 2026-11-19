@@ -79,7 +79,8 @@
 //! | `en/<msg_id>` | the executor app an `executor_notice` is wrapped to, kept with the batch that queues it | |
 //! | `eo/<record key>` | this app's own crossing end of an Allowance, recorded while sends to its counterparty were held, whose message is sent from the record once they aren't (`allowances.rs`, `Paykit::send_owed_ends`); never restored | |
 
-//! | `end/<msg_id>` | origin of the exact signed Allowance end and its target and references, written with the end and retained through its delivery lifetime | |
+//! | `eb/<msg_id>` | native batch ID for a crossing end waiting for its record application before queueing; removed with the applied result or terminal retirement | |
+//! | `end/<msg_id>` | origin of the exact signed Allowance end and its target and references, written before submission and retained through its delivery lifetime | |
 
 use paykit_lib::bodies::ResendRequest;
 use paykit_lib::derive::{natural_key, request_obligation_blinded};
@@ -430,7 +431,7 @@ impl Stored for [u8; 16] {
 
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
-            StateKey::OfflineBatch(_) => Ok(()),
+            StateKey::OfflineBatch(_) | StateKey::EndBatch(_) => Ok(()),
             _ => corrupt(),
         }
     }
@@ -1358,6 +1359,10 @@ pub(crate) mod key {
         format!("{END_ORIGINS}{msg_id}")
     }
 
+    pub(crate) fn end_batch(msg_id: &str) -> String {
+        format!("eb/{msg_id}")
+    }
+
     pub(crate) const OWED_ENDS: &str = "eo/";
 
     /// This app's own crossing end of the Allowance whose record is `record_key`, recorded
@@ -1729,6 +1734,8 @@ pub(crate) enum StateKey {
     OwedEnd([u8; 32]),
     /// The exact own signed end recorded by the producer.
     EndOrigin(String),
+    /// The unresolved native batch that will record an automatic end before queueing.
+    EndBatch(String),
 }
 
 impl StateKey {
@@ -1858,6 +1865,7 @@ impl StateKey {
                     "cf" => Self::Conflict(b64_32(rest)?),
                     "en" => Self::NoticeTarget(msg_id(rest)?),
                     "end" => Self::EndOrigin(msg_id(rest)?),
+                    "eb" => Self::EndBatch(msg_id(rest)?),
                     "eo" => Self::OwedEnd(b64_32(rest)?),
                     "rs" => {
                         let (requester, id) = rest.split_once('/')?;
@@ -2828,6 +2836,7 @@ mod tests {
             (key::conflict(&pubky), StateKey::Conflict(pubky)),
             (key::notice_target(id), StateKey::NoticeTarget(id.into())),
             (key::end_origin(id), StateKey::EndOrigin(id.into())),
+            (key::end_batch(id), StateKey::EndBatch(id.into())),
         ];
         for (built, family) in cases {
             assert_eq!(StateKey::parse(built.as_bytes()), Some(family), "{built}");

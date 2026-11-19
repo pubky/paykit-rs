@@ -697,6 +697,12 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
+            StateKey::EndBatch(_) => {
+                // The Switch does not restore pending batches. A proven end can be
+                // recovered from its shared record and its producer's separate origin.
+                state::restored::<[u8; 16]>(&key, &value, &binder).map_err(|_| unread())?;
+                continue;
+            }
             StateKey::EndOrigin(_) => {
                 state::restored::<crate::allowances::EndOrigin>(&key, &value, &binder)
                     .map_err(|_| unread())?;

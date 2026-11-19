@@ -290,8 +290,8 @@ pub(crate) enum EndCause {
     Automatic,
 }
 
-/// The origin of one exact signed Allowance end (`end/<msg_id>`), recorded atomically
-/// with its record and queue or owed mark (Paykit spec 8.1, 8.3). This retains neither
+/// The origin of one exact signed Allowance end (`end/<msg_id>`), recorded before
+/// submitting its record and queue or owed mark (Paykit spec 8.1, 8.3). This retains neither
 /// message bytes nor a delivery obligation. It does not classify a later copy as an
 /// original delivery: recovery copies still follow the re-send rules.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1619,9 +1619,21 @@ impl Paykit {
             {
                 continue;
             }
-            // One bounded local deletion; protocol_commit neither settles a batch nor
-            // creates outgoing work. No acceptance, clock or missing eo implies absence.
-            self.local_delete(&key::end_origin(&origin.msg_id)).await?;
+            // A crossing end held before queueing is absent from the client's delivery
+            // index. Its batch can still install the owed end, even after a lost answer.
+            let batch_key = key::end_batch(&origin.msg_id);
+            if let Some(id) = self.local_get::<[u8; 16]>(&batch_key).await? {
+                if matches!(
+                    self.app.kept_batch(id).await?,
+                    Some(pubky_switch_client::app::KeptBatchStatus::Kept { .. })
+                ) {
+                    continue;
+                }
+            }
+            let mut tx = state::Tx::default();
+            tx.delete(&key::end_origin(&origin.msg_id))
+                .delete(&batch_key);
+            self.local_commit(tx).await?;
         }
         Ok(())
     }
@@ -1771,7 +1783,9 @@ impl Paykit {
             if kind == Kind::AllowanceEnd {
                 let origin =
                     EndOrigin::of(*record, &held, &self.own_copy(&signed)?, EndCause::User)?;
-                locals.push(state::local_put(&key::end_origin(&msg_id), &origin)?);
+                // A backup omits unresolved batches. Keep the producer's exact intent before
+                // the service can apply the record write and its answer can be lost.
+                Box::pin(self.local_put(&key::end_origin(&msg_id), &origin)).await?;
             }
             let mut queue = vec![signed];
             if kind == Kind::AllowanceEnd {
@@ -1843,6 +1857,12 @@ impl Paykit {
         let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
             .entry(write)
             .locals(locals);
+        if let Some(owed) = owed {
+            let marker = key::end_batch(&owed.msg_id).into_bytes();
+            batch = batch
+                .keep_id_at(marker.clone())
+                .local(LocalWrite::Delete { key: marker });
+        }
         for message in queue {
             batch = batch.queue(message);
         }
@@ -2420,10 +2440,7 @@ impl Paykit {
                         &self.own_copy(&own_end)?,
                         EndCause::Automatic,
                     )?;
-                    locals.push(state::local_put(
-                        &key::end_origin(own_end.msg_id()),
-                        &origin,
-                    )?);
+                    Box::pin(self.local_put(&key::end_origin(own_end.msg_id()), &origin)).await?;
                     next = held.clone();
                     place(&mut next, self.own_copy(&own_end)?);
                     place(&mut next, end.clone());

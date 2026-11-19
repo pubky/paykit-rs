@@ -4166,6 +4166,76 @@ async fn test_allowances_crossing_end_recorded_while_blocked_sent_once_after_a_r
 }
 
 #[tokio::test]
+async fn test_allowances_crossing_end_recovers_its_origin_after_an_unanswered_write() {
+    use pubky_switch_client::testing::Fault;
+
+    let w = World::new();
+    let mut shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(keeper(&w)).await;
+    let (theirs, mine) = Box::pin(proposed(&w, &mut shop, &mut wallet)).await;
+    Box::pin(accept_elsewhere(&w, &mut wallet, &mine)).await;
+    // The withdrawal reaches Alice before the block, and she processes it afterwards.
+    shop.end_allowance(&theirs).await.unwrap();
+    wallet.block(&w.bob_id()).await.unwrap();
+    w.alice.switch().fail_next(Fault::LoseAnswer {
+        path: "/ops".into(),
+    });
+    for _ in 0..4 {
+        w.alice.switch().fail_next(Fault::Unreachable {
+            path: "/ops".into(),
+            after: 0,
+        });
+    }
+    wallet.receive(None).await.unwrap();
+    let markers = wallet.app().protocol_scan("paykit", b"eb/").await.unwrap();
+    assert_eq!(
+        markers.len(),
+        1,
+        "expected the unpaid crossing end in an unresolved batch"
+    );
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"end/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let backup = wallet.backup().await.unwrap();
+    // The original installation settles the same write once the connection returns.
+    // Its backup still dates from before that response, while the counterparty stays blocked.
+    for _ in 0..6 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert!(Box::pin(ends_naming_both(&wallet, &mine)).await);
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"eb/")
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
+    drop(wallet);
+
+    let mut restored = Box::pin(restored_unreceived(&w, &backup)).await;
+    restored.receive(None).await.unwrap();
+    assert!(Box::pin(ends_naming_both(&restored, &mine)).await);
+    assert!(restored
+        .app()
+        .protocol_scan("paykit", b"eb/")
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
+    restored.unblock(&w.bob_id()).await.unwrap();
+    restored.receive(None).await.unwrap();
+    assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 1);
+    restored.receive(None).await.unwrap();
+    assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
+}
+
+#[tokio::test]
 async fn test_allowances_view_blocked_unknown_while_the_deny_copy_is_unknown() {
     // A failed read of the lists leaves the copy unknown: the view says so, never "not
     // blocked"; the next read shows him not blocked (Paykit spec 8.1).
@@ -4697,21 +4767,31 @@ async fn test_allowances_end_dropped_for_the_bound_taken_again_from_a_resend() {
     let w = World::new();
     let mut shop = Box::pin(shop(&w)).await;
     let mut wallet = Box::pin(wallet(&w)).await;
-    let first = 0xffff;
-    let mut end = pubky_switch_client::app::OutgoingMessage::new(
-        w.alice_id(),
-        "paykit.allowance_end",
-        json!({ "allowance_id": format!("d0efffb7-191b-4709-b6c7-e343af55{first:04x}") })
-            .as_object()
-            .cloned()
-            .unwrap(),
-    );
-    end.refs = vec![[0xee; 32]];
-    let signed = shop.app().sign_message(end).unwrap();
-    shop.app_mut().queue_signed(signed).await.unwrap();
-    shop.app_mut().flush_outbox().await.unwrap();
+    // The proposal never reached Alice. Bob withdraws that queued delivery and ends
+    // the Allowance through Paykit, which retains the signed end's producer origin.
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/inbox".into(),
+            after: 0,
+        });
+    let proposal = Box::pin(shop.propose_allowance(w.alice_id(), AllowanceRole::Allowee, terms()))
+        .await
+        .unwrap();
+    assert!(shop
+        .app_mut()
+        .withdraw_message("paykit", &proposal.msg_id)
+        .await
+        .unwrap());
+    let first = wallet
+        .app()
+        .record_key(&allowances_target(&w.bob_id(), &proposal.allowance_id))
+        .unwrap();
+    Box::pin(shop.end_allowance(&proposal.record))
+        .await
+        .unwrap();
     wallet.receive(None).await.unwrap();
-    assert!(Box::pin(keeps_end(&w, &wallet, first)).await);
+    assert!(Box::pin(keeps_end_at(&wallet, &first)).await);
     let bound = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
     for i in 0..bound {
         w.clock.advance_ms(1);
@@ -4720,7 +4800,7 @@ async fn test_allowances_end_dropped_for_the_bound_taken_again_from_a_resend() {
     // Asked at once, in the receive that drops it, with no record of bob's held, and once
     // only.
     assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
-    assert!(!Box::pin(keeps_end(&w, &wallet, first)).await);
+    assert!(!Box::pin(keeps_end_at(&wallet, &first)).await);
     assert_eq!(Box::pin(stops(&wallet)).await, bound);
     assert_eq!(
         wallet
@@ -4735,7 +4815,7 @@ async fn test_allowances_end_dropped_for_the_bound_taken_again_from_a_resend() {
     shop.receive(None).await.unwrap();
     let got = wallet.receive(None).await.unwrap();
     assert!(received(&got, "paykit.allowance_end"), "{got:?}");
-    assert!(Box::pin(keeps_end(&w, &wallet, first)).await);
+    assert!(Box::pin(keeps_end_at(&wallet, &first)).await);
 }
 
 #[tokio::test]
