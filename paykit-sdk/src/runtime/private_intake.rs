@@ -560,6 +560,27 @@ where
     }
 }
 
+/// Probes a peer's next expected slots after a stream event buffered a packet.
+///
+/// A peer may have written more packets than the event revealed, and only an
+/// absent next slot proves the peer is caught up. The probe follows the
+/// healthy audit's rule, without a cursor, so the durable cursor never moves
+/// past a buffered packet that was not processed yet. It does not record
+/// `last_successful_audit_at`, which stays the time of the last scheduled
+/// audit; callers map the outcome only to a transport state.
+async fn probe_private_intake_peer_after_live_insert(
+    peer: PubkyPublicKey,
+    acquire: &PrivateIntakeAcquire,
+    work: &Notify,
+) -> Result<PrivatePacketAcquisition> {
+    work.notify_waiters();
+    let probe = audit_private_intake_peer(peer, |peer, cursor| acquire(peer, cursor)).await;
+    if probe.inserted {
+        work.notify_waiters();
+    }
+    probe.outcome
+}
+
 #[derive(Debug)]
 enum PrivateIntakeEventLoopExit {
     Stopped,
@@ -757,7 +778,21 @@ async fn run_connected_private_intake_stream(
             event = stream.next() => match event {
                 Some(Ok(event)) => {
                     let mut acquire_one = |peer, cursor| acquire(peer, cursor);
-                    match process_private_intake_event(group, event, &mut acquire_one).await {
+                    let routed = process_private_intake_event(group, event, &mut acquire_one).await;
+                    // A live insert reports the probe's outcome, so the peer
+                    // settles now instead of at the next audit.
+                    let routed = match routed {
+                        Some((peer, Ok(PrivatePacketAcquisition::Inserted))) => {
+                            let outcome =
+                                probe_private_intake_peer_after_live_insert(peer.clone(), &acquire, work)
+                                    .await;
+                            Some((peer, outcome))
+                        }
+                        routed => routed,
+                    };
+                    match routed {
+                        // The probe after a live insert hit its bound; the
+                        // next audit or event picks up the remaining slots.
                         Some((peer, Ok(PrivatePacketAcquisition::Inserted))) => {
                             work.notify_waiters();
                             set_peer_state(health, peer, PrivateIntakeTransportState::Replaying).await;
@@ -3708,6 +3743,148 @@ mod tests {
         .expect("pending handshake should retry before healthy audit cadence");
     }
 
+    type ObservedAcquisitions = Vec<(PubkyPublicKey, Option<PrivateIntakeCursorRecord>)>;
+
+    /// Runs the connected stream loop over one live event from `peer` until the
+    /// stream ends. `outcomes` answers acquisitions in order: the first answers
+    /// the event, the rest answer the follow-up probe.
+    async fn run_live_insert_event(
+        peer: &PubkyPublicKey,
+        outcomes: Vec<Result<PrivatePacketAcquisition>>,
+    ) -> (
+        PrivateIntakeEventLoopExit,
+        ObservedAcquisitions,
+        PrivateIntakeHealth,
+    ) {
+        let owner = peer.to_public_key().unwrap();
+        let group = SubscriptionGroup {
+            homeserver: pubky::Keypair::random().public_key(),
+            homeserver_name: "homeserver-a".into(),
+            peers: vec![peer.clone()],
+        };
+        let events = stream::iter([Ok(pubky::Event {
+            event_type: pubky::EventType::Put {
+                content_hash: blake3::Hash::from_bytes([7; 32]),
+            },
+            resource: format!("pubky://{}/pub/paykit/v0/private/slot", owner.z32())
+                .parse()
+                .unwrap(),
+            cursor: pubky::EventCursor::new(42),
+        })]);
+        let outcomes = Arc::new(StdMutex::new(std::collections::VecDeque::from(outcomes)));
+        let observed = Arc::new(StdMutex::new(Vec::new()));
+        let health = Arc::new(AsyncRwLock::new(PrivateIntakeHealth::default()));
+        let work = Arc::new(Notify::new());
+        let (_stop, stop_rx) = watch::channel(false);
+        let acquire: PrivateIntakeAcquire = Arc::new({
+            let observed = Arc::clone(&observed);
+            move |requested, cursor| {
+                observed.lock().unwrap().push((requested, cursor));
+                let outcome = outcomes
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("unexpected private intake acquisition");
+                Box::pin(async move { outcome })
+            }
+        });
+        let audit: PrivateIntakeAudit =
+            Arc::new(|| Box::pin(async { PrivateIntakeAuditOutcome::default() }));
+
+        let exit = run_connected_private_intake_stream(
+            &group,
+            Box::pin(events),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+            stop_rx,
+            &health,
+            &work,
+            acquire,
+            audit,
+            false,
+        )
+        .await;
+
+        let observed = observed.lock().unwrap().clone();
+        let health = health.read().await.clone();
+        (exit, observed, health)
+    }
+
+    #[tokio::test]
+    async fn test_live_insert_event_probes_until_caught_up() {
+        let peer = users(1).remove(0);
+
+        let (exit, observed, health) = run_live_insert_event(
+            &peer,
+            vec![
+                Ok(PrivatePacketAcquisition::Inserted),
+                Ok(PrivatePacketAcquisition::Inserted),
+                Ok(PrivatePacketAcquisition::Absent),
+            ],
+        )
+        .await;
+
+        assert!(matches!(exit, PrivateIntakeEventLoopExit::Ended));
+        assert_eq!(observed.len(), 3);
+        assert!(observed.iter().all(|(requested, _)| requested == &peer));
+        assert_eq!(observed[0].1.as_ref().unwrap().event_id, 42);
+        assert!(
+            observed[1..].iter().all(|(_, cursor)| cursor.is_none()),
+            "the probe must not advance the durable cursor"
+        );
+        assert_eq!(
+            health.peers[&peer],
+            PrivateIntakeTransportState::CaughtUp,
+            "a probe that finds the next slot absent proves the peer is caught up"
+        );
+        assert!(
+            !health.last_successful_audit_at.contains_key(&peer),
+            "the probe must not stand in for the scheduled audit"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_live_insert_event_probe_at_capacity_backpressures() {
+        let peer = users(1).remove(0);
+
+        let (exit, observed, health) = run_live_insert_event(
+            &peer,
+            vec![
+                Ok(PrivatePacketAcquisition::Inserted),
+                Ok(PrivatePacketAcquisition::InsertedAtCapacity),
+            ],
+        )
+        .await;
+
+        assert!(matches!(exit, PrivateIntakeEventLoopExit::Backpressured));
+        assert_eq!(observed.len(), 2);
+        assert_eq!(
+            health.peers[&peer],
+            PrivateIntakeTransportState::Backpressured
+        );
+    }
+
+    #[tokio::test]
+    async fn test_live_insert_event_probe_failure_marks_peer_stale() {
+        let peer = users(1).remove(0);
+
+        let (exit, observed, health) = run_live_insert_event(
+            &peer,
+            vec![
+                Ok(PrivatePacketAcquisition::Inserted),
+                Err(PaykitSdkError::Transport {
+                    context: "probe fetch failed".into(),
+                    source: None,
+                }),
+            ],
+        )
+        .await;
+
+        assert!(matches!(exit, PrivateIntakeEventLoopExit::Ended));
+        assert_eq!(observed.len(), 2);
+        assert_eq!(health.peers[&peer], PrivateIntakeTransportState::Stale);
+    }
+
     #[tokio::test]
     async fn test_expected_slot_fetch_derives_exact_resource_and_atomically_buffers_cursor() {
         let storage = crate::storage::InMemoryStorage::new();
@@ -4063,6 +4240,10 @@ mod tests {
             .private_application_message_resource_at_counter(&local, &secret, 3)
             .unwrap()
             .0;
+        let next_resource = snapshot
+            .private_application_message_resource_at_counter(&local, &secret, 4)
+            .unwrap()
+            .0;
         let snapshot_bytes = snapshot.serialize();
         let observed_resources = Arc::new(StdMutex::new(Vec::new()));
         let group = SubscriptionGroup {
@@ -4087,11 +4268,13 @@ mod tests {
             let local = local.clone();
             let snapshot_bytes = snapshot_bytes.clone();
             let observed_resources = Arc::clone(&observed_resources);
+            let expected_resource = expected_resource.clone();
             move |requested_peer, cursor| {
                 let storage = storage.clone();
                 let local = local.clone();
                 let snapshot_bytes = snapshot_bytes.clone();
                 let observed_resources = Arc::clone(&observed_resources);
+                let expected_resource = expected_resource.clone();
                 Box::pin(async move {
                     let snapshot = paykit_lib::EncryptedLinkSnapshot::deserialize(&snapshot_bytes)?;
                     acquire_expected_private_packet_with_fetch(
@@ -4104,8 +4287,13 @@ mod tests {
                         cursor,
                         Utc::now(),
                         move |resource| {
+                            // The peer published only the expected slot.
+                            let published = resource == expected_resource;
                             observed_resources.lock().unwrap().push(resource);
-                            async { Ok(Some(vec![9; crate::storage::PRIVATE_INTAKE_PACKET_BYTES])) }
+                            async move {
+                                Ok(published
+                                    .then(|| vec![9; crate::storage::PRIVATE_INTAKE_PACKET_BYTES]))
+                            }
                         },
                     )
                     .await
@@ -4131,12 +4319,18 @@ mod tests {
         .await;
 
         assert!(matches!(exit, PrivateIntakeEventLoopExit::Ended));
-        assert_eq!(*observed_resources.lock().unwrap(), vec![expected_resource]);
+        assert_eq!(
+            *observed_resources.lock().unwrap(),
+            vec![expected_resource, next_resource]
+        );
         let state = storage.snapshot().unwrap();
         assert_eq!(state.private_intake_cursors[&peer].event_id, 42);
+        let buffered = &state.private_intake_peers[&peer].buffered_packets;
+        assert_eq!(buffered.len(), 1);
+        assert_eq!(buffered[0].receive_counter, 3);
         assert_eq!(
-            state.private_intake_peers[&peer].buffered_packets[0].receive_counter,
-            3
+            health.read().await.peers[&peer],
+            PrivateIntakeTransportState::CaughtUp
         );
     }
 
@@ -4261,10 +4455,12 @@ mod tests {
             let storage = storage.clone();
             let local = local.clone();
             let fetches = Arc::clone(&fetches);
+            let sibling = peers[1].clone();
             move |peer, cursor| {
                 let storage = storage.clone();
                 let local = local.clone();
                 let fetches = Arc::clone(&fetches);
+                let sibling = sibling.clone();
                 Box::pin(async move {
                     let snapshot_bytes = storage.snapshot().unwrap().encrypted_link_states[&peer]
                         .link_snapshot
@@ -4282,8 +4478,19 @@ mod tests {
                         cursor,
                         Utc::now(),
                         move |_| {
-                            *fetches.lock().unwrap().entry(fetched_peer).or_default() += 1;
-                            async { Ok(Some(vec![9; crate::storage::PRIVATE_INTAKE_PACKET_BYTES])) }
+                            let fetched = {
+                                let mut fetches = fetches.lock().unwrap();
+                                let fetched = fetches.entry(fetched_peer.clone()).or_default();
+                                *fetched += 1;
+                                *fetched
+                            };
+                            // The sibling published one packet; the full peer
+                            // has more than it can buffer.
+                            let published = fetched_peer != sibling || fetched == 1;
+                            async move {
+                                Ok(published
+                                    .then(|| vec![9; crate::storage::PRIVATE_INTAKE_PACKET_BYTES]))
+                            }
                         },
                     )
                     .await
@@ -4355,7 +4562,12 @@ mod tests {
         )
         .await;
         assert!(matches!(sibling_exit, PrivateIntakeEventLoopExit::Ended));
-        assert_eq!(fetches.lock().unwrap().get(&peers[1]), Some(&1));
+        // The event fetch buffers the packet; the probe finds the next slot absent.
+        assert_eq!(fetches.lock().unwrap().get(&peers[1]), Some(&2));
+        assert_eq!(
+            health.read().await.peers[&peers[1]],
+            PrivateIntakeTransportState::CaughtUp
+        );
         assert_eq!(
             storage.snapshot().unwrap().private_intake_cursors[&peers[1]].event_id,
             43

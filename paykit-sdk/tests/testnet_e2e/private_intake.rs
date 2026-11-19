@@ -971,6 +971,62 @@ async fn test_private_intake_buffers_new_packet_from_live_event_stream() {
     supervisor.stop().await;
 }
 
+/// After a live stream event buffers a packet, intake probes the peer's next
+/// expected slot at once, so health returns to `CaughtUp` without waiting for
+/// the hour-long healthy audit.
+#[tokio::test]
+async fn test_private_intake_live_insert_returns_peer_to_caught_up() {
+    let pair = linked_two_party().await;
+    let sdk = Arc::new(PaykitSdk::new(
+        pair.alice.storage.clone(),
+        TestnetSessionProvider::new(pair.alice.access.clone()),
+        pair.alice.adapter.clone(),
+        PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+    ));
+    let mut config = PrivateIntakeConfig::new(1).unwrap();
+    config.healthy_audit_interval = Duration::from_secs(60 * 60);
+    let supervisor = sdk.start_private_intake(config).await.unwrap();
+    wait_for_caught_up(
+        &supervisor,
+        &pair.bob.public_key,
+        "startup audit should catch up before the live packet is published",
+    )
+    .await;
+    // Outlast the first in-stream audit, which fires after at most five
+    // seconds of jitter.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    assert_eq!(
+        supervisor.health().await.peers.get(&pair.bob.public_key),
+        Some(&PrivateIntakeTransportState::CaughtUp),
+        "private intake stream must still be connected before the live packet is published"
+    );
+
+    publish_private_lists(&pair.bob, &pair.alice, 1).await;
+
+    wait_for_buffered(&pair.alice.storage, &pair.bob.public_key, 1).await;
+    let state = pair.alice.storage.snapshot().unwrap();
+    assert!(
+        state.private_intake_peers[&pair.bob.public_key].buffered_packets[0]
+            .source_cursor
+            .is_some(),
+        "packet must arrive through the live event stream, not an audit"
+    );
+    // Health still reads the pre-publish `CaughtUp` for a moment after the
+    // packet is stored. Let the stream finish handling the event so a peer
+    // left `Replaying` cannot pass on that stale value.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while supervisor.health().await.peers.get(&pair.bob.public_key)
+            != Some(&PrivateIntakeTransportState::CaughtUp)
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("health should return to CaughtUp after a live insert, not wait for the audit");
+    supervisor.stop().await;
+}
+
 /// Build a path under the private directory with the homeserver's maximum
 /// storage path length (pubky-common `MAX_STORAGE_PATH_TOTAL_LENGTH`), split
 /// into segments of at most `MAX_STORAGE_PATH_SEGMENT_LENGTH` bytes. Its PUT
