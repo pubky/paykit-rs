@@ -341,8 +341,8 @@ where
 
     /// Fetch public Pubky app follows.
     ///
-    /// They are read from the layout pubky.app's migration flag names for the
-    /// signed-in identity when its session may read the flag; otherwise from
+    /// They are read from the signed-in identity's own layout when its session
+    /// may read pubky.app's migration flag; otherwise from
     /// Pubky social v1 when the identity has a profile there, else from
     /// pubky.app (v0).
     pub async fn fetch_pubky_follows(
