@@ -473,8 +473,15 @@ pub(crate) fn restores_payee_marker(
         && eager.check_receipt_publication(later).is_ok()
 }
 
-/// A different own app may already have published the complete one-time receipt.
-/// Verify what is actually shared before acknowledging the delete (Paykit wire 5).
+fn can_publish(deletion: &RecordDeletion<'_>, cx: &ReceiveContext<'_>) -> bool {
+    deletion.original_in_current_generation
+        && deletion.exact_version_authenticated
+        && deletion.version.generation == deletion.base.expected_version.generation
+        && paykit_lib::scopes::check_certificate(cx.cert()).is_ok()
+}
+
+/// Compare the applied successor with the issued receipt. If its direct predecessor
+/// is the deletion, both records can contribute to a conditional repair (Paykit wire 5).
 pub(crate) fn receipt_publication(
     deletion: &RecordDeletion<'_>,
     successor: &RecordSuccessor<'_>,
@@ -486,13 +493,10 @@ pub(crate) fn receipt_publication(
         return Ok(PutBackSuccessor::Wait);
     };
     if deletion.collection != collection.name()
-        || !deletion.original_in_current_generation
-        || !deletion.exact_version_authenticated
-        || deletion.version.generation != deletion.base.expected_version.generation
+        || !can_publish(deletion, cx)
         || successor.version.generation != deletion.version.generation
         || deletion.policy != Some(successor.policy)
         || *successor.policy != collection.policy(label.as_ref())
-        || paykit_lib::scopes::check_certificate(cx.cert()).is_err()
     {
         return Ok(PutBackSuccessor::Wait);
     }
@@ -513,17 +517,43 @@ pub(crate) fn receipt_publication(
     let Some(prior) = bind(exact).filter(issued_one_time) else {
         return Ok(PutBackSuccessor::Wait);
     };
-    let Some(later) = bind(successor.value).filter(issued_one_time) else {
+    let Some(current) = bind(successor.value) else {
         return Ok(PutBackSuccessor::Wait);
     };
-    if prior.check_receipt_publication(&later).is_err()
-        || prior.lost_to_delete.is_some() && later.lost_to_delete != prior.lost_to_delete
-        || later.lost_to_delete == Some(deletion.item_hash)
-            && later.lost_to_delete != prior.lost_to_delete
-    {
+    let covers_prior = |record: &ActivityRecord| {
+        prior.check_receipt_publication(record).is_ok()
+            && (prior.lost_to_delete == record.lost_to_delete
+                || prior.lost_to_delete.is_none()
+                    && record.lost_to_delete != Some(deletion.item_hash))
+    };
+    let needs_repair = !covers_prior(&current);
+    let mut repaired_marker = None;
+    let merged;
+    let later = if needs_repair {
+        if successor.expected_version != deletion.version {
+            return Ok(PutBackSuccessor::Wait);
+        }
+        let answers_delete = successor.conditions.iter().any(|condition| {
+            matches!(condition, pubky_switch_core::ops::Condition::RecordCurrent { key, revision, deleted: true }
+                if key == deletion.key && revision.generation == deletion.version.generation
+                    && revision.seq == deletion.version.version && revision.item_hash == deletion.item_hash)
+        });
+        let Ok(value) =
+            prior.merge_issued_payee_receipt(&current, &deletion.item_hash, answers_delete)
+        else {
+            return Ok(PutBackSuccessor::Wait);
+        };
+        if answers_delete && original_marker(&prior, &current, &value, deletion.item_hash) {
+            repaired_marker = Some(successor.value);
+        }
+        merged = value;
+        &merged
+    } else {
+        &current
+    };
+    if !issued_one_time(later) || (needs_repair && !covers_prior(later)) {
         return Ok(PutBackSuccessor::Wait);
     }
-    let mut repaired_marker = None;
     if let Some(repair) = successor.repair {
         let Some(eager) = bind(&repair.held_value) else {
             return Ok(PutBackSuccessor::Wait);
@@ -532,12 +562,12 @@ pub(crate) fn receipt_publication(
             || repair.deletion.item_hash != deletion.item_hash
             || repair.prior_value != exact
             || repair.policy != *successor.policy
-            || eager.check_receipt_publication(&later).is_err()
+            || eager.check_receipt_publication(later).is_err()
         {
             return Ok(PutBackSuccessor::Wait);
         }
         if eager.lost_to_delete.is_some() && eager.lost_to_delete != later.lost_to_delete {
-            if !original_marker(&prior, &eager, &later, deletion.item_hash) {
+            if !original_marker(&prior, &eager, later, deletion.item_hash) {
                 return Ok(PutBackSuccessor::Wait);
             }
             repaired_marker = Some(repair.held_value.as_slice());
@@ -550,7 +580,7 @@ pub(crate) fn receipt_publication(
         let Some(held) = bind(&seen) else {
             return Ok(PutBackSuccessor::Wait);
         };
-        if held.check_receipt_publication(&later).is_err()
+        if held.check_receipt_publication(later).is_err()
             || held.lost_to_delete.is_some()
                 && held.lost_to_delete != later.lost_to_delete
                 && repaired_marker != Some(seen.as_slice())
@@ -558,7 +588,12 @@ pub(crate) fn receipt_publication(
             return Ok(PutBackSuccessor::Wait);
         }
     }
-    Ok(PutBackSuccessor::Covered)
+    if needs_repair {
+        let value = later.to_json().map_err(|e| view_failure(e.into()))?;
+        Ok(PutBackSuccessor::Merge { value })
+    } else {
+        Ok(PutBackSuccessor::Covered)
+    }
 }
 
 /// Observe a deletion. The signed record and the credit hold stay on this app.
@@ -595,6 +630,7 @@ pub(crate) fn observe_payee_deletion(
         None => None,
     };
     let mut observed = Vec::new();
+    let mut publication = None;
     if let Some(label) = label {
         let read = |bytes: &[u8]| {
             crate::records::bind_activity(
@@ -679,6 +715,19 @@ pub(crate) fn observe_payee_deletion(
                     }
                 }
             }
+            if exact
+                && can_publish(deletion, cx)
+                && issued_one_time(&record)
+                && deletion.seen.is_none_or(|seen| {
+                    read(seen).is_some_and(|held| {
+                        held.check_receipt_publication(&record).is_ok()
+                            && (held.lost_to_delete.is_none()
+                                || held.lost_to_delete == record.lost_to_delete)
+                    })
+                })
+            {
+                publication = deletion.exact_value;
+            }
             observation.notice = Some(Notice::Pending);
             observation.protected =
                 exact && (protected == ReceiptBinding::Verified || record.lost_to_delete.is_some());
@@ -692,7 +741,13 @@ pub(crate) fn observe_payee_deletion(
         observation = previous;
     }
     observed.push(state::local_put(&local_key, &observation).map_err(view_failure)?);
-    Ok(Some(PutBack::Prepare { observed }))
+    Ok(Some(match publication {
+        Some(value) => PutBack::Write {
+            observed,
+            value: value.to_vec(),
+        },
+        None => PutBack::Prepare { observed },
+    }))
 }
 
 fn usable(r: &pubky_switch_client::app::SharedRecord, label: Option<&Label>) -> bool {

@@ -26,6 +26,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+pubky-switch-harness.workspace = true
+pubky-switch-signer.workspace = true
 paykit-sdk = { path = ".", features = ["test-support"] }
 pubky-switch-client = { workspace = true, features = ["test-support"] }
 pubky-switch-core = { workspace = true, features = ["test-vectors"] }

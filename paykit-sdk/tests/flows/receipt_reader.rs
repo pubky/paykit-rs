@@ -6,6 +6,39 @@ use paykit_lib::records::{ActivityRecord, ActivitySide};
 use paykit_sdk::{AppScopes, PayOptions, Paykit, Refusal};
 use pubky_switch_client::app::{Collection as SwitchCollection, RecordTarget};
 use pubky_switch_client::clock::Clock;
+use pubky_switch_client::testing::{Fault, ScriptedSwitch};
+use pubky_switch_client::transport::{BoxFuture, Request, Response, Transport};
+use pubky_switch_client::TransportError;
+use pubky_switch_core::ops::{Entry, OpsRequest};
+use std::sync::Arc;
+
+/// This reader can receive and acknowledge pages while another till publishes.
+/// Its service refuses signed writes for quota throughout this reader's journey.
+struct ReaderQuota {
+    transport: Arc<dyn Transport>,
+    service: Arc<ScriptedSwitch>,
+}
+
+impl Transport for ReaderQuota {
+    fn send(&self, request: Request) -> BoxFuture<'_, Result<Response, TransportError>> {
+        if request.method == "POST"
+            && request.path_and_query.ends_with("/ops")
+            && OpsRequest::parse(&request.body).is_ok_and(|batch| {
+                batch
+                    .entries
+                    .iter()
+                    .any(|entry| matches!(entry, Entry::Signed(_)))
+            })
+        {
+            self.service.fail_next(Fault::Error {
+                path: "ops".into(),
+                code: pubky_switch_core::http::ErrorCode::QuotaExceeded,
+                current: serde_json::Value::Null,
+            });
+        }
+        self.transport.send(request)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReadCase {
@@ -124,6 +157,25 @@ async fn read_repaired_marker(case: ReadCase) {
             serde_json::from_slice(held.content.value().unwrap()).unwrap();
         assert_eq!(held, original);
     }
+    let witness_env = |store| {
+        let mut env = w.env(&w.bob, store);
+        env.transport = Arc::new(ReaderQuota {
+            transport: env.transport,
+            service: w.bob.switch().clone(),
+        });
+        env
+    };
+    let app_id = witness.app_id();
+    drop(witness);
+    witness = Paykit::load(
+        witness_env(device.clone()),
+        Default::default(),
+        app_id,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
     let deletion = till
         .app_mut()
         .delete_record(&target, Vec::new())
@@ -214,7 +266,6 @@ async fn read_repaired_marker(case: ReadCase) {
     }
     assert_eq!(w.record_writes(&w.bob, &key), before);
     assert!(late.retained_payee_receipts().await.unwrap().is_empty());
-    let app_id = witness.app_id();
     let backup = witness.backup().await.unwrap();
     shop.app_mut().read_record_fresh(&target).await.unwrap();
     let mut union = original;
@@ -262,11 +313,18 @@ async fn read_repaired_marker(case: ReadCase) {
     if matches!(case, ReadCase::Reload | ReadCase::FreshRestore) {
         drop(witness);
         witness = if case == ReadCase::Reload {
-            w.load_on_clock(&w.bob, device, app_id, w.clock.clone())
-                .await
+            Paykit::load(
+                witness_env(device),
+                Default::default(),
+                app_id,
+                w.rail.clone(),
+                w.timer(),
+            )
+            .await
+            .unwrap()
         } else {
             Box::pin(Paykit::restore(
-                w.env(&w.bob, store()),
+                witness_env(store()),
                 Default::default(),
                 &backup,
                 w.rail.clone(),
