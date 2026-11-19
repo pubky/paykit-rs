@@ -49,4 +49,6 @@ After an intended wire change, the same tests run with `PAYKIT_WRITE_VECTORS` se
 
 The JSON examples in `specs/v0.2/wire-format.md` are taken from these files; update them with the vectors.
 
+For the publisher's counter (Paykit wire 5.8), `identifiers.json` gives the named-generation policy and record key. The `private_list_publications` group in `sealed.json` binds the shop's signed list to its record, opens signed writes at each displayed key and tests the held counter against later writes. Each write names its certificate in `documents.json`.
+
 The Allowance binding cases in `sealed.json` include a signed ledger handoff and a signed handoff naming a ledger version no write gives. Both records read and preserve the handoff; only the valid handoff can count. The library also checks parsed and unread handoff preservation, ordering replacements by their grant history even when a reader skips versions (Paykit wire 5.4).

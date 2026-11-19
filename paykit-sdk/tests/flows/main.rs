@@ -40,6 +40,7 @@ mod publishing;
 mod receipts;
 mod receive_faults;
 mod recovery;
+mod recovery_reports;
 mod recovery_state;
 mod recurring;
 mod replies;

@@ -39,6 +39,9 @@ use crate::journal::JournalEntry;
 use crate::paykit::Paykit;
 use crate::state::{self, key};
 
+mod reports;
+pub use reports::{RecoveryMembers, RecoveryReport};
+
 /// The reason of a [`crate::Refusal::MayBePaid`] for an obligation a provider loss leaves
 /// in doubt.
 pub(crate) const LOSS_DOUBT: &str =

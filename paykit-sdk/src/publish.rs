@@ -907,6 +907,80 @@ mod tests {
     }
 
     #[test]
+    fn test_publication_binds_the_signed_record_vectors() {
+        use pubky_switch_core::enc::hash;
+        use pubky_switch_core::keys::IdentityKey;
+        use pubky_switch_core::ops::{OpKind, SignedOp};
+        use pubky_switch_core::records::AppCert;
+        use pubky_switch_core::sealed::RecordValue;
+        use serde_json::Value;
+
+        let vectors =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../specs/v0.2/vectors");
+        let load = |name: &str| -> Value {
+            serde_json::from_slice(&std::fs::read(vectors.join(name)).unwrap()).unwrap()
+        };
+        let keys = load("keys.json");
+        let owner = keys["identities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == "bob")
+            .unwrap();
+        let label = owner["seed_label"].as_str().unwrap();
+        let identity =
+            IdentityKey::from_secret(hash(format!("paykit/v1/test-vectors/{label}").as_bytes()));
+        let naming = identity.naming_key();
+        let docs = load("documents.json");
+        let certificates = docs["certificates"]["cases"].as_array().unwrap();
+        let sealed = load("sealed.json");
+        let cases = &sealed["private_list_publications"];
+        for case in cases["writes"].as_array().unwrap() {
+            let cert = certificates
+                .iter()
+                .find(|row| row["app"] == case["writer"])
+                .unwrap();
+            let cert = AppCert::verify(
+                &serde_json::from_value(cert["signed"].clone()).unwrap(),
+                &identity.public(),
+            )
+            .unwrap();
+            let op = SignedOp::verify_with_cert(
+                &serde_json::from_value(case["operation"].clone()).unwrap(),
+                &cert,
+                &identity.public(),
+            )
+            .unwrap();
+            let OpKind::RecordPut(put) = &op.body().kind else {
+                panic!("expected record.put")
+            };
+            let scope_key = identity.scope_key(put.value_sealed.data_epoch, &put.policy.read_scope);
+            let RecordValue::Json(plaintext) = put
+                .value_sealed
+                .open(&scope_key, &identity.public(), &put.key)
+                .unwrap()
+            else {
+                panic!("expected a live counter");
+            };
+            let publication = ListPublicationRecord::read(&plaintext).unwrap();
+            let held = SharedRecord {
+                content: RecordContent::Value(plaintext),
+                key: put.key,
+                policy: put.policy.clone(),
+                ..record(&publication, cert.app_id())
+            };
+            let result = bound_publication(&held, |target| {
+                Ok(naming.record_key(
+                    &target.collection.name,
+                    &target.natural_key,
+                    &target.collection.policy.hash().unwrap(),
+                ))
+            });
+            assert_eq!(case["accepted"], result.is_ok(), "{}", case["name"]);
+        }
+    }
+
+    #[test]
     fn test_publication_only_its_publisher_supplies_the_counter_and_floor() {
         let issued = publication();
         let own = issued.publisher;
