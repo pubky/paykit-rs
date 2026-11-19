@@ -713,7 +713,7 @@ impl Paykit {
         // An equal readable counter can outlive an undecided batch.
         self.resolve_publications(&recipient.recipient).await?;
         let prior = self.local_get::<ListReservation>(&at).await?;
-        let mut requested = false;
+        let mut requested_after = None;
         if let Some(prior) = prior.as_ref() {
             let same_choice = prior.choice == recipient.choice;
             let same_list = same_choice && prior.revision == revision;
@@ -731,22 +731,30 @@ impl Paykit {
                 let Some(now) = self.service_time() else {
                     return Ok(());
                 };
-                if !recipient.chosen || revision.is_none() || accepted.is_none() {
+                if !recipient.chosen || revision.is_none() {
                     return Ok(());
                 }
-                let version = ListVersion::new(prior.generation, prior.counter)?;
-                let missing = if recipient.answers.has_requests() {
-                    self.earlier_list_answers(&recipient, prior.missing, now)
+                let local = ListVersion::new(prior.generation, prior.counter)?;
+                let (version, missing) = if recipient.answers.has_requests() {
+                    self.current_list_for_request(prior, accepted.is_some())
                         .await?
                 } else {
-                    prior.missing
+                    (local, prior.missing)
                 };
+                if version == local && accepted.is_none() {
+                    return Ok(());
+                }
+                let now = self.service_time().unwrap_or(now);
+                let missing = self.earlier_list_answers(&recipient, missing, now).await?;
                 match recipient.answers.decision(now, version, missing) {
                     answers::Reply::Wait => return Ok(()),
-                    answers::Reply::Newer => requested = true,
-                    answers::Reply::Repeat => {
+                    answers::Reply::Newer => requested_after = Some(version),
+                    answers::Reply::Repeat if version == local => {
                         return self.repeat_list(&mut recipient, prior, now, report).await
                     }
+                    // The other installation queued that list in its own outbox.
+                    // Its authenticated counter cannot reproduce the signed plaintext.
+                    answers::Reply::Repeat => return Ok(()),
                 }
             }
         }
@@ -754,9 +762,13 @@ impl Paykit {
             return Ok(());
         }
         let endpoints = settings.map_or_else(|| Ok(BTreeMap::new()), |s| s.endpoints())?;
-        let issue =
-            Box::pin(self.reserve_private_list(&mut recipient, revision, &endpoints, requested))
-                .await?;
+        let issue = Box::pin(self.reserve_private_list(
+            &mut recipient,
+            revision,
+            &endpoints,
+            requested_after,
+        ))
+        .await?;
         if recipient.withdraw {
             recipient.withdraw = false;
             self.local_put(&key::list_recipient(&recipient.recipient), &recipient)
@@ -819,7 +831,7 @@ impl Paykit {
         choice: &mut ListRecipient,
         revision: Option<[u8; 16]>,
         endpoints: &BTreeMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
-        requested: bool,
+        requested_after: Option<ListVersion>,
     ) -> Result<ListPublicationRecord> {
         let recipient = choice.recipient;
         self.first_read_before_writing().await?;
@@ -839,13 +851,21 @@ impl Paykit {
         let previous = self
             .local_get::<ListReservation>(&key::list_reservation(&recipient))
             .await?;
-        let (counter, unknown) = match self.app.read_record_fresh(&target).await? {
+        let (counter, unknown, observed) = match self.app.read_record_fresh(&target).await? {
             RecordRead::Fresh(held) => {
                 let current = self.publication_at(&held).await?;
-                if requested && !previous.as_ref().is_some_and(|r| r.matches(&current)) {
+                let version = ListVersion::new(current.generation, current.counter)?;
+                if requested_after.is_some_and(|expected| expected != version) {
                     return Err(counter_unavailable().into());
                 }
-                (current.counter, current.unknown)
+                let observed = if requested_after.is_some() {
+                    self.local_get::<PublicationHistory>(&key::publication_history(&key))
+                        .await?
+                        .and_then(|history| history.missing_since)
+                } else {
+                    None
+                };
+                (current.counter, current.unknown, observed)
             }
             RecordRead::Kept {
                 record: None,
@@ -859,7 +879,7 @@ impl Paykit {
                     .is_none_or(|issue| issue.generation < generation)
                 && self.app.record_seen(&key).await?.is_none() =>
             {
-                (0, UnknownMembers::default())
+                (0, UnknownMembers::default(), None)
             }
             _ => return Err(counter_unavailable().into()),
         };
@@ -876,8 +896,13 @@ impl Paykit {
         let accepted = previous
             .as_ref()
             .is_some_and(|r| choice.answers.first(r).is_some());
-        let missing =
-            answers::MissingAnswers::after(previous.as_ref(), generation, counter, now, accepted)?;
+        let missing = answers::MissingAnswers::after(
+            previous.as_ref(),
+            generation,
+            counter,
+            observed.unwrap_or(now),
+            accepted,
+        )?;
         let version = ListVersion::new(generation, counter + 1)?;
         let list = PrivatePaymentList {
             version,
@@ -919,7 +944,7 @@ impl Paykit {
             .await?;
         let at = key::list_reservation(&recipient);
         let reservation = ListReservation {
-            answer: choice.answers.answer(requested),
+            answer: choice.answers.answer(requested_after.is_some()),
             missing,
             expires: list.expires_at,
             recipient,

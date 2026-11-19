@@ -533,6 +533,53 @@ pub(crate) fn note(
 }
 
 impl Paykit {
+    /// Reconcile the local accepted issue with the permanent counter before spending
+    /// any answer capacity. Its signed record identifies a sibling's publication,
+    /// but only the installation holding the original can resend it unchanged.
+    pub(super) async fn current_list_for_request(
+        &mut self,
+        prior: &ListReservation,
+        accepted: bool,
+    ) -> Result<(ListVersion, Option<MissingAnswers>)> {
+        let local = ListVersion::new(prior.generation, prior.counter)?;
+        self.own_identity_confirmed(false).await?;
+        if self.app.own_identity().generation() != prior.generation {
+            return Ok((local, prior.missing));
+        }
+        let target = target(&self.app_id(), &prior.recipient, prior.generation);
+        let RecordRead::Fresh(held) = self.app.read_record_fresh(&target).await? else {
+            return Err(counter_unavailable().into());
+        };
+        let current = self.publication_at(&held).await?;
+        if prior.matches(&current) {
+            return Ok((local, prior.missing));
+        }
+        let at = key::publication_history(&held.key);
+        let mut history = self
+            .local_get::<super::PublicationHistory>(&at)
+            .await?
+            .ok_or_else(counter_unavailable)?;
+        let seen = match history.missing_since {
+            Some(seen) => seen,
+            None => {
+                let seen = self.service_time().ok_or_else(counter_unavailable)?;
+                history.missing_since = Some(seen);
+                self.local_put(&at, &history).await?;
+                seen
+            }
+        };
+        Ok((
+            ListVersion::new(current.generation, current.counter)?,
+            MissingAnswers::after(
+                Some(prior),
+                current.generation,
+                current.counter,
+                seen,
+                accepted,
+            )?,
+        ))
+    }
+
     /// A restore can cross a provider generation. A new counter starts at one, while
     /// the recipient's answer limits still cover the previous generation's sends.
     pub(super) async fn earlier_list_answers(
