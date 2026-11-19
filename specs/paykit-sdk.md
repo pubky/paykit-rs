@@ -1378,15 +1378,21 @@ SSE-assisted intake treats each event as an untrusted hint. It validates the
 subscribed owner. For a Linked Peer with an established Encrypted Link, it
 ignores DELETEs and every PUT that is neither under that link's current read
 folder nor at an Encrypted Link Handshake slot. An ignored event triggers
-no fetch and changes neither health nor the stored per-user cursor. Peers with
-a pending Encrypted Link Handshake, and peers whose read folder cannot be
-derived, are not filtered. For a relevant event, the SDK still derives the
-expected immutable Noise resource independently of the event path, fetches only
-that resource, and atomically stores ciphertext with the relevant per-user
-cursor. The read folders are refreshed after each audit. Audits remain the
-delivery guarantee, so a hint dropped through a stale read folder only adds
-latency, up to the audit interval. Intake does not decrypt application data
-or advance the Noise receive checkpoint in the background. Explicit buffered
+no fetch and does not change health. The stream remembers the highest ignored
+event per peer in memory, and after the next successful audit of that peer it
+advances the stored per-user cursor to that event unless the cursor is already
+past it, so a reconnect does not replay it. Ignored events cannot announce the link's packets, and that audit
+fetched the expected slot after them. Peers with a pending Encrypted Link
+Handshake, and peers whose read folder cannot be derived, are not filtered.
+For a relevant event, the SDK still derives the expected immutable Noise
+resource independently of the event path, fetches only that resource, and
+atomically stores ciphertext with the relevant per-user cursor. Every
+acquisition, from a stream event or an audit, refreshes the peer's read folder
+from the Encrypted Link snapshot it used, so a link that moves to a new folder
+is followed from its next acquisition. Audits remain the delivery guarantee,
+so a hint dropped through a stale read folder only adds latency, up to the
+audit interval. Intake does not decrypt application data or advance the Noise
+receive checkpoint in the background. Explicit buffered
 drain commits plaintext stream records, Event Message dedupe, the advanced
 Noise snapshot, queue removal, and retained packet generations together.
 Failure leaves the packet and checkpoint unchanged.

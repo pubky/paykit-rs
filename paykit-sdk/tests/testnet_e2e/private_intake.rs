@@ -262,49 +262,48 @@ fn paykit_noise_secret_key(user: &TestUser) -> [u8; 32] {
     paykit_lib::derive_paykit_noise_secret_key(paykit_key.as_bytes())
 }
 
-async fn pending_handshake_write_path(user: &TestUser, counterparty: &PubkyPublicKey) -> String {
+/// Return `user`'s write folder for its Encrypted Link with `counterparty`:
+/// the established link's folder, or the pending Encrypted Link Handshake's
+/// folder while no link is established. An established write folder is also
+/// the counterparty's private intake read folder for `user`.
+async fn encrypted_link_write_path(user: &TestUser, counterparty: &PubkyPublicKey) -> String {
     let state = load_encrypted_link_state(&user.storage, counterparty)
         .await
         .unwrap()
         .unwrap();
-    paykit_lib::restore_encrypted_link_handshake(
-        user.access.session.clone(),
-        paykit_noise_secret_key(user),
-        &counterparty.to_public_key().unwrap(),
-        user.access.outbox_client.clone(),
-        paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(
-            state.handshake_snapshot.as_ref().unwrap(),
+    let session = user.access.session.clone();
+    let secret = paykit_noise_secret_key(user);
+    let remote = counterparty.to_public_key().unwrap();
+    let outbox = user.access.outbox_client.clone();
+    match state.link_snapshot.as_ref() {
+        Some(link) => paykit_lib::restore_encrypted_link(
+            session,
+            secret,
+            &remote,
+            outbox,
+            paykit_lib::EncryptedLinkSnapshot::deserialize(link).unwrap(),
         )
-        .unwrap(),
-    )
-    .await
-    .unwrap()
-    .config()
-    .write_path
-    .clone()
-}
-
-/// Return `user`'s write folder for its established Encrypted Link with
-/// `counterparty`. It is also the counterparty's private intake read folder
-/// for `user`.
-async fn established_link_write_path(user: &TestUser, counterparty: &PubkyPublicKey) -> String {
-    let state = load_encrypted_link_state(&user.storage, counterparty)
         .await
         .unwrap()
-        .unwrap();
-    paykit_lib::restore_encrypted_link(
-        user.access.session.clone(),
-        paykit_noise_secret_key(user),
-        &counterparty.to_public_key().unwrap(),
-        user.access.outbox_client.clone(),
-        paykit_lib::EncryptedLinkSnapshot::deserialize(state.link_snapshot.as_ref().unwrap())
+        .config()
+        .write_path
+        .clone(),
+        None => paykit_lib::restore_encrypted_link_handshake(
+            session,
+            secret,
+            &remote,
+            outbox,
+            paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(
+                state.handshake_snapshot.as_ref().unwrap(),
+            )
             .unwrap(),
-    )
-    .await
-    .unwrap()
-    .config()
-    .write_path
-    .clone()
+        )
+        .await
+        .unwrap()
+        .config()
+        .write_path
+        .clone(),
+    }
 }
 
 async fn publish_pending_handshake_packet_from_restarted_intake(
@@ -313,10 +312,7 @@ async fn publish_pending_handshake_packet_from_restarted_intake(
 ) -> String {
     for _ in 0..3 {
         advance_handshake_from_intake_after_restart(user, counterparty).await;
-        let packet_path = format!(
-            "{}/0",
-            pending_handshake_write_path(user, counterparty).await
-        );
+        let packet_path = format!("{}/0", encrypted_link_write_path(user, counterparty).await);
         if user
             .access
             .outbox_client
@@ -1078,7 +1074,7 @@ async fn test_private_intake_stream_ignores_unrelated_private_events() {
     tokio::time::sleep(Duration::from_secs(7)).await;
     let advances_before = cursor_only_advances.load(Ordering::SeqCst);
 
-    let bob_write_folder = established_link_write_path(&pair.bob, &pair.alice.public_key).await;
+    let bob_write_folder = encrypted_link_write_path(&pair.bob, &pair.alice.public_key).await;
     let other_link_folder = format!(
         "{}/{}",
         paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX,
@@ -1201,7 +1197,7 @@ async fn test_private_intake_stream_survives_largest_private_event() {
     };
     let baseline_cursor = intake_cursor(&pair.alice.storage)
         .expect("startup replay should have advanced the private intake cursor");
-    let bob_write_folder = established_link_write_path(&pair.bob, &pair.alice.public_key).await;
+    let bob_write_folder = encrypted_link_write_path(&pair.bob, &pair.alice.public_key).await;
 
     pair.bob
         .access

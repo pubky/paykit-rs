@@ -155,8 +155,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   directory for other Encrypted Links, its Receipts, and deletes no longer each
   trigger an expected-slot fetch inline in the stream loop. Before, a burst of
   such events could delay other peers' packets and `stop()`, and an unrelated
-  fetch error could mark the peer `Stale`. Ignored events do not advance the
-  replay cursor.
+  fetch error could mark the peer `Stale`. Each acquisition refreshes the
+  peer's read folder, so a recovered link's new folder is followed at once.
+  Ignored events advance the replay cursor after the next successful audit of
+  that peer.
 
 ### Integration
 
