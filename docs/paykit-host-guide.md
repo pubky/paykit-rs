@@ -105,10 +105,25 @@ rail's capabilities before the App is saved. Open backups with
 journal before any restore write. If an SDK-restored store is still in
 reconciliation on startup, reopen it with the SDK load constructors.
 
+## Outgoing payment history and payer access
+
+An app granted `paykit_pay` can make payments and read the identity's past and
+future outgoing Paykit history. This includes earlier payments made by other
+wallets under the same identity and payments made without a request.
+
+We recommend that the signer or host explain this access in its own words
+before the user approves the grant. This applies to direct payer grants,
+Allowance executor grants with payer access, and grants that bundle payer
+access with another protocol.
+
 ## Payment and delivery progress
 
+Use the SDK states below to explain payment progress in the wallet's own words.
+The wallet chooses how to present each state. While a payment may already have
+gone through, keep that uncertainty clear and follow the reconciliation rules.
+
 After loading, read the durable journal with `Paykit::payments()`. Match the
-existing `PaymentView::attempt_id` and display its `stage`. A durable
+existing `PaymentView::attempt_id` and use its `stage` to track progress. A durable
 `Stage::RailPaid` entry means the rail paid, with outcome reporting still
 pending. Use `resume_payments` to progress outstanding work, then read
 `payments()` again to refresh the journal view.
@@ -116,6 +131,11 @@ pending. Use `resume_payments` to progress outstanding work, then read
 After restoring, process `receive` and `reconcile`, show unresolved attempts
 using the report, and complete `end_reconcile` after user confirmation.
 A missing receipt or an unavailable provider can leave the outcome unresolved.
+Read `Paykit::notices()` after the first receive and on subsequent loads. A
+`PossiblyDelivered` notice identifies an outgoing message whose recipient may
+already have it. Reconcile it using the message ID, recipient and signed hash.
+The original wallet can resume an outstanding delivery when reopened from its
+current store.
 
 | Case | What to show or do |
 |---|---|
@@ -147,6 +167,13 @@ A missing receipt or an unavailable provider can leave the outcome unresolved.
 | `MessageDelivery::Other` | Preserve and display the client state conservatively. |
 
 ## Request and Allowance status
+
+A wallet with `paykit_allowance` receives pending proposal records from other
+apps on its account. A host inspecting an `allowance_proposals` record can use
+`PendingAllowanceRecord::read` and `bind` to check its signed proposal against
+the account and record key (Paykit wire 5.4). A verified current deletion ends
+that proposal’s lifetime. An unreadable or flagged value keeps the last
+qualified roles and supplies no new proposal to act on.
 
 | Case | What to show or do |
 |---|---|
@@ -180,8 +207,12 @@ A missing receipt or an unavailable provider can leave the outcome unresolved.
 
 Read `notices` and `payee_deletion_notices` by their stable identities. Acknowledge
 each through its matching SDK API after recording or showing it. Handle Switch
-duty events from `ReceiveSummary::report`. After a receive error, read and
-retain committed duties from `wallet.app_mut().unacknowledged_events()`.
+duty events from `ReceiveSummary::report`. If `records_unlisted` says the listing
+has more to read, call `receive(None)` again. The wallet can still be listing
+collections after the Switch has finished its feed read. An explicit `reconcile` or
+`end_reconcile` can also run its own listing. Follow the action named in its
+`NotNow` result to resume that scan. After a receive error,
+read and retain committed duties from `wallet.app_mut().unacknowledged_events()`.
 Wait for a later successful `receive` so the SDK can process its duties, then
 acknowledge for `"paykit"` with `App::ack_events_for` up to the last duty in
 that successful report. Use the app-wide `App::ack_events` only after the
@@ -194,11 +225,16 @@ shared record.
 | `NoticeKind::PaidAfterFailed` | Show that a verified receipt arrived for an attempt previously shown as failed. |
 | `NoticeKind::HeldWithoutPay` | Show that the open attempt needs a wallet with `paykit_pay`. |
 | `NoticeKind::MessageGivenUp` | Show the message or request whose effect or delivery was given up. Acknowledgment can also retire the stored entry. |
+| `NoticeKind::PossiblyDelivered` | Reconcile the original message with its recipient using its ID and signed hash. Acknowledging the notice records that the host has seen it. It authorizes no send or replacement. |
 | `NoticeKind::BlockedMessagesLost` | Show the affected counterparty and acceptance-time range. Consult the payment method for payments that may have been among the lost messages. |
+| `NoticeKind::SettlementBucketFull` | Show that the payee cannot add a mark to this bucket. A warning from a bucket read has no payer. Explain that issuing a receipt without a mark can let another till credit the same settlement again. |
+| `NoticeKind::SettlementMarksChanged` | Show the bucket and the own app that signed its current value. The wallet checks the current write again and restores the retained marks that fit. |
+| `NoticeKind::SettlementCreditedTwice` | Show the conflicting occurrence marks. Acknowledging the notice records that the user saw it. Every retained mark continues to prevent another credit. |
+| `NoticeKind::CreditNeedsUser` | Show the user which settlement or requested proof needs a credit decision. Acknowledging the warning leaves the credit decision open. |
 | `PaykitError::Client` | Handle the enclosed Switch outcome. Preserve any kept batch and its ID. |
 | `PaykitError::Lib` | Use the rule error to distinguish invalid input from invalid network or shared data. |
 | `PaykitError::Rail` | Preserve any unresolved attempt unless the method established definitive refusal. |
-| `PaykitError::Homeserver` | Show the read failure and retry discovery when the Homeserver is available. |
+| `PaykitError::Homeserver` | Retry discovery when the Homeserver is available. If the user is waiting, explain that discovery could not finish. |
 | `PaykitError::Refused` | Follow the specific refusal below. |
 | `PaykitError::Conflict` | Read the current state and decide again. |
 | `RailError::Unavailable` | Preserve the open attempt. Submission may have happened. |
@@ -208,9 +244,9 @@ shared record.
 | `RailOutcome::Failed` | Report only a definitive failure. |
 | `RailOutcome::Pending` | Leave the attempt open while its result is unknown. |
 | `PublicAppFailureReason::Homeserver` | Retry reading the affected app's Homeserver record. |
-| `PublicAppFailureReason::Refused` | Exclude the unusable record and show its rule failure. |
+| `PublicAppFailureReason::Refused` | Exclude the unusable record. Its rule failure can help diagnose the lookup. |
 | `PublicAppFailureReason::Expired` | Wait for a current record from that app. |
-| `PublicAppFailureReason::OverBound` | Show that this app's endpoints did not fit within the lookup bounds. |
+| `PublicAppFailureReason::OverBound` | This app's endpoints did not fit within the lookup bounds. Use the reason when explaining an incomplete lookup. |
 
 ## Refusals
 
@@ -233,6 +269,7 @@ shared record.
 | `Refusal::DeadlinePassed` | Show the expired deadline and stop the old attempt. |
 | `Refusal::Recurring` | Use subscription and Billing Period APIs for this request. |
 | `Refusal::MaybeCredited` | Show that the occurrence may already be credited. Wait for evidence or the supported explicit confirmation. |
+| `Refusal::SettlementBucketFull` | Wait for the payee to decide whether to issue an unmarked receipt. Pass the explicit choice through `ReceiptDetails::with_unmarked_credit_confirmed`. |
 | `Refusal::Subscribed` | Show that the recurring request is already accepted. |
 | `Refusal::NotSubscribed` | Wait until the payer accepts the recurring request. |
 | `Refusal::PeriodNotStarted` | Show when this Billing Period starts. If the payer chooses to pay early, call `pay_period` for that period with `PayOptions::with_early_payment_confirmed`. |

@@ -68,12 +68,15 @@ mod paykit;
 mod periods;
 mod protocol;
 pub mod rail;
+mod receipt_delivery;
 mod receipts;
 mod receive;
 mod reconcile;
 mod records;
 mod requests;
 mod resend;
+mod settlement_marks;
+mod settlements;
 mod state;
 mod stored;
 #[cfg(test)]
@@ -92,7 +95,7 @@ pub use hold::HeldRequest;
 pub use journal::{PaymentView, Stage};
 pub use loss::LossBoundary;
 pub use marks::MAX_DROPPED_MARKS;
-pub use notices::{Notice, NoticeKind};
+pub use notices::{Notice, NoticeKind, SettlementSubject};
 pub use own_record::{MAX_OWN_PUBLIC_ENDPOINTS, RECORD_LIFETIME_MS};
 pub use pay::{
     BlockedPayment, PayOptions, PayOutcome, PayResult, PaymentDoubt, PaymentMode, TransferQuote,

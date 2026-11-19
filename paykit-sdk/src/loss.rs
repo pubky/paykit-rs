@@ -82,6 +82,11 @@ impl LossBoundary {
         self.uncertain_until_ms
     }
 
+    /// The payment method must date a settlement strictly after the residual window.
+    pub(crate) fn settlement_uncertain(&self, paid_at: u64) -> bool {
+        self.declared_at_ms == 0 || paid_at <= self.uncertain_until_ms
+    }
+
     /// The boundary of `loss`, as the client tells of it.
     pub(crate) fn of(loss: &ProviderLoss) -> Self {
         Self {
@@ -193,6 +198,11 @@ impl Paykit {
             }),
             (None, None) => None,
         })
+    }
+
+    /// The newest declared loss known to this wallet or its current service.
+    pub(crate) async fn settlement_loss(&self) -> Result<Option<LossBoundary>> {
+        Ok(self.decisive_loss().await?.map(|loss| loss.boundary))
     }
 
     /// The provider loss that leaves `obligation`, of `request` or of its Billing Period

@@ -64,7 +64,7 @@ async fn test_notices_late_receipt_of_a_payment_written_failed_raises_one() {
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, NoticeKind::PaidAfterFailed);
     assert_eq!(notices[0].attempt_id, Some(attempt_id));
-    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert_eq!(notices[0].counterparty, Some(w.bob_id()));
     // The receipt is in the activity record.
     let key = wallet.payments().await.unwrap()[0].request_hash.unwrap();
     let view = wallet
@@ -150,7 +150,7 @@ async fn test_notices_late_receipt_written_later_raises_one_and_ends_the_wait() 
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, NoticeKind::PaidAfterFailed);
     assert_eq!(notices[0].attempt_id, Some(attempt_id));
-    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert_eq!(notices[0].counterparty, Some(w.bob_id()));
     assert!(!waits_for_receipt(&wallet, attempt_id).await);
     assert!(wallet.payments().await.unwrap()[0].receipt.is_some());
     // Raised once, and the entry goes past its window like any other.
@@ -202,7 +202,13 @@ async fn test_notices_late_receipt_raised_by_an_owner_restored_from_before_the_f
     w.clock.advance_ms(PAST_THE_CLAIM_MS);
     receipt(&mut shop).await;
     restored.receive(None).await.unwrap();
-    let notices = restored.notices().await.unwrap();
+    let notices: Vec<_> = restored
+        .notices()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|notice| notice.kind == NoticeKind::PaidAfterFailed)
+        .collect();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, NoticeKind::PaidAfterFailed);
     assert_eq!(notices[0].attempt_id, Some(attempt_id));
@@ -773,7 +779,7 @@ async fn test_notices_receipt_waiting_for_its_records_key_given_up_once_the_clie
     let notices = wallet.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, NoticeKind::MessageGivenUp);
-    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert_eq!(notices[0].counterparty, Some(w.bob_id()));
     assert!(notices[0].msg_id.is_some());
     wallet.receive(None).await.unwrap();
     assert_eq!(wallet.notices().await.unwrap().len(), 1);

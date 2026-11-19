@@ -172,7 +172,8 @@ const POLICIES_DESCRIPTION: &str = "Wire 1.5, Switch wire 1.5: the policies of P
 collections, each with its read scope, its write scopes and its policy hash, \
 hash(lp(\"pubky-switch/v1/policy\", read_scope, u64(n), write_scope_1, ..., write_scope_n)), \
 hashed_bytes_hex being the bytes hashed: the fixed policy of each collection, by its name, \
-settlements' the one policy of every payee app's bucket writes, labelled or not, and, last, \
+the permanent settlements policy uses the permanent-policy label and appends u64(0) \
+for its null generation, and, last, \
 payee_activity's policy for a request labelled shop1.";
 
 /// `policies`: each collection's fixed policy, and `payee_activity`'s under the label
@@ -191,22 +192,34 @@ fn policies() -> Value {
         .iter()
         .map(|(name, policy)| {
             let count = u64be(policy.write_scopes.len() as u64);
-            let mut parts: Vec<&[u8]> = vec![
-                labels::derive::POLICY.as_bytes(),
-                policy.read_scope.as_bytes(),
-                &count,
-            ];
+            let label = if policy.permanent.is_some() {
+                labels::derive::PERMANENT_POLICY
+            } else {
+                labels::derive::POLICY
+            };
+            let mut parts: Vec<&[u8]> =
+                vec![label.as_bytes(), policy.read_scope.as_bytes(), &count];
             parts.extend(policy.write_scopes.iter().map(String::as_bytes));
+            let generation = policy
+                .permanent
+                .map(|permanent| u64be(permanent.generation.unwrap_or(0)));
+            if let Some(generation) = &generation {
+                parts.push(generation);
+            }
             let hashed = lp(&parts);
             let policy_hash = policy.hash().unwrap();
             assert_eq!(hash(&hashed), policy_hash, "{name}");
-            json!({
+            let mut case = json!({
                 "hashed_bytes_hex": hex(&hashed),
                 "name": name,
                 "policy_hash": b64(&policy_hash),
                 "read_scope": policy.read_scope,
                 "write_scopes": policy.write_scopes,
-            })
+            });
+            if let Some(permanent) = policy.permanent {
+                case["permanent"] = json!({"generation": permanent.generation});
+            }
+            case
         })
         .collect();
     json!({ "cases": cases, "description": POLICIES_DESCRIPTION })
@@ -224,6 +237,12 @@ fn check_policies(v: &Value) {
             Some(c) => c.fixed_policy(),
             None => Collection::PayeeActivity.policy(Some(&shop1)),
         };
+        assert_eq!(
+            case.get("permanent").cloned(),
+            policy
+                .permanent
+                .map(|p| json!({"generation": p.generation}))
+        );
         assert_eq!(policy.read_scope, st(case, "read_scope"), "{name}");
         assert_eq!(json!(policy.write_scopes), case["write_scopes"], "{name}");
         assert_eq!(
@@ -266,7 +285,7 @@ fn record_keys(keys: &Keys) -> Value {
     let shop = keys.app("shop").keys.app_id_bytes();
     let txid = UNREQUESTED_TXID;
     let shop1 = Label::parse(SHOP1).unwrap();
-    let named: [(&str, Collection, Vec<u8>, Option<&Label>); 9] = [
+    let named: [(&str, Collection, Vec<u8>, Option<&Label>); 10] = [
         (
             "payer request record",
             Collection::PayerActivity,
@@ -304,6 +323,12 @@ fn record_keys(keys: &Keys) -> Value {
             "payment_lists record of the shop app",
             Collection::PaymentLists,
             natural_key::payment_list(&bob, &shop),
+            None,
+        ),
+        (
+            "pending Allowance proposal",
+            Collection::AllowanceProposals,
+            natural_key::allowance(&bob, &allowance),
             None,
         ),
         (

@@ -28,6 +28,46 @@ use pubky_switch_client::transport::Transport;
 use pubky_switch_core::ops::OpKind;
 use serde_json::Value;
 
+/// Complete the bounded client and wallet listings used by these small fixtures.
+pub async fn finish_listing(wallet: &mut Paykit) {
+    for _ in 0..8 {
+        let summary = wallet.receive(None).await.unwrap();
+        if summary.report.more {
+            continue;
+        }
+        if let Some(reason) = summary.records_unlisted.as_deref() {
+            assert!(reason.contains("Call receive again"), "{summary:?}");
+            continue;
+        }
+        assert!(!wallet.app().listing_owed().await.unwrap(), "{summary:?}");
+        return;
+    }
+    panic!("the test wallet's listing did not finish");
+}
+
+/// Read the accepted message and check that its effect is reported exactly once in that read.
+pub async fn receive_message(wallet: &mut Paykit, msg_id: &str) {
+    for _ in 0..8 {
+        let summary = wallet.receive(None).await.unwrap();
+        let count = summary
+            .applied
+            .iter()
+            .filter(|id| id.as_str() == msg_id)
+            .count();
+        if count > 0 {
+            assert_eq!(count, 1);
+            return;
+        }
+        if summary.report.more {
+            continue;
+        }
+        if let Some(reason) = summary.records_unlisted.as_deref() {
+            assert!(reason.contains("Call receive again"), "{summary:?}");
+        }
+    }
+    panic!("the accepted message {msg_id} did not reach its wallet");
+}
+
 pub const HOUR_MS: u64 = 3_600_000;
 
 /// Where alice's switch is.
@@ -1046,6 +1086,16 @@ impl World {
         .await
         .unwrap()
     }
+}
+
+/// An original message reported for reconciliation without a new local delivery.
+pub async fn possibly_delivered(app: &Paykit, msg_id: &str) -> bool {
+    app.message_delivery(msg_id).await.unwrap().is_none()
+        && app.notices().await.unwrap().iter().any(|notice| {
+            notice.kind == paykit_sdk::NoticeKind::PossiblyDelivered
+                && notice.msg_id.as_deref() == Some(msg_id)
+                && notice.message_hash.is_some()
+        })
 }
 
 /// The re-send requests `app` delivered to `to`, as their `accepted_from` and

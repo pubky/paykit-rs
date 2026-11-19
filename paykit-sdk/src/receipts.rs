@@ -57,6 +57,11 @@ pub(crate) fn receipt_binding(
 #[derive(Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ReceiptDetails {
+    /// Store the signed receipt in shared activity without sending it to the payer.
+    pub store_only: bool,
+    /// The user has seen that the shared settlement mark cannot be written and a
+    /// different occurrence may therefore be credited again (Paykit wire 5.7).
+    pub unmarked_credit_confirmed: Option<UserConfirmed>,
     /// The payee's opaque metadata.
     pub metadata: Option<Map<String, Value>>,
     /// The payee's reference for a payment without a request; a receipt of a request
@@ -72,6 +77,8 @@ pub struct ReceiptDetails {
 impl std::fmt::Debug for ReceiptDetails {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReceiptDetails")
+            .field("store_only", &self.store_only)
+            .field("unmarked_credit_confirmed", &self.unmarked_credit_confirmed)
             .field("metadata", &self.metadata.as_ref().map(Map::len))
             .field("payment_reference", &self.payment_reference.is_some())
             .field("maybe_credited_confirmed", &self.maybe_credited_confirmed)
@@ -83,6 +90,21 @@ impl ReceiptDetails {
     /// A receipt with nothing beyond the proof it confirms.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Keep the signed receipt in the payee's activity without queuing it for delivery.
+    #[must_use]
+    pub fn store_only(mut self) -> Self {
+        self.store_only = true;
+        self
+    }
+
+    /// Permit receipt-only credit after showing the risk of a second credit when
+    /// a full bucket, the value limit or the storage quota prevents a mark.
+    #[must_use]
+    pub fn with_unmarked_credit_confirmed(mut self, confirmed: UserConfirmed) -> Self {
+        self.unmarked_credit_confirmed = Some(confirmed);
+        self
     }
 
     /// The payee's opaque metadata.

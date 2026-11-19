@@ -51,10 +51,11 @@
 //! | `rsd/<pubky>/<day>` | how many messages were re-sent to a requester that day | |
 //! | `nl` | set by a restore: the shared records aren't listed since, so the client's copy is empty and a record's absence means nothing yet; cleared once they are listed; never restored | |
 //! | `lc` | the certificate the shared records were last listed under, signed: a certificate held now other than it means the copy may lack records until Paykit lists them, since one held between may have read less (`hold.rs`); written only by a Paykit listing, in its commit; absent from a join or a restore until that listing, which leaves the records unlisted; never restored | |
-//! | `ro` | set by a restore: this app's own messages its activity and Allowance records store to be sent are queued again once the records are listed (`hold.rs`, `Paykit::queue_own_again`); after a pass, the counterparties whose messages wait: those whose sends were held then, and those whose period details wait for their request record to show whether a later stop covers them; or none named, every record judged again at the next receive, after a pass that found an activity or Allowance record it couldn't read within 30 days of the restore; and the restore's time, which `Paykit::restore` writes right after the restore and the mark keeps; never restored | |
-//! | `ha/<payee>/<msg_id>` | a rejection or payer's cancellation recorded while sends to its payee were held, its message stored in the request record and not queued, written with the record's batch: queued from the record once sends to the payee aren't held, or given up with a notice past its window (`hold.rs`, `Paykit::queue_own_again`) | |
+//! | `ro` | records to check after a restore for possibly delivered messages, with the time limit for unreadable records and any counterparties waiting for their period's request | |
+//! | `ha/<payee>/<msg_id>` | the wallet's held answer and request. A backup marks it restored so it cannot authorize delivery | |
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `paykit_pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
+//! | `nt/outgoing/<recipient>/<msg_id>/<hash>` | the disposition of an exact original delivery is unknown after restore. Acknowledgment is retained for repeated imports | |
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
 //! | `dl` | the deny list as the app last read it, with this app's blocks kept unanswered (`bk/`), for the views and a payment the user starts (Paykit spec 8.1) | |
 //! | `fg` | the flagged senders as the app last read them, at most `MAX_FLAGGED_COPY`; absent while not known, which holds the asks of block marks (`marks.rs`); never restored | |
@@ -79,6 +80,9 @@
 //! | `en/<msg_id>` | the executor app an `executor_notice` is wrapped to, kept with the batch that queues it | |
 //! | `eo/<record key>` | this app's own crossing end of an Allowance, recorded while sends to its counterparty were held, whose message is sent from the record once they aren't (`allowances.rs`, `Paykit::send_owed_ends`); never restored | |
 
+//! | `eb/<msg_id>` | native batch ID for a crossing end waiting for its record application before queueing; removed with the applied result or terminal retirement | |
+//! | `end/<msg_id>` | origin of the exact signed Allowance end and its target and references, written before submission and retained through its delivery lifetime | |
+
 use paykit_lib::bodies::ResendRequest;
 use paykit_lib::derive::{natural_key, request_obligation_blinded};
 use paykit_lib::scopes::verify_certificate;
@@ -91,7 +95,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::activity::{ActivityTarget, KeptSide};
-use crate::allowances::{allowance_target, ConsentEntry, NoticeTarget, OwedEnd};
+use crate::allowances::{
+    allowance_target, ConsentEntry, EndCause, EndOrigin, NoticeTarget, OwedEnd,
+};
 use crate::app_records::SeenRecords;
 use crate::error::{PaykitError, Result};
 use crate::hold::HeldAnswer;
@@ -102,6 +108,7 @@ use crate::journal::JournalEntry;
 use crate::loss::LossBoundary;
 use crate::marks::{DropMark, KeyWaitMark};
 use crate::notices::KeptNotice;
+use crate::notices::SettlementSubject;
 use crate::pay::ListAsk;
 use crate::paykit::Paykit;
 use crate::protocol::{MissedItemMark, QueuedAsk};
@@ -374,6 +381,19 @@ pub(crate) fn cx_scan<T: Stored>(
     Ok(out)
 }
 
+/// Read the owning protocol's exact value with the delivery's current certificate and naming key.
+pub(crate) fn delivery_get<T: Stored>(
+    delivery: &pubky_switch_client::app::DeliveryView<'_>,
+    key: &str,
+) -> Result<Option<T>> {
+    let Some(bytes) = delivery.local().local_get(key.as_bytes())? else {
+        return Ok(None);
+    };
+    let blind = |input: &[u8]| delivery.blind(input);
+    let binder = Binder::new(delivery.local().identity(), delivery.cert(), &blind);
+    bound(key.as_bytes(), &bytes, &binder).map(Some)
+}
+
 /// The value at `key`, read through a [`LocalView`] and bound to it.
 pub(crate) fn view_get<T: Stored>(view: &LocalView<'_>, key: &str) -> Result<Option<T>> {
     let Some(bytes) = view.local_get(key.as_bytes())? else {
@@ -413,7 +433,9 @@ impl Stored for [u8; 16] {
 
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
-            StateKey::OfflineBatch(_) => Ok(()),
+            StateKey::OfflineBatch(_) | StateKey::EndBatch(_) | StateKey::ReceiptBatch { .. } => {
+                Ok(())
+            }
             _ => corrupt(),
         }
     }
@@ -921,9 +943,8 @@ impl Stored for LossBoundary {
 
 impl sealed::Sealed for OwnResendOwed {}
 
-/// The restore's re-send owed: a retained subset of waiting counterparties is nonempty,
-/// ascending, each once; the mark is deleted once none remain (Paykit spec 7.2;
-/// `Paykit::queue_own_again`). Neither the counterparties nor the restore's time name a key.
+/// Counterparties still waiting for the restored-record scan are in ascending order,
+/// each once. The scan clears its mark once all have been checked (Paykit spec 7.2).
 impl Stored for OwnResendOwed {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
@@ -1073,6 +1094,41 @@ impl Stored for KeyWaitMark {
     }
 }
 
+impl sealed::Sealed for crate::settlement_marks::BucketHistory {}
+
+impl Stored for crate::settlement_marks::BucketHistory {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let StateKey::SettlementBucket(record) = family else {
+            return corrupt();
+        };
+        if self.number >= paykit_lib::derive::SETTLEMENT_BUCKETS
+            || self.generation == 0
+            || binder.record_key(&crate::settlement_marks::target(self.number))? != *record
+        {
+            return corrupt();
+        }
+        Ok(())
+    }
+}
+
+impl sealed::Sealed for crate::settlement_marks::ObservedMark {}
+
+impl Stored for crate::settlement_marks::ObservedMark {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let StateKey::SettlementMark { record, mark } = family else {
+            return corrupt();
+        };
+        if self.bucket >= paykit_lib::derive::SETTLEMENT_BUCKETS
+            || self.mark != *mark
+            || paykit_lib::records::SettlementMark::from_bytes(mark).is_err()
+            || binder.record_key(&crate::settlement_marks::target(self.bucket))? != *record
+        {
+            return corrupt();
+        }
+        Ok(())
+    }
+}
+
 impl sealed::Sealed for crate::deletions::PayeeDeletion {}
 
 impl Stored for crate::deletions::PayeeDeletion {
@@ -1182,6 +1238,35 @@ impl Stored for OwedEnd {
 
 impl sealed::Sealed for NoticeTarget {}
 
+impl sealed::Sealed for EndOrigin {}
+
+/// An exact own end's origin: the key names its ID, and its identity, app and canonical
+/// Allowance tuple belong to this app. An automatic crossing always names an acceptance.
+/// Its hash and references must also match the signed message before they can be used as
+/// that message's evidence (Paykit spec 8.1, 8.3).
+impl Stored for EndOrigin {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let StateKey::EndOrigin(msg_id) = family else {
+            return corrupt();
+        };
+        let cert = binder.cert.ok_or_else(PaykitError::corrupt)?;
+        let allowance_id = paykit_lib::AllowanceId::parse(&self.allowance_id)
+            .map_err(|_| PaykitError::corrupt())?;
+        if self.msg_id != *msg_id
+            || self.own != binder.own
+            || self.app_id != cert.app_id()
+            || self.counterparty == self.own
+            || (self.cause == EndCause::Automatic && self.acceptance.is_none())
+            || self.acceptance == Some(self.proposal)
+            || binder.record_key(&allowance_target(&self.counterparty, &allowance_id))?
+                != self.record
+        {
+            return corrupt();
+        }
+        Ok(())
+    }
+}
+
 /// The executor app an `executor_notice` is wrapped to: of the notice's `msg_id` its key
 /// names, written in the batch that queues that notice (`allowances.rs`).
 impl Stored for NoticeTarget {
@@ -1207,6 +1292,21 @@ pub(crate) mod key {
 
     pub(crate) const RETAINED_RECEIPTS: &str = "rc/";
     pub(crate) const CREDIT_HOLDS: &str = "ch/";
+    pub(crate) const SETTLEMENT_NOTICES: &str = "nt/settlement/";
+    pub(crate) const SETTLEMENT_MARKS: &str = "sm/";
+    pub(crate) const SETTLEMENT_BUCKETS: &str = "sb/";
+    pub(crate) fn settlement_bucket(key: &[u8; 32]) -> String {
+        format!("{SETTLEMENT_BUCKETS}{}", b64(key))
+    }
+    pub(crate) fn receipt_batch(
+        record: &[u8; 32],
+        hash: &[u8; 32],
+        id: &str,
+        imported: bool,
+    ) -> String {
+        let prefix = if imported { "ir" } else { "ri" };
+        format!("{prefix}/{}/{}/{id}", b64(record), b64(hash))
+    }
     pub(crate) fn retained_receipt(hash: &[u8; 32]) -> String {
         format!("{RETAINED_RECEIPTS}{}", b64(hash))
     }
@@ -1249,6 +1349,7 @@ pub(crate) mod key {
     pub(crate) const HELD_ANSWERS: &str = "ha/";
     pub(crate) const LISTED_CERT: &str = "lc";
     pub(crate) const NOTICES: &str = "nt/";
+    pub(crate) const RESTORED_DELIVERIES: &str = "nt/outgoing/";
     pub(crate) const STORED_NOTES: &str = "se/";
     pub(crate) const KEPT_REPLIES: &str = "pr/";
     pub(crate) const DROPPED_REPLIES: &str = "pd/";
@@ -1306,6 +1407,16 @@ pub(crate) mod key {
     pub(crate) const CONFLICTS: &str = "cf/";
     pub(crate) const CONSENTS: &str = "ac/";
     pub(crate) const NOTICE_TARGETS: &str = "en/";
+    pub(crate) const END_ORIGINS: &str = "end/";
+
+    pub(crate) fn end_origin(msg_id: &str) -> String {
+        format!("{END_ORIGINS}{msg_id}")
+    }
+
+    pub(crate) fn end_batch(msg_id: &str) -> String {
+        format!("eb/{msg_id}")
+    }
+
     pub(crate) const OWED_ENDS: &str = "eo/";
 
     /// This app's own crossing end of the Allowance whose record is `record_key`, recorded
@@ -1411,6 +1522,11 @@ pub(crate) mod key {
     /// The notice that `sender`'s message `msg_id` was given up.
     pub(crate) fn message_notice(sender: &[u8; 32], msg_id: &str) -> String {
         format!("{NOTICES}{}/{msg_id}", b64(sender))
+    }
+
+    /// A restored outgoing message, bound to its recipient, ID and signed JSON hash.
+    pub(crate) fn restored_delivery(to: &[u8; 32], id: &str, hash: &[u8; 32]) -> String {
+        format!("{RESTORED_DELIVERIES}{}/{id}/{}", b64(to), b64(hash))
     }
 
     /// The notice of `kind` about `attempt`.
@@ -1525,6 +1641,15 @@ pub(crate) mod key {
 /// every builder's key parses to its own family, so the two can't drift.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StateKey {
+    /// A warning once per bucket or settlement.
+    SettlementNotice(SettlementSubject),
+    /// The last verified physical application and its outstanding repair.
+    SettlementBucket([u8; 32]),
+    /// A complete mark observed at the permanently bound settlement bucket key.
+    SettlementMark {
+        record: [u8; 32],
+        mark: [u8; paykit_lib::records::SETTLEMENT_MARK_LEN],
+    },
     /// A signed receipt, bound to its record and signed receipt hash.
     RetainedReceipt([u8; 32]),
     /// A credit restriction on a record from the previous installation.
@@ -1540,6 +1665,13 @@ pub(crate) enum StateKey {
     Journal(AttemptId),
     /// The original Switch batch ID of a paid offline attempt.
     OfflineBatch(AttemptId),
+    /// The first local keep of a requested receipt delivery, awaiting its batch outcome.
+    ReceiptBatch {
+        record: [u8; 32],
+        hash: [u8; 32],
+        msg_id: String,
+        imported: bool,
+    },
     /// `ask/<sender>/<from>`: a `resend_request` to send.
     Ask { sender: [u8; 32], from_ms: u64 },
     /// `ans/<seq>/<msg_id>`: a `resend_request` received, to answer.
@@ -1576,7 +1708,7 @@ pub(crate) enum StateKey {
     PayerPassOwed,
     /// `wc`: the Paykit expiry policy for the own record's current endpoints is owed (`crate::own_record`).
     RecordExpiryOwed,
-    /// `ro`: the restore's re-send of this app's own messages is owed.
+    /// `ro` marks a pending scan for this app's outgoing messages after restore.
     OwnResendOwed,
     /// `lc`: the certificate the shared records were last listed under.
     ListedCert,
@@ -1647,6 +1779,12 @@ pub(crate) enum StateKey {
     },
     /// `se/<sender>/<msg_id>`: a stored entry's message to write later.
     StoredNote { sender: [u8; 32], msg_id: String },
+    /// A notice of a possibly delivered outgoing message (Paykit spec 7.2).
+    RestoredDelivery {
+        to: [u8; 32],
+        msg_id: String,
+        hash: [u8; 32],
+    },
     /// `nt/<sender>/<msg_id>`: a notice for the host about a message given up.
     MessageNotice { sender: [u8; 32], msg_id: String },
     /// `dv/<record key>`: the pause mark of a divergent record.
@@ -1675,6 +1813,10 @@ pub(crate) enum StateKey {
     /// `eo/<record key>`: this app's own crossing end, recorded while sends were held, whose
     /// message is owed.
     OwedEnd([u8; 32]),
+    /// The exact own signed end recorded by the producer.
+    EndOrigin(String),
+    /// The unresolved native batch that will record an automatic end before queueing.
+    EndBatch(String),
 }
 
 impl StateKey {
@@ -1724,7 +1866,29 @@ impl StateKey {
             _ => {
                 let (family, rest) = text.split_once('/')?;
                 match family {
+                    "sb" => Self::SettlementBucket(b64_32(rest)?),
+                    "sm" => {
+                        let (record, mark) = rest.split_once('/')?;
+                        let bytes = pubky_switch_core::enc::unb64_array(mark).ok()?;
+                        if pubky_switch_core::enc::b64(&bytes) != mark {
+                            return None;
+                        }
+                        Self::SettlementMark {
+                            record: b64_32(record)?,
+                            mark: bytes,
+                        }
+                    }
                     "rc" => Self::RetainedReceipt(b64_32(rest)?),
+                    "ri" | "ir" => {
+                        let (record, rest) = rest.split_once('/')?;
+                        let (hash, id) = rest.split_once('/')?;
+                        Self::ReceiptBatch {
+                            record: b64_32(record)?,
+                            hash: b64_32(hash)?,
+                            msg_id: msg_id(id)?,
+                            imported: text.starts_with("ir/"),
+                        }
+                    }
                     "ch" => Self::CreditHold(b64_32(rest)?),
                     "del" => {
                         let (record, rest) = rest.split_once('/')?;
@@ -1803,6 +1967,8 @@ impl StateKey {
                     "ac" => Self::Consent(b64_32(rest)?),
                     "cf" => Self::Conflict(b64_32(rest)?),
                     "en" => Self::NoticeTarget(msg_id(rest)?),
+                    "end" => Self::EndOrigin(msg_id(rest)?),
+                    "eb" => Self::EndBatch(msg_id(rest)?),
                     "eo" => Self::OwedEnd(b64_32(rest)?),
                     "rs" => {
                         let (requester, id) = rest.split_once('/')?;
@@ -1883,7 +2049,20 @@ impl StateKey {
                         }
                     }
                     "nt" => {
+                        if let Some(subject) = rest.strip_prefix("settlement/") {
+                            return crate::notices::SettlementSubject::parse(subject)
+                                .map(Self::SettlementNotice);
+                        }
                         let (attempt, tag) = rest.split_once('/')?;
+                        if attempt == "outgoing" {
+                            let (to, rest) = tag.split_once('/')?;
+                            let (id, hash) = rest.split_once('/')?;
+                            return Some(Self::RestoredDelivery {
+                                to: b64_32(to)?,
+                                msg_id: msg_id(id)?,
+                                hash: b64_32(hash)?,
+                            });
+                        }
                         if let (Some(counterparty), Some(from)) =
                             (b64_32(attempt), tag.strip_prefix("lost-"))
                         {
@@ -2338,7 +2517,7 @@ mod tests {
             serde_json::json!(false)
         ));
         assert!(!reads::<bool>(&key::peer(&pubky), serde_json::json!(true)));
-        // The restore's re-send owed at its key only, its waiting counterparties ascending.
+        // The restored-record scan binds to its own key and keeps counterparties in order.
         let owed = |waiting: serde_json::Value| serde_json::json!({ "waiting": waiting, "restored_at_ms": null });
         assert!(reads::<OwnResendOwed>(
             key::OWN_RESEND_OWED,
@@ -2380,7 +2559,14 @@ mod tests {
         assert!(reads::<KeptSide>(&key::side(id), side(id)));
         assert!(!reads::<KeptSide>(&key::side(id), side(other)));
         // A held answer of the payee and message its key names.
-        let held = |payee: &str, msg_id: &str| serde_json::json!({ "payee": payee, "msg_id": msg_id, "request_hash": sender });
+        let held = |payee: &str, msg_id: &str| {
+            serde_json::json!({
+                "payee": payee,
+                "msg_id": msg_id,
+                "request_hash": sender,
+                "restored": false,
+            })
+        };
         assert!(reads::<HeldAnswer>(
             &key::held_answer(&pubky, id),
             held(&sender, id)
@@ -2772,6 +2958,8 @@ mod tests {
             (key::consent(&pubky), StateKey::Consent(pubky)),
             (key::conflict(&pubky), StateKey::Conflict(pubky)),
             (key::notice_target(id), StateKey::NoticeTarget(id.into())),
+            (key::end_origin(id), StateKey::EndOrigin(id.into())),
+            (key::end_batch(id), StateKey::EndBatch(id.into())),
         ];
         for (built, family) in cases {
             assert_eq!(StateKey::parse(built.as_bytes()), Some(family), "{built}");

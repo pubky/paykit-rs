@@ -62,6 +62,15 @@
       },
       {
         "hashed_bytes_hex": "000000167075626b792d7377697463682f76312f706f6c696379000000107061796b69745f616c6c6f77616e6365000000080000000000000001000000107061796b69745f616c6c6f77616e6365",
+        "name": "allowance_proposals",
+        "policy_hash": "UoT8AyaYBgZCAy6dFx7wfZUAvLL6zjhNakF3I_-iVek",
+        "read_scope": "paykit_allowance",
+        "write_scopes": [
+          "paykit_allowance"
+        ]
+      },
+      {
+        "hashed_bytes_hex": "000000167075626b792d7377697463682f76312f706f6c696379000000107061796b69745f616c6c6f77616e6365000000080000000000000001000000107061796b69745f616c6c6f77616e6365",
         "name": "allowances",
         "policy_hash": "UoT8AyaYBgZCAy6dFx7wfZUAvLL6zjhNakF3I_-iVek",
         "read_scope": "paykit_allowance",
@@ -88,9 +97,12 @@
         ]
       },
       {
-        "hashed_bytes_hex": "000000167075626b792d7377697463682f76312f706f6c696379000000127061796b69745f736574746c656d656e7473000000080000000000000001000000127061796b69745f736574746c656d656e7473",
+        "hashed_bytes_hex": "000000207075626b792d7377697463682f76312f7065726d616e656e742d706f6c696379000000127061796b69745f736574746c656d656e7473000000080000000000000001000000127061796b69745f736574746c656d656e7473000000080000000000000000",
         "name": "settlements",
-        "policy_hash": "xIm4ilTz_ofcF_9A-qDIpXcSgID4e9E1N-HigTb5EW8",
+        "permanent": {
+          "generation": null
+        },
+        "policy_hash": "PTx9B1HSsaRRuMN6zBOkvS-rOEZLYXRIyDt3rJKMM_w",
         "read_scope": "paykit_settlements",
         "write_scopes": [
           "paykit_settlements"
@@ -106,7 +118,7 @@
         ]
       }
     ],
-    "description": "Wire 1.5, Switch wire 1.5: the policies of Paykit's collections, each with its read scope, its write scopes and its policy hash, hash(lp(\"pubky-switch/v1/policy\", read_scope, u64(n), write_scope_1, ..., write_scope_n)), hashed_bytes_hex being the bytes hashed: the fixed policy of each collection, by its name, settlements' the one policy of every payee app's bucket writes, labelled or not, and, last, payee_activity's policy for a request labelled shop1."
+    "description": "Wire 1.5, Switch wire 1.5: the policies of Paykit's collections, each with its read scope, its write scopes and its policy hash, hash(lp(\"pubky-switch/v1/policy\", read_scope, u64(n), write_scope_1, ..., write_scope_n)), hashed_bytes_hex being the bytes hashed: the fixed policy of each collection, by its name, the permanent settlements policy uses the permanent-policy label and appends u64(0) for its null generation, and, last, payee_activity's policy for a request labelled shop1."
   },
   "record_keys": {
     "cases": [
@@ -178,6 +190,17 @@
       },
       {
         "blinded_natural_key": "Tg9e6p9NJU_RWUm715jvEDIOl5U-60c9VcQh2dj3dRQ",
+        "collection": "allowance_proposals",
+        "identity": "6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy",
+        "key_material_hex": "00000013616c6c6f77616e63655f70726f706f73616c73000000204e0f5eea9f4d254fd15949bbd798ef10320e97953eeb473d55c421d9d8f77514000000205284fc032698060642032e9d171ef07d9500bcb2face384d6a417723ffa255e9",
+        "name": "pending Allowance proposal",
+        "natural_key": "AAAAIOt0UWtOhbjKGKId9mJHpQAvJAGOAObxuQeGzwLIILwHAAAAJGQwZWZmZmI3LTE5MWItNDcwOS1iNmM3LWUzNDNhZjU1MDBiNA",
+        "natural_key_hex": "00000020eb74516b4e85b8ca18a21df66247a5002f24018e00e6f1b90786cf02c820bc070000002464306566666662372d313931622d343730392d623663372d653334336166353530306234",
+        "policy_hash": "UoT8AyaYBgZCAy6dFx7wfZUAvLL6zjhNakF3I_-iVek",
+        "record_key": "7LAElrewZOFf10aJPu4GxA7SMdVRTtnL96xiKmUUVbE"
+      },
+      {
+        "blinded_natural_key": "Tg9e6p9NJU_RWUm715jvEDIOl5U-60c9VcQh2dj3dRQ",
         "collection": "allowances",
         "identity": "6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy",
         "key_material_hex": "0000000a616c6c6f77616e636573000000204e0f5eea9f4d254fd15949bbd798ef10320e97953eeb473d55c421d9d8f77514000000205284fc032698060642032e9d171ef07d9500bcb2face384d6a417723ffa255e9",
@@ -215,7 +238,7 @@
         "bucket": 280,
         "collection": "settlements",
         "identity": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
-        "key_material_hex": "0000000b736574746c656d656e747300000020687e2bc0b6e33d6792dbcb03ac90890fcef00403496d51ba4bd67ebefa8318f100000020c489b88a54f3fe87dc17ff40faa0c8a577128080f87bd13537e1e28136f9116f",
+        "key_material_hex": "0000000b736574746c656d656e747300000020687e2bc0b6e33d6792dbcb03ac90890fcef00403496d51ba4bd67ebefa8318f1000000203d3c7d0751d2b1a451b8c37acc13a4bd2fab38464b617448c83b77ac928c33fc",
         "mark_settlement_tag_hex": "a2d2cb72f49c902268dbf518",
         "name": "settlements bucket of the bitcoin-txid settlement of the payment without a request",
         "natural_key": "AAAACAAAAAAAAAEY",
@@ -223,8 +246,8 @@
         "occurrence": "payee record of a payment without a request",
         "occurrence_blinded_natural_key": "JVNwdjURbbfCCchdYlyZIT4i3Hh4suyojt__of39bt4",
         "occurrence_tag_hex": "cf7d6f998b468bb4",
-        "policy_hash": "xIm4ilTz_ofcF_9A-qDIpXcSgID4e9E1N-HigTb5EW8",
-        "record_key": "kzIEgCng4k4ZOo90JXE2dktXxNLMtTTkjm47UGTVFjc",
+        "policy_hash": "PTx9B1HSsaRRuMN6zBOkvS-rOEZLYXRIyDt3rJKMM_w",
+        "record_key": "pK51FYHkzOf8ShLmidZGleRd73RxIFe6NsAfW5fhvi8",
         "settlement_id": "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b",
         "settlement_tag_hex": "4632a2d2cb72f49c902268dbf5181bcec64c26d1fc999c3f3362345c20925219",
         "settlement_tag_input_hex": "0000004034613565316534626161623839663361333235313861383863333162633837663631386637363637336532636337376162323132376237616664656461333362"
