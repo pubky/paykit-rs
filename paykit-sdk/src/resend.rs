@@ -154,10 +154,8 @@ impl Paykit {
         self.queue_missed_asks().await?;
         // Each read bound to its key, as a restore reads it (`state::Stored`).
         let asks = self.local_scan::<QueuedAsk>(key::ASKS).await?;
-        // A copy of the deny list not known, as after a restore, is read first when there is
-        // an ask to send, so the asks a reconcile queues go now; a read that fails leaves
-        // them waiting.
-        if !asks.is_empty() && !self.deny_copy_known().await? {
+        // A pending ask needs a current deny list, including after a restore.
+        if !asks.is_empty() {
             self.refresh_lists_when_due().await?;
         }
         let mut sent = 0u64;

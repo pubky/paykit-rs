@@ -1365,6 +1365,153 @@ async fn test_blocked_resend_request_to_a_blocked_counterparty_refused_with_noth
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
 }
 
+/// Keep a normally authorized re-send request in the outbox for its next delivery.
+async fn queued_resend(w: &World, wallet: &mut Paykit) -> String {
+    w.bob.switch().fail_next(Fault::Error {
+        path: "/inbox".into(),
+        code: ErrorCode::Unavailable,
+        current: serde_json::Value::Null,
+    });
+    wallet
+        .request_resend(
+            w.bob_id(),
+            paykit_sdk::ResendSelection::default().with_accepted_from_ms(0),
+        )
+        .await
+        .unwrap()
+}
+
+async fn may_send(wallet: &Paykit, id: &str) -> bool {
+    wallet
+        .app()
+        .queued_messages("paykit")
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|message| message.msg_id == id)
+        .expect("queued message")
+        .may_send
+}
+
+#[tokio::test]
+async fn test_blocked_direct_delivery_requires_a_current_deny_list() {
+    use paykit_lib::scopes::ExtensionPrefix;
+    use pubky_switch_client::app::OutgoingMessage;
+
+    let w = World::new();
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    let scopes = AppScopes::new()
+        .pay()
+        .manage_contacts()
+        .extension(&ExtensionPrefix::parse("paykit-cap").unwrap())
+        .build()
+        .unwrap();
+    let mut wallet = w.join(&w.alice, "wallet", scopes.clone()).await;
+    let mut phone = w.join(&w.alice, "phone", scopes).await;
+    let bob = w.bob_id();
+    let ask = Box::pin(queued_resend(&w, &mut wallet)).await;
+    let offer = wallet
+        .app_mut()
+        .queue(OutgoingMessage::new(
+            bob,
+            "paykit-cap.offer",
+            serde_json::Map::new(),
+        ))
+        .await
+        .unwrap();
+
+    let read = w.clock.now_ms();
+    let before = w.bob.switch().entries_from(&w.alice_id());
+    w.clock.set_ms(read - 1);
+    wallet.app_mut().flush_outbox().await.unwrap();
+    for id in [&ask, &offer] {
+        assert!(!may_send(&wallet, id).await);
+    }
+    w.clock.set_ms(read + paykit_sdk::LISTS_REFRESH_MS - 1);
+    for id in [&ask, &offer] {
+        assert!(may_send(&wallet, id).await);
+    }
+    phone.block(&bob).await.unwrap();
+    w.clock.advance_ms(1);
+    for id in [&ask, &offer] {
+        wallet.app_mut().flush_message(id).await.unwrap();
+        assert!(!may_send(&wallet, id).await);
+    }
+    fail_list_read(&w);
+    wallet.flush().await.unwrap();
+    wallet.app_mut().flush_outbox().await.unwrap();
+    for id in [&ask, &offer] {
+        wallet.app_mut().resend(id).await.unwrap();
+        assert!(!may_send(&wallet, id).await);
+    }
+    wallet.flush().await.unwrap();
+    for id in [&ask, &offer] {
+        assert!(!may_send(&wallet, id).await);
+    }
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+
+    phone.unblock(&bob).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    // Keep the extension available for inspecting its permission after the wallet read.
+    wallet
+        .app_mut()
+        .hold_message("paykit", &offer)
+        .await
+        .unwrap();
+    wallet.flush().await.unwrap();
+    assert!(may_send(&wallet, &offer).await);
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
+}
+
+#[tokio::test]
+async fn test_blocked_queued_resend_waits_for_permission_to_deliver() {
+    let w = World::new();
+    let (mut wallet, _shop, _) = received(&w, PaykitConfig::default()).await;
+    let id = Box::pin(queued_resend(&w, &mut wallet)).await;
+    assert!(may_send(&wallet, &id).await);
+    let before = w.bob.switch().entries_from(&w.alice_id());
+    wallet.block(&w.bob_id()).await.unwrap();
+    assert!(!may_send(&wallet, &id).await);
+    wallet.app_mut().flush_outbox().await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet.app_mut().flush_outbox().await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
+}
+
+#[tokio::test]
+async fn test_blocked_queued_resend_checks_current_contacts_and_the_deny_copy() {
+    let w = World::new();
+    let (mut wallet, _shop, _) = received(&w, PaykitConfig::default()).await;
+    let id = Box::pin(queued_resend(&w, &mut wallet)).await;
+    assert!(wallet.app_mut().hold_message("paykit", &id).await.unwrap());
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    fail_list_read(&w);
+    wallet.receive(None).await.unwrap();
+    assert!(!may_send(&wallet, &id).await);
+    wallet.receive(None).await.unwrap();
+    assert!(may_send(&wallet, &id).await);
+
+    let app_id = wallet.app_id();
+    let old = wallet.app().cert().clone();
+    let scopes = AppScopes::new().allowance().build().unwrap();
+    let renewed = crate::certificate::renew(&w, app_id, &scopes, 1_000);
+    crate::certificate::list(&w, app_id, &old, &renewed);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().cert().hash(), renewed.hash());
+    assert!(!may_send(&wallet, &id).await);
+    let before = w.bob.switch().entries_from(&w.alice_id());
+    wallet
+        .app_mut()
+        .release_message("paykit", &id)
+        .await
+        .unwrap();
+    wallet.app_mut().flush_outbox().await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+}
+
 #[tokio::test]
 async fn test_blocked_resend_request_while_the_deny_list_is_unknown_refused_with_nothing_sent() {
     // The wallet's copy of the lists isn't known: its due read failed, and the read the call
@@ -1929,14 +2076,20 @@ enum Between {
     Restore,
 }
 
-/// The wallet's receive and flush while its sends to bob are still `held`: a read of the
-/// lists fails first while the copy isn't known.
+/// Hold every due list read during a flush that exercises the unavailable-list case.
+async fn flush_held(w: &World, wallet: &mut Paykit, held: Held) {
+    if let Held::Unknown = held {
+        fail_list_read(w);
+    }
+    wallet.flush().await.unwrap();
+}
+
 async fn receive_held(w: &World, wallet: &mut Paykit, held: Held) {
     if let Held::Unknown = held {
         fail_list_read(w);
     }
     wallet.receive(None).await.unwrap();
-    wallet.flush().await.unwrap();
+    flush_held(w, wallet, held).await;
 }
 
 /// Bob's request is held by alice's wallet, and its sends to bob are then `held`. The
@@ -1997,7 +2150,7 @@ async fn answer_held(held: Held, answer: Answer, between: Between) {
     let entries = w.bob.switch().entries_from(&w.alice_id());
 
     let msg_id = answer.give(&mut wallet, &request).await.unwrap();
-    wallet.flush().await.unwrap();
+    flush_held(&w, &mut wallet, held).await;
     assert_eq!(
         counts.outbox.load(std::sync::atomic::Ordering::SeqCst),
         queued,
