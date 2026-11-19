@@ -8135,9 +8135,15 @@ async fn test_pending_proposal_conflict_keeps_an_identical_recreation_separate()
     Box::pin(place_competing_proposal(PendingChange::Recreated)).await;
 }
 
+#[tokio::test]
+async fn test_pending_proposal_conflict_preserves_a_live_successors_unknown_member() {
+    Box::pin(place_competing_proposal(PendingChange::Extended)).await;
+}
+
 enum PendingChange {
     Unchanged,
     Rewritten,
+    Extended,
     Recreated,
 }
 
@@ -8223,11 +8229,18 @@ async fn place_competing_proposal(change: PendingChange) {
         .version;
     match change {
         PendingChange::Unchanged => (),
-        PendingChange::Rewritten => {
-            Box::pin(write_record(&mut phone, &target, Some(&original))).await;
+        PendingChange::Rewritten | PendingChange::Extended => {
+            let current = if matches!(change, PendingChange::Extended) {
+                let mut value: Value = serde_json::from_slice(&original).unwrap();
+                value["shop_display"] = json!({"currency":"BTC"});
+                serde_json::to_vec(&value).unwrap()
+            } else {
+                original.clone()
+            };
+            Box::pin(write_record(&mut phone, &target, Some(&current))).await;
             let saved = phone.app().shared_record(&physical).await.unwrap().unwrap();
             assert!(saved.version > first);
-            assert_eq!(saved.content.value(), Some(original.as_slice()));
+            assert_eq!(saved.content.value(), Some(current.as_slice()));
         }
         PendingChange::Recreated => {
             Box::pin(write_record(&mut phone, &target, None)).await;
@@ -8264,6 +8277,10 @@ async fn place_competing_proposal(change: PendingChange) {
         let held = app.app().shared_record(&physical).await.unwrap().unwrap();
         let placed =
             PendingAllowanceRecord::read(held.content.value().unwrap(), &w.alice_id()).unwrap();
+        if matches!(change, PendingChange::Extended) {
+            let raw: Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
+            assert_eq!(raw["shop_display"], json!({"currency":"BTC"}));
+        }
         assert_eq!(placed.proposal().hash(), p.hash());
         assert_eq!(placed.conflicted().unwrap().hash(), other.hash());
     }

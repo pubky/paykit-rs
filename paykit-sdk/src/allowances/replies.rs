@@ -894,7 +894,7 @@ impl Paykit {
             .local_scan::<PendingConflict>(key::PENDING_CONFLICTS)
             .await?
         {
-            let mut original = stop.original(&own)?;
+            let original = stop.original(&own)?;
             let peer = *original.counterparty();
             let id = original.allowance_id().clone();
             let target = allowance_record_target(Collection::AllowanceProposals, &peer, &id);
@@ -910,9 +910,14 @@ impl Paykit {
             let RecordRead::Fresh(held) = self.app.read_record_fresh(&target).await? else {
                 continue;
             };
-            if held.content.value() != Some(stop.pending.as_slice())
-                || qualified(&held, &target, &key, &own).is_none()
+            let Some(mut pending) = qualified(&held, &target, &key, &own) else {
+                continue;
+            };
+            if original.check_later_write(&pending).is_err()
+                || pending.conflicted().is_some()
                 || held.version < stop.current.record_version()
+                || (held.version == stop.source()
+                    && held.content.value() != Some(stop.pending.as_slice()))
                 || (held.version != stop.current.record_version()
                     && self.pending_predecessor(&target, &held).await?
                         != Some(stop.current.record_version()))
@@ -948,7 +953,7 @@ impl Paykit {
                 continue;
             };
             let second = second.stored(&own)?;
-            original.note_proposal(second)?;
+            pending.note_proposal(second)?;
             let conditions = vec![
                 selected,
                 Condition::RecordVersion {
@@ -958,7 +963,7 @@ impl Paykit {
             ];
             let write = self
                 .app
-                .record_op(&target, Some(&original.to_json()?), conditions)
+                .record_op(&target, Some(&pending.to_json()?), conditions)
                 .await?;
             crate::stored::submitted(
                 self.submit(OpBatch::for_protocol(crate::protocol::BACKUP_NAME).entry(write))
