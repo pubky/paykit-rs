@@ -1816,7 +1816,7 @@ async fn test_one_time_stops_bound_never_drops_a_stop_for_a_request_kept_to_writ
 #[tokio::test]
 async fn test_one_time_cancellation_of_a_request_not_held_kept_as_stop_and_reply_at_an_app_paying_and_requesting(
 ) {
-    // Alice's till both pays and requests. Bob cancels a request it holds on neither side:
+    // Both apps can pay and sell. Bob cancels a request the recipient holds on neither side:
     // it keeps the cancellation as the stop and as a payer's reply, one of each.
     let w = World::new();
     let till = w
@@ -1832,7 +1832,17 @@ async fn test_one_time_cancellation_of_a_request_not_held_kept_as_stop_and_reply
         .await;
     let mut till = till;
     till.app_mut().invite(&w.bob_id()).await.unwrap();
-    let _shop = w.shop().await;
+    let _shop = w
+        .join(
+            &w.bob,
+            "shop",
+            paykit_sdk::AppScopes::new()
+                .pay()
+                .request()
+                .build()
+                .unwrap(),
+        )
+        .await;
     let hash = [7; 32];
     crate::common::finish_listing(&mut till).await;
     let id = cancel_to(&w, &[till.app_id()], hash);

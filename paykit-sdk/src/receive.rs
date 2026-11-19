@@ -233,61 +233,68 @@ pub(crate) fn effect(
             };
             let payer_target =
                 ActivityTarget::payer(natural_key::request_record(&sender, &request));
-            // A payee's cancellation is kept, the kept-copy stop (Paykit spec 8.1): the
-            // receive step writes no record for it. The app places it in the request record
-            // itself, as a later write of its own, and every new attempt reads the kept copy,
-            // so a stop that can't be placed still refuses the payment. One for a request
-            // whose record the app holds, open or sealed under a scope key it doesn't hold
-            // yet, always applies and is kept at once: keeping it needs only the record's
-            // key, so the stop never waits for the value's key or a listing, and no give-up
-            // of the entry can lose it.
-            // Its sender is judged against the request's label wherever the stop is read
-            // ([`crate::requests::stop_applies`], Paykit spec 3.4), and one that fails is
-            // dropped by the later write that would place it.
-            if pay && held_request(cx, &payer_target)? {
-                return keep_cancellation(cx, &payer_target, stored, position, true);
-            }
-            // A payer's cancellation of a request this app holds goes into its record. One naming a
-            // request held on neither side is new state, which the spam rule gates once: at an app
-            // holding `paykit_pay`, it is kept as the stop, which no payment passes; at one taking
-            // payments, as a payer's reply until the record comes (Paykit spec 8.1, "Replies before
-            // their record"). An app holding both keeps both, each counted only in its own bounds:
-            // the message may be a payee's cancellation of a request to this identity, or a payer's
-            // of one another own app sent.
-            let label = stored.body().label().cloned();
-            let payee_target = ActivityTarget::payee(
-                natural_key::request_record(&cx.identity(), &request),
-                label.as_ref(),
-            );
-            let payee_held = payee && cx.record(&payee_target.record_target())?.is_some();
-            if !pay || payee_held {
-                if payee {
+            let label = stored.body().label();
+            let sender_scopes = stored.cert().scopes();
+            let stop = pay && label.is_none() && paykit_lib::scopes::acts_as_payee(sender_scopes);
+            let reply = writes_payee_label(&scopes, label)
+                && paykit_lib::kinds::may_send(
+                    paykit_lib::Kind::PaymentRequestCancellation,
+                    paykit_lib::kinds::Side::Payer,
+                    sender_scopes,
+                    label,
+                );
+            if !stop {
+                if reply {
                     payer_reply(cx, stored, position, &scopes, settlement)?;
                 }
                 return Ok(());
             }
-            // A request already kept to write protects its stop just as a held record does.
-            // Speculative admission as a payee reply must not defer this payer's custody.
-            if keeps_stored_of(cx, &sender, &request)? {
+            let payee_target =
+                ActivityTarget::payee(natural_key::request_record(&cx.identity(), &request), label);
+            let payer_record = cx.record(&payer_target.record_target())?;
+            if has_original(cx, &payer_target, payer_record.as_ref(), settlement)? {
                 return keep_cancellation(cx, &payer_target, stored, position, true);
             }
-            // While the copy of a side may lack records, the absence decides nothing: the
-            // entry is held.
-            let content = cx
-                .record(&payer_target.record_target())?
-                .map(|held| held.content);
-            if !holds_record(content.as_ref()) {
+            let mut owed = holds_activity(payer_record.as_ref());
+            let own = cx.identity();
+            for (_, note) in
+                state::cx_scan::<crate::stored::StoredNote>(cx, &key::stored_notes_of(&sender))?
+            {
+                if note.placed {
+                    continue;
+                }
+                let message = note.message.stored(&own).map_err(|_| Fail::corrupt())?;
+                if matches!(message.body(), Body::PaymentRequest(_)) && message.hash() == request {
+                    return keep_cancellation(cx, &payer_target, stored, position, true);
+                }
+                owed |= crate::stored::named_request(&message) == Some(request);
+            }
+            // A bound original identifies a sale even when a sibling signed it. A delete,
+            // unreadable row or stored message merely referring to the hash does not.
+            if writes_payee_label(&scopes, label) {
+                let sale = cx.record(&payee_target.record_target())?;
+                if has_original(cx, &payee_target, sale.as_ref(), settlement)? {
+                    if reply {
+                        payer_reply(cx, stored, position, &scopes, settlement)?;
+                    }
+                    return Ok(());
+                }
+            }
+            if !owed {
                 hold_while_unlisted(cx, RecordSide::Payer)?;
             }
-            let reply = payee && writes_payee_label(&scopes, label.as_ref());
+            if !reply && owed {
+                return keep_cancellation(cx, &payer_target, stored, position, true);
+            }
             if reply {
                 hold_while_unlisted(cx, RecordSide::Payee)?;
             }
-            if admits_new_state(cx, &sender, &scopes, stored)? {
-                keep_cancellation(cx, &payer_target, stored, position, false)?;
-                if reply {
-                    keep_reply(cx, &payee_target, stored, position)?;
-                }
+            let admitted = admits_new_state(cx, &sender, &scopes, stored)?;
+            if owed || admitted {
+                keep_cancellation(cx, &payer_target, stored, position, owed)?;
+            }
+            if reply && admitted {
+                keep_reply(cx, &payee_target, stored, position)?;
             }
         }
         Body::PaymentReceipt(receipt) if pay => {
@@ -717,6 +724,20 @@ fn bound_activity(
 /// Whether the app's copy holds the record at `target` ([`holds_record`]).
 fn held_request(cx: &ReceiveContext<'_>, target: &ActivityTarget) -> Result<bool, Fail> {
     Ok(holds_activity(cx.record(&target.record_target())?.as_ref()))
+}
+
+/// Is the exact signed parent readable at this side's derived physical key?
+fn has_original(
+    cx: &ReceiveContext<'_>,
+    target: &ActivityTarget,
+    held: Option<&SharedRecord>,
+    settlement: Settlement<'_>,
+) -> Result<bool, Fail> {
+    let Some(value) = held.and_then(|r| r.content.value()) else {
+        return Ok(false);
+    };
+    Ok(bound_activity(cx, target, value, settlement)?
+        .is_some_and(|r| crate::requests::request_of(&r).is_some()))
 }
 
 /// A signed delete disputed at its version cannot show the request is gone. Its

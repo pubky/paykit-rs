@@ -283,7 +283,12 @@ async fn receive_request_owed(w: &World, payer: &mut Paykit, request: &MessagePl
 async fn test_labels_protected_cancellation_outlives_ordinary_bounds() {
     let w = World::new();
     let _issuer = w.join(&w.alice, "issuer", selling("shop1")).await;
-    let _authorized = w.join(&w.alice, "wallet", selling("shop1")).await;
+    let both = AppScopes::new()
+        .pay()
+        .request_label(&Label::parse("shop1").unwrap())
+        .build()
+        .unwrap();
+    let _authorized = w.join(&w.alice, "wallet", both).await;
     let mut payer = w
         .join(
             &w.bob,
@@ -297,7 +302,12 @@ async fn test_labels_protected_cancellation_outlives_ordinary_bounds() {
     let limit = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
     for n in 0..limit {
         let name = format!("other{n}");
-        let _other = w.join(&w.alice, &name, selling(&name)).await;
+        let scopes = AppScopes::new()
+            .pay()
+            .request_label(&Label::parse(&name).unwrap())
+            .build()
+            .unwrap();
+        let _other = w.join(&w.alice, &name, scopes).await;
         payer
             .app_mut()
             .identity_of(&w.alice_id(), true)
@@ -307,6 +317,13 @@ async fn test_labels_protected_cancellation_outlives_ordinary_bounds() {
         let got = payer.receive(None).await.unwrap();
         assert!(got.applied.contains(&stop), "{got:?}");
     }
+    let sale_side = crate::restore::payee_record(&RequestRef {
+        payee: w.bob_id(),
+        request_hash: request.hash(),
+    });
+    // A physical row at the opposite key carries no signed outgoing request.
+    crate::allowances::write_record(&mut payer, &sale_side, Some(crate::outcome_record::INVALID))
+        .await;
     receive_request_owed(&w, &mut payer, &request).await;
 
     let replies = payer.app().protocol_scan("paykit", b"pr/").await.unwrap();
@@ -518,4 +535,60 @@ async fn test_labels_places_the_earlier_original_across_a_known_feed_loss() {
 #[tokio::test]
 async fn test_labels_retains_originals_when_a_later_loss_obscures_their_order() {
     stops_across_loss(true).await;
+}
+
+/// A stored acceptance references the request without being its original. The sibling's
+/// restored signed sale decides the direction of the later payer cancellation.
+#[tokio::test]
+async fn test_labels_stored_payer_reply_preserves_the_siblings_sale() {
+    let w = World::new();
+    let _buyer = w
+        .join(
+            &w.alice,
+            "buyer",
+            AppScopes::new().pay().request().build().unwrap(),
+        )
+        .await;
+    let mut till = w.shop().await;
+    let mut wallet = w
+        .join(
+            &w.bob,
+            "wallet",
+            AppScopes::new().pay().request().build().unwrap(),
+        )
+        .await;
+    wallet.app_mut().invite(&w.alice_id()).await.unwrap();
+    let request = request_from(&mut till, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let sale = crate::restore::payee_record(&request);
+    let original = wallet.app_mut().read_record(&sale).await.unwrap().unwrap();
+    let pending = w.inject(
+        &w.alice,
+        "buyer",
+        &w.bob,
+        &[wallet.app_id()],
+        "paykit.payment_request_acceptance",
+        vec![request.request_hash],
+        Default::default(),
+    );
+    refuse_record_writes(&w, &mut wallet, 2).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(local_count(&wallet, b"se/").await, 1);
+    crate::allowances::write_record(&mut till, &sale, None).await;
+    wallet.app_mut().read_record(&sale).await.unwrap();
+    let stop = send_stop(&w, "buyer", wallet.app_id(), request.request_hash);
+    let read = wallet.receive(None).await.unwrap();
+    assert!(read.applied.contains(&stop), "{read:?}");
+    assert_eq!(local_count(&wallet, b"pr/").await, 1);
+    assert_eq!(local_count(&wallet, b"kc/").await, 1);
+    crate::allowances::write_record(&mut till, &sale, original.content.value()).await;
+    crate::common::finish_listing(&mut wallet).await;
+    let held = wallet.app_mut().read_record(&sale).await.unwrap().unwrap();
+    let restored = paykit_lib::records::ActivityRecord::read(
+        held.content.value().unwrap(),
+        &w.bob_id(),
+        paykit_lib::records::ActivitySide::Payee,
+    )
+    .unwrap();
+    assert_eq!(restored.cancellation.unwrap().message().msg_id, stop);
+    assert_eq!(restored.response.unwrap().message().msg_id, pending);
 }

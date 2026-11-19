@@ -1655,7 +1655,9 @@ async fn test_restore_cursor_time_ahead_of_the_backup_is_clamped() {
 }
 
 /// Bob's shop's record of `request`.
-fn payee_record(request: &paykit_sdk::RequestRef) -> pubky_switch_client::app::RecordTarget {
+pub(super) fn payee_record(
+    request: &paykit_sdk::RequestRef,
+) -> pubky_switch_client::app::RecordTarget {
     use paykit_lib::collections::Collection;
     let collection = Collection::PayeeActivity;
     pubky_switch_client::app::RecordTarget::new(
