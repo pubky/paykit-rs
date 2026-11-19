@@ -193,19 +193,16 @@ pub enum Refusal {
         /// The destination and what it would transfer.
         quote: Box<crate::TransferQuote>,
     },
-    /// The payment is priced by a rate, and its user hasn't confirmed the amount so computed
-    /// (Paykit spec 7.2 step 1, 8.2): `payment` is that amount, in the endpoint's asset, with
-    /// the rate and the destination, to show the user; paying it carries it back
-    /// ([`crate::PayOptions::with_rate_confirmed`]), and the payer then pays exactly that
-    /// amount. Nothing was written. An automatic payment never pays one: it is refused
-    /// whatever is confirmed, and is made by hand only. At the final payment check, a
-    /// payment whose confirmed rates stopped being usable, or whose kept amount the rate no
-    /// longer gives, pays nothing: a first dispatch writes `failed` with it, and the payment
-    /// is made again only once its user confirms again; a repeat, which may follow a
-    /// submitted call, writes nothing and stays "may be paid"
-    /// ([`crate::PayOutcome::Uncertain`]). `payment` then names what it would pay now, or,
-    /// when no amount can be computed now, what its user confirmed.
-    #[error("Paykit spec 7.2 step 1: a payment priced by a rate needs its user's confirmation of the amount")]
+    /// This quote needs authorization for this payment (Paykit spec 7.2 step 1, 8.2).
+    /// At selection, no attempt has been opened. The host may confirm the exact quote with
+    /// the user or apply the user's bounded policy for this payment and return the quote
+    /// through [`crate::PayOptions::with_rate_authorized`] or [`crate::Paykit::pay_period_automatically`].
+    /// An Allowance cannot authorize repricing. A quote whose rate expired or whose computed
+    /// amount changed before dispatch fails the first attempt. A repeat that may already
+    /// have been submitted stays [`crate::PayOutcome::Uncertain`] on its original terms.
+    #[error(
+        "Paykit spec 7.2 step 1: the rate and computed amount need authorization for this payment"
+    )]
     PricedByRate {
         /// What the user is shown: the amount computed, the rate and the destination.
         payment: Box<crate::PricedPayment>,
@@ -303,6 +300,10 @@ pub enum PaykitError {
     /// own refusals.
     #[error(transparent)]
     Client(AppError),
+    /// The requested public endpoint edit is durable but has no signed record yet.
+    /// The reported signing refusal must be resolved before the client can publish it.
+    #[error("public endpoint change pending: {0}")]
+    PublicEndpointChangePending(#[source] AppError),
     /// A Paykit rule of `paykit-lib`: caller input that fails a structural check
     /// (`Validation`), or network or shared data that breaks a rule (`Invalid`).
     #[error(transparent)]

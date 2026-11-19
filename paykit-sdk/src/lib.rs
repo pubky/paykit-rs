@@ -102,7 +102,7 @@ pub use journal::{PaymentView, Stage};
 pub use loss::{LossBoundary, RecoveryMembers, RecoveryReport};
 pub use marks::MAX_DROPPED_MARKS;
 pub use notices::{Notice, NoticeKind, SettlementSubject};
-pub use own_record::{MAX_OWN_PUBLIC_ENDPOINTS, RECORD_LIFETIME_MS};
+pub use own_record::MAX_OWN_PUBLIC_ENDPOINTS;
 pub use pay::{
     BlockedPayment, PayOptions, PayOutcome, PayResult, PaymentDoubt, PaymentMode, TransferQuote,
     UnrequestedPayment, UNREQUESTED_DEADLINE_MS,
@@ -116,7 +116,7 @@ pub use paykit_lib::{
     Asset, AttemptId, Decimal, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
     PaymentReference,
 };
-pub use periods::{PeriodDetailsView, PeriodView};
+pub use periods::{PeriodDetailsView, PeriodPrice, PeriodView};
 pub use protocol::{PaykitProtocol, HANDLED_KINDS};
 pub use pubky_switch_client::app::{
     App, AppConfig, AppEnv, JoinRequest, ProtocolSet, UserConfirmed,
@@ -302,6 +302,8 @@ mod tests {
                             payee: [1; 32],
                             request_hash: [4; 32],
                         },
+                        billing_period: None,
+                        rate_source_hash: [4; 32],
                         app_id: [2; 16],
                         endpoint_id: id(),
                         payload_hash: pubky_switch_core::enc::hash(payload().as_str().as_bytes()),

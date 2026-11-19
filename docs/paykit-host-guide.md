@@ -7,6 +7,15 @@ for store guarantees, approval and client outcomes. Keep app keys and backups in
 host-protected storage and serialize operations on the handle. A memory store
 cannot preserve unanswered writes or payments across a restart.
 
+The integrator chooses whether to enroll an App ID per installation or share one
+App ID and its keys. A separate App ID has its own signer approval and can be
+revoked independently. Installations sharing an App ID have the same grants.
+Synchronize receive keys, cursor, the public endpoint member and its deadline,
+payment journal and backend payment history across those installations and restores. The wallet owns payment-method
+idempotency and must prevent duplicate execution of an attempt.
+For example, two wallets enrolled independently under the same payer identity
+use distinct App IDs and can both retrieve the seller's receipt for the same payment.
+
 ## Open a wallet and pay a one-time request
 
 Use `Paykit::join` with a signer-approved `JoinRequest` at enrollment. On an
@@ -71,6 +80,28 @@ async fn payment_after_restart(wallet: &Paykit, attempt_id: &AttemptId) -> Resul
 `manual_only`, `held` and `divergent`. `PayResult` carries the outcome or error
 and any unavailable public endpoint apps. Keep an explicit conservative fallback
 for future variants in non-exhaustive enums.
+
+## Publish a public endpoint
+
+An app with plain `paykit_request` and record publication enabled can use
+`set_public_endpoint` to add a reusable destination. A new offer has no Paykit
+deadline by default. To choose a fixed cutoff for the whole offer, call
+`set_public_endpoints` with the complete endpoint map and `Some(timestamp_ms)`.
+Use `None` to offer the full set without a Paykit deadline. A different protocol on the same App ID may
+require an earlier deadline for the signed record. Receive renews the record
+within the identity age limit. Once the cutoff arrives, upkeep withdraws the
+endpoints. A fresh explicit offer may choose a new deadline.
+
+`own_public_endpoints` reads the latest locally signed offer. A successful
+`Publication::Published` confirms the Homeserver copy. If a sibling protocol
+delays signing, `PaykitError::PublicEndpointChangePending` means that the
+client retained the requested edit. Show the withdrawal as pending until the
+client signs the updated record and reports its publication.
+
+After restoring a backup, drive the wallet's first receive. When publication
+returns `Publication::AwaitingRecord`, the wallet still has a newer record
+choice to settle. Keep the change pending and continue normal receives.
+A restore carrying only the accepted offer can repair its missing public copy.
 
 ## Use a Switch App built by the host
 
@@ -233,14 +264,30 @@ automatic payments.
 
 ## Scheduling a Billing Period
 
-The host schedules payments and records the user's recurring-payment policy. After accepting
-a subscription, use its signed recurrence to identify the current Billing Period. If that
-policy authorizes this subscription and it has no Allowance, call
-`pay_period_automatically(&request, &period)` and handle the returned `PayResult`. The SDK
-checks the current payment window, the request and period records, and the usual payment
-restrictions again before dispatch. A period that needs the user's choice stays available
-through `pay_period` when its other payment conditions hold. A missed period is never
-automatically caught up.
+The host schedules payments and records the user's recurring-payment policy. Accepting a
+subscription schedules no payment. For a current period outside an Allowance, choose how
+the host may use the endpoint before calling `pay_period_automatically`.
+
+- Use `PeriodPrice::RequestedAmount` when the host authorizes an eligible endpoint that
+  transfers the requested asset and amount. This call can pay immediately.
+- Use `PeriodPrice::QuoteFor(endpoint)` to inspect a signed rate for that endpoint.
+  The call returns `PricedByRate` or another refusal and opens no attempt. It still opens
+  no attempt when another endpoint can transfer the requested amount.
+- Use `PeriodPrice::AtRate(quote)` only after the host authorizes that exact quote. If
+  the user or policy declines it, leave the period unpaid and make no payment call.
+
+For example, a user can authorize one subscription's current monthly period at a named
+shop, payable to its chosen BTC endpoint for at most 0.0002 BTC at a rate of at most
+0.00002 BTC per requested USD. Check the request, period, destination and both assets
+before comparing the decimal amounts. If either ceiling is exceeded, keep the payment
+waiting or show this quote to the user. The same standing policy can evaluate the next
+month's quote. The SDK checks the signed source, amount and payment method again. A fee
+above the configured cap still stops automatic payment. For a payment by hand, pass the
+authorized quote through `PayOptions::with_rate_authorized`.
+
+The SDK checks the automatic payment window, the request and period records, and the
+usual payment restrictions again before dispatch. A missed period remains available for
+`pay_period` when its other payment conditions hold.
 
 ## Notices and errors
 
@@ -282,6 +329,7 @@ service. Acknowledging the deletion notice leaves the credit restriction in forc
 | `PaykitError::Client` | Handle the enclosed Switch outcome. Preserve any kept batch and its ID. |
 | `PaykitError::Lib` | Use the rule error to distinguish invalid input from invalid network or shared data. |
 | `PaykitError::Rail` | Preserve any unresolved attempt unless the method established definitive refusal. |
+| `PaykitError::PublicEndpointChangePending` | Keep the previously signed offer visible with a pending change. Resolve the reported signing refusal and check the resulting publication. |
 | `PaykitError::Homeserver` | Retry discovery when the Homeserver is available. If the user is waiting, explain that discovery could not finish. |
 | `PaykitError::Refused` | Follow the specific refusal below. |
 | `PaykitError::Conflict` | Read the current state and decide again. |
@@ -293,7 +341,7 @@ service. Acknowledging the deletion notice leaves the credit restriction in forc
 | `RailOutcome::Pending` | Leave the attempt open while its result is unknown. |
 | `PublicAppFailureReason::Homeserver` | Retry reading the affected app's Homeserver record. |
 | `PublicAppFailureReason::Refused` | Exclude the unusable record. Its rule failure can help diagnose the lookup. |
-| `PublicAppFailureReason::Expired` | Wait for a current record from that app. |
+| `PublicAppFailureReason::Expired` | Wait for a current record from that app. A public record reaches its limit at any finite signed deadline or at the maximum age in the payee's signed identity document (90 days by default). |
 | `PublicAppFailureReason::OverBound` | This app's endpoints did not fit within the lookup bounds. Use the reason when explaining an incomplete lookup. |
 
 ## Refusals
@@ -330,7 +378,7 @@ service. Acknowledging the deletion notice leaves the credit restriction in forc
 | `Refusal::UnsupportedEndpoint` | Ask the user to choose a compatible endpoint or payment method. |
 | `Refusal::WaitingForList` | Show that a newer Private Payment List was requested. A public destination is a separate user choice. |
 | `Refusal::Transfer` | Show the actual transfer or fee quote and return that exact quote only on confirmation. |
-| `Refusal::PricedByRate` | Show the rate and computed amount for confirmation in a manual payment. |
+| `Refusal::PricedByRate` | Obtain authorization for this exact quote from the user or their bounded policy (Scheduling a Billing Period). |
 | `Refusal::IdentityUnavailable` | Refresh the required identity before retrying. |
 | `Refusal::IdentityUnconfirmed` | Ask for explicit confirmation before using a public destination without Switch confirmation. |
 | `Refusal::PaymentInProgress` | Wait for the existing attempt before rejecting or cancelling. |
