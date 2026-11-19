@@ -2123,6 +2123,92 @@ impl ActivityRecord {
         )
     }
 
+    /// Merge the signed roles of an already issued one-time payee receipt into a
+    /// later publication of its record (Paykit wire 5, Publishing an issued one-time payee receipt).
+    /// `answers_delete` means the caller verified that the current write signed
+    /// the exact deletion condition for the original complete predecessor.
+    ///
+    /// # Errors
+    ///
+    /// The records identify different payments, a signed role or opaque member
+    /// conflicts, or one value cannot preserve both deletion restrictions.
+    pub fn merge_issued_payee_receipt(
+        &self,
+        current: &Self,
+        delete: &[u8; 32],
+        answers_delete: bool,
+    ) -> Result<Self> {
+        ensure(
+            self.side == ActivitySide::Payee
+                && matches!(self.request.as_ref().map(StoredMessage::body),
+                    Some(Body::PaymentRequest(request)) if request.recurrence.is_none())
+                && self.proof.is_some() && self.receipt.is_some(),
+            "Paykit wire 5: receipt publication requires a one-time payee request, proof and receipt",
+        )?;
+        self.check_same_record(current)?;
+        let mut merged = current.clone();
+        for (slot, prior) in [
+            (&mut merged.response, &self.response),
+            (&mut merged.cancellation, &self.cancellation),
+            (&mut merged.proof, &self.proof),
+            (&mut merged.receipt, &self.receipt),
+        ] {
+            if slot.is_none() {
+                slot.clone_from(prior);
+            }
+        }
+        let current_loss = current
+            .lost_to_delete
+            .filter(|marker| !(answers_delete && marker == delete));
+        ensure(
+            self.lost_to_delete.is_none()
+                || current_loss.is_none()
+                || self.lost_to_delete == current_loss,
+            "Paykit wire 5: different deletion restrictions cannot be merged into one marker",
+        )?;
+        merged.lost_to_delete = self.lost_to_delete.or(current_loss);
+        self.check_later_write(&merged)?;
+        current.check_later_write(&merged)?;
+        let later_members = std::mem::take(&mut merged.unknown);
+        merged.unknown =
+            self.unknown
+                .merge_identified(&later_members, &merged.to_json()?, &ACTIVITY_SHAPE)?;
+        merged.msg_ids = bounded_msg_ids(&merged.stored_msg_ids(), &current.msg_ids);
+        Ok(merged)
+    }
+
+    /// Check the signed roles and opaque members a publication of an issued one-time
+    /// payee receipt must preserve from this record (Paykit wire 5). The caller checks
+    /// the record key, the receipt's occurrence, and the deletion restrictions.
+    ///
+    /// # Errors
+    ///
+    /// The publication is for a different record, lacks the signed payment or drops
+    /// or changes a retained member, including a member of a nested object.
+    pub fn check_receipt_publication(&self, later: &Self) -> Result<()> {
+        self.check_later_write(later)?;
+        ensure(
+            self.side == ActivitySide::Payee
+                && matches!(later.request.as_ref().map(StoredMessage::body),
+                    Some(Body::PaymentRequest(request)) if request.recurrence.is_none())
+                && later.receipt.is_some() && later.proof.is_some(),
+            "Paykit wire 5: the publication must carry the one-time payee request, proof and receipt",
+        )?;
+        ensure(
+            self.unknown.held.iter().all(|prior| {
+                later.unknown.held.iter().any(|current| {
+                    current.anchor == prior.anchor
+                        && current.path == prior.path
+                        && prior
+                            .members
+                            .iter()
+                            .all(|(name, value)| current.members.get(name) == Some(value))
+                })
+            }),
+            "Paykit wire 5: the publication drops or changes a retained opaque member",
+        )
+    }
+
     /// "Attempted periods" (Paykit wire 5.3): a reader that holds the version a write was
     /// built on (`self`) checks every listed period `later` drops: the write's `conditions`
     /// carry a `claim_step` condition on that period's claim, the obligation of (payee,
