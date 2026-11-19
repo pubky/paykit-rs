@@ -320,7 +320,7 @@ Every payment follows these steps, whether it pays a one-time request, a Billing
 - **An app that isn't current can write nothing,** not even outcomes. Its attempts are reconciled through receipts or by other apps.
 - **Graceful removal:** the signer warns before revoking an app, or letting its certificate lapse (Pubky Switch spec, Section 3.2), while it still owns open attempts, which `GET /v1/{id}/apps` lists. Apps with `paykit_allowance` warn when an Allowance's executor stops being current (Section 8.3).
 
-An app with `paykit_recovery` can show which original apps are listed on the identity-signed opening, which have an explicit signed removal for that loss, and which have a verifiable report at the service (wire 5.10). A report identifies the historical evidence its author committed to. Roster completion, removal and republication do not establish that a particular obligation was unpaid or a settlement uncredited.
+An app with `paykit_recovery` can show which original apps are listed on the identity-signed opening, which have an explicit signed removal for that loss, and which have a verifiable report at the service (wire 5.10). A report commits to the original’s inventory cutoff, the subjects it found and its decision for each. A wallet given the disclosed evidence can recompute the three digests using wire 5.10 and independently check the basis of a decision. Roster completion, removal and republication do not establish that a particular obligation was unpaid or a settlement uncredited.
 
 ## 8. Payment flows and features
 
