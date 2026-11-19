@@ -45,6 +45,26 @@ futures-channel = "0.3.34"
 js-sys = "0.3.107"
 wasm-bindgen = "0.2.130"
 wasm-bindgen-futures = "0.4.80"
+# The fetch transport (`src/fetch.rs`): the browser's `fetch`, its request, answer, header and
+# body stream types, `AbortController`, and the URL parser it checks the signed path with.
+web-sys = { version = "0.3.107", features = [
+  "AbortController",
+  "AbortSignal",
+  "Headers",
+  "ReadableStream",
+  "ReadableStreamDefaultReader",
+  "ReadableStreamReadResult",
+  "ReferrerPolicy",
+  "Request",
+  "RequestCache",
+  "RequestCredentials",
+  "RequestInit",
+  "RequestMode",
+  "RequestRedirect",
+  "Response",
+  "ResponseType",
+  "Url",
+] }
 
 [dev-dependencies]
 serde_json.workspace = true
