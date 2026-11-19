@@ -34,6 +34,8 @@ For canonical protocol vocabulary, see [THESAURUS.md](THESAURUS.md).
 The Switch's own crates live in `pubky/pubky-switch`. The crates here are being
 built; none is published yet. Language bindings come later.
 
+See the [Paykit host guide](docs/paykit-host-guide.md) for wallet setup and SDK outcomes.
+
 ## Development
 
 ```sh

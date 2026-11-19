@@ -350,14 +350,6 @@ async fn test_blocked_restore_reads_the_deny_list_again_before_a_payment() {
         .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
         .await
         .unwrap();
-    restored
-        .confirm_possibly_cancelled(
-            &request,
-            &crate::common::held(&restored, &request).await,
-            pubky_switch_client::app::UserConfirmed::new(),
-        )
-        .await
-        .unwrap();
     let refused = restored
         .pay_request(&request, PayOptions::default())
         .await
@@ -921,9 +913,7 @@ async fn test_blocked_own_block_kept_unanswered_survives_a_restore_and_is_writte
     wallet.receive(None).await.unwrap();
     let lists = wallet.app_mut().allow_list().await.unwrap();
     assert!(lists.deny.contains(&w.bob_id()));
-    // Past the restore's hold, which the user confirms, the block refuses the payment.
-    let held = PayOptions::default()
-        .with_possibly_cancelled_confirmed(crate::common::held(&wallet, &request).await);
+    let held = PayOptions::default();
     let refused = wallet
         .pay_request(&request, held)
         .await
@@ -1569,8 +1559,7 @@ async fn test_blocked_own_unblock_kept_unanswered_not_restored() {
         .is_empty());
     let lists = wallet.app_mut().allow_list().await.unwrap();
     assert!(lists.deny.contains(&w.bob_id()));
-    let held = PayOptions::default()
-        .with_possibly_cancelled_confirmed(crate::common::held(&wallet, &request).await);
+    let held = PayOptions::default();
     let error = wallet
         .pay_request(&request, held)
         .await
@@ -2181,13 +2170,9 @@ async fn answer_held(held: Held, answer: Answer, between: Between) {
         wallet.unblock(&w.bob_id()).await.unwrap();
     }
     wallet.receive(None).await.unwrap();
-    // The held answer goes, once. After a restore while bob was blocked, the restore's block
-    // mark of him asks too, once, when its own read of the lists shows him unblocked.
+    // Once bob can receive, the held answer goes once. A clean restore owes no block ask.
     let asks = crate::common::asked(&wallet, &w.bob_id()).await.len();
-    assert_eq!(
-        asks,
-        usize::from(matches!((held, between), (Held::Blocked, Between::Restore)))
-    );
+    assert_eq!(asks, 0);
     assert_eq!(
         w.bob.switch().entries_from(&w.alice_id()),
         entries + 1 + asks,

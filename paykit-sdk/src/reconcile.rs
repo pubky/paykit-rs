@@ -199,11 +199,10 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// The client's errors; the rail's errors; [`crate::Refusal::NotNow`] while a wider
-    /// certificate's scope keys are still missing: its payer pass reads the obligations from
-    /// the records, and a listing before the keys can't open the records they add, so the
-    /// pass would miss them. [`Paykit::resume_payments`] still finishes the payments already
-    /// dispatched meanwhile.
+    /// Returns [`crate::Refusal::NotNow`] while more collection pages remain or a wider
+    /// certificate's scope keys are missing. Call again to continue the listing. The payer
+    /// pass needs the keys to read every obligation. [`Paykit::resume_payments`] can still
+    /// finish payments already dispatched. Client and rail errors propagate to the caller.
     pub async fn reconcile(&mut self) -> Result<ReconcileReport> {
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.reconcile_inner()).await
@@ -484,6 +483,7 @@ impl Paykit {
             rail_proof: None,
             paid_at_ms: None,
             proof_msg_id: None,
+            offline: None,
             restored: true,
             journaled_at_ms: self.now(),
             carrier: None,
@@ -756,10 +756,11 @@ impl Paykit {
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
+        Box::pin(self.restore_verdict_not_known_holds()).await?;
         let asks_owed = self
             .local_get::<RestoreHold>(key::RESTORE_HOLD)
             .await?
-            .is_some_and(|hold| !hold.asks_queued);
+            .is_some_and(|hold| hold.asks_due());
         if asks_owed {
             self.list_records().await?;
             self.queue_restore_asks().await?;
