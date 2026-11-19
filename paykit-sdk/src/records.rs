@@ -59,6 +59,10 @@ pub(crate) struct KeptMessage {
     /// carries none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     seq: Option<u64>,
+    /// The feed generation of a pooled reply. Its sequence alone cannot
+    /// order entries on opposite sides of a provider loss.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generation: Option<u64>,
     /// The selected version of the pending proposal this answer was matched against.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) pending_source: Option<crate::divergent::SeenVersion>,
@@ -69,10 +73,42 @@ pub(crate) struct KeptMessage {
 /// inbox gives each entry as it accepts it, whoever sent it (Switch spec 8.3), never by its
 /// `msg_id`, which its sender chooses, nor by the store that keeps it. A stored entry keeps
 /// the `seq` it was read at when the client tries it again, so a message keeps its position
-/// whichever store keeps it and however often it is taken. The `seq` starts again at a
-/// provider change, and the entry's generation is not handed to the receive step: two
-/// messages of one millisecond accepted under two generations are ordered by their `seq`s.
+/// whichever store keeps it and however often it is taken. Pending Allowance replies retain
+/// their complete feed position and use the client's feed order across generations.
 pub(crate) type KeptOrder = (u64, u64);
+
+/// Compare inbox acceptance times, using the verified feed order to break a tie.
+pub(crate) fn compare_received(
+    a: (u64, pubky_switch_client::app::FeedPosition),
+    b: (u64, pubky_switch_client::app::FeedPosition),
+    order: impl Fn(
+        pubky_switch_client::app::FeedPosition,
+        pubky_switch_client::app::FeedPosition,
+    ) -> Option<std::cmp::Ordering>,
+) -> Option<std::cmp::Ordering> {
+    match a.0.cmp(&b.0) {
+        std::cmp::Ordering::Equal => order(a.1, b.1),
+        distinct => Some(distinct),
+    }
+}
+
+/// The first item only when every relevant comparison proves it.
+pub(crate) fn first_received<T>(
+    items: &[T],
+    compare: impl Fn(&T, &T) -> Option<std::cmp::Ordering>,
+) -> Option<usize> {
+    items.first()?;
+    let mut first = 0;
+    for (index, item) in items.iter().enumerate().skip(1) {
+        if compare(item, &items[first]) == Some(std::cmp::Ordering::Less) {
+            first = index;
+        }
+    }
+    items
+        .iter()
+        .all(|other| compare(&items[first], other).is_some_and(|o| !o.is_gt()))
+        .then_some(first)
+}
 
 impl std::fmt::Debug for KeptMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -81,6 +117,19 @@ impl std::fmt::Debug for KeptMessage {
 }
 
 impl KeptMessage {
+    /// Keep the original signed by this app before it hands it to the outbox.
+    pub(crate) fn signed(sender: [u8; 32], cert: &SignedDoc, message: &SignedMessage) -> Self {
+        Self {
+            sender,
+            cert: cert.clone(),
+            plaintext: message.plaintext().encode(),
+            accepted_at: None,
+            seq: None,
+            generation: None,
+            pending_source: None,
+        }
+    }
+
     /// Keep `stored`.
     pub(crate) fn of(stored: &StoredMessage) -> Self {
         Self {
@@ -89,6 +138,7 @@ impl KeptMessage {
             plaintext: stored.plaintext().encode(),
             accepted_at: stored.accepted_at(),
             seq: None,
+            generation: None,
             pending_source: None,
         }
     }
@@ -99,6 +149,22 @@ impl KeptMessage {
             seq: Some(seq),
             ..Self::of(stored)
         }
+    }
+
+    pub(crate) fn taken_at(
+        stored: &StoredMessage,
+        at: pubky_switch_client::app::FeedPosition,
+    ) -> Self {
+        let mut held = Self::taken(stored, at.seq);
+        held.generation = Some(at.generation);
+        held
+    }
+
+    pub(crate) fn position(&self) -> Option<pubky_switch_client::app::FeedPosition> {
+        Some(pubky_switch_client::app::FeedPosition {
+            generation: self.generation?,
+            seq: self.seq?,
+        })
     }
 
     /// The feed `seq` its entry was read at, for a message ordered among others
@@ -149,6 +215,7 @@ impl KeptMessage {
         .map_err(|_| PaykitError::corrupt())?;
         if let Some(source) = self.pending_source {
             if source.record_version().is_none()
+                || self.position().is_none()
                 || self.order().is_err()
                 || !matches!(
                     message.body(),

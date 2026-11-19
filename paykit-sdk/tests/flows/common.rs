@@ -44,6 +44,7 @@ pub fn spec() -> ProtocolSpec {
             "paykit_pay",
             "paykit_request",
             "paykit_settlements",
+            "paykit_recovery",
             "paykit_allowance",
             "paykit_allowance_execute",
             "paykit_contacts",
@@ -355,16 +356,20 @@ pub struct FailingRecordReads {
     armed: std::sync::atomic::AtomicBool,
     /// Once set, the read of a held record that brings it to 1 fails, alone.
     countdown: std::sync::atomic::AtomicU64,
-    /// One actual record whose next read exceeds the store's limit.
-    limited_record: std::sync::Mutex<Option<String>>,
+    /// One stored value whose next read exceeds the store's limit.
+    limited_key: std::sync::Mutex<Option<String>>,
     /// While set, every journal entry reads back as bytes that don't read.
     corrupt_journal: std::sync::atomic::AtomicBool,
 }
 
 impl FailingRecordReads {
     pub fn limit_next_record(&self, key: &[u8; 32]) {
-        *self.limited_record.lock().unwrap() =
+        *self.limited_key.lock().unwrap() =
             Some(format!("rec/{}", pubky_switch_core::enc::b64(key)));
+    }
+
+    pub fn limit_next_cursor_time(&self) {
+        *self.limited_key.lock().unwrap() = Some("p/paykit/ct".into());
     }
 
     /// Fail every read of a held record from now on.
@@ -396,7 +401,7 @@ impl StateStore for FailingRecordReads {
         ns: &str,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
-        let mut limited = self.limited_record.lock().unwrap();
+        let mut limited = self.limited_key.lock().unwrap();
         if limited.as_deref().map(str::as_bytes) == Some(key) {
             if let Some(stored) = self.inner.get(ns, key)? {
                 *limited = None;

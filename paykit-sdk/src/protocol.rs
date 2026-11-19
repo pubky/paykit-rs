@@ -467,8 +467,9 @@ pub const BACKUP_NAME: &str = "paykit";
 /// The families whose size the runtime bounds at every write are counted, and a layer
 /// past a bound is refused: the notices of lost messages owed (`bl/`, at most
 /// [`crate::marks::MAX_LOST_OWED`]) and each family of marks (`pd/`, `ud/`, `kw/`, `bd/`, at
-/// most [`crate::marks::MAX_DROPPED_MARKS`] each). No run leaves more, and the runtime
-/// checks the bound only as it adds one, so a restored layer over it would stay over it.
+/// most [`crate::marks::MAX_DROPPED_MARKS`] each). Retired reply windows and their
+/// unacknowledged loss notices together occupy at most [`crate::marks::MAX_LOST_OWED`]
+/// distinct sender and start-time pairs across both histories.
 pub(crate) fn restore_paykit_layer(
     layer: Option<&ProtocolLayer>,
     restoring: &RestoreContext<'_>,
@@ -534,7 +535,7 @@ pub(crate) fn restore_paykit_layer(
     let mut awaiting_recording = std::collections::BTreeSet::new();
     let mut journaled = std::collections::BTreeSet::new();
     let mut acknowledged = Vec::new();
-    let mut writes = Vec::with_capacity(state.len());
+    let mut writes = crate::reply_asks::restore(restoring, &binder, &state)?;
     let mut cursor_time_ms = 0;
     let mut bounded = BoundedFamilies::default();
     for (key, value) in state {
@@ -548,6 +549,9 @@ pub(crate) fn restore_paykit_layer(
         let unread = || String::from("Paykit's local state in the backup doesn't read");
         bounded.count(&family)?;
         let attempt = match family {
+            StateKey::ReplyAsks { .. }
+            | StateKey::ReplyFloorBatch { .. }
+            | StateKey::DroppedLost { .. } => continue, // Merged and bounded together above.
             StateKey::RestoreHold => continue, // Validated above before reading its confirmations.
             StateKey::MissedHold => {
                 state::restored::<crate::hold::MissedHold>(&key, &value, &binder)
@@ -1089,10 +1093,14 @@ impl Protocol for PaykitProtocol {
             Ok(MessageKind::Paykit(Kind::AllowanceEnd)) => {
                 crate::allowances::may_deliver_end(delivery).map_err(view_failure)
             }
+            Ok(MessageKind::Paykit(Kind::ResendRequest)) => {
+                if !may_deliver_to_contact(delivery).map_err(view_failure)? {
+                    return Ok(false);
+                }
+                crate::reply_asks::may_deliver_request(delivery).map_err(view_failure)
+            }
             Ok(
-                MessageKind::Paykit(
-                    Kind::AllowanceProposal | Kind::AllowanceRejection | Kind::ResendRequest,
-                )
+                MessageKind::Paykit(Kind::AllowanceProposal | Kind::AllowanceRejection)
                 | MessageKind::Extension(_),
             ) => may_deliver_to_contact(delivery).map_err(view_failure),
             _ => Ok(true),
@@ -1255,6 +1263,8 @@ impl Protocol for PaykitProtocol {
             // entry itself, whatever is returned (Switch spec 3.5).
             Ok(()) | Err(Fail::NotNow) => Outcome::Apply(Effect::default()),
             Err(Fail::Need(needs)) => Outcome::Need(needs),
+            Err(Fail::Consume) => Outcome::Consume,
+            Err(Fail::AwaitAdmission) => Outcome::AwaitAdmission,
             Err(Fail::Drop(reason)) => Outcome::Drop { reason },
             Err(Fail::Store(failure)) => Outcome::Retry(failure),
             // A record value waits for its scope key: the client stores the entry and passes
@@ -2217,7 +2227,14 @@ mod receive_tests {
             vec![[4; 32]],
             object(json!({})),
         );
-        let value = state::encode(&KeptMessage::taken(&reply, 0)).unwrap();
+        let value = state::encode(&KeptMessage::taken_at(
+            &reply,
+            pubky_switch_client::app::FeedPosition {
+                generation: 1,
+                seq: 1,
+            },
+        ))
+        .unwrap();
         let target = ActivityTarget::payee(natural_key::request_record(&bob.id(), &[4; 32]), None);
         (reply, value, fake_key(&target.record_target()))
     }
@@ -2619,7 +2636,14 @@ mod receive_tests {
             vec![[4; 32], [5; 32]],
             object(json!({ "attempt_id": "DgCVYQKL1eyDacZvG6YhZg" })),
         );
-        let value = state::encode(&KeptMessage::taken(&receipt, 0)).unwrap();
+        let value = state::encode(&KeptMessage::taken_at(
+            &receipt,
+            pubky_switch_client::app::FeedPosition {
+                generation: 1,
+                seq: 1,
+            },
+        ))
+        .unwrap();
         let at = key::kept_reply(&carol.id(), &record, &receipt.message().msg_id);
         assert!(!restores::<KeptMessage>(&bob, at.as_bytes(), &value));
     }
@@ -2638,7 +2662,11 @@ mod receive_tests {
             panic!("an acceptance");
         };
         let record = fake_key(&allowance_target(&alice.id(), &body.allowance_id));
-        let value = state::encode(&KeptMessage::taken(&answer, 0)).unwrap();
+        let at = pubky_switch_client::app::FeedPosition {
+            generation: 1,
+            seq: 1,
+        };
+        let value = state::encode(&KeptMessage::taken_at(&answer, at)).unwrap();
         (answer, value, record)
     }
 
@@ -2715,6 +2743,12 @@ mod receive_tests {
         let at = key::kept_reply(&alice.id(), &record, &answer.message().msg_id);
         let unordered = state::encode(&KeptMessage::of(&answer)).unwrap();
         assert!(!restores::<KeptMessage>(&bob, at.as_bytes(), &unordered));
+        let missing_generation = state::encode(&KeptMessage::taken(&answer, 1)).unwrap();
+        assert!(!restores::<KeptMessage>(
+            &bob,
+            at.as_bytes(),
+            &missing_generation
+        ));
         let (reply, _, record) = kept_reply(&alice, &bob);
         let at = key::kept_reply(&alice.id(), &record, &reply.message().msg_id);
         let unordered = state::encode(&KeptMessage::of(&reply)).unwrap();
@@ -2825,7 +2859,11 @@ mod receive_tests {
             object(json!({ "allowance_id": body.allowance_id.as_str() })),
         );
         for conflict in [&proposal, &response] {
-            let value = state::encode(&KeptMessage::taken(conflict, 1)).unwrap();
+            let position = pubky_switch_client::app::FeedPosition {
+                generation: 1,
+                seq: 1,
+            };
+            let value = state::encode(&KeptMessage::taken_at(conflict, position)).unwrap();
             assert!(restores::<KeptMessage>(&alice, at.as_bytes(), &value));
             assert!(!restores::<KeptMessage>(
                 &alice,
@@ -2897,8 +2935,8 @@ mod receive_tests {
     #[test]
     fn test_protocol_restore_refuses_a_kept_unrequested_proof_it_cannot_order() {
         // A proof of a payment without a request is a kept reply (`pr/`) like any other, and
-        // is placed among them in the order its inbox accepted it: one kept without its feed
-        // `seq`, or with a null one, can't be ordered, so a restore refuses it, though its
+        // is placed among them in the order its inbox accepted it: one kept without its full
+        // feed position can't be ordered, so a restore refuses it, though its
         // record, which only the rail names, isn't bound until it is placed.
         let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
         let bob = Party::new(
@@ -2919,7 +2957,14 @@ mod receive_tests {
             })),
         );
         let at = key::kept_reply(&alice.id(), &[9; 32], &proof.message().msg_id);
-        let value = state::encode(&KeptMessage::taken(&proof, 3)).unwrap();
+        let value = state::encode(&KeptMessage::taken_at(
+            &proof,
+            pubky_switch_client::app::FeedPosition {
+                generation: 1,
+                seq: 3,
+            },
+        ))
+        .unwrap();
         assert!(restores::<KeptMessage>(&bob, at.as_bytes(), &value));
         assert!(restores::<KeptMessage>(
             &bob,
