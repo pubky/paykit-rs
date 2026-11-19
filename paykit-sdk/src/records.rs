@@ -684,7 +684,7 @@ mod own_message_tests {
             "an own message's stored copy is made somewhere new: queue it in the same batch"
         );
         // Every stored message is built in one of these: a received message kept
-        // (`KeptMessage::stored`) or stored by the client (`note_stored`), an own message's
+        // (`KeptMessage::stored`) or parked by the client (`parked_message`), an own message's
         // copy (`own_copy`), an acceptance journaled (`acceptance_message`), and the unit
         // tests' parties and copies (`as_read`). A copy built anywhere else could store an own message unqueued.
         assert_eq!(
@@ -701,7 +701,8 @@ mod own_message_tests {
         assert!(body(text("records.rs"), "own_copy").contains("StoredMessage::new("));
         assert!(body(text("allowances.rs"), "as_read").contains("StoredMessage::new("));
         assert!(body(text("journal.rs"), "acceptance_message").contains("StoredMessage::new("));
-        assert!(body(text("stored.rs"), "note_stored").contains("StoredMessage::new("));
+        assert!(body(text("stored.rs"), "note_stored").contains("parked_message(&entry, &own)"));
+        assert!(body(text("stored.rs"), "parked_message").contains("StoredMessage::new("));
         // Each requested delivery is queued with the write of the signed message.
         let send = body(text("records.rs"), "send_with_record");
         assert!(send.contains("self.own_copy(&signed)"));

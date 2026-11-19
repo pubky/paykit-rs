@@ -420,11 +420,19 @@ pub(crate) fn view_get<T: Stored>(view: &LocalView<'_>, key: &str) -> Result<Opt
 /// Every value under `prefix`, read through a [`LocalView`], with the key's rest after the
 /// prefix, each bound to its own key.
 pub(crate) fn view_scan<T: Stored>(view: &LocalView<'_>, prefix: &str) -> Result<Vec<(String, T)>> {
-    let binder = Binder::view(view);
+    bound_view_scan(view, prefix, &Binder::view(view))
+}
+
+/// Read the same protocol namespace with the key and certificate available to its caller.
+pub(crate) fn bound_view_scan<T: Stored>(
+    view: &LocalView<'_>,
+    prefix: &str,
+    binder: &Binder<'_>,
+) -> Result<Vec<(String, T)>> {
     let mut out = Vec::new();
     for (key, value) in view.local_scan(prefix.as_bytes())? {
         let rest = rest_of(&key, prefix.as_bytes()).ok_or_else(PaykitError::corrupt)?;
-        out.push((rest, bound(&key, &value, &binder)?));
+        out.push((rest, bound(&key, &value, binder)?));
     }
     Ok(out)
 }
