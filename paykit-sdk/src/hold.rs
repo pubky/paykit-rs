@@ -405,6 +405,8 @@ pub(crate) fn side_unlisted(
 /// Why the shared records aren't listed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Unlisted {
+    /// No certificate has been listed yet. A wallet action can run the initial listing.
+    FirstListing,
     /// A restore set `p/nl`: the client owes a listing too, which its next read makes
     /// before the feed (Switch spec 12.4 step 2.1).
     Restore,
@@ -414,7 +416,7 @@ pub(crate) enum Unlisted {
     /// ([`Paykit::list_records`]) ends this, at the end of that receive.
     Missed,
     /// The certificate the app holds is another than the one the records were last listed
-    /// under (`p/lc`), or none is kept ([`side_unlisted`]). A client owes a listing too for
+    /// under (`p/lc`, [`side_unlisted`]). A client owes a listing too for
     /// one that reads collections, or members of one, that the certificate before it didn't
     /// (Switch spec 8.3), made at the start of a later read once it holds the scope keys,
     /// but tells no caller when it made it: a listing Paykit makes ([`Paykit::list_records`])
@@ -453,10 +455,13 @@ impl Paykit {
         {
             return Ok(Some(Unlisted::Missed));
         }
-        Ok(self
-            .side_unlisted(RecordSide::All)
-            .await?
-            .then_some(Unlisted::Certificate))
+        let Some(listed) = self.listed_cert().await? else {
+            return Ok(Some(Unlisted::FirstListing));
+        };
+        Ok(
+            side_unlisted(RecordSide::All, false, Some(&listed), self.app.cert())
+                .then_some(Unlisted::Certificate),
+        )
     }
 
     /// [`side_unlisted`] for `side`, from what the store holds. Under a certificate Paykit
@@ -964,7 +969,7 @@ impl Paykit {
     pub(crate) async fn list_under_new_cert(&mut self) -> Result<Option<String>> {
         let owed = matches!(
             self.unlisted().await?,
-            Some(Unlisted::Certificate | Unlisted::Missed)
+            Some(Unlisted::FirstListing | Unlisted::Certificate | Unlisted::Missed)
         );
         if !owed || !self.holds_scope_keys() {
             return Ok(None);
