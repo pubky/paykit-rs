@@ -28,6 +28,25 @@ use pubky_switch_client::transport::Transport;
 use pubky_switch_core::ops::OpKind;
 use serde_json::Value;
 
+/// Deliver the first collection page of each bounded read from before a newer directory.
+pub fn delay_listing_pages(signer: &TestSigner, earlier: u64) {
+    use pubky_switch_client::app::{Protocol, LISTING_PAGES_PER_READ};
+    assert!(signer.switch().tip_seq() > earlier);
+    let reads = paykit_sdk::PaykitProtocol::new()
+        .collections()
+        .len()
+        .div_ceil(LISTING_PAGES_PER_READ as usize);
+    for _ in 0..reads {
+        signer
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Head {
+                path: "records?collection".into(),
+                at: Some(earlier),
+                forked: false,
+            });
+    }
+}
+
 /// Complete the bounded client and wallet listings used by these small fixtures.
 pub async fn finish_listing(wallet: &mut Paykit) {
     for _ in 0..8 {

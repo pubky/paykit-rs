@@ -11528,16 +11528,16 @@ async fn test_pending_capacity_waits_for_a_fresh_listing_after_a_delayed_page() 
         at: Some(before),
         forked: false,
     });
-    if wallet.app_mut().list_collections().await.unwrap() {
-        assert!(!wallet.app_mut().list_collections().await.unwrap());
-    }
+    assert!(wallet.app_mut().list_collections().await.unwrap());
     assert!(wallet
         .app_mut()
         .current_collection(&family, &complete)
         .await
         .unwrap()
         .is_none());
-    // A fresh listing is now owed. While it is unavailable the old page cannot admit a proposal.
+    // A missed entry makes the wallet relist before admitting another proposal.
+    missed(&w);
+    let unavailable = w.alice.switch().unreached_bodies().len();
     w.alice.switch().fail_next(Fault::Unreachable {
         path: page_path,
         after: 0,
@@ -11546,6 +11546,7 @@ async fn test_pending_capacity_waits_for_a_fresh_listing_after_a_delayed_page() 
         .propose_allowance(w.bob_id(), AllowanceRole::Allower, terms())
         .await;
     assert!(result.is_err(), "{result:?}");
+    assert_eq!(w.alice.switch().unreached_bodies().len(), unavailable + 1);
     // The interrupted listing requires the wallet to reload before inspecting its outbox.
     let app_id = wallet.app_id();
     drop(wallet);
