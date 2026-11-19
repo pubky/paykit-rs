@@ -860,7 +860,7 @@ async fn test_periods_proof_for_a_payee_record_not_listed_yet_held_until_listed(
     let before = wallet.receive(None).await.unwrap().report.cursor;
     let till_id = w.alice.identity().app_keys("till").app_id_bytes();
     let body = period_proof(&w, till_id, january()).await;
-    w.inject(
+    let proof = w.inject(
         &w.bob,
         "bwallet",
         &w.alice,
@@ -873,12 +873,8 @@ async fn test_periods_proof_for_a_payee_record_not_listed_yet_held_until_listed(
     assert!(!received(&summary, "paykit.payment_proof"), "{summary:?}");
     assert_eq!(summary.report.cursor, before);
     store_bundle(&w, me, &wider);
-    let mut proofs = 0;
-    for _ in 0..3 {
-        let summary = wallet.receive(None).await.unwrap();
-        proofs += usize::from(received(&summary, "paykit.payment_proof"));
-    }
-    assert_eq!(proofs, 1);
+    crate::common::receive_message(&mut wallet, &proof).await;
+    assert!(!wallet.receive(None).await.unwrap().applied.contains(&proof));
     let sales = wallet.payee_activity().await.unwrap();
     assert_eq!(sales.len(), 1, "{sales:?}");
     assert_eq!(sales[0].periods.len(), 1);

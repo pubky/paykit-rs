@@ -32,14 +32,40 @@ use serde_json::Value;
 pub async fn finish_listing(wallet: &mut Paykit) {
     for _ in 0..8 {
         let summary = wallet.receive(None).await.unwrap();
-        if !summary.report.more
-            && summary.records_unlisted.is_none()
-            && !wallet.app().listing_owed().await.unwrap()
-        {
-            return;
+        if summary.report.more {
+            continue;
         }
+        if let Some(reason) = summary.records_unlisted.as_deref() {
+            assert!(reason.contains("Call receive again"), "{summary:?}");
+            continue;
+        }
+        assert!(!wallet.app().listing_owed().await.unwrap(), "{summary:?}");
+        return;
     }
     panic!("the test wallet's listing did not finish");
+}
+
+/// Read the accepted message and check that its effect is reported exactly once in that read.
+pub async fn receive_message(wallet: &mut Paykit, msg_id: &str) {
+    for _ in 0..8 {
+        let summary = wallet.receive(None).await.unwrap();
+        let count = summary
+            .applied
+            .iter()
+            .filter(|id| id.as_str() == msg_id)
+            .count();
+        if count > 0 {
+            assert_eq!(count, 1);
+            return;
+        }
+        if summary.report.more {
+            continue;
+        }
+        if let Some(reason) = summary.records_unlisted.as_deref() {
+            assert!(reason.contains("Call receive again"), "{summary:?}");
+        }
+    }
+    panic!("the accepted message {msg_id} did not reach its wallet");
 }
 
 pub const HOUR_MS: u64 = 3_600_000;

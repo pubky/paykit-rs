@@ -885,13 +885,15 @@ impl Paykit {
         if self.unlisted().await?.is_none() {
             return Ok(());
         }
-        self.list_records().await.map_err(|error| {
-            if unanswered(&error) {
-                unlisted()
-            } else {
-                error
-            }
-        })
+        self.list_records("Retry the original action")
+            .await
+            .map_err(|error| {
+                if unanswered(&error) {
+                    unlisted()
+                } else {
+                    error
+                }
+            })
     }
 
     /// Refused as not now while a wider certificate's scope keys are still missing: the
@@ -911,12 +913,21 @@ impl Paykit {
     /// keeps values the app can't open, and keeping the certificate then would mark them
     /// listed for good. Every listing of Paykit's comes here. Only a receive takes a
     /// certificate, so none is taken during the listing.
-    pub(crate) async fn list_records(&mut self) -> Result<()> {
+    pub(crate) async fn list_records(&mut self, retry: &'static str) -> Result<()> {
         self.refuse_while_scope_keys_missing().await?;
+        // A certificate change or missed feed requires a new pass. The client's owed
+        // listing shares its continuation with list_collections and finishes on receive.
+        if self.app.listing_owed().await?
+            && matches!(
+                self.unlisted().await?,
+                Some(Unlisted::Certificate | Unlisted::Missed)
+            )
+        {
+            return Err(listing_continues("Call receive again"));
+        }
         let signed = self.app.cert().signed().clone();
         if self.app.list_collections().await? {
-            // Switch keeps the listing position across calls and reloads.
-            return Err(unlisted());
+            return Err(listing_continues(retry));
         }
         let mut tx = Tx::default();
         tx.delete(key::RECORDS_UNLISTED);
@@ -955,12 +966,10 @@ impl Paykit {
             self.unlisted().await?,
             Some(Unlisted::Certificate | Unlisted::Missed)
         );
-        // The client and an explicit listing share a continuation. Finish the client's
-        // owed listing before starting Paykit's own pass under the new certificate.
-        if !owed || !self.holds_scope_keys() || self.app.listing_owed().await? {
+        if !owed || !self.holds_scope_keys() {
             return Ok(None);
         }
-        match self.list_records().await {
+        match self.list_records("Call receive again").await {
             Ok(()) => Ok(None),
             Err(error) if local_failure(&error) => Err(error),
             Err(error) => Ok(Some(error.to_string())),
@@ -1715,6 +1724,13 @@ pub(crate) fn payer_pass_refusal() -> Refusal {
          restore"
             .into(),
     )
+}
+
+fn listing_continues(retry: &str) -> crate::error::PaykitError {
+    Refusal::NotNow(format!(
+        "the shared records aren't listed yet. {retry} to continue the listing"
+    ))
+    .into()
 }
 
 pub(crate) fn unlisted() -> crate::error::PaykitError {

@@ -200,8 +200,12 @@ current store.
 
 Read `notices` and `payee_deletion_notices` by their stable identities. Acknowledge
 each through its matching SDK API after recording or showing it. Handle Switch
-duty events from `ReceiveSummary::report`. After a receive error, read and
-retain committed duties from `wallet.app_mut().unacknowledged_events()`.
+duty events from `ReceiveSummary::report`. If `records_unlisted` says the listing
+has more to read, call `receive(None)` again. The wallet can still be listing
+collections after the Switch has finished its feed read. An explicit `reconcile` or
+`end_reconcile` can also run its own listing. Follow the action named in its
+`NotNow` result to resume that scan. After a receive error,
+read and retain committed duties from `wallet.app_mut().unacknowledged_events()`.
 Wait for a later successful `receive` so the SDK can process its duties, then
 acknowledge for `"paykit"` with `App::ack_events_for` up to the last duty in
 that successful report. Use the app-wide `App::ack_events` only after the

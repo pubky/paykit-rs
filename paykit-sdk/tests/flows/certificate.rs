@@ -1367,12 +1367,22 @@ async fn test_certificate_renewal_reading_more_lists_its_records_first() {
         });
     let mut summary = wallet.receive(None).await.unwrap();
     for _ in 0..8 {
-        if !summary.report.more || summary.records_unlisted.is_some() {
+        if summary
+            .records_unlisted
+            .as_deref()
+            .is_some_and(|why| !why.contains("continue the listing"))
+        {
             break;
         }
         summary = wallet.receive(None).await.unwrap();
     }
-    assert!(summary.records_unlisted.is_some(), "{summary:?}");
+    assert!(
+        summary
+            .records_unlisted
+            .as_deref()
+            .is_some_and(|why| !why.contains("continue the listing")),
+        "{summary:?}"
+    );
     let refused = wallet.payee_activity().await.unwrap_err();
     assert!(is_not_now(&refused), "{refused:?}");
     // The next read lists them: the till's request shows.
@@ -1400,7 +1410,7 @@ async fn test_certificate_renewal_reading_more_taken_by_a_failed_read_holds_read
         matches!(refused.refusal(), Some(Refusal::NotNow(_))),
         "{refused:?}"
     );
-    wallet.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut wallet).await;
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
 }
 
@@ -1420,7 +1430,7 @@ async fn test_certificate_renewal_reading_more_listed_after_a_reload() {
     let w = World::new();
     let base = store();
     let mut wallet = reloaded_after_a_failed_read(&w, &base).await;
-    wallet.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut wallet).await;
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
 }
 
@@ -1594,8 +1604,23 @@ async fn test_certificate_renewal_reading_more_listing_refused_holds_reads_until
     assert_eq!(wallet.app().cert().hash(), wider.hash());
     let refused = wallet.payee_activity().await.unwrap_err();
     assert!(is_not_now(&refused), "{refused:?}");
+    // While Switch still owes this certificate its own listing, receive must go first.
+    assert!(wallet.app().listing_owed().await.unwrap());
+    let waiting = wallet.reconcile().await.unwrap_err();
+    assert!(
+        matches!(waiting.refusal(), Some(Refusal::NotNow(reason)) if reason.contains("Call receive again")),
+        "{waiting:?}"
+    );
     let summary = wallet.receive(None).await.unwrap();
-    assert!(summary.records_unlisted.is_none(), "{summary:?}");
+    assert!(
+        summary
+            .records_unlisted
+            .as_deref()
+            .is_some_and(|why| why.contains("continue the listing")),
+        "{summary:?}"
+    );
+    assert!(is_not_now(&wallet.payee_activity().await.unwrap_err()));
+    crate::common::finish_listing(&mut wallet).await;
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
 }
 
@@ -2319,7 +2344,7 @@ async fn test_certificate_reconcile_waits_for_the_scope_keys_then_lists() {
     assert_eq!(wallet.app().cert().hash(), wider.hash());
     let refused = wallet.reconcile().await.unwrap_err();
     assert!(waits_for_keys(&refused), "{refused:?}");
-    wallet.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut wallet).await;
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
 }
 
@@ -3465,9 +3490,17 @@ async fn test_reconcile_waits_for_the_last_collection_of_the_wallet() {
         .count();
     assert!(matches!(
         result.unwrap_err().refusal(),
-        Some(Refusal::NotNow(_))
+        Some(Refusal::NotNow(reason)) if reason.contains("Call reconcile again")
     ));
     assert_eq!(pages, budget);
+
+    // This scan was opened by reconcile. A feed read has no owed listing to finish.
+    let before = w.router.log().len();
+    let read = wallet.receive(None).await.unwrap();
+    assert!(read.records_unlisted.is_none(), "{read:?}");
+    assert!(w.router.log()[before..]
+        .iter()
+        .all(|route| !route.contains("records?collection")));
 
     let id = wallet.app_id();
     drop(wallet);

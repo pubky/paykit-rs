@@ -228,10 +228,9 @@ pub struct ReceiveSummary {
     /// gives it: the read went on, holding Paykit's entries unprocessed, and none of the
     /// Paykit steps after it ran.
     pub certificate_refused: Option<Refusal>,
-    /// A certificate taken is another than the one the records were last listed under, and
-    /// the listing this read made under it failed: the text says why, without content. The
-    /// records stay unlisted, so the calls that only read are refused as not now, and the
-    /// next receive or write lists them again.
+    /// The wallet's required listing under a new certificate or after a missed feed is
+    /// incomplete. The reason indicates when to call `receive` again to continue a
+    /// bounded listing or why it failed. Read-only activity views wait for completion.
     pub records_unlisted: Option<String>,
     /// A certificate taken is another than the one the records were last listed under, and
     /// the app waits for its scope keys, which the signer stores when it is next
