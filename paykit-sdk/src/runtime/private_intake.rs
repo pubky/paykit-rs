@@ -560,6 +560,121 @@ where
     }
 }
 
+/// Audits one peer and persists its subscription seed only when the audit
+/// proves the next expected slot absent.
+///
+/// Security: the seed lets a first subscription start at the newest event M
+/// instead of replaying the peer's whole private history, so the stream
+/// skips every event at or before M. That skip loses no packet:
+/// - every event at or before M was committed before the seed read;
+/// - this audit runs after the seed read and fetches the next expected slot
+///   regardless of events, so an `Absent` outcome proves every packet those
+///   events could announce is already buffered;
+/// - events are only hints: a packet whose event id is at or below M but
+///   that commits after the seed read is fetched by the next audit, at the
+///   latest the jittered in-stream audit.
+///
+/// Any other outcome leaves the seed unpersisted, so the next connect seeds
+/// again behind a fresh audit.
+async fn audit_seeded_private_intake_peer<S, F, Fut>(
+    storage: &S,
+    peer: PubkyPublicKey,
+    seed: Option<&PrivateIntakeCursorRecord>,
+    acquire: F,
+) -> PrivateIntakePeerAudit
+where
+    S: StorageAdapter,
+    F: FnMut(PubkyPublicKey, Option<PrivateIntakeCursorRecord>) -> Fut,
+    Fut: Future<Output = Result<PrivatePacketAcquisition>>,
+{
+    let audit = audit_private_intake_peer(peer, acquire).await;
+    if let (Some(seed), Ok(PrivatePacketAcquisition::Absent)) = (seed, &audit.outcome) {
+        commit_seeded_private_intake_cursor(storage, seed.clone()).await;
+    }
+    audit
+}
+
+async fn commit_seeded_private_intake_cursor<S: StorageAdapter>(
+    storage: &S,
+    seed: PrivateIntakeCursorRecord,
+) {
+    // The cursor is only an optimization: a failed commit (for example a
+    // cursor still recorded for another homeserver) costs one history replay,
+    // health keeps the audit result, and the next connect seeds again.
+    let _ = storage
+        .transaction(move |tx| tx.advance_private_intake_cursor(seed))
+        .await;
+}
+
+/// Reads the cursor of the first event, the newest one for a reverse query.
+async fn newest_private_intake_event_cursor<S>(
+    mut stream: S,
+) -> std::result::Result<Option<pubky::EventCursor>, pubky::Error>
+where
+    S: futures_util::Stream<Item = std::result::Result<pubky::Event, pubky::Error>> + Unpin,
+{
+    stream
+        .next()
+        .await
+        .transpose()
+        .map(|event| event.map(|event| event.cursor))
+}
+
+/// Subscription cursors for one stream plus the seeds to persist once the
+/// startup audit proves absence.
+///
+/// A peer with a stored cursor resumes from it. Peers without one share one
+/// `query_newest` call for the homeserver's newest private event among them;
+/// each starts from it and gets a seed record. A failed or empty query
+/// leaves them without a cursor, replaying from the beginning.
+async fn private_intake_subscription_cursors<F, Fut>(
+    stored: Vec<(PubkyPublicKey, Option<u64>)>,
+    homeserver_name: &str,
+    query_newest: F,
+) -> (
+    Vec<(PubkyPublicKey, Option<pubky::EventCursor>)>,
+    HashMap<PubkyPublicKey, PrivateIntakeCursorRecord>,
+)
+where
+    F: FnOnce(Vec<PubkyPublicKey>) -> Fut,
+    Fut: Future<Output = std::result::Result<Option<pubky::EventCursor>, pubky::Error>>,
+{
+    let seedless = stored
+        .iter()
+        .filter(|(_, event_id)| event_id.is_none())
+        .map(|(peer, _)| peer.clone())
+        .collect::<Vec<_>>();
+    let newest = if seedless.is_empty() {
+        None
+    } else {
+        query_newest(seedless)
+            .await
+            .ok()
+            .flatten()
+            .map(|cursor| cursor.id())
+    };
+    let mut seeds = HashMap::new();
+    let cursors = stored
+        .into_iter()
+        .map(|(peer, stored)| {
+            let event_id = stored.or_else(|| {
+                let event_id = newest?;
+                seeds.insert(
+                    peer.clone(),
+                    PrivateIntakeCursorRecord {
+                        subscribed_user: peer.clone(),
+                        homeserver: homeserver_name.to_owned(),
+                        event_id,
+                    },
+                );
+                Some(event_id)
+            });
+            (peer, event_id.map(pubky::EventCursor::new))
+        })
+        .collect();
+    (cursors, seeds)
+}
+
 #[derive(Debug)]
 enum PrivateIntakeEventLoopExit {
     Stopped,
@@ -1352,7 +1467,7 @@ where
             };
             let client = access.outbox_client.client().clone();
             drop(access);
-            let cursors = match self
+            let stored_cursors = match self
                 .storage
                 .transaction({
                     let peers = active_group.peers.clone();
@@ -1362,12 +1477,12 @@ where
                         Ok(peers
                             .into_iter()
                             .map(|peer| {
-                                let cursor = state
+                                let event_id = state
                                     .private_intake_cursors
                                     .get(&peer)
                                     .filter(|cursor| cursor.homeserver == homeserver)
-                                    .map(|cursor| pubky::EventCursor::new(cursor.event_id));
-                                (peer, cursor)
+                                    .map(|cursor| cursor.event_id);
+                                (peer, event_id)
                             })
                             .collect::<Vec<_>>())
                     }
@@ -1383,6 +1498,34 @@ where
                     continue;
                 }
             };
+            // A one-shot, non-live query: `reverse` with `live` is rejected,
+            // and the newest event among the listed users ends the stream.
+            let max_event_bytes = config.max_event_bytes;
+            let seed_query =
+                pubky::EventStreamBuilder::for_homeserver(client.clone(), &active_group.homeserver);
+            let (cursors, seeds) = private_intake_subscription_cursors(
+                stored_cursors,
+                &active_group.homeserver_name,
+                |seedless| async move {
+                    let keys = seedless
+                        .iter()
+                        .filter_map(|peer| peer.to_public_key().ok())
+                        .collect::<Vec<_>>();
+                    if keys.is_empty() {
+                        return Ok(None);
+                    }
+                    let stream = seed_query
+                        .add_users(keys.iter().map(|key| (key, None)))?
+                        .path(private_intake_event_path_filter())
+                        .max_event_bytes(max_event_bytes)
+                        .reverse()
+                        .limit(1)
+                        .subscribe()
+                        .await?;
+                    newest_private_intake_event_cursor(stream).await
+                },
+            )
+            .await;
             let public_keys = cursors
                 .iter()
                 .filter_map(|(peer, cursor)| peer.to_public_key().ok().map(|key| (key, *cursor)))
@@ -1412,11 +1555,20 @@ where
             {
                 Ok(stream) => stream,
                 Err(error) => {
+                    // Without a stream no event is skipped, so no seed applies.
+                    let no_seeds = HashMap::new();
                     let (state, retry_after, audit_outcome) =
                         audit_disconnected_private_intake_stream(
                             &error,
                             config.healthy_audit_interval,
-                            || self.audit_private_intake_group(&active_group, &health, &work),
+                            || {
+                                self.audit_private_intake_group(
+                                    &active_group,
+                                    &health,
+                                    &work,
+                                    &no_seeds,
+                                )
+                            },
                         )
                         .await;
                     if audit_outcome.backpressured {
@@ -1435,9 +1587,11 @@ where
             };
             // Establish live delivery before startup audit. Pending handshakes can
             // publish their next packet during audit; subscribing first prevents
-            // that packet from falling into the live-stream setup gap.
+            // that packet from falling into the live-stream setup gap. Running
+            // after the seed read also lets this audit cover the history the
+            // seeded cursors skip, so only it may persist the seeds.
             let audit_outcome = self
-                .audit_private_intake_group(&active_group, &health, &work)
+                .audit_private_intake_group(&active_group, &health, &work, &seeds)
                 .await;
             if audit_outcome.backpressured {
                 topology_changed.notify_one();
@@ -1463,9 +1617,10 @@ where
                     let group = group.clone();
                     let health = Arc::clone(&health);
                     let work = Arc::clone(&work);
-                    Box::pin(
-                        async move { sdk.audit_private_intake_group(&group, &health, &work).await },
-                    )
+                    Box::pin(async move {
+                        sdk.audit_private_intake_group(&group, &health, &work, &HashMap::new())
+                            .await
+                    })
                 })
             };
             let exit = run_connected_private_intake_stream(
@@ -1502,6 +1657,7 @@ where
         group: &SubscriptionGroup,
         health: &Arc<AsyncRwLock<PrivateIntakeHealth>>,
         work: &Arc<Notify>,
+        seeds: &HashMap<PubkyPublicKey, PrivateIntakeCursorRecord>,
     ) -> PrivateIntakeAuditOutcome {
         let active_peers = match self
             .storage
@@ -1534,9 +1690,12 @@ where
                 .await;
                 continue;
             }
-            let peer_audit = audit_private_intake_peer(peer.clone(), |peer, cursor| {
-                self.acquire_expected_private_packet(peer, cursor)
-            })
+            let peer_audit = audit_seeded_private_intake_peer(
+                &self.storage,
+                peer.clone(),
+                seeds.get(peer),
+                |peer, cursor| self.acquire_expected_private_packet(peer, cursor),
+            )
             .await;
             if peer_audit.inserted {
                 work.notify_waiters();
@@ -4466,5 +4625,307 @@ mod tests {
             );
             assert_eq!(private_intake_peer_phase(&state, &peer), None);
         }
+    }
+
+    fn intake_seed(
+        peer: &PubkyPublicKey,
+        homeserver: &str,
+        event_id: u64,
+    ) -> PrivateIntakeCursorRecord {
+        PrivateIntakeCursorRecord {
+            subscribed_user: peer.clone(),
+            homeserver: homeserver.into(),
+            event_id,
+        }
+    }
+
+    fn private_event(event_id: u64) -> pubky::Event {
+        let owner = pubky::Keypair::random().public_key();
+        pubky::Event {
+            event_type: pubky::EventType::Delete,
+            resource: format!("pubky://{}/pub/paykit/v0/private/slot", owner.z32())
+                .parse()
+                .unwrap(),
+            cursor: pubky::EventCursor::new(event_id),
+        }
+    }
+
+    fn event_stream_error() -> pubky::Error {
+        pubky::Error::Request(pubky::errors::RequestError::Server {
+            status: pubky::StatusCode::INTERNAL_SERVER_ERROR,
+            message: "event stream failed".into(),
+        })
+    }
+
+    fn stored_cursor_ids(
+        cursors: &[(PubkyPublicKey, Option<pubky::EventCursor>)],
+    ) -> Vec<(PubkyPublicKey, Option<u64>)> {
+        cursors
+            .iter()
+            .map(|(peer, cursor)| (peer.clone(), cursor.map(|cursor| cursor.id())))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_seed_assigns_newest_cursor_to_seedless_peers_only() {
+        let peers = users(3);
+        let requested = Arc::new(StdMutex::new(Vec::new()));
+
+        let (cursors, seeds) = private_intake_subscription_cursors(
+            vec![
+                (peers[0].clone(), None),
+                (peers[1].clone(), Some(5)),
+                (peers[2].clone(), None),
+            ],
+            "homeserver-a",
+            {
+                let requested = Arc::clone(&requested);
+                move |seedless| {
+                    requested.lock().unwrap().push(seedless);
+                    async { Ok(Some(pubky::EventCursor::new(42))) }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(
+            *requested.lock().unwrap(),
+            vec![vec![peers[0].clone(), peers[2].clone()]]
+        );
+        assert_eq!(
+            stored_cursor_ids(&cursors),
+            vec![
+                (peers[0].clone(), Some(42)),
+                (peers[1].clone(), Some(5)),
+                (peers[2].clone(), Some(42)),
+            ]
+        );
+        assert_eq!(
+            seeds,
+            HashMap::from([
+                (peers[0].clone(), intake_seed(&peers[0], "homeserver-a", 42)),
+                (peers[2].clone(), intake_seed(&peers[2], "homeserver-a", 42)),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_seed_query_skipped_when_every_peer_has_cursor() {
+        let peers = users(2);
+        let queries = Arc::new(AtomicUsize::new(0));
+        let stored = vec![(peers[0].clone(), Some(3)), (peers[1].clone(), Some(9))];
+
+        let (cursors, seeds) =
+            private_intake_subscription_cursors(stored.clone(), "homeserver-a", {
+                let queries = Arc::clone(&queries);
+                move |_| {
+                    queries.fetch_add(1, Ordering::SeqCst);
+                    async { Ok(Some(pubky::EventCursor::new(42))) }
+                }
+            })
+            .await;
+
+        assert_eq!(queries.load(Ordering::SeqCst), 0);
+        assert_eq!(stored_cursor_ids(&cursors), stored);
+        assert!(seeds.is_empty());
+    }
+
+    async fn assert_seed_query_falls_back_to_full_replay(
+        newest: std::result::Result<Option<pubky::EventCursor>, pubky::Error>,
+    ) {
+        let peers = users(2);
+        let (cursors, seeds) = private_intake_subscription_cursors(
+            vec![(peers[0].clone(), None), (peers[1].clone(), Some(7))],
+            "homeserver-a",
+            move |_| async move { newest },
+        )
+        .await;
+
+        assert_eq!(
+            stored_cursor_ids(&cursors),
+            vec![(peers[0].clone(), None), (peers[1].clone(), Some(7))]
+        );
+        assert!(seeds.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_seed_query_failure_replays_from_beginning() {
+        assert_seed_query_falls_back_to_full_replay(Err(event_stream_error())).await;
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_seed_query_without_events_replays_from_beginning() {
+        assert_seed_query_falls_back_to_full_replay(Ok(None)).await;
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_newest_event_cursor_reads_first_event() {
+        let cursor = newest_private_intake_event_cursor(stream::iter(vec![
+            Ok(private_event(42)),
+            Ok(private_event(7)),
+        ]))
+        .await
+        .unwrap();
+        assert_eq!(cursor.map(|cursor| cursor.id()), Some(42));
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_newest_event_cursor_reports_stream_error() {
+        let result = newest_private_intake_event_cursor(stream::iter(vec![
+            Err(event_stream_error()),
+            Ok(private_event(42)),
+        ]))
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_newest_event_cursor_is_none_without_events() {
+        let cursor = newest_private_intake_event_cursor(stream::empty())
+            .await
+            .unwrap();
+        assert!(cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_startup_audit_buffers_pre_seed_packet_then_persists_seed() {
+        let storage = crate::storage::InMemoryStorage::new();
+        let local = pubky::Keypair::random().public_key();
+        let remote = pubky::Keypair::random().public_key();
+        let peer = PubkyPublicKey::from_public_key(&remote);
+        let (snapshot, secret) = intake_snapshot(&local, &remote, 3);
+        seed_intake_link(&storage, peer.clone(), &snapshot, 7).await;
+        let seed = intake_seed(&peer, "homeserver-a", 42);
+        let fetched = Arc::new(AtomicUsize::new(0));
+        let snapshot_bytes = snapshot.serialize();
+
+        let audit = audit_seeded_private_intake_peer(&storage, peer.clone(), Some(&seed), {
+            let storage = storage.clone();
+            let fetched = Arc::clone(&fetched);
+            move |requested_peer, cursor| {
+                let storage = storage.clone();
+                let fetched = Arc::clone(&fetched);
+                let local = local.clone();
+                let snapshot_bytes = snapshot_bytes.clone();
+                async move {
+                    let snapshot = paykit_lib::EncryptedLinkSnapshot::deserialize(&snapshot_bytes)?;
+                    acquire_expected_private_packet_with_fetch(
+                        &storage,
+                        requested_peer,
+                        &snapshot,
+                        &local,
+                        &secret,
+                        7,
+                        cursor,
+                        Utc::now(),
+                        move |_| {
+                            // Only the first expected slot was written before the seed read.
+                            let first = fetched.fetch_add(1, Ordering::SeqCst) == 0;
+                            async move {
+                                Ok(first
+                                    .then(|| vec![9; crate::storage::PRIVATE_INTAKE_PACKET_BYTES]))
+                            }
+                        },
+                    )
+                    .await
+                }
+            }
+        })
+        .await;
+
+        assert!(audit.inserted);
+        assert!(matches!(
+            audit.outcome,
+            Ok(PrivatePacketAcquisition::Absent)
+        ));
+        assert_eq!(fetched.load(Ordering::SeqCst), 2);
+        let state = storage.snapshot().unwrap();
+        let buffered = &state.private_intake_peers[&peer].buffered_packets;
+        assert_eq!(buffered.len(), 1);
+        assert_eq!(buffered[0].receive_counter, 3);
+        assert!(buffered[0].source_cursor.is_none());
+        assert_eq!(state.private_intake_cursors[&peer], seed);
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_seed_not_persisted_unless_audit_proves_absence() {
+        let unproven: [fn() -> Result<PrivatePacketAcquisition>; 6] = [
+            || Ok(PrivatePacketAcquisition::Inserted),
+            || Ok(PrivatePacketAcquisition::InsertedAtCapacity),
+            || Ok(PrivatePacketAcquisition::AlreadyBuffered),
+            || Ok(PrivatePacketAcquisition::CapacityReached),
+            || Ok(PrivatePacketAcquisition::PendingHandshake),
+            || {
+                Err(PaykitSdkError::Transport {
+                    context: "expected slot fetch failed".into(),
+                    source: None,
+                })
+            },
+        ];
+        for outcome in unproven {
+            let storage = crate::storage::InMemoryStorage::new();
+            let peer = users(1).remove(0);
+            let seed = intake_seed(&peer, "homeserver-a", 42);
+
+            let audit = audit_seeded_private_intake_peer(
+                &storage,
+                peer.clone(),
+                Some(&seed),
+                |_, _| async move { outcome() },
+            )
+            .await;
+
+            assert!(!matches!(
+                audit.outcome,
+                Ok(PrivatePacketAcquisition::Absent)
+            ));
+            assert!(!storage
+                .snapshot()
+                .unwrap()
+                .private_intake_cursors
+                .contains_key(&peer));
+        }
+
+        let storage = crate::storage::InMemoryStorage::new();
+        let peer = users(1).remove(0);
+        let seed = intake_seed(&peer, "homeserver-a", 42);
+        audit_seeded_private_intake_peer(&storage, peer.clone(), Some(&seed), |_, _| async {
+            Ok(PrivatePacketAcquisition::Absent)
+        })
+        .await;
+        assert_eq!(
+            storage.snapshot().unwrap().private_intake_cursors[&peer],
+            seed
+        );
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_seed_commit_failure_is_ignored() {
+        let storage = crate::storage::InMemoryStorage::new();
+        let peer = users(1).remove(0);
+        let existing = intake_seed(&peer, "homeserver-b", 7);
+        storage
+            .transaction({
+                let existing = existing.clone();
+                move |tx| tx.advance_private_intake_cursor(existing)
+            })
+            .await
+            .unwrap();
+        let seed = intake_seed(&peer, "homeserver-a", 42);
+
+        let audit =
+            audit_seeded_private_intake_peer(&storage, peer.clone(), Some(&seed), |_, _| async {
+                Ok(PrivatePacketAcquisition::Absent)
+            })
+            .await;
+
+        assert!(matches!(
+            audit.outcome,
+            Ok(PrivatePacketAcquisition::Absent)
+        ));
+        assert_eq!(
+            storage.snapshot().unwrap().private_intake_cursors[&peer],
+            existing
+        );
     }
 }
