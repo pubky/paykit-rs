@@ -455,11 +455,19 @@ pub(crate) fn view_get<T: Stored>(view: &LocalView<'_>, key: &str) -> Result<Opt
 /// Every value under `prefix`, read through a [`LocalView`], with the key's rest after the
 /// prefix, each bound to its own key.
 pub(crate) fn view_scan<T: Stored>(view: &LocalView<'_>, prefix: &str) -> Result<Vec<(String, T)>> {
-    let binder = Binder::view(view);
+    bound_view_scan(view, prefix, &Binder::view(view))
+}
+
+/// Read the same protocol namespace with the key and certificate available to its caller.
+pub(crate) fn bound_view_scan<T: Stored>(
+    view: &LocalView<'_>,
+    prefix: &str,
+    binder: &Binder<'_>,
+) -> Result<Vec<(String, T)>> {
     let mut out = Vec::new();
     for (key, value) in view.local_scan(prefix.as_bytes())? {
         let rest = rest_of(&key, prefix.as_bytes()).ok_or_else(PaykitError::corrupt)?;
-        out.push((rest, bound(&key, &value, &binder)?));
+        out.push((rest, bound(&key, &value, binder)?));
     }
     Ok(out)
 }
@@ -887,7 +895,17 @@ impl Stored for KeptMessage {
         } else if self.seq().is_some() {
             return corrupt();
         }
+        if self.pending_create.is_some() && !matches!(family, StateKey::AllowanceEnd { .. }) {
+            return corrupt();
+        }
         let message = self.stored(&binder.own)?;
+        if (matches!(family, StateKey::KeptReply { .. })
+            || (matches!(family, StateKey::Conflict(_))
+                && crate::allowances::is_allowance_response(message.body())))
+            && self.position().is_none()
+        {
+            return corrupt();
+        }
         let first = || {
             message
                 .message()
@@ -967,6 +985,19 @@ impl Stored for KeptMessage {
                     record,
                     msg_id,
                 },
+                Body::AllowanceProposal(proposal),
+            ) if message.sender() == *sender
+                && message.message().msg_id == *msg_id
+                && message.accepted_at().is_some() =>
+            {
+                (allowance_target(sender, &proposal.allowance_id), record)
+            }
+            (
+                StateKey::KeptReply {
+                    sender,
+                    record,
+                    msg_id,
+                },
                 Body::AllowanceAcceptance(answer) | Body::AllowanceRejection(answer),
             ) if message.sender() == *sender
                 && message.message().msg_id == *msg_id
@@ -1005,6 +1036,28 @@ impl Stored for KeptMessage {
             return corrupt();
         }
         Ok(())
+    }
+}
+
+impl sealed::Sealed for crate::allowances::PendingConflict {}
+
+impl Stored for crate::allowances::PendingConflict {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let StateKey::PendingConflict(key) = family else {
+            return corrupt();
+        };
+        self.bind(key, binder)
+    }
+}
+
+impl sealed::Sealed for crate::allowances::PendingRetirement {}
+
+impl Stored for crate::allowances::PendingRetirement {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let StateKey::PendingRetirement(key) = family else {
+            return corrupt();
+        };
+        self.bind(key, binder)
     }
 }
 
@@ -1414,6 +1467,61 @@ impl Stored for OwedEnd {
     }
 }
 
+impl sealed::Sealed for crate::allowances::PreparedPendingReply {}
+
+impl Stored for crate::allowances::PreparedPendingReply {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let StateKey::PendingReply {
+            record,
+            reply: hash,
+        } = family
+        else {
+            return corrupt();
+        };
+        let reply = self.message.stored(&self.peer)?;
+        let id =
+            crate::allowances::named_allowance(reply.body()).ok_or_else(PaykitError::corrupt)?;
+        let target = crate::allowances::allowance_target(&self.peer, id);
+        if self.source.record_version().is_none()
+            || reply.hash() != *hash
+            || !self.sealed_delete.looks_like_delete()
+            || self
+                .sealed_delete
+                .check_shape(
+                    &paykit_lib::collections::Collection::AllowanceProposals
+                        .fixed_policy()
+                        .read_scope,
+                )
+                .is_err()
+            || reply.sender() != binder.own
+            || binder
+                .cert
+                .is_none_or(|cert| reply.message().from.app_id != cert.app_id())
+            || reply.accepted_at().is_some()
+            || reply.message().refs.len() != 1
+            || !matches!(
+                reply.body(),
+                Body::AllowanceRejection(_) | Body::AllowanceEnd(_)
+            )
+            || binder.record_key(&target)? != *record
+        {
+            return corrupt();
+        }
+        Ok(())
+    }
+}
+
+impl sealed::Sealed for crate::allowances::AppliedReply {}
+
+impl Stored for crate::allowances::AppliedReply {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::AppliedReply(hash) if self.reply == *hash => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
 impl sealed::Sealed for NoticeTarget {}
 
 impl sealed::Sealed for EndOrigin {}
@@ -1676,6 +1784,35 @@ pub(crate) mod key {
     /// `record_key`.
     pub(crate) fn allowance_ends(record_key: &[u8; 32]) -> String {
         format!("{ALLOWANCE_ENDS}{}/", b64(record_key))
+    }
+
+    pub(crate) const PENDING_CONFLICTS: &str = "pc/";
+
+    pub(crate) const PENDING_REPLIES: &str = "ap/";
+    pub(crate) const APPLIED_REPLIES: &str = "aq/";
+
+    pub(crate) fn pending_replies(record: &[u8; 32]) -> String {
+        format!("{PENDING_REPLIES}{}/", b64(record))
+    }
+
+    pub(crate) fn pending_reply(record: &[u8; 32], reply: &[u8; 32]) -> String {
+        format!("{}{}", pending_replies(record), b64(reply))
+    }
+
+    pub(crate) fn applied_reply(hash: &[u8; 32]) -> String {
+        format!("{APPLIED_REPLIES}{}", b64(hash))
+    }
+
+    pub(crate) const PENDING_RETIREMENTS: &str = "pce/";
+
+    /// The latest verified deletion of this physical pending key.
+    pub(crate) fn pending_retirement(record: &[u8; 32]) -> String {
+        format!("{PENDING_RETIREMENTS}{}", b64(record))
+    }
+
+    /// A conflict in this pending Allowance lifetime.
+    pub(crate) fn pending_conflict(record: &[u8; 32]) -> String {
+        format!("{PENDING_CONFLICTS}{}", b64(record))
     }
 
     /// A conflicting proposal or response of the Allowance whose record is `record_key`,
@@ -2149,6 +2286,17 @@ pub(crate) enum StateKey {
     },
     /// `ac/<record key>`: an entry of the consent list.
     Consent([u8; 32]),
+    /// `pc/<record key>`: a conflict kept for one pending Allowance lifetime.
+    PendingConflict([u8; 32]),
+    /// An original reply prepared for this canonical Allowance key.
+    PendingReply {
+        record: [u8; 32],
+        reply: [u8; 32],
+    },
+    /// A signed reply whose exact proposal deletion was applied.
+    AppliedReply([u8; 32]),
+    /// The latest verified end of a conflict at the named pending key.
+    PendingRetirement([u8; 32]),
     /// `cf/<record key>`: a conflicting proposal or response kept as the stop.
     Conflict([u8; 32]),
     /// `en/<msg_id>`: the executor app an `executor_notice` is wrapped to.
@@ -2325,6 +2473,16 @@ impl StateKey {
                         }
                     }
                     "ac" => Self::Consent(b64_32(rest)?),
+                    "pc" => Self::PendingConflict(b64_32(rest)?),
+                    "ap" => {
+                        let (record, reply) = rest.split_once('/')?;
+                        Self::PendingReply {
+                            record: b64_32(record)?,
+                            reply: b64_32(reply)?,
+                        }
+                    }
+                    "aq" => Self::AppliedReply(b64_32(rest)?),
+                    "pce" => Self::PendingRetirement(b64_32(rest)?),
                     "cf" => Self::Conflict(b64_32(rest)?),
                     "en" => Self::NoticeTarget(msg_id(rest)?),
                     "end" => Self::EndOrigin(msg_id(rest)?),
@@ -3399,6 +3557,22 @@ mod tests {
                 },
             ),
             (key::consent(&pubky), StateKey::Consent(pubky)),
+            (
+                key::pending_conflict(&pubky),
+                StateKey::PendingConflict(pubky),
+            ),
+            (
+                key::pending_retirement(&pubky),
+                StateKey::PendingRetirement(pubky),
+            ),
+            (
+                key::pending_reply(&pubky, &pubky),
+                StateKey::PendingReply {
+                    record: pubky,
+                    reply: pubky,
+                },
+            ),
+            (key::applied_reply(&pubky), StateKey::AppliedReply(pubky)),
             (key::conflict(&pubky), StateKey::Conflict(pubky)),
             (key::notice_target(id), StateKey::NoticeTarget(id.into())),
             (key::end_origin(id), StateKey::EndOrigin(id.into())),
