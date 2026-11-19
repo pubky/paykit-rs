@@ -65,11 +65,23 @@ impl PendingRetirement {
     pub(super) fn withdrawal_after(
         &self,
         original: SeenVersion,
+        recovery_from: Option<u64>,
     ) -> pubky_switch_client::app::AppendDecision {
         use pubky_switch_client::app::AppendDecision::{Hold, Send, Withdraw};
         match self.version.cmp(&original) {
             Ordering::Less => Hold,
-            Ordering::Equal if self.reopened.is_none() => Send,
+            Ordering::Equal if self.reopened.is_none() => {
+                // The old delete stays authentic after loss. Replacement absence
+                // cannot account for a later lifetime at the previous provider.
+                if super::delivery::deletion_continues(
+                    original.record_version().generation,
+                    recovery_from,
+                ) {
+                    Send
+                } else {
+                    Hold
+                }
+            }
             _ => Withdraw,
         }
     }
@@ -1395,4 +1407,39 @@ pub(crate) fn restore_conflicts(
         writes.push(state::local_put(&key::pending_retirement(&key), &receipt)?);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod withdrawal_tests {
+    use super::*;
+    use pubky_switch_client::app::AppendDecision::{Hold, Send, Withdraw};
+
+    #[test]
+    fn test_withdrawal_checks_the_generation_lost_by_the_followed_identity() {
+        let original = SeenVersion::from(RecordVersion::new(3, 11));
+        let mut closed = PendingRetirement {
+            account: [1; 32],
+            key: [2; 32],
+            version: original,
+            reopened: None,
+        };
+        for (boundary, expected) in [
+            (None, Send),
+            (Some(2), Send),
+            (Some(3), Hold),
+            (Some(4), Hold),
+        ] {
+            assert_eq!(closed.withdrawal_after(original, boundary), expected);
+        }
+        closed.reopened = Some(ReopenedProposal {
+            version: RecordVersion::new(3, 12).into(),
+            proposal: [3; 32],
+        });
+        assert_eq!(closed.withdrawal_after(original, Some(3)), Withdraw);
+        closed.reopened = None;
+        closed.version = RecordVersion::new(3, 14).into();
+        assert_eq!(closed.withdrawal_after(original, Some(3)), Withdraw);
+        closed.version = RecordVersion::new(3, 10).into();
+        assert_eq!(closed.withdrawal_after(original, None), Hold);
+    }
 }
