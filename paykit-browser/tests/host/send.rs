@@ -25,10 +25,9 @@ impl Drop for DropFlag {
     }
 }
 
-/// A local future that sets `started` when first polled, holds `guard`, and then waits on a
-/// promise that never settles.
-async fn wait_forever(started: Rc<Cell<bool>>, guard: DropFlag) {
-    let _guard = guard;
+/// A local future that sets `started` when first polled, holds `_guard` (an async fn keeps its
+/// arguments until it ends), and then waits on a promise that never settles.
+async fn wait_forever(started: Rc<Cell<bool>>, _guard: DropFlag) {
     started.set(true);
     let _ = JsFuture::from(Promise::new(&mut |_resolve, _reject| {})).await;
 }

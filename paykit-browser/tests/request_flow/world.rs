@@ -9,6 +9,7 @@ use paykit_browser::clock::JsClock;
 use paykit_browser::timer::JsTimer;
 use paykit_lib::bodies::{PaymentRequest, RequestDestination};
 use paykit_lib::records::{ActivityRecord, ActivitySide};
+use paykit_lib::scopes::{keyed_scopes, PAYKIT_SCOPE_NAMES};
 use paykit_lib::{
     Asset, Body, Decimal, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
     PaymentReference,
@@ -35,7 +36,7 @@ const PAYEE_ORIGIN: &str = "https://payee-switch.example";
 pub struct World {
     pub clock: Arc<TestClock>,
     pub payer: TestSigner,
-    pub payee: TestSigner,
+    payee: TestSigner,
     router: Arc<Router>,
     rail: Arc<FakeRail>,
 }
@@ -46,21 +47,11 @@ impl World {
         let clock = Arc::new(TestClock::new(JsClock.now_ms()));
         let seeds = Seeds::default();
         let homeserver = Arc::new(TestHomeserver::new());
-        // Every scope Paykit gives keys to (Paykit spec 3.5): an approval carries the keys of
-        // each scope the app holds, the scopes its scopes require included (Paykit spec 3.1).
+        // Every scope Paykit gives keys to (Paykit spec 3.5), as paykit-lib picks them out of
+        // its scope names. An approval carries the keys of each scope the app holds, the scopes its
+        // scopes require included (Paykit spec 3.1).
         let spec = ProtocolSpec {
-            keyed_scopes: [
-                "paykit_pay",
-                "paykit_request",
-                "paykit_settlements",
-                "paykit_recovery",
-                "paykit_allowance",
-                "paykit_allowance_execute",
-                "paykit_contacts",
-                "paykit_manage_contacts",
-            ]
-            .map(str::to_owned)
-            .to_vec(),
+            keyed_scopes: keyed_scopes(&PAYKIT_SCOPE_NAMES.map(str::to_owned)),
             ..ProtocolSpec::default()
         };
         let signer = |name: &str, origin: &str| {
@@ -95,17 +86,21 @@ impl World {
         self.payee.identity().public()
     }
 
+    /// The payer's wallet, holding `paykit_pay`, which has not invited the payee.
+    pub async fn uninvited_wallet(&self) -> Paykit {
+        self.join(
+            &self.payer,
+            "wallet",
+            AppScopes::new().pay().build().unwrap(),
+        )
+        .await
+    }
+
     /// The payer's wallet, holding `paykit_pay`. It invites the payee first, a conversation
     /// the payer starts, as at a checkout, so the payee's Payment Requests are admitted
     /// (Paykit spec 1).
     pub async fn wallet(&self) -> Paykit {
-        let mut wallet = self
-            .join(
-                &self.payer,
-                "wallet",
-                AppScopes::new().pay().build().unwrap(),
-            )
-            .await;
+        let mut wallet = self.uninvited_wallet().await;
         wallet.app_mut().invite(&self.payee_id()).await.unwrap();
         wallet
     }
@@ -122,7 +117,7 @@ impl World {
 
     /// Join app `name` of `signer` with `scopes`, approved by the signer, on a store of its
     /// own, and finish the join with a first receive.
-    pub async fn join(&self, signer: &TestSigner, name: &str, scopes: RequestedScopes) -> Paykit {
+    async fn join(&self, signer: &TestSigner, name: &str, scopes: RequestedScopes) -> Paykit {
         let keys = signer.identity().app_keys(name);
         let names: Vec<&str> = scopes.scopes.iter().map(String::as_str).collect();
         let app = AppSpec::new(&names).with_permissions(&scopes.permissions);

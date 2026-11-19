@@ -2,7 +2,7 @@
 //! payer's wallet, and shown open, expired once their proposal expiry has passed, or
 //! rejected; and a request that waits until the payer admits the payee.
 
-use paykit_sdk::{AppScopes, MessageDelivery, PayeeStatus, Refusal, RequestStatus};
+use paykit_sdk::{MessageDelivery, PayeeStatus, Refusal, RequestStatus};
 use pubky_switch_client::clock::Clock;
 use wasm_bindgen_test::wasm_bindgen_test;
 
@@ -112,9 +112,7 @@ async fn test_request_flow_request_waits_for_the_payer_to_admit_the_payee() {
     // The payer's wallet hasn't invited the payee: the payer's switch doesn't admit the
     // payee's request, which waits for the payer. Once the payer invites the payee, it goes.
     let w = World::new();
-    let mut wallet = w
-        .join(&w.payer, "wallet", AppScopes::new().pay().build().unwrap())
-        .await;
+    let mut wallet = w.uninvited_wallet().await;
     let mut shop = w.shop().await;
     let sent = shop
         .send_request(w.payer_id(), draft("1", w.clock.now_ms() + 24 * HOUR_MS))
