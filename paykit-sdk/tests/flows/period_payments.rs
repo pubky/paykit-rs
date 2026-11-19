@@ -1777,15 +1777,12 @@ async fn test_period_payments_resume_the_users_attempt_on_a_manual_only_subscrip
     assert_eq!(proof.billing_period, Some(january()));
 }
 
-#[tokio::test]
-async fn test_period_payments_hold_a_cancelled_attempt_on_a_manual_only_subscription() {
-    let w = World::new();
-    let (attempt, outcomes, period) = resume_marked_subscription(&w, true, async |shop, sale| {
-        shop.cancel_sent_request(&sale, None).await.unwrap();
-    })
-    .await;
+fn assert_period_stays_uncertain(
+    w: &World,
+    (attempt, outcomes, period): (paykit_lib::AttemptId, Vec<PayOutcome>, ActivityRecord),
+) {
     assert!(
-        matches!(outcomes.as_slice(), [PayOutcome::Uncertain { attempt_id }] if *attempt_id == attempt),
+        matches!(outcomes.as_slice(), [PayOutcome::Uncertain { attempt_id, .. }] if *attempt_id == attempt),
         "{outcomes:?}"
     );
     assert_eq!(w.rail.pay_calls(&attempt), 1);
@@ -1794,16 +1791,20 @@ async fn test_period_payments_hold_a_cancelled_attempt_on_a_manual_only_subscrip
 }
 
 #[tokio::test]
+async fn test_period_payments_hold_a_cancelled_attempt_on_a_manual_only_subscription() {
+    let w = World::new();
+    let resumed = resume_marked_subscription(&w, true, async |shop, sale| {
+        shop.cancel_sent_request(&sale, None).await.unwrap();
+    })
+    .await;
+    assert_period_stays_uncertain(&w, resumed);
+}
+
+#[tokio::test]
 async fn test_period_payments_hold_a_dispatch_without_idempotency_or_history() {
     let w = World::new();
-    let (attempt, outcomes, period) = resume_marked_subscription(&w, false, async |_, _| {}).await;
-    assert!(
-        matches!(outcomes.as_slice(), [PayOutcome::Uncertain { attempt_id }] if *attempt_id == attempt),
-        "{outcomes:?}"
-    );
-    assert_eq!(w.rail.pay_calls(&attempt), 1);
-    assert_eq!(w.rail.all_executions().values().sum::<u64>(), 1);
-    assert!(period.proof.is_none());
+    let resumed = resume_marked_subscription(&w, false, async |_, _| {}).await;
+    assert_period_stays_uncertain(&w, resumed);
 }
 
 #[tokio::test]
