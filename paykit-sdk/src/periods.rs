@@ -69,6 +69,20 @@ pub struct PeriodDetailsView {
     pub rates: Vec<Rate>,
 }
 
+/// What the host authorizes for this own-policy Billing Period (Paykit spec 7.2, 8.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PeriodPrice<'a> {
+    /// Pay an eligible endpoint in the requested asset at the requested amount.
+    /// A destination priced by a signed rate still needs its own authorization.
+    RequestedAmount,
+    /// Return the signed rate quote for this endpoint, or a refusal. This choice
+    /// never opens an attempt, pays a plain endpoint or asks for a Private Payment List.
+    QuoteFor(PaymentEndpointIdentifier),
+    /// Pay only this exact quote, authorized by the user or their bounded policy.
+    AtRate(&'a crate::PricedPayment),
+}
+
 /// One Billing Period of a recurring request, from the period record the app holds (Paykit
 /// wire 5.3).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -931,11 +945,16 @@ impl Paykit {
         &mut self,
         request: &RequestRef,
         period: &PeriodRef,
-        rate_authorized: Option<crate::PricedPayment>,
+        price: PeriodPrice<'_>,
     ) -> PayResult {
-        let options = PayOptions {
-            rate_authorized,
-            ..PayOptions::default()
+        let options = match price {
+            PeriodPrice::RequestedAmount => PayOptions::default(),
+            PeriodPrice::QuoteFor(endpoint) => PayOptions {
+                endpoint: Some(endpoint),
+                quote_only: true,
+                ..PayOptions::default()
+            },
+            PeriodPrice::AtRate(quote) => PayOptions::default().with_rate_authorized(quote.clone()),
         };
         self.pay_selected_period(request, period, Initiator::Automatic, options)
             .await
@@ -967,9 +986,14 @@ impl Paykit {
         public_failures: &mut Vec<PublicAppFailure>,
     ) -> Result<PayOutcome> {
         self.refresh_own()?;
-        Box::pin(self.first_read_before_writing()).await?;
-        self.refresh_own()?;
-        self.records_known().await?;
+        if options.quote_only {
+            self.require_first_read()?;
+            self.refuse_while_unlisted().await?;
+        } else {
+            Box::pin(self.first_read_before_writing()).await?;
+            self.refresh_own()?;
+            self.records_known().await?;
+        }
         self.require_pay()?;
         let automatic = by == Initiator::Automatic;
         self.app
@@ -981,7 +1005,11 @@ impl Paykit {
             &request.request_hash,
         ));
         self.period_payment_base(&parent).await?;
-        let (target, record) = self.payer_request(request).await?;
+        let (target, record) = if options.quote_only {
+            self.read_payer_request(request).await?
+        } else {
+            self.payer_request(request).await?
+        };
         let (stored, body) = request_of(&record).ok_or(Refusal::NotFound)?;
         let (stored, body) = (stored.clone(), body.clone());
         if !body.is_recurring() {
@@ -1083,7 +1111,17 @@ impl Paykit {
             )
             .await?;
         // A blocked payee's period is paid only once the user confirms it (Paykit spec 8.1).
-        let blocked = if automatic {
+        let blocked = if options.quote_only {
+            // Acting on a fresh deny-list read can publish an unblock floor. Leave it to
+            // the real dispatch; a quote never authorizes that write.
+            if self.floor_write_is_kept().await? {
+                return Err(crate::floor::unreadable_floor());
+            }
+            if self.denied_as_last_read(&request.payee).await? {
+                return Err(Refusal::NotNow("the payee is blocked".into()).into());
+            }
+            false
+        } else if automatic {
             self.denied(&request.payee).await?
         } else {
             self.denied_for_user(&request.payee).await?

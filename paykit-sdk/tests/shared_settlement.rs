@@ -23,7 +23,7 @@ use paykit_lib::records::{
 use paykit_lib::{Asset, Body, Decimal, PaymentAmount};
 use paykit_sdk::rail::FakeRail;
 use paykit_sdk::{
-    AppScopes, PayOptions, PayOutcome, Paykit, ReceiptsOf, RequestDraft, RequestRef,
+    AppScopes, PayOptions, PayOutcome, Paykit, PeriodPrice, ReceiptsOf, RequestDraft, RequestRef,
     RequestedScopes, Timer,
 };
 use pubky_switch_client::app::SharedRecord;
@@ -123,6 +123,12 @@ async fn test_two_wallets_settle_a_period_with_an_authorized_rate() -> TestResul
         let result = Box::pin(settle_period(&world, PeriodPayment::PolicyRate)).await;
         world.close().await?;
         result?;
+        let Some(world) = World::start(backend)? else {
+            continue;
+        };
+        let result = Box::pin(settle_period(&world, PeriodPayment::PolicyRequestedAmount)).await;
+        world.close().await?;
+        result?;
     }
     Ok(())
 }
@@ -132,6 +138,7 @@ enum PeriodPayment {
     Manual,
     ConfirmedRate,
     PolicyRate,
+    PolicyRequestedAmount,
 }
 
 async fn period_wallets(
@@ -174,15 +181,26 @@ async fn period_wallets(
 
 async fn settle_period(world: &World, how: PeriodPayment) -> TestResult {
     let priced = how != PeriodPayment::Manual;
+    let mixed = matches!(
+        how,
+        PeriodPayment::PolicyRate | PeriodPayment::PolicyRequestedAmount
+    );
     use paykit_lib::periods::{AnchoredRule, Recurrence, Unit};
 
     let rail = Arc::new(FakeRail::with_clock(world.clock().clone()));
+    let buyer_store = Arc::new(MemoryStore::new());
     let (mut buyer, mut shop, mut shop_signer) =
-        Box::pin(period_wallets(world, Arc::new(MemoryStore::new()), &rail)).await?;
+        Box::pin(period_wallets(world, buyer_store.clone(), &rail)).await?;
     let start = world.now_ms() / 1000 * 1000;
     let recurrence = Recurrence::new(AnchoredRule::new(start, 1, Unit::Month)?, start, None)?;
     let period = PeriodRef::from(recurrence.first()?);
-    let request = Box::pin(subscribe(world, &mut buyer, &mut shop, recurrence, priced)).await?;
+    if mixed {
+        rail.set_endpoint_identifiers(vec![
+            PaymentEndpointIdentifier::new("usd-ach-account")?,
+            PaymentEndpointIdentifier::new("btc-lightning-bolt11")?,
+        ]);
+    }
+    let request = Box::pin(subscribe(world, &mut buyer, &mut shop, recurrence, how)).await?;
     let rate_source = if priced {
         let id = Box::pin(issue_period_rate(
             &mut shop,
@@ -207,11 +225,35 @@ async fn settle_period(world: &World, how: PeriodPayment) -> TestResult {
     let (mut buyer, payment, rate_source) = tokio::spawn(Box::pin(async move {
         let mut options = PayOptions::default();
         if let Some((id, expected)) = &rate_source {
-            let automatic = Box::pin(buyer.pay_period_automatically(&request, &period, None)).await;
+            let endpoint = PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
+            if mixed {
+                let plain = Box::pin(buyer.pay_period_automatically(
+                    &request,
+                    &period,
+                    PeriodPrice::QuoteFor(
+                        PaymentEndpointIdentifier::new("usd-ach-account").unwrap(),
+                    ),
+                ))
+                .await;
+                assert!(matches!(
+                    plain.outcome.unwrap_err().refusal(),
+                    Some(paykit_sdk::Refusal::UnsupportedEndpoint(_))
+                ));
+            }
+            let automatic = Box::pin(buyer.pay_period_automatically(
+                &request,
+                &period,
+                PeriodPrice::QuoteFor(endpoint.clone()),
+            ))
+            .await;
             assert!(automatic.public_failures.is_empty());
             let automatic_refusal = automatic.outcome.unwrap_err();
             let quote = buyer
-                .pay_period(&request, &period, PayOptions::default())
+                .pay_period(
+                    &request,
+                    &period,
+                    PayOptions::default().with_endpoint(endpoint),
+                )
                 .await;
             assert!(quote.public_failures.is_empty());
             let refusal = quote.outcome.unwrap_err();
@@ -227,7 +269,7 @@ async fn settle_period(world: &World, how: PeriodPayment) -> TestResult {
             assert_eq!(&payment.amount, expected);
             assert!(payer_rail.all_executions().is_empty());
             assert_eq!(payment.billing_period, Some(period));
-            if how == PeriodPayment::PolicyRate {
+            if mixed {
                 let within_limit = |quote: &paykit_sdk::PricedPayment, ceiling: &Decimal| {
                     quote.request == request
                         && quote.billing_period == Some(period)
@@ -237,24 +279,37 @@ async fn settle_period(world: &World, how: PeriodPayment) -> TestResult {
                         && quote.amount.asset.as_str() == "btc"
                         && &quote.amount.value <= ceiling
                 };
-                // The host withholds an over-limit quote. Calling without authorization
-                // leaves the attempt unopened. A higher user-selected limit permits it.
-                assert!(!within_limit(payment, &Decimal::new("0.0001").unwrap()));
-                let waiting =
-                    Box::pin(buyer.pay_period_automatically(&request, &period, None)).await;
-                assert_eq!(
-                    waiting.outcome.unwrap_err().refusal(),
-                    Some(&paykit_sdk::Refusal::PricedByRate {
-                        payment: payment.clone()
-                    })
-                );
+                // A declined quote leaves the host with no payment call to make.
+                let denied = if within_limit(payment, &Decimal::new("0.0001").unwrap()) {
+                    Some(
+                        Box::pin(buyer.pay_period_automatically(
+                            &request,
+                            &period,
+                            PeriodPrice::AtRate(payment),
+                        ))
+                        .await,
+                    )
+                } else {
+                    None
+                };
+                assert!(denied.is_none());
                 assert!(buyer.payments().await.unwrap().is_empty());
                 assert!(payer_rail.all_executions().is_empty());
+                if how == PeriodPayment::PolicyRequestedAmount {
+                    // This host independently authorizes the signed request's USD amount.
+                    let result = Box::pin(buyer.pay_period_automatically(
+                        &request,
+                        &period,
+                        PeriodPrice::RequestedAmount,
+                    ))
+                    .await;
+                    return (buyer, result, None);
+                }
                 assert!(within_limit(payment, &Decimal::new("0.0002").unwrap()));
                 let result = Box::pin(buyer.pay_period_automatically(
                     &request,
                     &period,
-                    Some((**payment).clone()),
+                    PeriodPrice::AtRate(payment),
                 ))
                 .await;
                 return (buyer, result, rate_source);
@@ -269,6 +324,19 @@ async fn settle_period(world: &World, how: PeriodPayment) -> TestResult {
     let PayOutcome::Paid { attempt_id, .. } = payment.outcome? else {
         return Err("manual payment did not settle".into());
     };
+    if mixed {
+        let id = buyer.app_id();
+        drop(buyer);
+        buyer = Box::pin(Paykit::load(
+            world.app_env(buyer_store),
+            Default::default(),
+            id,
+            rail.clone(),
+            Arc::new(TestTimer),
+        ))
+        .await?;
+        assert_eq!(buyer.payments().await?.as_slice()[0].attempt_id, attempt_id);
+    }
     shop.receive(None).await?;
     let period_record = shop
         .payee_activity()
@@ -311,6 +379,26 @@ async fn settle_period(world: &World, how: PeriodPayment) -> TestResult {
         assert_eq!(proof.message().refs, [request.request_hash, details.hash()]);
         assert_eq!(credit.message().refs, [proof.hash(), request.request_hash]);
         assert_eq!(rail.paid_amount(&attempt_id), Some(expected));
+    } else if how == PeriodPayment::PolicyRequestedAmount {
+        assert_eq!(
+            rail.paid_amount(&attempt_id),
+            Some(PaymentAmount {
+                asset: Asset::new("usd")?,
+                value: Decimal::new("10")?
+            })
+        );
+        let activity = ActivityRecord::read(
+            issued
+                .content
+                .value()
+                .ok_or("missing period record value")?,
+            &shop.identity(),
+            ActivitySide::Payee,
+        )?;
+        assert_eq!(
+            activity.proof.ok_or("missing signed proof")?.message().refs,
+            [request.request_hash]
+        );
     }
 
     buyer.receive(None).await?;
@@ -338,7 +426,7 @@ async fn settle_period(world: &World, how: PeriodPayment) -> TestResult {
         &buyer.identity(),
         ActivitySide::Payer,
     )?;
-    assert_eq!(activity.manual_only, how != PeriodPayment::PolicyRate);
+    assert_eq!(activity.manual_only, !mixed);
     assert_eq!(
         payer_period.receipt.as_ref().map(|r| &r.msg_id),
         Some(&receipt)
@@ -492,7 +580,14 @@ async fn second_app_rate(world: &World, issuer: QuoteIssuer) -> TestResult {
     let start = world.now_ms() / 1000 * 1000;
     let recurrence = Recurrence::new(AnchoredRule::new(start, 1, Unit::Month)?, start, None)?;
     let period = PeriodRef::from(recurrence.first()?);
-    let request = Box::pin(subscribe(world, &mut buyer, &mut shop, recurrence, true)).await?;
+    let request = Box::pin(subscribe(
+        world,
+        &mut buyer,
+        &mut shop,
+        recurrence,
+        PeriodPayment::ConfirmedRate,
+    ))
+    .await?;
     quotes.receive(None).await?;
     let id = Box::pin(issue_period_rate(
         &mut quotes,
@@ -593,12 +688,22 @@ async fn subscribe(
     buyer: &mut Paykit,
     shop: &mut Paykit,
     recurrence: paykit_lib::periods::Recurrence,
-    priced: bool,
+    how: PeriodPayment,
 ) -> TestResult<RequestRef> {
-    let endpoints = BTreeMap::from([(
+    let priced = how != PeriodPayment::Manual;
+    let mut endpoints = BTreeMap::from([(
         PaymentEndpointIdentifier::new("btc-lightning-bolt11")?,
         PaymentEndpointPayload::new("ln-manual-period")?,
     )]);
+    if matches!(
+        how,
+        PeriodPayment::PolicyRate | PeriodPayment::PolicyRequestedAmount
+    ) {
+        endpoints.insert(
+            PaymentEndpointIdentifier::new("usd-ach-account")?,
+            PaymentEndpointPayload::new("acct-1")?,
+        );
+    }
     let requested = if priced {
         PaymentAmount {
             asset: Asset::new("usd")?,
@@ -765,7 +870,14 @@ async fn reconcile_fractional_periods(world: &World) -> TestResult {
     );
     let mut occurrences = Vec::new();
     for (listed, recorded) in [(first, next), (next, first)] {
-        let request = Box::pin(subscribe(world, &mut buyer, &mut shop, recurrence, false)).await?;
+        let request = Box::pin(subscribe(
+            world,
+            &mut buyer,
+            &mut shop,
+            recurrence,
+            PeriodPayment::Manual,
+        ))
+        .await?;
         let target = |natural: Vec<u8>| {
             RecordTarget::new(
                 SwitchCollection::new(
@@ -954,9 +1066,15 @@ async fn early_paid_period_after_loss(world: &World) -> TestResult {
         .lookup(recurrence.first()?.ends_at)?
         .ok_or("second period missing")?;
     let period = PeriodRef::from(next);
-    let request = Box::pin(subscribe(world, &mut buyer, &mut shop, recurrence, false))
-        .await
-        .map_err(|e| format!("initial subscription: {e}"))?;
+    let request = Box::pin(subscribe(
+        world,
+        &mut buyer,
+        &mut shop,
+        recurrence,
+        PeriodPayment::Manual,
+    ))
+    .await
+    .map_err(|e| format!("initial subscription: {e}"))?;
     tablet
         .receive(None)
         .await
@@ -1092,9 +1210,15 @@ async fn early_paid_period_after_loss(world: &World) -> TestResult {
     let later = loss.uncertain_until_ms + pubky_switch_core::records::CLOCK_TOLERANCE_MS + 1;
     world.advance_ms(later.saturating_sub(world.now_ms()));
     shop.receive(None).await?;
-    let fresh = Box::pin(subscribe(world, &mut paid, &mut shop, schedule()?, false))
-        .await
-        .map_err(|e| format!("post-window subscription: {e}"))?;
+    let fresh = Box::pin(subscribe(
+        world,
+        &mut paid,
+        &mut shop,
+        schedule()?,
+        PeriodPayment::Manual,
+    ))
+    .await
+    .map_err(|e| format!("post-window subscription: {e}"))?;
     assert_ne!(fresh, request);
     let result = tokio::spawn(Box::pin(async move {
         paid.pay_period(&fresh, &period, early()).await.outcome

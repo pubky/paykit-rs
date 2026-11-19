@@ -124,6 +124,8 @@ pub struct PayOptions {
     /// [`Refusal::PricedByRate`] for this request and occurrence. The SDK checks its
     /// destination, signed source, rate and resulting amount again before paying.
     pub rate_authorized: Option<PricedPayment>,
+    /// Inspect the selected endpoint without opening an attempt or asking for a list.
+    pub(crate) quote_only: bool,
     /// The signed rate details to use for a Billing Period, identified by their message ID.
     /// By default the latest usable details that price the chosen endpoint are used.
     pub period_details: Option<String>,
@@ -2077,7 +2079,7 @@ impl Paykit {
         // list isn't paused, and merely expired or is used up, is asked as without a paused
         // list.
         if !paused_lists.is_empty() {
-            if !held.is_empty() && !unsupported_only && !unusable {
+            if !options.quote_only && !held.is_empty() && !unsupported_only && !unusable {
                 self.ask_for_lists(payee, app, &held, &installed).await?;
             }
             Box::pin(self.refuse_while_paused(&paused_lists)).await?;
@@ -2090,6 +2092,12 @@ impl Paykit {
                 "Paykit spec 8.4: the payee's Private Payment List has no endpoint this payment \
                  may use"
                     .into(),
+            )
+            .into());
+        }
+        if options.quote_only {
+            return Err(Refusal::NotNow(
+                "a current Private Payment List is needed to quote this endpoint".into(),
             )
             .into());
         }
@@ -2271,9 +2279,11 @@ impl Paykit {
                     "Paykit spec 8.2: the selected period rate does not price this endpoint",
                 ));
             }
-            Priced::Plain(_) | Priced::ByHand(_) if options.rate_authorized.is_some() => {
+            Priced::Plain(_) | Priced::ByHand(_)
+                if options.quote_only || options.rate_authorized.is_some() =>
+            {
                 return Ok(Taken::Unusable(
-                    "Paykit spec 7.2: the authorized quote names another destination or rate",
+                    "Paykit spec 7.2: this endpoint is not priced by the requested signed rate",
                 ));
             }
             Priced::Plain(amount) => return Ok(Taken::Pay(amount, None)),
