@@ -185,10 +185,26 @@ Playwright's Chromium support. `all` runs the three Playwright builds.
 
 The `Browser` workflow (`.github/workflows/browser.yml`) runs on the same pushes and pull
 requests as `CI`. Its `wasm-check` job runs `cargo clippy` for `wasm32-unknown-unknown`, which
-also type-checks the build; `cargo check` of the library alone, without the test-only features
-of the dev-dependencies; `cargo doc` for wasm32, where the host pieces are; and then
-`rig/check-wasm-deps.sh`, which fails when the wasm32 dependency graph contains a native
-networking or TLS crate such as `mio`, `ring` or `tokio`.
+also type-checks the build, with the clippy settings in `rig/wasm-clippy/`; `cargo check` of
+the library alone, without the test-only features of the dev-dependencies; `cargo doc` for
+wasm32, where the host pieces are; and then `rig/check-wasm-deps.sh`, which fails when the
+wasm32 dependency graph contains a native networking or TLS crate such as `mio`, `ring` or
+`tokio`.
 Its `browser-tests` job runs once per engine (`chromium`, `firefox`, `webkit`), as three jobs;
 each runs `rig/test.sh` in a page and then in a dedicated worker, with `wasm-bindgen-cli`
 installed at the version in `Cargo.lock`.
+
+The clippy settings in `rig/wasm-clippy/clippy.toml` reject `now` and `elapsed` of
+`std::time::Instant` and of `std::time::SystemTime`, which compile for `wasm32-unknown-unknown`
+and then panic there, and the Switch client's `SystemClock`, which reads `SystemTime::now()`
+(use `clock::JsClock`). Only the `wasm-check` job reads them, through `CLIPPY_CONF_DIR`; native
+clippy does not. With `-p paykit-browser`, clippy lints this crate and the workspace crates it
+depends on, `paykit-lib` and `paykit-sdk`, as the browser build compiles them: code for other
+targets and features that build leaves off are not checked, and neither is any dependency
+from outside the workspace, such as the git dependency `pubky-switch-client`. To run the same
+check from the repository root:
+
+```sh
+CLIPPY_CONF_DIR="$PWD/paykit-browser/rig/wasm-clippy" \
+  cargo clippy --locked --target wasm32-unknown-unknown -p paykit-browser --all-targets -- -D warnings
+```

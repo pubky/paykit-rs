@@ -1,0 +1,12 @@
+# Clippy settings for the wasm32 lint of the browser build only, which the `wasm-check` job of
+# `.github/workflows/browser.yml` selects with `CLIPPY_CONF_DIR`. What they cover:
+# paykit-browser/README.md, "Continuous integration".
+disallowed-methods = [
+  { path = "std::time::Instant::now", reason = "panics on wasm32-unknown-unknown; use web_time::Instant, which is std's Instant on every other target" },
+  { path = "std::time::Instant::elapsed", reason = "calls std's Instant::now, which panics on wasm32-unknown-unknown; use web_time::Instant" },
+  { path = "std::time::SystemTime::now", reason = "panics on wasm32-unknown-unknown; read the wall clock through the host's Clock" },
+  { path = "std::time::SystemTime::elapsed", reason = "calls std's SystemTime::now, which panics on wasm32-unknown-unknown; read the wall clock through the host's Clock" },
+]
+disallowed-types = [
+  { path = "pubky_switch_client::clock::SystemClock", reason = "reads SystemTime::now, which panics on wasm32-unknown-unknown; use paykit_browser::clock::JsClock" },
+]
