@@ -7,7 +7,9 @@
 //! later resume would, changes nothing, and an acknowledged one stays acknowledged. A notice
 //! that messages a block dropped can no longer come back is kept per window: per
 //! counterparty and the window's earliest acceptance time, which its key names; it is
-//! deleted at its acknowledgement.
+//! deleted at its acknowledgement. An outgoing message with an uncertain disposition is
+//! identified by its recipient, ID and signed hash. Its acknowledgment survives later
+//! imports into the same wallet store.
 
 use paykit_lib::AttemptId;
 use pubky_switch_core::enc::{b64, serde_b64, unb64_array};
@@ -613,9 +615,10 @@ impl Paykit {
         Ok(out)
     }
 
-    /// Acknowledge the notice `id`, once the user has seen it: it is no longer listed, and
-    /// raising it again changes nothing. It is kept, acknowledged, only as long as the
-    /// journal holds its payment.
+    /// Acknowledge `id` once the user has seen the notice. The wallet stops listing it.
+    /// A payment notice keeps its acknowledgment while the journal holds the payment.
+    /// For a possibly delivered message, the acknowledgment survives repeated imports
+    /// into this store and never triggers delivery.
     ///
     /// # Errors
     ///

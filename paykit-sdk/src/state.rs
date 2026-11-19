@@ -923,9 +923,8 @@ impl Stored for LossBoundary {
 
 impl sealed::Sealed for OwnResendOwed {}
 
-/// The restore's re-send owed: a retained subset of waiting counterparties is nonempty,
-/// ascending, each once; the mark is deleted once none remain (Paykit spec 7.2;
-/// `Paykit::queue_own_again`). Neither the counterparties nor the restore's time name a key.
+/// Counterparties still waiting for the restored-record scan are in ascending order,
+/// each once. The scan clears its mark once all have been checked (Paykit spec 7.2).
 impl Stored for OwnResendOwed {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
@@ -1627,7 +1626,7 @@ pub(crate) enum StateKey {
     PayerPassOwed,
     /// `wc`: the Paykit expiry policy for the own record's current endpoints is owed (`crate::own_record`).
     RecordExpiryOwed,
-    /// `ro`: the restore's re-send of this app's own messages is owed.
+    /// `ro` marks a pending scan for this app's outgoing messages after restore.
     OwnResendOwed,
     /// `lc`: the certificate the shared records were last listed under.
     ListedCert,
@@ -2429,7 +2428,7 @@ mod tests {
             serde_json::json!(false)
         ));
         assert!(!reads::<bool>(&key::peer(&pubky), serde_json::json!(true)));
-        // The restore's re-send owed at its key only, its waiting counterparties ascending.
+        // The restored-record scan binds to its own key and keeps counterparties in order.
         let owed = |waiting: serde_json::Value| serde_json::json!({ "waiting": waiting, "restored_at_ms": null });
         assert!(reads::<OwnResendOwed>(
             key::OWN_RESEND_OWED,

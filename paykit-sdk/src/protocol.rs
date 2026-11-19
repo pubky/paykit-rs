@@ -580,9 +580,8 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::Flagged
             | StateKey::StoredNote { .. }
             | StateKey::Taken(_) => continue,
-            // An own crossing end owed while sends were held isn't restored: the restore queues
-            // the record's own end again itself, under the same gate (`hold.rs`,
-            // `queue_own_again`).
+            // Only the original installation holds this duty. A restore reconciles its
+            // shared end through the outgoing delivery notices.
             StateKey::OwedEnd(_) => continue,
             // The time of the last read of the lists isn't restored: the copy of the deny
             // list the backup holds may be stale by any time, so the list is read again before
@@ -955,7 +954,7 @@ pub(crate) fn restore_paykit_layer(
     // Check the restored records for original deliveries whose disposition the host must
     // reconcile. The records cannot authorize another delivery (Paykit spec 7.2).
     let resend = state::local_put(key::OWN_RESEND_OWED, &crate::hold::OwnResendOwed::default())
-        .map_err(|_| String::from("the restore's re-send mark can't be written"))?;
+        .map_err(|_| String::from("the restored-record scan mark can't be written"))?;
     writes.push(resend);
     for (key, notice) in settlement_notices {
         let value = state::encode(&notice).map_err(|_| "invalid saved settlement notice")?;
@@ -3053,11 +3052,9 @@ mod receive_tests {
     }
 
     #[test]
-    fn test_protocol_own_period_details_each_sent_again_after_a_restore() {
-        // A period record keeps every details the payee sent for its period, the latest in
-        // `period_details` and the others in `earlier_details`: a restore queues again each
-        // this app signed, the earlier ones first, and none another app signed (Paykit spec
-        // 7.2, "What a restore loses").
+    fn test_protocol_restore_selects_each_period_detail_signed_by_this_app() {
+        // Reconciliation covers current and earlier details in signing order (Paykit
+        // spec 7.2). Another app can also have signed details in the same record.
         let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
         let bob = Party::new(
             "bob",

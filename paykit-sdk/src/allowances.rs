@@ -12,9 +12,9 @@
 //!   holds (`own_allowance_to_send_again`), and the delivery gate holds every attempt to
 //!   send one (`PaykitProtocol::may_send`). A message that would break the record's rules
 //!   (Paykit wire 5.4) is reflected by its `msg_id` only, such as an acceptance crossing
-//!   the proposer's withdrawal. No path stores a message of this app's without queuing it, so a
-//!   proposal, rejection or end this app signed in an Allowance record is one to be sent;
-//!   the re-send after a restore builds on that (`stores_unqueued`).
+//!   the proposer's withdrawal. A signed proposal, rejection or end from this app
+//!   records its original delivery intent (`stores_unqueued`). On restore, the host can
+//!   reconcile it through a [`crate::NoticeKind::PossiblyDelivered`] notice.
 //! - **Receiving:** a proposal opens the record, gated by the spam rule; an acceptance or a
 //!   rejection that would take the record's response is kept by the receive step (`pr/`), and a
 //!   rejection goes into the proposer's record after the read, once the read's stored entries are
@@ -270,8 +270,8 @@ pub(crate) struct NoticeTarget {
 /// message is owed (`eo/<record key>`; Paykit spec 8.1, "Blocked counterparties"; 8.3,
 /// "Ending"): it names the record and the end's `msg_id`, and is written in the batch that
 /// records the end. The message goes from the record once sends to the counterparty aren't
-/// held ([`Paykit::send_owed_ends`]). Never restored: a restore queues the record's own end
-/// again itself, under the same gate (`hold.rs`, `queue_own_again`).
+/// held ([`Paykit::send_owed_ends`]). After restore the signed end can give rise to a
+/// possibly-delivered notice. The original installation retains its local delivery duty.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct OwedEnd {
@@ -1366,7 +1366,7 @@ impl Paykit {
     /// no writer leaves it so, and dropping it would leave the counterparty without the end. As a message queued again from its
     /// record it goes only until 30 days after its `created_at`, less the clock tolerance
     /// (Paykit spec 8.3, "Ending"; 7.2, "What a restore loses"): one the client refuses for
-    /// good past that is neither sent nor told, as at a restore's re-send
+    /// good past that retires the local duty
     /// ([`Paykit::queue_stored_again`]), and the end in the record stands either way. A store
     /// failure is the call's error, and the mark stays. The mark was read bound to its key
     /// (`state::Stored`).
@@ -2531,18 +2531,10 @@ fn written(result: Result<()>) -> Result<Placed> {
     }
 }
 
-/// The messages of the Allowance record `record` this app signed, `app_id` of identity `own`,
-/// that it queues again after a restore (Paykit spec 7.2, "What a restore loses"; 8.3): each
-/// one the record stores to be sent, since every message this app stores in an Allowance
-/// record it also queues in that batch, or, for a crossing end recorded while sends to the
-/// counterparty were held, marks owed in it ([`stores_unqueued`]), while the counterparty
-/// hasn't answered it and no later stop covers it. The proposal goes while the record holds
-/// no response and no end; a rejection while it holds no end; an end, a stop, always. An
-/// acceptance never goes, whoever wrote it into the record: this app sends no acceptance
-/// (Paykit spec 8.3.1), so it isn't queued either, and the delivery gate holds any that
-/// reaches the outbox (`PaykitProtocol::may_send`). Nothing goes for a conflicted Allowance
-/// (Paykit spec 8.3, "Conflicted"); the caller leaves out one whose conflict or
-/// counterparty's end this app keeps as a stop not in the record yet.
+/// This app's signed Allowance messages whose delivery may need reconciliation after
+/// restore (Paykit spec 7.2 and 8.3). A response closes a proposal, and an end closes
+/// both the proposal and the rejection. Conflicted Allowances and acceptances are
+/// excluded. The caller also checks for stops the app has kept outside the record.
 pub(crate) fn own_allowance_to_send_again<'a>(
     record: &'a AllowanceRecord,
     own: &[u8; 32],
@@ -2573,7 +2565,7 @@ pub(crate) fn own_allowance_to_send_again<'a>(
 /// an Allowance record is written in the batch that queues it, or, for a crossing end
 /// recorded while sends to the counterparty are held, in the batch that marks it owed
 /// (`eo/`, which `queued` then names; Paykit spec 8.3, "Ending"), so one signed by this app
-/// there is one to be sent: the re-send after a restore can rely on that.
+/// there establishes original delivery intent.
 fn stores_unqueued(
     before: Option<&AllowanceRecord>,
     next: &AllowanceRecord,
