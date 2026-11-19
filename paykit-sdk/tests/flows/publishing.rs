@@ -1858,3 +1858,73 @@ async fn test_publication_restored_answers_use_the_retained_request_and_current_
         );
     }
 }
+
+#[tokio::test]
+async fn test_publication_replaces_an_undelivered_withdrawal_only_when_due() {
+    use crate::common::HOUR_MS;
+    use pubky_switch_client::app::{AppEvent, Delivery};
+
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let payer = w.alice_id();
+    shop.app_mut().invite(&payer).await.unwrap();
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    shop.set_list_endpoints(offered("lno1original"))
+        .await
+        .unwrap();
+    shop.publish_list_to(payer).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let pay = || UnrequestedPayment::new(w.bob_id(), btc("0.001"));
+    assert!(matches!(
+        wallet.pay_without_request(pay()).await.outcome.unwrap(),
+        PayOutcome::Paid { .. }
+    ));
+    let at = target(&shop, &payer, shop.app().own_identity().generation());
+    let key = shop.app().record_key(&at).unwrap();
+    shop.app_mut().hold_queued(&payer).await.unwrap();
+    shop.withdraw_list_from(payer).await.unwrap();
+    let held = shop.app().shared_record(&key).await.unwrap().unwrap();
+    let empty = ListPublicationRecord::read(held.content.value().unwrap()).unwrap();
+    assert_eq!(empty.counter, 2);
+    assert!(matches!(
+        shop.app().delivery(&empty.msg_id).await.unwrap(),
+        Some(Delivery::Queued { .. })
+    ));
+    assert!(shop
+        .app_mut()
+        .withdraw_message("paykit", &empty.msg_id)
+        .await
+        .unwrap());
+    shop.app_mut().release_queued(&payer).await.unwrap();
+    let report = shop.receive(None).await.unwrap();
+    assert!(report.report.events.iter().any(|event| matches!(event,
+        AppEvent::MessageUndelivered { msg_id, resend: false, .. } if msg_id == &empty.msg_id)));
+    w.clock.advance_ms(HOUR_MS - 1);
+    shop.receive(None).await.unwrap();
+    assert_eq!(w.record_writes(&w.bob, &key), 2);
+    w.clock.advance_ms(1);
+    shop.receive(None).await.unwrap();
+    let held = shop.app().shared_record(&key).await.unwrap().unwrap();
+    let replacement = ListPublicationRecord::read(held.content.value().unwrap()).unwrap();
+    assert_eq!(
+        replacement.counter, 3,
+        "a proven undelivered withdrawal needs a new reservation"
+    );
+    assert_ne!(replacement.msg_id, empty.msg_id);
+    assert!(matches!(
+        shop.app().delivery(&replacement.msg_id).await.unwrap(),
+        Some(Delivery::Accepted { .. })
+    ));
+    wallet.receive(None).await.unwrap();
+    assert!(matches!(
+        wallet
+            .pay_without_request(pay())
+            .await
+            .outcome
+            .as_ref()
+            .err()
+            .and_then(|e| e.refusal()),
+        Some(paykit_sdk::Refusal::NoDestination(_))
+    ));
+}
