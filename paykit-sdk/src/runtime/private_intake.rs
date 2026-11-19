@@ -5380,8 +5380,9 @@ mod tests {
         let storage = crate::storage::InMemoryStorage::new();
         let peer = users(1).remove(0);
         // Any rejected commit works here; a cursor stored for another
-        // homeserver is simply the easiest one to set up. The supervisor
-        // itself never seeds such a peer.
+        // homeserver is simply the easiest one to set up. The epoch-start
+        // homeserver reconcile removes mismatched cursors before the group
+        // task runs, so the supervisor does not normally seed such a peer.
         let existing = intake_seed(&peer, "homeserver-b", 7);
         storage
             .transaction({

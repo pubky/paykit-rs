@@ -1429,9 +1429,9 @@ is not replayed from the beginning of its private-directory history. Before
 subscribing, the supervisor makes one non-live, newest-first request limited to
 one event for those peers and subscribes them from that event. The startup
 audit runs after the subscription and reconciles every slot announced by an
-event the request could see. Event IDs come from a sequence assigned at
-insert, so an event at or before the returned one can commit after the
-request. The stream skips it, and the next audit fetches its slot: the
+event the request could see. Homeserver event ids come from a sequence
+assigned at insert, so an event at or before the returned one can commit
+after the request. The stream skips it, and the next audit fetches its slot: the
 jittered in-stream audit, then each healthy audit. Every audit on that
 connection runs after the request, so the first one that finds a peer's
 expected slot absent stores that peer's cursor, and no later audit on the
