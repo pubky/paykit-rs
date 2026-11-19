@@ -478,6 +478,14 @@ fn subscribable_private_intake_peers(
         .collect()
 }
 
+/// Event stream path filter selecting every private Paykit slot.
+///
+/// The homeserver event stream treats a path without a trailing `/` as one
+/// exact file; only a trailing `/` selects the directory's descendants.
+fn private_intake_event_path_filter() -> String {
+    format!("{}/", paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX)
+}
+
 fn route_private_intake_event(
     group: &SubscriptionGroup,
     event: pubky::Event,
@@ -1377,7 +1385,7 @@ where
                     }
                 };
             let stream = match builder
-                .path(paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX)
+                .path(private_intake_event_path_filter())
                 .max_event_bytes(config.max_event_bytes)
                 .live()
                 .subscribe()
@@ -2333,6 +2341,16 @@ mod tests {
 
         assert!(matches!(error, PaykitSdkError::Policy { .. }));
         assert_eq!(admissions[&peers[1]], "homeserver-a");
+    }
+
+    #[test]
+    fn test_private_intake_event_path_filter_selects_private_directory() {
+        let filter = private_intake_event_path_filter();
+        assert_eq!(
+            filter,
+            format!("{}/", paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX)
+        );
+        assert!(format!("{}/abc/0", paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX).starts_with(&filter));
     }
 
     #[test]

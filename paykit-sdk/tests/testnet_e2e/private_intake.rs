@@ -896,3 +896,41 @@ async fn test_buffered_receive_retention_refusal_keeps_packet_and_checkpoint() {
     );
     supervisor.stop().await;
 }
+
+/// Guards #435: a packet published while intake is connected must arrive
+/// through the live event stream. The healthy audit interval is maxed so the
+/// only audits in the test window are the startup audit and the first jittered
+/// in-stream audit, both of which finish before the packet is published.
+#[tokio::test]
+async fn test_private_intake_buffers_new_packet_from_live_event_stream() {
+    let pair = linked_two_party().await;
+    let sdk = Arc::new(PaykitSdk::new(
+        pair.alice.storage.clone(),
+        TestnetSessionProvider::new(pair.alice.access.clone()),
+        pair.alice.adapter.clone(),
+        PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+    ));
+    let mut config = PrivateIntakeConfig::new(1).unwrap();
+    config.healthy_audit_interval = Duration::from_secs(60 * 60);
+    let supervisor = sdk.start_private_intake(config).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if supervisor.health().await.peers.get(&pair.bob.public_key)
+                == Some(&PrivateIntakeTransportState::CaughtUp)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("startup audit should catch up before the live packet is published");
+    // Outlast the first in-stream audit, which fires after at most five
+    // seconds of jitter.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+
+    publish_private_lists(&pair.bob, &pair.alice, 1).await;
+
+    wait_for_buffered(&pair.alice.storage, &pair.bob.public_key, 1).await;
+    supervisor.stop().await;
+}
