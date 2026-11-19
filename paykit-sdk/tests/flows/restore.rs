@@ -2762,6 +2762,56 @@ async fn test_restore_fresh_store_keeps_an_issued_receipt_without_assuming_deliv
 }
 
 #[tokio::test]
+async fn test_an_unanswered_receipt_keeps_its_batch_id_when_saving_the_application_fails() {
+    use pubky_switch_client::store::{Fault, FaultStore};
+
+    let w = World::new();
+    let mut buyer = w.wallet("wallet").await;
+    let store = Arc::new(FaultStore::new(store(), Fault::None));
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default(),
+            store.clone(),
+        )
+        .await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    buyer.receive(None).await.unwrap();
+    buyer
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    // The native first keep fits. The write preserving its signed application does not.
+    store.refuse_puts_as_too_large_over(Some(b"p/paykit/ri/"), 16);
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+            path: "/ops".into(),
+        });
+    let err = shop
+        .confirm_payment_with(&record, paykit_sdk::ReceiptDetails::new())
+        .await
+        .unwrap_err();
+    let batch = err
+        .kept_batch()
+        .expect("the unanswered submission names its original kept batch");
+    let pending = shop.app().protocol_scan("paykit", b"ri/").await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].1, batch);
+    let queued = shop.app().queued_messages("paykit").await.unwrap();
+    assert!(queued.iter().any(
+        |m| m.kept_batch == Some(batch) && m.kind == paykit_lib::Kind::PaymentReceipt.as_str()
+    ));
+    buyer.receive(None).await.unwrap();
+    assert!(buyer.request(&request).await.unwrap().receipt.is_none());
+}
+
+#[tokio::test]
 async fn test_restore_shared_receipt_alone_does_not_create_a_delivery() {
     // The shared receipt survives restore. Its presence alone cannot establish an original delivery.
     let w = World::new();

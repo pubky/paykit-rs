@@ -87,6 +87,7 @@ impl Paykit {
         marker: &str,
         batch: [u8; 16],
     ) -> Result<()> {
+        self.retire_refused_receipt_batch(Some(marker)).await?;
         if !matches!(self.local_get::<ReceiptBatch>(marker).await?, Some(ReceiptBatch::Awaiting(id)) if id == batch)
         {
             return Ok(());

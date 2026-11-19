@@ -1464,11 +1464,13 @@ impl Paykit {
                 }
                 None => self.submit(batch).await.map_err(PaykitError::from),
             };
-            if let Err(error) = &submitted {
-                self.retire_refused_receipt_batch(delivery_marker.as_deref())
-                    .await?;
-                if let (Some(marker), Some(batch)) = (&delivery_marker, error.kept_batch()) {
-                    Box::pin(self.remember_receipt_application(&target, marker, batch)).await?;
+            if let (Err(error), Some(marker)) = (&submitted, &delivery_marker) {
+                if let Some(batch) = error.kept_batch() {
+                    // Preserve the original submission's ID even if saving its evidence fails.
+                    let _ =
+                        Box::pin(self.remember_receipt_application(&target, marker, batch)).await;
+                } else {
+                    self.retire_refused_receipt_batch(Some(marker)).await?;
                 }
             }
             match submitted {
