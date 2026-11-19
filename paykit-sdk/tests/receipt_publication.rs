@@ -332,9 +332,10 @@ async fn publish_after_restart(world: &World, shared: Shared, restart: Restart) 
     till.receive(None).await?;
     shop.app_mut().flush_cursor().await?;
     let delete = till.app_mut().delete_record(&target, vec![]).await?;
-    // The shop observes the delete while the service cannot accept its publication.
-    world.refuse("POST", "/ops", 429, "quota_exceeded");
+    // The shop observes the deletion before its conditional publication reaches the service.
+    world.unreachable("POST", "/ops");
     shop.app_mut().receive(None).await?;
+    assert_eq!(world.faults_left(), 0);
     let notice = shop
         .payee_deletion_notices()
         .await?

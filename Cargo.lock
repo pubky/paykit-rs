@@ -1671,7 +1671,7 @@ dependencies = [
 [[package]]
 name = "pubky-switch"
 version = "0.1.0"
-source = "git+https://github.com/pubky/pubky-switch?rev=2aac716ad30021151ff0b4a540cbe3a002e86708#2aac716ad30021151ff0b4a540cbe3a002e86708"
+source = "git+https://github.com/pubky/pubky-switch?rev=794478e57f15afb212537c760e09da4b0f3eb81a#794478e57f15afb212537c760e09da4b0f3eb81a"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1703,7 +1703,7 @@ dependencies = [
 [[package]]
 name = "pubky-switch-client"
 version = "0.1.0"
-source = "git+https://github.com/pubky/pubky-switch?rev=2aac716ad30021151ff0b4a540cbe3a002e86708#2aac716ad30021151ff0b4a540cbe3a002e86708"
+source = "git+https://github.com/pubky/pubky-switch?rev=794478e57f15afb212537c760e09da4b0f3eb81a#794478e57f15afb212537c760e09da4b0f3eb81a"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -1720,7 +1720,7 @@ dependencies = [
 [[package]]
 name = "pubky-switch-core"
 version = "0.1.0"
-source = "git+https://github.com/pubky/pubky-switch?rev=2aac716ad30021151ff0b4a540cbe3a002e86708#2aac716ad30021151ff0b4a540cbe3a002e86708"
+source = "git+https://github.com/pubky/pubky-switch?rev=794478e57f15afb212537c760e09da4b0f3eb81a#794478e57f15afb212537c760e09da4b0f3eb81a"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -1739,7 +1739,7 @@ dependencies = [
 [[package]]
 name = "pubky-switch-harness"
 version = "0.1.0"
-source = "git+https://github.com/pubky/pubky-switch?rev=2aac716ad30021151ff0b4a540cbe3a002e86708#2aac716ad30021151ff0b4a540cbe3a002e86708"
+source = "git+https://github.com/pubky/pubky-switch?rev=794478e57f15afb212537c760e09da4b0f3eb81a#794478e57f15afb212537c760e09da4b0f3eb81a"
 dependencies = [
  "axum",
  "futures-util",
@@ -1758,7 +1758,7 @@ dependencies = [
 [[package]]
 name = "pubky-switch-signer"
 version = "0.1.0"
-source = "git+https://github.com/pubky/pubky-switch?rev=2aac716ad30021151ff0b4a540cbe3a002e86708#2aac716ad30021151ff0b4a540cbe3a002e86708"
+source = "git+https://github.com/pubky/pubky-switch?rev=794478e57f15afb212537c760e09da4b0f3eb81a#794478e57f15afb212537c760e09da4b0f3eb81a"
 dependencies = [
  "pubky-switch-client",
  "pubky-switch-core",
