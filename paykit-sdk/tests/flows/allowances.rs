@@ -8630,6 +8630,65 @@ async fn test_pending_proposal_conflict_discard_checks_the_selected_record_and_s
 }
 
 #[tokio::test]
+async fn test_pending_proposal_conflict_discard_reads_the_current_proposal_after_restore() {
+    use paykit_lib::records::PendingAllowanceRecord;
+    use pubky_switch_client::app::{Collection, RecordContent, RecordTarget};
+
+    let w = World::new();
+    let wallet = Box::pin(wallet(&w)).await;
+    let mut phone = Box::pin(alice_app(
+        &w,
+        "phone",
+        AppScopes::new().pay().allowance().build().unwrap(),
+    ))
+    .await;
+    let mut shop = Box::pin(shop(&w)).await;
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+
+    let id = paykit_lib::AllowanceId::generate().unwrap();
+    let peer = w.bob_id();
+    let incoming = signed_pending_proposal(&shop, w.alice_id(), &id, "allowee");
+    let outgoing = signed_pending_proposal(&phone, peer, &id, "allower");
+    let mut pending = PendingAllowanceRecord::new(&w.alice_id(), incoming).unwrap();
+    pending.note_proposal(outgoing).unwrap();
+    let family = paykit_lib::Collection::AllowanceProposals;
+    let target = RecordTarget::new(
+        Collection::new(family.name(), family.fixed_policy()),
+        &paykit_lib::derive::natural_key::allowance(&peer, &id),
+    );
+    let key = phone.app().record_key(&target).unwrap();
+    let canonical = phone
+        .app()
+        .record_key(&allowances_target(&peer, &id))
+        .unwrap();
+    Box::pin(write_record(
+        &mut phone,
+        &target,
+        Some(&pending.to_json().unwrap()),
+    ))
+    .await;
+
+    let mut restored = Box::pin(restored_unreceived(&w, &backup)).await;
+    restored
+        .discard_pending_allowance(&canonical)
+        .await
+        .unwrap();
+    let deleted = restored.app().shared_record(&key).await.unwrap().unwrap();
+    assert_eq!(deleted.content, RecordContent::Deleted);
+    assert!(restored
+        .app()
+        .shared_record(&canonical)
+        .await
+        .unwrap()
+        .is_none());
+    restored.flush().await.unwrap();
+    let seen = shop.receive(None).await.unwrap();
+    assert!(!received(&seen, "paykit.allowance_rejection"));
+    assert!(!received(&seen, "paykit.allowance_end"));
+}
+
+#[tokio::test]
 async fn test_pending_record_keeps_the_first_proposal_and_conflict_until_its_verified_deletion() {
     use paykit_lib::records::PendingAllowanceRecord;
     use pubky_switch_client::app::{Collection, RecordContent, RecordTarget};

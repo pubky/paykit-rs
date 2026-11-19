@@ -141,15 +141,14 @@ impl Paykit {
     /// A changed proposal or an uncertain read leaves the pending record in place.
     pub async fn discard_pending_allowance(&mut self, record: &[u8; 32]) -> Result<()> {
         self.refresh_own()?;
-        self.require_allowance()?;
-        let (selected, target) = Box::pin(self.pending_by_allowance_key(record))
-            .await?
-            .ok_or(Refusal::NotFound)?;
-        let condition = self.app.record_condition(&selected.key).await?;
         self.first_read_before_writing().await?;
         self.refresh_own()?;
         self.require_allowance()?;
         self.records_known().await?;
+        let (selected, target) = Box::pin(self.pending_by_allowance_key(record))
+            .await?
+            .ok_or(Refusal::NotFound)?;
+        let condition = self.app.record_condition(&selected.key).await?;
         let RecordRead::Fresh(held) = self.app.read_record_fresh(&target).await? else {
             return Err(not_current());
         };
