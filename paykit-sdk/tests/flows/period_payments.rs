@@ -67,6 +67,16 @@ fn periods(n: usize) -> Vec<PeriodRef> {
         .collect()
 }
 
+fn fractional_monthly() -> Recurrence {
+    let anchor = START_MS + 500;
+    Recurrence::new(
+        AnchoredRule::new(anchor, 1, Unit::Month).unwrap(),
+        anchor,
+        None,
+    )
+    .unwrap()
+}
+
 fn january() -> PeriodRef {
     periods(1)[0]
 }
@@ -1703,10 +1713,18 @@ async fn test_period_payments_reconcile_finds_a_period_paid_after_the_backup() {
     let w = World::new();
     let mut shop = w.shop().await;
     let mut wallet = w.wallet("wallet").await;
-    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    let schedule = fractional_monthly();
+    let period = PeriodRef::from(schedule.periods(2).unwrap()[1]);
+    let (request, _) = subscribed_to(
+        &w,
+        &mut shop,
+        &mut wallet,
+        monthly().with_recurrence(schedule),
+    )
+    .await;
     let backup = wallet.backup().await.unwrap();
     w.rail.next(Behaviour::Hang);
-    let attempt = by_user(&mut wallet, &request, february(), early())
+    let attempt = by_user(&mut wallet, &request, period, early())
         .await
         .unwrap()
         .attempt_id();
@@ -1722,12 +1740,12 @@ async fn test_period_payments_reconcile_finds_a_period_paid_after_the_backup() {
             .any(|o| matches!(o, PayOutcome::Paid { attempt_id, .. } if *attempt_id == attempt)),
         "{report:?}"
     );
-    let record = period_record(&w, &app, &request, february()).await.unwrap();
-    assert_eq!(proof_of(&record).1.billing_period, Some(february()));
+    let record = period_record(&w, &app, &request, period).await.unwrap();
+    assert_eq!(proof_of(&record).1.billing_period, Some(period));
     assert!(record.manual_only);
     assert_eq!(
         app.payments().await.unwrap()[0].billing_period,
-        Some(february())
+        Some(period)
     );
     shop.receive(None).await.unwrap();
     assert!(shop.payee_activity().await.unwrap()[0].periods[0].paid);
@@ -1743,26 +1761,30 @@ async fn test_period_payments_reconcile_leaves_a_period_whose_destination_it_can
     let w = World::new();
     let mut shop = w.shop().await;
     let mut wallet = w.wallet("wallet").await;
+    let schedule = fractional_monthly();
+    let period = PeriodRef::from(schedule.periods(2).unwrap()[1]);
     let (request, _) = subscribed_to(
         &w,
         &mut shop,
         &mut wallet,
-        monthly().with_per_period_endpoints(),
+        monthly()
+            .with_recurrence(schedule)
+            .with_per_period_endpoints(),
     )
     .await;
     let backup = wallet.backup().await.unwrap();
     // The wallet's attempt on February, as another version's batch would write it: the
     // period listed and its claim's attempt; then the method pays its details' destination.
-    w.clock.set_ms(february().starts_at);
+    w.clock.set_ms(period.starts_at);
     let natural = natural_key::request_record(&request.payee, &request.request_hash);
     let mut record = request_record(&w, &wallet, &request).await;
-    record.attempted_periods.push(february().start_secs());
+    record.attempted_periods.push(period.start_secs());
     write_payer_record(&mut wallet, &natural, &record).await;
     let obligation = paykit_lib::derive::request_obligation(
         wallet.app().naming_key(),
         &request.payee,
         &request.request_hash,
-        february().start_secs(),
+        period.start_secs(),
     );
     let attempt = paykit_lib::AttemptId::generate().unwrap();
     let op =
@@ -1797,10 +1819,10 @@ async fn test_period_payments_reconcile_leaves_a_period_whose_destination_it_can
         .find(|d| d.obligation == obligation)
         .unwrap_or_else(|| panic!("{report:?}"));
     assert_eq!(doubtful.attempts, [attempt]);
+    assert_eq!(doubtful.payee, Some(request.payee));
+    assert_eq!(doubtful.request_hash, Some(request.request_hash));
     assert!(report.resolved.is_empty(), "{report:?}");
-    assert!(period_record(&w, &app, &request, february())
-        .await
-        .is_none());
+    assert!(period_record(&w, &app, &request, period).await.is_none());
 }
 
 /// A backup `w`'s wallet takes paying January by hand, its dispatch in flight.

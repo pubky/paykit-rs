@@ -341,7 +341,7 @@ async fn test_historical_subscription_keeps_an_early_paid_period_held_after_loss
     Ok(())
 }
 
-async fn follow_subscriber(wallet: &mut Paykit) -> TestResult {
+async fn follow_subscriber(wallet: &mut Paykit) -> TestResult<paykit_sdk::ReconcileReport> {
     wallet.app_mut().refresh_identity().await?;
     wallet.app_mut().follow_provider().await?;
     for _ in 0..8 {
@@ -349,13 +349,198 @@ async fn follow_subscriber(wallet: &mut Paykit) -> TestResult {
         if summary.report.more || summary.records_unlisted.is_some() {
             continue;
         }
-        wallet.reconcile().await?;
+        let report = wallet.reconcile().await?;
         wallet
             .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
             .await?;
-        return Ok(());
+        return Ok(report);
     }
     Err("subscriber did not finish reading its recovered records".into())
+}
+
+#[tokio::test]
+async fn test_reconcile_finds_fractional_periods_after_restart_and_provider_loss() -> TestResult {
+    for backend in [Backend::Scripted, Backend::Service] {
+        let Some(world) = World::start(backend)? else {
+            continue;
+        };
+        let result = Box::pin(reconcile_fractional_periods(&world)).await;
+        world.close().await?;
+        result?;
+    }
+    Ok(())
+}
+
+async fn reconcile_fractional_periods(world: &World) -> TestResult {
+    use paykit_lib::collections::Collection;
+    use paykit_lib::derive::request_obligation;
+    use paykit_lib::periods::{AnchoredRule, Recurrence, Unit};
+    use pubky_switch_client::app::{
+        ClaimOp, Collection as SwitchCollection, ObligationDeadline, OpBatch, RecordTarget,
+    };
+
+    let origin = "https://subscriber.payment.test";
+    let mut signer = Box::pin(setup_identity(world, "subscriber", origin)).await?;
+    let mut merchant = Box::pin(setup_identity(world, "shop", "https://shop.payment.test")).await?;
+    let rail = Arc::new(FakeRail::with_clock(world.clock().clone()));
+    let store = Arc::new(MemoryStore::new());
+    let mut buyer = Box::pin(join(
+        world,
+        &mut signer,
+        "subscriber",
+        "subscriber-app",
+        AppScopes::new().pay().manage_contacts().build()?,
+        store.clone(),
+        &rail,
+    ))
+    .await?;
+    let mut shop = Box::pin(join(
+        world,
+        &mut merchant,
+        "shop",
+        "period-till",
+        AppScopes::new().request().manage_contacts().build()?,
+        Arc::new(MemoryStore::new()),
+        &rail,
+    ))
+    .await?;
+    buyer.app_mut().invite(&shop.identity()).await?;
+    shop.app_mut().invite(&buyer.identity()).await?;
+    let anchor = world.now_ms() / 1000 * 1000 + 500;
+    let recurrence = Recurrence::new(AnchoredRule::new(anchor, 1, Unit::Month)?, anchor, None)?;
+    let first = PeriodRef::from(recurrence.first()?);
+    let next = PeriodRef::from(
+        recurrence
+            .lookup(first.ends_at)?
+            .ok_or("missing next period")?,
+    );
+    let mut occurrences = Vec::new();
+    for (listed, recorded) in [(first, next), (next, first)] {
+        let request = Box::pin(subscribe(world, &mut buyer, &mut shop, recurrence)).await?;
+        let target = |natural: Vec<u8>| {
+            RecordTarget::new(
+                SwitchCollection::new(
+                    Collection::PayerActivity.name(),
+                    Collection::PayerActivity.policy(None),
+                ),
+                &natural,
+            )
+        };
+        let parent = target(natural_key::request_record(
+            &request.payee,
+            &request.request_hash,
+        ));
+        let key = buyer.app().record_key(&parent)?;
+        let held = buyer
+            .app()
+            .shared_record(&key)
+            .await?
+            .ok_or("missing subscription")?;
+        let mut activity = ActivityRecord::bind(
+            held.content.value().ok_or("unreadable subscription")?,
+            &buyer.identity(),
+            ActivitySide::Payer,
+            buyer.app().naming_key(),
+            &key,
+            None,
+        )?;
+        // A retained request can name an attempt whose separate period record is absent.
+        activity.attempted_periods.push(listed.start_secs());
+        let parent_write = buyer
+            .app_mut()
+            .record_op(&parent, Some(&activity.to_json()?), Vec::new())
+            .await?;
+        let obligation = |period: PeriodRef| {
+            request_obligation(
+                buyer.app().naming_key(),
+                &request.payee,
+                &request.request_hash,
+                period.start_secs(),
+            )
+        };
+        let listed_key = obligation(listed);
+        let recorded_key = obligation(recorded);
+        let id = paykit_lib::AttemptId::generate()?;
+        let claim = ClaimOp::attempt(listed_key, 0, id.to_bytes(), 4200, None);
+        // Another period has only its current signed record, as after a finished attempt
+        // has been dropped from the request's attempted_periods.
+        let period_target = target(natural_key::period_record(
+            &request.payee,
+            &request.request_hash,
+            recorded.start_secs(),
+        ));
+        let mut value = ActivityRecord::new(ActivitySide::Payer, request.payee);
+        value.request_hash = Some(request.request_hash);
+        value.billing_period = Some(recorded);
+        value.manual_only = true;
+        let period_write = buyer
+            .app_mut()
+            .record_op(&period_target, Some(&value.to_json()?), Vec::new())
+            .await?;
+        buyer
+            .app_mut()
+            .submit_batch(
+                OpBatch::for_protocol("paykit")
+                    .entry(parent_write)
+                    .entry(period_write)
+                    .op(claim.kind())
+                    .obligation_deadline(listed_key, ObligationDeadline::NoDeadline),
+            )
+            .await?;
+        occurrences.push((request, listed_key, recorded_key, id));
+    }
+    let app_id = buyer.app_id();
+    drop(buyer);
+    let mut reopened = Box::pin(Paykit::load(
+        world.app_env(store),
+        Default::default(),
+        app_id,
+        rail.clone(),
+        Arc::new(TestTimer),
+    ))
+    .await?;
+    let pending = Box::pin(reopened.reconcile()).await?;
+    for (request, listed_key, _, attempt) in &occurrences {
+        assert!(
+            pending
+                .doubtful
+                .iter()
+                .any(|row| row.obligation == *listed_key
+                    && row.request_hash == Some(request.request_hash)
+                    && row.attempts == [*attempt]),
+            "{pending:?}"
+        );
+    }
+    let subscriber = world.identity("subscriber")?;
+    world.lose_switch(origin);
+    let recovered = "https://recovered-subscriber.payment.test";
+    world.add_switch(recovered, &[&subscriber]).await?;
+    Box::pin(signer.declare_provider_loss(
+        recovered,
+        pubky_switch_signer::UserConfirmed::shown_and_confirmed(),
+    ))
+    .await?;
+    world.advance_ms(1000);
+    signer.end_staged_admission().await?;
+    world.advance_ms(1000);
+    let report = Box::pin(follow_subscriber(&mut reopened)).await?;
+    for (request, listed, recorded, _) in occurrences {
+        for obligation in [listed, recorded] {
+            let mut rows = report
+                .doubtful
+                .iter()
+                .filter(|row| row.obligation == obligation);
+            let row = rows
+                .next()
+                .ok_or_else(|| format!("missing period in {report:?}"))?;
+            assert_eq!(row.payee, Some(request.payee));
+            assert_eq!(row.request_hash, Some(request.request_hash));
+            assert!(row.before_loss.is_some());
+            assert!(rows.next().is_none());
+        }
+    }
+    assert!(rail.all_executions().is_empty());
+    Ok(())
 }
 
 async fn early_paid_period_after_loss(world: &World) -> TestResult {

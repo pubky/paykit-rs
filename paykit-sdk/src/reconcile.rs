@@ -197,9 +197,13 @@ impl Paykit {
             }) else {
                 continue;
             };
-            let at = start.checked_mul(1000).ok_or_else(PaykitError::corrupt)?;
-            let period = match body.recurrence.as_ref().map(|r| r.lookup(at)).transpose()? {
-                Some(Some(period)) if period.start_secs() == start => period,
+            let period = match body
+                .recurrence
+                .as_ref()
+                .map(|r| r.by_start_secs(start))
+                .transpose()?
+            {
+                Some(Some(period)) => period,
                 _ => continue,
             };
             out.push(Obligation {

@@ -1240,19 +1240,7 @@ fn check_reassociations(
 /// 4.4). A period starting at `...00.500Z` is named by its second, `...00Z`, so the period
 /// starting within that second is looked up.
 fn is_period_start(recurrence: &Recurrence, start: u64) -> bool {
-    let Some(first) = start.checked_mul(1000) else {
-        return false;
-    };
-    [Some(first), first.checked_add(999)]
-        .into_iter()
-        .flatten()
-        .any(|ms| {
-            recurrence
-                .lookup(ms)
-                .ok()
-                .flatten()
-                .is_some_and(|p| p.start_secs() == start)
-        })
+    recurrence.by_start_secs(start).ok().flatten().is_some()
 }
 
 fn unrequested_json(u: &UnrequestedDestination) -> Value {
