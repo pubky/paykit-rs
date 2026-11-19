@@ -83,7 +83,9 @@ impl Collection {
             Self::AllowanceLedgers => {
                 Policy::new("paykit_allowance", &["paykit_allowance_execute"])
             }
-            Self::Settlements => Policy::new("paykit_settlements", &["paykit_settlements"]),
+            Self::Settlements => {
+                Policy::new("paykit_settlements", &["paykit_settlements"]).permanent(None)
+            }
             Self::RecoveryUploads => {
                 Policy::new(crate::scopes::RECOVERY, &[crate::scopes::RECOVERY])
             }
@@ -160,7 +162,7 @@ mod tests {
         );
         assert_eq!(
             Collection::Settlements.fixed_policy(),
-            Policy::new("paykit_settlements", &["paykit_settlements"])
+            Policy::new("paykit_settlements", &["paykit_settlements"]).permanent(None)
         );
         for c in Collection::ALL {
             assert_eq!(Collection::from_name(c.name()), Some(c));
@@ -210,6 +212,8 @@ mod tests {
         assert_eq!(Collection::Settlements.policy(Some(&label)), fixed);
         assert_eq!(Collection::Settlements.policy_label(&fixed), Some(None));
         for other in [
+            Policy::new("paykit_settlements", &["paykit_settlements"]),
+            Policy::new("paykit_settlements", &["paykit_settlements"]).permanent(Some(1)),
             Policy::new("paykit_request", &["paykit_request"]),
             Policy::new("paykit_request:shop1", &["paykit_request:shop1"]),
             Policy::new(

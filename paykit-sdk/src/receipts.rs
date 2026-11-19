@@ -17,12 +17,51 @@ use crate::error::Result;
 use crate::paykit::Paykit;
 use crate::requests::RequestRef;
 
+/// A signed pair that disagrees with its signed request is invalid. If the
+/// request is unavailable, its Billing Period cannot yet be decided.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReceiptBinding {
+    Verified,
+    MissingRequest,
+    Invalid,
+}
+
+pub(crate) fn receipt_binding(
+    record: &ActivityRecord,
+    parent: Option<&ActivityRecord>,
+) -> ReceiptBinding {
+    if record.proof.is_none() || record.receipt.is_none() {
+        return ReceiptBinding::Invalid;
+    }
+    let Ok(binding) = record.binding() else {
+        return ReceiptBinding::Invalid;
+    };
+    let parent = match binding {
+        RecordBinding::Unrequested => return ReceiptBinding::Verified,
+        RecordBinding::Request { .. } => record,
+        RecordBinding::Period { .. } => match parent {
+            Some(p) if crate::requests::request_of(p).is_some() => p,
+            _ => return ReceiptBinding::MissingRequest,
+        },
+    };
+    if crate::periods::request_for_payment(parent, record, &binding).is_some() {
+        ReceiptBinding::Verified
+    } else {
+        ReceiptBinding::Invalid
+    }
+}
+
 /// What a payee's receipt carries beyond the proof it confirms (Paykit wire 4.11): its
 /// opaque `metadata`, and, for a payment without a request only, the payee's
 /// `payment_reference` for it, as in v0.1. Its `Debug` shows neither.
 #[derive(Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ReceiptDetails {
+    /// Store the signed receipt in shared activity without sending it to the payer.
+    pub store_only: bool,
+    /// The user has seen that the shared settlement mark cannot be written and a
+    /// different occurrence may therefore be credited again (Paykit wire 5.7).
+    pub unmarked_credit_confirmed: Option<UserConfirmed>,
     /// The payee's opaque metadata.
     pub metadata: Option<Map<String, Value>>,
     /// The payee's reference for a payment without a request; a receipt of a request
@@ -38,6 +77,8 @@ pub struct ReceiptDetails {
 impl std::fmt::Debug for ReceiptDetails {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReceiptDetails")
+            .field("store_only", &self.store_only)
+            .field("unmarked_credit_confirmed", &self.unmarked_credit_confirmed)
             .field("metadata", &self.metadata.as_ref().map(Map::len))
             .field("payment_reference", &self.payment_reference.is_some())
             .field("maybe_credited_confirmed", &self.maybe_credited_confirmed)
@@ -49,6 +90,21 @@ impl ReceiptDetails {
     /// A receipt with nothing beyond the proof it confirms.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Keep the signed receipt in the payee's activity without queuing it for delivery.
+    #[must_use]
+    pub fn store_only(mut self) -> Self {
+        self.store_only = true;
+        self
+    }
+
+    /// Permit receipt-only credit after showing the risk of a second credit when
+    /// a full bucket, the value limit or the storage quota prevents a mark.
+    #[must_use]
+    pub fn with_unmarked_credit_confirmed(mut self, confirmed: UserConfirmed) -> Self {
+        self.unmarked_credit_confirmed = Some(confirmed);
+        self
     }
 
     /// The payee's opaque metadata.

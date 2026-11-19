@@ -10,14 +10,15 @@ use paykit_lib::collections::Collection;
 use paykit_lib::records::{ActivityRecord, ActivitySide, RecordBinding};
 use paykit_lib::{derive::natural_key, Label};
 use pubky_switch_client::app::{PutBack, ReceiveContext, RecordDeletion, StoreFailure};
-use pubky_switch_client::error::StoreError;
 use pubky_switch_core::enc::{b64, serde_b64, serde_b64_vec};
 use serde::{Deserialize, Serialize};
 
 use crate::activity::ActivityTarget;
 use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
+use crate::protocol::step_failure;
 use crate::protocol::view_failure;
+use crate::receipts::{receipt_binding, ReceiptBinding};
 use crate::receive::{Fail, Settlement};
 use crate::state::{self, key};
 
@@ -380,13 +381,6 @@ pub struct PayeeReceiptDeletion {
     pub page_time_ms: Option<u64>,
 }
 
-fn step_failure(failure: Fail) -> StoreFailure {
-    match failure {
-        Fail::Store(error) => error,
-        _ => StoreFailure::unavailable(StoreError::Unavailable),
-    }
-}
-
 fn period_parent(
     own: &[u8; 32],
     record: &ActivityRecord,
@@ -399,37 +393,6 @@ fn signed_request(parent: &ActivityRecord) -> Result<Vec<u8>> {
     let mut signed = ActivityRecord::new(ActivitySide::Payee, parent.counterparty);
     signed.request.clone_from(&parent.request);
     Ok(signed.to_json()?)
-}
-
-/// A signed pair that disagrees with its signed request is invalid. If the
-/// request is unavailable, its Billing Period cannot yet be decided.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ReceiptBinding {
-    Verified,
-    MissingRequest,
-    Invalid,
-}
-
-fn receipt_binding(record: &ActivityRecord, parent: Option<&ActivityRecord>) -> ReceiptBinding {
-    if record.proof.is_none() || record.receipt.is_none() {
-        return ReceiptBinding::Invalid;
-    }
-    let Ok(binding) = record.binding() else {
-        return ReceiptBinding::Invalid;
-    };
-    let parent = match binding {
-        RecordBinding::Unrequested => return ReceiptBinding::Verified,
-        RecordBinding::Request { .. } => record,
-        RecordBinding::Period { .. } => match parent {
-            Some(p) if crate::requests::request_of(p).is_some() => p,
-            _ => return ReceiptBinding::MissingRequest,
-        },
-    };
-    if crate::periods::request_for_payment(parent, record, &binding).is_some() {
-        ReceiptBinding::Verified
-    } else {
-        ReceiptBinding::Invalid
-    }
 }
 
 /// Observe a deletion. The signed record and the credit hold stay on this app.

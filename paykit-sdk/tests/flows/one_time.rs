@@ -1833,8 +1833,9 @@ async fn test_one_time_cancellation_of_a_request_not_held_kept_as_stop_and_reply
     till.app_mut().invite(&w.bob_id()).await.unwrap();
     let _shop = w.shop().await;
     let hash = [7; 32];
-    cancel_to(&w, &[till.app_id()], hash);
-    till.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut till).await;
+    let id = cancel_to(&w, &[till.app_id()], hash);
+    assert!(till.receive(None).await.unwrap().applied.contains(&id));
     assert!(keeps_stop(&w, &till, hash).await);
     assert_eq!(
         till.app()
