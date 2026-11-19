@@ -18,7 +18,7 @@
 //! makes them, and it binds every value it reads to its key before any caller sees it
 //! ([`Stored`]), at a restore as at runtime.
 //! Paykit values are `{"v":1,"d":<record>}`. An outstanding list publication holds the
-//! client’s raw 16-byte batch ID, or the distinct IDs retained together by a restore.
+//! client's raw 16-byte batch ID, or the distinct IDs retained together by a restore.
 //!
 //! The whole of it is Paykit's layer in the app's backups ([`crate::PaykitBackup`]), which a
 //! restore installs, the journal checked and marked restored, in the commit of the

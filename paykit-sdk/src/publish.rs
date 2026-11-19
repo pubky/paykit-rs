@@ -1,6 +1,6 @@
 //! Publishing a Private Payment List to a chosen counterparty (Paykit spec 8.4.1).
 //!
-//! A native batch keeps the original message’s hash, recipient and generation in a
+//! A native batch keeps the original message's hash, recipient and generation in a
 //! protocol-local key naming the batch. Its application records the sharing decision
 //! and queues the signed message together. If the application is undecided, changes
 //! for that recipient wait while other recipients can proceed. An in-place restore
