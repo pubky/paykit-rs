@@ -195,6 +195,13 @@ impl Paykit {
         })
     }
 
+    /// A settlement can predate a provider loss even when its proof first arrives later.
+    pub(crate) async fn settlement_uncertain_after_loss(&self, paid_at: u64) -> Result<bool> {
+        Ok(self.decisive_loss().await?.is_some_and(|loss| {
+            loss.boundary.declared_at_ms == 0 || paid_at <= loss.boundary.uncertain_until_ms
+        }))
+    }
+
     /// The provider loss that leaves `obligation`, of `request` or of its Billing Period
     /// starting at `period_starts_at_ms`, in doubt (Paykit spec 7.3), its claim at the new
     /// service not SETTLED, which the caller judges first: the loss that decides now, when
