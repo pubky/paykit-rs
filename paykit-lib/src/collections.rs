@@ -39,7 +39,7 @@ pub enum Collection {
 
 impl Collection {
     /// Every collection.
-    pub const ALL: [Collection; 8] = [
+    pub const ALL: [Collection; 9] = [
         Self::PayerActivity,
         Self::PayeeActivity,
         Self::PaymentLists,
