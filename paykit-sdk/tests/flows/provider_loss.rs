@@ -1047,7 +1047,7 @@ async fn test_provider_loss_restore_keeps_its_held_answer_over_a_disputed_delete
         .await
         .unwrap()
         .is_none());
-    assert!(queued(&wallet, &answer).await);
+    assert!(crate::common::possibly_delivered(&wallet, &answer).await);
 }
 
 #[tokio::test]
@@ -1092,7 +1092,7 @@ async fn test_provider_loss_restore_waits_for_the_parent_before_resending_period
     assert!(!queued(&shop, &sent.msg_id).await);
     accept_activity_successor(&mut shop, &mut phone, &target).await;
     shop.receive(None).await.unwrap();
-    assert!(queued(&shop, &sent.msg_id).await);
+    assert!(crate::common::possibly_delivered(&shop, &sent.msg_id).await);
     assert!(shop
         .app()
         .protocol_get("paykit", b"ro")

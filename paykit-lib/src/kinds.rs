@@ -158,6 +158,16 @@ impl Kind {
         }
     }
 
+    /// Whether the sender meets the contacts requirement for proposing, accepting or
+    /// rejecting an Allowance (Paykit spec 3.3). An Allowance-only app can receive all
+    /// three, and a user's end does not require contacts.
+    pub fn has_allowance_sender_contacts(self, sender: &[String]) -> bool {
+        !matches!(
+            self,
+            Self::AllowanceProposal | Self::AllowanceAcceptance | Self::AllowanceRejection
+        ) || sender.iter().any(|scope| scope == scopes::CONTACTS)
+    }
+
     /// The scopes, any one of which receives the kind (Paykit spec 3.3). A cancellation goes
     /// to the other side; a `resend_request` to any app, whose answer is filtered instead.
     pub fn recipients(self) -> &'static [Role] {
@@ -391,6 +401,11 @@ pub fn check_sender_scopes(message: &Message, sender: &[String]) -> Result<()> {
         }
         MessageKind::Paykit(kind) => kind,
     };
+    if !kind.has_allowance_sender_contacts(sender) {
+        return invalid(
+            "Paykit spec 3.3: an Allowance proposal or answer requires paykit_contacts to send",
+        );
+    }
     if !holds_role(sender, kind.senders()) {
         return invalid(
             "Paykit spec 3.3: the sender's certificate holds no scope that sends the kind",
@@ -706,6 +721,27 @@ mod tests {
             &owned(&["paykit_ext:paykit-cap"]),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn test_kinds_allowance_contacts_are_required_only_to_propose_or_answer() {
+        let receiver = owned(&["paykit_allowance"]);
+        let sender = owned(&["paykit_allowance", "paykit_contacts"]);
+        for kind in [
+            Kind::AllowanceProposal,
+            Kind::AllowanceAcceptance,
+            Kind::AllowanceRejection,
+        ] {
+            let message = message(kind.as_str(), json!({}));
+            check_kind_scopes(&message, &sender, &receiver).unwrap();
+            assert!(check_kind_scopes(&message, &receiver, &sender).is_err());
+            assert!(
+                check_sender_scopes(&message, &owned(&["paykit_allowance", "other_protocol"]))
+                    .is_err()
+            );
+        }
+        let end = message(Kind::AllowanceEnd.as_str(), json!({}));
+        check_kind_scopes(&end, &receiver, &receiver).unwrap();
     }
 
     #[test]

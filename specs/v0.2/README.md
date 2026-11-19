@@ -32,7 +32,7 @@ Sections 3.3 and 9 require an extension eviction to atomically record its recove
 
 ## Allowance acceptance and initial ledgers
 
-Allowance acceptance is unavailable in this revision (Section 8.3.1, specified with its implementation). The proposal binds the verified Allower identity generation.
+Pending proposals and rejections use the records and delivery checks in Section 8.3.1. The proposal binds the verified Allower generation. The SDK withholds new acceptance, executor authority and automatic spending.
 
 ## Queued message delivery
 
