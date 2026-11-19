@@ -8935,6 +8935,16 @@ async fn test_pending_reply_stop_requires_the_acceptance_to_come_first() {
 }
 
 #[tokio::test]
+async fn test_pending_reply_stop_retains_the_rejection_and_later_acceptance_until_deletion() {
+    Box::pin(held_pending_replies(PendingReplyCase::RejectionRetry)).await;
+}
+
+#[tokio::test]
+async fn test_pending_reply_stop_never_deletes_a_recreated_proposal_for_an_earlier_rejection() {
+    Box::pin(held_pending_replies(PendingReplyCase::RejectionReopened)).await;
+}
+
+#[tokio::test]
 async fn test_pending_reply_stop_does_not_hide_the_give_up_of_a_lone_acceptance() {
     Box::pin(held_pending_replies(PendingReplyCase::LoneAcceptance)).await;
 }
@@ -9431,6 +9441,8 @@ enum PendingReplyCase {
     Restore,
     GiveUp,
     RejectionFirst,
+    RejectionRetry,
+    RejectionReopened,
     LoneAcceptance,
 }
 
@@ -9452,6 +9464,7 @@ async fn restore_pending_wallet(
 
 async fn held_pending_replies(by: PendingReplyCase) {
     use paykit_lib::records::PendingAllowanceRecord;
+    use pubky_switch_client::app::Delivery;
 
     let w = World::new();
     let mut shop = Box::pin(shop(&w)).await;
@@ -9514,7 +9527,13 @@ async fn held_pending_replies(by: PendingReplyCase) {
     } else {
         None
     };
-    let (first_kind, second_kind) = if matches!(by, PendingReplyCase::RejectionFirst) {
+    let rejection_first = matches!(
+        by,
+        PendingReplyCase::RejectionFirst
+            | PendingReplyCase::RejectionRetry
+            | PendingReplyCase::RejectionReopened
+    );
+    let (first_kind, second_kind) = if rejection_first {
         ("paykit.allowance_rejection", "paykit.allowance_acceptance")
     } else {
         ("paykit.allowance_acceptance", "paykit.allowance_rejection")
@@ -9668,6 +9687,40 @@ async fn held_pending_replies(by: PendingReplyCase) {
             SENT_SECOND,
         );
     }
+    if matches!(
+        by,
+        PendingReplyCase::RejectionRetry | PendingReplyCase::RejectionReopened
+    ) {
+        refuse_writes(&w, 1);
+        wallet.receive(None).await.unwrap();
+        assert!(Box::pin(keeps(&wallet, b"pr/", SENT_FIRST)).await);
+        assert!(Box::pin(keeps(&wallet, b"pr/", SENT_SECOND)).await);
+        let live = wallet.app().shared_record(&key).await.unwrap().unwrap();
+        assert_eq!(live.version, selected.version);
+        assert_eq!(live.content.value(), Some(original.as_slice()));
+        let delivery = wallet.app_mut().resend(&original_id).await.unwrap();
+        assert!(matches!(delivery, Delivery::Queued { .. }), "{delivery:?}");
+        if matches!(by, PendingReplyCase::RejectionReopened) {
+            Box::pin(write_record(&mut phone, &target, None)).await;
+            Box::pin(write_record(&mut phone, &target, Some(&original))).await;
+            let recreated = phone.app().shared_record(&key).await.unwrap().unwrap();
+            assert!(recreated.version > selected.version);
+            for _ in 0..2 {
+                wallet.receive(None).await.unwrap();
+            }
+            let live = wallet.app().shared_record(&key).await.unwrap().unwrap();
+            assert_eq!(live.version, recreated.version);
+            assert_eq!(live.content.value(), Some(original.as_slice()));
+            assert!(wallet
+                .app()
+                .records_of("allowances")
+                .await
+                .unwrap()
+                .is_empty());
+            assert!(w.rail.all_executions().is_empty());
+            return;
+        }
+    }
     if matches!(by, PendingReplyCase::RestoreRetryable) {
         limited.limit_next_record(&key);
     }
@@ -9695,7 +9748,13 @@ async fn held_pending_replies(by: PendingReplyCase) {
             assert!(Box::pin(keeps(app, b"pr/", SENT_SECOND)).await);
             continue;
         }
-        if matches!(by, PendingReplyCase::RejectionFirst) {
+        if rejection_first {
+            let closed = app.app().shared_record(&key).await.unwrap().unwrap();
+            assert_eq!(
+                closed.content,
+                pubky_switch_client::app::RecordContent::Deleted
+            );
+            assert!(closed.version > selected.version);
             assert!(app
                 .app()
                 .protocol_scan("paykit", b"pc/")
@@ -9717,7 +9776,40 @@ async fn held_pending_replies(by: PendingReplyCase) {
         assert!(Box::pin(keeps(app, b"pr/", SENT_FIRST)).await);
         assert!(!Box::pin(keeps(app, b"pr/", SENT_SECOND)).await);
     }
-    if matches!(by, PendingReplyCase::RejectionFirst) {
+    if rejection_first {
+        assert!(matches!(
+            wallet.app_mut().resend(&original_id).await.unwrap(),
+            Delivery::Queued { .. }
+        ));
+        let before = w.record_writes(&w.alice, &key);
+        inject_with_id(
+            &w,
+            &w.bob,
+            "shop",
+            &[wallet.app_id()],
+            "paykit.allowance_acceptance",
+            vec![p.hash()],
+            json!({"allowance_id":id.as_str()}),
+            "7b3e9a1c-5d2f-4a8e-b6c4-1e9f3d7a2b58",
+        );
+        wallet.receive(None).await.unwrap();
+        assert_eq!(w.record_writes(&w.alice, &key), before);
+        assert_eq!(
+            wallet
+                .app()
+                .shared_record(&key)
+                .await
+                .unwrap()
+                .unwrap()
+                .content,
+            pubky_switch_client::app::RecordContent::Deleted
+        );
+        assert!(wallet
+            .app()
+            .records_of("allowances")
+            .await
+            .unwrap()
+            .is_empty());
         assert!(w.rail.all_executions().is_empty());
         return;
     }
@@ -9796,7 +9888,6 @@ async fn held_pending_replies(by: PendingReplyCase) {
         return;
     }
     if matches!(by, PendingReplyCase::Retry) {
-        use pubky_switch_client::app::Delivery;
         let delivery = wallet.app_mut().resend(&original_id).await.unwrap();
         assert!(matches!(delivery, Delivery::Queued { .. }));
         let app_id = wallet.app_id();

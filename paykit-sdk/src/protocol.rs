@@ -40,8 +40,8 @@ use pubky_switch_client::app::{
     decode_local_state, AppBackup, AppError, Collection as SwitchCollection, Effect, LocalView,
     LocalWrite, LossActions, MissedEntries, OpaqueRule, Outcome, Protocol, ProtocolLayer,
     ProviderLoss, PutBack, PutBackSuccessor, ReceiveContext, ReceivedMessage, RecordDeletion,
-    RecordExpiry, RecordMarkContext, RecordRepair, RecordSuccessor, RecordTarget, ResendNeeded,
-    RestoreContext, StoreFailure, WriteBase,
+    RecordExpiry, RecordMarkContext, RecordRepair, RecordSuccessor, ResendNeeded, RestoreContext,
+    StoreFailure, WriteBase,
 };
 use pubky_switch_client::error::StoreError;
 use pubky_switch_core::enc::{serde_b64, unb64_array};
@@ -1510,6 +1510,9 @@ impl Protocol for PaykitProtocol {
         observation: &pubky_switch_client::app::RecordObservation<'_>,
         context: &ReceiveContext<'_>,
     ) -> Result<Vec<LocalWrite>, StoreFailure> {
+        if observation.record.collection == Collection::AllowanceProposals.name() {
+            return crate::allowances::observe_reopened(observation, context);
+        }
         crate::settlement_marks::observe(observation, context)
     }
 

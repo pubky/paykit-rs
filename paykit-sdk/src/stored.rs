@@ -306,6 +306,21 @@ pub(crate) enum PeriodPlace {
     Undecided,
 }
 
+/// Bind a parked message to the original admitted sender, recipient and service time.
+pub(crate) fn parked_message(
+    entry: &pubky_switch_client::app::ParkedMessage,
+    own: &[u8; 32],
+) -> Option<StoredMessage> {
+    StoredMessage::new(
+        entry.sender,
+        &entry.cert,
+        entry.plaintext.clone(),
+        Some(entry.accepted_at_ms),
+        own,
+    )
+    .ok()
+}
+
 impl Paykit {
     /// The note kept at `key`, read whole and bound to it ([`StoredNote::bound`]).
     async fn stored_note(&self, key: &str) -> Result<Option<StoredNote>> {
@@ -482,13 +497,7 @@ impl Paykit {
         let Some(entry) = self.app.parked_entry(stored_id).await? else {
             return Ok(false);
         };
-        let Ok(stored) = StoredMessage::new(
-            entry.sender,
-            &entry.cert,
-            entry.plaintext.clone(),
-            Some(entry.accepted_at_ms),
-            &own,
-        ) else {
+        let Some(stored) = parked_message(&entry, &own) else {
             return Ok(false);
         };
         let notice_key = key::message_notice(&entry.sender, &stored.message().msg_id);
