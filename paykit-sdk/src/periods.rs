@@ -29,7 +29,7 @@ use paykit_lib::records::{
     MAX_PERIOD_DETAILS,
 };
 use paykit_lib::{AttemptId, Body, PaymentEndpointIdentifier, Rate};
-use pubky_switch_client::app::{Initiator, KeptReason, RecordContent, RecordRead};
+use pubky_switch_client::app::{Initiator, KeptReason, RecordContent, RecordRead, SharedRecord};
 use pubky_switch_core::claims::{ClaimStatus, ClaimView, Outcome};
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::ops::{Condition, OpKind};
@@ -373,12 +373,30 @@ pub(crate) fn period_history_lost() -> Refusal {
 }
 
 impl Paykit {
-    /// The current payer activity used to open or dispatch a Billing Period. A retained
-    /// delete can hide the only proof after the claim expires (Paykit spec 6).
-    pub(crate) async fn period_payment_base(
+    /// Open against the held write, or check the service before creating a period at zero.
+    async fn period_payment_base(
         &mut self,
         target: &ActivityTarget,
     ) -> Result<Option<ActivityRecord>> {
+        if let Some(held) = self.app.shared_record(&self.activity_key(target)?).await? {
+            return self.checked_period_activity(target, &held).map(Some);
+        }
+        self.current_period_activity(target).await
+    }
+
+    /// Recheck the parent's and period's payment restrictions before calling the method.
+    /// A newer service view cannot clear an unconfirmed divergence the app already saw.
+    pub(crate) async fn current_period_activity(
+        &mut self,
+        target: &ActivityTarget,
+    ) -> Result<Option<ActivityRecord>> {
+        if let Some(held) = self.app.shared_record(&self.activity_key(target)?).await? {
+            let record = self.checked_period_activity(target, &held)?;
+            self.pause_of(&held).await?;
+            if record.shows_paid() || cancelled(&record) || rejected(&record) {
+                return Ok(Some(record));
+            }
+        }
         let held = match self.app.read_record_fresh(&target.record_target()).await? {
             RecordRead::Fresh(held) => held,
             RecordRead::Kept {
@@ -394,6 +412,15 @@ impl Paykit {
             } if held.content == RecordContent::Deleted => return Err(period_history_lost().into()),
             _ => return Err(period_record_unread()),
         };
+        self.checked_period_activity(target, &held).map(Some)
+    }
+
+    /// A delete can hide the only paid proof after the claim expires (Paykit spec 6).
+    fn checked_period_activity(
+        &self,
+        target: &ActivityTarget,
+        held: &SharedRecord,
+    ) -> Result<ActivityRecord> {
         if held.content == RecordContent::Deleted {
             return Err(period_history_lost().into());
         }
@@ -404,12 +431,12 @@ impl Paykit {
             return Err(period_record_unread());
         }
         let record = self
-            .read_activity(target, Some(&held))
+            .read_activity(target, Some(held))
             .ok_or_else(period_record_unread)?;
         if record.lost_to_delete.is_some() {
             return Err(period_history_lost().into());
         }
-        Ok(Some(record))
+        Ok(record)
     }
 
     /// The period records of `collection` this app holds that bind, with their keys, by the

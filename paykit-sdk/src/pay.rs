@@ -4304,7 +4304,7 @@ impl Paykit {
                 ActivityTarget::payer(entry.request_record()?.ok_or_else(PaykitError::corrupt)?);
             let period = ActivityTarget::payer(entry.natural_key.clone());
             for target in [&parent, &period] {
-                match Box::pin(self.period_payment_base(target)).await {
+                match Box::pin(self.current_period_activity(target)).await {
                     Ok(Some(record))
                         if !record.shows_paid() && !cancelled(&record) && !rejected(&record) => {}
                     Ok(_) | Err(PaykitError::Refused(_)) => return Ok(true),
