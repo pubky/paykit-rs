@@ -131,19 +131,20 @@ pub(crate) fn holds_delivery(
                 .pending_source
                 .is_some_and(|source| retired.as_ref().is_none_or(|end| source > end.version)))
     };
-    for (at, value) in delivery
-        .local()
-        .local_scan(key::kept_reply(&message.to, &permanent, "").as_bytes())?
-    {
-        if rejects(&state::restored::<KeptMessage>(&at, &value, &binder)?)? {
+    for (_, kept) in state::bound_view_scan::<KeptMessage>(
+        delivery.local(),
+        &key::kept_reply(&message.to, &permanent, ""),
+        &binder,
+    )? {
+        if rejects(&kept)? {
             return Ok(true);
         }
     }
-    for (at, value) in delivery
-        .local()
-        .local_scan(key::stored_notes_of(&message.to).as_bytes())?
-    {
-        let note = state::restored::<StoredNote>(&at, &value, &binder)?;
+    for (_, note) in state::bound_view_scan::<StoredNote>(
+        delivery.local(),
+        &key::stored_notes_of(&message.to),
+        &binder,
+    )? {
         if !note.placed && rejects(&note.message)? {
             return Ok(true);
         }
