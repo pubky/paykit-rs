@@ -878,7 +878,7 @@ impl Stored for KeptMessage {
         // writer gives it a `seq`.
         let pooled = matches!(
             family,
-            StateKey::KeptCancellation(_)
+            StateKey::KeptCancellation { .. }
                 | StateKey::KeptReply { .. }
                 | StateKey::AllowanceEnd { .. }
                 | StateKey::Conflict(_)
@@ -911,9 +911,13 @@ impl Stored for KeptMessage {
             {
                 return Ok(());
             }
-            (StateKey::KeptCancellation(record_key), Body::PaymentRequestCancellation(_))
-                if message.accepted_at().is_some() =>
-            {
+            (
+                StateKey::KeptCancellation {
+                    record: record_key,
+                    app_id,
+                },
+                Body::PaymentRequestCancellation(_),
+            ) if message.accepted_at().is_some() && message.message().from.app_id == *app_id => {
                 let target = ActivityTarget::payer(natural_key::request_record(
                     &message.sender(),
                     &first()?,
@@ -1882,8 +1886,15 @@ pub(crate) mod key {
         format!("{OWN_BLOCKS}{}", b64(pubky))
     }
 
-    pub(crate) fn kept_cancellation(record_key: &[u8; 32]) -> String {
-        format!("{KEPT_CANCELLATIONS}{}", b64(record_key))
+    /// The payee's cancellation app `app_id` sent, kept as a stop of the request record
+    /// `record_key`: one per sending app (Paykit spec 8.1, Messages that cross).
+    pub(crate) fn kept_cancellation(record_key: &[u8; 32], app_id: &[u8; 16]) -> String {
+        format!("{}{}", kept_cancellations(record_key), b64(app_id))
+    }
+
+    /// The prefix of every cancellation kept as a stop of the request record `record_key`.
+    pub(crate) fn kept_cancellations(record_key: &[u8; 32]) -> String {
+        format!("{KEPT_CANCELLATIONS}{}/", b64(record_key))
     }
 
     pub(crate) fn peer(pubky: &[u8; 32]) -> String {
@@ -1978,8 +1989,11 @@ pub(crate) enum StateKey {
     },
     /// `peer/<pubky>`: a counterparty with Paykit activity.
     Peer([u8; 32]),
-    /// `kc/<record key>`: a payee's cancellation kept to place.
-    KeptCancellation([u8; 32]),
+    /// `kc/<record key>/<app ID>`: a payee's cancellation kept to place, one per sending app.
+    KeptCancellation {
+        record: [u8; 32],
+        app_id: [u8; 16],
+    },
     /// `ct`: the acceptance time of the last entry the cursor passed.
     CursorTime,
     /// `pl`: the last provider loss followed.
@@ -2298,7 +2312,13 @@ impl StateKey {
                         from_ms: number(rest)?,
                     },
                     "peer" => Self::Peer(b64_32(rest)?),
-                    "kc" => Self::KeptCancellation(b64_32(rest)?),
+                    "kc" => {
+                        let (record, app) = rest.split_once('/')?;
+                        Self::KeptCancellation {
+                            record: b64_32(record)?,
+                            app_id: b64_16(app)?,
+                        }
+                    }
                     "bk" => Self::OwnBlock(b64_32(rest)?),
                     "hc" => Self::HoldConfirmed(b64_32(rest)?),
                     "hb" => Self::HoldConfirmedBefore(b64_32(rest)?),
@@ -3223,8 +3243,11 @@ mod tests {
             (key::missed_item(9), StateKey::MissedItem { from_ms: 9 }),
             (key::peer(&pubky), StateKey::Peer(pubky)),
             (
-                key::kept_cancellation(&pubky),
-                StateKey::KeptCancellation(pubky),
+                key::kept_cancellation(&pubky, &[5; 16]),
+                StateKey::KeptCancellation {
+                    record: pubky,
+                    app_id: [5; 16],
+                },
             ),
             (key::CURSOR_TIME.into(), StateKey::CursorTime),
             (key::RESTORE_HOLD.into(), StateKey::RestoreHold),

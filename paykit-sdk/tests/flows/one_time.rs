@@ -1457,7 +1457,8 @@ async fn test_one_time_cancellation_while_its_record_awaits_its_key_stops_it_pas
     assert!(!value["cancellation"].is_null(), "{value}");
 }
 
-/// Whether `wallet` keeps a stop for bob's request `hash`.
+/// Whether `wallet` keeps a stop for bob's request `hash`, from any of bob's apps: one copy is
+/// kept per sending app (Paykit spec 8.1).
 async fn keeps_stop(w: &World, wallet: &paykit_sdk::Paykit, hash: [u8; 32]) -> bool {
     let request = paykit_sdk::RequestRef {
         payee: w.bob_id(),
@@ -1467,14 +1468,14 @@ async fn keeps_stop(w: &World, wallet: &paykit_sdk::Paykit, hash: [u8; 32]) -> b
         .app()
         .record_key(&crate::outcome_record::payer_record(&request))
         .unwrap();
-    let stop = format!("kc/{}", pubky_switch_core::enc::b64(&key));
+    let stops = format!("kc/{}/", pubky_switch_core::enc::b64(&key));
     wallet
         .app()
-        .protocol_scan("paykit", stop.as_bytes())
+        .protocol_scan("paykit", stops.as_bytes())
         .await
         .unwrap()
         .iter()
-        .any(|(found, _)| found == stop.as_bytes())
+        .any(|(found, _)| found.starts_with(stops.as_bytes()))
 }
 
 #[tokio::test]
@@ -2067,7 +2068,7 @@ async fn state_value(app: &paykit_sdk::Paykit, key: &[u8]) -> Vec<u8> {
         .1
 }
 
-/// The stop key of bob's request `hash` at `wallet`.
+/// The stop key at `wallet` of bob's shop's cancellation of his request `hash`.
 fn stop_key(w: &World, wallet: &paykit_sdk::Paykit, hash: [u8; 32]) -> Vec<u8> {
     let request = paykit_sdk::RequestRef {
         payee: w.bob_id(),
@@ -2077,7 +2078,13 @@ fn stop_key(w: &World, wallet: &paykit_sdk::Paykit, hash: [u8; 32]) -> Vec<u8> {
         .app()
         .record_key(&crate::outcome_record::payer_record(&request))
         .unwrap();
-    format!("kc/{}", pubky_switch_core::enc::b64(&key)).into_bytes()
+    let shop = w.bob.identity().app_keys("shop").app_id_bytes();
+    format!(
+        "kc/{}/{}",
+        pubky_switch_core::enc::b64(&key),
+        pubky_switch_core::enc::b64(&shop)
+    )
+    .into_bytes()
 }
 
 #[tokio::test]

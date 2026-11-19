@@ -2440,7 +2440,12 @@ async fn test_periods_details_over_a_corrupt_kept_stop_not_dropped() {
         .app()
         .record_key(&crate::outcome_record::payer_record(&request))
         .unwrap();
-    let key = format!("kc/{}", pubky_switch_core::enc::b64(&record_key));
+    let shop_app = w.bob.identity().app_keys("shop").app_id_bytes();
+    let key = format!(
+        "kc/{}/{}",
+        pubky_switch_core::enc::b64(&record_key),
+        pubky_switch_core::enc::b64(&shop_app)
+    );
     wallet
         .app_mut()
         .protocol_commit(

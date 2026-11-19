@@ -9,7 +9,10 @@
 //! Security: check 8 decides which app may send a kind and which may take it. A labelled selling
 //! scope counts as `paykit_request` for the kind, and the request's `label` then narrows it, so a
 //! hosted app never sends a request outside its labels or takes the payer's replies about the
-//! identity's own requests.
+//! identity's own requests. The payee's messages about a request, which can redirect, confirm or
+//! end its payment, are narrowed by that request's label the same way ([`may_send`]): check 8
+//! sees no request, so the payer applies it where it reads the request
+//! ([`check_sender_for_request`]).
 
 use pubky_switch_core::json::OpaqueMember;
 use pubky_switch_core::message::Message;
@@ -377,6 +380,9 @@ fn body_label(message: &Message) -> Result<Option<&str>> {
 ///   sender's certificate, and one without needs `paykit_request`;
 /// - a cancellation with `label` is the payer's, so it needs `paykit_pay` in the sender's
 ///   certificate;
+/// - a `private_payment_list`, and a `payment_receipt` naming no request, need `paykit_request`;
+///   the payee's other messages about a request are narrowed by its label where the request is
+///   read ([`check_sender_for_request`]);
 /// - an extension kind `<prefix>.<name>` needs `paykit_ext:<prefix>` in the sender's certificate;
 /// - a `resend_request` names no kinds: any Paykit App may send it, one holding at least one
 ///   of Paykit's scopes.
@@ -415,26 +421,88 @@ pub fn check_sender_scopes(message: &Message, sender: &[String]) -> Result<()> {
         );
     }
     let label = body_label(message)?;
-    if kind == Kind::PaymentRequest {
-        let needs = label.map_or_else(
-            || "paykit_request".to_owned(),
-            |l| format!("{}:{l}", scopes::REQUEST),
-        );
-        if !switch_scopes::holds(sender, &needs) {
-            return invalid(
-                "Paykit wire 4.5: the sender's certificate doesn't hold the request's label",
-            );
+    match kind {
+        // A request is about itself: its own label narrows its sender.
+        Kind::PaymentRequest => {
+            let label = label.map(Label::parse).transpose();
+            if !label.is_ok_and(|label| may_send(kind, Side::Payee, sender, label.as_ref())) {
+                return invalid(
+                    "Paykit wire 4.5: the sender's certificate doesn't hold the request's label",
+                );
+            }
         }
-    }
-    if kind == Kind::PaymentRequestCancellation
-        && label.is_some()
-        && !sender.iter().any(|s| s == "paykit_pay")
-    {
-        return invalid(
-            "Paykit spec 3.3: a labelled cancellation is the payer's, from an app holding paykit_pay",
-        );
+        Kind::PaymentRequestCancellation if label.is_some() => {
+            if !may_send(kind, Side::Payer, sender, None) {
+                return invalid(
+                    "Paykit spec 3.3: a labelled cancellation is the payer's, from an app holding paykit_pay",
+                );
+            }
+        }
+        // A receipt naming no request names no labelled request.
+        Kind::PaymentReceipt
+            if message.refs.len() < 2 && !may_send(kind, Side::Payee, sender, None) =>
+        {
+            return invalid("Paykit spec 3.4: a receipt naming no request needs paykit_request");
+        }
+        _ => {}
     }
     Ok(())
+}
+
+/// Whether an app holding `sender` may send a message of `kind` from `side` about a request
+/// labelled `request_label` (Paykit spec 3.3, 3.4): the one rule of who sends what, which the
+/// inbox, a stored copy's reader and the sending app all apply.
+///
+/// - The kinds that start, redirect, confirm or end a payment from the payee's side, a
+///   `payment_request`, `payment_period_details`, `payment_receipt` and the payee's
+///   cancellation, need `paykit_request` or `paykit_request:<label>` for the request's label,
+///   and, about an unlabelled request (`None`), `paykit_request`. A receipt of a payment
+///   without a request names no request: `None`.
+/// - A `private_payment_list` needs `paykit_request` itself, whatever `request_label`
+///   ([`Role::ListPublisher`]).
+/// - The payer's cancellation needs `paykit_pay`; every other kind, a scope that sends it
+///   ([`Kind::senders`]), whatever `request_label`: the payer's replies are narrowed at their
+///   recipients instead ([`targets_app`]).
+///
+/// `side` matters only for a cancellation, which either side sends.
+///
+/// Security: a labelled selling scope counts as `paykit_request` for the kinds it sends, so
+/// without the request's label a hosted app could send period details with its own
+/// destination, a receipt or a cancellation about another label's request or the identity's
+/// own, and the payer would pay to it or stop paying.
+pub fn may_send(kind: Kind, side: Side, sender: &[String], request_label: Option<&Label>) -> bool {
+    match (kind, side) {
+        (Kind::PaymentRequestCancellation, Side::Payer) => holds_role(sender, &[Role::Pay]),
+        (Kind::PaymentRequestCancellation, Side::Payee)
+        | (Kind::PaymentRequest | Kind::PaymentPeriodDetails | Kind::PaymentReceipt, _) => {
+            selling_scope_for(sender, request_label.map(Label::as_str))
+        }
+        _ => holds_role(sender, kind.senders()),
+    }
+}
+
+/// The sender's side of check 8 against the request `message` names, labelled
+/// `request_label`, for a message sent from `side` (Paykit spec 3.4; Paykit wire 4.1, 5.3):
+/// [`may_send`]. Check 8 sees no request, so the payer applies this where it reads the
+/// request: at the receive step, at every later write that places the message, and at every
+/// reader of a stored copy. An extension kind names no request.
+///
+/// # Errors
+///
+/// [`Error::Invalid`]: the message is dropped with no effect, or the record holding it is
+/// invalid.
+pub fn check_sender_for_request(
+    message: &Message,
+    side: Side,
+    sender: &[String],
+    request_label: Option<&Label>,
+) -> Result<()> {
+    match Kind::from_kind(&message.kind) {
+        Some(kind) if !may_send(kind, side, sender, request_label) => invalid(
+            "Paykit spec 3.4: the sender's certificate holds neither paykit_request nor the label of the request the message names",
+        ),
+        _ => Ok(()),
+    }
 }
 
 /// Check 8 for a Paykit message (Paykit spec 3.3, 3.4; Paykit wire 4.1, Switch wire 5.1):
@@ -473,7 +541,7 @@ pub fn check_kind_scopes(message: &Message, sender: &[String], own: &[String]) -
     if kind == Kind::PaymentRequestCancellation {
         return check_cancellation_roles(label, sender, own);
     }
-    if kind.is_payer_reply() && !reply_label_allowed(label, own) {
+    if kind.is_payer_reply() && !selling_scope_for(own, label) {
         return invalid(
             "Paykit spec 3.4: the reply's label is outside the recipient's certificate",
         );
@@ -492,7 +560,7 @@ pub fn check_kind_scopes(message: &Message, sender: &[String], own: &[String]) -
 /// either side, so the check passes when either pairing holds.
 fn check_cancellation_roles(label: Option<&str>, sender: &[String], own: &[String]) -> Result<()> {
     let holds_pay = |scopes: &[String]| scopes.iter().any(|s| s == "paykit_pay");
-    let payer_cancels = holds_pay(sender) && reply_label_allowed(label, own);
+    let payer_cancels = holds_pay(sender) && selling_scope_for(own, label);
     let payee_cancels = label.is_none() && scopes::acts_as_payee(sender) && holds_pay(own);
     if payer_cancels || payee_cancels {
         return Ok(());
@@ -502,12 +570,11 @@ fn check_cancellation_roles(label: Option<&str>, sender: &[String], own: &[Strin
     )
 }
 
-/// Whether an app holding `scopes` takes a payer's reply labelled `label` (Paykit spec 3.4, Paykit
-/// wire 4.1 check 8): with a label, `paykit_request` or that label; without, `paykit_request`.
-fn reply_label_allowed(label: Option<&str>, scopes: &[String]) -> bool {
+/// Whether the certificate covers sales with this label (Paykit spec 3.4).
+fn selling_scope_for(scopes: &[String], label: Option<&str>) -> bool {
     match label {
         Some(label) => switch_scopes::holds(scopes, &format!("{}:{label}", scopes::REQUEST)),
-        None => scopes.iter().any(|s| s == "paykit_request"),
+        None => scopes.iter().any(|scope| scope == scopes::REQUEST),
     }
 }
 
@@ -539,10 +606,9 @@ pub fn targets_app(kind: Kind, side: Side, label: Option<&Label>, scopes: &[Stri
         (Kind::PaymentRequestCancellation, Side::Payee) => {
             label.is_none() && scopes.iter().any(|s| s == "paykit_pay")
         }
-        (k, Side::Payer) if k.is_payer_reply() => match label {
-            Some(label) => switch_scopes::holds(scopes, &label.scope()),
-            None => scopes.iter().any(|s| s == "paykit_request"),
-        },
+        (k, Side::Payer) if k.is_payer_reply() => {
+            selling_scope_for(scopes, label.map(Label::as_str))
+        }
         _ => true,
     }
 }
@@ -1185,6 +1251,176 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every kind, from each side that sends it, by every kind of sender certificate, about a
+    /// labelled, another label's and an unlabelled request (Paykit spec 3.3, 3.4).
+    #[test]
+    fn test_kinds_may_send_narrows_by_the_request_label() {
+        // The senders' names that may send a kind about a shop1 request, then an unlabelled one.
+        type Senders<'a> = (&'a [&'a str], &'a [&'a str]);
+        let shop1 = Label::parse("shop1").unwrap();
+        let shop2 = Label::parse("shop2").unwrap();
+        let plain = owned(&["paykit_request", "paykit_settlements", "paykit_contacts"]);
+        let in_shop1 = owned(&[
+            "paykit_request:shop1",
+            "paykit_settlements",
+            "paykit_contacts",
+        ]);
+        let in_shop2 = owned(&[
+            "paykit_request:shop2",
+            "paykit_settlements",
+            "paykit_contacts",
+        ]);
+        let pay = owned(&["paykit_pay", "paykit_contacts"]);
+        let allowance = owned(&["paykit_allowance", "paykit_contacts"]);
+        let execute = owned(&[
+            "paykit_allowance",
+            "paykit_allowance_execute",
+            "paykit_pay",
+            "paykit_contacts",
+        ]);
+        let senders = [
+            ("paykit_request", &plain),
+            ("paykit_request:shop1", &in_shop1),
+            ("paykit_request:shop2", &in_shop2),
+            ("paykit_pay", &pay),
+            ("paykit_allowance", &allowance),
+            ("executor", &execute),
+        ];
+        // Who may send each kind, by the sender's name above, about a request labelled
+        // shop1 and about an unlabelled one.
+        let payee_by_label: Senders<'_> = (
+            &["paykit_request", "paykit_request:shop1"],
+            &["paykit_request"],
+        );
+        let plain_only: Senders<'_> = (&["paykit_request"], &["paykit_request"]);
+        let payer: Senders<'_> = (&["paykit_pay", "executor"], &["paykit_pay", "executor"]);
+        let allowances: Senders<'_> = (
+            &["paykit_allowance", "executor"],
+            &["paykit_allowance", "executor"],
+        );
+        let any: Senders<'_> = (
+            &[
+                "paykit_request",
+                "paykit_request:shop1",
+                "paykit_request:shop2",
+                "paykit_pay",
+                "paykit_allowance",
+                "executor",
+            ],
+            &[
+                "paykit_request",
+                "paykit_request:shop1",
+                "paykit_request:shop2",
+                "paykit_pay",
+                "paykit_allowance",
+                "executor",
+            ],
+        );
+        let table: [(Kind, Side, Senders<'_>); 16] = [
+            (Kind::PaymentRequest, Side::Payee, payee_by_label),
+            (Kind::PaymentPeriodDetails, Side::Payee, payee_by_label),
+            (Kind::PaymentReceipt, Side::Payee, payee_by_label),
+            (
+                Kind::PaymentRequestCancellation,
+                Side::Payee,
+                payee_by_label,
+            ),
+            (Kind::PrivatePaymentList, Side::Payee, plain_only),
+            (Kind::PaymentRequestCancellation, Side::Payer, payer),
+            (Kind::PaymentRequestAcceptance, Side::Payer, payer),
+            (Kind::PaymentRequestRejection, Side::Payer, payer),
+            (Kind::PaymentProof, Side::Payer, payer),
+            (Kind::PrivatePaymentListRequest, Side::Payer, payer),
+            (Kind::AllowanceProposal, Side::Payer, allowances),
+            (Kind::AllowanceAcceptance, Side::Payer, allowances),
+            (Kind::AllowanceRejection, Side::Payer, allowances),
+            (Kind::AllowanceEnd, Side::Payer, allowances),
+            (Kind::ExecutorNotice, Side::Payer, allowances),
+            (Kind::ResendRequest, Side::Payer, any),
+        ];
+        for kind in Kind::ALL {
+            assert!(table.iter().any(|(k, _, _)| *k == kind), "{kind:?}");
+        }
+        for (kind, side, (labelled, unlabelled)) in table {
+            for (name, scopes) in senders {
+                assert_eq!(
+                    may_send(kind, side, scopes, Some(&shop1)),
+                    labelled.contains(&name),
+                    "{kind:?} from {name} about a shop1 request"
+                );
+                assert_eq!(
+                    may_send(kind, side, scopes, None),
+                    unlabelled.contains(&name),
+                    "{kind:?} from {name} about an unlabelled request"
+                );
+                // Another label's app never sends what its own label's would refuse.
+                if name == "paykit_request:shop1" {
+                    assert_eq!(
+                        may_send(kind, side, scopes, Some(&shop2)),
+                        kind == Kind::ResendRequest,
+                        "{kind:?} from {name} about a shop2 request"
+                    );
+                }
+            }
+        }
+        // A labelled selling scope never sends an Allowance kind or a notice.
+        for kind in [
+            Kind::AllowanceProposal,
+            Kind::AllowanceAcceptance,
+            Kind::AllowanceRejection,
+            Kind::AllowanceEnd,
+            Kind::ExecutorNotice,
+        ] {
+            assert!(!kind.senders().contains(&Role::Request), "{kind:?}");
+        }
+        // A labelled selling scope never takes a request for a list it can't send.
+        let list_request = message("paykit.private_payment_list_request", json!({}));
+        assert!(check_kind_scopes(&list_request, &pay, &in_shop1).is_err());
+        check_kind_scopes(&list_request, &pay, &plain).unwrap();
+        assert!(!holds_role(
+            &in_shop1,
+            Kind::PrivatePaymentListRequest.recipients()
+        ));
+    }
+
+    #[test]
+    fn test_kinds_payee_message_about_another_labels_request_refused() {
+        let shop1 = Label::parse("shop1").unwrap();
+        let in_shop2 = owned(&["paykit_request:shop2"]);
+        for kind in [
+            "paykit.payment_period_details",
+            "paykit.payment_receipt",
+            "paykit.payment_request_cancellation",
+        ] {
+            let mut m = message(kind, json!({}));
+            m.refs = vec![[1; 32], [2; 32]];
+            // Check 8 sees no request: a labelled selling scope passes it as `paykit_request`.
+            check_sender_scopes(&m, &in_shop2).unwrap();
+            let error =
+                check_sender_for_request(&m, Side::Payee, &in_shop2, Some(&shop1)).unwrap_err();
+            assert!(
+                error.to_string().contains("Paykit spec 3.4"),
+                "{kind}: {error}"
+            );
+            check_sender_for_request(
+                &m,
+                Side::Payee,
+                &owned(&["paykit_request:shop1"]),
+                Some(&shop1),
+            )
+            .unwrap();
+            assert!(check_sender_for_request(&m, Side::Payee, &in_shop2, None).is_err());
+        }
+        // A list, and a receipt naming no request, need `paykit_request` at check 8.
+        let list = message("paykit.private_payment_list", json!({}));
+        assert!(check_sender_scopes(&list, &in_shop2).is_err());
+        check_sender_scopes(&list, &owned(&["paykit_request"])).unwrap();
+        let mut receipt = message("paykit.payment_receipt", json!({}));
+        receipt.refs = vec![[1; 32]];
+        assert!(check_sender_scopes(&receipt, &in_shop2).is_err());
+        check_sender_scopes(&receipt, &owned(&["paykit_request"])).unwrap();
     }
 
     #[test]

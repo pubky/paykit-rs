@@ -42,7 +42,7 @@ use crate::identifiers::{
     AllowanceId, AttemptId, PaymentEndpointIdentifier, PaymentEndpointPayload,
 };
 use crate::json::{bad, check_v1, parse_object, Obj};
-use crate::kinds::{check_sender_scopes, Kind, OPAQUE_MEMBERS};
+use crate::kinds::{check_sender_for_request, check_sender_scopes, Kind, Side, OPAQUE_MEMBERS};
 use crate::periods::{PeriodRef, Recurrence};
 use crate::scopes::{self, Label};
 use crate::ListVersion;
@@ -869,6 +869,25 @@ impl StoredMessage {
     pub fn hash(&self) -> [u8; 32] {
         self.plaintext.hash()
     }
+
+    /// The payee's message about `request`, its period details, receipt or cancellation, is
+    /// from an app whose certificate may send it about that request: one holding
+    /// `paykit_request`, or `paykit_request:<label>` for the request's label (Paykit spec 3.4,
+    /// [`crate::kinds::may_send`]). The payer judges it wherever it reads the request the
+    /// message names.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`]: the message is dropped with no effect, never stored, paid by or
+    /// kept as a stop, and a record holding it is invalid.
+    pub fn check_payee_sender(&self, request: &PaymentRequest) -> Result<()> {
+        check_sender_for_request(
+            &self.message,
+            Side::Payee,
+            self.cert.scopes(),
+            request.label.as_ref(),
+        )
+    }
 }
 
 /// Which activity collection a record is in (Paykit spec 6).
@@ -1537,6 +1556,17 @@ impl ActivityRecord {
                 r.attempt_id == p.attempt_id && r.billing_period == p.billing_period,
                 "Paykit wire 4.11: the receipt isn't of the stored proof's attempt and Billing Period",
             )?;
+        }
+        // Paykit spec 3.4: in a request record, of either side, the payee's messages but the
+        // request are from an app the request's label lets send them.
+        if let Some(request_stored) = &self.request {
+            if let Body::PaymentRequest(request) = &request_stored.body {
+                for (role, stored) in self.stored() {
+                    if role != "request" && stored.sender == request_stored.sender {
+                        stored.check_payee_sender(request)?;
+                    }
+                }
+            }
         }
         let binding = self.binding()?;
         self.check_members(&binding)?;

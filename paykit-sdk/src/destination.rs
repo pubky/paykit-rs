@@ -53,6 +53,7 @@ use std::task::{Context, Poll};
 
 use paykit_lib::app_record::PaykitMember;
 use paykit_lib::bodies::RequestDestination;
+use paykit_lib::kinds::check_sender_scopes;
 use paykit_lib::records::{DestinationSource, StoredMessage};
 use paykit_lib::scopes::{acts_as_payee, check_certificate, holds, PaykitScope};
 use paykit_lib::Body;
@@ -664,7 +665,10 @@ pub(crate) fn current(
 ) -> std::result::Result<(), String> {
     let cert = carrier.cert();
     let allowed = match carrier {
-        Carrier::Message(_) => acts_as_payee(cert.scopes()),
+        Carrier::Message(message) => {
+            check_sender_scopes(message.message(), cert.scopes()).is_ok()
+                && acts_as_payee(cert.scopes())
+        }
         Carrier::Record(_) => holds(cert.scopes(), &PaykitScope::Request),
     };
     current_app(doc, app_id, cert, allowed, carrier.counts_at(now), now)?;
@@ -1021,6 +1025,30 @@ mod tests {
             current(&valid.doc(&[&valid]), &valid.app_id(), &carrier, NOW),
             Ok(())
         );
+    }
+
+    #[test]
+    fn test_destination_public_endpoints_only_from_paykit_request() {
+        // A labelled selling app publishes no public endpoints (Paykit spec 3.4, 4): its
+        // record carries none a payer takes, while its request under its label does.
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let shop = Party::new(
+            "bob",
+            "shop1",
+            &[
+                "paykit_request:shop1",
+                "paykit_settlements",
+                "paykit_contacts",
+            ],
+        );
+        let carrier = Carrier::Record(Box::new(shop.record(&["paykit.payment_request"])));
+        let doc = shop.doc(&[&shop]);
+        assert!(current(&doc, &shop.app_id(), &carrier, NOW).is_err());
+        let mut body = request_body();
+        body.insert("label".into(), serde_json::json!("shop1"));
+        let request = shop.message(&alice, "paykit.payment_request", vec![], body);
+        let carrier = Carrier::Message(Box::new(request));
+        assert_eq!(current(&doc, &shop.app_id(), &carrier, NOW), Ok(()));
     }
 
     #[test]

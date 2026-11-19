@@ -839,7 +839,7 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::KeptCancellation(_) => {
+            StateKey::KeptCancellation { .. } => {
                 state::restored::<KeptMessage>(&key, &value, &binder).map_err(|_| {
                     String::from(
                         "Paykit spec 8.1: a kept cancellation in the backup doesn't verify",
@@ -2009,6 +2009,33 @@ mod tests {
     }
 
     #[test]
+    fn test_protocol_labelled_app_accepts_no_list_request() {
+        // A labelled selling app sends no Private Payment List, so it takes no request for one
+        // (Paykit spec 3.3): its record doesn't accept the kind, and no payer wraps it to it.
+        use crate::testkit::Party;
+        let protocol = PaykitProtocol::new();
+        let labelled = Party::new(
+            "bob",
+            "shop1",
+            &[
+                "paykit_request:shop1",
+                "paykit_settlements",
+                "paykit_contacts",
+            ],
+        );
+        let plain = Party::new(
+            "bob",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
+        let kind = Kind::PrivatePaymentListRequest.as_str();
+        assert!(!protocol.accepts(&labelled.cert).iter().any(|k| k == kind));
+        assert!(!protocol.receives(kind, &labelled.cert));
+        assert!(protocol.accepts(&plain.cert).iter().any(|k| k == kind));
+        assert!(protocol.receives(kind, &plain.cert));
+    }
+
+    #[test]
     fn test_protocol_payee_label_write_scope() {
         let label = Label::parse("shop1").unwrap();
         assert!(writes_payee_label(&["paykit_request".into()], Some(&label)));
@@ -3115,7 +3142,7 @@ mod receive_tests {
             object(json!({})),
         );
         let target = ActivityTarget::payer(natural_key::request_record(&shop.id(), &[4; 32]));
-        let key = key::kept_cancellation(&fake_key(&target.record_target()));
+        let key = key::kept_cancellation(&fake_key(&target.record_target()), &shop.app_id());
         let unordered = state::encode(&KeptMessage::of(&cancellation)).unwrap();
         assert!(!restores::<KeptMessage>(
             &wallet,
@@ -3350,7 +3377,10 @@ mod receive_tests {
         let value = state::encode(&KeptMessage::taken(&cancellation, 0)).unwrap();
         let target = ActivityTarget::payer(natural_key::request_record(&bob.id(), &[4; 32]));
         let record = fake_key(&target.record_target());
-        (key::kept_cancellation(&record).into_bytes(), value)
+        (
+            key::kept_cancellation(&record, &bob.app_id()).into_bytes(),
+            value,
+        )
     }
 
     #[test]
@@ -3374,8 +3404,13 @@ mod receive_tests {
             &["paykit_request", "paykit_settlements", "paykit_contacts"],
         );
         let (key, value) = kept_cancellation(&alice, &bob);
-        let other = key::kept_cancellation(&[9; 32]).into_bytes();
+        let other = key::kept_cancellation(&[9; 32], &bob.app_id()).into_bytes();
         assert!(!restores::<KeptMessage>(&alice, &other, &value));
+        // Under another sending app's key it would stand for a stop that app never sent.
+        let target = ActivityTarget::payer(natural_key::request_record(&bob.id(), &[4; 32]));
+        let record = fake_key(&target.record_target());
+        let other_app = key::kept_cancellation(&record, &[6; 16]).into_bytes();
+        assert!(!restores::<KeptMessage>(&alice, &other_app, &value));
         assert!(!restores::<KeptMessage>(
             &alice,
             &key,

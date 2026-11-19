@@ -3,6 +3,8 @@
 
 #[path = "shared_settlement/period_policy.rs"]
 mod period_policy;
+#[path = "shared_settlement/selling_scope.rs"]
+mod selling_scope;
 
 use std::collections::BTreeMap;
 use std::error::Error;
