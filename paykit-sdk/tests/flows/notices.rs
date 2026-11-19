@@ -202,7 +202,13 @@ async fn test_notices_late_receipt_raised_by_an_owner_restored_from_before_the_f
     w.clock.advance_ms(PAST_THE_CLAIM_MS);
     receipt(&mut shop).await;
     restored.receive(None).await.unwrap();
-    let notices = restored.notices().await.unwrap();
+    let notices: Vec<_> = restored
+        .notices()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|notice| notice.kind == NoticeKind::PaidAfterFailed)
+        .collect();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, NoticeKind::PaidAfterFailed);
     assert_eq!(notices[0].attempt_id, Some(attempt_id));

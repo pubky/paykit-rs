@@ -12,9 +12,9 @@
 //!   holds (`own_allowance_to_send_again`), and the delivery gate holds every attempt to
 //!   send one (`PaykitProtocol::may_send`). A message that would break the record's rules
 //!   (Paykit wire 5.4) is reflected by its `msg_id` only, such as an acceptance crossing
-//!   the proposer's withdrawal. No path stores a message of this app's without queuing it, so a
-//!   proposal, rejection or end this app signed in an Allowance record is one to be sent;
-//!   the re-send after a restore builds on that (`stores_unqueued`).
+//!   the proposer's withdrawal. A signed proposal, rejection or end from this app
+//!   records its original delivery intent (`stores_unqueued`). On restore, the host can
+//!   reconcile it through a [`crate::NoticeKind::PossiblyDelivered`] notice.
 //! - **Receiving:** a proposal opens the record, gated by the spam rule; an acceptance or a
 //!   rejection that would take the record's response is kept by the receive step (`pr/`), and a
 //!   rejection goes into the proposer's record after the read, once the read's stored entries are
@@ -270,14 +270,125 @@ pub(crate) struct NoticeTarget {
 /// message is owed (`eo/<record key>`; Paykit spec 8.1, "Blocked counterparties"; 8.3,
 /// "Ending"): it names the record and the end's `msg_id`, and is written in the batch that
 /// records the end. The message goes from the record once sends to the counterparty aren't
-/// held ([`Paykit::send_owed_ends`]). Never restored: a restore queues the record's own end
-/// again itself, under the same gate (`hold.rs`, `queue_own_again`).
+/// held ([`Paykit::send_owed_ends`]). After restore the signed end can give rise to a
+/// possibly-delivered notice. The original installation retains its local delivery duty.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct OwedEnd {
     #[serde(with = "serde_b64")]
     pub(crate) record: [u8; 32],
     pub(crate) msg_id: String,
+}
+
+/// Why this app signed an Allowance end (Paykit spec 8.1, 8.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum EndCause {
+    /// The user explicitly ended or withdrew the Allowance.
+    User,
+    /// A withdrawal crossed an acceptance, so the app ended it itself.
+    Automatic,
+}
+
+/// The origin of one exact signed Allowance end (`end/<msg_id>`), recorded before
+/// submitting its record and queue or owed mark (Paykit spec 8.1, 8.3). This retains neither
+/// message bytes nor a delivery obligation. It does not classify a later copy as an
+/// original delivery: recovery copies still follow the re-send rules.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EndOrigin {
+    pub(crate) msg_id: String,
+    #[serde(with = "serde_b64")]
+    pub(crate) message_hash: [u8; 32],
+    #[serde(with = "serde_b64")]
+    pub(crate) own: [u8; 32],
+    #[serde(with = "serde_b64")]
+    pub(crate) app_id: [u8; 16],
+    #[serde(with = "serde_b64")]
+    pub(crate) counterparty: [u8; 32],
+    #[serde(with = "serde_b64")]
+    pub(crate) record: [u8; 32],
+    pub(crate) allowance_id: String,
+    #[serde(with = "serde_b64")]
+    pub(crate) proposal: [u8; 32],
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(crate) acceptance: Option<[u8; 32]>,
+    pub(crate) cause: EndCause,
+}
+
+impl EndOrigin {
+    fn matches(&self, message: &pubky_switch_core::message::Message, hash: [u8; 32]) -> bool {
+        let Ok(Body::AllowanceEnd(end)) = Body::parse(message) else {
+            return false;
+        };
+        self.msg_id == message.msg_id
+            && self.message_hash == hash
+            && self.own == message.from.identity
+            && self.app_id == message.from.app_id
+            && self.counterparty == message.to
+            && self.allowance_id == end.allowance_id.as_str()
+            && std::iter::once(self.proposal)
+                .chain(self.acceptance)
+                .eq(message.refs.iter().copied())
+    }
+
+    fn of(
+        record: [u8; 32],
+        held: &AllowanceRecord,
+        end: &StoredMessage,
+        cause: EndCause,
+    ) -> Result<Self> {
+        let Body::AllowanceEnd(body) = end.body() else {
+            return Err(PaykitError::corrupt());
+        };
+        let accepted = acceptance(held).map(StoredMessage::hash);
+        let mut refs = vec![held.proposal.hash()];
+        refs.extend(accepted);
+        if body.allowance_id != held.allowance_id
+            || end.message().to != held.counterparty
+            || end.message().refs != refs
+            || (accepted.is_none() && end.sender() != held.proposal.sender())
+            || (cause == EndCause::Automatic && accepted.is_none())
+        {
+            return Err(PaykitError::corrupt());
+        }
+        Ok(Self {
+            msg_id: end.message().msg_id.clone(),
+            message_hash: end.hash(),
+            own: end.sender(),
+            app_id: end.cert().app_id(),
+            counterparty: held.counterparty,
+            record,
+            allowance_id: held.allowance_id.as_str().to_owned(),
+            proposal: held.proposal.hash(),
+            acceptance: accepted,
+            cause,
+        })
+    }
+}
+
+/// Authorize this exact counterparty end at each delivery attempt (Paykit spec 3.1, 8.1).
+pub(crate) fn may_deliver_end(
+    delivery: &pubky_switch_client::app::DeliveryView<'_>,
+) -> Result<bool> {
+    use pubky_switch_client::app::DeliveryOrigin;
+
+    let message = delivery.message();
+    let scopes = delivery.cert().scopes();
+    if !scopes.iter().any(|scope| scope == "paykit_allowance") {
+        return Ok(false);
+    }
+    let fact = state::delivery_get::<EndOrigin>(delivery, &key::end_origin(&message.msg_id))?;
+    let Some(origin) = fact.filter(|origin| origin.matches(message, delivery.hash())) else {
+        return Ok(false);
+    };
+    if origin.cause == EndCause::User
+        && delivery.origin() == DeliveryOrigin::Original
+        && !delivery.resend()
+    {
+        return Ok(true);
+    }
+    crate::protocol::may_deliver_to_contact(delivery)
 }
 
 /// The client's target of the `allowances` record of `counterparty`'s Allowance
@@ -1189,6 +1300,47 @@ impl Paykit {
         }
     }
 
+    /// Contacts and a current permitting deny copy authorize an automatic end or a
+    /// reconstructed copy. The original user stop has its separate exception (Paykit spec 8.1).
+    async fn allowance_end_send_permitted(&self, peer: &[u8; 32]) -> Result<bool> {
+        if !self.holds("paykit_allowance") || !receive::reads_lists(self.app.cert().scopes()) {
+            return Ok(false);
+        }
+        let read = self.local_get::<u64>(key::LISTS_READ).await?;
+        if !read.is_some_and(|at| receive::lists_read_is_fresh(at, self.now()))
+            || self
+                .local_get::<Vec<[u8; 32]>>(key::DENIED)
+                .await?
+                .is_none()
+        {
+            return Ok(false);
+        }
+        Ok(!self.denied_as_last_read(peer).await?)
+    }
+
+    /// Reconstruct only the same classified end, under ordinary contact authorization.
+    pub(crate) async fn may_queue_stored_end(
+        &self,
+        message: &pubky_switch_core::message::Message,
+        hash: [u8; 32],
+    ) -> Result<bool> {
+        if !Box::pin(self.allowance_end_send_permitted(&message.to)).await? {
+            return Ok(false);
+        }
+        Ok(self
+            .local_get::<EndOrigin>(&key::end_origin(&message.msg_id))
+            .await?
+            .is_some_and(|origin| origin.matches(message, hash)))
+    }
+
+    fn require_allowance_send(&self, kind: Kind) -> Result<()> {
+        self.require_allowance()?;
+        if !kind.has_allowance_sender_contacts(self.app.cert().scopes()) {
+            return Err(Refusal::ScopeMissing("paykit_contacts".into()).into());
+        }
+        Ok(())
+    }
+
     /// The `allowances` record this app holds at `record`, bound to its key (Paykit wire
     /// 5.4); `None` when it holds none, or one that doesn't bind or isn't under the fixed
     /// policy.
@@ -1270,8 +1422,9 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// [`Refusal::ScopeMissing`] without `paykit_allowance`; [`Refusal::NotNow`] while sends to
-    /// `to` are held, at an app holding `paykit_contacts`: the deny list holds it, or the copy of
+    /// Proposing requires both `paykit_allowance` and `paykit_contacts`.
+    /// [`Refusal::ScopeMissing`] identifies a missing scope. [`Refusal::NotNow`] is returned
+    /// while sends to `to` are held because the deny list holds it, or the copy of
     /// the lists isn't known after a read tried now (Paykit spec 8.1, "Blocked counterparties"),
     /// with nothing signed, written or queued; [`PaykitError::Lib`] with `Validation` for terms
     /// that break Paykit wire 4.15, with nothing sent; the client's errors. A failure that leaves
@@ -1295,7 +1448,7 @@ impl Paykit {
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
-        self.require_allowance()?;
+        self.require_allowance_send(Kind::AllowanceProposal)?;
         Box::pin(self.refuse_while_sends_held(&to)).await?;
         let allowance_id = AllowanceId::generate()?;
         let proposer_role = match role {
@@ -1353,23 +1506,12 @@ impl Paykit {
         })
     }
 
-    /// Send each own crossing end recorded while sends to its counterparty were held (`eo/`,
-    /// [`OwedEnd`]) once they aren't, from the signed plaintext its record stores, with the
-    /// client's `queue_stored`, and drop the mark after it (Paykit spec 8.1, "Blocked
-    /// counterparties"; 8.3, "Ending"). A mark stays while sends to the counterparty are held,
-    /// or while its record isn't held as a value that reads and binds. One whose record is
-    /// held as deleted goes with nothing sent: no record holds the end to send; so does one
-    /// whose Allowance is conflicted by then, in the record or as a kept stop, for which
-    /// nothing is sent. A mark over a record that reads and binds without that end of this
-    /// app's is a corrupt store: the mark is written in the batch that records the end, and
-    /// the client keeps an end the app has seen against any later write (Switch spec 8.2), so
-    /// no writer leaves it so, and dropping it would leave the counterparty without the end. As a message queued again from its
-    /// record it goes only until 30 days after its `created_at`, less the clock tolerance
-    /// (Paykit spec 8.3, "Ending"; 7.2, "What a restore loses"): one the client refuses for
-    /// good past that is neither sent nor told, as at a restore's re-send
-    /// ([`Paykit::queue_stored_again`]), and the end in the record stands either way. A store
-    /// failure is the call's error, and the mark stays. The mark was read bound to its key
-    /// (`state::Stored`).
+    /// Deliver the original installation's owed crossing ends (Paykit spec 8.1, 8.3).
+    /// The record write created the local duty and named the exact end it owes. Keep it
+    /// while the record cannot be read, the current sending scopes or deny state hold
+    /// delivery, or a store error prevents the decision. A readable record that lacks
+    /// the named end is corrupt. A delete, a conflict or the end's replay deadline
+    /// retires the duty. A restore reconciles record-only delivery separately (spec 7.2).
     pub(crate) async fn send_owed_ends(&mut self) -> Result<()> {
         let own = self.identity();
         let app_id = self.app_id();
@@ -1395,16 +1537,72 @@ impl Paykit {
                 return Err(PaykitError::corrupt());
             };
             // Nothing is sent for a conflicted Allowance (Paykit spec 8.3, "Conflicted"), as
-            // a restore's re-send sends nothing for one: the conflict ended it on both sides.
-            if held.conflicted.is_some() || Box::pin(self.conflict_kept(&owed.record)).await? {
+            // both parties already stop the Allowance on this conflict.
+            if self.past_replay_window(end)
+                || held.conflicted.is_some()
+                || Box::pin(self.conflict_kept(&owed.record)).await?
+            {
                 Box::pin(self.local_delete(&mark)).await?;
                 continue;
             }
-            if Box::pin(self.sends_held(&held.counterparty)).await? {
+            if !Box::pin(self.may_queue_stored_end(end.message(), end.hash())).await? {
                 continue;
             }
             Box::pin(self.queue_stored_again(end)).await?;
             Box::pin(self.local_delete(&mark)).await?;
+        }
+        Ok(())
+    }
+
+    /// Retire an end's fact only after every source of its delivery has ended (Switch
+    /// spec 11). A positively bound pre-queue owed end keeps it even before the client
+    /// has the message. Every retained sent or failed delivery keeps it too.
+    ///
+    /// The host must hold uninterrupted ownership of the whole App namespace, across all
+    /// handles and processes, with prior operations finished and uncertain local writes
+    /// resolved. The mutable borrow alone cannot enforce that store contract. No producer
+    /// may run between these reads and the local commit; a cancelled future is not a
+    /// completed store operation. Errors retain the remaining facts for normal reload.
+    pub(crate) async fn retire_end_origins(&mut self) -> Result<()> {
+        let origins = self.local_scan::<EndOrigin>(key::END_ORIGINS).await?;
+        if origins.is_empty() {
+            return Ok(());
+        }
+        let restore = self
+            .local_get::<crate::hold::OwnResendOwed>(key::OWN_RESEND_OWED)
+            .await?;
+        let queued = self.queued_message_ids().await?;
+        for (_, origin) in origins {
+            if restore
+                .as_ref()
+                .is_some_and(|owed| owed.includes(&origin.counterparty))
+            {
+                continue;
+            }
+            if self
+                .local_get::<OwedEnd>(&key::owed_end(&origin.record))
+                .await?
+                .is_some_and(|owed| owed.msg_id == origin.msg_id)
+                || queued.contains(&origin.msg_id)
+                || self.app.delivery(&origin.msg_id).await?.is_some()
+            {
+                continue;
+            }
+            // A crossing end held before queueing is absent from the client's delivery
+            // index. Its batch can still install the owed end, even after a lost answer.
+            let batch_key = key::end_batch(&origin.msg_id);
+            if let Some(id) = self.local_get::<[u8; 16]>(&batch_key).await? {
+                if matches!(
+                    self.app.kept_batch(id).await?,
+                    Some(pubky_switch_client::app::KeptBatchStatus::Kept { .. })
+                ) {
+                    continue;
+                }
+            }
+            let mut tx = state::Tx::default();
+            tx.delete(&key::end_origin(&origin.msg_id))
+                .delete(&batch_key);
+            self.local_commit(tx).await?;
         }
         Ok(())
     }
@@ -1431,7 +1629,7 @@ impl Paykit {
     /// wire 4.16): the rejection is recorded, then sent. Only the proposal's recipient
     /// answers it, once. Returns the rejection's `msg_id`. A rejected Allowance has no
     /// end. A rejection is a stop: it goes over a record seen divergent as over any other
-    /// (Paykit spec 6).
+    /// (Paykit spec 6). Rejecting requires both `paykit_allowance` and `paykit_contacts`.
     ///
     /// # Errors
     ///
@@ -1451,7 +1649,8 @@ impl Paykit {
     /// answer, the proposal's withdrawal by this identity, its sender. The end is recorded,
     /// then sent, with an `executor_notice` to the executor the record's grant names when
     /// that is another own app (Paykit wire 4.17). The records stay as history. Returns the
-    /// end's `msg_id`.
+    /// end's `msg_id`. An app with `paykit_allowance` can end it even after the signer
+    /// removes its contacts permission.
     ///
     /// # Errors
     ///
@@ -1478,12 +1677,15 @@ impl Paykit {
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
+        self.require_allowance_send(kind)?;
         Box::pin(self.records_known()).await?;
-        self.require_allowance()?;
         // A record that can't be opened yet may hold a response or an end: nothing is
         // answered or ended over it until it opens (Paykit spec 8.3, one response).
         Box::pin(self.refuse_while_awaiting_key(record)).await?;
         let own = self.identity();
+        if kind == Kind::AllowanceEnd {
+            Box::pin(self.retire_end_origins()).await?;
+        }
         let mut tries = 0;
         loop {
             let held = self
@@ -1541,13 +1743,22 @@ impl Paykit {
             .to_body(kind)?;
             let signed = self.sign(held.counterparty, kind, refs, body)?;
             let msg_id = signed.msg_id().to_owned();
+            let stored = self.own_copy(&signed)?;
+            let origin = (kind == Kind::AllowanceEnd)
+                .then(|| EndOrigin::of(*record, &held, &stored, EndCause::User))
+                .transpose()?;
             let mut next = held.clone();
-            place(&mut next, self.own_copy(&signed)?);
+            place(&mut next, stored);
             if !reflects_stored(&next, &msg_id) {
                 return Err(PaykitError::corrupt());
             }
-            let mut queue = vec![signed];
             let mut locals = Vec::new();
+            if let Some(origin) = origin {
+                // A backup omits unresolved batches. Keep the producer's exact intent before
+                // the service can apply the record write and its answer can be lost.
+                Box::pin(self.local_put(&key::end_origin(&msg_id), &origin)).await?;
+            }
+            let mut queue = vec![signed];
             if kind == Kind::AllowanceEnd {
                 self.end_notice(&held, record, &mut queue, &mut locals)?;
             }
@@ -1617,6 +1828,12 @@ impl Paykit {
         let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
             .entry(write)
             .locals(locals);
+        if let Some(owed) = owed {
+            let marker = key::end_batch(&owed.msg_id).into_bytes();
+            batch = batch
+                .keep_id_at(marker.clone())
+                .local(LocalWrite::Delete { key: marker });
+        }
         for message in queue {
             batch = batch.queue(message);
         }
@@ -2158,6 +2375,7 @@ impl Paykit {
         let mut next = held.clone();
         let mut queue = Vec::new();
         let mut owed = None;
+        let mut locals = Vec::new();
         place(&mut next, end.clone());
         if !reflects_stored(&next, &end.message().msg_id) {
             match acceptance(&held) {
@@ -2171,6 +2389,11 @@ impl Paykit {
                     place(&mut next, end.clone());
                 }
                 Some(accepted) if refs == [proposal] && end.sender() == held.proposal.sender() => {
+                    Box::pin(self.retire_end_origins()).await?;
+                    // The signed end and own-app notice always record the payment stop.
+                    // Its separate counterparty delivery needs current authorization.
+                    let may_send =
+                        Box::pin(self.allowance_end_send_permitted(&held.counterparty)).await?;
                     let body = AllowanceReply {
                         allowance_id: held.allowance_id.clone(),
                         executor_app_id: None,
@@ -2182,8 +2405,11 @@ impl Paykit {
                         vec![proposal, accepted.hash()],
                         body,
                     )?;
+                    let stored = self.own_copy(&own_end)?;
+                    let origin = EndOrigin::of(record, &held, &stored, EndCause::Automatic)?;
+                    Box::pin(self.local_put(&key::end_origin(own_end.msg_id()), &origin)).await?;
                     next = held.clone();
-                    place(&mut next, self.own_copy(&own_end)?);
+                    place(&mut next, stored);
                     place(&mut next, end.clone());
                     // While sends to the counterparty are held (Paykit spec 8.1, "Blocked
                     // counterparties"), the end is recorded all the same, with its executor
@@ -2191,7 +2417,7 @@ impl Paykit {
                     // a batch built on the record's earlier version fails; only its message
                     // to the counterparty waits, owed (`eo/`), sent from the record once
                     // sends to it aren't held (Paykit spec 8.3, "Ending").
-                    if Box::pin(self.sends_held(&held.counterparty)).await? {
+                    if !may_send {
                         owed = Some(OwedEnd {
                             record,
                             msg_id: own_end.msg_id().to_owned(),
@@ -2218,7 +2444,6 @@ impl Paykit {
                 _ => return Box::pin(self.local_delete(stop)).await,
             }
         }
-        let mut locals = Vec::new();
         self.end_notice(&held, &record, &mut queue, &mut locals)?;
         locals.push(LocalWrite::Delete {
             key: stop.as_bytes().to_vec(),
@@ -2531,18 +2756,10 @@ fn written(result: Result<()>) -> Result<Placed> {
     }
 }
 
-/// The messages of the Allowance record `record` this app signed, `app_id` of identity `own`,
-/// that it queues again after a restore (Paykit spec 7.2, "What a restore loses"; 8.3): each
-/// one the record stores to be sent, since every message this app stores in an Allowance
-/// record it also queues in that batch, or, for a crossing end recorded while sends to the
-/// counterparty were held, marks owed in it ([`stores_unqueued`]), while the counterparty
-/// hasn't answered it and no later stop covers it. The proposal goes while the record holds
-/// no response and no end; a rejection while it holds no end; an end, a stop, always. An
-/// acceptance never goes, whoever wrote it into the record: this app sends no acceptance
-/// (Paykit spec 8.3.1), so it isn't queued either, and the delivery gate holds any that
-/// reaches the outbox (`PaykitProtocol::may_send`). Nothing goes for a conflicted Allowance
-/// (Paykit spec 8.3, "Conflicted"); the caller leaves out one whose conflict or
-/// counterparty's end this app keeps as a stop not in the record yet.
+/// This app's signed Allowance messages whose delivery may need reconciliation after
+/// restore (Paykit spec 7.2 and 8.3). A response closes a proposal, and an end closes
+/// both the proposal and the rejection. Conflicted Allowances and acceptances are
+/// excluded. The caller also checks for stops the app has kept outside the record.
 pub(crate) fn own_allowance_to_send_again<'a>(
     record: &'a AllowanceRecord,
     own: &[u8; 32],
@@ -2573,7 +2790,7 @@ pub(crate) fn own_allowance_to_send_again<'a>(
 /// an Allowance record is written in the batch that queues it, or, for a crossing end
 /// recorded while sends to the counterparty are held, in the batch that marks it owed
 /// (`eo/`, which `queued` then names; Paykit spec 8.3, "Ending"), so one signed by this app
-/// there is one to be sent: the re-send after a restore can rely on that.
+/// there establishes original delivery intent.
 fn stores_unqueued(
     before: Option<&AllowanceRecord>,
     next: &AllowanceRecord,

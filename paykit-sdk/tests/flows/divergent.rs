@@ -1408,7 +1408,16 @@ async fn test_divergent_given_up_write_stays_given_up_through_a_restore_and_a_re
         .await
         .unwrap()
         .is_empty());
-    assert_eq!(restored.notices().await.unwrap().len(), 2);
+    assert_eq!(
+        restored
+            .notices()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|notice| notice.kind == paykit_sdk::NoticeKind::MessageGivenUp)
+            .count(),
+        2
+    );
     assert_eq!(
         sale(&restored, &request).await.status,
         PayeeStatus::Requested

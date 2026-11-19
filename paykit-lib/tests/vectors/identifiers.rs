@@ -266,7 +266,7 @@ fn record_keys(keys: &Keys) -> Value {
     let shop = keys.app("shop").keys.app_id_bytes();
     let txid = UNREQUESTED_TXID;
     let shop1 = Label::parse(SHOP1).unwrap();
-    let named: [(&str, Collection, Vec<u8>, Option<&Label>); 9] = [
+    let named: [(&str, Collection, Vec<u8>, Option<&Label>); 10] = [
         (
             "payer request record",
             Collection::PayerActivity,
@@ -304,6 +304,12 @@ fn record_keys(keys: &Keys) -> Value {
             "payment_lists record of the shop app",
             Collection::PaymentLists,
             natural_key::payment_list(&bob, &shop),
+            None,
+        ),
+        (
+            "pending Allowance proposal",
+            Collection::AllowanceProposals,
+            natural_key::allowance(&bob, &allowance),
             None,
         ),
         (
