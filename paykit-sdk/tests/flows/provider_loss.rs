@@ -87,13 +87,18 @@ pub(super) async fn follow_generation(app: &mut Paykit) -> u64 {
 /// Recover at the new service and complete payment reconciliation.
 pub(super) async fn follow_loss(app: &mut Paykit) -> u64 {
     let until = follow_generation(app).await;
-    // Reconciliation starts its own bounded listing even after a receive finished one.
-    let mut result = app.reconcile().await;
-    if matches!(&result, Err(error) if matches!(error.refusal(), Some(Refusal::NotNow(why)) if why.contains("shared records aren't listed")))
-    {
-        result = app.reconcile().await;
+    // Reconciliation requests a fresh listing, even when receive finished its own listing.
+    let pages = crate::certificate::client_listing_requests(app.app().cert());
+    let mut reconciled = app.reconcile().await;
+    for _ in 1..pages.div_ceil(pubky_switch_client::app::LISTING_PAGES_PER_READ as usize) {
+        let Err(error) = &reconciled else { break };
+        assert!(
+            matches!(error.refusal(), Some(paykit_sdk::Refusal::NotNow(why)) if why.contains("shared records aren't listed")),
+            "{error}"
+        );
+        reconciled = app.reconcile().await;
     }
-    result.unwrap();
+    reconciled.unwrap();
     app.end_reconcile(UserConfirmed::new()).await.unwrap();
     until
 }

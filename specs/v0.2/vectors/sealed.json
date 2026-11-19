@@ -768,6 +768,75 @@
     ],
     "description": "Wire 5.3, 5.4: binding_accepted's payment_lists record with msg_ids replaced, and the msg_ids its reader keeps (kept), which a writer writes: the ID of each message the record stores, then the 16 newest distinct IDs of the others it names, oldest first, each once. Repeats are dropped at their later places before the 16 are taken. The record binds at binding_accepted's record_key."
   },
+  "private_list_publications": {
+    "later_writes": [
+      {
+        "accepted": true,
+        "name": "exact repeat",
+        "plaintext": "{\"v\":1,\"publisher\":\"brrz3m6g5rci6iqnzke44q4djc\",\"recipient\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"generation\":1,\"counter\":12,\"msg_id\":\"f914b9bb-64e0-4a65-9963-0eb5b82097b5\",\"message_hash\":\"ykRhQK7khxRFTdzCz3SMBIXzXnDcMD0aWTMV7jPpT3E\"}"
+      },
+      {
+        "accepted": false,
+        "name": "lower counter",
+        "plaintext": "{\"v\":1,\"publisher\":\"brrz3m6g5rci6iqnzke44q4djc\",\"recipient\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"generation\":1,\"counter\":11,\"msg_id\":\"9871f930-8d33-4451-8649-d56a24e1f007\",\"message_hash\":\"VFuBHRqVwu3G12URu55S3t8PGDt0-FYgXVHqb7hbJZc\"}"
+      },
+      {
+        "accepted": false,
+        "name": "equal counter with another hash",
+        "plaintext": "{\"v\":1,\"publisher\":\"brrz3m6g5rci6iqnzke44q4djc\",\"recipient\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"generation\":1,\"counter\":12,\"msg_id\":\"f914b9bb-64e0-4a65-9963-0eb5b82097b5\",\"message_hash\":\"5THED8TspDZSVi96ixcw4Ru_xf_ltUYkdQWQdflsJhM\"}"
+      },
+      {
+        "accepted": false,
+        "name": "equal counter with another message ID",
+        "plaintext": "{\"v\":1,\"publisher\":\"brrz3m6g5rci6iqnzke44q4djc\",\"recipient\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"generation\":1,\"counter\":12,\"msg_id\":\"9871f930-8d33-4451-8649-d56a24e1f007\",\"message_hash\":\"ykRhQK7khxRFTdzCz3SMBIXzXnDcMD0aWTMV7jPpT3E\"}"
+      },
+      {
+        "accepted": true,
+        "name": "newer counter",
+        "plaintext": "{\"v\":1,\"publisher\":\"brrz3m6g5rci6iqnzke44q4djc\",\"recipient\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"generation\":1,\"counter\":13,\"msg_id\":\"9871f930-8d33-4451-8649-d56a24e1f007\",\"message_hash\":\"WBaGvsmXXV83UthpphaKX5tnaq3KmkNuY5VHwbbBjWE\"}"
+      }
+    ],
+    "message": "private_payment_list",
+    "plaintext": "{\"v\":1,\"publisher\":\"brrz3m6g5rci6iqnzke44q4djc\",\"recipient\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"generation\":1,\"counter\":12,\"msg_id\":\"f914b9bb-64e0-4a65-9963-0eb5b82097b5\",\"message_hash\":\"ykRhQK7khxRFTdzCz3SMBIXzXnDcMD0aWTMV7jPpT3E\"}",
+    "writes": [
+      {
+        "aad_hex": "000000167075626b792d7377697463682f76312f7365616c656400000020eb74516b4e85b8ca18a21df66247a5002f24018e00e6f1b90786cf02c820bc070000000e7061796b69745f7265717565737400000020957a6fc39e6a579e7d6b3783d32f94505a8d3cfce9671ff4794dfababb511c8b",
+        "accepted": true,
+        "name": "publisher",
+        "nonce_hex": "64363214cd4afe652bf1ad3f748d28d03c8498b8432b4aa0",
+        "operation": {
+          "body": "eyJpZGVudGl0eSI6IjdwNGZuNDRxb3NoY3dnZm5kejVncnQ3Znl5ejFleWNxeWR1eGRxZThvNThvZjFieXpvZG8iLCJhcHBfaWQiOiJicnJ6M202ZzVyY2k2aXFuemtlNDRxNGRqYyIsImdlbmVyYXRpb24iOjEsImJhdGNoIjp7ImlkIjoiWEFObmJ2aFhpelpfWDEwQktRYUNNQSIsImNvdW50IjoxfSwib3AiOiJyZWNvcmQucHV0Iiwia2V5IjoibFhwdnc1NXFWNTU5YXplRDB5LVVVRnFOUFB6cFp4XzBlVTM2dXJ0UkhJcyIsImNvbGxlY3Rpb24iOiJ1bnMzSXVvQldkR0tLWV9LQnRkVEc1RnprUTAySWdBTzBGU0l3WXhCNDBJIiwicmVhZF9zY29wZSI6InBheWtpdF9yZXF1ZXN0Iiwid3JpdGVfc2NvcGVzIjpbInBheWtpdF9yZXF1ZXN0Il0sInBlcm1hbmVudCI6eyJnZW5lcmF0aW9uIjoxfSwiZXhwZWN0ZWRfdmVyc2lvbiI6eyJnZW5lcmF0aW9uIjoxLCJ2ZXJzaW9uIjoxMX0sInZhbHVlX3NlYWxlZCI6eyJkYXRhX2Vwb2NoIjoxLCJzY29wZSI6InBheWtpdF9yZXF1ZXN0Iiwibm9uY2UiOiJaRFl5Rk0xS19tVXI4YTBfZEkwbzBEeUVtTGhESzBxZyIsImN0IjoicXJvdDB5aTZOeGY2OU95azJJNnpERVdZMm80ZFAwT25jeUdaQUxzVnRxZ1lHc2lUQzRiNXVZenpKb3JRaEVINGZGX2l0N1FKaGJrU1hLTkNZdmR0SHJKbldmdTZGNG9TMjk1LXNXdzBMM2dmWjE2aHVNUGpGdDlLX0xYQVF1RGlYRkRhYUVkUDQ2ZUlBckFzNHM1eENVdnZKZEdMX2s2MUIxekxIQmI1c0Voc1U0b0RjRFp1QTZzYkFoLWNoc01EY2pxME9yZHVicU40Rzg2dThLdFlLNkJXUThScUgybDROT296OEIwN3NEZnFtaG45dDgxSVR5VURON2hwZ0o1ZzFFdXpWdWZ5QmYyX0VBbFNUcE1zdzVHZHNid29nZzczYkM5MlVjWThicFNvQlFzQW1ZVmstcEc3T1ljbjd3SjFQM1hyQkdDUEtTNmtLQ21YRS1NdHFXR2psVnlta0Q0cUJVQmpJRVpnUVRUcWpEMEVsa3dPV1Q5aklhWmVIQ0VZelRnUU1OR3JmU0dtWGFNMG1fLTFVOFdZSWlmejgwTGdreGNOemNaRnAyY09kMkJNdmZUejZSdXF4ZXpscEVQQTdlYWJmMmpPOEFxQVJtaHA1VXdIdUlOY1FhQ2x2bGlBb3hQWDlQN2ZVUkt1SmozMnMxVlR2ZGFSZWJhZU4yQnhzNXJtaDJreGlyd3o0Ti1IdW4tRW9EWEdwM2lzMk5TcVNpOG0tZHRpdVVVRlVfXzJUbzVzV1BYQjJ1aUxjVmlxVDBUczhiMUpqMjZsY3VKWGR6LTMzaV9kcDUyRk80YzZKYTl3Y1Vva3JBRkZGYndvSmpZZ2JrVGV0WVZKUnVGQ29IWXg5WWJNOFdxSTBKem9BcDVLOHNWRVh6c1h4N1AtQUFnVW1vQ2JoMzFndVh1WE95YU1tcTdmSEtsekJTQWYifX0",
+          "sig": "98qWfc0j8Hx_kmEd254yXKd1EDMzyImf2xOQCj4dB9-eQNcag9NGOZCdF3nXP-fy_MbaZ3BKcNjEu1AplhcPCg"
+        },
+        "record_key": "lXpvw55qV559azeD0y-UUFqNPPzpZx_0eU36urtRHIs",
+        "writer": "shop"
+      },
+      {
+        "aad_hex": "000000167075626b792d7377697463682f76312f7365616c656400000020eb74516b4e85b8ca18a21df66247a5002f24018e00e6f1b90786cf02c820bc070000000e7061796b69745f7265717565737400000020957a6fc39e6a579e7d6b3783d32f94505a8d3cfce9671ff4794dfababb511c8b",
+        "accepted": false,
+        "name": "another authorized app",
+        "nonce_hex": "76bdee560653a75c033a52f7809a7be6b2e55d5f1dfaf542",
+        "operation": {
+          "body": "eyJpZGVudGl0eSI6IjdwNGZuNDRxb3NoY3dnZm5kejVncnQ3Znl5ejFleWNxeWR1eGRxZThvNThvZjFieXpvZG8iLCJhcHBfaWQiOiJxdDRodDg2cnQ4MTV4Nm53bm84aG9taHdreSIsImdlbmVyYXRpb24iOjEsImJhdGNoIjp7ImlkIjoiekNZZW5vNkdiOWp6QWpOenBzcmp0USIsImNvdW50IjoxfSwib3AiOiJyZWNvcmQucHV0Iiwia2V5IjoibFhwdnc1NXFWNTU5YXplRDB5LVVVRnFOUFB6cFp4XzBlVTM2dXJ0UkhJcyIsImNvbGxlY3Rpb24iOiJ1bnMzSXVvQldkR0tLWV9LQnRkVEc1RnprUTAySWdBTzBGU0l3WXhCNDBJIiwicmVhZF9zY29wZSI6InBheWtpdF9yZXF1ZXN0Iiwid3JpdGVfc2NvcGVzIjpbInBheWtpdF9yZXF1ZXN0Il0sInBlcm1hbmVudCI6eyJnZW5lcmF0aW9uIjoxfSwiZXhwZWN0ZWRfdmVyc2lvbiI6eyJnZW5lcmF0aW9uIjoxLCJ2ZXJzaW9uIjoxMX0sInZhbHVlX3NlYWxlZCI6eyJkYXRhX2Vwb2NoIjoxLCJzY29wZSI6InBheWtpdF9yZXF1ZXN0Iiwibm9uY2UiOiJkcjN1VmdaVHAxd0RPbEwzZ0pwNzVyTGxYVjhkLXZWQyIsImN0IjoidVpiUVBxdWZ6bHNaX1ZfUTB2SFdCem84VVlsdFJpbVVfYmdvOGhRYlFlRnoxMkFJS0Y0TlZpR3Z4SkZvUTBWSUFNTDRiWUcybU9oVDJpbTZ6MzFKQUtsVUlzWE1UQjBVMkI3VTcwczZBSExOUXFocmc0V2hsNnN3LWdCcHlkLUxibWpnazRtbm9EYm5iVkx5MXNRRVJpMWJSdlBqTEVTWmk5c0VPMTd0OHFSSDh6ejlmbFZNU3pabzVMWlcxREx1RDRidTJnQnROTVB0Z253akdOR3c4OTFudXBpRkJleVF4UEJCbEpvZ0J6Z3p6OXZsUS15eU11UDdfazFRejRJak5PbXI5aVlFbzBRWlpROC1rT3pOZi1MZjlVM05ydGF5eng5TWI1S2toeHJPYWhHWk5zY0hPa05UUnRWM0xGS3MyeXlvamxHa1FqT2NFZGtJdURCUHItdVRLdUpnQlBSMVlRLXJOVXhsa3FGWGVfc1FUeGl2a01iNXNwSXJqbWJzNS1SbGd6elVFUXZ3WV9tWnl6RENObi1iWTlKWS1ZUDJGM3QtT21HWWdNQkFyVnZwWnR4LWRScUhCUm9NaUk4Q3JXc09lMF96VF9Sd2toQ2RoeUx1cHhsY0RYN21RLU82cHZCS3N4dEhkeDkzRmpLQmZ5SDM5VDhORkdaZ1otZDVhQ3loMXhZYzZKRFRCcVNLRjJiWVNNZGw5UEpkeTVKSmN2cnJXMzdFV0pvQ09Jck5jSG81Z2NhdnIzRm84ZUZMQlBCQnNGTzI4blR4NXZkeHdHUERDU05sbkY4eEdlZVY5V3ZKMWJQdnF4M0U1RDhET2dQWHNYMEgxMS0wcW9EMDU2Y2JyTjJtT1E4cGduaFAxdzAtc0RrWktSRHE1R2EzQVF2LWVSMXB4WUhiNkNSRlgwbENGQ0h0UHBQYnBtWHQifX0",
+          "sig": "RSqiDDqRdrpz82r24z3DRQM3VK-dXGxrRJHCMktP6805iLGw9OLRET6ulOsQ_EmtZO_gKvAKGftJExKyFa97BA"
+        },
+        "record_key": "lXpvw55qV559azeD0y-UUFqNPPzpZx_0eU36urtRHIs",
+        "writer": "cap"
+      },
+      {
+        "aad_hex": "000000167075626b792d7377697463682f76312f7365616c656400000020eb74516b4e85b8ca18a21df66247a5002f24018e00e6f1b90786cf02c820bc070000000e7061796b69745f7265717565737400000020900aebd50807ba3636ff6ba489c5f3543b7e4143a4e9ef10fe8d3ec618d2800d",
+        "accepted": false,
+        "name": "another recipient's key",
+        "nonce_hex": "c54b731fd882c1701630ac57a00b72c716a1486dc63267c7",
+        "operation": {
+          "body": "eyJpZGVudGl0eSI6IjdwNGZuNDRxb3NoY3dnZm5kejVncnQ3Znl5ejFleWNxeWR1eGRxZThvNThvZjFieXpvZG8iLCJhcHBfaWQiOiJicnJ6M202ZzVyY2k2aXFuemtlNDRxNGRqYyIsImdlbmVyYXRpb24iOjEsImJhdGNoIjp7ImlkIjoiQWV3cmE5dG95TThlS2V2Umhoc2xqUSIsImNvdW50IjoxfSwib3AiOiJyZWNvcmQucHV0Iiwia2V5Ijoia0FycjFRZ0h1alkyXzJ1a2ljWHpWRHQtUVVPazZlOFFfbzAteGhqU2dBMCIsImNvbGxlY3Rpb24iOiJ1bnMzSXVvQldkR0tLWV9LQnRkVEc1RnprUTAySWdBTzBGU0l3WXhCNDBJIiwicmVhZF9zY29wZSI6InBheWtpdF9yZXF1ZXN0Iiwid3JpdGVfc2NvcGVzIjpbInBheWtpdF9yZXF1ZXN0Il0sInBlcm1hbmVudCI6eyJnZW5lcmF0aW9uIjoxfSwiZXhwZWN0ZWRfdmVyc2lvbiI6eyJnZW5lcmF0aW9uIjoxLCJ2ZXJzaW9uIjoxMX0sInZhbHVlX3NlYWxlZCI6eyJkYXRhX2Vwb2NoIjoxLCJzY29wZSI6InBheWtpdF9yZXF1ZXN0Iiwibm9uY2UiOiJ4VXR6SDlpQ3dYQVdNS3hYb0F0eXh4YWhTRzNHTW1mSCIsImN0IjoibDgzT3o0ZEpTa01Dc3Bfam9JNWNUeHhhdWdFMHA3WWdYTVFnM2xhOU5PaEllV0lDekE0T0hxZjhUUGFaY2xDZVQzQ1hsNkFicDB5dVhvVjR4ZFl1alN4cjZoOFBRN25BRE9ZS05NOFg5Qmd0M0xSWFRZRmZpZ0JELVVjSnprS3FZbW9Jd1RMM0R3dHVVRHNIdzBRVVdSZ0dUR3MxcnZUTVBxLWYxeWQwa0ZLeEVsbHJPdVlCcWpZUE5GQjEyTGgxR3hhZFc4WFAtY3o3RjJSbzhoOV9GckhIbHhCVTJ2eEJKM3o4cXhjeTJvaXlCRzRRUzhfSnEwc1lpQkJtRkpfcldoNmE4Y3NuY0kxNlA3UTJHUFhsTllXTHRDT3dDbVotRzhGMW0zNzZZcXpuUVVYdlhMY29fZFNvYW0tdUF1aVJwdDItdVM2MHI2Y0NRSldJYkJWc2hsX1FPajJZZ2tnVnJJNFcwV19GMW5RSmt5YWg4Q1hGQWFab0g3RUNYUzlTQ1IxYUtOcXd6Qjk4d3cxeDR2NUZlMzRiQmxvRjNZWExUX01uS1dCQVFOMld2eVJlek1tTjlLeGJtN0pYcHdjOXlYT2tNYWtzVlM5S1lUN3JmaXJmNDRLdVpRamIzQm03SFlXMUFxWE9Jckp6VnlfMDRqeWMyTFRnY3ZoY0E1ZVBYT1RQeml6UWNtUEhwaVJKdWxRajd2NWdhUmExS1ZJeTVmcWEtUW5nVDBCMTZHblRkWThjb0V0M0pkbDBPREFWZS1UVGR1NzdiSl9zSW1sTVhFc0cwaGxTdkk2UGdyYVo5UWQzMnRSeGwwQ21jSG1RU19zQ0ZPM2tZU3BKaWY0ZjlPLWxuSkNpMVM2Ym9yMGxqRW43WU12RDFKSmdHU1JKMHRMY2Zia1BoNUQxMTF4SExSUURDYTRReHFhVFc2ODAifX0",
+          "sig": "_1SPeY02Ro9G83ocUboLM5WyKXIdmOV6Rm_mgeKhACEmowYcJuBUdq-RAEKDj49YfZNVzF0DfkVEelnYmDgmBA"
+        },
+        "record_key": "kArr1QgHujY2_2ukicXzVDt-QUOk6e8Q_o0-xhjSgA0",
+        "writer": "shop"
+      }
+    ]
+  },
   "settlement_marks": {
     "accepted": [
       {
