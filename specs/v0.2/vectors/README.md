@@ -15,7 +15,7 @@ The `failure_evidence` cases supply already validated counting evidence to the p
 
 The `allowance_proposals` cases in `sealed.json` give the pending record for a proposal sent or received and for two proposals that cross under one ID. Each case includes the record key and the signed messages in the value.
 
-Wire 5.1 and 5.9 specify the ledger's creation and update scopes and its exact first value. The current `identifiers.json` does not cover this split ledger policy or its derived key. The ledger in `sealed.json` `binding_accepted` has entries and totals and lacks the required original acceptance hash. It does not qualify as a first ledger or a bound successor under wire 5.5. The implementing library generates the new policy, key, canonical zero and successor binding cases. The current `allowance_proposals` cases and the usage arithmetic remain independently covered.
+Wire 5.1 and 5.9 specify a permanent ledger writable only under `paykit_allowance_execute`, including at creation. The current `identifiers.json` ledger example uses that write scope but omits permanence. Its policy hash and record key cover that ordinary policy. The ledger in `sealed.json` `binding_accepted` has entries and totals and lacks the required original acceptance hash. It does not qualify as a first ledger or a bound successor under wire 5.5. The implementing library generates the new policy, key, canonical zero and successor binding cases. The current `allowance_proposals` cases and the usage arithmetic remain independently covered.
 
 ## Settlement marks
 

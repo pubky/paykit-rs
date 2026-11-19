@@ -32,7 +32,7 @@ Sections 3.3 and 9 require an extension eviction to atomically record its recove
 
 ## Allowance acceptance and initial ledgers
 
-Pending proposals and rejections use the records and delivery checks in Section 8.3.1. The proposal binds the verified Allower generation. Wire 5.9 specifies the Allower's original zero in the same batch as the signed acceptance. The Allowee records the same proposal and acceptance on its own account. The published SDK still withholds new acceptance, executor authority and automatic spending.
+Pending proposals and rejections use the records and delivery checks in Section 8.3.1. The proposal binds the verified Allower generation. In the first release the Allower approves and executes in one wallet. That wallet retains the selected signed proposal and its service application and verifies the three ordered results for the permanent acceptance, the original zero ledger and the exact pending deletion (wire 5.9). Different-app execution is deferred. The Allowee records the same proposal and acceptance on its own account. The published SDK still withholds new acceptance, executor authority and automatic spending.
 
 ## Queued message delivery
 
