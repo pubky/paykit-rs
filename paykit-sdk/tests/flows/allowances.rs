@@ -8780,3 +8780,122 @@ async fn test_allowances_an_owed_end_without_its_origin_stays_held_after_restore
         .any(|q| q.msg_id == end && !q.may_send));
     assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
 }
+
+/// The selected original messages that reached this wallet on its next read.
+async fn received_originals(wallet: &mut Paykit, ids: &[&str]) -> Vec<String> {
+    wallet
+        .receive(None)
+        .await
+        .unwrap()
+        .report
+        .events
+        .into_iter()
+        .filter_map(|event| match event {
+            AppEvent::MessageReceived { msg_id, .. } if ids.contains(&msg_id.as_str()) => {
+                Some(msg_id)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn test_allowances_queued_proposal_and_rejection_wait_for_the_current_deny_list() {
+    let w = World::new();
+    let peer = w.bob_id();
+    let mut wallet = Box::pin(wallet(&w)).await;
+    let mut phone = Box::pin(keeper(&w)).await;
+    let mut shop = Box::pin(shop(&w)).await;
+    let (_, mine) = Box::pin(proposed(&w, &mut shop, &mut wallet)).await;
+    wallet.app_mut().hold_queued(&peer).await.unwrap();
+    let p = wallet
+        .propose_allowance(peer, AllowanceRole::Allower, terms())
+        .await
+        .unwrap();
+    let r = wallet.reject_allowance(&mine).await.unwrap();
+    let ids = [p.msg_id.as_str(), r.as_str()];
+
+    phone.block(&peer).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    wallet.app_mut().release_queued(&peer).await.unwrap();
+    wallet.app_mut().flush_outbox().await.unwrap();
+    assert!(Box::pin(received_originals(&mut shop, &ids))
+        .await
+        .is_empty());
+    wallet.flush().await.unwrap();
+    assert_eq!(wallet.allowance(&mine).await.unwrap().blocked, Some(true));
+    assert!(Box::pin(received_originals(&mut shop, &ids))
+        .await
+        .is_empty());
+
+    phone.unblock(&peer).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    wallet.flush().await.unwrap();
+    assert_eq!(wallet.allowance(&mine).await.unwrap().blocked, Some(false));
+    let mut got = Box::pin(received_originals(&mut shop, &ids)).await;
+    got.sort();
+    let mut expected = ids;
+    expected.sort();
+    assert_eq!(got, expected);
+    wallet.flush().await.unwrap();
+    assert!(Box::pin(received_originals(&mut shop, &ids))
+        .await
+        .is_empty());
+}
+
+#[tokio::test]
+async fn test_allowances_user_end_and_resend_request_apply_their_own_delivery_rules() {
+    let w = World::new();
+    let peer = w.bob_id();
+    let mut wallet = Box::pin(wallet(&w)).await;
+    let mut phone = Box::pin(keeper(&w)).await;
+    let mut shop = Box::pin(shop(&w)).await;
+    let p = wallet
+        .propose_allowance(peer, AllowanceRole::Allower, terms())
+        .await
+        .unwrap();
+    assert_eq!(
+        Box::pin(received_originals(&mut shop, &[&p.msg_id])).await,
+        [p.msg_id.as_str()]
+    );
+    wallet.app_mut().hold_queued(&peer).await.unwrap();
+    let ask = wallet
+        .request_resend(
+            peer,
+            paykit_sdk::ResendSelection::default().with_accepted_from_ms(0),
+        )
+        .await
+        .unwrap();
+    let end = wallet.end_allowance(&p.record).await.unwrap();
+    let ids = [end.as_str(), ask.as_str()];
+
+    phone.block(&peer).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    wallet.flush().await.unwrap();
+    assert_eq!(
+        wallet.allowance(&p.record).await.unwrap().blocked,
+        Some(true)
+    );
+    wallet.app_mut().release_queued(&peer).await.unwrap();
+    wallet.flush().await.unwrap();
+    assert_eq!(
+        Box::pin(received_originals(&mut shop, &ids)).await,
+        [end.as_str()]
+    );
+
+    phone.unblock(&peer).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    wallet.flush().await.unwrap();
+    assert_eq!(
+        wallet.allowance(&p.record).await.unwrap().blocked,
+        Some(false)
+    );
+    assert_eq!(
+        Box::pin(received_originals(&mut shop, &ids)).await,
+        [ask.as_str()]
+    );
+    wallet.flush().await.unwrap();
+    assert!(Box::pin(received_originals(&mut shop, &ids))
+        .await
+        .is_empty());
+}

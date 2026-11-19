@@ -371,7 +371,7 @@ impl EndOrigin {
 pub(crate) fn may_deliver_end(
     delivery: &pubky_switch_client::app::DeliveryView<'_>,
 ) -> Result<bool> {
-    use pubky_switch_client::app::{DeliveryOrigin, KeptBatchStatus};
+    use pubky_switch_client::app::DeliveryOrigin;
 
     let message = delivery.message();
     let scopes = delivery.cert().scopes();
@@ -388,26 +388,7 @@ pub(crate) fn may_deliver_end(
     {
         return Ok(true);
     }
-    if !receive::reads_lists(scopes) {
-        return Ok(false);
-    }
-    let read = state::delivery_get::<u64>(delivery, key::LISTS_READ)?;
-    if !receive::lists_fresh(read, delivery.now_ms()) {
-        return Ok(false);
-    }
-    let Some(denied) = state::delivery_get::<Vec<[u8; 32]>>(delivery, key::DENIED)? else {
-        return Ok(false);
-    };
-    if let Some(mark) =
-        state::delivery_get::<state::OwnBlockMark>(delivery, &key::own_block(&message.to))?
-    {
-        let kept = match mark.unblock_batch() {
-            Some(id) => matches!(delivery.kept_batch(id)?, Some(KeptBatchStatus::Kept { .. })),
-            None => false,
-        };
-        return Ok(mark.counts(kept) == Some(false));
-    }
-    Ok(!denied.contains(&message.to))
+    crate::protocol::may_deliver_to_contact(delivery)
 }
 
 /// The client's target of the `allowances` record of `counterparty`'s Allowance
@@ -1326,7 +1307,7 @@ impl Paykit {
             return Ok(false);
         }
         let read = self.local_get::<u64>(key::LISTS_READ).await?;
-        if !receive::lists_fresh(read, self.now())
+        if !read.is_some_and(|at| receive::lists_read_is_fresh(at, self.now()))
             || self
                 .local_get::<Vec<[u8; 32]>>(key::DENIED)
                 .await?

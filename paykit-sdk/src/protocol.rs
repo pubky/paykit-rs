@@ -28,7 +28,7 @@ use std::sync::{Arc, PoisonError, RwLock};
 use paykit_lib::bodies::check_body;
 use paykit_lib::collections::Collection;
 use paykit_lib::kinds::{
-    check_sender_scopes, targets_app, Kind, Role as KindRole, Side, OPAQUE_MEMBERS,
+    check_sender_scopes, targets_app, Kind, MessageKind, Role as KindRole, Side, OPAQUE_MEMBERS,
 };
 use paykit_lib::records::{
     ActivitySide, AllowanceRecord, BlockFloorRecord, PaymentListRecord, PendingAllowanceRecord,
@@ -347,6 +347,40 @@ pub(crate) fn view_failure(error: crate::PaykitError) -> StoreFailure {
         }
         _ => StoreFailure::of_entry(StoreError::Corrupt),
     }
+}
+
+/// Recheck this message's sender and the current deny copy before its delivery or re-send.
+pub(crate) fn may_deliver_to_contact(
+    delivery: &pubky_switch_client::app::DeliveryView<'_>,
+) -> crate::error::Result<bool> {
+    use pubky_switch_client::app::KeptBatchStatus;
+
+    let cert = delivery.cert();
+    if check_certificate(cert).is_err()
+        || !receive::reads_lists(cert.scopes())
+        || check_sender_scopes(delivery.message(), cert.scopes()).is_err()
+    {
+        return Ok(false);
+    }
+    let read = state::delivery_get::<u64>(delivery, key::LISTS_READ)?;
+    if !read.is_some_and(|at| receive::lists_read_is_fresh(at, delivery.now_ms())) {
+        return Ok(false);
+    }
+    let Some(denied) = state::delivery_get::<Vec<[u8; 32]>>(delivery, key::DENIED)? else {
+        return Ok(false);
+    };
+    let to = &delivery.message().to;
+    if let Some(mark) = state::delivery_get::<state::OwnBlockMark>(delivery, &key::own_block(to))? {
+        let kept = match mark.unblock_batch() {
+            Some(batch) => matches!(
+                delivery.kept_batch(batch)?,
+                Some(KeptBatchStatus::Kept { .. })
+            ),
+            None => false,
+        };
+        return Ok(mark.counts(kept) == Some(false));
+    }
+    Ok(!denied.contains(to))
 }
 
 /// How many keys of each family whose size the runtime bounds a restored layer holds
@@ -1001,23 +1035,26 @@ impl Protocol for PaykitProtocol {
     }
 
     /// Hold every attempt to deliver an Allowance acceptance, including a re-send or an
-    /// acceptance already in the outbox (Paykit spec 8.3.1). Proposals and rejections
-    /// require both current sender scopes on each attempt. Only an original user end
-    /// can proceed with the Allowance scope alone (Paykit spec 3.1, 8.1).
+    /// acceptance already in the outbox (Paykit spec 8.3.1). Proposals, rejections,
+    /// re-send requests and extensions require current sender scopes and a permitting
+    /// deny copy. An original user end has its own delivery rule (Paykit spec 3.1).
     fn may_send(
         &self,
         delivery: &pubky_switch_client::app::DeliveryView<'_>,
     ) -> Result<bool, StoreFailure> {
-        Ok(match Kind::from_kind(&delivery.message().kind) {
-            Some(Kind::AllowanceAcceptance) => false,
-            Some(Kind::AllowanceEnd) => {
-                crate::allowances::may_deliver_end(delivery).map_err(view_failure)?
+        match MessageKind::parse(&delivery.message().kind) {
+            Ok(MessageKind::Paykit(Kind::AllowanceAcceptance)) => Ok(false),
+            Ok(MessageKind::Paykit(Kind::AllowanceEnd)) => {
+                crate::allowances::may_deliver_end(delivery).map_err(view_failure)
             }
-            Some(Kind::AllowanceProposal | Kind::AllowanceRejection) => {
-                check_sender_scopes(delivery.message(), delivery.cert().scopes()).is_ok()
-            }
-            _ => true,
-        })
+            Ok(
+                MessageKind::Paykit(
+                    Kind::AllowanceProposal | Kind::AllowanceRejection | Kind::ResendRequest,
+                )
+                | MessageKind::Extension(_),
+            ) => may_deliver_to_contact(delivery).map_err(view_failure),
+            _ => Ok(true),
+        }
     }
 
     fn opaque_members(&self) -> Vec<OpaqueRule> {
