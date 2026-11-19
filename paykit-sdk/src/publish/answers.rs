@@ -489,6 +489,7 @@ impl Answers {
 pub(crate) fn note(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
+    scopes: &[String],
     request: &PrivatePaymentListRequest,
     seq: u64,
 ) -> std::result::Result<(), Fail> {
@@ -496,7 +497,7 @@ pub(crate) fn note(
         return Ok(());
     }
     let sender = stored.sender();
-    if sender == cx.identity() {
+    if sender == cx.identity() || !crate::receive::admits_new_state(cx, &sender, scopes, stored)? {
         return Ok(());
     }
     let at = key::list_recipient(&sender);
