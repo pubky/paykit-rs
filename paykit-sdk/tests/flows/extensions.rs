@@ -54,10 +54,10 @@ async fn shop_on(w: &World, config: PaykitConfig, store: Arc<dyn StateStore>) ->
 
 /// Alice's app holding `paykit_pay`, `paykit_contacts` and `paykit_ext:paykit-cap`.
 async fn sender(w: &World) -> Paykit {
-    sender_on(w, store()).await
+    sender_on(w, PaykitConfig::default(), store()).await
 }
 
-async fn sender_on(w: &World, storage: Arc<dyn StateStore>) -> Paykit {
+async fn sender_on(w: &World, config: PaykitConfig, storage: Arc<dyn StateStore>) -> Paykit {
     let mut wallet = w
         .join_with(
             &w.alice,
@@ -68,7 +68,7 @@ async fn sender_on(w: &World, storage: Arc<dyn StateStore>) -> Paykit {
                 .extension(&prefix())
                 .build()
                 .unwrap(),
-            PaykitConfig::default(),
+            config,
             storage,
         )
         .await;
@@ -101,8 +101,11 @@ fn fail_list_reads(signer: &pubky_switch_client::testing::TestSigner, n: usize) 
 #[tokio::test]
 async fn test_extensions_registered_kind_kept_until_taken() {
     let w = World::new();
-    let mut shop = shop_on(&w, handling(), store()).await;
+    let lists = Arc::new(ListsStore::default());
+    let mut shop = shop_on(&w, handling(), lists.clone()).await;
     let mut wallet = sender(&w).await;
+    // This shop does not pay. Its mailbox needs no access to a payer's pending unblocks.
+    lists.pending_unblocks_unreadable(true);
     let msg_id = wallet
         .send_extension(w.bob_id(), &offer(), Vec::new(), body(1))
         .await
@@ -121,6 +124,30 @@ async fn test_extensions_registered_kind_kept_until_taken() {
         .await
         .unwrap();
     assert!(shop.extension_messages().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_extensions_payer_receives_after_the_unblock_floor_can_be_checked() {
+    let w = World::new();
+    let lists = Arc::new(ListsStore::default());
+    let mut payer = sender_on(&w, handling(), lists.clone()).await;
+    let mut shop = shop_on(&w, handling(), store()).await;
+    payer.block(&w.bob_id()).await.unwrap();
+    payer.unblock(&w.bob_id()).await.unwrap();
+    let id = shop
+        .send_extension(w.alice_id(), &offer(), Vec::new(), body(1))
+        .await
+        .unwrap();
+
+    // Isolate delivery from the SDK's after-read work on the same floor.
+    lists.pending_unblocks_unreadable(true);
+    payer.app_mut().receive(None).await.unwrap();
+    assert!(payer.extension_messages().await.unwrap().is_empty());
+    lists.pending_unblocks_unreadable(false);
+    payer.receive(None).await.unwrap();
+    let kept = payer.extension_messages().await.unwrap();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].msg_id, id);
 }
 
 #[tokio::test]
@@ -598,7 +625,12 @@ async fn test_extensions_send_returns_the_queued_id_after_a_local_delivery_error
     let w = World::new();
     let mut shop = shop_on(&w, handling(), store()).await;
     let saved = Arc::new(FaultStore::new(store(), Fault::None));
-    let mut wallet = sender_on(&w, Arc::clone(&saved) as Arc<dyn StateStore>).await;
+    let mut wallet = sender_on(
+        &w,
+        PaykitConfig::default(),
+        Arc::clone(&saved) as Arc<dyn StateStore>,
+    )
+    .await;
     let app_id = wallet.app_id();
     // The outbox commit succeeds, then the attempt to record the delivery fails.
     saved.fail_put_once(b"sent/");

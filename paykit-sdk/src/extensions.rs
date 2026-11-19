@@ -32,9 +32,8 @@
 use paykit_lib::kinds::ExtensionKind;
 use pubky_switch_client::app::{
     AppError, Effect, FeedPosition, LocalWrite, Outcome, OutgoingMessage, ReceiveContext,
-    ReceivedMessage, Refusal as ClientRefusal, StoreFailure,
+    ReceivedMessage, Refusal as ClientRefusal,
 };
-use pubky_switch_client::error::StoreError;
 use pubky_switch_core::enc::serde_b64;
 use pubky_switch_core::message::Message;
 use serde::{Deserialize, Serialize};
@@ -159,11 +158,6 @@ pub(crate) fn extension_effect(
     cx: &mut ReceiveContext<'_>,
     message: &ReceivedMessage,
 ) -> std::result::Result<Outcome, Fail> {
-    if paykit_lib::scopes::check_certificate(cx.cert()).is_err() {
-        return Err(Fail::Store(StoreFailure::unavailable(
-            StoreError::Unavailable,
-        )));
-    }
     let scopes = cx.cert().scopes().to_vec();
     crate::receive::note_cursor_time_at(cx, message.accepted_at_ms)?;
     let incoming = ExtensionMessage::of(

@@ -1472,16 +1472,14 @@ impl Protocol for PaykitProtocol {
             Err(Fail::Store(failure)) => return Outcome::Retry(failure),
             Err(_) => return Outcome::Retry(StoreFailure::of_entry(StoreError::Corrupt)),
         }
-        let effect = if self.handles_extension(&message.message.kind) {
-            crate::extensions::extension_effect(cx, message)
-        } else {
-            let stored = match stored_copy(message) {
-                Ok(stored) => stored,
-                Err(reason) => return Outcome::Drop { reason },
-            };
+        let effect = receive::check_before_effect(cx, &message.sender).and_then(|()| {
+            if self.handles_extension(&message.message.kind) {
+                return crate::extensions::extension_effect(cx, message);
+            }
+            let stored = stored_copy(message).map_err(Fail::Drop)?;
             receive::effect(cx, &stored, message.seq, &|proof| self.settlement_id(proof))
                 .map(|()| Outcome::Apply(Effect::default()))
-        };
+        });
         match effect {
             Ok(outcome) => outcome,
             // A write the context couldn't build for want of a key: the context holds the

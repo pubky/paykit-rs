@@ -143,12 +143,9 @@ impl std::fmt::Debug for QueuedAnswer {
 /// ([`crate::Rail::settlement_id`]).
 pub(crate) type Settlement<'a> = &'a paykit_lib::derive::SettlementIdReader<'a>;
 
-pub(crate) fn effect(
-    cx: &mut ReceiveContext<'_>,
-    stored: &StoredMessage,
-    seq: u64,
-    settlement: Settlement<'_>,
-) -> Result<(), Fail> {
+/// Check the receiving app's certificate and the payer's floor before taking any
+/// further entry from a sender it saw unblocked (Paykit spec 8.1).
+pub(crate) fn check_before_effect(cx: &ReceiveContext<'_>, sender: &[u8; 32]) -> Result<(), Fail> {
     // No Paykit effect under an own certificate Paykit refuses, such as a renewal's the
     // Switch took (Paykit wire 3.1): the entry is held, never consumed, and tried again at
     // later reads, once a certificate that passes replaces it.
@@ -157,22 +154,36 @@ pub(crate) fn effect(
             StoreError::Unavailable,
         )));
     }
-    let sender = stored.sender();
-    let scopes = cx.cert().scopes().to_vec();
-    let pay = scopes.iter().any(|s| s == "paykit_pay");
+    let pay = cx
+        .cert()
+        .scopes()
+        .iter()
+        .any(|s| s == paykit_lib::scopes::PAY);
     if pay
         && (state::cx_get::<crate::floor::PendingUnblocks>(cx, key::BLOCK_FLOOR)?
-            .is_some_and(|pending| pending.senders.binary_search(&sender).is_ok())
+            .is_some_and(|pending| pending.senders.binary_search(sender).is_ok())
             || (state::cx_get::<Vec<[u8; 32]>>(cx, key::DENIED)?
-                .is_some_and(|deny| deny.contains(&sender))
-                && !cx.sender_disposition(&sender)?.blocked
-                && !state::cx_get::<OwnBlockMark>(cx, &key::own_block(&sender))?
+                .is_some_and(|deny| deny.contains(sender))
+                && !cx.sender_disposition(sender)?.blocked
+                && !state::cx_get::<OwnBlockMark>(cx, &key::own_block(sender))?
                     .is_some_and(|mark| mark.blocked())))
     {
         return Err(Fail::Store(StoreFailure::unavailable(
             StoreError::Unavailable,
         )));
     }
+    Ok(())
+}
+
+pub(crate) fn effect(
+    cx: &mut ReceiveContext<'_>,
+    stored: &StoredMessage,
+    seq: u64,
+    settlement: Settlement<'_>,
+) -> Result<(), Fail> {
+    let sender = stored.sender();
+    let scopes = cx.cert().scopes().to_vec();
+    let pay = scopes.iter().any(|s| s == paykit_lib::scopes::PAY);
     let payee = paykit_lib::scopes::acts_as_payee(&scopes);
     note_cursor_time(cx, stored)?;
     match stored.body() {
