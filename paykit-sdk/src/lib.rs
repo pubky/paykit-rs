@@ -86,7 +86,7 @@ pub use divergent::DivergentRecord;
 pub use error::{PaykitError, Refusal, Result};
 pub use hold::HeldRequest;
 pub use journal::{PaymentView, Stage};
-pub use loss::LossBoundary;
+pub use loss::{LossBoundary, RecoveryMembers, RecoveryReport};
 pub use marks::MAX_DROPPED_MARKS;
 pub use notices::{Notice, NoticeKind};
 pub use own_record::{MAX_OWN_PUBLIC_ENDPOINTS, RECORD_LIFETIME_MS};

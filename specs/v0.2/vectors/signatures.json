@@ -1,5 +1,25 @@
 {
   "description": "The signatures of Paykit's own labels (wire 2), as the Switch set's signatures.json gives those of the Switch's: Ed25519 over lp(label, field1, ..., fieldn), verified as the Switch's wire format spells out. signed_bytes_hex is that exact input.",
+  "recovery_report": {
+    "label": "paykit/v1/recovery-upload",
+    "opening": {
+      "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmlkZW50aXR5IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwidmVyc2lvbiI6MywiZ2VuZXJhdGlvbiI6Miwic2lnbmVyIjoiQkFRRUJBUUVCQVFFQkFRRUJBUUVCQSIsImluYm94Ijp7InVybCI6Imh0dHBzOi8vc3dpdGNoLmV4YW1wbGUiLCJzZXJ2aWNlX2tleSI6IjM0WkdWbVZaTEVhVzlMVi1mdmRocTVMV3N0UGhsakhHYkpnY1FWU1I5RWsifSwicG9saWN5Ijp7ImFkbWlzc2lvbiI6ImNvbnRhY3RzX2FuZF9jb252ZXJzYXRpb25zIiwiY29ubmVjdF9yZXF1ZXN0cyI6eyJlbmFibGVkIjpmYWxzZSwibWF4X3BlbmRpbmciOjUwLCJwdXNoIjpmYWxzZX19LCJhcHBzIjpbeyJhcHBfaWQiOiJnN3RlaWY5azF1cjc1anJtaWRxazd6N3U2dyIsImNlcnQiOiJpRXFnOFhycW8zb3NPcWhOZWVfLWlMMUoySWljSXZWQURGLWN0SGZEaHRNIn1dLCJyZW1vdmVkIjpbXSwiZGF0YV9lcG9jaCI6MSwicmVjb3ZlcnlfZnJvbSI6MX0",
+      "sig": "g-V9EAAy3-5jQmdV4HCuqfUdrM1jobyTBZ24Ro6yoOgYgBvsYcsXZRTcTy7-rA4SEtDcsU5b7m-xINY6kX29Bw"
+    },
+    "original": "N2KKl-qUyd2ki6jcrt-z9Q",
+    "report": {
+      "author_certificate": {
+        "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoiZzd0ZWlmOWsxdXI3NWpybWlkcWs3ejd1NnciLCJzaWduaW5nX2tleSI6IlVEeVgtTllWbUotZVlfQ1FsRlRNYml2VHVMZ1lwRzhJaHVkSjRwcGtjejQiLCJidW5kbGVfa2V5IjoiS3YxMER0dXlva2FfSDlzTTkteWZwUDNSVU5HM2lSd3ZCSXE1ZWJ3MmRuOCIsInNjb3BlcyI6WyJwYXlraXRfcGF5IiwicGF5a2l0X2FsbG93YW5jZSIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJjbGFpbXMucmVhZCIsImNsYWltcy53cml0ZSIsImxpc3RzLnJlYWQiLCJjb252ZXJzYXRpb24uYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI3LTAxLTAxVDAwOjAwOjAwLjAwMFoifQ",
+        "sig": "RaEOK65vcHJmMb1_aWzFubu-iH0s5X0qb-5uWQ3n-6tVbvEWXXH1f2P2k1VY_pse5xKO-K5wEnikzb2KhW1iAw"
+      },
+      "cutoff": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+      "dispositions": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
+      "inventory": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+      "signature": "aKnLkYWHROupFaP5J-yXpkaxqhL6datiBjipBlX8dRpXkfsNbO5RTat9OL2iM1u9PRj5nEw_18_biAdwjMhQCw"
+    },
+    "signed_bytes_hex": "000000197061796b69742f76312f7265636f766572792d75706c6f61640000010400000020f149881e9fb5b6c16f5a70fdae005551024ff70895b7fd499d5e368921b52f0c0000001037628a97ea94c9dda48ba8dcaedfb3f500000008000000000000000100000008000000000000000200000020df86465665592c4696f4b57e7ef761ab92d6b2d3e19631c66c981c415491f4490000002085cfa475dac9b90b7dff09531d5e40c4caa10a47fe8db5e93c22963e6155efbb000000200101010101010101010101010101010101010101010101010101010101010101000000200202020202020202020202020202020202020202020202020202020202020202000000200303030303030303030303030303030303030303030303030303030303030303",
+    "written_at_ms": 1764547200000
+  },
   "signatures": [
     {
       "fields": [

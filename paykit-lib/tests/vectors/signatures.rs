@@ -3,7 +3,10 @@
 
 use paykit_lib::grant::{grant_fields, handoff_fields, EXECUTOR_GRANT_LABEL, LEDGER_HANDOFF_LABEL};
 use paykit_lib::identifiers::AllowanceId;
+use paykit_lib::recovery::{RecoveryCommitments, RECOVERY_UPLOAD_LABEL};
 use pubky_switch_core::ops::RecordVersion;
+use pubky_switch_core::records::{IdentityBody, IdentityDoc, Inbox, ListedApp};
+use pubky_switch_core::sig::SignedDoc;
 use pubky_switch_core::sig::{signed_bytes, verify};
 
 use pubky_switch_core::enc::b64;
@@ -31,6 +34,7 @@ pub(crate) fn check() {
     let cases = arr(&v, "signatures");
     assert_eq!(cases.len(), 2);
     check_handoff(&keys, &cases[1]);
+    check_recovery_report(&keys, &v["recovery_report"]);
     let case = &cases[0];
     assert_eq!(st(case, "label"), EXECUTOR_GRANT_LABEL);
     assert!(!EXECUTOR_GRANT_LABEL.starts_with("pubky-switch/"));
@@ -191,5 +195,104 @@ pub(crate) fn generate(keys: &Keys) {
             json!(hex(field)),
         ));
     }
+    cases.push((
+        Place::Member("/recovery_report"),
+        recovery_report_case(keys),
+    ));
     generated("signatures.json", &cases);
+}
+
+fn recovery_report_case(keys: &Keys) -> serde_json::Value {
+    let cert = crate::common::phone_cert(keys);
+    let phone = keys.app("phone");
+    let mut body = IdentityBody::first(
+        phone.identity,
+        [4; 16],
+        Inbox::new(
+            "https://switch.example",
+            keys.app("wallet").keys.signing_public(),
+        ),
+        Default::default(),
+    );
+    body.version = 3;
+    body.generation = 2;
+    body.recovery_from = Some(1);
+    body.apps.push(ListedApp {
+        app_id: cert.app_id(),
+        cert: cert.hash(),
+    });
+    let opening = IdentityDoc::sign(keys.identity(&phone.identity), body).unwrap();
+    let commitments = RecoveryCommitments {
+        cutoff: [1; 32],
+        inventory: [2; 32],
+        dispositions: [3; 32],
+    };
+    let field = commitments.signing_field(&opening, &cert.app_id()).unwrap();
+    json!({
+        "opening":opening.signed(), "original":b64(&cert.app_id()), "written_at_ms":cert.issued_at(),
+        "label": RECOVERY_UPLOAD_LABEL, "signed_bytes_hex":hex(&signed_bytes(RECOVERY_UPLOAD_LABEL,&[&field])),
+        "report":{"author_certificate":cert.signed(), "cutoff":b64(&commitments.cutoff), "inventory":b64(&commitments.inventory),
+            "dispositions":b64(&commitments.dispositions), "signature":b64(&phone.keys.sign(RECOVERY_UPLOAD_LABEL,&[&field]))}
+    })
+}
+
+fn check_recovery_report(keys: &Keys, case: &serde_json::Value) {
+    let signed: SignedDoc = serde_json::from_value(case["opening"].clone()).unwrap();
+    let opening = IdentityDoc::verify(&signed, &keys.app("phone").identity).unwrap();
+    let id = b64n::<16>(st(case, "original"));
+    let written = case["written_at_ms"].as_u64().unwrap();
+    let report = &case["report"];
+    let value = serde_json::to_vec(report).unwrap();
+    let commitments =
+        RecoveryCommitments::verify(&value, &opening, &opening, &id, written).unwrap();
+    let mut extended = report.clone();
+    extended["new_member"] = serde_json::json!({"value": 1});
+    assert_eq!(
+        RecoveryCommitments::verify(
+            &serde_json::to_vec(&extended).unwrap(),
+            &opening,
+            &opening,
+            &id,
+            written,
+        )
+        .unwrap(),
+        commitments
+    );
+    for name in [
+        "cutoff",
+        "inventory",
+        "dispositions",
+        "signature",
+        "author_certificate",
+    ] {
+        let mut incomplete = extended.clone();
+        incomplete.as_object_mut().unwrap().remove(name);
+        assert!(RecoveryCommitments::verify(
+            &serde_json::to_vec(&incomplete).unwrap(),
+            &opening,
+            &opening,
+            &id,
+            written,
+        )
+        .is_err());
+    }
+    let field = commitments.signing_field(&opening, &id).unwrap();
+    assert_eq!(
+        hex(&signed_bytes(RECOVERY_UPLOAD_LABEL, &[&field])),
+        st(case, "signed_bytes_hex")
+    );
+    for name in ["cutoff", "inventory", "dispositions"] {
+        let mut changed = report.clone();
+        changed[name] = b64(&[33; 32]).into();
+        assert!(RecoveryCommitments::verify(
+            &serde_json::to_vec(&changed).unwrap(),
+            &opening,
+            &opening,
+            &id,
+            written
+        )
+        .is_err());
+    }
+    assert!(RecoveryCommitments::verify(&value, &opening, &opening, &[0; 16], written).is_err());
+    assert!(RecoveryCommitments::verify(&value, &opening, &opening, &id, written - 1).is_err());
 }

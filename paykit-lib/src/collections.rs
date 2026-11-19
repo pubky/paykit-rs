@@ -33,6 +33,8 @@ pub enum Collection {
     /// `settlements`: at most 1,024 bucket records, the marks of the settlements any own
     /// payee app has credited (Paykit wire 5.7).
     Settlements,
+    /// One recovery upload report per original app and opening identity document.
+    RecoveryUploads,
 }
 
 impl Collection {
@@ -46,6 +48,7 @@ impl Collection {
         Self::AllowanceLedgers,
         Self::BlockFloor,
         Self::Settlements,
+        Self::RecoveryUploads,
     ];
 
     /// The collection's name.
@@ -59,6 +62,7 @@ impl Collection {
             Self::AllowanceLedgers => "allowance_ledgers",
             Self::BlockFloor => "block_floor",
             Self::Settlements => "settlements",
+            Self::RecoveryUploads => "recovery_uploads",
         }
     }
 
@@ -80,6 +84,9 @@ impl Collection {
                 Policy::new("paykit_allowance", &["paykit_allowance_execute"])
             }
             Self::Settlements => Policy::new("paykit_settlements", &["paykit_settlements"]),
+            Self::RecoveryUploads => {
+                Policy::new(crate::scopes::RECOVERY, &[crate::scopes::RECOVERY])
+            }
         }
     }
 
