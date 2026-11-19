@@ -1527,7 +1527,7 @@ async fn check_receipt_at_removal(
         };
         let application: serde_json::Value = serde_json::from_slice(marker)?;
         assert_eq!(
-            application["batch"],
+            application["d"]["batch"],
             serde_json::to_value(original.kept_batch.ok_or("missing original batch")?)?
         );
         let receipt = format!(
@@ -1537,7 +1537,7 @@ async fn check_receipt_at_removal(
         );
         assert!(key.ends_with(receipt.as_bytes()));
         assert_eq!(
-            application["identity"],
+            application["d"]["identity"],
             serde_json::to_value(historical.signed())?
         );
     } else {
@@ -1584,12 +1584,12 @@ fn receipt_backup_with_historical_identity(
         .ok_or("missing original receipt intent")?;
     let mut application: serde_json::Value = serde_json::from_slice(value)?;
     let previous = IdentityDoc::verify(
-        &serde_json::from_value(application["identity"].clone())?,
+        &serde_json::from_value(application["d"]["identity"].clone())?,
         &historical.identity(),
     )?;
     previous.check_successor(historical)?;
     assert_eq!(previous.generation(), historical.generation());
-    application["identity"] = serde_json::to_value(historical.signed())?;
+    application["d"]["identity"] = serde_json::to_value(historical.signed())?;
     *value = serde_json::to_vec(&application)?;
     layer["data"] = b64(&encode_local_state(&entries)).into();
     Ok(paykit_sdk::PaykitBackup::from_bytes(&serde_json::to_vec(
