@@ -37,6 +37,11 @@ pub(super) fn declare_second_loss(w: &World) -> Arc<ScriptedSwitch> {
     declare_loss_of(w, SWITCH_ORIGIN, LATER_SECRET)
 }
 
+/// The signer replaces the second recovery service with a new service key.
+pub(super) fn declare_third_loss(w: &World) -> Arc<ScriptedSwitch> {
+    declare_loss_of(w, SWITCH_ORIGIN, [123; 32])
+}
+
 /// [`declare_loss`] of the service at `lost_origin`, the new one under `secret`.
 fn declare_loss_of(w: &World, lost_origin: &str, secret: [u8; 32]) -> Arc<ScriptedSwitch> {
     let lost_generation = w
@@ -82,13 +87,18 @@ pub(super) async fn follow_generation(app: &mut Paykit) -> u64 {
 /// Recover at the new service and complete payment reconciliation.
 pub(super) async fn follow_loss(app: &mut Paykit) -> u64 {
     let until = follow_generation(app).await;
-    // Reconciliation starts its own bounded listing even after a receive finished one.
-    let mut result = app.reconcile().await;
-    if matches!(&result, Err(error) if matches!(error.refusal(), Some(Refusal::NotNow(why)) if why.contains("shared records aren't listed")))
-    {
-        result = app.reconcile().await;
+    // Reconciliation requests a fresh listing, even when receive finished its own listing.
+    let pages = crate::certificate::client_listing_requests(app.app().cert());
+    let mut reconciled = app.reconcile().await;
+    for _ in 1..pages.div_ceil(pubky_switch_client::app::LISTING_PAGES_PER_READ as usize) {
+        let Err(error) = &reconciled else { break };
+        assert!(
+            matches!(error.refusal(), Some(paykit_sdk::Refusal::NotNow(why)) if why.contains("shared records aren't listed")),
+            "{error}"
+        );
+        reconciled = app.reconcile().await;
     }
-    result.unwrap();
+    reconciled.unwrap();
     app.end_reconcile(UserConfirmed::new()).await.unwrap();
     until
 }
@@ -1598,7 +1608,7 @@ async fn test_provider_loss_the_final_activity_read_precedes_the_payment_method_
 }
 
 /// The doubt a payment was refused with, as [`Refusal::MayBePaid`] shows it.
-fn doubt_of(paid: &paykit_sdk::Result<PayOutcome>) -> PaymentDoubt {
+pub(crate) fn doubt_of(paid: &paykit_sdk::Result<PayOutcome>) -> PaymentDoubt {
     match paid.as_ref().err().and_then(PaykitError::refusal) {
         Some(Refusal::MayBePaid {
             doubt: Some(doubt), ..

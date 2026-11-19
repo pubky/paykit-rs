@@ -71,7 +71,9 @@ use crate::rail::{
     CandidateId, PaymentEndpointCandidate, RailError, RailOutcome, RailPaid, RailPayment, Transfer,
 };
 use crate::records::{list_target, KeptMessage};
-use crate::requests::{cancelled, rejected, request_of, unreadable_request, Fresh, RequestRef};
+use crate::requests::{
+    cancelled, payment_ended, rejected, request_of, unreadable_request, Fresh, RequestRef,
+};
 use crate::state::{self, key};
 
 /// How long after the latest time it has seen a payment without a request's attempt pins its
@@ -105,6 +107,7 @@ pub struct PayOptions {
     /// gave it (Paykit spec 7.1, 7.2). Only that same doubt is passed: the SDK reads the
     /// claim again, and a doubt that changed since, such as another own app's attempt turned
     /// `unknown` or flagged `possibly_duplicate`, is refused again with the new one.
+    /// A Billing Period with incomplete pre-loss payment history stays held.
     pub may_be_paid_confirmed: Option<PaymentDoubt>,
     /// The transfer the user was shown and chose to pay anyway, as a refusal for another
     /// amount, or a fee above the app's cap, gave it ([`Refusal::Transfer`]; Paykit spec 7.2
@@ -140,6 +143,10 @@ pub struct PayOptions {
     /// The payment of a request from a blocked payee the user was shown and chose to make,
     /// as a [`Refusal::Blocked`] gave it (Paykit spec 8.1): only that same payment is made.
     pub blocked_confirmed: Option<BlockedPayment>,
+    /// The user has confirmed paying a Billing Period before it starts (Paykit spec 8.2,
+    /// "Not before its start"): without it a period that hasn't started is
+    /// [`Refusal::PeriodNotStarted`].
+    pub early_payment_confirmed: Option<UserConfirmed>,
 }
 
 impl PayOptions {
@@ -216,6 +223,15 @@ impl PayOptions {
         self.blocked_confirmed = Some(payment);
         self
     }
+
+    /// The user has confirmed paying a Billing Period before it starts (Paykit spec 8.2,
+    /// "Not before its start"): its attempt is applied from the latest service time verified
+    /// once the user confirmed, never earlier.
+    #[must_use]
+    pub fn with_early_payment_confirmed(mut self, confirmed: UserConfirmed) -> Self {
+        self.early_payment_confirmed = Some(confirmed);
+        self
+    }
 }
 
 /// A payment to a payee the identity's deny list holds, as a [`Refusal::Blocked`] shows it
@@ -287,8 +303,9 @@ pub struct PaymentDoubt {
     /// service, and nothing of that reaches the new one (Paykit spec 7.3). It names the loss
     /// that decides the doubt now, so a confirmation of a doubt shown under an older loss
     /// is refused again once a newer one decides. The host shows the user that it may
-    /// already be paid; the user pays over it, or states that it wasn't paid before that
-    /// loss ([`Paykit::confirm_not_paid_before_loss`], with it), which ends it.
+    /// already be paid. For a one-time request the user can pay over the doubt or state
+    /// that it wasn't paid before that loss ([`Paykit::confirm_not_paid_before_loss`]).
+    /// A Billing Period with incomplete pre-loss payment history stays held.
     pub before_loss: Option<crate::LossBoundary>,
 }
 
@@ -333,7 +350,8 @@ pub struct TransferQuote {
     pub transfer: Transfer,
 }
 
-/// What a payment call returns ([`Paykit::pay_request`], [`Paykit::pay_without_request`]):
+/// What a payment call returns ([`Paykit::pay_request`], [`Paykit::pay_period`],
+/// [`Paykit::pay_without_request`]):
 /// the payment's outcome or the error that stopped it, and, beside it, the payee's apps whose
 /// public endpoints couldn't be used in the read this call made, with why (Paykit spec 4).
 /// The failures come with every outcome and every error alike, so the host can tell the user
@@ -498,27 +516,32 @@ impl Held {
 pub(crate) type ListRead = (PaymentListRecord, RecordVersion);
 
 /// What one attempt needs beyond its journal entry.
-struct Plan {
-    entry: JournalEntry,
-    record: ActivityTarget,
-    carrier: Carrier,
-    step: u64,
+pub(crate) struct Plan {
+    pub(crate) entry: JournalEntry,
+    pub(crate) record: ActivityTarget,
+    pub(crate) carrier: Carrier,
+    pub(crate) step: u64,
     /// For a list endpoint, the `payment_lists` record of its list and the version selected
     /// from: the attempt is conditioned on it, and its batch writes a single-use mark.
-    reserve: Option<ListRead>,
+    pub(crate) reserve: Option<ListRead>,
     /// The record a payment without a request creates in the attempt's batch.
-    create: Option<ActivityRecord>,
+    pub(crate) create: Option<ActivityRecord>,
     /// Condition the attempt on the version of the request record read.
-    on_record: bool,
+    pub(crate) on_record: bool,
     /// Who starts the payment: the user, or an executor (Switch spec 4.3).
-    by: Initiator,
+    pub(crate) by: Initiator,
     /// The user's confirmation of a payee identity its switch couldn't confirm.
-    unconfirmed: Option<UserConfirmed>,
+    pub(crate) unconfirmed: Option<UserConfirmed>,
     /// The blocked payment the user confirmed, checked against the selected payment.
-    blocked_confirmed: Option<BlockedPayment>,
+    pub(crate) blocked_confirmed: Option<BlockedPayment>,
     /// The request record whose restore hold the user's confirmation ends, in the attempt's
     /// batch: a call refused before it keeps the hold.
-    end_hold: Option<[u8; 32]>,
+    pub(crate) end_hold: Option<[u8; 32]>,
+    /// More conditions of the attempt, such as a Billing Period's `server_time_in`.
+    pub(crate) conditions: Vec<Condition>,
+    /// Record writes of the attempt's batch, such as a Billing Period's `attempted_periods`
+    /// and `manual_only` (Paykit spec 8.2, 8.3).
+    pub(crate) record_writes: Vec<(Vec<Condition>, OpKind)>,
 }
 
 /// A Payment Endpoint a payment may take: its identifier and payload, handed to the payment
@@ -731,7 +754,7 @@ fn unsupported(what: &str) -> PaykitError {
     .into()
 }
 
-fn not_now(refusal: ClientRefusal) -> PaykitError {
+pub(crate) fn not_now(refusal: ClientRefusal) -> PaykitError {
     Refusal::NotNow(refusal.to_string()).into()
 }
 
@@ -753,10 +776,52 @@ pub(crate) enum Written {
     Divergent([u8; 32]),
 }
 
+/// A new proof for the outcome, or the original already held for this payment.
+enum PaidProof {
+    New(Box<SignedMessage>),
+    /// The record supplies the original payment evidence. Any pending delivery
+    /// remains with the outbox that holds the signed message (Paykit spec 7.2).
+    Original(Box<StoredMessage>),
+}
+
+impl PaidProof {
+    fn msg_id(&self) -> &str {
+        match self {
+            Self::New(proof) => proof.msg_id(),
+            Self::Original(proof) => &proof.message().msg_id,
+        }
+    }
+
+    fn hash(&self) -> [u8; 32] {
+        match self {
+            Self::New(proof) => proof.hash(),
+            Self::Original(proof) => proof.hash(),
+        }
+    }
+}
+
+/// Whether an authenticated payer proof records the journaled payment.
+fn matches_paid_proof(
+    original: &StoredMessage,
+    payer: [u8; 32],
+    app: [u8; 16],
+    payee: [u8; 32],
+    refs: &[[u8; 32]],
+    expected: &PaymentProof,
+) -> bool {
+    original.sender() == payer
+        && original.cert().app_id() == app
+        && original.message().to == payee
+        && original.message().refs == refs
+        && matches!(original.body(), Body::PaymentProof(held) if held == expected)
+}
+
 /// The payer's activity record's part of an outcome's batch.
 enum OutcomeRecord {
     /// This write.
     Write(Box<(Vec<Condition>, OpKind)>),
+    /// A correctly bound original proof is already present at this record revision.
+    Compared(Condition),
     /// None: the record already holds what the outcome places.
     Unchanged,
     /// The record can't be updated now: the outcome waits.
@@ -1031,7 +1096,7 @@ impl Paykit {
         let obligation = self.obligation(&request.payee, &request.request_hash, 0);
         let restored = self.restored_attempts(&obligation).await?;
         let step = self
-            .claim_step(&obligation, &stored, deadline, restored, &options, by)
+            .claim_step(&obligation, &stored, None, deadline, restored, &options, by)
             .await?;
         // No attempt once the deadline is at or before the highest service time verified
         // (Paykit spec 7.1); the service refuses one from its own clock anyway. The claim is
@@ -1077,6 +1142,7 @@ impl Paykit {
             refuse_blocked(true, shown, options.blocked_confirmed.as_ref())?;
         }
         let entry = JournalEntry {
+            user_started: by == Initiator::User,
             attempt_id: AttemptId::generate()?.to_text(),
             obligation,
             payee: request.payee,
@@ -1110,6 +1176,7 @@ impl Paykit {
             transfer_bound: Some(bound),
             price,
             failed_on_claim: false,
+            billing_period: None,
         };
         self.execute(Plan {
             entry,
@@ -1123,6 +1190,8 @@ impl Paykit {
             unconfirmed: options.unconfirmed_identity_confirmed,
             blocked_confirmed: options.blocked_confirmed,
             end_hold,
+            conditions: Vec::new(),
+            record_writes: Vec::new(),
         })
         .await
     }
@@ -1315,6 +1384,7 @@ impl Paykit {
         )?);
         record.status = Some("paying".into());
         let entry = JournalEntry {
+            user_started: true,
             attempt_id: attempt_id.to_text(),
             obligation: payment_obligation(&attempt_id),
             payee: payment.payee,
@@ -1348,6 +1418,7 @@ impl Paykit {
             transfer_bound: Some(bound),
             price: None,
             failed_on_claim: false,
+            billing_period: None,
         };
         if deadline.is_none() {
             return Box::pin(self.pay_public_offline(entry, carrier, &options)).await;
@@ -1364,6 +1435,8 @@ impl Paykit {
             unconfirmed: options.unconfirmed_identity_confirmed,
             blocked_confirmed: options.blocked_confirmed,
             end_hold: None,
+            conditions: Vec::new(),
+            record_writes: Vec::new(),
         })
         .await
     }
@@ -1507,7 +1580,7 @@ impl Paykit {
     /// The attempts a restore left unresolved for the obligation, which make it "may be
     /// paid" (Paykit spec 7.2); an open entry of this app's otherwise is a payment in
     /// progress.
-    async fn restored_attempts(&self, obligation: &[u8; 32]) -> Result<Vec<AttemptId>> {
+    pub(crate) async fn restored_attempts(&self, obligation: &[u8; 32]) -> Result<Vec<AttemptId>> {
         let mut restored = Vec::new();
         for entry in self.journal().await? {
             if &entry.obligation != obligation || !entry.open() {
@@ -1525,14 +1598,17 @@ impl Paykit {
     /// The step to attempt at, after the claim's checks (Paykit spec 7.1, 7.2, 7.3): a
     /// SETTLED claim is paid; another open attempt is another wallet's; a pinned deadline
     /// other than this app's may already be paid, with no confirmation passing it. Otherwise
-    /// the doubt, `restored` with the claim's and a provider loss's for `request`, read now:
-    /// a doubtful one is refused with it ([`PaymentDoubt`]) unless the user confirmed exactly
-    /// it, and one a provider loss leaves in doubt is refused an automatic payment `by`
-    /// whatever was confirmed.
-    async fn claim_step(
+    /// the doubt, `restored` with the claim's and a provider loss's for `request`, or its
+    /// Billing Period named by `period`, read now: a doubtful one is refused
+    /// with it ([`PaymentDoubt`]) unless the user confirmed exactly it, and one a provider
+    /// loss leaves in doubt is refused an automatic payment `by` whatever was confirmed.
+    /// A Billing Period with unresolved pre-loss history also holds a manual payment.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn claim_step(
         &mut self,
         obligation: &[u8; 32],
         request: &StoredMessage,
+        period: Option<PeriodRef>,
         deadline: Option<u64>,
         restored: Vec<AttemptId>,
         options: &PayOptions,
@@ -1566,7 +1642,13 @@ impl Paykit {
             );
         }
         // A SETTLED claim is refused above.
-        let before_loss = self.loss_doubt(obligation, Some(request), None).await?;
+        let before_loss = self.loss_doubt(obligation, Some(request), period).await?;
+        if period.is_some() && before_loss.is_some() {
+            return Err(Refusal::MayBePaid {
+                reason: "Paykit spec 7.3, 8.2: the Billing Period may have been paid early before the provider loss".into(),
+                doubt: None,
+            }.into());
+        }
         let doubt = PaymentDoubt {
             obligation: *obligation,
             step: view.as_ref().map(|v| v.step),
@@ -1580,8 +1662,7 @@ impl Paykit {
             early_pin: kept.early_pin,
             before_loss,
         };
-        let automatic_over_loss = before_loss.is_some() && by == Initiator::Automatic;
-        if automatic_over_loss
+        if before_loss.is_some() && by == Initiator::Automatic
             || doubt.doubtful() && options.may_be_paid_confirmed.as_ref() != Some(&doubt)
         {
             let reason = if !doubt.restored.is_empty() {
@@ -1609,7 +1690,7 @@ impl Paykit {
     /// isn't removed. A request whose destination any current app may give is not judged,
     /// and no copy is read for it. A read that fails is the refusal: no app is taken as
     /// current nor as removed without it.
-    async fn refuse_unpayable_request(
+    pub(crate) async fn refuse_unpayable_request(
         &mut self,
         payee: &[u8; 32],
         request: &StoredMessage,
@@ -2166,7 +2247,7 @@ impl Paykit {
     /// # Errors
     ///
     /// The read's failure: a record that couldn't be read again is never taken as unchanged.
-    async fn past_deadline(
+    pub(crate) async fn past_deadline(
         &mut self,
         target: &ActivityTarget,
         otherwise: Option<PaykitError>,
@@ -2441,7 +2522,7 @@ impl Paykit {
     }
 
     /// Steps 1 to 4 of the paying order for a planned attempt (Paykit spec 7.2).
-    async fn execute(&mut self, plan: Plan) -> Result<PayOutcome> {
+    pub(crate) async fn execute(&mut self, plan: Plan) -> Result<PayOutcome> {
         let Plan {
             mut entry,
             record,
@@ -2454,16 +2535,19 @@ impl Paykit {
             unconfirmed,
             blocked_confirmed,
             end_hold,
+            conditions: plan_conditions,
+            record_writes,
         } = plan;
         let attempt_id = entry.attempt()?;
         let selected_request = entry.request_hash()?.map(|request_hash| RequestRef {
             payee: entry.payee,
             request_hash,
         });
+        let selected_period = entry.period()?;
         let selected = entry.paid_amount()?.map(|amount| BlockedPayment {
             payee: entry.payee,
             request: selected_request,
-            period: None,
+            period: selected_period,
             amount,
         });
         let blocked_confirmed = selected
@@ -2503,7 +2587,7 @@ impl Paykit {
             self.config.orphan_after_s_for(&self.rail.declaration()),
             entry.deadline,
         );
-        let mut conditions = Vec::new();
+        let mut conditions = plan_conditions;
         if on_record {
             let key = self.activity_key(&record)?;
             conditions.push(self.app.record_condition(&key).await?);
@@ -2525,6 +2609,9 @@ impl Paykit {
         let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
             .op_if(op.kind(), conditions)
             .obligation_deadline(entry.obligation, own_deadline(entry.deadline));
+        for write in record_writes {
+            batch = batch.entry(write);
+        }
         if let Some(record_key) = end_hold {
             // The user saw the payee may have cancelled it (Paykit spec 7.2): the hold ends
             // with the attempt, and stays when the attempt isn't made.
@@ -2566,6 +2653,9 @@ impl Paykit {
         let mut attempted = entry.clone();
         attempted.stage = Stage::Attempted;
         batch = batch.local(journal_write(&attempted)?);
+        if Box::pin(self.period_recovery_held(&entry)).await? {
+            return Err(Refusal::NotNow(crate::loss::LOSS_DOUBT.into()).into());
+        }
         // The attempt ID is journaled before the write (Paykit spec 7.2), once the batch is
         // built: a batch that can't be built leaves no open entry behind it.
         self.save(&entry).await?;
@@ -2589,6 +2679,14 @@ impl Paykit {
                 // deadline, at the answer's service time.
                 if let Some(view) = claim_conflict(error.unkept()) {
                     self.refuse_claim(&view)?;
+                }
+                // A batch on a Billing Period writes its period record at the version read,
+                // marking it `manual_only`, or is conditioned on it (Paykit spec 8.3, "Manual
+                // only"): one another own app wrote since fails it, and is read again, so the
+                // next attempt builds on that write, not on the same stale copy.
+                if entry.period()?.is_some() {
+                    let period = ActivityTarget::payer(entry.natural_key.clone());
+                    self.app.read_record(&period.record_target()).await?;
                 }
                 let changed = PaykitError::Conflict(
                     "Paykit spec 7.2: the request or list record changed meanwhile".into(),
@@ -3009,7 +3107,11 @@ impl Paykit {
         // and accepting only its bound consent ([`Paykit::dispatch_held`]). A first
         // dispatch goes back to `Attempted`, known unsubmitted, as it does when the fence
         // stops it; a repeat stays open.
-        if self.dispatch_held(&entry, by, kind).await.unwrap_or(true) {
+        if self.dispatch_held(&entry, by, kind).await.unwrap_or(true)
+            || Box::pin(self.period_recovery_held(&entry))
+                .await
+                .unwrap_or(true)
+        {
             return self
                 .stopped_before_the_call(entry, kind, FinalCheck::Hold)
                 .await;
@@ -3257,15 +3359,23 @@ impl Paykit {
             // The record's update is settled first: without it nothing is written, `done`
             // included (Paykit spec 7.2 step 3).
             let proof = if paid {
-                Some(self.sign_proof(entry)?)
+                Box::pin(self.outcome_proof(entry, &target)).await?
             } else {
                 None
             };
-            let record_write = match self
-                .outcome_record(entry, &target, paid, proof.as_ref(), overwrite)
-                .await?
-            {
+            let decision = if paid && proof.is_none() {
+                OutcomeRecord::Held
+            } else {
+                self.outcome_record(entry, &target, paid, proof.as_ref(), overwrite)
+                    .await?
+            };
+            let mut compare = None;
+            let record_write = match decision {
                 OutcomeRecord::Write(write) => Some(*write),
+                OutcomeRecord::Compared(condition) => {
+                    compare = Some(condition);
+                    None
+                }
                 OutcomeRecord::Unchanged => None,
                 OutcomeRecord::Held => {
                     if !entry.record_held {
@@ -3276,7 +3386,10 @@ impl Paykit {
                 }
                 OutcomeRecord::Divergent(record) => return Ok(Written::Divergent(record)),
             };
-            let step = match entry.step {
+            let step = match entry
+                .step
+                .filter(|_| !matches!(proof, Some(PaidProof::Original(_))))
+            {
                 Some(step) => Some(step),
                 None => match self.attempt_state(entry).await? {
                     Some((step, Outcome::Open | Outcome::Unknown)) => Some(step),
@@ -3294,6 +3407,9 @@ impl Paykit {
                     .op(op.kind())
                     .obligation_deadline(entry.obligation, own_deadline(entry.deadline));
             }
+            if let Some(condition) = compare {
+                batch = batch.when(condition);
+            }
             if let Some(write) = record_write {
                 batch = batch.entry(write);
             }
@@ -3309,16 +3425,15 @@ impl Paykit {
             finished.proof_msg_id = proof.as_ref().map(|p| p.msg_id().to_owned());
             batch = batch.local(journal_write(&finished)?);
             if batch.is_empty() {
-                // Nothing to write at the switch: the proof is queued alone.
-                if let Some(proof) = proof {
-                    self.app.queue_signed(proof).await?;
+                if let Some(PaidProof::New(proof)) = proof {
+                    self.app.queue_signed(*proof).await?;
                 }
                 self.save(&finished).await?;
                 *entry = finished;
                 return Ok(Written::Done);
             }
-            if let Some(proof) = proof {
-                batch = batch.queue(proof);
+            if let Some(PaidProof::New(proof)) = proof {
+                batch = batch.queue(*proof);
             }
             match self.submit(batch).await {
                 Ok(_) => {
@@ -3373,13 +3488,17 @@ impl Paykit {
         entry: &JournalEntry,
         target: &ActivityTarget,
         paid: bool,
-        proof: Option<&SignedMessage>,
+        proof: Option<&PaidProof>,
         overwrite: bool,
     ) -> Result<OutcomeRecord> {
-        let own = self.identity();
         let key = self.activity_key(target)?;
         let held = self.app.shared_record(&key).await?;
-        if crate::records::activity_base_changed(held.as_ref()) {
+        if crate::records::activity_base_changed(held.as_ref())
+            || (entry.billing_period.is_some()
+                && held
+                    .as_ref()
+                    .is_some_and(|r| r.content == RecordContent::Deleted))
+        {
             return Ok(if paid {
                 OutcomeRecord::Held
             } else {
@@ -3411,7 +3530,7 @@ impl Paykit {
         }
         let read = match held.as_ref().map(|r| &r.content) {
             None | Some(RecordContent::Deleted) => None,
-            Some(content) => match activity::read(content.value(), &own, ActivitySide::Payer) {
+            Some(_) => match self.read_activity(target, held.as_ref()) {
                 Some(record) => Some(record),
                 None if paid && overwrite => None,
                 None if paid => return Ok(OutcomeRecord::Held),
@@ -3426,7 +3545,35 @@ impl Paykit {
         };
         changed |= self.place_acceptance(&mut record, entry)?;
         if let Some(proof) = proof {
-            changed |= activity::place(&mut record, Role::Proof, self.own_copy(proof)?);
+            if let PaidProof::New(proof) = proof {
+                changed |= activity::place(&mut record, Role::Proof, self.own_copy(proof)?);
+            }
+            if entry.billing_period.is_some() {
+                // The claim can expire. The payer must then be able to bind the
+                // period at this key and find the proof of the payment just recorded.
+                let value = record.to_json()?;
+                let bound = crate::records::bind_activity(
+                    &value,
+                    &self.identity(),
+                    ActivitySide::Payer,
+                    None,
+                    &key,
+                    |target| self.app.record_key(target).ok(),
+                    &|proof| self.rail.settlement_id(proof),
+                );
+                if !bound
+                    .as_ref()
+                    .and_then(|r| r.proof.as_ref())
+                    .is_some_and(|stored| stored.hash() == proof.hash())
+                {
+                    return Ok(OutcomeRecord::Held);
+                }
+                if !changed && matches!(proof, PaidProof::Original(_)) {
+                    return Ok(OutcomeRecord::Compared(
+                        self.app.record_condition(&key).await?,
+                    ));
+                }
+            }
         }
         // A payment made after `failed` was written on its claim: the record's informational
         // `status` shows it for display; no reader decides by it (Paykit wire 5.3).
@@ -3471,12 +3618,19 @@ impl Paykit {
 
     /// The payer's activity record of `entry`'s payment, rebuilt from the journal without
     /// its acceptance and proof, which the outcome places: the request kept with the entry,
-    /// or a payment without a request's own members (Paykit wire 5.3). A payment of a request
-    /// that keeps no request is a corrupt store ([`JournalEntry::check`] refuses it).
+    /// a Billing Period's request and period, or a payment without a request's own members
+    /// (Paykit wire 5.3). A payment of a request that keeps no request is a corrupt store
+    /// ([`JournalEntry::check`] refuses it).
     pub(crate) fn rebuilt_record(&self, entry: &JournalEntry) -> Result<ActivityRecord> {
         let own = self.identity();
         let mut record = activity::empty(ActivitySide::Payer, entry.payee);
         match entry.request_hash()? {
+            // A period record holds no request: it names its request and Billing Period
+            // (Paykit wire 5.3).
+            Some(hash) if entry.billing_period.is_some() => {
+                record.request_hash = Some(hash);
+                record.billing_period = entry.period()?;
+            }
             Some(hash) => {
                 let Some(kept) = &entry.request else {
                     return Err(PaykitError::corrupt());
@@ -3534,11 +3688,15 @@ impl Paykit {
     }
 
     /// The proof (Paykit spec 7.2 step 4, Paykit wire 4.10), signed for the outcome's batch.
-    fn sign_proof(&self, entry: &JournalEntry) -> Result<SignedMessage> {
+    async fn outcome_proof(
+        &self,
+        entry: &JournalEntry,
+        target: &ActivityTarget,
+    ) -> Result<Option<PaidProof>> {
         let request_hash = entry.request_hash()?;
         let proof = PaymentProof {
             attempt_id: entry.attempt()?,
-            billing_period: None,
+            billing_period: entry.period()?,
             payment_endpoint_identifier: entry.destination.endpoint_id()?,
             payment_app_id: entry.destination.app_id,
             list_version: entry.destination.list_version,
@@ -3552,8 +3710,28 @@ impl Paykit {
             proof: entry.rail_proof.clone().ok_or_else(PaykitError::corrupt)?,
         };
         let refs: Vec<[u8; 32]> = request_hash.into_iter().collect();
+        if entry.billing_period.is_some() {
+            if let Some(record) = self.held_activity(target).await? {
+                if let Some(original) = record.proof {
+                    let matches = matches_paid_proof(
+                        &original,
+                        self.identity(),
+                        self.app_id(),
+                        entry.payee,
+                        &refs,
+                        &proof,
+                    );
+                    return Ok(matches.then(|| PaidProof::Original(Box::new(original))));
+                }
+            }
+        }
         let body = proof.to_body(refs.len())?;
-        self.sign(entry.payee, Kind::PaymentProof, refs, body)
+        Ok(Some(PaidProof::New(Box::new(self.sign(
+            entry.payee,
+            Kind::PaymentProof,
+            refs,
+            body,
+        )?))))
     }
 
     /// Finish the payments a crash, a lost answer or a pending payment method left in the
@@ -3940,8 +4118,9 @@ impl Paykit {
     /// included, whatever copy this app keeps) or doesn't read as the request, a newer write
     /// this app refused included, so nothing shows it still open; or the request is held
     /// after a restore or a `missed` item until the user confirms it (Paykit spec 7.2,
-    /// [`Paykit::confirm_possibly_cancelled`]); or the record holds `manual_only`, or the
-    /// request is a one-time one dated before the block floor, or the floor can't be read
+    /// [`Paykit::confirm_possibly_cancelled`]); or the record holds `manual_only` for an
+    /// attempt the user did not start, or the request is a one-time one dated before the
+    /// block floor, or the floor can't be read
     /// (`crate::floor`, whatever the record holds: another app may have opened it before it
     /// held the floor): the request is paid only by hand, and a repeat is an automatic
     /// payment (Paykit spec 8.1, 8.3), so the attempt stays open and the user's payment
@@ -3958,10 +4137,12 @@ impl Paykit {
         if Box::pin(self.divergent_withholds(entry)).await? {
             return Ok(true);
         }
-        if entry.request_hash()?.is_none() {
+        // A Billing Period's request record is the one its payee cancels, beside the period
+        // record the outcome writes (Paykit spec 8.2).
+        let Some(natural) = entry.request_record()? else {
             return Ok(false);
-        }
-        let target = ActivityTarget::payer(entry.natural_key.clone());
+        };
+        let target = ActivityTarget::payer(natural);
         if self.kept_stop(&target).await? {
             return Ok(true);
         }
@@ -3981,8 +4162,9 @@ impl Paykit {
     /// ([`Paykit::fresh_request`]), withholds an automatic payment of it, at a repeat's
     /// withheld check and at the last check before any automatic call
     /// ([`Paykit::automatic_dispatch_held`]): the record shows the request cancelled or
-    /// rejected, or holds `manual_only`; the request is held after a restore or a `missed`
-    /// item until the user confirms it (Paykit spec 7.2); or the record, or the list's
+    /// rejected, or holds `manual_only` for an attempt the user did not start; the request
+    /// is held after a restore or a `missed` item until the user confirms it (Paykit
+    /// spec 7.2); or the record, or the list's
     /// record, is divergent or paused since it was seen so, the view read after the record
     /// (Paykit spec 6, 8.1, 8.3).
     async fn fresh_record_withholds(
@@ -3993,13 +4175,15 @@ impl Paykit {
     ) -> Result<bool> {
         Ok(cancelled(fresh)
             || rejected(fresh)
-            || fresh.manual_only
+            || (fresh.manual_only && !entry.user_started)
             || self.held(&self.activity_key(target)?, fresh).await?
             || Box::pin(self.divergent_withholds(entry)).await?)
     }
 
-    /// Whether `entry`'s request record, or the `payment_lists` record of the list its
-    /// destination came from, blocks an automatic payment ([`crate::divergent::Pause`]).
+    /// Whether `entry`'s request record, a Billing Period's period record, or the
+    /// `payment_lists` record of the list its destination came from, blocks an automatic
+    /// payment ([`crate::divergent::Pause`]): a divergent request record pauses every period
+    /// of the request, and a period record its own (Paykit spec 6, 8.2).
     async fn divergent_withholds(&mut self, entry: &JournalEntry) -> Result<bool> {
         self.divergent_pauses(entry, crate::divergent::Pause::blocks_automatic)
             .await
@@ -4011,7 +4195,10 @@ impl Paykit {
         rule: fn(crate::divergent::Pause) -> bool,
     ) -> Result<bool> {
         let mut records = Vec::new();
-        if entry.request_hash()?.is_some() {
+        if let Some(natural) = entry.request_record()? {
+            records.push(self.activity_key(&ActivityTarget::payer(natural))?);
+        }
+        if entry.period()?.is_some() {
             records.push(self.activity_key(&ActivityTarget::payer(entry.natural_key.clone()))?);
         }
         if entry.destination.source()? == DestinationSource::List {
@@ -4131,6 +4318,20 @@ impl Paykit {
         if self.payment_base_changed(entry).await? {
             return Ok(true);
         }
+        if entry.billing_period.is_some() {
+            let parent =
+                ActivityTarget::payer(entry.request_record()?.ok_or_else(PaykitError::corrupt)?);
+            let period = ActivityTarget::payer(entry.natural_key.clone());
+            let crossing_payee = (by == Initiator::User && matches!(kind, Dispatch::First { .. }))
+                .then_some(entry.payee);
+            for (target, crossing) in [(&parent, crossing_payee), (&period, None)] {
+                match Box::pin(self.current_period_activity(target, crossing)).await {
+                    Ok(Some(record)) if !payment_ended(&record, crossing) => {}
+                    Ok(_) | Err(PaykitError::Refused(_)) => return Ok(true),
+                    Err(error) => return Err(error),
+                }
+            }
+        }
         if by == Initiator::Automatic {
             return self.automatic_dispatch_held(entry).await;
         }
@@ -4218,14 +4419,14 @@ impl Paykit {
         if deny.contains(&entry.payee) {
             return Ok(None);
         }
-        if entry.request_hash()?.is_none() {
+        let Some(natural) = entry.request_record()? else {
             return Ok(Some(SharedState {
                 deny,
                 record: None,
                 floor: None,
             }));
-        }
-        let target = ActivityTarget::payer(entry.natural_key.clone());
+        };
+        let target = ActivityTarget::payer(natural);
         let (record, stamp) = match self.fresh_request_stamped(&target).await {
             Ok((Fresh::Held(record), Some(stamp))) => (*record, stamp),
             Ok(_) | Err(_) => return Ok(None),
@@ -4711,6 +4912,53 @@ mod tests {
 
     fn lost() -> AppError {
         AppError::Transport(TransportError::Connect("down".into()))
+    }
+
+    #[test]
+    fn test_restored_payment_compares_the_signed_occurrence_and_method_result() {
+        let vectors: serde_json::Value =
+            serde_json::from_str(include_str!("../../specs/v0.2/vectors/sealed.json")).unwrap();
+        let period = vectors["activity_records"]["accepted"].as_array().unwrap().iter()
+            .find(|r| r["name"] == "a period record whose proof names earlier details, with later ones in earlier_details").unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(period["value"].as_str().unwrap()).unwrap();
+        let payee =
+            pubky_switch_core::enc::pubky_key(value["counterparty"].as_str().unwrap()).unwrap();
+        let signed = StoredMessage::read(&value["proof"], &payee).unwrap();
+        let Body::PaymentProof(proof) = signed.body() else {
+            panic!("expected a payment proof")
+        };
+        let payer = signed.sender();
+        let app = signed.cert().app_id();
+        let refs = &signed.message().refs;
+        let matches = |expected: &PaymentProof| {
+            matches_paid_proof(&signed, payer, app, payee, refs, expected)
+        };
+        assert!(matches(proof));
+        assert!(!matches_paid_proof(&signed, payee, app, payer, refs, proof));
+        assert!(!matches_paid_proof(
+            &signed, payer, [0; 16], payee, refs, proof
+        ));
+        assert!(!matches_paid_proof(
+            &signed,
+            payer,
+            app,
+            payee,
+            &[[0; 32]],
+            proof
+        ));
+        let mut other = proof.clone();
+        other.attempt_id = AttemptId::from_bytes([0; 16]);
+        assert!(!matches(&other));
+        let mut other = proof.clone();
+        other.billing_period.as_mut().unwrap().ends_at += 1;
+        assert!(!matches(&other));
+        let mut other = proof.clone();
+        other.payment_app_id = [0; 16];
+        assert!(!matches(&other));
+        let mut other = proof.clone();
+        other.proof.clear();
+        assert!(!matches(&other));
     }
 
     #[test]

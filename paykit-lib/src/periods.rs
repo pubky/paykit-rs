@@ -438,6 +438,22 @@ impl Recurrence {
         Ok(self.in_range(period.index)?.then_some(period))
     }
 
+    /// The Billing Period whose start rounds down to the Unix second used by its
+    /// obligation and record key (Paykit wire 1.5, 5.3).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::lookup`], or if the second is outside the wire time range.
+    pub fn by_start_secs(&self, start: u64) -> Result<Option<BillingPeriod>> {
+        // Both fixed and calendar boundaries retain the anchor's fraction of a second.
+        let boundary = start
+            .checked_mul(1000)
+            .and_then(|ms| ms.checked_add(self.rule.anchor() % 1000))
+            .filter(|ms| *ms <= MAX_TIME_MS)
+            .ok_or_else(out_of_range)?;
+        Ok(self.lookup(boundary)?.filter(|p| p.starts_at == boundary))
+    }
+
     /// The Billing Period a message names, if it equals one of the request's periods,
     /// compared as instants (Paykit wire 4.4); `None` for anything else, which is rejected.
     ///
@@ -665,6 +681,29 @@ mod tests {
         };
         assert!(rec.named(&wrong).unwrap().is_none());
         assert_eq!(Recurrence::from_json(&rec.to_json()).unwrap(), rec);
+    }
+
+    #[test]
+    fn test_periods_find_the_start_named_in_whole_seconds() {
+        let anchor = t("2026-01-31T12:00:00.500Z");
+        for unit in [Unit::Day, Unit::Month] {
+            let rule = AnchoredRule::new(anchor, 1, unit).unwrap();
+            let end = rule.boundary(2).unwrap();
+            let recurrence = Recurrence::new(rule, anchor + 125, Some(end)).unwrap();
+            for period in recurrence.periods(2).unwrap() {
+                assert_eq!(
+                    recurrence.by_start_secs(period.start_secs()).unwrap(),
+                    Some(period)
+                );
+                assert!(recurrence
+                    .by_start_secs(period.start_secs() + 1)
+                    .unwrap()
+                    .is_none());
+            }
+            assert!(recurrence.by_start_secs(end / 1000).unwrap().is_none());
+            assert!(recurrence.by_start_secs(u64::MAX).is_err());
+            assert!(recurrence.by_start_secs(MAX_TIME_MS / 1000 + 1).is_err());
+        }
     }
 
     #[test]

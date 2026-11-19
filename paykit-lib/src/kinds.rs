@@ -46,6 +46,8 @@ pub enum Role {
     /// An app holding `paykit_request`, or a labelled selling scope, which counts as
     /// `paykit_request` for the kind before labels narrow it.
     Request,
+    /// A Private Payment List publisher holding plain `paykit_request`.
+    ListPublisher,
     /// An app holding `paykit_allowance`.
     Allowance,
     /// An app holding `paykit_allowance_execute`.
@@ -138,10 +140,10 @@ impl Kind {
     /// The scopes, any one of which sends the kind (Paykit spec 3.3).
     pub fn senders(self) -> &'static [Role] {
         match self {
-            Self::PaymentRequest
-            | Self::PaymentPeriodDetails
-            | Self::PaymentReceipt
-            | Self::PrivatePaymentList => &[Role::Request],
+            Self::PaymentRequest | Self::PaymentPeriodDetails | Self::PaymentReceipt => {
+                &[Role::Request]
+            }
+            Self::PrivatePaymentList => &[Role::ListPublisher],
             Self::PaymentRequestAcceptance
             | Self::PaymentRequestRejection
             | Self::PaymentProof
@@ -174,10 +176,10 @@ impl Kind {
             | Self::PaymentPeriodDetails
             | Self::PaymentReceipt
             | Self::PrivatePaymentList => &[Role::Pay],
-            Self::PaymentRequestAcceptance
-            | Self::PaymentRequestRejection
-            | Self::PaymentProof
-            | Self::PrivatePaymentListRequest => &[Role::Request],
+            Self::PaymentRequestAcceptance | Self::PaymentRequestRejection | Self::PaymentProof => {
+                &[Role::Request]
+            }
+            Self::PrivatePaymentListRequest => &[Role::ListPublisher],
             Self::PaymentRequestCancellation => &[Role::Request, Role::Pay],
             Self::AllowanceProposal
             | Self::AllowanceAcceptance
@@ -338,16 +340,16 @@ impl MessageKind {
     }
 }
 
-/// Whether `scopes` hold one of `roles`, a labelled selling scope counting as `paykit_request`
-/// (Paykit wire 4.1 check 8; the labels then narrow it). [`Role::Any`] is any Paykit App:
-/// a certificate holding at least one of Paykit's scopes, so a certificate of another
-/// protocol only sends and receives no Paykit kind (Switch wire 3.1 "Several protocols").
-fn holds_role(scopes: &[String], roles: &[Role]) -> bool {
+/// Whether `scopes` hold one of `roles` (Paykit wire 4.1 check 8). Labelled selling
+/// scopes authorize request-related kinds. A list publisher needs plain `paykit_request`.
+/// [`Role::Any`] requires at least one Paykit scope (Switch wire 3.1 "Several protocols").
+pub fn holds_role(scopes: &[String], roles: &[Role]) -> bool {
     let has = |s: &str| scopes.iter().any(|x| x == s);
     roles.iter().any(|role| match role {
         Role::Any => scopes::holds_paykit_scope(scopes),
         Role::Pay => has("paykit_pay"),
         Role::Request => scopes::acts_as_payee(scopes),
+        Role::ListPublisher => has(scopes::REQUEST),
         Role::Allowance => has("paykit_allowance"),
         Role::AllowanceExecute => has("paykit_allowance_execute"),
     })
@@ -832,6 +834,28 @@ mod tests {
             &owned(&["paykit_request:shop1"])
         )
         .is_err());
+    }
+
+    #[test]
+    fn test_kinds_list_requests_need_a_plain_publisher_for_every_target() {
+        let publisher = owned(&["paykit_request"]);
+        let labelled_payer = owned(&["paykit_request:shop1", "paykit_pay"]);
+        let labelled_seller = owned(&["paykit_request:shop1"]);
+        for target in [None, Some([7; 16])] {
+            let body = crate::bodies::PrivatePaymentListRequest {
+                app_id: target,
+                held_version: None,
+            }
+            .to_body()
+            .unwrap();
+            let request = message(
+                Kind::PrivatePaymentListRequest.as_str(),
+                serde_json::Value::Object(body),
+            );
+            check_kind_scopes(&request, &labelled_payer, &publisher).unwrap();
+            assert!(check_kind_scopes(&request, &labelled_payer, &labelled_payer).is_err());
+            assert!(check_kind_scopes(&request, &labelled_seller, &publisher).is_err());
+        }
     }
 
     #[test]

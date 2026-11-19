@@ -1259,3 +1259,98 @@ pub fn list_version(generation: u64, counter: u64) -> paykit_lib::ListVersion {
 pub fn single_use_payload(version: paykit_lib::ListVersion) -> String {
     format!("bc1qsingle{}x{}", version.generation(), version.counter())
 }
+
+/// A store that, once armed, fails the client's next commit that keeps a batch
+/// (`opq/<batch_id>`), once, applying nothing.
+#[derive(Default)]
+pub struct FailNextKeep {
+    inner: pubky_switch_client::store::MemoryStore,
+    before: std::sync::atomic::AtomicBool,
+    after: std::sync::atomic::AtomicBool,
+}
+
+impl pubky_switch_client::store::StateStore for FailNextKeep {
+    fn get(
+        &self,
+        ns: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+        self.inner.get(ns, key)
+    }
+
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    {
+        self.inner.scan(ns, prefix, after, limit)
+    }
+
+    fn commit(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        self.commit_with(batch, |batch| {
+            self.inner
+                .commit(batch)
+                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+        })
+        .map(|_| ())
+    }
+
+    fn acquire(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.inner.acquire(ns, owner)
+    }
+
+    fn commit_if(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
+    }
+}
+impl FailNextKeep {
+    pub fn fail_before_keep(&self) {
+        self.before.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    pub fn lose_keep_answer(&self) {
+        self.after.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn commit_with(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+        apply: impl FnOnce(
+            pubky_switch_client::store::WriteBatch,
+        ) -> Result<
+            pubky_switch_client::store::CommitOutcome,
+            pubky_switch_client::error::StoreError,
+        >,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        use pubky_switch_client::store::Write;
+        use std::sync::atomic::Ordering;
+        let keeps = batch
+            .writes()
+            .iter()
+            .any(|write| matches!(write, Write::Put { key, .. } if key.starts_with(b"opq/")));
+        if keeps && self.before.swap(false, Ordering::SeqCst) {
+            return Err(pubky_switch_client::error::StoreError::Unavailable);
+        }
+        let outcome = apply(batch)?;
+        if keeps && self.after.swap(false, Ordering::SeqCst) {
+            return Err(pubky_switch_client::error::StoreError::Unknown);
+        }
+        Ok(outcome)
+    }
+}

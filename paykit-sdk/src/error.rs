@@ -78,7 +78,8 @@ pub enum Refusal {
     /// is shown and may pay over: paying anyway carries it back
     /// ([`crate::PayOptions::with_may_be_paid_confirmed`]), and only that same doubt is
     /// passed. `None` for a reason no confirmation passes, such as a pinned deadline other
-    /// than the app's own, or a claim that doesn't show this app's attempt open.
+    /// than the app's own, a claim that doesn't show this app's attempt open, or a
+    /// Billing Period with incomplete payment history after payer-provider loss.
     #[error("may already be paid: {reason}")]
     MayBePaid {
         /// The rule that makes it doubtful.
@@ -99,8 +100,8 @@ pub enum Refusal {
     /// The attempt's deadline has passed, or the request's proposal expired (Paykit spec 7.1).
     #[error("Paykit spec 7.1: the deadline has passed")]
     DeadlinePassed,
-    /// A recurring request is paid, and cancelled by its payer, per Billing Period (Paykit
-    /// spec 8.2): `pay_request` and `cancel_request` refuse it.
+    /// A recurring request is paid per Billing Period (Paykit spec 8.2): `pay_request`
+    /// refuses it, and [`crate::Paykit::pay_period`] pays it.
     #[error("Paykit spec 8.2: a recurring request is paid per Billing Period")]
     Recurring,
     /// Whether this payment is credited already to another occurrence of the payer's can't
@@ -124,10 +125,22 @@ pub enum Refusal {
     /// spec 8.2): it is neither accepted nor rejected again, only cancelled.
     #[error("Paykit spec 8.2: the subscription is accepted already")]
     Subscribed,
-    /// The payer hasn't accepted the recurring request, as the payee's record shows: its
-    /// period details wait for the acceptance, as v0.1's quotes did (Paykit spec 8.2).
+    /// The payer hasn't accepted the recurring request: as the payee's record shows it, its
+    /// period details wait for the acceptance, as v0.1's quotes did; as the payer's request
+    /// record shows it, no Billing Period is paid before it (Paykit spec 8.2).
     #[error("Paykit spec 8.2: the payer hasn't accepted the subscription")]
     NotSubscribed,
+    /// The Billing Period hasn't started on the latest service time verified: it is paid
+    /// only by the user, after confirming paying it early
+    /// ([`crate::PayOptions::with_early_payment_confirmed`]; Paykit spec 8.2, "Not before its
+    /// start").
+    #[error("Paykit spec 8.2: the Billing Period hasn't started")]
+    PeriodNotStarted,
+    /// The request record lists 16 Billing Periods that may have an open attempt and none of
+    /// them has finished: no attempt is made on another period until one does (Paykit spec
+    /// 8.2, "Attempted periods").
+    #[error("Paykit spec 8.2: 16 Billing Periods may have an open attempt")]
+    AttemptedPeriodsFull,
     /// The destination check failed (Paykit spec 4, 7.2): the text names the rule. Refused
     /// before the attempt was written, nothing was written; refused after it, the refusal
     /// comes as [`Refusal::AttemptFailed`].

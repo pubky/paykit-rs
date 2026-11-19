@@ -1273,6 +1273,13 @@ fn period_details_effect(
     // value waits for its key holds the entry; one held that doesn't open, read or bind
     // decides nothing and is never written over here: the details are kept until placed.
     wait_for_key(cx, &target)?;
+    if cx
+        .record(&target.record_target())?
+        .is_some_and(|held| held.content == RecordContent::Deleted)
+    {
+        // New details cannot replace the evidence a deleted period may have held.
+        return Ok(());
+    }
     let period = match held_value(cx, &target)? {
         None if held_request(cx, &target)? => {
             return keep_until_placed(cx, stored, position, scopes, &request_target);
@@ -1591,17 +1598,50 @@ fn receipt_effect(
         }
         return Ok(());
     };
-    if found.names_held_proof {
-        place(cx, &target, sender, Role::Receipt, stored, seq, settlement)?;
-    }
+    let mut conditions = Vec::new();
+    let parent = if let Some(parent_target) = receipt_parent(stored) {
+        let record_key = cx.record_key(&target.record_target())?;
+        let parent_key = cx.record_key(&parent_target.record_target())?;
+        conditions.push(cx.record_condition(&record_key)?);
+        conditions.push(cx.record_condition(&parent_key)?);
+        let held = intake_activity(cx, &parent_target, RecordSide::Payer)?;
+        let Some(held) = held.filter(|h| !crate::records::activity_base_changed(Some(h))) else {
+            return keep_reply(cx, &target, stored, position);
+        };
+        if crate::divergent::step_write_waits(cx, &held, stored, seq, settlement)? {
+            return keep_reply(cx, &target, stored, position);
+        }
+        let Some(parent) = held_bound(cx, &parent_target, settlement)? else {
+            return keep_reply(cx, &target, stored, position);
+        };
+        match period_receipt(stored, &record, &parent) {
+            PeriodReceipt::Missing => return keep_reply(cx, &target, stored, position),
+            PeriodReceipt::Different => return Ok(()),
+            PeriodReceipt::Matched => {}
+        }
+        let mut updated = record.clone();
+        if activity::place(&mut updated, Role::Receipt, stored.clone()) {
+            cx.put_record(
+                &target.record_target(),
+                &updated.to_json()?,
+                conditions.clone(),
+            )?;
+        }
+        Some(parent)
+    } else {
+        if found.names_held_proof {
+            place(cx, &target, sender, Role::Receipt, stored, seq, settlement)?;
+        }
+        None
+    };
     // The journal entry of the attempt, if this app made it: it holds a payment without a
     // request's deadline, and whether `failed` stands on the claim of a payment made. One
     // that doesn't read parks the receipt rather than settling the claim with no deadline,
     // or consuming it (Switch spec 8.2): the store is corrupt. It is read as
     // `Paykit::journal_entry_on` reads it: bound to its key, and to the claim the receipt
     // settles, so an entry of the attempt on another claim parks the receipt too.
-    let claim = receipt_claim(stored, &attempt_id, |request| {
-        obligation(cx, &sender, request, 0)
+    let claim = receipt_claim(stored, &attempt_id, |request, start| {
+        obligation(cx, &sender, request, start)
     });
     let journaled = JournalEntry::on_claim(
         state::cx_get::<JournalEntry>(cx, &key::journal(&attempt_id))?,
@@ -1615,7 +1655,11 @@ fn receipt_effect(
         return Ok(());
     }
     let obligation = claim;
-    let deadline = receipt_deadline(stored, &record, journaled.as_ref());
+    let deadline = receipt_deadline(
+        stored,
+        parent.as_ref().unwrap_or(&record),
+        journaled.as_ref(),
+    );
     // A claim the app keeps no view of is read from the switch first, so the receipt
     // settles it in the cursor's batch (Switch spec 10.2 row 3).
     let read = cx.switch_claim(&obligation).map(|fetch| match fetch {
@@ -1640,7 +1684,7 @@ fn receipt_effect(
         first_receipt: found.first_receipt,
     })?;
     if let Some((op, deadline)) = settles.claim {
-        cx.claim(op, Vec::new(), deadline)?;
+        cx.claim(op, conditions, deadline)?;
     }
     if let Some(late) = settles.notice {
         let notice = key::notice(&attempt_id, NoticeKind::PaidAfterFailed);
@@ -1740,21 +1784,73 @@ pub(crate) fn failure_view(kept: Option<ClaimView>, read: Option<SwitchClaim>) -
     }
 }
 
-/// The payer's record a receipt goes into: its request's, or for a payment without a
-/// request the record of the attempt it names (Paykit wire 4.11, 5.3). This SDK makes no
-/// payment of a Billing Period: the request record holds no proof of one, so a receipt
-/// naming a period is neither stored nor settles its claim here.
+/// The payer record of the signed receipt's request, Billing Period or unrequested payment.
 pub(crate) fn receipt_target(
     stored: &StoredMessage,
     own: &[u8; 32],
     attempt_id: &AttemptId,
 ) -> ActivityTarget {
-    match stored.message().refs.get(1) {
-        Some(request) => {
-            ActivityTarget::payer(natural_key::request_record(&stored.sender(), request))
+    let sender = stored.sender();
+    let key = match (stored.message().refs.get(1), stored.body().billing_period()) {
+        (Some(request), Some(period)) => {
+            natural_key::period_record(&sender, request, period.start_secs())
         }
-        None => ActivityTarget::payer(natural_key::payer_payment_record(own, attempt_id)),
+        (Some(request), None) => natural_key::request_record(&sender, request),
+        (None, _) => natural_key::payer_payment_record(own, attempt_id),
+    };
+    ActivityTarget::payer(key)
+}
+
+/// The separate request record that authenticates a receipt's Billing Period.
+pub(crate) fn receipt_parent(stored: &StoredMessage) -> Option<ActivityTarget> {
+    stored.body().billing_period()?;
+    Some(ActivityTarget::payer(natural_key::request_record(
+        &stored.sender(),
+        stored.message().refs.get(1)?,
+    )))
+}
+
+/// The signed evidence for a receipt naming a Billing Period (Paykit wire 4.11).
+pub(crate) enum PeriodReceipt {
+    Matched,
+    Missing,
+    Different,
+}
+
+pub(crate) fn period_receipt(
+    receipt: &StoredMessage,
+    period: &ActivityRecord,
+    parent: &ActivityRecord,
+) -> PeriodReceipt {
+    let Some((signed, request)) = crate::requests::request_of(parent) else {
+        return PeriodReceipt::Missing;
+    };
+    if receipt.message().refs.get(1) != Some(&signed.hash())
+        || !matches!(crate::periods::named_period(request, receipt), Ok(Some(_)))
+    {
+        return PeriodReceipt::Different;
     }
+    let Some(proof) = &period.proof else {
+        return PeriodReceipt::Missing;
+    };
+    if receipt.message().refs.first() != Some(&proof.hash()) {
+        return PeriodReceipt::Missing;
+    }
+    let (Body::PaymentProof(paid), Body::PaymentReceipt(confirmed)) =
+        (proof.body(), receipt.body())
+    else {
+        return PeriodReceipt::Different;
+    };
+    if paid.attempt_id != confirmed.attempt_id
+        || paid.billing_period != confirmed.billing_period
+        || proof.message().refs.first() != receipt.message().refs.get(1)
+        || !period.binding().ok().is_some_and(|binding| {
+            crate::periods::request_for_payment(parent, period, &binding).is_some()
+        })
+    {
+        return PeriodReceipt::Different;
+    }
+    PeriodReceipt::Matched
 }
 
 /// What a receipt finds in the payer's record it names ([`receipt_on_record`]).
@@ -1782,7 +1878,11 @@ pub(crate) fn receipt_on_record(
     record: &ActivityRecord,
     stored: &StoredMessage,
 ) -> Option<ReceiptOnRecord> {
-    if record.counterparty != stored.sender() {
+    // A recurring request has no payment of its own. Its receipt and proof
+    // belong to the separate record of the Billing Period they name.
+    if record.counterparty != stored.sender()
+        || crate::requests::request_of(record).is_some_and(|(_, request)| request.is_recurring())
+    {
         return None;
     }
     let names_held_proof = record
@@ -1800,10 +1900,16 @@ pub(crate) fn receipt_on_record(
 pub(crate) fn receipt_claim(
     stored: &StoredMessage,
     attempt_id: &AttemptId,
-    request_obligation: impl FnOnce(&[u8; 32]) -> [u8; 32],
+    request_obligation: impl FnOnce(&[u8; 32], u64) -> [u8; 32],
 ) -> [u8; 32] {
     match stored.message().refs.get(1) {
-        Some(request) => request_obligation(request),
+        Some(request) => request_obligation(
+            request,
+            stored
+                .body()
+                .billing_period()
+                .map_or(0, |period| period.start_secs()),
+        ),
         None => paykit_lib::derive::payment_obligation(attempt_id),
     }
 }
@@ -1818,7 +1924,15 @@ pub(crate) fn receipt_deadline(
 ) -> ObligationDeadline {
     match stored.message().refs.get(1) {
         Some(_) => crate::requests::request_of(record)
-            .and_then(|(_, body)| body.attempt_deadline(None).ok())
+            .and_then(|(_, body)| {
+                let period = stored
+                    .body()
+                    .billing_period()
+                    .map(|named| body.named_period(named))
+                    .transpose()
+                    .ok()?;
+                body.attempt_deadline(period.as_ref()).ok()
+            })
             .map_or(ObligationDeadline::NotKnown, crate::pay::own_deadline),
         None => journaled.map_or(ObligationDeadline::NotKnown, |entry| {
             crate::pay::own_deadline(entry.deadline)

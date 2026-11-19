@@ -425,8 +425,9 @@ pub enum RequestStatus {
     /// seen that ([`Paykit::confirm_divergent`], Paykit spec 6).
     Divergent,
     /// A recurring request this identity accepted, the subscription running: each Billing
-    /// Period is paid on its own (Paykit spec 8.2). The payee may cancel it; the SDK refuses
-    /// the payer's cancellation of it ([`Refusal::Recurring`]).
+    /// Period is paid on its own (Paykit spec 8.2). Either side's cancellation ends it: the
+    /// payer's ([`Paykit::cancel_request`]) is refused only while a listed period has an open
+    /// or `unknown` attempt (Paykit spec 8.2, "Ending").
     Subscribed,
     /// An accepted recurring request whose last Billing Period has ended, on the highest
     /// service time verified: no period is left to come, though a payment of an earlier one
@@ -582,6 +583,17 @@ pub(crate) fn rejected(record: &ActivityRecord) -> bool {
 /// The record holds a cancellation from either side (Paykit spec 8.1).
 pub(crate) fn cancelled(record: &ActivityRecord) -> bool {
     record.cancellation.is_some()
+}
+
+/// A payment stops for a proof, rejection or cancellation. An accepted attempt finishes
+/// across its payee's cancellation of the parent request (Paykit spec 8.1).
+pub(crate) fn payment_ended(record: &ActivityRecord, crossing_payee: Option<[u8; 32]>) -> bool {
+    record.shows_paid()
+        || rejected(record)
+        || record
+            .cancellation
+            .as_ref()
+            .is_some_and(|stop| Some(stop.sender()) != crossing_payee)
 }
 
 impl Paykit {
@@ -1086,7 +1098,19 @@ impl Paykit {
                     ),
                     crate::conversion::Priced::Unusable(_) => return Ok(None),
                 };
-                (amount, payload, destination_expires, rate_window)
+                let period_deadline = match binding {
+                    RecordBinding::Period { billing_period, .. } => {
+                        request.period_payment_deadline(&billing_period)?
+                    }
+                    _ => None,
+                };
+                (
+                    amount,
+                    payload,
+                    destination_expires,
+                    rate_window,
+                    period_deadline,
+                )
             }
             // A period record whose request record the app holds but can't open or bind yet,
             // sealed under a scope key it doesn't hold or a value that doesn't read: not now,
@@ -1103,10 +1127,11 @@ impl Paykit {
                 None,
                 None,
                 None,
+                None,
             ),
             None => return Err(Refusal::NotFound.into()),
         };
-        let (amount, payload, destination_expires, rate_window) = payment;
+        let (amount, payload, destination_expires, rate_window, period_deadline) = payment;
         let settlement_id = self.rail.settlement_id(&proof.proof);
         let typed = proof.proof.get("type").filter(|value| !value.is_null());
         let known_method = typed.and_then(Value::as_str) == Some("bitcoin-txid")
@@ -1142,7 +1167,8 @@ impl Paykit {
         // destination must be unexpired; rates include both signed interval boundaries
         // (Paykit spec 8.2, Paykit wire 4.9). Same-asset payments use no rate interval.
         let verified = self.rail.verify(check).await?.filter(|paid_at| {
-            destination_expires.is_none_or(|expires| *paid_at < expires)
+            period_deadline.is_none_or(|deadline| *paid_at <= deadline)
+                && destination_expires.is_none_or(|expires| *paid_at < expires)
                 && rate_window.is_none_or(|(start, expires)| {
                     paykit_lib::periods::rates_apply(start, expires, *paid_at)
                 })
@@ -1936,9 +1962,8 @@ impl Paykit {
     /// Whether the request in `record` may still be answered as `answer` says (Paykit spec
     /// 8.1, 8.2): not paid, rejected or cancelled, nor `stopped` by a cancellation the app
     /// keeps. A recurring request is accepted or rejected only before it is accepted, and
-    /// its payer cancellation belongs to the flows that pay its periods; a one-time request
-    /// is accepted only by paying it. Its expiry is judged apart, on the record read again
-    /// ([`Paykit::expired_answer`]).
+    /// cancelled before or after; a one-time request is accepted only by paying it. Its
+    /// expiry is judged apart, on the record read again ([`Paykit::expired_answer`]).
     fn refuse_answer(
         &self,
         record: &ActivityRecord,
@@ -1956,7 +1981,7 @@ impl Paykit {
             return Err(Refusal::Cancelled.into());
         }
         match (body.is_recurring(), answer) {
-            (true, Answer::Cancel) => Err(Refusal::Recurring.into()),
+            (true, Answer::Cancel) => Ok(()),
             (true, _) if record.response.is_some() => Err(Refusal::Subscribed.into()),
             (false, Answer::Accept) => Err(Refusal::Usage(
                 "Paykit spec 8.1: a one-time request is accepted by paying it".into(),
@@ -2207,16 +2232,20 @@ impl Paykit {
         Ok(msg_id)
     }
 
-    /// The payer cancels a one-time request (Paykit spec 8.1, Paykit wire 4.8), recorded and
-    /// sent as a rejection is, and held as a rejection is: while sends to the payee are held
-    /// it is recorded, and its message goes once they aren't. Returns the cancellation's
-    /// `msg_id`.
+    /// The payer cancels a request (Paykit spec 8.1, 8.2; Paykit wire 4.8), recorded and sent
+    /// as a rejection is, and held as a rejection is: while sends to the payee are held it is
+    /// recorded, and its message goes once they aren't. A one-time request's cancellation is
+    /// conditioned on its claim; a recurring request's, which ends the subscription, on the
+    /// claim of every Billing Period its record lists in `attempted_periods`, each at the
+    /// step read with no open or `unknown` attempt, and on the record's version: an attempt
+    /// on a period not listed writes the record, so an attempt and the cancellation can't
+    /// both succeed. Returns the cancellation's `msg_id`.
     ///
     /// # Errors
     ///
-    /// As [`Paykit::reject_request`]; [`Refusal::Recurring`] for a recurring request, whose
-    /// cancellation is conditioned on its Billing Periods' claims (Paykit spec 8.2), with
-    /// nothing recorded, whether or not sends to the payee are held.
+    /// As [`Paykit::reject_request`]; for a recurring request, [`Refusal::PaymentInProgress`]
+    /// while a listed period's attempt is open, and [`Refusal::MayBePaid`] while one's
+    /// outcome is `unknown`.
     pub async fn cancel_request(
         &mut self,
         request: &RequestRef,
@@ -2350,10 +2379,11 @@ impl Paykit {
             crate::pay::refuse_blocked(blocked, shown, options.blocked_confirmed.as_ref())?;
         }
         let expiry = expiry_deadline(&record, body);
-        // Past its proposal expiry, a recurring request can't be answered: the batch's time
-        // condition would refuse it on every try. The copy held may be stale, so the record
-        // the switch holds decides.
-        if recurring && self.reached(expiry) {
+        // Past its proposal expiry, a recurring request can't be accepted or rejected: the
+        // batch's time condition would refuse it on every try. The copy held may be stale, so
+        // the record the switch holds decides. Its cancellation carries no time condition.
+        let timed = recurring && answer != Answer::Cancel;
+        if timed && self.reached(expiry) {
             return Err(self.expired_answer(&target, answer, None).await?);
         }
         let obligation = self.obligation(&request.payee, &request.request_hash, 0);
@@ -2400,8 +2430,12 @@ impl Paykit {
         // step read: an attempt meanwhile fails the batch, and the reply goes nowhere (Paykit
         // spec 8.1). A recurring request has no claim before it is accepted; its acceptance
         // and rejection are conditioned on the proposal not having expired, when it has an
-        // expiry, so the two can't both go out (Paykit spec 8.2).
-        let conditions = if recurring {
+        // expiry, so the two can't both go out (Paykit spec 8.2). Its payer's cancellation is
+        // conditioned on the claims of the Billing Periods its record lists instead
+        // ([`Paykit::cancel_conditions`]).
+        let conditions = if recurring && answer == Answer::Cancel {
+            self.cancel_conditions(&record, request).await?
+        } else if recurring {
             acceptance_end
                 .map(|end| Condition::ServerTimeIn {
                     start: None,
@@ -2437,14 +2471,27 @@ impl Paykit {
             Err(error) => {
                 if let PaykitError::Client(client) = &error {
                     if let Some(view) = claim_conflict(client.unkept()) {
-                        refuse_on_claim(&view)?;
+                        if !recurring {
+                            refuse_on_claim(&view)?;
+                        }
                     }
+                }
+                // A listed period's claim moved since it was read: the claims, read again,
+                // refuse the cancellation as the check before it does, an open attempt as in
+                // progress and an `unknown` one as may be paid; claims that show no open
+                // attempt leave a conflict, for the caller to read again (Paykit spec 8.2,
+                // "Ending").
+                if recurring
+                    && answer == Answer::Cancel
+                    && error.code() == Some(ErrorCode::Conflict)
+                {
+                    self.cancel_conditions(&record, request).await?;
                 }
                 // The proposal expired at the service: the answer's verified time says so.
                 // Only on `409 conflict`: any other failure is the error. The record the
                 // service holds decides, read again, and a record that isn't there or doesn't
                 // read as this request leaves the conflict as the answer.
-                if recurring && error.code() == Some(ErrorCode::Conflict) && self.reached(expiry) {
+                if timed && error.code() == Some(ErrorCode::Conflict) && self.reached(expiry) {
                     let error = conflict(error);
                     return Err(self.expired_answer(&target, answer, Some(error)).await?);
                 }
@@ -2471,6 +2518,49 @@ impl Paykit {
             self.send_message(&msg_id).await?;
         }
         Ok((msg_id.clone(), Some(self.delivered(&msg_id).await?)))
+    }
+}
+
+impl Paykit {
+    /// The conditions of a payer's cancellation of the recurring request in `record`
+    /// (Paykit spec 8.2, "Ending"): a `claim_step` on the claim of every Billing Period it
+    /// lists in `attempted_periods`, at the step read, none of which may have an open or
+    /// `unknown` attempt; the record's version is the write's own.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::PaymentInProgress`] for a listed period with an open attempt;
+    /// [`Refusal::MayBePaid`] for one whose attempt's outcome is `unknown`; the client's
+    /// errors.
+    async fn cancel_conditions(
+        &mut self,
+        record: &ActivityRecord,
+        request: &RequestRef,
+    ) -> Result<Vec<Condition>> {
+        let (finished, conditions) = self.finished_periods(record, request).await?;
+        for listed in &record.attempted_periods {
+            if finished.contains(listed) {
+                continue;
+            }
+            // An `unknown` attempt may have paid, whatever the claim's state: may be paid,
+            // until its owner reports it or another own app writes it `failed`.
+            let claim_key = self.obligation(&request.payee, &request.request_hash, *listed);
+            let unknown = self.app.read_claim(&claim_key).await?.is_some_and(|read| {
+                read.view
+                    .attempts
+                    .iter()
+                    .any(|a| a.outcome == Outcome::Unknown)
+            });
+            if unknown {
+                return Err(Refusal::MayBePaid {
+                    reason: "Paykit spec 8.2: a listed period's attempt is unknown".into(),
+                    doubt: None,
+                }
+                .into());
+            }
+            return Err(Refusal::PaymentInProgress.into());
+        }
+        Ok(conditions)
     }
 }
 

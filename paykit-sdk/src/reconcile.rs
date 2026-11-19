@@ -14,12 +14,13 @@
 //! `reconcile`, `unknown`, or `failed`). [`Paykit::end_reconcile`] completes Paykit's part;
 //! the app stays in reconcile mode until its other protocols complete theirs.
 //!
-//! After a provider loss, a reconcile also lists each one-time request of the payer's records
-//! still in doubt from before the loss ([`Doubtful::before_loss`], Paykit spec 7.3, "After a
-//! provider loss"), with no attempt when the new service holds none: the user pays it by hand
-//! over the doubt or states it wasn't paid before the loss
-//! ([`Paykit::confirm_not_paid_before_loss`]). One whose claim there is SETTLED, or that the
-//! user's statement for that loss covers, isn't listed.
+//! After a provider loss, a reconcile also lists each one-time request, and each Billing
+//! Period of a subscription that may have been attempted, of the payer's records still in
+//! doubt from before the loss ([`Doubtful::before_loss`], Paykit spec 7.3, "After a
+//! provider loss"), with no attempt when the new service holds none. A SETTLED claim
+//! resolves the doubt. A Billing Period of an earlier subscription stays held while its
+//! payment history is incomplete. For a one-time request the user can confirm the doubt
+//! or state it wasn't paid before that loss ([`Paykit::confirm_not_paid_before_loss`]).
 //!
 //! The payer pass, the reading of the payer's obligations above, needs `paykit_pay`: without it the
 //! switch answers no claim read. After a restore, no new attempt is made and nothing is
@@ -32,6 +33,7 @@
 use paykit_lib::bodies::RequestDestination;
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::{natural_key, payment_obligation};
+use paykit_lib::periods::{BillingPeriod, PeriodRef};
 use paykit_lib::records::{ActivityRecord, ActivitySide, DestinationSource, RecordBinding};
 use paykit_lib::{AttemptId, Body};
 use pubky_switch_client::app::{
@@ -40,11 +42,11 @@ use pubky_switch_client::app::{
 use pubky_switch_core::claims::{Basis, ClaimStatus, Outcome};
 use pubky_switch_core::ops::{Condition, OpKind};
 
-use crate::activity::{self, ActivityTarget};
+use crate::activity::ActivityTarget;
 use crate::destination::Carrier;
-use crate::error::{Refusal, Result};
+use crate::error::{PaykitError, Refusal, Result};
 use crate::hold::RestoreHold;
-use crate::journal::{Destination, JournalEntry, KeptAmount, Stage};
+use crate::journal::{Destination, JournalEntry, KeptAmount, KeptPeriod, Stage};
 use crate::pay::{own_deadline, PayOutcome, Written};
 use crate::paykit::Paykit;
 use crate::rail::{RailOutcome, RailPaid};
@@ -87,7 +89,8 @@ pub struct Doubtful {
     /// hand over the doubt ([`crate::PayOptions::with_may_be_paid_confirmed`], with the
     /// doubt [`Paykit::pay_request`] refuses it with) or states it wasn't paid
     /// ([`Paykit::confirm_not_paid_before_loss`], with this loss). A newer loss lists it
-    /// again, under that loss. `None` for an obligation no provider loss leaves in doubt.
+    /// again, under that loss. A Billing Period of an earlier subscription stays held while
+    /// its payment history is incomplete. `None` for an obligation no provider loss leaves in doubt.
     pub before_loss: Option<crate::LossBoundary>,
 }
 
@@ -112,20 +115,58 @@ struct Obligation {
     claim_key: [u8; 32],
     payee: [u8; 32],
     request_hash: Option<[u8; 32]>,
+    /// The request record, or a payment without a request's record.
     record: ActivityRecord,
+    /// The Billing Period, for a recurring request.
+    period: Option<BillingPeriod>,
+    /// The natural key of the record its outcome writes: the request's, the period's, or
+    /// the payment's.
+    natural_key: Vec<u8>,
 }
 
 impl Paykit {
-    fn obligations(&self, records: &[ActivityRecord]) -> Vec<Obligation> {
+    /// The obligations of the payer's `records` (Paykit spec 7.3): each one-time request's,
+    /// each payment without a request's, and, for a recurring request, every Billing Period
+    /// its request record lists in `attempted_periods`, where every attempt on a period is
+    /// listed from its own batch on until its claim has no open or `unknown` attempt, and
+    /// every period of it a period record names (Paykit spec 8.2).
+    ///
+    /// # Errors
+    ///
+    /// A corrupt store for a listed start whose recurrence can't be computed.
+    fn obligations(&self, records: &[ActivityRecord]) -> Result<Vec<Obligation>> {
         let mut out = Vec::new();
+        let mut periods: Vec<([u8; 32], [u8; 32], u64)> = Vec::new();
         for record in records {
             match record.binding() {
-                Ok(RecordBinding::Request { request_hash }) => out.push(Obligation {
-                    claim_key: self.obligation(&record.counterparty, &request_hash, 0),
-                    payee: record.counterparty,
-                    request_hash: Some(request_hash),
-                    record: record.clone(),
-                }),
+                Ok(RecordBinding::Request { request_hash }) => {
+                    let payee = record.counterparty;
+                    if request_of(record).is_some_and(|(_, body)| body.is_recurring()) {
+                        periods.extend(
+                            record
+                                .attempted_periods
+                                .iter()
+                                .map(|start| (payee, request_hash, *start)),
+                        );
+                        continue;
+                    }
+                    out.push(Obligation {
+                        claim_key: self.obligation(&payee, &request_hash, 0),
+                        payee,
+                        request_hash: Some(request_hash),
+                        record: record.clone(),
+                        period: None,
+                        natural_key: natural_key::request_record(&payee, &request_hash),
+                    });
+                }
+                Ok(RecordBinding::Period {
+                    request_hash,
+                    billing_period,
+                }) => periods.push((
+                    record.counterparty,
+                    request_hash,
+                    billing_period.start_secs(),
+                )),
                 Ok(RecordBinding::Unrequested) => {
                     if let Some(attempt) = record.attempt_id {
                         out.push(Obligation {
@@ -133,19 +174,56 @@ impl Paykit {
                             payee: record.counterparty,
                             request_hash: None,
                             record: record.clone(),
+                            period: None,
+                            natural_key: natural_key::payer_payment_record(
+                                &self.identity(),
+                                &attempt,
+                            ),
                         });
                     }
                 }
                 _ => {}
             }
         }
-        out
+        periods.sort_unstable();
+        periods.dedup();
+        for (payee, request_hash, start) in periods {
+            // The period of a request the app holds, by its recurrence; a start that names
+            // no Billing Period of it is no period's (Paykit wire 5.3).
+            let Some((record, body)) = records.iter().find_map(|record| {
+                let (stored, body) = request_of(record)?;
+                (stored.hash() == request_hash && record.counterparty == payee)
+                    .then_some((record, body))
+            }) else {
+                continue;
+            };
+            let period = match body
+                .recurrence
+                .as_ref()
+                .map(|r| r.by_start_secs(start))
+                .transpose()?
+            {
+                Some(Some(period)) => period,
+                _ => continue,
+            };
+            out.push(Obligation {
+                claim_key: self.obligation(&payee, &request_hash, start),
+                payee,
+                request_hash: Some(request_hash),
+                record: record.clone(),
+                period: Some(period),
+                natural_key: natural_key::period_record(&payee, &request_hash, start),
+            });
+        }
+        Ok(out)
     }
 
-    /// The provider loss that leaves `obligation`, a one-time request's, in doubt (Paykit
-    /// spec 7.3), its claim at the new service not SETTLED, which the caller judges first:
-    /// as the request's status reads [`crate::RequestStatus::MayBePaid`] for the loss, the
-    /// record showing it neither paid, rejected nor cancelled.
+    /// The provider loss that leaves `obligation`, a one-time request's or a Billing
+    /// Period's, in doubt (Paykit spec 7.3), its claim at the new service not SETTLED, which
+    /// the caller judges first: as the request's status reads
+    /// [`crate::RequestStatus::MayBePaid`] for the loss, the request record showing it neither
+    /// rejected nor cancelled, and the record of the occurrence not showing it paid. A Billing
+    /// Period may have been paid early, before the signed subscription's service was lost.
     async fn request_loss_doubt(
         &self,
         obligation: &Obligation,
@@ -155,15 +233,28 @@ impl Paykit {
             return Ok(None);
         };
         if obligation.request_hash.is_none()
-            || body.is_recurring()
-            || record.shows_paid()
+            || body.is_recurring() != obligation.period.is_some()
             || rejected(record)
             || cancelled(record)
         {
             return Ok(None);
         }
-        self.loss_doubt(&obligation.claim_key, Some(stored), None)
-            .await
+        let paid = match obligation.period {
+            None => record.shows_paid(),
+            Some(_) => self
+                .held_activity(&ActivityTarget::payer(obligation.natural_key.clone()))
+                .await?
+                .is_some_and(|period| period.shows_paid()),
+        };
+        if paid {
+            return Ok(None);
+        }
+        self.loss_doubt(
+            &obligation.claim_key,
+            Some(stored),
+            obligation.period.map(PeriodRef::from),
+        )
+        .await
     }
 
     async fn payer_records(&self) -> Result<Vec<ActivityRecord>> {
@@ -241,7 +332,7 @@ impl Paykit {
             Vec::new()
         };
         let me = self.app_id();
-        for obligation in self.obligations(&records) {
+        for obligation in self.obligations(&records)? {
             let mut read = self.app.read_claim(&obligation.claim_key).await?;
             let attempts = read
                 .as_ref()
@@ -360,10 +451,12 @@ impl Paykit {
     /// The journal entry of an own attempt on `obligation` the journal doesn't hold, rebuilt
     /// from the payer's request record and the payee's lists, enough for its outcome and its
     /// proof (Paykit spec 7.2, Paykit wire 4.10): the request's amount, label and deadline,
-    /// and the destination paid. `None` when the records can't tell which destination was
-    /// paid: a request whose own endpoints leave more than one usable, a list endpoint not
-    /// marked used by this attempt at the version held, or a payment without a request,
-    /// whose record doesn't keep the amount its proof states.
+    /// the Billing Period's for a period, and the destination paid. `None` when the records
+    /// can't tell which destination was paid: a request whose own endpoints leave more than
+    /// one usable, a list endpoint not marked used by this attempt at the version held, a
+    /// later Billing Period of a request with `per_period_endpoints`, paid to its period
+    /// details' destination, or a payment without a request, whose record doesn't keep the
+    /// amount its proof states.
     async fn rebuilt_entry(
         &self,
         obligation: &Obligation,
@@ -378,12 +471,24 @@ impl Paykit {
             &obligation.payee,
             &request_hash,
         ));
-        if body.is_recurring()
+        if body.is_recurring() != obligation.period.is_some()
             || self
                 .activity_base_changed(&self.activity_key(&target)?)
                 .await?
         {
             return Ok(None);
+        }
+        // The request's destination serves a period unless the request has
+        // `per_period_endpoints` and it isn't the first (Paykit spec 8.2).
+        if let Some(period) = obligation.period {
+            let first = body
+                .recurrence
+                .as_ref()
+                .ok_or_else(PaykitError::corrupt)?
+                .first()?;
+            if body.per_period_endpoints && period != first {
+                return Ok(None);
+            }
         }
         let (destination, carrier) = match &body.destination {
             RequestDestination::Endpoints(endpoints) => {
@@ -461,15 +566,17 @@ impl Paykit {
             }
         };
         let mut entry = JournalEntry {
+            // The claim alone cannot establish that the user started this payment.
+            user_started: false,
             attempt_id: attempt.to_text(),
             obligation: obligation.claim_key,
             payee: obligation.payee,
             request_hash: Some(pubky_switch_core::enc::b64(&request_hash)),
-            natural_key: natural_key::request_record(&obligation.payee, &request_hash),
+            natural_key: obligation.natural_key.clone(),
             amount: KeptAmount::of(&body.amount),
             payment_amount: KeptAmount::of(&body.amount),
             destination,
-            deadline: body.attempt_deadline(None)?,
+            deadline: body.attempt_deadline(obligation.period.as_ref())?,
             stage: Stage::Paying,
             step: None,
             label: body.label.as_ref().map(|l| l.as_str().to_owned()),
@@ -496,6 +603,9 @@ impl Paykit {
             transfer_bound: None,
             price: None,
             failed_on_claim: false,
+            billing_period: obligation
+                .period
+                .map(|period| KeptPeriod::of(&PeriodRef::from(period))),
         };
         entry.keep_carrier(&carrier);
         Ok(Some(entry))
@@ -516,6 +626,8 @@ impl Paykit {
     /// - otherwise the record gets the journaled acceptance, if any, and `status` `paid`,
     ///   built on the version held; an absent or deleted record is rebuilt from the journal
     ///   entry, and one that doesn't read, with no copy this app trusts, holds;
+    /// - for a Billing Period the shared record must carry the signed proof of this
+    ///   attempt. The claim expires, and a period's status does not establish payment;
     /// - a record this app can't find or rebuild holds too ([`Refusal::RecordHeld`]).
     ///
     /// `unknown` and `failed` move no money toward the payee and need no record update. Neither
@@ -629,11 +741,14 @@ impl Paykit {
         let deadline = entry
             .as_ref()
             .map_or(ObligationDeadline::NotKnown, |e| own_deadline(e.deadline));
+        let record_write = match &done_target {
+            Some(target) => Some(self.done_record(target, &attempt, entry.as_ref()).await?),
+            None => None,
+        };
         let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
             .op(op.kind())
             .obligation_deadline(*obligation, deadline);
-        if let Some(target) = &done_target {
-            let write = self.done_record(target, entry.as_ref()).await?;
+        if let Some(write) = record_write {
             batch = batch.entry(write);
         }
         if let Some(mut entry) = entry.filter(JournalEntry::open) {
@@ -669,13 +784,10 @@ impl Paykit {
             }
             None => {
                 let records = self.payer_records().await?;
-                self.obligations(&records)
+                self.obligations(&records)?
                     .into_iter()
                     .find(|o| o.claim_key == *obligation)
-                    .and_then(|o| {
-                        o.request_hash
-                            .map(|h| natural_key::request_record(&o.payee, &h))
-                    })
+                    .and_then(|o| o.request_hash.map(|_| o.natural_key))
             }
         };
         let Some(natural) = natural else {
@@ -701,20 +813,26 @@ impl Paykit {
     /// with the journaled acceptance placed and `status` `paid`, built on the version held, so
     /// `done` and the update are applied together or not at all. An absent or deleted record
     /// is rebuilt from `entry`; one that doesn't read, with no copy this app trusts, or one
-    /// that can't be rebuilt, holds.
+    /// that can't be rebuilt, holds. A Billing Period also needs its signed proof:
+    /// the period's status and its manual-only mark cannot show payment after claim expiry.
     async fn done_record(
         &mut self,
         target: &ActivityTarget,
+        attempt: &AttemptId,
         entry: Option<&JournalEntry>,
     ) -> Result<(Vec<Condition>, OpKind)> {
-        let own = self.identity();
         let held =
             |why: &str| -> crate::error::PaykitError { Refusal::RecordHeld(why.into()).into() };
         let key = self.activity_key(target)?;
         let current = self.activity_write_base(&key).await?;
         let read = match current.as_ref().map(|r| &r.content) {
+            Some(RecordContent::Deleted)
+                if entry.is_some_and(|entry| entry.billing_period.is_some()) =>
+            {
+                return Err(crate::periods::period_history_lost().into())
+            }
             None | Some(RecordContent::Deleted) => None,
-            Some(content) => match activity::read(content.value(), &own, ActivitySide::Payer) {
+            Some(_) => match self.read_activity(target, current.as_ref()) {
                 Some(record) => Some(record),
                 None => return Err(held("the record holds a value that doesn't read")),
             },
@@ -729,11 +847,30 @@ impl Paykit {
         if let Some(entry) = entry {
             self.place_acceptance(&mut record, entry)?;
         }
+        let mut conditions = Vec::new();
+        if let binding @ RecordBinding::Period { request_hash, .. } = record.binding()? {
+            let parent = ActivityTarget::payer(natural_key::request_record(
+                &record.counterparty,
+                &request_hash,
+            ));
+            let parent_key = self.activity_key(&parent)?;
+            let base = self.activity_write_base(&parent_key).await?;
+            let request = self.read_activity(&parent, base.as_ref());
+            let proof = record.proof.as_ref().map(|stored| stored.body());
+            if !matches!(proof, Some(Body::PaymentProof(proof)) if &proof.attempt_id == attempt)
+                || !request.as_ref().is_some_and(|request| {
+                    crate::periods::request_for_payment(request, &record, &binding).is_some()
+                })
+            {
+                return Err(held("the Billing Period needs this attempt's proof and its signed request to record payment"));
+            }
+            conditions.push(self.app.record_condition(&parent_key).await?);
+        }
         record.status = Some("paid".into());
         let value = record.to_json()?;
         Ok(self
             .app
-            .record_op(&target.record_target(), Some(&value), Vec::new())
+            .record_op(&target.record_target(), Some(&value), conditions)
             .await?)
     }
 

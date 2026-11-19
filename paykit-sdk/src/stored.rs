@@ -1064,7 +1064,8 @@ impl Paykit {
                     return Ok(Placed::Done);
                 }
                 if role == Role::Receipt {
-                    return self.place_receipt(target, &record, stored, locals).await;
+                    return Box::pin(self.place_receipt(target, &record, stored, order, locals))
+                        .await;
                 }
                 // A payer's reply never takes the response while a different one its inbox
                 // accepted earlier is still kept to write, as at receive: it is only
@@ -1128,12 +1129,54 @@ impl Paykit {
         target: &ActivityTarget,
         record: &ActivityRecord,
         stored: StoredMessage,
+        order: crate::records::KeptOrder,
         locals: Tx,
     ) -> Result<Placed> {
         let Body::PaymentReceipt(receipt) = stored.body() else {
             return Ok(Placed::Not);
         };
         let attempt_id = receipt.attempt_id;
+        let mut conditions = Vec::new();
+        let current;
+        let mut terms = None;
+        let record = if let Some(parent) = crate::receive::receipt_parent(&stored) {
+            let key = self.activity_key(target)?;
+            let parent_key = self.activity_key(&parent)?;
+            conditions.push(self.app.record_condition(&key).await?);
+            conditions.push(self.app.record_condition(&parent_key).await?);
+            let held = self.app.shared_record(&key).await?;
+            let parent_held = self.app.shared_record(&parent_key).await?;
+            if crate::records::activity_base_changed(held.as_ref())
+                || crate::records::activity_base_changed(parent_held.as_ref())
+                || Box::pin(self.divergent_write_waits(&parent_key, &stored, Some(order))).await?
+            {
+                return Ok(Placed::Not);
+            }
+            let Some(parent) = self.read_activity(&parent, parent_held.as_ref()) else {
+                if !crate::receive::holds_activity(parent_held.as_ref())
+                    && self.side_unlisted(crate::hold::RecordSide::Payer).await?
+                {
+                    return Ok(Placed::Waits);
+                }
+                return Ok(Placed::Not);
+            };
+            current = self.read_activity(target, held.as_ref());
+            let Some(record) = current.as_ref() else {
+                return Ok(Placed::Not);
+            };
+            match crate::receive::period_receipt(&stored, record, &parent) {
+                crate::receive::PeriodReceipt::Missing => return Ok(Placed::Not),
+                crate::receive::PeriodReceipt::Different => {
+                    self.local_commit(locals).await?;
+                    return Ok(Placed::Done);
+                }
+                crate::receive::PeriodReceipt::Matched => {}
+            }
+            terms = Some(parent);
+            record
+        } else {
+            record
+        };
         let mut tx = locals;
         let Some(found) = receipt_on_record(record, &stored) else {
             self.local_commit(tx).await?;
@@ -1144,7 +1187,13 @@ impl Paykit {
         let mut writes = false;
         if found.names_held_proof {
             if let Some(entry) = self
-                .placed_write(target, sender, Role::Receipt, stored.clone(), Vec::new())
+                .placed_write(
+                    target,
+                    sender,
+                    Role::Receipt,
+                    stored.clone(),
+                    conditions.clone(),
+                )
                 .await?
             {
                 batch = batch.entry(entry);
@@ -1153,11 +1202,15 @@ impl Paykit {
         }
         if self.app.cert().has_permission(Permission::ClaimsWrite) {
             // Read bound to its key and to the claim the receipt settles, as at the first read.
-            let obligation = receipt_claim(&stored, &attempt_id, |request| {
-                self.obligation(&sender, request, 0)
+            let obligation = receipt_claim(&stored, &attempt_id, |request, start| {
+                self.obligation(&sender, request, start)
             });
             let journaled = self.journal_entry_on(&attempt_id, &obligation).await?;
-            let deadline = receipt_deadline(&stored, record, journaled.as_ref());
+            let deadline = receipt_deadline(
+                &stored,
+                terms.as_ref().unwrap_or(record),
+                journaled.as_ref(),
+            );
             // The claim view as the first read takes it, by the same rule
             // (`receive::failure_view`): the view the app keeps, or the switch's read only
             // when it asks for it. A read the switch refuses settles nothing.
@@ -1190,7 +1243,7 @@ impl Paykit {
             };
             if let Some((op, deadline)) = settles.claim {
                 batch = batch
-                    .op(op.kind())
+                    .op_if(op.kind(), conditions)
                     .obligation_deadline(obligation, deadline);
                 writes = true;
             }
