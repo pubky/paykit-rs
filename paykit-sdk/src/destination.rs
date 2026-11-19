@@ -651,9 +651,9 @@ fn record_carries(
 /// The app `app_id` that sent the carrier, or whose record it is, is current in the payee's
 /// `identity.json`, with a certificate that passes Paykit's verifiers' checks (Paykit wire
 /// 3.1: its scope rules, and permissions with none missing and, without another protocol's
-/// scope, no other), allows the destination and, when listed, hasn't expired. A message may
-/// come from a labelled selling app; a public record requires plain `paykit_request` and
-/// stays within the identity's record age limit (Paykit spec 4). The Switch takes a
+/// scope, no other), allows the destination and, when listed, hasn't expired. Requests and
+/// period details may come from a labelled selling app. A list or public record requires
+/// plain `paykit_request`. The record stays within the identity's age limit (Paykit spec 4). The Switch takes a
 /// certificate Paykit's verifiers refuse, so a record's, which nothing else checks, is
 /// checked here.
 pub(crate) fn current(
@@ -665,6 +665,8 @@ pub(crate) fn current(
     let cert = carrier.cert();
     check_certificate(cert).map_err(|error| error.to_string())?;
     let allowed = match carrier {
+        // StoredMessage checked the signing scope for its kind, including plain
+        // paykit_request for a list. All message destinations also require a payee.
         Carrier::Message(_) => acts_as_payee(cert.scopes()),
         Carrier::Record(_) => holds(cert.scopes(), &PaykitScope::Request),
     };
@@ -923,6 +925,37 @@ mod tests {
             ),
             Ok(())
         );
+    }
+
+    #[test]
+    fn test_destination_only_a_plain_publisher_can_supply_a_stored_list() {
+        let (payer, publisher) = parties();
+        let shop = Party::new(
+            "bob",
+            "hosted",
+            &[
+                "paykit_request:shop1",
+                "paykit_settlements",
+                "paykit_contacts",
+            ],
+        );
+        for empty in [false, true] {
+            let mut body = list_body(NOW + 60_000);
+            if empty {
+                body.insert("payment_endpoints".into(), json!({}));
+            }
+            assert!(shop
+                .try_message(&payer, "paykit.private_payment_list", vec![], body.clone())
+                .is_err());
+            let list = publisher.message(&payer, "paykit.private_payment_list", vec![], body);
+            current(
+                &publisher.doc(&[&publisher]),
+                &publisher.app_id(),
+                &Carrier::Message(Box::new(list)),
+                NOW,
+            )
+            .unwrap();
+        }
     }
 
     #[test]

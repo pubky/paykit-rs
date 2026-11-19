@@ -28,7 +28,7 @@ use std::sync::{Arc, PoisonError, RwLock};
 use paykit_lib::bodies::check_body;
 use paykit_lib::collections::Collection;
 use paykit_lib::kinds::{
-    check_sender_scopes, targets_app, Kind, MessageKind, Role as KindRole, Side, OPAQUE_MEMBERS,
+    check_sender_scopes, holds_role, targets_app, Kind, MessageKind, Side, OPAQUE_MEMBERS,
 };
 use paykit_lib::records::{
     ActivitySide, AllowanceRecord, BlockFloorRecord, PaymentListRecord, PendingAllowanceRecord,
@@ -45,7 +45,7 @@ use pubky_switch_client::app::{
 };
 use pubky_switch_client::error::StoreError;
 use pubky_switch_core::enc::{serde_b64, unb64_array};
-use pubky_switch_core::message::Message;
+use pubky_switch_core::message::{Message, MessagePlaintext};
 use pubky_switch_core::receive::KindRules;
 use pubky_switch_core::records::{AppCert, AppRecord};
 use pubky_switch_core::scopes as switch_scopes;
@@ -67,10 +67,8 @@ use crate::state::{self, key, StateKey};
 /// The kinds this SDK handles (Paykit wire 4.3): the one-time request flow, recurring
 /// requests' acceptance and period details, payments without a request, the payer's side of
 /// Private Payment Lists, re-sends, and the Allowance messages with `executor_notice`.
-/// Publishing Private Payment Lists comes later. A `private_payment_list_request` this SDK
-/// receives is taken with no effect: it publishes no list at all yet, so the Publishing
-/// rule's answer to a request naming a used version (Paykit spec 8.4) comes with list
-/// publishing, with that rule's other triggers.
+/// Chosen recipients get reusable Private Payment Lists. An incoming
+/// `private_payment_list_request` currently has no effect.
 pub const HANDLED_KINDS: [Kind; 15] = [
     Kind::PaymentRequest,
     Kind::PaymentRequestAcceptance,
@@ -302,19 +300,6 @@ pub(crate) fn stored_copy(message: &ReceivedMessage) -> Result<StoredMessage, St
     .map_err(|error| error.to_string())
 }
 
-/// Whether a certificate's scopes hold one of `roles` (Paykit spec 3.3).
-pub(crate) fn holds_role(scopes: &[String], roles: &[KindRole]) -> bool {
-    roles.iter().any(|role| match role {
-        KindRole::Pay => scopes.iter().any(|s| s == "paykit_pay"),
-        KindRole::Request => acts_as_payee(scopes),
-        KindRole::Allowance => scopes.iter().any(|s| s == "paykit_allowance"),
-        KindRole::AllowanceExecute => scopes.iter().any(|s| s == "paykit_allowance_execute"),
-        // Any Paykit App: another protocol's scopes alone take no Paykit kind (Switch wire
-        // 3.1 "Several protocols").
-        KindRole::Any => paykit_lib::scopes::holds_paykit_scope(scopes),
-    })
-}
-
 /// The label in a message body, if it is a valid one.
 pub(crate) fn body_label(message: &Message) -> Option<Label> {
     message
@@ -490,6 +475,24 @@ pub(crate) fn restore_paykit_layer(
     let own_cert = restoring.cert();
     let blind = |input: &[u8]| restoring.blind(input);
     let binder = state::Binder::new(own, own_cert, &blind);
+    let mut publications = crate::publish::RestoredPublications::default();
+    for prefix in [
+        key::PUBLICATIONS,
+        key::LIST_RESERVATIONS,
+        key::PUBLICATION_HISTORY,
+    ] {
+        for (key, value) in restoring
+            .previous_local_scan(prefix.as_bytes())
+            .map_err(|_| "the installation's private list publications cannot be read")?
+        {
+            match prefix {
+                key::PUBLICATIONS => publications.pending(&key, &value, &binder),
+                key::LIST_RESERVATIONS => publications.applied(&key, &value, &binder),
+                _ => publications.observed(&key, &value, &binder),
+            }
+            .map_err(|err| format!("invalid retained private list publication: {err}"))?;
+        }
+    }
     let mut settlement_buckets = std::collections::BTreeMap::new();
     for (key, value) in restoring
         .previous_local_scan(key::SETTLEMENT_BUCKETS.as_bytes())
@@ -831,6 +834,38 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
+            StateKey::ListSettings => {
+                state::restored::<crate::publish::ListSettings>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                continue;
+            }
+            StateKey::ListDiscovery => continue,
+            StateKey::ListRecipient(_) => {
+                let recipient =
+                    state::restored::<crate::publish::ListRecipient>(&key, &value, &binder)
+                        .map_err(|_| unread())?;
+                publications.recipient(recipient);
+                continue;
+            }
+            StateKey::Publication(_) => {
+                publications
+                    .pending(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                continue;
+            }
+            StateKey::PublicationHistory(_) => {
+                publications
+                    .observed(&key, &value, &binder)
+                    .map_err(|err| format!("invalid private list publication in backup: {err}"))?;
+                continue;
+            }
+            StateKey::ListReservation(_) => {
+                publications
+                    .applied(&key, &value, &binder)
+                    .map_err(|err| format!("invalid private list publication in backup: {err}"))?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
             StateKey::ListAsk { .. } => {
                 state::restored::<ListAsk>(&key, &value, &binder).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
@@ -1055,6 +1090,14 @@ pub(crate) fn restore_paykit_layer(
             .writes()
             .map_err(|_| "the retained payee evidence cannot be stored")?,
     );
+    writes.extend(
+        publications
+            .writes()
+            .map_err(|_| "the retained private list publications cannot be stored")?,
+    );
+    // A previous publication can outlive both the backup and a narrowed certificate.
+    // Discovery waits until this app holds plain paykit_request (Paykit spec 8.4.1).
+    writes.push(state::local_put(key::LIST_DISCOVERY, &true).map_err(|e| e.to_string())?);
     Ok(writes)
 }
 
@@ -1152,11 +1195,13 @@ impl Protocol for PaykitProtocol {
     /// acceptance already in the outbox (Paykit spec 8.3.1). Proposals, rejections,
     /// re-send requests and extensions require current sender scopes and a permitting
     /// deny copy. An original user end has its own delivery rule (Paykit spec 3.1).
+    /// A Private Payment List must still match the current sharing choice (Paykit spec 8.4).
     fn may_send(
         &self,
         delivery: &pubky_switch_client::app::DeliveryView<'_>,
     ) -> Result<bool, StoreFailure> {
         match MessageKind::parse(&delivery.message().kind) {
+            Ok(MessageKind::Paykit(Kind::PrivatePaymentList)) => crate::publish::may_send(delivery),
             Ok(MessageKind::Paykit(Kind::AllowanceAcceptance)) => Ok(false),
             Ok(MessageKind::Paykit(Kind::AllowanceEnd)) => {
                 crate::allowances::may_deliver_end(delivery).map_err(view_failure)
@@ -1453,11 +1498,20 @@ impl Protocol for PaykitProtocol {
         kind != Kind::ResendRequest.as_str()
     }
 
+    fn message_adds_conversation(&self, message: &Message, _: &MessagePlaintext) -> bool {
+        // A withdrawal never admits its recipient to the publisher's inbox (Paykit wire 4.13).
+        message.kind != Kind::PrivatePaymentList.as_str()
+            || paykit_lib::bodies::PrivatePaymentList::from_body(&message.body)
+                .is_ok_and(|list| !list.payment_endpoints.is_empty())
+    }
+
     /// Paykit's collections with their fixed policies (Paykit spec 6, Paykit wire 5.1):
     /// `payee_activity` with one policy per label, so an app holding `paykit_request` lists and
     /// takes every label's records, and one holding `paykit_request:<label>` its label's.
     fn collections(&self) -> Vec<SwitchCollection> {
-        crate::hold::RecordSide::All.collections()
+        let mut collections = crate::hold::RecordSide::All.collections();
+        collections.push(crate::publish::collection());
+        collections
     }
 
     fn observe_record(
@@ -1465,7 +1519,9 @@ impl Protocol for PaykitProtocol {
         observation: &pubky_switch_client::app::RecordObservation<'_>,
         context: &ReceiveContext<'_>,
     ) -> Result<Vec<LocalWrite>, StoreFailure> {
-        crate::settlement_marks::observe(observation, context)
+        let mut writes = crate::settlement_marks::observe(observation, context)?;
+        writes.extend(crate::publish::history::observe(observation, context)?);
+        Ok(writes)
     }
 
     fn mark_ends_at_delete(&self, collection: &str) -> bool {
@@ -1490,6 +1546,11 @@ impl Protocol for PaykitProtocol {
         value: Option<&[u8]>,
     ) -> Option<Vec<u8>> {
         let own = self.own()?;
+        if collection == crate::publish::COLLECTION {
+            return value
+                .and_then(|bytes| crate::publish::own_counter_mark(own.cert.app_id(), bytes))
+                .or_else(|| seen.map(<[u8]>::to_vec));
+        }
         let reads = match (Collection::from_name(collection)?, value) {
             (Collection::PayerActivity, Some(v)) => {
                 activity::read(Some(v), &own.identity, ActivitySide::Payer).is_some()
@@ -1546,6 +1607,13 @@ impl Protocol for PaykitProtocol {
         value: Option<&[u8]>,
         base: WriteBase,
     ) -> Option<String> {
+        if collection == crate::publish::COLLECTION {
+            return crate::publish::foreign_publication(
+                self.own().map(|own| own.cert.app_id()),
+                seen,
+                value,
+            );
+        }
         // Nothing seen of the record yet, as at its first read: nothing to go back on.
         self.regression(collection, seen?, value, base.held, base.repair.as_ref())
     }
@@ -1950,6 +2018,33 @@ mod receive_tests {
         let p = PaykitProtocol::new();
         p.set_own(own.id(), own.cert.clone());
         p
+    }
+
+    #[test]
+    fn test_protocol_only_a_readable_nonempty_private_list_can_add_a_conversation() {
+        let shop = Party::new("shop", "shop", &["paykit_request", "paykit_settlements"]);
+        let p = protocol_of(&shop);
+        for (endpoints, expected) in [
+            (json!({"btc-bitcoin-p2wpkh": {"payload": "bc1q"}}), true),
+            (json!({}), false),
+            (json!(null), false),
+        ] {
+            let message = Message::new(
+                Kind::PrivatePaymentList.as_str(),
+                pubky_switch_core::message::Sender::of_app(shop.id(), &shop.keys),
+                [4; 32],
+                NOW,
+                vec![],
+                object(json!({
+                    "version": {"generation": 1, "counter": 1},
+                    "expires_at": pubky_switch_core::time::rfc3339(NOW + 3_600_000),
+                    "payment_endpoints": endpoints
+                })),
+            )
+            .unwrap();
+            let plaintext = message.sign(&shop.keys).unwrap();
+            assert_eq!(p.message_adds_conversation(&message, &plaintext), expected);
+        }
     }
 
     fn request_body() -> serde_json::Map<String, serde_json::Value> {

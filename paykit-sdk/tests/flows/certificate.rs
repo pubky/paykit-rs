@@ -1335,6 +1335,18 @@ pub(super) fn client_listing_requests(cert: &AppCert) -> usize {
         .count()
 }
 
+async fn read_payee_pages(wallet: &mut Paykit) {
+    for _ in 0..8 {
+        let summary = wallet.receive(None).await.unwrap();
+        if summary.records_unlisted.is_some() {
+            assert!(is_not_now(&wallet.payee_activity().await.unwrap_err()));
+        } else if !summary.report.more && !wallet.app().listing_owed().await.unwrap() {
+            return;
+        }
+    }
+    panic!("the wallet's payee records are still unlisted");
+}
+
 #[tokio::test]
 async fn test_certificate_renewal_reading_more_lists_its_records_first() {
     // The wallet's copy lacks the till's record until the collection is listed: a call that
@@ -1357,8 +1369,8 @@ async fn test_certificate_renewal_reading_more_lists_its_records_first() {
     assert!(wallet.receive(None).await.is_err());
     let refused = wallet.payee_activity().await.unwrap_err();
     assert!(is_not_now(&refused), "{refused:?}");
-    // The client's listing goes through and Paykit's own, after the read, can't connect:
-    // the read keeps its report, and says the records stay unlisted.
+    // The client's pages succeed. Paykit's next listing request after that read
+    // cannot connect, so the report must carry the outage and keep the records held.
     w.alice
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Unreachable {
@@ -1367,26 +1379,27 @@ async fn test_certificate_renewal_reading_more_lists_its_records_first() {
         });
     let mut summary = wallet.receive(None).await.unwrap();
     for _ in 0..8 {
-        if summary
+        if !summary
             .records_unlisted
             .as_deref()
-            .is_some_and(|why| !why.contains("continue the listing"))
+            .is_some_and(|why| why.contains("Call receive again"))
         {
             break;
         }
+        assert!(is_not_now(&wallet.payee_activity().await.unwrap_err()));
         summary = wallet.receive(None).await.unwrap();
     }
     assert!(
         summary
             .records_unlisted
             .as_deref()
-            .is_some_and(|why| !why.contains("continue the listing")),
+            .is_some_and(|why| why.contains("connection failed: scripted")),
         "{summary:?}"
     );
     let refused = wallet.payee_activity().await.unwrap_err();
     assert!(is_not_now(&refused), "{refused:?}");
-    // The next read lists them: the till's request shows.
-    crate::common::finish_listing(&mut wallet).await;
+    // The next reads finish the remaining pages before the till's request can be shown.
+    read_payee_pages(&mut wallet).await;
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
 }
 
@@ -1469,7 +1482,7 @@ async fn test_certificate_renewal_reading_more_listing_lost_before_its_note_list
         .await;
     let refused = wallet.payee_activity().await.unwrap_err();
     assert!(is_not_now(&refused), "{refused:?}");
-    crate::common::finish_listing(&mut wallet).await;
+    read_payee_pages(&mut wallet).await;
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
 }
 
@@ -2102,7 +2115,7 @@ async fn test_certificate_narrowed_then_widened_lists_again() {
     wallet.receive(None).await.unwrap();
     list(&w, me, &narrow, &again);
     wallet.receive(None).await.unwrap();
-    crate::common::finish_listing(&mut wallet).await;
+    read_payee_pages(&mut wallet).await;
     assert_eq!(wallet.app().cert().hash(), again.hash());
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 2);
 }
@@ -2772,18 +2785,20 @@ async fn test_certificate_duty_event_raised_by_the_sdks_listing_reaches_a_report
     let mut wallet = w
         .load_with_transport(&w.alice, Arc::clone(&base), me, transport)
         .await;
-    let mut events = Vec::new();
-    for _ in 0..8 {
-        let read = wallet.receive(None).await.unwrap();
-        events.extend(read.report.events);
-        if events
-            .iter()
-            .any(|e| matches!(e, AppEvent::RecordUncheckable { .. }))
-        {
-            break;
-        }
-    }
+    let mut events = wallet.receive(None).await.unwrap().report.events;
     assert_eq!(wallet.app().cert().hash(), wider.hash());
+    // The native read lists the first pages after it acquires the wider keys. The
+    // following SDK call finishes that listing, then lists under the new certificate.
+    let partial = wallet.app_mut().receive(None).await.unwrap();
+    assert!(partial.more);
+    assert!(wallet.app().listing_owed().await.unwrap());
+    assert!(!partial
+        .events
+        .iter()
+        .any(|e| matches!(e, AppEvent::RecordUncheckable { .. })));
+    for _ in 0..3 {
+        events.extend(wallet.receive(None).await.unwrap().report.events);
+    }
     assert!(
         events
             .iter()
@@ -3394,11 +3409,24 @@ async fn restored_queued_reply_before_wider_keys(keys_present: bool) {
     .unwrap();
     assert_eq!(restored.app().restore_held_cursor(), None);
     let mut result = restored.flush().await;
-    if keys_present && restored.app().listing_owed().await.unwrap() {
+    assert_eq!(restored.app().cert().hash(), wider.hash());
+    if keys_present {
+        // This certificate reads more collections than fit in one native read.
+        assert!(matches!(
+            result,
+            Err(PaykitError::Client(AppError::Refused(
+                ClientRefusal::NotNow(_)
+            )))
+        ));
+        assert_eq!(restored.app().restore_held_cursor(), None);
+        assert!(matches!(
+            restored.message_delivery(&msg_id).await.unwrap(),
+            Some(paykit_sdk::MessageDelivery::Queued { .. })
+        ));
+        assert!(!shop.receive(None).await.unwrap().applied.contains(&msg_id));
         crate::common::finish_listing(&mut restored).await;
         result = restored.flush().await;
     }
-    assert_eq!(restored.app().cert().hash(), wider.hash());
     let verdict = restored.app().restore_held_cursor();
     if keys_present {
         assert!(verdict.is_some(), "{result:?}");

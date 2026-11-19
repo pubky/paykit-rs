@@ -37,6 +37,7 @@ mod provider_loss;
 mod pruning;
 mod public;
 mod public_read;
+mod publishing;
 mod receipt_reader;
 mod receipts;
 mod receive_faults;
