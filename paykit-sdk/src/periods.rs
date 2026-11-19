@@ -1055,7 +1055,7 @@ impl Paykit {
             failed_on_claim: false,
             billing_period: Some(KeptPeriod::of(&period)),
         };
-        self.execute(Plan {
+        Box::pin(self.execute(Plan {
             entry,
             record: target,
             carrier,
@@ -1069,7 +1069,7 @@ impl Paykit {
             end_hold,
             conditions,
             record_writes,
-        })
+        }))
         .await
     }
 
