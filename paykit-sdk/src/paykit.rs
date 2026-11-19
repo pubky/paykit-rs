@@ -452,7 +452,7 @@ pub struct Paykit {
     /// When this handle last left a raise unwritten, on its monotonic clock: none since it
     /// started means every wait is over, the time waited not being known; with it, a clock set
     /// back between checks can't hide time ([`crate::floor::RaiseRetry`]).
-    pub(crate) raise_tried_at: std::sync::Mutex<Option<std::time::Instant>>,
+    pub(crate) raise_tried_at: std::sync::Mutex<Option<web_time::Instant>>,
     /// How many activity records this handle bound ([`Paykit::activity_binds`]).
     #[cfg(feature = "test-support")]
     pub(crate) activity_binds: std::sync::atomic::AtomicU64,

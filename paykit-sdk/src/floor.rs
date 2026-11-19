@@ -892,7 +892,7 @@ impl Paykit {
         // from it.
         self.raise_clock_seen.store(self.now(), Ordering::SeqCst);
         if let Ok(mut at) = self.raise_tried_at.lock() {
-            *at = Some(std::time::Instant::now());
+            *at = Some(web_time::Instant::now());
         }
         let previous = match self.raise_retry().await? {
             Some(retry) if !self.floor_changed_since(&retry).await? => Some(retry),
