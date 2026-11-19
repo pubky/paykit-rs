@@ -11232,3 +11232,245 @@ async fn test_pending_rejection_waits_when_the_second_record_cannot_be_read() {
         1
     );
 }
+
+#[tokio::test]
+async fn test_pending_competing_proposal_retries_its_original_parked_entry_after_reload() {
+    use pubky_switch_client::app::ParkReason;
+    use std::sync::Arc;
+
+    let w = World::new();
+    let storage = Arc::new(crate::common::FailingRecordReads::default());
+    let mut wallet = Box::pin(w.join_with(
+        &w.alice,
+        "wallet",
+        AppScopes::new().pay().allowance().build().unwrap(),
+        Default::default(),
+        storage.clone(),
+    ))
+    .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut shop = Box::pin(shop(&w)).await;
+    let mut phone = Box::pin(alice_app(
+        &w,
+        "phone",
+        AppScopes::new().pay().allowance().build().unwrap(),
+    ))
+    .await;
+    let (_, canonical) = Box::pin(proposed(&w, &mut shop, &mut wallet)).await;
+    let id = wallet.allowance(&canonical).await.unwrap().allowance_id;
+    let physical = pending_key(&wallet, &w.bob_id(), &id);
+    let writes = w.record_writes(&w.alice, &physical);
+    Box::pin(read_listed_records(&mut wallet)).await;
+    wallet.app_mut().flush_cursor().await.unwrap();
+    let second = competing_proposal(&w, &shop, &wallet, &id);
+    let msg_id = &second.message().msg_id;
+    storage.limit_next_record(&physical);
+    wallet.app_mut().receive(None).await.unwrap();
+    let entries = wallet.app_mut().parked_entries().await.unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].reason, ParkReason::StoreRejected);
+    let parked = wallet
+        .app_mut()
+        .parked_entry(entries[0].stored_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(parked.sender_verified);
+    assert_eq!(parked.sender, w.bob_id());
+    assert_eq!(&parked.plaintext, second.plaintext());
+    let me = wallet.app_id();
+    drop(wallet);
+
+    let mut reopened = Box::pin(w.load_on_clock(&w.alice, storage, me, w.clock.clone())).await;
+    assert!(reopened
+        .app_mut()
+        .parked_entry(entries[0].stored_id)
+        .await
+        .unwrap()
+        .is_some());
+    reopened.receive(None).await.unwrap();
+    assert!(reopened
+        .app_mut()
+        .parked_entries()
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(Box::pin(keeps(&reopened, b"pr/", msg_id)).await);
+    assert!(reopened
+        .app()
+        .protocol_scan("paykit", b"pc/")
+        .await
+        .unwrap()
+        .is_empty());
+    let bytes = reopened
+        .app()
+        .protocol_scan("paykit", b"pr/")
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|(key, _)| key.ends_with(msg_id.as_bytes()))
+        .unwrap()
+        .1;
+    let note: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(note["d"]["accepted_at"], parked.accepted_at_ms);
+    assert_eq!(note["d"]["seq"], parked.seq);
+    assert_eq!(note["d"]["generation"], parked.generation);
+    assert_eq!(w.record_writes(&w.alice, &physical), writes);
+    assert!(Box::pin(pending_at(&reopened, &canonical))
+        .await
+        .conflicted()
+        .is_none());
+    assert!(matches!(
+        refusal(&reopened.reject_allowance(&canonical).await.unwrap_err()),
+        Some(Refusal::AllowanceConflicted)
+    ));
+    Box::pin(share_competing_proposal(&w, &mut phone, &id, &second)).await;
+    reopened.receive(None).await.unwrap();
+    assert!(!Box::pin(keeps(&reopened, b"pr/", msg_id)).await);
+    assert_eq!(
+        Box::pin(pending_at(&reopened, &canonical))
+            .await
+            .conflicted()
+            .unwrap()
+            .hash(),
+        second.hash()
+    );
+}
+
+/// The backup predates a deletion read by every then-enrolled app. A new
+/// installation sees the service's current absence but did not witness the delete.
+async fn restored_competitor_without_original(full: bool) {
+    use pubky_switch_client::app::{KeptReason, RecordRead};
+
+    let w = World::new();
+    let mut shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(wallet(&w)).await;
+    let mut phone = Box::pin(alice_app(
+        &w,
+        "phone",
+        AppScopes::new().pay().allowance().build().unwrap(),
+    ))
+    .await;
+    let (_, canonical) = Box::pin(proposed(&w, &mut shop, &mut wallet)).await;
+    let id = wallet.allowance(&canonical).await.unwrap().allowance_id;
+    let pending = pending_target(&w.bob_id(), &id);
+    let accepted = allowances_target(&w.bob_id(), &id);
+    let physical = wallet.app().record_key(&pending).unwrap();
+    let second = competing_proposal(&w, &shop, &wallet, &id);
+    let msg_id = &second.message().msg_id;
+    wallet.receive(None).await.unwrap();
+    let owed = wallet.app().protocol_scan("paykit", b"pr/").await.unwrap();
+    assert_eq!(owed.len(), 1);
+    assert!(owed[0].0.ends_with(msg_id.as_bytes()));
+    let bytes: Value = serde_json::from_slice(&owed[0].1).unwrap();
+    assert!(bytes["d"]["pending_source"]["version"].as_u64().is_some());
+    let backup = wallet.backup().await.unwrap();
+    phone.receive(None).await.unwrap();
+    assert!(matches!(
+        phone.app_mut().read_record_fresh(&pending).await.unwrap(),
+        RecordRead::Fresh(_)
+    ));
+    Box::pin(write_record(&mut phone, &pending, None)).await;
+    for app in [&mut wallet, &mut phone] {
+        app.receive(None).await.unwrap();
+        app.app_mut().flush_cursor().await.unwrap();
+    }
+    assert!(matches!(
+        phone.app_mut().read_record_fresh(&pending).await.unwrap(),
+        RecordRead::Kept {
+            reason: KeptReason::NotFound,
+            ..
+        }
+    ));
+    drop(wallet);
+    if full {
+        for _ in 0..8 {
+            let other = paykit_lib::AllowanceId::generate().unwrap();
+            propose_as(&w, &[phone.app_id()], other.as_str(), "0.20");
+            phone.receive(None).await.unwrap();
+        }
+        assert_eq!(
+            phone
+                .allowances()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|view| view.counterparty == w.bob_id()
+                    && view.status == AllowanceStatus::Proposed)
+                .count(),
+            8
+        );
+    }
+    let mut restored = Box::pin(restored_unreceived(&w, &backup)).await;
+    assert_eq!(
+        restored
+            .app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap(),
+        owed
+    );
+    assert!(restored
+        .app()
+        .protocol_scan("paykit", b"pce/")
+        .await
+        .unwrap()
+        .is_empty());
+    for target in [&pending, &accepted] {
+        let read = restored.app_mut().read_record_fresh(target).await.unwrap();
+        assert!(
+            matches!(
+                read,
+                RecordRead::Kept {
+                    reason: KeptReason::NotFound,
+                    record: None
+                }
+            ),
+            "{read:?}"
+        );
+    }
+    let before = w.record_writes(&w.alice, &physical);
+    for _ in 0..3 {
+        restored.receive(None).await.unwrap();
+    }
+    assert_eq!(
+        w.record_writes(&w.alice, &physical),
+        before,
+        "a sourced second proposal cannot create an original"
+    );
+    assert_eq!(
+        restored
+            .app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap(),
+        owed,
+        "admission must retain the original signed obligation"
+    );
+    assert!(!restored
+        .notices()
+        .await
+        .unwrap()
+        .iter()
+        .any(
+            |notice| notice.kind == paykit_sdk::NoticeKind::MessageGivenUp
+                && notice.msg_id.as_ref() == Some(msg_id)
+        ));
+    assert!(restored
+        .app()
+        .shared_record(&canonical)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_restored_competing_proposal_cannot_create_an_original_from_current_absence() {
+    Box::pin(restored_competitor_without_original(false)).await;
+}
+
+#[tokio::test]
+async fn test_restored_competing_proposal_remains_owed_at_full_admission() {
+    Box::pin(restored_competitor_without_original(true)).await;
+}

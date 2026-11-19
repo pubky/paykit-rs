@@ -79,7 +79,7 @@ pub(super) fn awaits_competing_proposal(
         let message = held.stored(own)?;
         if message.sender() == *pending.counterparty()
             && matches!(message.body(), paykit_lib::Body::AllowanceProposal(p) if &p.allowance_id == pending.allowance_id())
-            && message.hash() != pending.proposal().hash()
+            && (held.pending_source.is_some() || message.hash() != pending.proposal().hash())
             && !end.is_some_and(|end| {
                 end.compare(held.pending_source, held.position(), |a, b| {
                     (a.generation == b.generation).then(|| a.seq.cmp(&b.seq))
@@ -653,8 +653,8 @@ impl Paykit {
             if existing.counterparty() != &peer || existing.allowance_id() != id {
                 return Ok(Some(Placed::Waits));
             }
-            let reflected =
-                existing.proposal().hash() == message.hash() || existing.conflicted().is_some();
+            let reflected = existing.conflicted().is_some()
+                || (held.pending_source.is_none() && existing.proposal().hash() == message.hash());
             return Ok(Some(if reflected {
                 Placed::Done
             } else {
@@ -679,6 +679,11 @@ impl Paykit {
                 Some(std::cmp::Ordering::Less) => return Ok(Some(Placed::Done)),
                 _ => return Ok(Some(Placed::Waits)),
             }
+        }
+        // A proposal first received over a live original is owed for that
+        // lifetime. Its absence from a new installation cannot admit it again.
+        if held.pending_source.is_some() {
+            return Ok(Some(Placed::Waits));
         }
         let Some(count) = self.pending_count(report, &peer, false).await? else {
             return Ok(Some(Placed::Waits));
