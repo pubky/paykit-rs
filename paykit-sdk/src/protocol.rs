@@ -498,6 +498,7 @@ pub(crate) fn restore_paykit_layer(
     let mut confirmed_before = std::collections::BTreeSet::new();
     let mut open = std::collections::BTreeSet::new();
     let mut recordings = std::collections::BTreeSet::new();
+    let mut receipt_batches = std::collections::BTreeMap::new();
     let mut awaiting_recording = std::collections::BTreeSet::new();
     let mut journaled = std::collections::BTreeSet::new();
     let mut acknowledged = Vec::new();
@@ -606,6 +607,27 @@ pub(crate) fn restore_paykit_layer(
                 state::restored::<[u8; 16]>(&key, &value, &binder).map_err(|_| unread())?;
                 recordings.insert(attempt);
                 writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::ReceiptBatch {
+                record,
+                hash,
+                msg_id,
+                ..
+            } => {
+                state::restored::<[u8; 16]>(&key, &value, &binder).map_err(|_| unread())?;
+                // The original batch may have finished after this snapshot.
+                let imported = key::receipt_batch(&record, &hash, &msg_id, true).into_bytes();
+                if let Some(previous) = receipt_batches.insert(imported.clone(), value.clone()) {
+                    if previous != value {
+                        return Err(unread());
+                    }
+                } else {
+                    writes.push(LocalWrite::Put {
+                        key: imported,
+                        value,
+                    });
+                }
                 continue;
             }
             StateKey::Journal(attempt) => attempt,

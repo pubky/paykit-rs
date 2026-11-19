@@ -414,7 +414,7 @@ impl Stored for [u8; 16] {
 
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
-            StateKey::OfflineBatch(_) => Ok(()),
+            StateKey::OfflineBatch(_) | StateKey::ReceiptBatch { .. } => Ok(()),
             _ => corrupt(),
         }
     }
@@ -1228,6 +1228,15 @@ pub(crate) mod key {
     pub(crate) const CREDIT_HOLDS: &str = "ch/";
     pub(crate) const SETTLEMENT_NOTICES: &str = "nt/settlement/";
     pub(crate) const SETTLEMENT_MARKS: &str = "sm/";
+    pub(crate) fn receipt_batch(
+        record: &[u8; 32],
+        hash: &[u8; 32],
+        id: &str,
+        imported: bool,
+    ) -> String {
+        let prefix = if imported { "ir" } else { "ri" };
+        format!("{prefix}/{}/{}/{id}", b64(record), b64(hash))
+    }
     pub(crate) fn retained_receipt(hash: &[u8; 32]) -> String {
         format!("{RETAINED_RECEIPTS}{}", b64(hash))
     }
@@ -1568,6 +1577,13 @@ pub(crate) enum StateKey {
     Journal(AttemptId),
     /// The original Switch batch ID of a paid offline attempt.
     OfflineBatch(AttemptId),
+    /// The first local keep of a requested receipt delivery, awaiting its batch outcome.
+    ReceiptBatch {
+        record: [u8; 32],
+        hash: [u8; 32],
+        msg_id: String,
+        imported: bool,
+    },
     /// `ask/<sender>/<from>`: a `resend_request` to send.
     Ask { sender: [u8; 32], from_ms: u64 },
     /// `ans/<seq>/<msg_id>`: a `resend_request` received, to answer.
@@ -1764,6 +1780,16 @@ impl StateKey {
                         }
                     }
                     "rc" => Self::RetainedReceipt(b64_32(rest)?),
+                    "ri" | "ir" => {
+                        let (record, rest) = rest.split_once('/')?;
+                        let (hash, id) = rest.split_once('/')?;
+                        Self::ReceiptBatch {
+                            record: b64_32(record)?,
+                            hash: b64_32(hash)?,
+                            msg_id: msg_id(id)?,
+                            imported: text.starts_with("ir/"),
+                        }
+                    }
                     "ch" => Self::CreditHold(b64_32(rest)?),
                     "del" => {
                         let (record, rest) = rest.split_once('/')?;

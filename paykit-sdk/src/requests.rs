@@ -1439,7 +1439,14 @@ impl Paykit {
                 .record_op(&target, Some(&activity.to_json()?), conditions)
                 .await?;
             let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME).entry(entry);
-            if !details.store_only {
+            let delivery_marker = (!details.store_only)
+                .then(|| key::receipt_batch(record, &signed.plaintext().hash(), &msg_id, false));
+            if let Some(marker) = &delivery_marker {
+                batch = batch.keep_id_at(marker.as_bytes().to_vec()).local(
+                    pubky_switch_client::app::LocalWrite::Delete {
+                        key: marker.as_bytes().to_vec(),
+                    },
+                );
                 batch = batch.queue(signed);
             }
             let submitted = match settlement {
@@ -1448,11 +1455,16 @@ impl Paykit {
                         batch,
                         write,
                         details.unmarked_credit_confirmed.is_some(),
+                        delivery_marker.as_deref(),
                     ))
                     .await
                 }
                 None => self.submit(batch).await.map_err(PaykitError::from),
             };
+            if submitted.is_err() {
+                self.retire_refused_receipt_batch(delivery_marker.as_deref())
+                    .await?;
+            }
             match submitted {
                 Ok(_) => break msg_id,
                 Err(PaykitError::Client(error)) if error.code() == Some(ErrorCode::Conflict) => {

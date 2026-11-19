@@ -371,6 +371,11 @@ async fn competing_tills(world: &World) -> TestResult {
         Some(stored.clone())
     );
     assert!(restored.app().delivery(&stored).await?.is_none());
+    assert!(restored
+        .notices()
+        .await?
+        .iter()
+        .all(|n| { n.msg_id.as_deref() != Some(stored.as_str()) }));
     other.receive(None).await?;
     assert!(other
         .receipts(ReceiptsOf::Request(independent))
@@ -615,6 +620,12 @@ async fn test_full_bucket_warns_once_and_a_confirmed_stored_receipt_stays_unsent
         .await?
         .ok_or("missing stored receipt")?;
     assert!(tills.till.app().delivery(&stored).await?.is_none());
+    assert!(tills
+        .till
+        .app()
+        .protocol_scan("paykit", b"ri/")
+        .await?
+        .is_empty());
     assert!(tills.till.notices().await?.is_empty());
     drop(tills.till);
     let mut restored = Paykit::restore(
@@ -626,7 +637,11 @@ async fn test_full_bucket_warns_once_and_a_confirmed_stored_receipt_stays_unsent
     )
     .await?;
     restored.receive(None).await?;
-    assert!(restored.notices().await?.is_empty());
+    assert!(restored
+        .notices()
+        .await?
+        .iter()
+        .all(|n| { n.id != notice_id && n.msg_id.as_deref() != Some(stored.as_str()) }));
     assert_eq!(
         restored.confirm_payment(&record).await?,
         Some(stored.clone())

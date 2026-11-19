@@ -646,7 +646,6 @@ mod own_message_tests {
         assert!(
             receipt.contains("OpBatch::for_protocol(crate::protocol::BACKUP_NAME).entry(entry)")
         );
-        assert!(receipt.contains("if!details.store_only{batch=batch.queue(signed);"));
         assert!(receipt.contains("self.submit_settlement_credit(batch,write,"));
         assert!(!receipt.contains("queue_signed"));
         // An Allowance's proposal, answer or end, and an end crossing a withdrawal, queue

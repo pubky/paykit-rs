@@ -64,6 +64,7 @@ mod paykit;
 mod periods;
 mod protocol;
 pub mod rail;
+mod receipt_delivery;
 mod receipts;
 mod receive;
 mod reconcile;

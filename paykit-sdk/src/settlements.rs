@@ -152,6 +152,7 @@ impl Paykit {
         batch: OpBatch,
         write: SettlementWrite,
         unmarked_confirmed: bool,
+        delivery_marker: Option<&str>,
     ) -> Result<Submitted> {
         let receipt_only =
             |batch: OpBatch| write.conditions.iter().copied().fold(batch, OpBatch::when);
@@ -177,6 +178,7 @@ impl Paykit {
             self.raise_settlement_notice(SettlementSubject::Bucket(write.number), write.payer)
                 .await?;
             if unmarked_confirmed {
+                self.retire_refused_receipt_batch(delivery_marker).await?;
                 return Ok(self.submit(receipt_only(batch)).await?);
             }
             return Err(Refusal::SettlementBucketFull {
@@ -185,6 +187,29 @@ impl Paykit {
             .into());
         }
         Ok(submitted?)
+    }
+
+    /// A definite refusal releases the original batch's marker before a fresh decision.
+    /// An interrupted call can still have applied and retains its exact ID.
+    pub(crate) async fn retire_refused_receipt_batch(
+        &mut self,
+        marker: Option<&str>,
+    ) -> Result<()> {
+        use pubky_switch_client::app::{KeptBatchDrop, KeptBatchStatus};
+        let Some(key) = marker else { return Ok(()) };
+        let Some(id) = self.local_get::<[u8; 16]>(key).await? else {
+            return Ok(());
+        };
+        if matches!(
+            self.app.kept_batch(id).await?,
+            Some(KeptBatchStatus::Dropped {
+                reason: KeptBatchDrop::Unsent | KeptBatchDrop::Refused { .. },
+                ..
+            })
+        ) {
+            self.local_delete(key).await?;
+        }
+        Ok(())
     }
 }
 

@@ -2616,12 +2616,29 @@ async fn test_restore_fresh_store_keeps_an_issued_receipt_without_assuming_deliv
         .unwrap();
     assert_eq!(original.kind, paykit_lib::Kind::PaymentReceipt.as_str());
     assert_eq!(original.to, w.alice_id());
+    let kept_receipts = shop.app().protocol_scan("paykit", b"ri/").await.unwrap();
+    assert_eq!(kept_receipts.len(), 1);
+    assert_eq!(kept_receipts[0].1, kept);
     wallet.receive(None).await.unwrap();
     assert!(wallet.request(&request).await.unwrap().receipt.is_none());
     let backup = shop.backup().await.unwrap();
     drop(shop);
     let mut shop = restored_unreceived(&w, &w.bob, &backup).await;
     shop.receive(None).await.unwrap();
+    let notices = shop.notices().await.unwrap();
+    let uncertain: Vec<_> = notices
+        .iter()
+        .filter(|notice| {
+            notice.kind == paykit_sdk::NoticeKind::PossiblyDelivered
+                && notice.msg_id.as_deref() == Some(original.msg_id.as_str())
+        })
+        .collect();
+    let [notice] = uncertain.as_slice() else {
+        panic!("expected one notice about the original receipt: {notices:?}");
+    };
+    assert_eq!(notice.counterparty, w.alice_id());
+    assert_eq!(notice.message_hash, Some(original.hash));
+    shop.acknowledge_notice(&notice.id).await.unwrap();
     assert!(shop
         .app()
         .protocol_get("paykit", b"ro")
@@ -2644,6 +2661,12 @@ async fn test_restore_fresh_store_keeps_an_issued_receipt_without_assuming_deliv
     shop.flush().await.unwrap();
     wallet.receive(None).await.unwrap();
     assert!(wallet.request(&request).await.unwrap().receipt.is_none());
+    assert!(shop
+        .notices()
+        .await
+        .unwrap()
+        .iter()
+        .all(|n| { n.msg_id.as_deref() != Some(original.msg_id.as_str()) }));
     assert!(shop
         .app()
         .delivery(&original.msg_id)

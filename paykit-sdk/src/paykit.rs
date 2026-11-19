@@ -1176,6 +1176,7 @@ impl Paykit {
         {
             Box::pin(self.queue_restore_asks()).await?;
             Box::pin(self.queue_own_again()).await?;
+            Box::pin(self.note_imported_receipt_batches()).await?;
         }
         let asked = Box::pin(self.send_asks()).await?;
         // A confirmed mark goes once its record's view isn't divergent any more, after this
