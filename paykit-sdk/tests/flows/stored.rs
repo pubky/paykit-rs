@@ -316,24 +316,21 @@ async fn wallet_with_kept_mark(
     assert!(wallet.requests().await.unwrap().is_empty());
     wallet.unblock(&w.bob_id()).await.unwrap();
     w.clock.advance_ms(11 * 60_000);
-    w.alice.switch().fail_next(Fault::LoseAnswer {
-        path: "/ops".into(),
+    w.bob.switch().fail_next(Fault::Unreachable {
+        path: "inbox".into(),
+        after: 0,
     });
     wallet.receive(None).await.unwrap();
     let marks = wallet.app().protocol_scan("paykit", b"bd/").await.unwrap();
     assert_eq!(marks.len(), 1);
     let mark: serde_json::Value = serde_json::from_slice(&marks[0].1).unwrap();
-    assert_eq!(
-        mark["d"]["queued"]["kept_batch"].as_array().unwrap().len(),
-        16
-    );
     assert!(mark["d"]["queued"]["msg_id"].is_string());
     assert!(mark["d"]["queued"]["hash"].is_string());
     (wallet, storage)
 }
 
 #[tokio::test]
-async fn test_mark_state_kept_batch_reload_restore_and_send() {
+async fn test_mark_state_queued_request_reload_restore_and_send() {
     let w = World::new();
     let (wallet, storage) = Box::pin(wallet_with_kept_mark(&w)).await;
     let held = wallet.app().protocol_scan("paykit", b"bd/").await.unwrap();

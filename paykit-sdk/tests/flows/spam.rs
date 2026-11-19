@@ -237,6 +237,18 @@ fn keep_ops(w: &World, n: usize) {
     }
 }
 
+/// Let the required floor raise apply, then keep the unblock and its retries unanswered.
+fn keep_unblock_ops(w: &World, n: usize) {
+    assert!(n > 0);
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/ops".into(),
+            after: 1,
+        });
+    keep_ops(w, n - 1);
+}
+
 #[tokio::test]
 async fn test_spam_own_block_kept_unanswered_counts_new_state_at_once() {
     // The wallet blocks bob while its switch doesn't answer: the `deny.put` is kept, and the
@@ -282,7 +294,7 @@ async fn test_spam_own_unblock_kept_unanswered_leaves_the_copy_to_decide() {
     .await
     .unwrap();
     wallet.block(&w.bob_id()).await.unwrap();
-    keep_ops(&w, 8);
+    keep_unblock_ops(&w, 8);
     wallet.unblock(&w.bob_id()).await.unwrap();
     let lists = wallet.app_mut().allow_list().await.unwrap();
     assert!(lists.deny.contains(&w.bob_id()));
@@ -303,7 +315,7 @@ async fn test_spam_own_unblock_refused_before_the_feed_leaves_new_state_counted(
     let mut shop = w.shop().await;
     request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.block(&w.bob_id()).await.unwrap();
-    keep_ops(&w, 1);
+    keep_unblock_ops(&w, 1);
     wallet.unblock(&w.bob_id()).await.unwrap();
     assert_eq!(
         wallet
@@ -362,8 +374,9 @@ async fn test_spam_own_unblock_applied_with_its_answer_lost_lets_new_state_throu
     wallet.block(&w.bob_id()).await.unwrap();
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+        .fail_next(pubky_switch_client::testing::Fault::LoseAnswerAfter {
             path: "/ops".into(),
+            after: 1,
         });
     wallet.unblock(&w.bob_id()).await.unwrap();
     assert_eq!(

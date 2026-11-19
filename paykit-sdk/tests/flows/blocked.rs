@@ -263,6 +263,18 @@ fn keep_ops(w: &World, n: usize) {
     }
 }
 
+/// Let the required floor raise apply, then keep the unblock and its retries unanswered.
+fn keep_unblock_ops(w: &World, n: usize) {
+    assert!(n > 0);
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/ops".into(),
+            after: 1,
+        });
+    keep_ops(w, n - 1);
+}
+
 #[tokio::test]
 async fn test_blocked_own_block_kept_unanswered_counts_at_once() {
     // The wallet blocks bob while its switch doesn't answer: the `deny.put` is kept, the list
@@ -280,20 +292,20 @@ async fn test_blocked_own_block_kept_unanswered_counts_at_once() {
 }
 
 #[tokio::test]
-async fn test_blocked_own_unblock_kept_unanswered_counts_at_once() {
-    // Bob is blocked; the wallet's unblock is kept unanswered: the list at the switch still
-    // holds him, but the resume's fresh read counts the wallet's own unblock at once, and
-    // makes the repeat (Paykit spec 8.1).
+async fn test_blocked_own_unblock_kept_unanswered_leaves_the_floor_holding_a_repeat() {
+    // The floor is applied before the unanswered unblock. Even though that unblock
+    // counts for the local deny copy, the earlier one-time request cannot be repeated
+    // automatically under the raised floor (Paykit spec 8.1).
     let w = World::new();
     let calls = resumed_repeat(&w, async |wallet| {
         wallet.block(&w.bob_id()).await.unwrap();
-        keep_ops(&w, 8);
+        keep_unblock_ops(&w, 8);
         wallet.unblock(&w.bob_id()).await.unwrap();
         let lists = wallet.app_mut().allow_list().await.unwrap();
         assert!(lists.deny.contains(&w.bob_id()));
     })
     .await;
-    assert_eq!(calls, 2);
+    assert_eq!(calls, 1);
 }
 
 #[tokio::test]
@@ -368,7 +380,7 @@ async fn test_blocked_own_unblock_kept_unanswered_lets_the_users_payment_go() {
     // the payment goes, with no confirmation.
     let w = World::new();
     let (mut wallet, request) = blocked(&w).await;
-    keep_ops(&w, 1);
+    keep_unblock_ops(&w, 1);
     wallet.unblock(&w.bob_id()).await.unwrap();
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
@@ -1042,7 +1054,7 @@ async fn wallet_with_block_mark(
         }
         BlockMarkValue::KeptUnblock => {
             wallet.block(&w.bob_id()).await.unwrap();
-            keep_ops(w, 1);
+            keep_unblock_ops(w, 1);
             wallet.unblock(&w.bob_id()).await.unwrap();
         }
     }
@@ -1573,7 +1585,7 @@ async fn test_blocked_resend_request_while_the_deny_list_is_unknown_refused_with
 /// Then the phone, another own app, blocks bob too.
 async fn unblock_dropped_then_blocked_by_the_phone(w: &World, wallet: &mut Paykit) {
     wallet.block(&w.bob_id()).await.unwrap();
-    keep_ops(w, 1);
+    keep_unblock_ops(w, 1);
     wallet.unblock(&w.bob_id()).await.unwrap();
     w.alice.switch().fail_next(Fault::Error {
         path: "/ops".into(),
@@ -1632,7 +1644,7 @@ async fn test_blocked_own_unblock_kept_unanswered_not_restored() {
     let w = World::new();
     let (mut wallet, _, request) = received(&w, PaykitConfig::default()).await;
     wallet.block(&w.bob_id()).await.unwrap();
-    keep_ops(&w, 1);
+    keep_unblock_ops(&w, 1);
     wallet.unblock(&w.bob_id()).await.unwrap();
     let backup = wallet.backup().await.unwrap();
     drop(wallet);
@@ -1796,7 +1808,7 @@ async fn test_blocked_own_unblock_applied_in_the_read_keeps_the_resend_request_o
     let w = World::new();
     let (mut wallet, shop, request) = received(&w, PaykitConfig::default()).await;
     wallet.block(&w.bob_id()).await.unwrap();
-    keep_ops(&w, 1);
+    keep_unblock_ops(&w, 1);
     wallet.unblock(&w.bob_id()).await.unwrap();
     kept_resend_request(&w, &mut wallet, &shop, &request).await;
     let first = wallet.receive(None).await.unwrap();
