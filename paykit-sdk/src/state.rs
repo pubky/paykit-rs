@@ -854,6 +854,17 @@ impl Stored for crate::allowances::PendingConflict {
     }
 }
 
+impl sealed::Sealed for crate::allowances::PendingRetirement {}
+
+impl Stored for crate::allowances::PendingRetirement {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let StateKey::PendingRetirement(key) = family else {
+            return corrupt();
+        };
+        self.bind(key, binder)
+    }
+}
+
 impl sealed::Sealed for KeptNotice {}
 
 /// A notice: of the attempt and kind, or the sender and `msg_id`, its key names
@@ -1397,6 +1408,13 @@ pub(crate) mod key {
 
     pub(crate) const PENDING_CONFLICTS: &str = "pc/";
 
+    pub(crate) const PENDING_RETIREMENTS: &str = "pce/";
+
+    /// The verified end of an earlier conflict at this physical pending key.
+    pub(crate) fn pending_retirement(record: &[u8; 32]) -> String {
+        format!("{PENDING_RETIREMENTS}{}", b64(record))
+    }
+
     /// A conflict in this pending Allowance lifetime.
     pub(crate) fn pending_conflict(record: &[u8; 32]) -> String {
         format!("{PENDING_CONFLICTS}{}", b64(record))
@@ -1757,6 +1775,8 @@ pub(crate) enum StateKey {
     Consent([u8; 32]),
     /// `pc/<record key>`: a conflict kept for one pending Allowance lifetime.
     PendingConflict([u8; 32]),
+    /// The latest verified end of a conflict at the named pending key.
+    PendingRetirement([u8; 32]),
     /// `cf/<record key>`: a conflicting proposal or response kept as the stop.
     Conflict([u8; 32]),
     /// `en/<msg_id>`: the executor app an `executor_notice` is wrapped to.
@@ -1895,6 +1915,7 @@ impl StateKey {
                     }
                     "ac" => Self::Consent(b64_32(rest)?),
                     "pc" => Self::PendingConflict(b64_32(rest)?),
+                    "pce" => Self::PendingRetirement(b64_32(rest)?),
                     "cf" => Self::Conflict(b64_32(rest)?),
                     "en" => Self::NoticeTarget(msg_id(rest)?),
                     "end" => Self::EndOrigin(msg_id(rest)?),
@@ -2885,6 +2906,10 @@ mod tests {
             (
                 key::pending_conflict(&pubky),
                 StateKey::PendingConflict(pubky),
+            ),
+            (
+                key::pending_retirement(&pubky),
+                StateKey::PendingRetirement(pubky),
             ),
             (key::conflict(&pubky), StateKey::Conflict(pubky)),
             (key::notice_target(id), StateKey::NoticeTarget(id.into())),

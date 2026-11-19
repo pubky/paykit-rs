@@ -87,7 +87,7 @@ use crate::state::{self, key, Tx};
 use crate::stored::{Placed, StoredNote};
 
 pub(crate) use replies::holds_delivery as pending_conflict_holds_delivery;
-pub(crate) use replies::{lifetime_ended, restore_conflicts, PendingConflict};
+pub(crate) use replies::{lifetime_ended, restore_conflicts, PendingConflict, PendingRetirement};
 mod replies;
 
 /// How many times a write of this app's is built again after its record changed meanwhile.
@@ -680,9 +680,10 @@ enum Held {
 pub(crate) fn receive_effect(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
-    seq: u64,
+    position: pubky_switch_client::app::FeedPosition,
     scopes: &[String],
 ) -> std::result::Result<(), Fail> {
+    let seq = position.seq;
     let sender = stored.sender();
     let own = cx.identity();
     let Some(allowance_id) = named_allowance(stored.body()).cloned() else {
@@ -695,12 +696,16 @@ pub(crate) fn receive_effect(
     if is_allowance_response(stored.body()) {
         let pending =
             allowance_record_target(Collection::AllowanceProposals, &sender, &allowance_id);
-        if let Some(held) = cx.record(&pending)? {
-            if cx.record(&target)?.is_none() {
+        let held = cx.record(&pending)?;
+        if cx.record(&target)?.is_none() {
+            if replies::before_retirement(cx, held.as_ref(), &pending, stored, position)? {
+                return receive::note_peer(cx, &sender, stored);
+            }
+            if let Some(held) = held {
                 match replies::observe(cx, &held, stored, seq)? {
                     replies::PendingReply::Unrelated => {}
-                    replies::PendingReply::Waits => {
-                        keep_answer(cx, &target, stored, seq, true)?;
+                    replies::PendingReply::Waits(version) => {
+                        keep_answer(cx, &target, stored, seq, true, Some(version))?;
                         return receive::note_peer(cx, &sender, stored);
                     }
                     replies::PendingReply::Stopped => {
@@ -763,7 +768,7 @@ pub(crate) fn receive_effect(
             // held ([`keep_answer`]).
             Held::None => {
                 if receive::admits_new_state(cx, &sender, scopes, stored)? {
-                    keep_answer(cx, &target, stored, seq, deleted)?;
+                    keep_answer(cx, &target, stored, seq, deleted, None)?;
                 }
                 Ok(())
             }
@@ -791,6 +796,7 @@ fn keep_answer(
     stored: &StoredMessage,
     seq: u64,
     over_held: bool,
+    source: Option<crate::divergent::SeenVersion>,
 ) -> std::result::Result<(), Fail> {
     let sender = stored.sender();
     let record = cx.record_key(target)?;
@@ -811,7 +817,9 @@ fn keep_answer(
         if !earliest {
             receive::make_room_for_reply(cx, &sender, order)?;
         }
-        receive::keep_local(cx, receive::local(&kept, &KeptMessage::taken(stored, seq))?);
+        let mut message = KeptMessage::taken(stored, seq);
+        message.pending_source = source;
+        receive::keep_local(cx, receive::local(&kept, &message)?);
     }
     Ok(())
 }
@@ -911,7 +919,7 @@ fn put_placed(
         && record.response.is_none()
         && !reflects(&record, &stored.message().msg_id)
     {
-        keep_answer(cx, target, stored, seq, true)?;
+        keep_answer(cx, target, stored, seq, true, None)?;
         if matches!(stored.body(), Body::AllowanceRejection(_))
             && scopes.iter().any(|s| s == "paykit_allowance_execute")
         {
@@ -936,7 +944,7 @@ fn put_placed(
             if crate::divergent::step_write_waits(cx, &held, stored, seq, &|_| None)? {
                 return match stored.body() {
                     Body::AllowanceProposal(_) => stored_entry(cx, stored),
-                    _ => keep_answer(cx, target, stored, seq, false),
+                    _ => keep_answer(cx, target, stored, seq, false, None),
                 };
             }
         }
@@ -2554,9 +2562,14 @@ impl Paykit {
         if !receive::holds_record(content.as_ref()) {
             match Box::pin(self.pending_reply_later(&record, &reply, order)).await? {
                 replies::PendingReply::Stopped => return self.local_delete(kept_key).await,
-                replies::PendingReply::Waits => {
+                replies::PendingReply::Waits(version) => {
                     if crate::stored::past_window(accepted_at, self.service_time()) {
                         self.give_up(kept_key, &reply).await?;
+                    } else if let Some(mut kept) = self.local_get::<KeptMessage>(kept_key).await? {
+                        if kept.pending_source.is_none() {
+                            kept.pending_source = Some(version);
+                            self.local_put(kept_key, &kept).await?;
+                        }
                     }
                     return Ok(());
                 }
@@ -2706,7 +2719,7 @@ impl Paykit {
                             .await?;
                         return Ok(Placed::Done);
                     }
-                    replies::PendingReply::Waits | replies::PendingReply::Unrelated => None,
+                    replies::PendingReply::Waits(_) | replies::PendingReply::Unrelated => None,
                 }
             }
             // A record absent is opened only by a message that may open it, a proposal, as

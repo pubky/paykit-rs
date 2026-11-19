@@ -355,11 +355,18 @@ pub struct FailingRecordReads {
     armed: std::sync::atomic::AtomicBool,
     /// Once set, the read of a held record that brings it to 1 fails, alone.
     countdown: std::sync::atomic::AtomicU64,
+    /// One actual record whose next read exceeds the store's limit.
+    limited_record: std::sync::Mutex<Option<String>>,
     /// While set, every journal entry reads back as bytes that don't read.
     corrupt_journal: std::sync::atomic::AtomicBool,
 }
 
 impl FailingRecordReads {
+    pub fn limit_next_record(&self, key: &[u8; 32]) {
+        *self.limited_record.lock().unwrap() =
+            Some(format!("rec/{}", pubky_switch_core::enc::b64(key)));
+    }
+
     /// Fail every read of a held record from now on.
     pub fn arm(&self) {
         self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -389,6 +396,18 @@ impl StateStore for FailingRecordReads {
         ns: &str,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+        let mut limited = self.limited_record.lock().unwrap();
+        if limited.as_deref().map(str::as_bytes) == Some(key) {
+            if let Some(stored) = self.inner.get(ns, key)? {
+                *limited = None;
+                let size = u64::try_from(stored.len()).unwrap();
+                return Err(pubky_switch_client::error::StoreError::TooLarge {
+                    size,
+                    cap: size.saturating_sub(1),
+                });
+            }
+        }
+        drop(limited);
         if self
             .corrupt_journal
             .load(std::sync::atomic::Ordering::SeqCst)

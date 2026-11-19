@@ -59,6 +59,9 @@ pub(crate) struct KeptMessage {
     /// carries none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     seq: Option<u64>,
+    /// The selected version of the pending proposal this answer was matched against.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) pending_source: Option<crate::divergent::SeenVersion>,
 }
 
 /// The order the inbox accepted a kept message in (Paykit spec 8.1): by acceptance time,
@@ -86,6 +89,7 @@ impl KeptMessage {
             plaintext: stored.plaintext().encode(),
             accepted_at: stored.accepted_at(),
             seq: None,
+            pending_source: None,
         }
     }
 
@@ -135,14 +139,27 @@ impl KeptMessage {
     pub(crate) fn stored(&self, recipient: &[u8; 32]) -> Result<StoredMessage> {
         let plaintext =
             MessagePlaintext::decode(&self.plaintext).map_err(|_| PaykitError::corrupt())?;
-        StoredMessage::new(
+        let message = StoredMessage::new(
             self.sender,
             &self.cert,
             plaintext,
             self.accepted_at,
             recipient,
         )
-        .map_err(|_| PaykitError::corrupt())
+        .map_err(|_| PaykitError::corrupt())?;
+        if let Some(source) = self.pending_source {
+            if source.record_version().is_none()
+                || self.order().is_err()
+                || !matches!(
+                    message.body(),
+                    paykit_lib::Body::AllowanceAcceptance(_)
+                        | paykit_lib::Body::AllowanceRejection(_)
+                )
+            {
+                return Err(PaykitError::corrupt());
+            }
+        }
+        Ok(message)
     }
 }
 

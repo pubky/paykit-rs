@@ -8935,14 +8935,42 @@ async fn test_pending_reply_stop_does_not_hide_the_give_up_of_a_lone_acceptance(
     Box::pin(held_pending_replies(PendingReplyCase::LoneAcceptance)).await;
 }
 
+#[tokio::test]
+async fn test_pending_reply_stop_stays_retired_when_an_older_backup_is_restored_over_recreation() {
+    Box::pin(held_pending_replies(PendingReplyCase::RestoreRetired)).await;
+}
+
+#[tokio::test]
+async fn test_pending_reply_stop_retries_a_native_stored_acceptance_after_an_older_restore() {
+    Box::pin(held_pending_replies(PendingReplyCase::RestoreRetryable)).await;
+}
+
 enum PendingReplyCase {
     Retry,
     DeletionSeen,
     OnlyRecreationSeen,
+    RestoreRetired,
+    RestoreRetryable,
     Restore,
     GiveUp,
     RejectionFirst,
     LoneAcceptance,
+}
+
+async fn restore_pending_wallet(
+    world: &World,
+    storage: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+    backup: &paykit_sdk::PaykitBackup,
+) -> Paykit {
+    Paykit::restore(
+        world.env(&world.alice, storage),
+        Default::default(),
+        backup,
+        world.rail.clone(),
+        world.timer(),
+    )
+    .await
+    .unwrap()
 }
 
 async fn held_pending_replies(by: PendingReplyCase) {
@@ -8957,7 +8985,8 @@ async fn held_pending_replies(by: PendingReplyCase) {
             AppScopes::new().request().allowance().build().unwrap(),
         )
         .await;
-    let storage = crate::common::store();
+    let limited = std::sync::Arc::new(crate::common::FailingRecordReads::default());
+    let storage: std::sync::Arc<dyn pubky_switch_client::store::StateStore> = limited.clone();
     let mut wallet = Box::pin(w.join_with(
         &w.alice,
         "wallet",
@@ -9000,7 +9029,10 @@ async fn held_pending_replies(by: PendingReplyCase) {
                 if kind == "paykit.allowance_proposal" && msg_id == &original_id)));
     }
     assert_ne!(shop.app_id(), till.app_id());
-    let early = if matches!(by, PendingReplyCase::Restore) {
+    let early = if matches!(
+        by,
+        PendingReplyCase::Restore | PendingReplyCase::RestoreRetryable
+    ) {
         Some(wallet.backup().await.unwrap())
     } else {
         None
@@ -9020,6 +9052,13 @@ async fn held_pending_replies(by: PendingReplyCase) {
         json!({"allowance_id":id.as_str()}),
         SENT_FIRST,
     );
+    let only_q = if matches!(by, PendingReplyCase::RestoreRetired) {
+        wallet.receive(None).await.unwrap();
+        assert!(Box::pin(keeps(&wallet, b"pr/", SENT_FIRST)).await);
+        Some(wallet.backup().await.unwrap())
+    } else {
+        None
+    };
     let single = matches!(by, PendingReplyCase::LoneAcceptance);
     if !single {
         inject_with_id(
@@ -9033,8 +9072,33 @@ async fn held_pending_replies(by: PendingReplyCase) {
             SENT_SECOND,
         );
     }
+    if matches!(by, PendingReplyCase::RestoreRetryable) {
+        limited.limit_next_record(&key);
+    }
     for app in [&mut wallet, &mut phone] {
-        app.receive(None).await.unwrap();
+        let summary = app.receive(None).await.unwrap();
+        if matches!(by, PendingReplyCase::RestoreRetryable)
+            && app.app_id() == w.alice.identity().app_keys("wallet").app_id_bytes()
+        {
+            let parked = app.app_mut().parked_entries().await.unwrap();
+            assert_eq!(parked.len(), 1);
+            assert_eq!(
+                parked[0].reason,
+                pubky_switch_client::app::ParkReason::StoreRejected
+            );
+            let q = app
+                .app_mut()
+                .parked_entry(parked[0].stored_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(q.message.unwrap().msg_id, SENT_FIRST);
+            assert!(q.sender_verified);
+            assert!(!Box::pin(keeps(app, b"se/", SENT_FIRST)).await);
+            assert!(!Box::pin(keeps(app, b"pr/", SENT_FIRST)).await);
+            assert!(Box::pin(keeps(app, b"pr/", SENT_SECOND)).await);
+            continue;
+        }
         if matches!(by, PendingReplyCase::RejectionFirst) {
             assert!(app
                 .app()
@@ -9050,7 +9114,9 @@ async fn held_pending_replies(by: PendingReplyCase) {
                 .await
                 .unwrap()
                 .len(),
-            usize::from(!single)
+            usize::from(!single),
+            "{:?}",
+            summary.report.events
         );
         assert!(Box::pin(keeps(app, b"pr/", SENT_FIRST)).await);
         assert!(!Box::pin(keeps(app, b"pr/", SENT_SECOND)).await);
@@ -9061,15 +9127,33 @@ async fn held_pending_replies(by: PendingReplyCase) {
     }
     if let Some(backup) = early {
         drop(wallet);
-        let wallet = Box::pin(Paykit::restore(
-            w.env(&w.alice, storage),
-            Default::default(),
-            &backup,
-            std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
-            w.timer(),
-        ))
-        .await
-        .unwrap();
+        let mut wallet = Box::pin(restore_pending_wallet(&w, storage, &backup)).await;
+        if matches!(by, PendingReplyCase::RestoreRetryable) {
+            Box::pin(read_restored_records(&mut wallet)).await;
+            for _ in 0..2 {
+                wallet.receive(None).await.unwrap();
+            }
+            let q = Box::pin(keeps(&wallet, b"pr/", SENT_FIRST)).await;
+            let stopped = Box::pin(kept_under(&wallet, b"pc/")).await;
+            let r = Box::pin(keeps(&wallet, b"pr/", SENT_SECOND)).await;
+            let native = wallet.app_mut().parked_entries().await.unwrap();
+            w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS + 1);
+            wallet.receive(None).await.unwrap();
+            let notices = wallet.notices().await.unwrap();
+            let given_up = notices
+                .iter()
+                .filter(|n| {
+                    n.kind == paykit_sdk::NoticeKind::MessageGivenUp
+                        && n.msg_id.as_deref() == Some(SENT_FIRST)
+                })
+                .count();
+            assert_eq!(
+                (q, stopped, r, native.len(), given_up),
+                (true, 1, false, 0, 1),
+                "post-restore custody of the retryable signed acceptance and its later rejection"
+            );
+            return;
+        }
         assert_eq!(
             wallet
                 .app()
@@ -9079,7 +9163,11 @@ async fn held_pending_replies(by: PendingReplyCase) {
                 .len(),
             1
         );
-        assert!(Box::pin(keeps(&wallet, b"pr/", SENT_FIRST)).await);
+        assert!(
+            Box::pin(keeps(&wallet, b"pr/", SENT_FIRST)).await
+                || Box::pin(keeps(&wallet, b"se/", SENT_FIRST)).await,
+            "the unplaced acceptance must survive replacement of this installation"
+        );
         assert!(w.rail.all_executions().is_empty());
         return;
     }
@@ -9127,9 +9215,17 @@ async fn held_pending_replies(by: PendingReplyCase) {
             && q.resend));
         assert!(Box::pin(keeps(&wallet, b"pr/", SENT_FIRST)).await);
     } else {
+        let stale = if matches!(by, PendingReplyCase::RestoreRetired) {
+            Some(wallet.backup().await.unwrap())
+        } else {
+            None
+        };
         // The user's other wallet deletes its selected pending write on the service.
         Box::pin(write_record(&mut phone, &target, None)).await;
-        let seen = matches!(by, PendingReplyCase::DeletionSeen);
+        let seen = matches!(
+            by,
+            PendingReplyCase::DeletionSeen | PendingReplyCase::RestoreRetired
+        );
         if seen {
             wallet.app_mut().receive(None).await.unwrap();
             let r = wallet.app().shared_record(&key).await.unwrap().unwrap();
@@ -9140,7 +9236,7 @@ async fn held_pending_replies(by: PendingReplyCase) {
         let app_id = wallet.app_id();
         drop(wallet);
         let mut wallet =
-            Box::pin(w.load_on_clock(&w.alice, storage, app_id, w.clock.clone())).await;
+            Box::pin(w.load_on_clock(&w.alice, storage.clone(), app_id, w.clock.clone())).await;
         phone.receive(None).await.unwrap();
         Box::pin(write_record(&mut phone, &target, Some(&original))).await;
         wallet.receive(None).await.unwrap();
@@ -9156,6 +9252,116 @@ async fn held_pending_replies(by: PendingReplyCase) {
                 .len(),
             usize::from(!seen)
         );
+        if let Some(backup) = stale {
+            drop(wallet);
+            let mut restored = Box::pin(restore_pending_wallet(&w, storage.clone(), &backup)).await;
+            Box::pin(read_restored_records(&mut restored)).await;
+            let current = restored.app().shared_record(&key).await.unwrap().unwrap();
+            assert_eq!(current.content.value(), Some(original.as_slice()));
+            assert!(
+                restored
+                    .app()
+                    .protocol_scan("paykit", b"pc/")
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "the restored layer reinstated the earlier rejection over the current proposal"
+            );
+            assert!(
+                !Box::pin(keeps(&restored, b"pr/", SENT_FIRST)).await,
+                "the restored layer reinstated a retired placement duty"
+            );
+            let fresh_store = crate::common::store();
+            let fresh = Box::pin(restore_pending_wallet(&w, fresh_store.clone(), &backup)).await;
+            assert_eq!(Box::pin(kept_under(&fresh, b"pc/")).await, 1);
+            assert!(Box::pin(keeps(&fresh, b"pr/", SENT_FIRST)).await);
+            // Restore a layer from before R. Its only duty still names the earlier P.
+            drop(restored);
+            let only_q = only_q.unwrap();
+            let mut restored = Box::pin(restore_pending_wallet(&w, storage.clone(), &only_q)).await;
+            assert!(!Box::pin(keeps(&restored, b"pr/", SENT_FIRST)).await);
+            Box::pin(read_restored_records(&mut restored)).await;
+            let closed = restored.backup().await.unwrap();
+            drop(fresh);
+            let handed_off =
+                Box::pin(restore_pending_wallet(&w, fresh_store.clone(), &closed)).await;
+            assert_eq!(Box::pin(kept_under(&handed_off, b"pce/")).await, 1);
+            drop(handed_off);
+            for selected in [&backup, &only_q] {
+                let again =
+                    Box::pin(restore_pending_wallet(&w, fresh_store.clone(), selected)).await;
+                assert_eq!(Box::pin(kept_under(&again, b"pc/")).await, 0);
+                assert_eq!(Box::pin(kept_under(&again, b"pce/")).await, 1);
+                assert!(!Box::pin(keeps(&again, b"pr/", SENT_FIRST)).await);
+            }
+            let selected = restored
+                .app_mut()
+                .read_record(&target)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                selected.authenticated
+                    && !selected.not_taken
+                    && !selected.doubtful
+                    && !selected.divergent
+                    && !selected.flagged
+            );
+            assert_eq!(selected.version, r.version);
+            assert_eq!(selected.content.value(), Some(original.as_slice()));
+            let preceding: Vec<_> = restored
+                .app()
+                .protocol_scan("paykit", b"pr/")
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|(k, _)| String::from_utf8(k).unwrap())
+                .collect();
+            let second_q = "d6723437-48b0-45ca-9c7e-cdce3a9b788f";
+            for (sender, kind, msg_id) in [
+                ("shop", first_kind, second_q),
+                ("till", second_kind, SORTS_FIRST),
+            ] {
+                inject_with_id(
+                    &w,
+                    &w.bob,
+                    sender,
+                    &[restored.app_id(), phone.app_id()],
+                    kind,
+                    vec![p.hash()],
+                    json!({"allowance_id":id.as_str()}),
+                    msg_id,
+                );
+            }
+            let got = restored.receive(None).await.unwrap();
+            assert!(Box::pin(keeps(&restored, b"pr/", second_q)).await);
+            assert_eq!(
+                Box::pin(kept_under(&restored, b"pc/")).await,
+                1,
+                "verified {:?}, prior replies {:?}, events {:?}",
+                selected.version,
+                preceding,
+                got.report.events
+            );
+            let later = restored.backup().await.unwrap();
+            drop(restored);
+            let mut restored = Box::pin(restore_pending_wallet(&w, storage.clone(), &backup)).await;
+            assert_eq!(Box::pin(kept_under(&restored, b"pc/")).await, 1);
+            assert!(Box::pin(keeps(&restored, b"pr/", second_q)).await);
+            assert!(!Box::pin(keeps(&restored, b"pr/", SENT_FIRST)).await);
+            Box::pin(read_restored_records(&mut restored)).await;
+            phone.receive(None).await.unwrap();
+            Box::pin(write_record(&mut phone, &target, None)).await;
+            restored.receive(None).await.unwrap();
+            assert_eq!(Box::pin(kept_under(&restored, b"pc/")).await, 0);
+            drop(restored);
+            for selected in [&later, &backup, &only_q] {
+                let again = Box::pin(restore_pending_wallet(&w, storage.clone(), selected)).await;
+                assert_eq!(Box::pin(kept_under(&again, b"pce/")).await, 1);
+                assert_eq!(Box::pin(kept_under(&again, b"pc/")).await, 0);
+                assert_eq!(Box::pin(kept_under(&again, b"pr/")).await, 0);
+            }
+        }
     }
     assert!(w.rail.all_executions().is_empty());
 }

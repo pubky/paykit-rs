@@ -484,6 +484,8 @@ pub(crate) fn restore_paykit_layer(
     // and unresolved ones first observed since the backup (Paykit spec 7.2).
     let mut delivery_notices = std::collections::BTreeMap::new();
     let mut pending_conflicts = std::collections::BTreeMap::new();
+    let mut retirements = std::collections::BTreeMap::new();
+    let mut sourced_replies = std::collections::BTreeMap::new();
     for (key, value) in restoring
         .previous_local_scan(key::RESTORED_DELIVERIES.as_bytes())
         .map_err(|_| "the outgoing delivery notices cannot be read")?
@@ -717,11 +719,18 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::PendingConflict(_) => {
+            StateKey::PendingRetirement(record) => {
+                let end =
+                    state::restored::<crate::allowances::PendingRetirement>(&key, &value, &binder)
+                        .map_err(|_| unread())?;
+                retirements.insert(record, end);
+                continue;
+            }
+            StateKey::PendingConflict(record) => {
                 let conflict =
                     state::restored::<crate::allowances::PendingConflict>(&key, &value, &binder)
                         .map_err(|_| unread())?;
-                pending_conflicts.insert(key, conflict);
+                pending_conflicts.insert(record, conflict);
                 continue;
             }
             StateKey::AllowanceEnd { .. } | StateKey::Conflict(_) => {
@@ -803,12 +812,17 @@ pub(crate) fn restore_paykit_layer(
                 continue;
             }
             StateKey::KeptReply { .. } => {
-                state::restored::<KeptMessage>(&key, &value, &binder).map_err(|_| {
-                    String::from(
-                        "Switch spec 8.2: a kept payer's reply in the backup doesn't verify",
-                    )
-                })?;
-                writes.push(LocalWrite::Put { key, value });
+                let message =
+                    state::restored::<KeptMessage>(&key, &value, &binder).map_err(|_| {
+                        String::from(
+                            "Switch spec 8.2: a kept payer's reply in the backup doesn't verify",
+                        )
+                    })?;
+                if message.pending_source.is_some() {
+                    sourced_replies.insert(String::from_utf8(key).map_err(|_| unread())?, message);
+                } else {
+                    writes.push(LocalWrite::Put { key, value });
+                }
                 continue;
             }
             // A notice of lost messages owed is carried as the marks and the notices are: the
@@ -897,8 +911,15 @@ pub(crate) fn restore_paykit_layer(
         let value = state::encode(&entry).map_err(|_| bad())?;
         writes.push(LocalWrite::Put { key, value });
     }
-    crate::allowances::restore_conflicts(restoring, &binder, pending_conflicts, &mut writes)
-        .map_err(|_| "the pending Allowance replies cannot be retained")?;
+    crate::allowances::restore_conflicts(
+        restoring,
+        &binder,
+        pending_conflicts,
+        retirements,
+        sourced_replies,
+        &mut writes,
+    )
+    .map_err(|_| "the pending Allowance replies cannot be retained")?;
     for (key, notice) in delivery_notices {
         let value = state::encode(&notice).map_err(|_| "a delivery notice cannot be written")?;
         writes.push(LocalWrite::Put { key, value });
@@ -1227,7 +1248,9 @@ impl Protocol for PaykitProtocol {
             Ok(stored) => stored,
             Err(reason) => return Outcome::Drop { reason },
         };
-        match receive::effect(cx, &stored, message.seq, &|proof| self.settlement_id(proof)) {
+        match receive::effect(cx, &stored, message.position(), &|proof| {
+            self.settlement_id(proof)
+        }) {
             // A write the context couldn't build for want of a key: the context holds the
             // entry itself, whatever is returned (Switch spec 3.5).
             Ok(()) | Err(Fail::NotNow) => Outcome::Apply(Effect::default()),

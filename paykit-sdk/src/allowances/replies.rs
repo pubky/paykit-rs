@@ -6,7 +6,7 @@ use crate::error::{PaykitError, Result};
 use crate::protocol::{store_failure, view_failure};
 use crate::receive::{self, Fail};
 use crate::records::KeptMessage;
-use crate::state::{self, key, Binder};
+use crate::state::{self, key, Binder, StateKey};
 use crate::stored::StoredNote;
 use paykit_lib::bodies::ProposerRole;
 use paykit_lib::collections::Collection;
@@ -17,6 +17,7 @@ use pubky_switch_client::app::{
 };
 use pubky_switch_core::ops::RecordVersion;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// The readable source at which this app first established the conflict.
 #[derive(Clone, Serialize, Deserialize)]
@@ -27,6 +28,34 @@ pub(crate) struct PendingConflict {
     pending: Vec<u8>,
     acceptance: KeptMessage,
     rejection: KeptMessage,
+}
+
+/// The latest verified deletion of an actually conflicted pending key. A later
+/// in-place restore can still select an older backup after the same P reappears.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PendingRetirement {
+    #[serde(with = "pubky_switch_core::enc::serde_b64")]
+    counterparty: [u8; 32],
+    allowance_id: String,
+    #[serde(with = "pubky_switch_core::enc::serde_b64")]
+    proposal: [u8; 32],
+    version: SeenVersion,
+}
+
+impl PendingRetirement {
+    pub(crate) fn bind(&self, key: &[u8; 32], binder: &Binder<'_>) -> Result<()> {
+        let id = paykit_lib::AllowanceId::parse(&self.allowance_id)?;
+        let target =
+            allowance_record_target(Collection::AllowanceProposals, &self.counterparty, &id);
+        if self.version.record_version().is_none()
+            || self.counterparty == *binder.identity()
+            || binder.record_key(&target)? != *key
+        {
+            return Err(PaykitError::corrupt());
+        }
+        Ok(())
+    }
 }
 
 /// A qualified, unresolved conflict at this proposal lifetime stops its outgoing
@@ -111,7 +140,7 @@ impl PendingConflict {
         } else if matches!(answer.body(), Body::AllowanceRejection(_)) {
             PendingReply::Stopped
         } else {
-            PendingReply::Waits
+            PendingReply::Waits(self.source)
         })
     }
 
@@ -182,9 +211,42 @@ fn original_for(
     (pending.conflicted().is_none() && p.sender() == *own && answers(p, answer)).then_some(pending)
 }
 
+/// A restored cursor can replay the old answer after the same proposal has reopened.
+/// Compare the actual inbox position with the selected deletion in the account feed.
+pub(super) fn before_retirement(
+    cx: &ReceiveContext<'_>,
+    held: Option<&SharedRecord>,
+    target: &pubky_switch_client::app::RecordTarget,
+    answer: &StoredMessage,
+    position: pubky_switch_client::app::FeedPosition,
+) -> std::result::Result<bool, Fail> {
+    use pubky_switch_client::app::FeedPosition;
+    let key = cx.record_key(target)?;
+    let Some(end) = state::cx_get::<PendingRetirement>(cx, &key::pending_retirement(&key))? else {
+        return Ok(false);
+    };
+    if answer.message().refs.as_slice() != [end.proposal]
+        && !held
+            .is_some_and(|held| original_for(held, target, &key, &cx.identity(), answer).is_some())
+    {
+        return Ok(false);
+    }
+    let deleted = end.version.record_version();
+    let at = FeedPosition {
+        generation: deleted.generation,
+        seq: deleted.version,
+    };
+    match cx.received_order(position, at) {
+        Some(order) => Ok(order.is_lt()),
+        None => Err(Fail::Store(StoreFailure::unavailable(
+            pubky_switch_client::error::StoreError::Unavailable,
+        ))),
+    }
+}
+
 pub(super) enum PendingReply {
     Unrelated,
-    Waits,
+    Waits(SeenVersion),
     Stopped,
 }
 
@@ -223,10 +285,10 @@ pub(super) fn observe(
         return Ok(if rejected {
             PendingReply::Stopped
         } else {
-            PendingReply::Waits
+            PendingReply::Waits(held.version.into())
         });
     }
-    Ok(PendingReply::Waits)
+    Ok(PendingReply::Waits(held.version.into()))
 }
 
 /// The exact discard also settles held replies to its P. A stored entry must still go
@@ -288,7 +350,21 @@ pub(crate) fn lifetime_ended(
         .map_err(Fail::into_store_failure)?;
     let stored = state::cx_scan::<StoredNote>(cx, &key::stored_notes_of(peer))
         .map_err(Fail::into_store_failure)?;
-    retire(&own, &record.key, pending.proposal(), held, stored).map_err(view_failure)
+    let mut writes =
+        retire(&own, &record.key, pending.proposal(), held, stored).map_err(view_failure)?;
+    let key = key::pending_retirement(&record.key);
+    let previous =
+        state::cx_get::<PendingRetirement>(cx, &key).map_err(Fail::into_store_failure)?;
+    if previous.is_none_or(|old| old.version.record_version() < version) {
+        let retirement = PendingRetirement {
+            counterparty: *peer,
+            allowance_id: pending.allowance_id().as_str().to_owned(),
+            proposal: pending.proposal().hash(),
+            version: version.into(),
+        };
+        writes.push(state::local_put(&key, &retirement).map_err(view_failure)?);
+    }
+    Ok(writes)
 }
 
 impl Paykit {
@@ -323,7 +399,7 @@ impl Paykit {
             return stop.reply(&own, message);
         }
         Ok(if matches!(message.body(), Body::AllowanceAcceptance(_)) {
-            PendingReply::Waits
+            PendingReply::Waits(held.version.into())
         } else {
             PendingReply::Unrelated
         })
@@ -335,12 +411,51 @@ impl Paykit {
 pub(crate) fn restore_conflicts(
     restoring: &pubky_switch_client::app::RestoreContext<'_>,
     binder: &Binder<'_>,
-    mut imported: std::collections::BTreeMap<Vec<u8>, PendingConflict>,
+    mut imported: BTreeMap<[u8; 32], PendingConflict>,
+    mut retirements: BTreeMap<[u8; 32], PendingRetirement>,
+    mut replies: BTreeMap<String, KeptMessage>,
     writes: &mut Vec<LocalWrite>,
 ) -> Result<()> {
-    let own = binder.identity();
-    for (key, bytes) in restoring.previous_local_scan(key::PENDING_CONFLICTS.as_bytes())? {
-        let old = state::restored::<PendingConflict>(&key, &bytes, binder)?;
+    for (at, bytes) in restoring.previous_local_scan(key::PENDING_RETIREMENTS.as_bytes())? {
+        let receipt = state::restored::<PendingRetirement>(&at, &bytes, binder)?;
+        let Some(StateKey::PendingRetirement(key)) = StateKey::parse(&at) else {
+            return Err(PaykitError::corrupt());
+        };
+        if retirements
+            .get(&key)
+            .is_none_or(|r| r.version < receipt.version)
+        {
+            retirements.insert(key, receipt);
+        }
+    }
+    let retired = |key: &[u8; 32], source: SeenVersion| {
+        retirements.get(key).is_some_and(|r| source < r.version)
+    };
+    imported.retain(|key, stop| !retired(key, stop.source));
+    for (at, bytes) in restoring.previous_local_scan(key::PENDING_CONFLICTS.as_bytes())? {
+        let old = state::restored::<PendingConflict>(&at, &bytes, binder)?;
+        let Some(StateKey::PendingConflict(key)) = StateKey::parse(&at) else {
+            return Err(PaykitError::corrupt());
+        };
+        if retired(&key, old.source) {
+            continue;
+        }
+        let q = old.unplaced_acceptance_key(binder)?;
+        if let Some((at, bytes)) = restoring
+            .previous_local_scan(q.as_bytes())?
+            .into_iter()
+            .find(|(at, _)| at == q.as_bytes())
+        {
+            let mut held = state::restored::<KeptMessage>(&at, &bytes, binder)?;
+            if held.stored(binder.identity())?.hash()
+                != old.acceptance.stored(binder.identity())?.hash()
+                || held.order()? != old.acceptance.order()?
+            {
+                return Err(PaykitError::corrupt());
+            }
+            held.pending_source.get_or_insert(old.source);
+            replies.insert(q, held);
+        }
         if let Some(other) = imported.get(&key) {
             if other.source() > old.source()
                 || (other.source() == old.source() && other.first_order()? < old.first_order()?)
@@ -348,31 +463,23 @@ pub(crate) fn restore_conflicts(
                 continue;
             }
         }
-        let q = old.unplaced_acceptance_key(binder)?;
-        if !writes
-            .iter()
-            .any(|w| matches!(w, LocalWrite::Put { key,.. } if key == q.as_bytes()))
-        {
-            for (at, bytes) in restoring.previous_local_scan(q.as_bytes())? {
-                if at == q.as_bytes() {
-                    let held = state::restored::<KeptMessage>(&at, &bytes, binder)?;
-                    if held.stored(own)?.hash() != old.acceptance.stored(own)?.hash() {
-                        return Err(PaykitError::corrupt());
-                    }
-                    writes.push(LocalWrite::Put {
-                        key: at,
-                        value: bytes,
-                    });
-                }
-            }
-        }
         imported.insert(key, old);
     }
     for (key, stop) in imported {
-        writes.push(LocalWrite::Put {
-            key,
-            value: state::encode(&stop)?,
-        });
+        writes.push(state::local_put(&key::pending_conflict(&key), &stop)?);
+    }
+    for (at, held) in replies {
+        let message = held.stored(binder.identity())?;
+        let id = named_allowance(message.body()).ok_or_else(PaykitError::corrupt)?;
+        let target = allowance_record_target(Collection::AllowanceProposals, &message.sender(), id);
+        let key = binder.record_key(&target)?;
+        let source = held.pending_source.ok_or_else(PaykitError::corrupt)?;
+        if !retired(&key, source) {
+            writes.push(state::local_put(&at, &held)?);
+        }
+    }
+    for (key, receipt) in retirements {
+        writes.push(state::local_put(&key::pending_retirement(&key), &receipt)?);
     }
     Ok(())
 }

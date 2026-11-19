@@ -152,9 +152,10 @@ pub(crate) type Settlement<'a> = &'a paykit_lib::derive::SettlementIdReader<'a>;
 pub(crate) fn effect(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
-    seq: u64,
+    position: pubky_switch_client::app::FeedPosition,
     settlement: Settlement<'_>,
 ) -> Result<(), Fail> {
+    let seq = position.seq;
     // No Paykit effect under an own certificate Paykit refuses, such as a renewal's the
     // Switch took (Paykit wire 3.1): the entry is held, never consumed, and tried again at
     // later reads, once a certificate that passes replaces it.
@@ -303,7 +304,7 @@ pub(crate) fn effect(
         | Body::AllowanceEnd(_)
             if scopes.iter().any(|s| s == "paykit_allowance") =>
         {
-            crate::allowances::receive_effect(cx, stored, seq, &scopes)?;
+            crate::allowances::receive_effect(cx, stored, position, &scopes)?;
         }
         Body::ExecutorNotice(notice) if scopes.iter().any(|s| s == "paykit_allowance_execute") => {
             crate::allowances::notice_effect(cx, notice)?;
