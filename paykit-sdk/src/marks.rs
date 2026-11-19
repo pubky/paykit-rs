@@ -63,8 +63,9 @@
 //! **Cadence.** Once asked, a sender is asked again at most once in any 24 hours while its
 //! mark lives, on the device clock. Asking doesn't change the mark's times. A request that
 //! doesn't reach the sender's inbox counts as not sent: one still queued is tried again at
-//! the next receive, one refused for good, or no longer kept, is asked anew, and the 24 hours
-//! count from the last request the outbox delivered.
+//! the next receive. A request for dropped replies can be replaced after confirmed first
+//! non-delivery. If the outcome is uncertain, overlapping asks wait for reconciliation.
+//! The 24 hours count from the last request the outbox delivered.
 //!
 //! **Expiry and bounds.** A mark goes [`crate::KEPT_MESSAGE_MS`] after its latest time, on the
 //! highest service time verified, once its sender keeps none of the messages it covers.
@@ -597,6 +598,7 @@ impl Paykit {
     /// Ask on live marks at a receive, subject to the sender's holds and the mark's cadence.
     /// Returns how many requests were queued.
     pub(crate) async fn ask_on_marks(&mut self, refused: &mut Option<Refusal>) -> Result<u64> {
+        self.reconcile_reply_asks().await?;
         let mut asked = 0u64;
         for family in [MarkFamily::Replies, MarkFamily::Unverified] {
             for (rest, mark) in self.local_scan::<DropMark>(family.prefix()).await? {
@@ -935,6 +937,21 @@ impl Paykit {
                 let floor = self.local_get::<u64>(key::BLOCK_FLOOR).await?;
                 fold_into_floor(&mut tx, floor, gone.latest_ms)?;
             }
+            if family == MarkFamily::Replies {
+                let gone = mark.drop_mark();
+                let evidence = self
+                    .local_get::<crate::reply_asks::ReplyAsks>(&key::reply_asks(&gone.sender))
+                    .await?
+                    .unwrap_or_default();
+                if let Some((key, lost)) = evidence.lost_notice(
+                    &gone.sender,
+                    gone.earliest_ms,
+                    gone.latest_ms,
+                    self.service_time().unwrap_or(0),
+                ) {
+                    tx.put(&key, &lost)?;
+                }
+            }
             self.local_commit(tx).await?;
             return Ok(0);
         }
@@ -956,7 +973,16 @@ impl Paykit {
         key: &str,
         mut held: M,
     ) -> Result<u64> {
-        let sender = held.drop_mark().sender;
+        let mark = held.drop_mark();
+        let sender = mark.sender;
+        let selection = family.selection(mark);
+        let pending = mark.queued.as_ref().map(|q| (q.msg_id.as_str(), q.hash));
+        if !self
+            .recovery_request_permitted(&sender, &selection.request(), pending)
+            .await?
+        {
+            return Ok(0);
+        }
         if let Some(queued) = held.drop_mark().queued.clone() {
             let msg_id = &queued.msg_id;
             // The batch that queues it with the raise is still kept by the client, to send
@@ -983,10 +1009,17 @@ impl Paykit {
                 // request: a `msg_id` naming another message is a corrupt store, never a
                 // request delivered.
                 Some(Delivery::Accepted { .. }) => {
+                    if family == MarkFamily::Replies {
+                        self.reconcile_reply_asks().await?;
+                        return Ok(0);
+                    }
                     self.delivered_request(&sender, &queued).await?;
                     held.drop_mark().asked_at_ms = Some(self.now());
                 }
-                // Refused for good, or no longer kept: not sent, so asked anew below.
+                // A reply ask waits for its exact first-delivery duty. A later refusal,
+                // or an absent queue entry after a crash, cannot establish non-delivery.
+                _ if family == MarkFamily::Replies => return Ok(0),
+                // Other marks follow their usual retry rule.
                 _ => {}
             }
             held.drop_mark().queued = None;
@@ -1027,15 +1060,24 @@ impl Paykit {
         let selection = family.selection(held.drop_mark());
         let signed = self.resend_request_message(sender, selection)?;
         let msg_id = signed.msg_id().to_owned();
-        // Kept before it is queued: a crash between the two finds the request not kept by
-        // the outbox, and asks anew.
+        // Keep the signed reply ask with its mark before handing it to the outbox.
+        // If the handoff is interrupted, a missing queue entry cannot authorize a second ask.
         let hash = signed.hash();
         held.drop_mark().queued = Some(QueuedRequest {
             msg_id: msg_id.clone(),
             hash,
             kept_batch: None,
         });
-        self.local_put(key, &held).await?;
+        let mut tx = crate::state::Tx::default();
+        if family == MarkFamily::Replies
+            && !self
+                .reserve_reply_ask(&mut tx, held.drop_mark(), &signed)
+                .await?
+        {
+            return Ok(0);
+        }
+        tx.put(key, &held)?;
+        self.local_commit(tx).await?;
         // With the raise of the block floor its mark needs, in one batch: a floor that can't
         // be read, the switch's refusal of the raise, or a conflict, leaves the request kept
         // as queued and not sent, so the next pass asks anew (`crate::floor`). A failure of
@@ -1059,7 +1101,10 @@ impl Paykit {
                 if crate::floor::floor_write_waits(&error)
                     || error.code() == Some(pubky_switch_core::http::ErrorCode::Conflict) =>
             {
-                return Ok(0)
+                if family == MarkFamily::Replies {
+                    self.reply_ask_not_queued(&sender, &msg_id).await?;
+                }
+                return Ok(0);
             }
             Err(error) => return Err(error),
         }
@@ -1068,10 +1113,14 @@ impl Paykit {
             self.app.delivery(&msg_id).await?,
             Some(Delivery::Accepted { .. })
         ) {
-            let mark = held.drop_mark();
-            mark.queued = None;
-            mark.asked_at_ms = Some(self.now());
-            self.local_put(key, &held).await?;
+            if family == MarkFamily::Replies {
+                self.reconcile_reply_asks().await?;
+            } else {
+                let mark = held.drop_mark();
+                mark.queued = None;
+                mark.asked_at_ms = Some(self.now());
+                self.local_put(key, &held).await?;
+            }
         }
         Ok(1)
     }

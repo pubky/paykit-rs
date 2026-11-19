@@ -449,6 +449,25 @@ async fn test_replies_dropped_mark_past_128_the_one_with_the_earliest_latest_tim
     assert!(senders.contains(&w.alice_id()));
     assert!(!senders.contains(&held[0]));
     assert!(senders.contains(&held[1]));
+    let lost: Vec<_> = shop
+        .notices()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|n| {
+            n.kind == paykit_sdk::NoticeKind::DroppedMessagesLost && n.counterparty == held[0]
+        })
+        .collect();
+    assert_eq!(lost.len(), 1);
+    assert!(lost[0].msg_id.is_none());
+    shop.acknowledge_notice(&lost[0].id).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert!(!shop
+        .notices()
+        .await
+        .unwrap()
+        .iter()
+        .any(|n| n.id == lost[0].id));
 }
 
 #[tokio::test]
@@ -518,19 +537,25 @@ async fn test_replies_dropped_ask_not_delivered_tried_again_its_day_counted_from
 }
 
 #[tokio::test]
-async fn test_replies_dropped_ask_refused_for_good_asked_anew_at_the_next_receive() {
+async fn test_replies_dropped_terminal_refusal_of_a_sealed_ask_keeps_the_window_held() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     let n = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
-    let (request, at) = unmatched_after_payment(&w, &mut wallet, &mut shop, n).await;
+    let (request, _) = unmatched_after_payment(&w, &mut wallet, &mut shop, n).await;
     refuse_next_delivery(&w, ErrorCode::PermissionMissing);
     assert_eq!(shop.receive(None).await.unwrap().resends, 1);
     record_request(&w, &mut shop, &request).await;
     assert!(asked(&shop, &w.alice_id()).await.is_empty());
-    // Refused, it counts as not sent: asked anew, within the day.
-    assert_eq!(shop.receive(None).await.unwrap().resends, 1);
-    assert_eq!(asked(&shop, &w.alice_id()).await, vec![(Some(at), None)]);
+    // Switch committed the envelope before the POST. A terminal refusal of that
+    // try carries no assurance that the original was never accepted.
+    let duties = shop.app_mut().unacknowledged_events().await.unwrap();
+    assert!(duties.iter().any(|d| matches!(
+        d,
+        pubky_switch_client::app::AppEvent::DeliveryUnknown { .. }
+    )));
+    assert_eq!(shop.receive(None).await.unwrap().resends, 0);
+    assert!(asked(&shop, &w.alice_id()).await.is_empty());
     assert_eq!(shop.receive(None).await.unwrap().resends, 0);
 }
 
@@ -1946,16 +1971,16 @@ async fn test_replies_stored_of_one_millisecond_placed_in_acceptance_order() {
 }
 
 #[tokio::test]
-async fn test_replies_dropped_before_their_record_are_asked_after_a_restored_block_ends() {
+async fn test_replies_dropped_before_their_record_are_asked_after_a_live_block_ends() {
     dropped_before_record_after_unblock(false).await;
 }
 
 #[tokio::test]
-async fn test_replies_dropped_with_a_stored_mark_that_had_no_parent_still_ask_after_unblock() {
+async fn test_replies_dropped_before_their_record_hold_an_unidentified_ask_after_restore() {
     dropped_before_record_after_unblock(true).await;
 }
 
-async fn dropped_before_record_after_unblock(mark_waited_for_parent: bool) {
+async fn dropped_before_record_after_unblock(restore: bool) {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w
@@ -1980,30 +2005,45 @@ async fn dropped_before_record_after_unblock(mark_waited_for_parent: bool) {
     shop.app_mut().receive(None).await.unwrap();
     assert_eq!(marks(&shop).await, vec![(accepted, accepted)]);
     shop.block(&payer).await.unwrap();
-    let mut backup = shop.backup().await.unwrap();
-    if mark_waited_for_parent {
-        // A sender mark kept before its parent was known can have this readiness value.
-        let saved = serde_json::from_slice(&backup.to_bytes().unwrap()).unwrap();
-        let mut layer = crate::restore::layer_of(&saved);
-        let mut marks = layer.iter_mut().filter(|(key, _)| key.starts_with(b"pd/"));
-        let (_, value) = marks.next().unwrap();
-        assert_eq!(value["d"]["due"], true);
-        value["d"]["due"] = false.into();
-        assert!(marks.next().is_none());
-        let saved = crate::restore::with_layer(&saved, layer);
-        backup =
-            paykit_sdk::PaykitBackup::from_bytes(&serde_json::to_vec(&saved).unwrap()).unwrap();
+    if restore {
+        let backup = shop.backup().await.unwrap();
+        // The original installation delivered the ask, lost its reply and gave up that ID.
+        shop.unblock(&payer).await.unwrap();
+        w.alice.switch().fail_next(Fault::LoseAnswer {
+            path: "inbox".into(),
+        });
+        shop.receive(None).await.unwrap();
+        let original = shop
+            .app()
+            .queued_messages("paykit")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.kind == "paykit.resend_request")
+            .unwrap()
+            .msg_id;
+        let seen = wallet.app_mut().receive(None).await.unwrap();
+        assert!(seen.events.iter().any(|e| matches!(e,
+            pubky_switch_client::app::AppEvent::MessageReceived {msg_id, ..} if msg_id == &original)));
+        assert!(shop
+            .app_mut()
+            .withdraw_message("paykit", &original)
+            .await
+            .unwrap());
+        assert!(shop.app_mut().unacknowledged_events().await.unwrap().iter().any(|e| matches!(e,
+            pubky_switch_client::app::AppEvent::DeliveryUnknown {msg_id, ..} if msg_id == &original)));
+        shop.block(&payer).await.unwrap();
+        drop(shop);
+        shop = Paykit::restore(
+            w.env(&w.bob, store()),
+            PaykitConfig::default(),
+            &backup,
+            w.rail.clone(),
+            w.timer(),
+        )
+        .await
+        .unwrap();
     }
-    drop(shop);
-    let mut shop = Paykit::restore(
-        w.env(&w.bob, store()),
-        PaykitConfig::default(),
-        &backup,
-        w.rail.clone(),
-        w.timer(),
-    )
-    .await
-    .unwrap();
     shop.receive(None).await.unwrap();
     shop.app_mut().flush_outbox().await.unwrap();
     assert!(asked(&shop, &payer).await.is_empty());
@@ -2015,6 +2055,125 @@ async fn dropped_before_record_after_unblock(mark_waited_for_parent: bool) {
         .into_iter()
         .filter(|(_, until)| until.is_none())
         .collect::<Vec<_>>();
+    if restore {
+        assert!(reply_asks.is_empty());
+        let overlap = paykit_sdk::ResendSelection::default().with_accepted_from_ms(accepted);
+        assert!(matches!(
+            shop.request_resend(payer, overlap)
+                .await
+                .unwrap_err()
+                .refusal(),
+            Some(paykit_sdk::Refusal::NotNow(_))
+        ));
+        let earlier = paykit_sdk::ResendSelection::default()
+            .with_accepted_from_ms(accepted - 1)
+            .with_accepted_until_ms(accepted - 1);
+        let id = shop.request_resend(payer, earlier).await.unwrap();
+        assert!(matches!(
+            shop.app().delivery(&id).await.unwrap(),
+            Some(pubky_switch_client::app::Delivery::Accepted { .. })
+        ));
+        let mut body = paykit_lib::bodies::ResendRequest::default();
+        body.accepted_from = Some(accepted);
+        let raw = shop
+            .app()
+            .sign_message(OutgoingMessage::new(
+                payer,
+                "paykit.resend_request",
+                body.to_body().unwrap(),
+            ))
+            .unwrap();
+        let id = shop.app_mut().queue_signed(raw).await.unwrap();
+        shop.app_mut().flush_outbox().await.unwrap();
+        assert!(matches!(
+            shop.app().delivery(&id).await.unwrap(),
+            Some(pubky_switch_client::app::Delivery::Queued { .. })
+        ));
+        // The counterparty can still return the exact proof. It settles the sale alone.
+        record_request(&w, &mut shop, &request).await;
+        let proof = wallet
+            .app()
+            .sent_to(&w.bob_id(), 0, u64::MAX)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.kind == "paykit.payment_proof")
+            .unwrap();
+        wallet.app_mut().resend(&proof.msg_id).await.unwrap();
+        shop.receive(None).await.unwrap();
+        assert_eq!(
+            shop.payee_activity().await.unwrap()[0].status,
+            PayeeStatus::ProofReceived
+        );
+        let overlapping = paykit_sdk::ResendSelection::default().with_msg_ids(vec![proof.msg_id]);
+        assert!(matches!(
+            shop.request_resend(payer, overlapping)
+                .await
+                .unwrap_err()
+                .refusal(),
+            Some(paykit_sdk::Refusal::NotNow(_))
+        ));
+
+        let mut carol = w
+            .join(
+                &w.carol,
+                "other-wallet",
+                paykit_sdk::AppScopes::new()
+                    .pay()
+                    .manage_contacts()
+                    .build()
+                    .unwrap(),
+            )
+            .await;
+        carol.app_mut().allow_connect(&w.bob_id()).await.unwrap();
+        let unrelated = shop
+            .request_resend(
+                w.carol_id(),
+                paykit_sdk::ResendSelection::default().with_accepted_from_ms(accepted),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            shop.app().delivery(&unrelated).await.unwrap(),
+            Some(pubky_switch_client::app::Delivery::Accepted { .. })
+        ));
+        w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS + 1);
+        shop.receive(None).await.unwrap();
+        assert!(marks(&shop).await.is_empty());
+        let lost: Vec<_> = shop
+            .notices()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|notice| {
+                notice.kind == paykit_sdk::NoticeKind::DroppedMessagesLost
+                    && notice.counterparty == payer
+            })
+            .collect();
+        assert_eq!(lost.len(), 1);
+        assert_eq!(
+            (lost[0].lost_from_ms, lost[0].lost_until_ms),
+            (Some(accepted), Some(accepted))
+        );
+        shop.acknowledge_notice(&lost[0].id).await.unwrap();
+        shop.receive(None).await.unwrap();
+        assert!(!shop
+            .notices()
+            .await
+            .unwrap()
+            .iter()
+            .any(|n| n.kind == paykit_sdk::NoticeKind::DroppedMessagesLost));
+        let overlapping = paykit_sdk::ResendSelection::default().with_accepted_from_ms(accepted);
+        assert!(matches!(
+            shop.request_resend(payer, overlapping)
+                .await
+                .unwrap_err()
+                .refusal(),
+            Some(paykit_sdk::Refusal::NotNow(_))
+        ));
+        assert_eq!(w.rail.all_executions().len(), 1);
+        return;
+    }
     assert_eq!(reply_asks, vec![(Some(accepted), None)]);
     wallet.receive(None).await.unwrap();
     record_request(&w, &mut shop, &request).await;
@@ -2024,4 +2183,92 @@ async fn dropped_before_record_after_unblock(mark_waited_for_parent: bool) {
         PayeeStatus::ProofReceived
     );
     assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_replies_dropped_restore_in_place_uses_the_identified_first_delivery() {
+    for accepted in [true, false] {
+        let w = World::new();
+        let payer = w.alice_id();
+        let storage = store();
+        let mut wallet = w.wallet("wallet").await;
+        let mut shop = w
+            .join_with(
+                &w.bob,
+                "shop",
+                paykit_sdk::AppScopes::new()
+                    .request()
+                    .manage_contacts()
+                    .build()
+                    .unwrap(),
+                PaykitConfig::default(),
+                Arc::clone(&storage),
+            )
+            .await;
+        let (_sale, from) = unmatched_after_payment(
+            &w,
+            &mut wallet,
+            &mut shop,
+            paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER,
+        )
+        .await;
+        shop.app_mut().receive(None).await.unwrap();
+        shop.block(&payer).await.unwrap();
+        let older = shop.backup().await.unwrap();
+        shop.unblock(&payer).await.unwrap();
+        if !accepted {
+            shop.app_mut().forget_directory(&payer).await.unwrap();
+            w.alice.switch().fail_next(Fault::Unreachable {
+                path: "directory".into(),
+                after: 0,
+            });
+        }
+        shop.receive(None).await.unwrap();
+        if accepted {
+            assert_eq!(asked(&shop, &payer).await, vec![(Some(from), None)]);
+        } else {
+            let id = shop
+                .app()
+                .queued_messages("paykit")
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|m| m.kind == "paykit.resend_request")
+                .unwrap()
+                .msg_id;
+            assert!(shop
+                .app_mut()
+                .withdraw_message("paykit", &id)
+                .await
+                .unwrap());
+            assert!(shop.app_mut().unacknowledged_events().await.unwrap().iter().any(|e| matches!(e,
+                pubky_switch_client::app::AppEvent::MessageUndelivered {msg_id, resend:false,..} if msg_id == &id)));
+        }
+        shop.block(&payer).await.unwrap();
+        shop.receive(None).await.unwrap();
+        drop(shop);
+        let mut shop = Paykit::restore(
+            w.env(&w.bob, storage),
+            PaykitConfig::default(),
+            &older,
+            w.rail.clone(),
+            w.timer(),
+        )
+        .await
+        .unwrap();
+        shop.receive(None).await.unwrap();
+        shop.unblock(&payer).await.unwrap();
+        shop.receive(None).await.unwrap();
+        let open = |asks: Vec<(Option<u64>, Option<u64>)>| {
+            asks.into_iter()
+                .filter(|(_, until)| until.is_none())
+                .collect::<Vec<_>>()
+        };
+        if accepted {
+            assert!(open(asked(&shop, &payer).await).is_empty());
+            w.clock.advance_ms(DAY_MS);
+            shop.receive(None).await.unwrap();
+        }
+        assert_eq!(open(asked(&shop, &payer).await), vec![(Some(from), None)]);
+    }
 }

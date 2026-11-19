@@ -68,6 +68,9 @@ pub enum NoticeKind {
     /// spec 8.1, "Blocked counterparties"). The app never kept them, so the notice holds no
     /// content: a payment among them shows only in the payment method.
     BlockedMessagesLost,
+    /// A bounded recovery family discarded a window before a request covering it was
+    /// delivered. Recovery of those messages is no longer tracked (Paykit spec 9).
+    DroppedMessagesLost,
 }
 
 impl NoticeKind {
@@ -78,6 +81,7 @@ impl NoticeKind {
             Self::HeldWithoutPay => "held_without_pay",
             Self::MessageGivenUp => "given_up",
             Self::BlockedMessagesLost => "blocked_lost",
+            Self::DroppedMessagesLost => "dropped_lost",
         }
     }
 
@@ -88,6 +92,7 @@ impl NoticeKind {
             "held_without_pay" => Some(Self::HeldWithoutPay),
             "given_up" => Some(Self::MessageGivenUp),
             "blocked_lost" => Some(Self::BlockedMessagesLost),
+            "dropped_lost" => Some(Self::DroppedMessagesLost),
             _ => None,
         }
     }
@@ -113,10 +118,10 @@ pub struct Notice {
     /// When it was raised, in Unix milliseconds: the highest service time the app had
     /// verified then, 0 before any.
     pub raised_at_ms: u64,
-    /// For [`NoticeKind::BlockedMessagesLost`]: the earliest acceptance time of what can no
+    /// For [`NoticeKind::BlockedMessagesLost`] or [`NoticeKind::DroppedMessagesLost`]: the earliest acceptance time of what can no
     /// longer come back.
     pub lost_from_ms: Option<u64>,
-    /// For [`NoticeKind::BlockedMessagesLost`]: the latest such time.
+    /// For [`NoticeKind::BlockedMessagesLost`] or [`NoticeKind::DroppedMessagesLost`]: the latest such time.
     pub lost_until_ms: Option<u64>,
 }
 
@@ -269,7 +274,12 @@ impl KeptNotice {
     /// corrupt store.
     pub(crate) fn check(&self, attempt: &AttemptId, kind: NoticeKind) -> Result<()> {
         if self.kind != kind
-            || kind == NoticeKind::MessageGivenUp
+            || matches!(
+                kind,
+                NoticeKind::MessageGivenUp
+                    | NoticeKind::BlockedMessagesLost
+                    | NoticeKind::DroppedMessagesLost
+            )
             || self.attempt_id.as_deref() != Some(attempt.to_text().as_str())
             || self.msg_id.is_some()
             || self.stored.is_some()
@@ -301,10 +311,20 @@ impl KeptNotice {
     /// The notice of lost messages read whole, at the counterparty and start its key names:
     /// one that doesn't is a corrupt store. It is deleted at its acknowledgement.
     pub(crate) fn check_lost(&self, counterparty: &[u8; 32], from: u64) -> Result<()> {
+        self.check_lost_kind(counterparty, from, NoticeKind::BlockedMessagesLost)
+    }
+
+    pub(crate) fn dropped_lost(counterparty: [u8; 32], from: u64, until: u64, at: u64) -> Self {
+        let mut notice = Self::blocked_lost(counterparty, from, until, at);
+        notice.kind = NoticeKind::DroppedMessagesLost;
+        notice
+    }
+
+    fn check_lost_kind(&self, counterparty: &[u8; 32], from: u64, kind: NoticeKind) -> Result<()> {
         let window_read = self
             .lost
             .is_some_and(|(start, end)| start == from && end >= start);
-        if self.kind != NoticeKind::BlockedMessagesLost
+        if self.kind != kind
             || self.attempt_id.is_some()
             || self.msg_id.is_some()
             || self.request_hash.is_some()
@@ -384,6 +404,11 @@ pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
             counterparty,
             from_ms,
         }) => notice.check_lost(&counterparty, from_ms),
+        Some(StateKey::DroppedLost {
+            counterparty,
+            from_ms,
+            ..
+        }) => notice.check_lost_kind(&counterparty, from_ms, NoticeKind::DroppedMessagesLost),
         _ => Err(PaykitError::corrupt()),
     }
 }
@@ -426,6 +451,7 @@ impl Paykit {
                 StateKey::Notice { .. }
                     | StateKey::MessageNotice { .. }
                     | StateKey::BlockedLost { .. }
+                    | StateKey::DroppedLost { .. }
             )
         ) {
             return Err(Refusal::NotFound.into());

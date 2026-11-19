@@ -2214,12 +2214,18 @@ fn mark_dropped(
     }
     let counted = count_dropped(held, &others, from, earliest, true);
     if let Some(gone) = counted.evicted {
+        let key = family.key(&gone);
+        let retired = state::cx_get::<crate::marks::DropMark>(cx, &key)?
+            .ok_or_else(|| Fail::Store(StoreFailure::of_entry(StoreError::Corrupt)))?;
+        crate::reply_asks::retire_in_receive(cx, &gone, retired.earliest_ms, retired.latest_ms)?;
         keep_local(
             cx,
             LocalWrite::Delete {
-                key: family.key(&gone).into_bytes(),
+                key: key.into_bytes(),
             },
         );
+    } else if counted.put.is_none() {
+        crate::reply_asks::retire_in_receive(cx, &from, earliest, latest)?;
     }
     if let Some(mut mark) = counted.put {
         mark.latest_ms = mark.latest_ms.max(latest);

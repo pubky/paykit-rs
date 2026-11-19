@@ -524,7 +524,7 @@ pub(crate) fn restore_paykit_layer(
     let mut awaiting_recording = std::collections::BTreeSet::new();
     let mut journaled = std::collections::BTreeSet::new();
     let mut acknowledged = Vec::new();
-    let mut writes = Vec::with_capacity(state.len());
+    let mut writes = crate::reply_asks::restore(restoring, &binder, &state)?;
     let mut cursor_time_ms = 0;
     let mut bounded = BoundedFamilies::default();
     for (key, value) in state {
@@ -538,6 +538,7 @@ pub(crate) fn restore_paykit_layer(
         let unread = || String::from("Paykit's local state in the backup doesn't read");
         bounded.count(&family)?;
         let attempt = match family {
+            StateKey::ReplyAsks { .. } => continue, // Merged with the installation above.
             StateKey::RestoreHold => continue, // Validated above before reading its confirmations.
             StateKey::MissedHold => {
                 state::restored::<crate::hold::MissedHold>(&key, &value, &binder)
@@ -824,7 +825,8 @@ pub(crate) fn restore_paykit_layer(
             }
             StateKey::MessageNotice { .. }
             | StateKey::Notice { .. }
-            | StateKey::BlockedLost { .. } => {
+            | StateKey::BlockedLost { .. }
+            | StateKey::DroppedLost { .. } => {
                 let notice =
                     state::restored::<KeptNotice>(&key, &value, &binder).map_err(|_| unread())?;
                 // An acknowledged notice of an attempt is kept only while the journal holds
@@ -1012,7 +1014,36 @@ impl Protocol for PaykitProtocol {
         let kind = &delivery.message().kind;
         let extension = ExtensionKind::parse(kind).ok();
         if kind == Kind::ResendRequest.as_str() || extension.is_some() {
-            return may_deliver_to_contact(delivery, extension.as_ref());
+            if !may_deliver_to_contact(delivery, extension.as_ref())? {
+                return Ok(false);
+            }
+            if kind == Kind::ResendRequest.as_str() {
+                let message = delivery.message();
+                if let Some(asks) = state::view_get::<crate::reply_asks::ReplyAsks>(
+                    delivery.local(),
+                    &key::reply_asks(&message.to),
+                )
+                .map_err(view_failure)?
+                {
+                    let body = paykit_lib::bodies::ResendRequest::from_body(&message.body)
+                        .map_err(|_| StoreFailure::of_entry(StoreError::Corrupt))?;
+                    if asks.permits(&body, None) {
+                        return Ok(true);
+                    }
+                    let mark = state::view_get::<DropMark>(
+                        delivery.local(),
+                        &key::dropped_replies(&message.to),
+                    )
+                    .map_err(view_failure)?;
+                    let current = mark.and_then(|m| m.queued);
+                    return Ok(current.as_ref().is_some_and(|q| {
+                        q.msg_id == message.msg_id
+                            && q.hash == delivery.hash()
+                            && asks.permits(&body, Some((&q.msg_id, q.hash)))
+                    }));
+                }
+            }
+            return Ok(true);
         }
         Ok(kind != Kind::AllowanceAcceptance.as_str())
     }

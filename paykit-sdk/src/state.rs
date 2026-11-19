@@ -61,6 +61,7 @@
 //! | `bf` | the raise of the identity's block floor this app owes: the latest of the latest times of the block marks gone for the bound or their own expiry, and of a restore's first read of the lists; written to the shared `block_floor` record before the block marks ask and with any ask, and deleted in that batch; applied as a floor meanwhile (`crate::floor`) | yes |
 //! | `fo/<record key>` | a request record a read opened without `manual_only`, checked against the block floor once the read is done and marked if dated before it (`crate::floor`); never restored | |
 //! | `bk/<pubky>` | this app's block or unblock of `pubky` not yet shown by the list (`OwnBlockMark`): a block from before the switch is asked, an unblock only with the batch the client keeps; a block counts until a read of the list shows it, and is written again at a receive while the client neither keeps nor applied its batch, a restored one too, since the kept batch stays with the device that kept it; an unblock counts for payments and held sends only while the client still keeps its batch, never for the spam rule, and isn't restored (Paykit spec 8.1) | |
+//! | `ra/<sender>` | signed recovery requests for dropped replies, their first-delivery outcomes and any unresolved original missing from a restore | |
 //! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`); at most `MAX_DROPPED_MARKS` in each family of marks (`pd/`, `ud/`, `kw/`, `bd/`), and a restore refuses a backup holding more | |
 //! | `bd/<sender>` | a mark of a sender's messages dropped for the user's block, each as one never processed (its pair forgotten), as `pd/` holds; it asks that sender once it is neither blocked nor flagged (`marks.rs`, Paykit spec 8.1) | |
 //! | `bl/<sender>/<msg_id>` | a notice of lost messages owed on a block's mark the receive step dropped for the bound while it named a request as queued: the mark's window, when the notice was raised, and the request's `msg_id` and hash; settled in the pass after the read from the outbox's answer on that request, told or dropped (`marks.rs`, `Paykit::settle_lost_owed`); at most `MAX_LOST_OWED`, the receive step holding the next entry that would owe one more; restored, and a restore refuses a backup holding more | |
@@ -258,6 +259,7 @@ impl Paykit {
 /// there.
 pub(crate) struct Binder<'a> {
     own: [u8; 32],
+    app_id: Option<[u8; 16]>,
     cert: Option<&'a AppCert>,
     blind: Option<Blind<'a>>,
 }
@@ -270,6 +272,7 @@ impl<'a> Binder<'a> {
     pub(crate) fn new(own: [u8; 32], cert: &'a AppCert, blind: Blind<'a>) -> Self {
         Self {
             own,
+            app_id: Some(cert.app_id()),
             cert: Some(cert),
             blind: Some(blind),
         }
@@ -279,9 +282,21 @@ impl<'a> Binder<'a> {
     pub(crate) fn unblinded(own: [u8; 32]) -> Self {
         Self {
             own,
+            app_id: None,
             cert: None,
             blind: None,
         }
+    }
+
+    fn view(view: &LocalView<'_>) -> Self {
+        Self {
+            app_id: Some(view.app_id()),
+            ..Self::unblinded(view.identity())
+        }
+    }
+
+    pub(crate) fn app_id(&self) -> Option<[u8; 16]> {
+        self.app_id
     }
 
     pub(crate) fn identity(&self) -> &[u8; 32] {
@@ -379,13 +394,13 @@ pub(crate) fn view_get<T: Stored>(view: &LocalView<'_>, key: &str) -> Result<Opt
     let Some(bytes) = view.local_get(key.as_bytes())? else {
         return Ok(None);
     };
-    bound(key.as_bytes(), &bytes, &Binder::unblinded(view.identity())).map(Some)
+    bound(key.as_bytes(), &bytes, &Binder::view(view)).map(Some)
 }
 
 /// Every value under `prefix`, read through a [`LocalView`], with the key's rest after the
 /// prefix, each bound to its own key.
 pub(crate) fn view_scan<T: Stored>(view: &LocalView<'_>, prefix: &str) -> Result<Vec<(String, T)>> {
-    let binder = Binder::unblinded(view.identity());
+    let binder = Binder::view(view);
     let mut out = Vec::new();
     for (key, value) in view.local_scan(prefix.as_bytes())? {
         let rest = rest_of(&key, prefix.as_bytes()).ok_or_else(PaykitError::corrupt)?;
@@ -968,6 +983,17 @@ impl Stored for Vec<[u8; 32]> {
     }
 }
 
+impl sealed::Sealed for crate::reply_asks::ReplyAsks {}
+
+impl Stored for crate::reply_asks::ReplyAsks {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::ReplyAsks { sender } => self.check(sender, binder),
+            _ => corrupt(),
+        }
+    }
+}
+
 impl sealed::Sealed for DropMark {}
 
 /// A mark of a sender's dropped messages: of the sender its key names, its times not crossed
@@ -1251,6 +1277,7 @@ pub(crate) mod key {
     pub(crate) const NOTICES: &str = "nt/";
     pub(crate) const STORED_NOTES: &str = "se/";
     pub(crate) const KEPT_REPLIES: &str = "pr/";
+    pub(crate) const REPLY_ASKS: &str = "ra/";
     pub(crate) const DROPPED_REPLIES: &str = "pd/";
     pub(crate) const DROPPED_UNVERIFIED: &str = "ud/";
     pub(crate) const DROPPED_BLOCKED: &str = "bd/";
@@ -1342,6 +1369,11 @@ pub(crate) mod key {
         format!("{NOTICE_TARGETS}{msg_id}")
     }
 
+    /// First-delivery evidence for requests for the sender's dropped replies.
+    pub(crate) fn reply_asks(sender: &[u8; 32]) -> String {
+        format!("{REPLY_ASKS}{}", b64(sender))
+    }
+
     /// The mark of replies from `sender` dropped for the bounds.
     pub(crate) fn dropped_replies(sender: &[u8; 32]) -> String {
         format!("{DROPPED_REPLIES}{}", b64(sender))
@@ -1373,6 +1405,14 @@ pub(crate) mod key {
     /// user's block, can no longer come back.
     pub(crate) fn blocked_lost(counterparty: &[u8; 32], from_ms: u64) -> String {
         format!("{NOTICES}{}/lost-{from_ms:020}", b64(counterparty))
+    }
+
+    /// A lost recovery window, separated by family so simultaneous losses do not overwrite.
+    pub(crate) fn dropped_lost(counterparty: &[u8; 32], family: &str, from_ms: u64) -> String {
+        format!(
+            "{NOTICES}{}/dropped-{family}-{from_ms:020}",
+            b64(counterparty)
+        )
     }
 
     /// The mark of `sender`'s entries dropped while they waited for a scope key.
@@ -1615,6 +1655,8 @@ pub(crate) enum StateKey {
     Taken(String),
     /// `pd/<sender>`: the mark of a sender's replies dropped for the bounds.
     DroppedReplies { sender: [u8; 32] },
+    /// Outstanding and last settled requests for a sender's dropped replies.
+    ReplyAsks { sender: [u8; 32] },
     /// `ud/<sender>`: the mark of a sender's entries dropped unverified.
     DroppedUnverified { sender: [u8; 32] },
     /// `bd/<sender>`: the mark of a sender's messages dropped for the user's block.
@@ -1635,6 +1677,12 @@ pub(crate) enum StateKey {
     /// can no longer come back.
     BlockedLost {
         counterparty: [u8; 32],
+        from_ms: u64,
+    },
+    /// A bounded recovery family's unasked window, retained until host acknowledgement.
+    DroppedLost {
+        counterparty: [u8; 32],
+        family: String,
         from_ms: u64,
     },
     /// `kw/<sender>`: the mark of a sender's entries dropped while they waited for a key.
@@ -1832,6 +1880,9 @@ impl StateKey {
                         let id = rest.parse::<pubky_switch_client::app::EventId>().ok()?;
                         (id.to_string() == rest).then(|| Self::Taken(rest.to_owned()))?
                     }
+                    "ra" => Self::ReplyAsks {
+                        sender: b64_32(rest)?,
+                    },
                     "pd" => Self::DroppedReplies {
                         sender: b64_32(rest)?,
                     },
@@ -1889,6 +1940,19 @@ impl StateKey {
                         {
                             return Some(Self::BlockedLost {
                                 counterparty,
+                                from_ms: number(from)?,
+                            });
+                        }
+                        if let (Some(counterparty), Some(rest)) =
+                            (b64_32(attempt), tag.strip_prefix("dropped-"))
+                        {
+                            let (family, from) = rest.split_once('-')?;
+                            if !matches!(family, "pd" | "ud" | "kw" | "bd") {
+                                return None;
+                            }
+                            return Some(Self::DroppedLost {
+                                counterparty,
+                                family: family.into(),
                                 from_ms: number(from)?,
                             });
                         }
@@ -2715,6 +2779,18 @@ mod tests {
                 },
             ),
             (key::FLAGGED.into(), StateKey::Flagged),
+            (
+                key::reply_asks(&pubky),
+                StateKey::ReplyAsks { sender: pubky },
+            ),
+            (
+                key::dropped_lost(&pubky, "pd", 7),
+                StateKey::DroppedLost {
+                    counterparty: pubky,
+                    family: "pd".into(),
+                    from_ms: 7,
+                },
+            ),
             (key::BLOCK_FLOOR.into(), StateKey::BlockFloor),
             (key::floor_opened(&pubky), StateKey::FloorOpened(pubky)),
             (

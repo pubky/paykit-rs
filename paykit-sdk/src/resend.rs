@@ -60,6 +60,16 @@ pub struct ResendSelection {
 }
 
 impl ResendSelection {
+    pub(crate) fn request(&self) -> ResendRequest {
+        ResendRequest {
+            msg_ids: self.msg_ids.clone(),
+            accepted_from: self.accepted_from_ms,
+            accepted_until: self.accepted_until_ms,
+            request_hashes: self.request_hashes.clone(),
+            billing_period: None,
+        }
+    }
+
     /// Messages by `msg_id`.
     #[must_use]
     pub fn with_msg_ids(mut self, msg_ids: Vec<String>) -> Self {
@@ -100,7 +110,8 @@ impl Paykit {
     /// # Errors
     ///
     /// [`crate::Refusal::ScopeMissing`] without `paykit_contacts`;
-    /// [`crate::Refusal::NotNow`] while sends to `counterparty` are held, or while the app
+    /// [`crate::Refusal::NotNow`] while sends to `counterparty` are held, while the selection
+    /// overlaps a dropped-reply request whose first delivery is unresolved, or while the app
     /// can't read the block floor it must raise first (Paykit wire 5.6: when `counterparty`
     /// has a live block mark here, or the app owes a raise), with nothing queued;
     /// [`paykit_lib::Error::Validation`] for a selection that selects nothing; the client's
@@ -119,6 +130,15 @@ impl Paykit {
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
         self.refuse_while_sends_held(&counterparty).await?;
+        if !self
+            .recovery_request_permitted(&counterparty, &selection.request(), None)
+            .await?
+        {
+            return Err(Refusal::NotNow(
+                "the outcome of an overlapping recovery request is unknown".into(),
+            )
+            .into());
+        }
         let signed = self.resend_request_message(counterparty, selection)?;
         let msg_id = self.queue_resend_request(signed, &counterparty).await?;
         self.send_message(&msg_id).await?;
@@ -153,14 +173,7 @@ impl Paykit {
         if let Some(reason) = self.resend_scope_refusal() {
             return Err(reason.into());
         }
-        let body = ResendRequest {
-            msg_ids: selection.msg_ids,
-            accepted_from: selection.accepted_from_ms,
-            accepted_until: selection.accepted_until_ms,
-            request_hashes: selection.request_hashes,
-            billing_period: None,
-        }
-        .to_body()?;
+        let body = selection.request().to_body()?;
         self.sign(counterparty, Kind::ResendRequest, Vec::new(), body)
     }
 
@@ -195,6 +208,20 @@ impl Paykit {
             // request, never an ask dropped.
             // Without contacts, keep the queued association until a receive can act on it
             // or the obligation expires under the usual retention rule.
+            let selection = ResendSelection {
+                accepted_from_ms: Some(ask.from_ms),
+                accepted_until_ms: ask.until_ms,
+                ..ResendSelection::default()
+            };
+            if !self
+                .recovery_request_permitted(&ask.sender, &selection.request(), None)
+                .await?
+            {
+                if crate::stored::past_window(ask.until_ms.unwrap_or(ask.from_ms), service) {
+                    self.local_delete(&ask_key).await?;
+                }
+                continue;
+            }
             if let Some(queued) = ask
                 .queued
                 .as_ref()
@@ -227,14 +254,7 @@ impl Paykit {
                 continue;
             }
             self.refresh_own()?;
-            let signed = self.resend_request_message(
-                ask.sender,
-                ResendSelection {
-                    accepted_from_ms: Some(ask.from_ms),
-                    accepted_until_ms: ask.until_ms,
-                    ..ResendSelection::default()
-                },
-            )?;
+            let signed = self.resend_request_message(ask.sender, selection)?;
             let msg_id = signed.msg_id().to_owned();
             let hash = signed.hash();
             // Kept before it is queued: a crash between the two, or a write that queues it
