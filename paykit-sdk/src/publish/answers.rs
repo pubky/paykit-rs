@@ -1,8 +1,7 @@
 //! A publisher's bounded replies to one chosen recipient (Paykit spec 8.4).
 
 use super::{
-    collection, counter_unavailable, target, ListRecipient, ListReservation, ListSettings,
-    PublicationHistory, COLLECTION, SCOPE,
+    counter_unavailable, target, ListRecipient, ListReservation, ListSettings, COLLECTION, SCOPE,
 };
 use crate::error::{PaykitError, Result};
 use crate::receive::{keep_local, local, Fail};
@@ -12,7 +11,7 @@ use paykit_lib::bodies::{PrivatePaymentListRequest, PRIVATE_LIST_MAX_AGE_MS};
 use paykit_lib::records::StoredMessage;
 use paykit_lib::{Kind, ListVersion};
 use pubky_switch_client::app::{
-    AppError, Delivery, ReceiveContext, RecordRead, Refusal, WontDeliver,
+    AppError, Delivery, ReceiveContext, ReceiveReport, RecordRead, Refusal, WontDeliver,
 };
 use serde::{Deserialize, Serialize};
 
@@ -648,37 +647,6 @@ impl Paykit {
         Ok(accepted)
     }
 
-    /// A second installation can reserve a newer version at a different permanent
-    /// key. Check the later generations without assuming every generation has a key.
-    async fn newer_list_reserved(&mut self, issue: &ListReservation) -> Result<bool> {
-        if self.app.list_collection(&collection()).await?.more {
-            return Err(counter_unavailable().into());
-        }
-        let publisher = self.app_id();
-        for record in self.app.records_of(COLLECTION).await? {
-            let Some(generation) = record.policy.permanent.and_then(|p| p.generation) else {
-                continue;
-            };
-            if generation > issue.generation
-                && self
-                    .app
-                    .record_key(&target(&publisher, &issue.recipient, generation))?
-                    == record.key
-            {
-                return Ok(true);
-            }
-        }
-        Ok(self
-            .local_scan::<PublicationHistory>(key::PUBLICATION_HISTORY)
-            .await?
-            .into_iter()
-            .any(|(_, history)| {
-                history.floor.publisher == publisher
-                    && history.floor.recipient == issue.recipient
-                    && history.floor.generation > issue.generation
-            }))
-    }
-
     /// A repeat can expose only the newest signed version of this recipient's
     /// current permanent counter, including after another installation published.
     pub(super) async fn repeat_list(
@@ -686,6 +654,7 @@ impl Paykit {
         recipient: &mut ListRecipient,
         issue: &ListReservation,
         now: u64,
+        report: Option<&ReceiveReport>,
     ) -> Result<()> {
         self.refuse_while_sends_held(&recipient.recipient).await?;
         if !matches!(
@@ -697,7 +666,8 @@ impl Paykit {
         self.own_identity_confirmed(false).await?;
         let generation = self.app.own_identity().generation();
         if issue.generation > generation
-            || (issue.generation < generation && self.newer_list_reserved(issue).await?)
+            || (issue.generation < generation
+                && self.newer_list_reserved(issue, generation, report).await?)
         {
             return Err(counter_unavailable().into());
         }

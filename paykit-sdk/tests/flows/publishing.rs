@@ -1884,6 +1884,12 @@ async fn test_publication_request_for_an_unchanged_offer_uses_the_active_generat
 
 #[tokio::test]
 async fn test_publication_repeats_the_newest_signed_list_after_a_generation_change() {
+    for second_installation_withdraws in [false, true] {
+        repeat_across_generations(second_installation_withdraws).await;
+    }
+}
+
+async fn repeat_across_generations(second_installation_withdraws: bool) {
     use crate::common::{store, BOB_ORIGIN};
     use paykit_sdk::PaykitConfig;
     use pubky_switch_core::records::Inbox;
@@ -1934,34 +1940,64 @@ async fn test_publication_repeats_the_newest_signed_list_after_a_generation_chan
         }
     ));
 
-    // A second installation of the same publisher withdraws this recipient's list.
-    let mut restored = Paykit::restore(
-        w.env(&w.bob, store()),
-        PaykitConfig::default(),
-        &backup,
-        w.rail.clone(),
-        w.timer(),
-    )
-    .await
-    .unwrap();
-    restored.receive(None).await.unwrap();
-    let RecordRead::Fresh(record) = restored
-        .app_mut()
-        .read_record_fresh(&current_key)
+    if second_installation_withdraws {
+        // A second installation of the same publisher withdraws this recipient's list.
+        let mut restored = Paykit::restore(
+            w.env(&w.bob, store()),
+            PaykitConfig::default(),
+            &backup,
+            w.rail.clone(),
+            w.timer(),
+        )
         .await
-        .unwrap()
-    else {
-        panic!("the restored publisher did not reserve its withdrawal")
-    };
-    let withdrawal = ListPublicationRecord::read(record.content.value().unwrap()).unwrap();
-    assert_eq!((withdrawal.generation, withdrawal.counter), (2, 1));
-    assert!(published(&restored, &wallet)
-        .await
-        .iter()
-        .any(|sent| sent.withdrawn && sent.id == withdrawal.msg_id));
+        .unwrap();
+        restored.receive(None).await.unwrap();
+        let RecordRead::Fresh(record) = restored
+            .app_mut()
+            .read_record_fresh(&current_key)
+            .await
+            .unwrap()
+        else {
+            panic!("the restored publisher did not reserve its withdrawal")
+        };
+        let withdrawal = ListPublicationRecord::read(record.content.value().unwrap()).unwrap();
+        assert_eq!((withdrawal.generation, withdrawal.counter), (2, 1));
+        assert!(published(&restored, &wallet)
+            .await
+            .iter()
+            .any(|sent| sent.withdrawn && sent.id == withdrawal.msg_id));
+        w.clock.advance_ms(3_600_000);
+        request_list(&mut wallet, &mut shop, publisher, Some(first)).await;
+        assert_eq!(published(&shop, &wallet).await, expected);
+    }
+    let last = service.change_key_into([75; 32]);
+    w.router.add_switch(BOB_ORIGIN, &last);
+    let moved = w
+        .bob
+        .sign_next(|body| {
+            body.generation = 3;
+            body.inbox = Inbox::new(BOB_ORIGIN, last.service_key());
+        })
+        .unwrap();
+    last.deliver_identity(&moved).unwrap();
+    shop.app_mut().refresh_identity().await.unwrap();
+    shop.app_mut().follow_provider().await.unwrap();
     w.clock.advance_ms(3_600_000);
     request_list(&mut wallet, &mut shop, publisher, Some(first)).await;
+    // A missing current inventory asks the next receive to list the collection.
+    shop.receive(None).await.unwrap();
+    if !second_installation_withdraws {
+        expected[1].repeats += 1;
+    }
     assert_eq!(published(&shop, &wallet).await, expected);
+    let latest = target(&shop, &recipient, 3);
+    assert!(matches!(
+        shop.app_mut().read_record_fresh(&latest).await.unwrap(),
+        RecordRead::Kept {
+            record: None,
+            reason: KeptReason::NotFound
+        }
+    ));
 }
 
 #[tokio::test]

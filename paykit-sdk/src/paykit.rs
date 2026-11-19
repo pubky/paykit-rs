@@ -1184,7 +1184,7 @@ impl Paykit {
         // read's events were taken.
         Box::pin(self.end_confirmed_marks()).await?;
         let divergent = Box::pin(self.newly_paused(&paused_before)).await?;
-        Box::pin(self.tend_private_lists()).await?;
+        Box::pin(self.tend_private_lists(Some(&report))).await?;
         Ok(ReceiveSummary {
             report,
             applied,
