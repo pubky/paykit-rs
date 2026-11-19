@@ -8,14 +8,14 @@
 # filter. Needs wasm-bindgen-test-runner on PATH (or in WASM_BINDGEN_TEST_RUNNER) at the
 # wasm-bindgen version of Cargo.lock, and `npm ci --ignore-scripts` run in this folder.
 #
-# Without --switch it runs every test target except the network ones (network_targets below),
-# so it needs no database and no service. With --switch it runs the network targets, or the
-# targets given with `--test`, against a real Pubky Switch service behind switch-rig.mjs, which
-# terminates TLS and answers CORS on https://localhost:<rig port>, on 127.0.0.1 and ::1. The
-# script picks the test targets: `--test` is the only cargo target option it takes, in either
-# mode. This is test rig code only, never for production. The run starts the service, the rig
-# and a fresh database, and removes them on every exit, including a failure and Ctrl-C. It
-# reads:
+# Without --switch it runs the library's unit tests and every test target except the network
+# ones (network_targets below), so it needs no database and no service. With --switch it runs
+# the network targets, or the targets given with `--test`, against a real Pubky Switch service
+# behind switch-rig.mjs, which terminates TLS and answers CORS on https://localhost:<rig port>,
+# on 127.0.0.1 and ::1. The script picks the test targets: `--test` is the only cargo target
+# option it takes, in either mode. This is test rig code only, never for production. The run
+# starts the service, the rig and a fresh database, and removes them on every exit, including
+# a failure and Ctrl-C. It reads:
 #
 #   PAYKIT_BROWSER_SWITCH_BIN           the pubky-switch service binary, at the version that
 #                                       Cargo.lock pins (required)
@@ -115,9 +115,10 @@ for arg in "$@"; do
   fi
 done
 
-# Without `--test`, the targets of this mode, named one by one. Naming them also keeps the
-# library out: given a test name filter, `cargo test` would run the library test binary too,
-# despite its `test = false`, and that binary has no browser tests.
+# Without `--test`, the targets of this mode, named one by one, so the network targets stay out
+# of the other mode. Without --switch, `--lib` adds the library's unit tests (the store's format
+# and logic, src/store/), which run in browsers too; with --switch, or given `--test`, the
+# library is left out.
 targets=()
 if [[ $given_targets -eq 0 ]]; then
   if [[ $switch -eq 1 ]]; then
@@ -125,6 +126,7 @@ if [[ $given_targets -eq 0 ]]; then
       targets+=(--test "$target")
     done
   else
+    targets+=(--lib)
     # Cargo's test targets: tests/*.rs and tests/*/main.rs.
     for file in "$root"/paykit-browser/tests/*.rs "$root"/paykit-browser/tests/*/main.rs; do
       [[ -f "$file" ]] || continue
@@ -159,6 +161,9 @@ if [[ "$rig" =~ [[:space:]] ]]; then
   die "the path $rig contains whitespace, which a cargo runner setting cannot hold"
 fi
 export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="node $rig/runner.mjs"
+# A target that runs in one context only runs in the other context's run when its own context
+# is not asked for (runner.mjs, "Target modes"), so a run of one context still covers it.
+export PAYKIT_BROWSER_CONTEXTS="${contexts[*]}"
 
 # Everything this run starts or creates, removed by `cleanup` on every exit.
 work=""
@@ -225,9 +230,10 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/paykit-browser-rig.XXXXXX")
-# Each run's output, kept to check that some test target ran a test: a test target passes when
-# a test name filter leaves it no test to run (runner.mjs), so a mistyped filter would
-# otherwise pass every run without running anything.
+# Each run's output, kept to check that some test target ran a test in each engine: a test
+# target passes when a test name filter leaves it no test to run (runner.mjs), so a mistyped
+# filter would otherwise pass every run without running anything. The check is per engine, not
+# per context, as a filter may match only targets that run in one context.
 log="$work/test-output.txt"
 
 port_setting() {
@@ -381,7 +387,14 @@ else
 fi
 
 failed=()
+# Test targets that run in one context only, and so were skipped in the other (runner.mjs).
+skipped=()
+# Store targets not run in an engine build without the Origin Private File System, with the
+# reason (runner.mjs, NO_OPFS).
+excluded=()
 for engine in "${engines[@]}"; do
+  ran=no
+  failed_before=${#failed[@]}
   for context in "${contexts[@]}"; do
     echo "== $engine, $context"
     # In the background, so that a signal stops the run at once, through the traps above.
@@ -396,11 +409,29 @@ for engine in "${engines[@]}"; do
     tests_pid=""
     if [[ $status -ne 0 ]]; then
       failed+=("$engine/$context")
-    elif ! grep -q '^\[runner\] PASS ' "$log"; then
-      echo "error: no test ran in $engine/$context; check the test name filter" >&2
-      failed+=("$engine/$context")
+    elif grep -q '^\[runner\] PASS ' "$log"; then
+      ran=yes
     fi
+    for target in $(sed -n 's/^\[runner\] SKIP \([^:]*\):.*/\1/p' "$log"); do
+      skipped+=("$target@$engine/$context")
+    done
+    while IFS= read -r line; do
+      excluded+=("$engine/$context: $line")
+    done < <(sed -n 's/^\[runner\] EXCLUDED //p' "$log")
   done
+  if [[ $ran == no && ${#failed[@]} -eq $failed_before ]]; then
+    echo "error: no test ran in $engine (${contexts[*]}); check the test name filter" >&2
+    failed+=("$engine")
+  fi
+done
+
+if [[ ${#skipped[@]} -gt 0 ]]; then
+  echo "not run, as they run only in the other context: ${skipped[*]}"
+fi
+for entry in ${excluded[@]+"${excluded[@]}"}; do
+  echo "warning: not run, excluded in this engine build: $entry" >&2
+  # A GitHub Actions annotation, so the exclusion shows on the run's summary page.
+  [[ -z "${GITHUB_ACTIONS:-}" ]] || echo "::warning title=Store target not run::$entry"
 done
 
 if [[ $switch -eq 1 ]]; then
