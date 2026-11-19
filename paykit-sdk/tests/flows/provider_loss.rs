@@ -1362,18 +1362,7 @@ async fn test_provider_loss_missing_record_epoch_holds_the_original_request_proo
         paykit_sdk::MessageDelivery::Accepted { .. }
     ));
     let bought = sent.request.unwrap();
-    // A read can finish a collection listing before it reaches the next inbox entry.
-    let mut applied = Vec::new();
-    for _ in 0..8 {
-        applied.extend(writer.receive(None).await.unwrap().applied);
-        if applied.contains(&sent.msg_id) {
-            break;
-        }
-    }
-    assert!(
-        applied.contains(&sent.msg_id),
-        "the payer received the seller's request"
-    );
+    crate::common::receive_message(&mut writer, &sent.msg_id).await;
     writer
         .pay_request(&bought, PayOptions::default())
         .await
