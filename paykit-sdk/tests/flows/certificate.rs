@@ -590,7 +590,7 @@ async fn test_certificate_renewal_bringing_pay_back_drops_the_held_payment_notic
     let again = renew(&w, me, &AppScopes::new().pay().build().unwrap(), 2_000);
     let _ = wallet.receive(None).await;
     list(&w, me, &reduced, &again);
-    wallet.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut wallet).await;
     assert_eq!(wallet.app().cert().hash(), again.hash());
     w.rail.settle(&attempt_id, true);
     let resumed = wallet.resume_payments().await.unwrap();
@@ -663,7 +663,7 @@ async fn test_certificate_renewal_dropping_pay_keeps_a_dispatched_payment() {
     let regranted = renew(&w, me, &AppScopes::new().pay().build().unwrap(), 2_000);
     let _ = wallet.receive(None).await;
     list(&w, me, &reduced, &regranted);
-    wallet.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut wallet).await;
     assert_eq!(wallet.app().cert().hash(), regranted.hash());
     wallet.resume_payments().await.unwrap();
     assert_eq!(
@@ -808,7 +808,7 @@ async fn test_certificate_restored_lost_acceptance_not_signed_again_without_pay(
     let regranted = renew(&w, me, &AppScopes::new().pay().build().unwrap(), 2_000);
     let _ = restored.receive(None).await;
     list(&w, me, &reduced, &regranted);
-    restored.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut restored).await;
     assert_eq!(restored.app().cert().hash(), regranted.hash());
     let paid = restored.resume_payments().await.unwrap();
     assert!(
@@ -1031,7 +1031,7 @@ async fn test_certificate_renewal_dropping_pay_rechecks_no_failed_payment() {
     let regranted = renew(&w, me, &AppScopes::new().pay().build().unwrap(), 2_000);
     let _ = wallet.receive(None).await;
     list(&w, me, &reduced, &regranted);
-    wallet.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut wallet).await;
     let resumed = wallet.resume_payments().await.unwrap();
     assert!(
         matches!(resumed.as_slice(), [paykit_sdk::PayOutcome::Paid { .. }]),
@@ -1106,7 +1106,7 @@ async fn test_certificate_restore_without_pay_attempts_nothing_until_a_reconcile
     let regranted = renew(&w, me, &AppScopes::new().pay().build().unwrap(), 2_000);
     let _ = restored.receive(None).await;
     list(&w, me, &reduced, &regranted);
-    restored.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut restored).await;
     assert_eq!(restored.app().cert().hash(), regranted.hash());
     for request in [&paid, &other] {
         let refused = restored
