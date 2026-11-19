@@ -457,7 +457,8 @@ impl Paykit {
         Box::pin(self.tend_private_lists()).await
     }
 
-    /// Share the current reusable list with the counterparty the host chose.
+    /// Share the current reusable list with the counterparty the host chose. If
+    /// sends are held, choosing a new or withdrawn recipient requires another host call.
     pub async fn publish_list_to(&mut self, recipient: [u8; 32]) -> Result<()> {
         self.first_read_before_writing().await?;
         self.refresh_own()?;
@@ -478,16 +479,16 @@ impl Paykit {
             .into());
         }
         let at = key::list_recipient(&recipient);
-        let mut state = self.local_get::<ListRecipient>(&at).await?;
-        if state.as_ref().is_none_or(|r| !r.chosen) {
-            let chosen = ListRecipient::new(recipient, true)?;
-            self.local_put(&at, &chosen).await?;
-            state = Some(chosen);
-        }
-        if let Some(chosen) = state {
-            Box::pin(self.publish_recipient(chosen)).await?;
-        }
-        Ok(())
+        let choice = match self.local_get::<ListRecipient>(&at).await? {
+            Some(prior) if prior.chosen => prior,
+            _ => {
+                self.refuse_while_sends_held(&recipient).await?;
+                let chosen = ListRecipient::new(recipient, true)?;
+                self.local_put(&at, &chosen).await?;
+                chosen
+            }
+        };
+        Box::pin(self.publish_recipient(choice)).await
     }
 
     /// Stop sharing with this counterparty. A fresh, empty list supersedes what it may hold.
