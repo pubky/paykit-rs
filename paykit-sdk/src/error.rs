@@ -53,11 +53,6 @@ pub enum Refusal {
     /// "Conflicted").
     #[error("Paykit spec 8.3: the Allowance is conflicted")]
     AllowanceConflicted,
-    /// Allowance acceptance is unavailable in this revision (Paykit spec 8.3.1).
-    /// [`crate::Paykit::accept_allowance`] returns this refusal in either role before
-    /// it reads, signs, writes or sends anything.
-    #[error("Paykit spec 8.3.1: accepting an Allowance is unavailable in this version")]
-    AllowanceAcceptanceUnavailable,
     /// A payee activity record lost credit history to a delete. A new receipt cannot
     /// be issued for this occurrence, including by hand (Paykit spec 6).
     #[error("Paykit spec 6: the payee record lost credit history to a delete")]

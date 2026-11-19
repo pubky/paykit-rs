@@ -1175,7 +1175,7 @@ impl Paykit {
         // The Allowance answers the read kept go into their records next, in the order their
         // inbox accepted them, after the stored entries noted above, so an earlier answer
         // whose write the switch refused is seen first (`allowances.rs`).
-        Box::pin(self.recover_pending_deletes()).await?;
+        Box::pin(self.recover_pending_replies()).await?;
         Box::pin(self.place_kept_allowance_responses(pending_read)).await?;
         // The payees' cancellations the read kept go into their records, as later writes of
         // this app's own (Paykit spec 8.1), unless the payer's side waits for its scope keys:
@@ -1271,7 +1271,7 @@ impl Paykit {
         self.send_outbox().await?;
         // Flushing can settle a kept deletion. Its signed reply can leave only
         // once Paykit has verified the applied operation and its service result.
-        Box::pin(self.recover_pending_deletes()).await?;
+        Box::pin(self.recover_pending_replies()).await?;
         Ok(())
     }
 }
