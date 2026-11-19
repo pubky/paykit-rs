@@ -1036,6 +1036,18 @@ impl Paykit {
         by: Initiator,
         public_failures: &mut Vec<PublicAppFailure>,
     ) -> Result<PayOutcome> {
+        // Finish the request reads before polling the payment and its outgoing messages.
+        let plan = Box::pin(self.plan_request(request, options, by, public_failures)).await?;
+        Box::pin(self.execute(plan)).await
+    }
+
+    async fn plan_request(
+        &mut self,
+        request: &RequestRef,
+        options: PayOptions,
+        by: Initiator,
+        public_failures: &mut Vec<PublicAppFailure>,
+    ) -> Result<Plan> {
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
@@ -1178,7 +1190,7 @@ impl Paykit {
             failed_on_claim: false,
             billing_period: None,
         };
-        self.execute(Plan {
+        Ok(Plan {
             entry,
             record: target,
             carrier,
@@ -1193,7 +1205,6 @@ impl Paykit {
             conditions: Vec::new(),
             record_writes: Vec::new(),
         })
-        .await
     }
 
     /// Choose the request's destination under its accepted identifiers and pricing
