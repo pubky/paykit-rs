@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 
 use crate::common::refuse_writes;
 use crate::common::{btc, draft, endpoint, list_version, request_from, World};
-use crate::restore::{kept, kept_message, kept_message_with_refs};
+use crate::restore::{kept, kept_message};
 use crate::stored::receipt_of_another_proof;
 
 /// A `msg_id` no message here has.
@@ -688,23 +688,15 @@ async fn cancellation_under_another_requests_key(
 ) -> (RequestRef, String) {
     let request = request_from(shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
-    let record = wallet
-        .app()
-        .record_key(&crate::outcome_record::payer_record(&request))
-        .unwrap();
-    // The key of the shop's own copy, the app that sends the cancellation below.
-    let shop_app = w.bob.identity().app_keys("shop").app_id_bytes();
-    let key = format!("kc/{}/{}", b64(&record), b64(&shop_app));
-    let cancellation = kept_message_with_refs(
-        w,
-        "shop",
-        "shop",
-        &w.alice,
-        "paykit.payment_request_cancellation",
-        vec![[9; 32]],
-        json!({ "reason": null }),
-    );
-    put(wallet, &key, &kept(cancellation)).await;
+    let key =
+        String::from_utf8(crate::one_time::stop_key(w, wallet, request.request_hash)).unwrap();
+    let cancellation = crate::one_time::receive_stop(w, wallet, [9; 32]).await;
+    put(
+        wallet,
+        &key,
+        &serde_json::from_slice(&cancellation).unwrap(),
+    )
+    .await;
     (request, key)
 }
 

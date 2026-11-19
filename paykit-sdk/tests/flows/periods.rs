@@ -44,7 +44,7 @@ pub(crate) fn monthly(now: u64, ends_at: Option<u64>) -> RequestDraft {
 }
 
 /// The request's first Billing Period: January 2026.
-fn january() -> PeriodRef {
+pub(crate) fn january() -> PeriodRef {
     let start = pubky_switch_client::testing::START_MS;
     PeriodRef {
         starts_at: start,
@@ -429,7 +429,9 @@ async fn test_periods_draft_with_both_deadlines_refused_period_deadline_sent() {
 }
 
 /// Bob's signed monthly request to alice's apps, not delivered yet, and its hash.
-fn signed_request(w: &World) -> (pubky_switch_core::message::MessagePlaintext, [u8; 32]) {
+pub(crate) fn signed_request(
+    w: &World,
+) -> (pubky_switch_core::message::MessagePlaintext, [u8; 32]) {
     let now = w.clock.now_ms();
     let body = paykit_lib::bodies::PaymentRequest {
         amount: btc("1"),
@@ -460,7 +462,7 @@ fn signed_request(w: &World) -> (pubky_switch_core::message::MessagePlaintext, [
 
 /// Bob's shop's details for `period` of the request `hash`, entered at alice's switch for
 /// `targets`.
-fn inject_details(w: &World, targets: &[[u8; 16]], hash: [u8; 32], period: PeriodRef) {
+pub(crate) fn inject_details(w: &World, targets: &[[u8; 16]], hash: [u8; 32], period: PeriodRef) {
     let body = details(period, "lnbc1p", w.clock.now_ms() + DAY_MS)
         .to_body()
         .unwrap();

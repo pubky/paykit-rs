@@ -2056,20 +2056,8 @@ async fn test_one_time_restore_asks_wait_for_a_sealed_records_key() {
     assert_eq!(crate::common::asked(&restored, &w.bob_id()).await.len(), 1);
 }
 
-/// The value Paykit keeps at `key` in `app`'s state.
-async fn state_value(app: &paykit_sdk::Paykit, key: &[u8]) -> Vec<u8> {
-    app.app()
-        .protocol_scan("paykit", key)
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|(found, _)| found == key)
-        .unwrap()
-        .1
-}
-
 /// The stop key at `wallet` of bob's shop's cancellation of his request `hash`.
-fn stop_key(w: &World, wallet: &paykit_sdk::Paykit, hash: [u8; 32]) -> Vec<u8> {
+pub(crate) fn stop_key(w: &World, wallet: &paykit_sdk::Paykit, hash: [u8; 32]) -> Vec<u8> {
     let request = paykit_sdk::RequestRef {
         payee: w.bob_id(),
         request_hash: hash,
@@ -2087,6 +2075,23 @@ fn stop_key(w: &World, wallet: &paykit_sdk::Paykit, hash: [u8; 32]) -> Vec<u8> {
     .into_bytes()
 }
 
+/// Receive a cancellation before its request and read the copy kept by the wallet.
+pub(crate) async fn receive_stop(
+    w: &World,
+    wallet: &mut paykit_sdk::Paykit,
+    hash: [u8; 32],
+) -> Vec<u8> {
+    let id = cancel_to(w, &[wallet.app_id()], hash);
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(summary.applied.contains(&id), "{summary:?}");
+    wallet
+        .app()
+        .protocol_get("paykit", &stop_key(w, wallet, hash))
+        .await
+        .unwrap()
+        .unwrap()
+}
+
 #[tokio::test]
 async fn test_one_time_stop_naming_another_request_refused_as_corrupt() {
     // The stop kept for one request is found at another request's key: a corrupt store. The
@@ -2098,9 +2103,7 @@ async fn test_one_time_stop_naming_another_request_refused_as_corrupt() {
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     let other = [7; 32];
-    cancel_to(&w, &[wallet.app_id()], other);
-    wallet.receive(None).await.unwrap();
-    let value = state_value(&wallet, &stop_key(&w, &wallet, other)).await;
+    let value = receive_stop(&w, &mut wallet, other).await;
     let key = stop_key(&w, &wallet, request.request_hash);
     wallet
         .app_mut()
@@ -2478,9 +2481,7 @@ async fn test_one_time_stop_at_another_key_refuses_the_receive_steps_bounds() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let _shop = w.shop().await;
-    cancel_to(&w, &[wallet.app_id()], [7; 32]);
-    wallet.receive(None).await.unwrap();
-    let value = state_value(&wallet, &stop_key(&w, &wallet, [7; 32])).await;
+    let value = receive_stop(&w, &mut wallet, [7; 32]).await;
     let key = stop_key(&w, &wallet, [8; 32]);
     wallet
         .app_mut()
