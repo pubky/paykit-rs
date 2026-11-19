@@ -1419,7 +1419,9 @@ cadence, with a 60-second default plus bounded jitter. This repairs missing or
 parser-skipped events without turning an unavailable SSE endpoint into an
 always-on polling fallback. After a live event buffers a packet, intake marks
 the Linked Peer `Replaying`, wakes consumers, and then probes the next expected
-slots by the healthy audit's rule, without a cursor. The probe reports
+slots by the healthy audit's rule, without a cursor, unless that packet fills
+the peer's capacity, in which case the Linked Peer is `Backpressured` and no
+probe runs. The probe reports
 `CaughtUp` when the next slot is absent and `Backpressured` when it fills
 capacity. A failed probe leaves the Linked Peer `Replaying` until the next
 event or healthy audit, and a probe never records the last successful audit.

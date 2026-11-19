@@ -217,7 +217,9 @@ A buffered result's `freshness` is the state when that drain started; `health`
 shows the current state. After a live event buffers a packet, the Linked Peer
 is `Replaying` while intake checks its next expected slot, and stays
 `Replaying` until the next event or audit if that check fails. No further
-wakeup follows when the check settles the peer.
+wakeup follows when the check settles the peer. The exception is a packet that
+fills the peer's capacity: the Linked Peer is then `Backpressured`, and no
+check runs.
 `Connecting`, `Replaying`, `Stale`, `Backpressured`, `Unsupported`, and `Stopped`
 must not be interpreted as remote queue emptiness. `Stale` also covers a peer
 whose Pubky homeserver could not be resolved. A homeserver that rejects or

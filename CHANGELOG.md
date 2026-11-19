@@ -155,7 +155,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   event stream, intake now checks the Linked Peer's next expected slot at once.
   Health reports `Replaying` while that check runs, then `CaughtUp` when the
   next slot is absent or `Backpressured` when the check fills capacity. If the
-  check fails, health stays `Replaying` until the next event or audit. Packets
+  check fails, health stays `Replaying` until the next event or audit. A packet
+  that itself fills the Linked Peer's capacity reports `Backpressured` at once,
+  and no check runs. Packets
   written back to back are buffered together. Previously health reported the
   Linked Peer as `Replaying` until the next healthy audit. A drain woken by the
   packet can still report the `Replaying` freshness it started with, and no
