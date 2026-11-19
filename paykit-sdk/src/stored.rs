@@ -218,7 +218,8 @@ impl StoredNote {
             return Err(PaykitError::corrupt());
         };
         let stored = self.message.stored(own)?;
-        if crate::allowances::is_allowance_response(stored.body())
+        if (matches!(stored.body(), Body::AllowanceProposal(_))
+            || crate::allowances::is_allowance_response(stored.body()))
             && self.message.position().is_none()
         {
             return Err(PaykitError::corrupt());
@@ -818,7 +819,10 @@ impl Paykit {
     /// messages are taken in the order their inbox accepted them, by acceptance time and
     /// then by the feed `seq` their entries were read at, as the kept replies are, never in
     /// the order of their `msg_id`s nor of their entries' local IDs.
-    pub(crate) async fn place_stored(&mut self) -> Result<()> {
+    pub(crate) async fn place_stored(
+        &mut self,
+        pending_read: Option<&pubky_switch_client::app::ReceiveReport>,
+    ) -> Result<()> {
         let own = self.identity();
         // Every note in the order its inbox accepted its message, never in the order of the
         // keys, which end in a `msg_id` its sender chooses: by acceptance time, then by the
@@ -844,7 +848,13 @@ impl Paykit {
                         Placed::Done
                     }
                     Some(Place::Allowance) => {
-                        Box::pin(self.place_allowance_note(stored.clone(), &note.message)).await?
+                        Box::pin(self.place_allowance_note(
+                            stored.clone(),
+                            &note.message,
+                            note.stored_id,
+                            pending_read,
+                        ))
+                        .await?
                     }
                     Some(Place::Record {
                         target,

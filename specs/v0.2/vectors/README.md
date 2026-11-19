@@ -13,7 +13,7 @@ them byte for byte. The conformance scope is described below.
 
 The `failure_evidence` cases supply already validated counting evidence to the pure library. Callers must bind that evidence to the attempt, obligation, Allowance, amount, asset and owner. These cases do not establish the SDK's authority to obtain or persist the evidence, reconstruct a ledger, release a reservation, or dispatch a payment. The generator checks exact expected lifetime amounts before regenerating the vectors.
 
-The `allowance_proposals` cases in `sealed.json` give the pending record for a proposal sent or received and for two proposals that cross under one ID. Each case includes the record key and the signed messages in the value.
+The `allowance_proposals` cases in `sealed.json` give the pending record for a proposal sent or received and for two proposals that cross under one ID. Each case includes the record key and the signed messages in the value. The permanent `allowances` cases require the original signed proposal and its matching acceptance. The accepted Allowance and the ordinary pending proposal have distinct policy hashes and record keys. The signed `executor_notice` names the permanent key.
 
 ## Settlement marks
 

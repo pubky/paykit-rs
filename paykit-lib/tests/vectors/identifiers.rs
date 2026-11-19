@@ -172,8 +172,8 @@ const POLICIES_DESCRIPTION: &str = "Wire 1.5, Switch wire 1.5: the policies of P
 collections, each with its read scope, its write scopes and its policy hash, \
 hash(lp(\"pubky-switch/v1/policy\", read_scope, u64(n), write_scope_1, ..., write_scope_n)), \
 hashed_bytes_hex being the bytes hashed: the fixed policy of each collection, by its name, \
-the permanent settlements policy uses the permanent-policy label and appends u64(0) \
-for its null generation, and, last, \
+the permanent allowances and settlements policies use the permanent-policy label and append \
+u64(0) for their null generation, and, last, \
 payee_activity's policy for a request labelled shop1.";
 
 /// `policies`: each collection's fixed policy, and `payee_activity`'s under the label

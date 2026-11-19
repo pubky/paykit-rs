@@ -1011,11 +1011,29 @@ impl Paykit {
     /// Finish a first read made for an explicit block, keeping its report for the host.
     pub(crate) async fn finish_first_read(&mut self, read: ReadResult) -> Result<()> {
         let summary = Box::pin(self.after_read(read)).await?;
+        self.remember_read(summary);
+        Ok(())
+    }
+
+    /// Count proposals against this completed client read before combining its events with
+    /// any earlier report the host has yet to collect.
+    pub(crate) async fn own_pending_count(&mut self, peer: &[u8; 32]) -> Result<Option<usize>> {
+        let read = Box::pin(self.read_before_effects(None)).await?;
+        let summary = Box::pin(self.after_read(read)).await?;
+        let report = summary
+            .records_unlisted
+            .is_none()
+            .then_some(&summary.report);
+        let count = Box::pin(self.pending_count(report, peer, true)).await;
+        self.remember_read(summary);
+        count
+    }
+
+    fn remember_read(&mut self, summary: ReceiveSummary) {
         self.first_read_summary = Some(Box::new(match self.first_read_summary.take() {
             Some(earlier) => summary.after(*earlier),
             None => summary,
         }));
-        Ok(())
     }
 
     /// Run the SDK's recovery work after the client's read and any explicit block.
@@ -1107,17 +1125,19 @@ impl Paykit {
         // a narrower one included: they are listed now, or stay unlisted for the next
         // receive or write (`Paykit::list_under_new_cert`).
         let records_unlisted = Box::pin(self.list_under_new_cert()).await?;
+        let pending_read = records_unlisted.is_none().then_some(&report);
         let keys = Box::pin(self.scope_keys_awaited()).await?;
         // The entries the client stored for good: their messages, kept above, written into
         // their records as room frees (`stored.rs`), unless the payer's side waits for its
         // scope keys or its listing, as for the payees' cancellations below.
         if !Box::pin(self.payer_waits(keys)).await? {
-            Box::pin(self.place_stored()).await?;
+            Box::pin(self.place_stored(pending_read)).await?;
         }
         // The Allowance answers the read kept go into their records next, in the order their
         // inbox accepted them, after the stored entries noted above, so an earlier answer
         // whose write the switch refused is seen first (`allowances.rs`).
-        Box::pin(self.place_kept_allowance_responses()).await?;
+        Box::pin(self.recover_pending_deletes()).await?;
+        Box::pin(self.place_kept_allowance_responses(pending_read)).await?;
         // The payees' cancellations the read kept go into their records, as later writes of
         // this app's own (Paykit spec 8.1), unless the payer's side waits for its scope keys:
         // they build on request records the copy may lack, and stay kept meanwhile.

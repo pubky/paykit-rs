@@ -70,9 +70,12 @@
         ]
       },
       {
-        "hashed_bytes_hex": "000000167075626b792d7377697463682f76312f706f6c696379000000107061796b69745f616c6c6f77616e6365000000080000000000000001000000107061796b69745f616c6c6f77616e6365",
+        "hashed_bytes_hex": "000000207075626b792d7377697463682f76312f7065726d616e656e742d706f6c696379000000107061796b69745f616c6c6f77616e6365000000080000000000000001000000107061796b69745f616c6c6f77616e6365000000080000000000000000",
         "name": "allowances",
-        "policy_hash": "UoT8AyaYBgZCAy6dFx7wfZUAvLL6zjhNakF3I_-iVek",
+        "permanent": {
+          "generation": null
+        },
+        "policy_hash": "uLSqfqXUfoNJ16TQ66T_8TWkSHuD5rqZIVnK-DBf-sI",
         "read_scope": "paykit_allowance",
         "write_scopes": [
           "paykit_allowance"
@@ -127,7 +130,7 @@
         ]
       }
     ],
-    "description": "Wire 1.5, Switch wire 1.5: the policies of Paykit's collections, each with its read scope, its write scopes and its policy hash, hash(lp(\"pubky-switch/v1/policy\", read_scope, u64(n), write_scope_1, ..., write_scope_n)), hashed_bytes_hex being the bytes hashed: the fixed policy of each collection, by its name, the permanent settlements policy uses the permanent-policy label and appends u64(0) for its null generation, and, last, payee_activity's policy for a request labelled shop1."
+    "description": "Wire 1.5, Switch wire 1.5: the policies of Paykit's collections, each with its read scope, its write scopes and its policy hash, hash(lp(\"pubky-switch/v1/policy\", read_scope, u64(n), write_scope_1, ..., write_scope_n)), hashed_bytes_hex being the bytes hashed: the fixed policy of each collection, by its name, the permanent allowances and settlements policies use the permanent-policy label and append u64(0) for their null generation, and, last, payee_activity's policy for a request labelled shop1."
   },
   "record_keys": {
     "cases": [
@@ -212,12 +215,12 @@
         "blinded_natural_key": "Tg9e6p9NJU_RWUm715jvEDIOl5U-60c9VcQh2dj3dRQ",
         "collection": "allowances",
         "identity": "6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy",
-        "key_material_hex": "0000000a616c6c6f77616e636573000000204e0f5eea9f4d254fd15949bbd798ef10320e97953eeb473d55c421d9d8f77514000000205284fc032698060642032e9d171ef07d9500bcb2face384d6a417723ffa255e9",
+        "key_material_hex": "0000000a616c6c6f77616e636573000000204e0f5eea9f4d254fd15949bbd798ef10320e97953eeb473d55c421d9d8f7751400000020b8b4aa7ea5d47e8349d7a4d0eba4fff135a4487b83e6ba992159caf8305ffac2",
         "name": "Allowance record",
         "natural_key": "AAAAIOt0UWtOhbjKGKId9mJHpQAvJAGOAObxuQeGzwLIILwHAAAAJGQwZWZmZmI3LTE5MWItNDcwOS1iNmM3LWUzNDNhZjU1MDBiNA",
         "natural_key_hex": "00000020eb74516b4e85b8ca18a21df66247a5002f24018e00e6f1b90786cf02c820bc070000002464306566666662372d313931622d343730392d623663372d653334336166353530306234",
-        "policy_hash": "UoT8AyaYBgZCAy6dFx7wfZUAvLL6zjhNakF3I_-iVek",
-        "record_key": "kNgxYqkcwbzOglKDpn58fw-UwvdX7mAeDCJKhK1bBUA"
+        "policy_hash": "uLSqfqXUfoNJ16TQ66T_8TWkSHuD5rqZIVnK-DBf-sI",
+        "record_key": "EYc8sNwJ6k6KvVe7tuHS6XevkOhfAttONK0Eel4I3HY"
       },
       {
         "blinded_natural_key": "Tg9e6p9NJU_RWUm715jvEDIOl5U-60c9VcQh2dj3dRQ",

@@ -35,6 +35,15 @@ use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
 use crate::receive::Settlement;
 
+/// The pending write prepared from an inbox proposal while its signed withdrawal was already held.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PendingCreate {
+    pub(crate) proposal_at: pubky_switch_client::app::FeedPosition,
+    #[serde(with = "serde_b64")]
+    pub(crate) operation: [u8; 32],
+}
+
 /// A verified message kept in Paykit's local state, to be stored in a record later: its
 /// sender, the certificate it was received with, its signed plaintext and its acceptance
 /// time. It is verified again when it is taken back ([`KeptMessage::stored`]).
@@ -66,6 +75,9 @@ pub(crate) struct KeptMessage {
     /// The selected version of the pending proposal this answer was matched against.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) pending_source: Option<crate::divergent::SeenVersion>,
+    /// Retained with a withdrawal only when the same batch places its earlier proposal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) pending_create: Option<PendingCreate>,
 }
 
 /// The order the inbox accepted a kept message in (Paykit spec 8.1): by acceptance time,
@@ -127,6 +139,7 @@ impl KeptMessage {
             seq: None,
             generation: None,
             pending_source: None,
+            pending_create: None,
         }
     }
 
@@ -140,6 +153,7 @@ impl KeptMessage {
             seq: None,
             generation: None,
             pending_source: None,
+            pending_create: None,
         }
     }
 
@@ -213,6 +227,16 @@ impl KeptMessage {
             recipient,
         )
         .map_err(|_| PaykitError::corrupt())?;
+        if let Some(create) = &self.pending_create {
+            if !matches!(message.body(), paykit_lib::Body::AllowanceEnd(_))
+                || message.message().refs.len() != 1
+                || self.position().is_none()
+                || create.proposal_at.generation == 0
+                || create.proposal_at.seq == 0
+            {
+                return Err(PaykitError::corrupt());
+            }
+        }
         if let Some(source) = self.pending_source {
             if source.record_version().is_none()
                 || self.position().is_none()
@@ -677,6 +701,7 @@ mod own_message_tests {
             count("self.own_copy("),
             named(&[
                 ("allowances.rs", 3),
+                ("allowances/pending.rs", 1),
                 ("pay.rs", 1),
                 ("records.rs", 2),
                 ("requests.rs", 2),
@@ -735,6 +760,11 @@ mod own_message_tests {
         let propose = body(allowances, "propose_allowance_inner");
         assert!(propose.contains("self.own_copy(&signed)"));
         assert!(propose.contains(".queue(signed)"));
+        let pending = body(text("allowances/pending.rs"), "answer_pending");
+        assert!(pending.contains("self.own_copy(&reply)"));
+        assert!(pending.contains("message: KeptMessage::of(&q)"));
+        assert!(pending.contains("batch = batch.entry(delete)"));
+        assert!(pending.contains("self.submit(batch.queue(reply))"));
         let answer = body(allowances, "answer_allowance");
         assert!(answer.contains("self.own_copy(&signed)"));
         assert!(answer.contains("let mut queue = vec![signed];"));

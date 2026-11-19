@@ -398,6 +398,8 @@ pub struct FailingRecordReads {
     countdown: std::sync::atomic::AtomicU64,
     /// One stored value whose next read exceeds the store's limit.
     limited_key: std::sync::Mutex<Option<String>>,
+    /// One held record that stays too large until the store's limit is lifted.
+    capped_record: std::sync::Mutex<Option<String>>,
     /// While set, every journal entry reads back as bytes that don't read.
     corrupt_journal: std::sync::atomic::AtomicBool,
 }
@@ -406,6 +408,12 @@ impl FailingRecordReads {
     pub fn limit_next_record(&self, key: &[u8; 32]) {
         *self.limited_key.lock().unwrap() =
             Some(format!("rec/{}", pubky_switch_core::enc::b64(key)));
+    }
+
+    /// Hold or release repeated reads of the same local record.
+    pub fn cap_record(&self, key: Option<&[u8; 32]>) {
+        *self.capped_record.lock().unwrap() =
+            key.map(|key| format!("rec/{}", pubky_switch_core::enc::b64(key)));
     }
 
     pub fn limit_next_cursor_time(&self) {
@@ -442,9 +450,19 @@ impl StateStore for FailingRecordReads {
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
         let mut limited = self.limited_key.lock().unwrap();
-        if limited.as_deref().map(str::as_bytes) == Some(key) {
+        let once = limited.as_deref().map(str::as_bytes) == Some(key);
+        let capped = self
+            .capped_record
+            .lock()
+            .unwrap()
+            .as_deref()
+            .map(str::as_bytes)
+            == Some(key);
+        if once || capped {
             if let Some(stored) = self.inner.get(ns, key)? {
-                *limited = None;
+                if once {
+                    *limited = None;
+                }
                 let size = u64::try_from(stored.len()).unwrap();
                 return Err(pubky_switch_client::error::StoreError::TooLarge {
                     size,
