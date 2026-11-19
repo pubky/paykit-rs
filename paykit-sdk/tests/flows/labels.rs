@@ -109,11 +109,15 @@ async fn renew_till(w: &World, till: &mut Paykit, label: &str) {
     assert_eq!(till.app().cert().hash(), renewed.hash(), "{label}");
 }
 
-fn sale(w: &World) -> MessagePlaintext {
+fn sale(
+    w: &World,
+    issuer: &pubky_switch_client::testing::TestSigner,
+    payer: &pubky_switch_client::testing::TestSigner,
+) -> MessagePlaintext {
     w.sign_as(
-        &w.alice,
+        issuer,
         "issuer",
-        &w.bob,
+        payer,
         "paykit.payment_request",
         vec![],
         serde_json::json!({
@@ -187,8 +191,7 @@ async fn recorded_stop(
 
 /// The original certificate decides each stop even if its till is later renewed with a
 /// different selling label while the payer still waits for the request (Paykit spec 3.4).
-#[tokio::test]
-async fn test_labels_cancellation_before_request_survives_till_renewal_and_reload() {
+async fn early_stops_after_renewal(restore: bool) {
     let w = World::new();
     let _issuer = w.join(&w.alice, "issuer", selling("shop1")).await;
     let mut till = w.join(&w.alice, "wallet", selling("shop1")).await;
@@ -204,7 +207,7 @@ async fn test_labels_cancellation_before_request_survives_till_renewal_and_reloa
         .await;
     payer.app_mut().invite(&w.alice_id()).await.unwrap();
     let app_id = payer.app_id();
-    let request = sale(&w);
+    let request = sale(&w, &w.alice, &w.bob);
     let first = send_stop(&w, "wallet", app_id, request.hash());
     assert!(payer.receive(None).await.unwrap().applied.contains(&first));
     let old = till.app().cert().clone();
@@ -212,12 +215,41 @@ async fn test_labels_cancellation_before_request_survives_till_renewal_and_reloa
     let second = send_stop(&w, "wallet", app_id, request.hash());
     let got = payer.receive(None).await.unwrap();
     assert!(got.applied.contains(&second), "{got:?}");
+    let originals = payer.app().protocol_scan("paykit", b"kc/").await.unwrap();
+    assert_eq!(originals.len(), 2);
+    let backup = payer.backup().await.unwrap();
     drop(payer);
-    let mut payer = w
-        .load_on_clock(&w.bob, storage, app_id, w.clock.clone())
-        .await;
+    let mut payer = if restore {
+        Box::pin(Paykit::restore(
+            w.env(&w.bob, store()),
+            Default::default(),
+            &backup,
+            w.rail.clone(),
+            w.timer(),
+        ))
+        .await
+        .unwrap()
+    } else {
+        w.load_on_clock(&w.bob, storage, app_id, w.clock.clone())
+            .await
+    };
+    assert_eq!(
+        payer.app().protocol_scan("paykit", b"kc/").await.unwrap(),
+        originals
+    );
+    if restore {
+        crate::common::finish_listing(&mut payer).await;
+        payer.reconcile().await.unwrap();
+        payer
+            .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+            .await
+            .unwrap();
+    }
     w.deliver(&w.alice, "issuer", &w.bob, &[app_id], &request);
-    payer.receive(None).await.unwrap();
+    let id = pubky_switch_core::message::Message::parse(request.json(), &[])
+        .unwrap()
+        .msg_id;
+    Box::pin(crate::common::receive_message(&mut payer, &id)).await;
     let purchase = RequestRef {
         payee: w.alice_id(),
         request_hash: request.hash(),
@@ -225,6 +257,16 @@ async fn test_labels_cancellation_before_request_survives_till_renewal_and_reloa
     let signed = recorded_stop(&w, &mut payer, &purchase).await;
     assert_eq!(signed.message().msg_id, first);
     assert_eq!(signed.cert().hash(), old.hash());
+}
+
+#[tokio::test]
+async fn test_labels_cancellation_before_request_survives_till_renewal_and_reload() {
+    early_stops_after_renewal(false).await;
+}
+
+#[tokio::test]
+async fn test_labels_cancellation_before_request_survives_till_renewal_and_restore() {
+    early_stops_after_renewal(true).await;
 }
 
 /// Receive the signed parent and keep its refused write for a later receive.
@@ -243,10 +285,14 @@ async fn test_labels_protected_cancellation_outlives_ordinary_bounds() {
     let _issuer = w.join(&w.alice, "issuer", selling("shop1")).await;
     let _authorized = w.join(&w.alice, "wallet", selling("shop1")).await;
     let mut payer = w
-        .join(&w.bob, "payer", AppScopes::new().pay().build().unwrap())
+        .join(
+            &w.bob,
+            "payer",
+            AppScopes::new().pay().request().build().unwrap(),
+        )
         .await;
     payer.app_mut().invite(&w.alice_id()).await.unwrap();
-    let request = sale(&w);
+    let request = sale(&w, &w.alice, &w.bob);
     let app_id = payer.app_id();
     let limit = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
     for n in 0..limit {
@@ -263,11 +309,18 @@ async fn test_labels_protected_cancellation_outlives_ordinary_bounds() {
     }
     receive_request_owed(&w, &mut payer, &request).await;
 
+    let replies = payer.app().protocol_scan("paykit", b"pr/").await.unwrap();
+    assert_eq!(replies.len(), limit);
     let applicable = send_stop(&w, "wallet", app_id, request.hash());
     refuse_record_writes(&w, &mut payer, 1).await;
     let got = payer.receive(None).await.unwrap();
     assert!(got.applied.contains(&applicable), "{got:?}");
     assert_eq!(local_count(&payer, b"kc/").await, limit + 1);
+    assert_eq!(
+        payer.app().protocol_scan("paykit", b"pr/").await.unwrap(),
+        replies,
+        "custody of the owed payer request leaves the full ordinary reply pool intact"
+    );
 
     w.clock.advance_ms(22 * pubky_switch_core::records::DAY_MS);
     payer.receive(None).await.unwrap();
@@ -291,10 +344,14 @@ async fn test_labels_payment_proceeds_when_every_early_cancellation_is_excluded(
     let _issuer = w.join(&w.alice, "issuer", selling("shop1")).await;
     let mut till = w.join(&w.alice, "wallet", selling("shop2")).await;
     let mut payer = w
-        .join(&w.bob, "payer", AppScopes::new().pay().build().unwrap())
+        .join(
+            &w.bob,
+            "payer",
+            AppScopes::new().pay().request().build().unwrap(),
+        )
         .await;
     payer.app_mut().invite(&w.alice_id()).await.unwrap();
-    let request = sale(&w);
+    let request = sale(&w, &w.alice, &w.bob);
     let app_id = payer.app_id();
     receive_request_owed(&w, &mut payer, &request).await;
     let first = send_stop(&w, "wallet", app_id, request.hash());
@@ -330,4 +387,135 @@ async fn test_labels_payment_proceeds_when_every_early_cancellation_is_excluded(
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+/// Two originals from the same certificate and millisecond belong to different feeds.
+/// Use the known loss boundary or retain both if a subsequent loss obscures it.
+async fn stops_across_loss(another_loss: bool) {
+    use pubky_switch_client::app::FeedPosition;
+    use pubky_switch_client::testing::ScriptedSwitch;
+    let w = World::new();
+    let mut payer = w.wallet("wallet").await;
+    let issuer = w.join(&w.bob, "issuer", selling("shop1")).await;
+    payer.app_mut().invite(&w.bob_id()).await.unwrap();
+    let request = sale(&w, &w.bob, &w.alice);
+    let first = crate::provider_loss::declare_loss(&w);
+    Box::pin(crate::provider_loss::follow_generation(&mut payer)).await;
+    let send = |service: &ScriptedSwitch, target, hash| {
+        let stop = w.sign_as(
+            &w.bob,
+            "issuer",
+            &w.alice,
+            "paykit.payment_request_cancellation",
+            vec![hash],
+            Default::default(),
+        );
+        service
+            .send_plaintext(w.bob_id(), issuer.app().cert(), &stop, &[target])
+            .unwrap();
+        pubky_switch_core::message::Message::parse(stop.json(), &[])
+            .unwrap()
+            .msg_id
+    };
+    for _ in 0..24 {
+        send(&first, payer.app_id(), [42; 32]);
+    }
+    let old = send(&first, payer.app_id(), request.hash());
+    assert!(payer.receive(None).await.unwrap().applied.contains(&old));
+    let second = crate::provider_loss::declare_second_loss(&w);
+    Box::pin(crate::provider_loss::follow_generation(&mut payer)).await;
+    let new = send(&second, payer.app_id(), request.hash());
+    assert!(payer.receive(None).await.unwrap().applied.contains(&new));
+    let purchase = RequestRef {
+        payee: w.bob_id(),
+        request_hash: request.hash(),
+    };
+    let key = payer
+        .app()
+        .record_key(&crate::outcome_record::payer_record(&purchase))
+        .unwrap();
+    let prefix = format!("kc/{}/", pubky_switch_core::enc::b64(&key));
+    let originals = payer
+        .app()
+        .protocol_scan("paykit", prefix.as_bytes())
+        .await
+        .unwrap();
+    assert_eq!(originals.len(), 2);
+    let received = |raw: &[u8]| {
+        let value: serde_json::Value = serde_json::from_slice(raw).unwrap();
+        let data = &value["d"];
+        (
+            data["accepted_at"].as_u64().unwrap(),
+            FeedPosition {
+                generation: data["generation"].as_u64().unwrap(),
+                seq: data["seq"].as_u64().unwrap(),
+            },
+        )
+    };
+    let mut positions: Vec<_> = originals.iter().map(|(_, v)| received(v)).collect();
+    positions.sort_by_key(|(_, p)| p.generation);
+    let [(at_old, old_position), (at_new, new_position)] = positions[..] else {
+        unreachable!()
+    };
+    assert_eq!(at_old, at_new);
+    assert!(
+        old_position.generation < new_position.generation && old_position.seq > new_position.seq
+    );
+    let current = if another_loss {
+        let third = crate::provider_loss::declare_third_loss(&w);
+        Box::pin(crate::provider_loss::follow_generation(&mut payer)).await;
+        third
+    } else {
+        second
+    };
+    assert_eq!(
+        payer.app().received_order(old_position, new_position),
+        (!another_loss).then_some(std::cmp::Ordering::Less)
+    );
+    current
+        .send_plaintext(w.bob_id(), issuer.app().cert(), &request, &[payer.app_id()])
+        .unwrap();
+    payer.receive(None).await.unwrap();
+    let value = crate::outcome_record::record_value(&mut payer, &purchase)
+        .await
+        .unwrap();
+    if another_loss {
+        assert!(value["cancellation"].is_null());
+        let error = payer.request(&purchase).await.unwrap_err();
+        assert!(
+            matches!(error.refusal(),Some(Refusal::NotNow(reason)) if reason.contains("order of the request's cancellations")),
+            "{error}"
+        );
+
+        assert_eq!(
+            payer
+                .app()
+                .protocol_scan("paykit", prefix.as_bytes())
+                .await
+                .unwrap(),
+            originals
+        );
+        assert!(payer
+            .pay_request(&purchase, PayOptions::default())
+            .await
+            .outcome
+            .is_err());
+    } else {
+        let signed =
+            paykit_lib::records::StoredMessage::read(&value["cancellation"], &w.alice_id())
+                .unwrap();
+        assert_eq!(signed.message().msg_id, old);
+        assert_eq!(local_count(&payer, prefix.as_bytes()).await, 0);
+    }
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_labels_places_the_earlier_original_across_a_known_feed_loss() {
+    stops_across_loss(false).await;
+}
+
+#[tokio::test]
+async fn test_labels_retains_originals_when_a_later_loss_obscures_their_order() {
+    stops_across_loss(true).await;
 }

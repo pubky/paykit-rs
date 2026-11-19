@@ -245,7 +245,7 @@ pub(crate) fn effect(
             // ([`crate::requests::stop_applies`], Paykit spec 3.4), and one that fails is
             // dropped by the later write that would place it.
             if pay && held_request(cx, &payer_target)? {
-                return keep_cancellation(cx, &payer_target, stored, seq, true);
+                return keep_cancellation(cx, &payer_target, stored, position, true);
             }
             // A payer's cancellation of a request this app holds goes into its record. One naming a
             // request held on neither side is new state, which the spam rule gates once: at an app
@@ -266,6 +266,11 @@ pub(crate) fn effect(
                 }
                 return Ok(());
             }
+            // A request already kept to write protects its stop just as a held record does.
+            // Speculative admission as a payee reply must not defer this payer's custody.
+            if keeps_stored_of(cx, &sender, &request)? {
+                return keep_cancellation(cx, &payer_target, stored, position, true);
+            }
             // While the copy of a side may lack records, the absence decides nothing: the
             // entry is held.
             let content = cx
@@ -279,7 +284,7 @@ pub(crate) fn effect(
                 hold_while_unlisted(cx, RecordSide::Payee)?;
             }
             if admits_new_state(cx, &sender, &scopes, stored)? {
-                keep_cancellation(cx, &payer_target, stored, seq, false)?;
+                keep_cancellation(cx, &payer_target, stored, position, false)?;
                 if reply {
                     keep_reply(cx, &payee_target, stored, position)?;
                 }
@@ -1059,31 +1064,38 @@ fn keep_cancellation(
     cx: &mut ReceiveContext<'_>,
     target: &ActivityTarget,
     stored: &StoredMessage,
-    seq: u64,
+    position: FeedPosition,
     held: bool,
 ) -> Result<(), Fail> {
     let record = cx.record_key(&target.record_target())?;
-    let name = key::kept_cancellation(&record, &stored.cert().hash());
-    let order = (stored.accepted_at().ok_or_else(Fail::corrupt)?, seq);
+    let name = key::kept_cancellation(&record, &stored.cert().hash(), position.generation);
+    let order = (stored.accepted_at().ok_or_else(Fail::corrupt)?, position);
     let mut superseded = Vec::new();
     for (key, kept) in state::cx_scan::<KeptMessage>(cx, &key::kept_cancellations(&record))? {
         let (old, _) = kept_with_time(cx, &kept)?;
         if old.message().from.app_id != stored.message().from.app_id {
             continue;
         }
-        let earlier = ordered(&kept)?;
-        if earlier <= order && covers_selling_scopes(&old, stored) {
+        let prior = kept.received_at().map_err(|_| Fail::corrupt())?;
+        let Some(comparison) =
+            crate::records::compare_received(prior, order, |a, b| cx.received_order(a, b))
+        else {
+            continue;
+        };
+        // The next loss can obscure a known tie across generations. Keep those originals
+        // available to compare again when the parent arrives.
+        if prior.0 == order.0 && prior.1.generation != position.generation {
+            continue;
+        }
+        if !comparison.is_gt() && covers_selling_scopes(&old, stored) {
             return Ok(());
         }
-        if order <= earlier && covers_selling_scopes(stored, &old) {
+        if !comparison.is_lt() && covers_selling_scopes(stored, &old) {
             superseded.push(key);
         }
     }
     if !held && superseded.is_empty() {
-        let request = stored.message().refs.first().ok_or_else(Fail::corrupt)?;
-        if !keeps_stored_of(cx, &stored.sender(), request)? {
-            make_room_for_stop(cx, &stored.sender(), order)?;
-        }
+        make_room_for_stop(cx, &stored.sender(), (order.0, position.seq))?;
     }
     for old in superseded {
         if old != name {
@@ -1095,7 +1107,7 @@ fn keep_cancellation(
             );
         }
     }
-    keep_local(cx, local(&name, &KeptMessage::taken(stored, seq))?);
+    keep_local(cx, local(&name, &KeptMessage::taken_at(stored, position))?);
     Ok(())
 }
 
@@ -2365,9 +2377,8 @@ pub(crate) fn make_room_for_reply(
         msg_id: String,
         at: (u64, FeedPosition),
     }
-    let inbox_time = |kept: &KeptMessage| -> Result<_, Fail> {
-        Ok((ordered(kept)?.0, kept.position().ok_or_else(Fail::corrupt)?))
-    };
+    let inbox_time =
+        |kept: &KeptMessage| -> Result<_, Fail> { kept.received_at().map_err(|_| Fail::corrupt()) };
     let mut members = Vec::with_capacity(existing.len() + 1);
     let mut groups = BTreeMap::<[u8; 32], Vec<usize>>::new();
     let mut counts = BTreeMap::<[u8; 32], usize>::new();

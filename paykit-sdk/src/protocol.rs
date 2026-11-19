@@ -3234,7 +3234,7 @@ mod receive_tests {
             object(json!({})),
         );
         let target = ActivityTarget::payer(natural_key::request_record(&shop.id(), &[4; 32]));
-        let key = key::kept_cancellation(&fake_key(&target.record_target()), &shop.cert.hash());
+        let key = key::kept_cancellation(&fake_key(&target.record_target()), &shop.cert.hash(), 1);
         let unordered = state::encode(&KeptMessage::of(&cancellation)).unwrap();
         assert!(!restores::<KeptMessage>(
             &wallet,
@@ -3477,11 +3477,18 @@ mod receive_tests {
             vec![[4; 32]],
             object(json!({})),
         );
-        let value = state::encode(&KeptMessage::taken(&cancellation, 0)).unwrap();
+        let value = state::encode(&KeptMessage::taken_at(
+            &cancellation,
+            pubky_switch_client::app::FeedPosition {
+                generation: 1,
+                seq: 1,
+            },
+        ))
+        .unwrap();
         let target = ActivityTarget::payer(natural_key::request_record(&bob.id(), &[4; 32]));
         let record = fake_key(&target.record_target());
         (
-            key::kept_cancellation(&record, &bob.cert.hash()).into_bytes(),
+            key::kept_cancellation(&record, &bob.cert.hash(), 1).into_bytes(),
             value,
         )
     }
@@ -3507,13 +3514,19 @@ mod receive_tests {
             &["paykit_request", "paykit_settlements", "paykit_contacts"],
         );
         let (key, value) = kept_cancellation(&alice, &bob);
-        let other = key::kept_cancellation(&[9; 32], &bob.cert.hash()).into_bytes();
+        let other = key::kept_cancellation(&[9; 32], &bob.cert.hash(), 1).into_bytes();
         assert!(!restores::<KeptMessage>(&alice, &other, &value));
         // A renewal of the same app can grant different selling scopes.
         let target = ActivityTarget::payer(natural_key::request_record(&bob.id(), &[4; 32]));
         let record = fake_key(&target.record_target());
-        let other_cert = key::kept_cancellation(&record, &[6; 32]).into_bytes();
+        let other_cert = key::kept_cancellation(&record, &[6; 32], 1).into_bytes();
         assert!(!restores::<KeptMessage>(&alice, &other_cert, &value));
+        let other_generation = key::kept_cancellation(&record, &bob.cert.hash(), 2);
+        assert!(!restores::<KeptMessage>(
+            &alice,
+            other_generation.as_bytes(),
+            &value
+        ));
         assert!(!restores::<KeptMessage>(
             &alice,
             &key,

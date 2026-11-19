@@ -2068,9 +2068,10 @@ pub(crate) fn stop_key(w: &World, wallet: &paykit_sdk::Paykit, hash: [u8; 32]) -
         .unwrap();
     let shop = w.bob.identity().app_keys("shop").app_id_bytes();
     format!(
-        "kc/{}/{}",
+        "kc/{}/{}/{:020}",
         pubky_switch_core::enc::b64(&key),
-        pubky_switch_core::enc::b64(&w.bob.switch().app(&shop).cert.unwrap().hash())
+        pubky_switch_core::enc::b64(&w.bob.switch().app(&shop).cert.unwrap().hash()),
+        wallet.app().own_identity().generation(),
     )
     .into_bytes()
 }

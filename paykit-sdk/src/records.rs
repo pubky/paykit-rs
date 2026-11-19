@@ -69,7 +69,7 @@ pub(crate) struct KeptMessage {
     /// carries none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     seq: Option<u64>,
-    /// The feed generation of a pooled reply. Its sequence alone cannot
+    /// The feed generation of a pooled reply or retained cancellation. Its sequence alone cannot
     /// order entries on opposite sides of a provider loss.
     #[serde(skip_serializing_if = "Option::is_none")]
     generation: Option<u64>,
@@ -86,14 +86,17 @@ pub(crate) struct KeptMessage {
 /// inbox gives each entry as it accepts it, whoever sent it (Switch spec 8.3), never by its
 /// `msg_id`, which its sender chooses, nor by the store that keeps it. A stored entry keeps
 /// the `seq` it was read at when the client tries it again, so a message keeps its position
-/// whichever store keeps it and however often it is taken. Pending Allowance replies retain
-/// their complete feed position and use the client's feed order across generations.
+/// whichever store keeps it and however often it is taken. Pending Allowance replies and payment-request
+/// cancellations retain their complete feed position to compare across generations.
 pub(crate) type KeptOrder = (u64, u64);
+
+/// The authenticated acceptance time and original position of a received message.
+pub(crate) type ReceivedAt = (u64, pubky_switch_client::app::FeedPosition);
 
 /// Compare inbox acceptance times, using the verified feed order to break a tie.
 pub(crate) fn compare_received(
-    a: (u64, pubky_switch_client::app::FeedPosition),
-    b: (u64, pubky_switch_client::app::FeedPosition),
+    a: ReceivedAt,
+    b: ReceivedAt,
     order: impl Fn(
         pubky_switch_client::app::FeedPosition,
         pubky_switch_client::app::FeedPosition,
@@ -223,6 +226,14 @@ impl KeptMessage {
             generation: self.generation?,
             seq: self.seq?,
         })
+    }
+
+    /// The verified intake time and original feed position used to compare received messages.
+    pub(crate) fn received_at(&self) -> Result<ReceivedAt> {
+        Ok((
+            self.order()?.0,
+            self.position().ok_or_else(PaykitError::corrupt)?,
+        ))
     }
 
     /// The feed `seq` its entry was read at, for a message ordered among others

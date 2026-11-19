@@ -47,7 +47,7 @@
 //! | `lp/<recipient>/<generation>/<message hash>` | outstanding original publication batch IDs, kept atomically before submission and retained across restore | yes |
 //! | `lres/<recipient>` | the applied list, its publisher and original signed message, first non-delivery, prior offers' latest possible expiry, and the interval of an outstanding withdrawal | yes |
 //! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read: never written over it, which could drop its single-use marks, until the record reads | |
-//! | `kc/<record key>/<certificate hash>` | a payee's cancellation of a request, kept until it is placed in the payer's request record | |
+//! | `kc/<record key>/<certificate hash>/<feed generation>` | a payee's cancellation of a request, kept until it is placed in the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
 //! | `lr` | when the app last read the lists, on the device clock; absent before the first read and after a due read failed, when new activity waits (Paykit wire 4.1); never restored, so a restored app reads the deny list again before any payment | |
 //! | `spam/<pubky>` | how many messages from a blocked or flagged sender only were counted (Paykit wire 4.1) | |
@@ -845,7 +845,7 @@ impl sealed::Sealed for KeptMessage {}
 
 /// A message kept: verified for this app, and of the record its key names.
 ///
-/// - At `kc/<record key>/<certificate hash>`, a `paykit.payment_request_cancellation` its inbox accepted, kept
+/// - At `kc/<record key>/<certificate hash>/<feed generation>`, a `paykit.payment_request_cancellation` its inbox accepted, kept
 ///   under the record key of the payer's record of the request it cancels, from its sender
 ///   and the first of its `refs` (Paykit spec 8.1).
 /// - At `pr/<sender>/<record key>/<msg_id>`, a payer's acceptance, rejection, cancellation
@@ -932,9 +932,12 @@ impl Stored for KeptMessage {
                 StateKey::KeptCancellation {
                     record: record_key,
                     cert,
+                    generation,
                 },
                 Body::PaymentRequestCancellation(_),
-            ) if message.accepted_at().is_some() && message.cert().hash() == *cert => {
+            ) if self.received_at()?.1.generation == *generation
+                && message.cert().hash() == *cert =>
+            {
                 let target = ActivityTarget::payer(natural_key::request_record(
                     &message.sender(),
                     &first()?,
@@ -2022,8 +2025,17 @@ pub(crate) mod key {
     }
 
     /// The earliest cancellation under this signing certificate for the payer's request record (Paykit spec 8.1, Messages that cross).
-    pub(crate) fn kept_cancellation(record_key: &[u8; 32], cert: &[u8; 32]) -> String {
-        format!("{}{}", kept_cancellations(record_key), b64(cert))
+    pub(crate) fn kept_cancellation(
+        record_key: &[u8; 32],
+        cert: &[u8; 32],
+        generation: u64,
+    ) -> String {
+        format!(
+            "{}{}/{}",
+            kept_cancellations(record_key),
+            b64(cert),
+            num(generation)
+        )
     }
 
     /// The prefix of every cancellation kept as a stop of the request record `record_key`.
@@ -2123,10 +2135,11 @@ pub(crate) enum StateKey {
     },
     /// `peer/<pubky>`: a counterparty with Paykit activity.
     Peer([u8; 32]),
-    /// `kc/<record key>/<certificate hash>`: a payee's cancellation kept to place, one per original signing certificate.
+    /// `kc/<record key>/<certificate hash>/<feed generation>`: a payee's cancellation kept to place, one per original signing certificate and feed generation.
     KeptCancellation {
         record: [u8; 32],
         cert: [u8; 32],
+        generation: u64,
     },
     /// `ct`: the acceptance time of the last entry the cursor passed.
     CursorTime,
@@ -2455,10 +2468,12 @@ impl StateKey {
                     },
                     "peer" => Self::Peer(b64_32(rest)?),
                     "kc" => {
-                        let (record, cert) = rest.split_once('/')?;
+                        let (record, rest) = rest.split_once('/')?;
+                        let (cert, generation) = rest.split_once('/')?;
                         Self::KeptCancellation {
                             record: b64_32(record)?,
                             cert: b64_32(cert)?,
+                            generation: number(generation)?,
                         }
                     }
                     "bk" => Self::OwnBlock(b64_32(rest)?),
@@ -3387,10 +3402,11 @@ mod tests {
             (key::missed_item(9), StateKey::MissedItem { from_ms: 9 }),
             (key::peer(&pubky), StateKey::Peer(pubky)),
             (
-                key::kept_cancellation(&pubky, &[5; 32]),
+                key::kept_cancellation(&pubky, &[5; 32], 1),
                 StateKey::KeptCancellation {
                     record: pubky,
                     cert: [5; 32],
+                    generation: 1,
                 },
             ),
             (key::CURSOR_TIME.into(), StateKey::CursorTime),

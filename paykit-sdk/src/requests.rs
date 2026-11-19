@@ -27,8 +27,8 @@ use paykit_lib::{
     AttemptId, Body, Label, PaymentAmount, PaymentEndpointIdentifier, PaymentReference,
 };
 use pubky_switch_client::app::{
-    claim_conflict, AppError, Delivery, KeptReason, OpBatch, RecordContent, RecordRead,
-    UndeliverableReason,
+    claim_conflict, AppError, Delivery, FeedPosition, KeptReason, OpBatch, RecordContent,
+    RecordRead, UndeliverableReason,
 };
 use pubky_switch_client::error::ClientError;
 use pubky_switch_core::claims::{ClaimStatus, Outcome};
@@ -46,7 +46,7 @@ use crate::receipts::{
     receipt_binding, received_receipt, ReceiptBinding, ReceiptDetails, ReceivedReceipt,
 };
 use crate::receive::KEPT_MESSAGE_MS;
-use crate::records::{conflict, KeptMessage, KeptOrder};
+use crate::records::{compare_received, conflict, first_received, KeptMessage, ReceivedAt};
 use crate::settlements::{SettlementCredit, SettlementWrite};
 use crate::state::{key, Tx};
 
@@ -566,15 +566,26 @@ pub(crate) fn stop_applies(stop: &StoredMessage, record: Option<&ActivityRecord>
         .is_some_and(|(_, request)| stop.check_payee_sender(request).is_err())
 }
 
-/// Pick in inbox acceptance order, including the intake sequence for a shared timestamp.
+/// Place the first authorized original only if its acceptance order is known.
 fn first_kept_stop(
-    copies: impl Iterator<Item = (KeptOrder, StoredMessage)>,
+    copies: impl Iterator<Item = (ReceivedAt, StoredMessage)>,
     record: Option<&ActivityRecord>,
-) -> Option<StoredMessage> {
-    copies
+    order: impl Fn(FeedPosition, FeedPosition) -> Option<std::cmp::Ordering>,
+) -> Result<Option<StoredMessage>> {
+    let mut applicable: Vec<_> = copies
         .filter(|(_, stop)| stop_applies(stop, record))
-        .min_by_key(|(order, _)| *order)
-        .map(|(_, stop)| stop)
+        .collect();
+    if applicable.is_empty() {
+        return Ok(None);
+    }
+    let first = first_received(&applicable, |a, b| compare_received(a.0, b.0, &order)).ok_or_else(
+        || {
+            Refusal::NotNow(
+                "the order of the request's cancellations is unknown after provider loss".into(),
+            )
+        },
+    )?;
+    Ok(Some(applicable.swap_remove(first).1))
 }
 
 /// The request in a record, with its body.
@@ -1706,7 +1717,17 @@ impl Paykit {
         for key in copies.keys() {
             tx.delete(key);
         }
-        let Some(cancellation) = first_kept_stop(copies.into_values(), record.as_ref()) else {
+        if record
+            .as_ref()
+            .is_some_and(|record| record.cancellation.is_some())
+        {
+            self.local_commit(tx).await?;
+            return Ok(false);
+        }
+        let Some(cancellation) = first_kept_stop(copies.into_values(), record.as_ref(), |a, b| {
+            self.app.received_order(a, b)
+        })?
+        else {
             self.local_commit(tx).await?;
             return Ok(false);
         };
@@ -1745,7 +1766,7 @@ impl Paykit {
     }
 
     /// A payee's cancellation kept as a stop of the request record at `target` that stops it,
-    /// the earliest accepted: of the kept copies, one per original certificate, those
+    /// the earliest accepted: of the kept copies, from their original certificates and feed generations, those
     /// [`stop_applies`] takes against the record as the app holds it now. The one place a
     /// kept stop is judged outside the receive step.
     pub(crate) async fn kept_stop_message(
@@ -1754,7 +1775,9 @@ impl Paykit {
     ) -> Result<Option<StoredMessage>> {
         let record = self.held_activity(target).await?;
         let copies = self.kept_stop_copies(target).await?;
-        Ok(first_kept_stop(copies.into_values(), record.as_ref()))
+        first_kept_stop(copies.into_values(), record.as_ref(), |a, b| {
+            self.app.received_order(a, b)
+        })
     }
 
     /// Every cancellation kept as a stop of the request record at `target`, by its key, each
@@ -1763,14 +1786,14 @@ impl Paykit {
     async fn kept_stop_copies(
         &self,
         target: &ActivityTarget,
-    ) -> Result<std::collections::BTreeMap<String, (KeptOrder, StoredMessage)>> {
+    ) -> Result<std::collections::BTreeMap<String, (ReceivedAt, StoredMessage)>> {
         let prefix = key::kept_cancellations(&self.activity_key(target)?);
         let own = self.identity();
         let mut copies = std::collections::BTreeMap::new();
         for (rest, kept) in self.local_scan::<KeptMessage>(&prefix).await? {
             copies.insert(
                 format!("{prefix}{rest}"),
-                (kept.order()?, kept.stored(&own)?),
+                (kept.received_at()?, kept.stored(&own)?),
             );
         }
         Ok(copies)
@@ -2994,8 +3017,14 @@ mod stop_tests {
             .unwrap();
             let mut tx = Tx::default();
             tx.put(
-                &key::kept_cancellation(&view.record, &stop.cert().hash()),
-                &KeptMessage::taken(&stop, 1),
+                &key::kept_cancellation(&view.record, &stop.cert().hash(), 1),
+                &KeptMessage::taken_at(
+                    &stop,
+                    FeedPosition {
+                        generation: 1,
+                        seq: 1,
+                    },
+                ),
             )
             .unwrap();
             wallet.local_commit(tx).await.unwrap();
@@ -3114,13 +3143,17 @@ mod stop_order_tests {
         // pick the other one.
         let keys: Vec<String> = stops
             .iter()
-            .map(|(cert, _)| key::kept_cancellation(&record, cert))
+            .map(|(cert, _)| key::kept_cancellation(&record, cert, 1))
             .collect();
         let first = usize::from(keys[0] < keys[1]);
         let mut tx = Tx::default();
         for (i, (_, stop)) in stops.iter().enumerate() {
             let seq = if i == first { 1 } else { 2 };
-            tx.put(&keys[i], &KeptMessage::taken(stop, seq)).unwrap();
+            tx.put(
+                &keys[i],
+                &KeptMessage::taken_at(stop, FeedPosition { generation: 1, seq }),
+            )
+            .unwrap();
         }
         wallet.local_commit(tx).await.unwrap();
         wallet.place_kept_cancellations().await.unwrap();
