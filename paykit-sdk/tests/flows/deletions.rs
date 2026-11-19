@@ -212,13 +212,18 @@ async fn test_payee_deletion_without_a_copy_keeps_the_delete_through_reload() {
     drop(observer);
     let mut observer = w.load_on_clock(&w.bob, device, id, w.clock.clone()).await;
     observer.receive(None).await.unwrap();
+    let mut expected: serde_json::Value = serde_json::from_slice(&held).unwrap();
+    assert!(expected["d"]["page_time_ms"].is_null());
+    expected["d"]["page_time_ms"] = w.clock.now_ms().into();
+    let dated = observer
+        .app()
+        .protocol_get("paykit", &state_key)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        observer
-            .app()
-            .protocol_get("paykit", &state_key)
-            .await
-            .unwrap(),
-        Some(held)
+        serde_json::from_slice::<serde_json::Value>(&dated).unwrap(),
+        expected
     );
     assert_eq!(w.record_writes(&w.bob, &key), before);
     assert!(observer.payee_activity().await.unwrap().is_empty());

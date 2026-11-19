@@ -4013,6 +4013,144 @@ fn test_record_transitions_compare_versions_of_one_record() {
 }
 
 #[test]
+fn test_issued_payee_receipt_preserves_independent_deletion_restrictions() {
+    let keys = Keys::from_seeds();
+    let paid = ActivityRecord {
+        request: Some(stored_message(&keys, "payment_request")),
+        proof: Some(stored_message(&keys, "payment_proof")),
+        receipt: Some(stored_message(&keys, "payment_receipt")),
+        ..activity(ActivitySide::Payee, pubky(ALICE))
+    };
+    let delete = [1; 32];
+    let prior = [2; 32];
+    let eager = ActivityRecord {
+        lost_to_delete: Some(delete),
+        receipt: None,
+        ..paid.clone()
+    };
+    let repaired = paid
+        .merge_issued_payee_receipt(&eager, &delete, true)
+        .unwrap();
+    assert_eq!(repaired.to_json().unwrap(), paid.to_json().unwrap());
+    let indirect = paid
+        .merge_issued_payee_receipt(&eager, &delete, false)
+        .unwrap();
+    assert_eq!(indirect.lost_to_delete, Some(delete));
+    let restricted = ActivityRecord {
+        lost_to_delete: Some(prior),
+        ..paid
+    };
+    let repaired = restricted
+        .merge_issued_payee_receipt(&eager, &delete, true)
+        .unwrap();
+    assert_eq!(repaired.to_json().unwrap(), restricted.to_json().unwrap());
+    assert!(restricted
+        .merge_issued_payee_receipt(&eager, &delete, false)
+        .is_err());
+}
+
+#[test]
+fn test_issued_payee_receipt_merges_notes_and_refuses_conflicting_values() {
+    let keys = Keys::from_seeds();
+    let paid = ActivityRecord {
+        request: Some(stored_message(&keys, "payment_request")),
+        proof: Some(stored_message(&keys, "payment_proof")),
+        receipt: Some(stored_message(&keys, "payment_receipt")),
+        ..activity(ActivitySide::Payee, pubky(ALICE))
+    };
+    let note = |field: &str, value: &str, nested_field: &str, nested_value: &str| {
+        let mut json = written(&paid);
+        json[field] = serde_json::json!(value);
+        json["proof"]["cert"][nested_field] = serde_json::json!(nested_value);
+        ActivityRecord::read(
+            &serde_json::to_vec(&json).unwrap(),
+            &pubky(BOB),
+            ActivitySide::Payee,
+        )
+        .unwrap()
+    };
+    let original = note(
+        "merchant_note",
+        "collected",
+        "merchant_reference",
+        "order 5",
+    );
+    let current = note("shipping_note", "delivered", "shipping_reference", "item 8");
+    let merged = original
+        .merge_issued_payee_receipt(&current, &[7; 32], false)
+        .unwrap();
+    let value = written(&merged);
+    assert_eq!(value["merchant_note"], "collected");
+    assert_eq!(value["shipping_note"], "delivered");
+    assert_eq!(value["proof"]["cert"]["merchant_reference"], "order 5");
+    assert_eq!(value["proof"]["cert"]["shipping_reference"], "item 8");
+    assert_eq!(value["receipt"], written(&paid)["receipt"]);
+    assert!(original
+        .merge_issued_payee_receipt(
+            &note("merchant_note", "refunded", "merchant_reference", "order 5"),
+            &[7; 32],
+            false
+        )
+        .is_err());
+    assert!(original
+        .merge_issued_payee_receipt(
+            &note(
+                "shipping_note",
+                "delivered",
+                "merchant_reference",
+                "order 6"
+            ),
+            &[7; 32],
+            false
+        )
+        .is_err());
+}
+
+#[test]
+fn test_issued_receipt_publication_keeps_members_of_each_record_and_nested_object() {
+    let keys = Keys::from_seeds();
+    let paid = ActivityRecord {
+        request: Some(stored_message(&keys, "payment_request")),
+        proof: Some(stored_message(&keys, "payment_proof")),
+        receipt: Some(stored_message(&keys, "payment_receipt")),
+        ..activity(ActivitySide::Payee, pubky(ALICE))
+    };
+    let read = |json: &Value| {
+        ActivityRecord::read(
+            &serde_json::to_vec(json).unwrap(),
+            &pubky(BOB),
+            ActivitySide::Payee,
+        )
+        .unwrap()
+    };
+    let mut prior = written(&paid);
+    prior["merchant_reference"] = "order 5".into();
+    prior["proof"]["cert"]["merchant_note"] = "collected".into();
+    let mut eager = written(&paid);
+    eager["shipping_reference"] = "item 8".into();
+    eager["proof"]["cert"]["shipping_note"] = "delivered".into();
+    let mut union = prior.clone();
+    union["shipping_reference"] = eager["shipping_reference"].clone();
+    union["proof"]["cert"]["shipping_note"] = eager["proof"]["cert"]["shipping_note"].clone();
+    assert!(read(&prior)
+        .check_receipt_publication(&read(&union))
+        .is_ok());
+    assert!(read(&eager)
+        .check_receipt_publication(&read(&union))
+        .is_ok());
+    assert!(read(&prior)
+        .check_receipt_publication(&read(&eager))
+        .is_err());
+    union["proof"]["cert"]["shipping_note"] = "returned".into();
+    assert!(read(&prior)
+        .check_receipt_publication(&read(&union))
+        .is_ok());
+    assert!(read(&eager)
+        .check_receipt_publication(&read(&union))
+        .is_err());
+}
+
+#[test]
 fn test_activity_record_receipt_is_of_its_proofs_billing_period() {
     // A period record with the February period's proof, and a receipt of that proof's attempt
     // that names another Billing Period: refused for the receipt's period.
