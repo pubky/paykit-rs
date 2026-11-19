@@ -79,7 +79,11 @@ async fn join(
         Arc::new(TestTimer),
     )
     .await?;
-    wallet.receive(None).await?;
+    let wallet = tokio::spawn(Box::pin(async move {
+        wallet.receive(None).await?;
+        Ok::<_, paykit_sdk::PaykitError>(wallet)
+    }))
+    .await??;
     Ok((wallet, signer))
 }
 
@@ -504,6 +508,47 @@ async fn two_transactions(world: &World) -> TestResult {
         );
         let (a, b) = (a?, b?);
         assert_ne!(a.is_some(), b.is_some());
+        let (loser, losing_key) = if a.is_some() {
+            (&mut wallets.labelled, &label_key)
+        } else {
+            (&mut wallets.till, &plain_key)
+        };
+        let original = loser
+            .app()
+            .shared_record(losing_key)
+            .await?
+            .ok_or("missing losing occurrence")?;
+        let activity = paykit_lib::records::ActivityRecord::read(
+            original
+                .content
+                .value()
+                .ok_or("unreadable losing occurrence")?,
+            &loser.identity(),
+            paykit_lib::records::ActivitySide::Payee,
+        )?;
+        assert!(activity.receipt.is_none());
+        let Some(paykit_lib::Body::PaymentProof(proof)) =
+            activity.proof.as_ref().map(|signed| signed.body())
+        else {
+            return Err("missing losing occurrence's proof".into());
+        };
+        let checked = wallets.rail.proof_checks().len();
+        let consent = ReceiptDetails::new()
+            .with_unmarked_credit_confirmed(pubky_switch_client::app::UserConfirmed::new());
+        assert!(Box::pin(loser.confirm_payment_with(losing_key, consent))
+            .await?
+            .is_none());
+        let checks = wallets.rail.proof_checks();
+        assert_eq!(checks.len(), checked + 1);
+        assert_eq!(checks[checked].attempt_id, proof.attempt_id);
+        assert_eq!(checks[checked].proof, proof.proof);
+        let current = loser
+            .app()
+            .shared_record(losing_key)
+            .await?
+            .ok_or("missing checked occurrence")?;
+        assert_eq!(original.version, current.version);
+        assert_eq!(original.content, current.content);
         wallets.buyer.receive(None).await?;
         wallets.other.receive(None).await?;
         let receipt_ids = |receipts: Vec<paykit_sdk::ReceivedReceipt>| {
@@ -547,13 +592,22 @@ async fn two_transactions(world: &World) -> TestResult {
 
 #[tokio::test]
 async fn test_full_bucket_warns_once_and_a_confirmed_stored_receipt_stays_unsent() -> TestResult {
+    for backend in [Backend::Scripted, Backend::Service] {
+        let Some(world) = World::start(backend)? else {
+            continue;
+        };
+        let result = Box::pin(stored_receipt_over_full_bucket(&world)).await;
+        world.close().await?;
+        result?;
+    }
+    Ok(())
+}
+
+async fn stored_receipt_over_full_bucket(world: &World) -> TestResult {
     use pubky_switch_client::app::{
         Collection as SwitchCollection, OpBatch, RecordTarget, UserConfirmed,
     };
-    let Some(world) = World::start(Backend::Scripted)? else {
-        return Err("missing scripted switch".into());
-    };
-    let mut tills = Box::pin(enrolled_tills(&world)).await?;
+    let mut tills = Box::pin(enrolled_tills(world)).await?;
     let (buyer, request, record) = Box::pin(paid_request(
         &mut tills.till,
         tills.buyer,
@@ -636,6 +690,14 @@ async fn test_full_bucket_warns_once_and_a_confirmed_stored_receipt_stays_unsent
     );
     let notice_id = warning.id.clone();
     tills.till.acknowledge_notice(&notice_id).await?;
+    let bucket_key = tills.till.app().record_key(&target)?;
+    let full = tills
+        .till
+        .app()
+        .shared_record(&bucket_key)
+        .await?
+        .ok_or("missing full bucket")?;
+    assert!(full.authenticated);
     let stored = tills
         .till
         .confirm_payment_with(
@@ -646,6 +708,32 @@ async fn test_full_bucket_warns_once_and_a_confirmed_stored_receipt_stays_unsent
         )
         .await?
         .ok_or("missing stored receipt")?;
+    let evidence = tills.till.app().shared_evidence().await?;
+    let mut receipt_writes = 0;
+    for kept in &evidence.ops {
+        use pubky_switch_core::ops::{Condition, OpKind, SignedOp};
+        if kept.cert != *tills.till.app().cert().signed() {
+            continue;
+        }
+        let op =
+            SignedOp::verify_with_cert(&kept.op, tills.till.app().cert(), &tills.till.identity())?;
+        if matches!(&op.body().kind, OpKind::RecordPut(put) if put.key == record) {
+            assert!(op.body().conditions.contains(&Condition::RecordVersion {
+                key: bucket_key,
+                version: full.version,
+            }));
+            receipt_writes += 1;
+        }
+    }
+    assert_eq!(receipt_writes, 1);
+    let current = tills
+        .till
+        .app()
+        .shared_record(&bucket_key)
+        .await?
+        .ok_or("missing checked bucket")?;
+    assert_eq!(current.version, full.version);
+    assert_eq!(current.content, full.content);
     assert!(tills.till.app().delivery(&stored).await?.is_none());
     assert!(tills
         .till
@@ -681,7 +769,6 @@ async fn test_full_bucket_warns_once_and_a_confirmed_stored_receipt_stays_unsent
         .await?
         .is_empty());
     assert_eq!(tills.rail.all_executions().values().sum::<u64>(), 1);
-    world.close().await?;
     Ok(())
 }
 

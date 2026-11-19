@@ -2744,7 +2744,7 @@ impl Paykit {
                     self.refuse_claim(&view)?;
                 }
                 // A batch on a Billing Period writes its period record at the version read,
-                // marking it `manual_only`, or is conditioned on it (Paykit spec 8.3, "Manual
+                // marking it `manual_only` when paid by hand, or is conditioned on it (Paykit spec 8.3, "Manual
                 // only"): one another own app wrote since fails it, and is read again, so the
                 // next attempt builds on that write, not on the same stale copy.
                 if entry.period()?.is_some() {
@@ -4221,6 +4221,13 @@ impl Paykit {
             return Ok(false);
         };
         let target = ActivityTarget::payer(natural);
+        if let Some(period) = entry.period()?.filter(|_| !entry.user_started) {
+            return Ok(
+                Box::pin(self.policy_period_conditions(entry, &target, period, None))
+                    .await?
+                    .is_none(),
+            );
+        }
         if self.kept_stop(&target).await? {
             return Ok(true);
         }
@@ -4396,12 +4403,13 @@ impl Paykit {
         if self.payment_base_changed(entry).await? {
             return Ok(true);
         }
+        let crossing_payee = (entry.billing_period.is_some()
+            && matches!(kind, Dispatch::First { .. }))
+        .then_some(entry.payee);
         if entry.billing_period.is_some() {
             let parent =
                 ActivityTarget::payer(entry.request_record()?.ok_or_else(PaykitError::corrupt)?);
             let period = ActivityTarget::payer(entry.natural_key.clone());
-            let crossing_payee = (by == Initiator::User && matches!(kind, Dispatch::First { .. }))
-                .then_some(entry.payee);
             for (target, crossing) in [(&parent, crossing_payee), (&period, None)] {
                 match Box::pin(self.current_period_activity(target, crossing)).await {
                     Ok(Some(record)) if !payment_ended(&record, crossing) => {}
@@ -4411,7 +4419,7 @@ impl Paykit {
             }
         }
         if by == Initiator::Automatic {
-            return self.automatic_dispatch_held(entry).await;
+            return self.automatic_dispatch_held(entry, crossing_payee).await;
         }
         if Box::pin(self.divergent_pauses(entry, crate::divergent::Pause::blocks_by_hand)).await? {
             return Ok(true);
@@ -4456,6 +4464,10 @@ impl Paykit {
     /// `read_record_fresh`, a read that shows anything but the switch's current write holding
     /// the dispatch.
     ///
+    /// For a period started under the host's policy, each pass instead reads the deny list,
+    /// subscription and occurrence. Compare the exact applications of both permitted records,
+    /// keeping every independent restriction found during either pass.
+    ///
     /// Another own app can block the payee, record a cancellation or a rejection, mark the
     /// record `manual_only` or raise the floor while this app awaits anything, between these
     /// reads included. A record's version only grows, whoever writes, a delete included, so an
@@ -4469,14 +4481,57 @@ impl Paykit {
     /// (for a recurring request, the copy of the record just taken; for a payment without a
     /// request, the commit of the deny list read and the widenings it applies), and then
     /// only code with no await runs before the call.
-    async fn automatic_dispatch_held(&mut self, entry: &JournalEntry) -> Result<bool> {
-        let Some(judged) = Box::pin(self.shared_collect(entry, true)).await? else {
+    async fn automatic_dispatch_held(
+        &mut self,
+        entry: &JournalEntry,
+        crossing_payee: Option<[u8; 32]>,
+    ) -> Result<bool> {
+        let Some(judged) = Box::pin(self.shared_collect(entry, true, crossing_payee)).await? else {
             return Ok(true);
         };
-        let Some(confirmed) = Box::pin(self.shared_collect(entry, false)).await? else {
+        let Some(confirmed) = Box::pin(self.shared_collect(entry, false, crossing_payee)).await?
+        else {
             return Ok(true);
         };
-        Ok(judged != confirmed)
+        if judged == confirmed {
+            return Ok(false);
+        }
+        // A seller's cancellation arrived between the two reads. Confirm the new
+        // parent, unchanged occurrence, deny list and independent holds together.
+        if judged.deny == confirmed.deny
+            && matches!((&judged.policy_period, &confirmed.policy_period),
+            (Some(before), Some(after)) if !before[0].crossed_stop && after[0].crossed_stop && before[1] == after[1])
+        {
+            let latest = Box::pin(self.shared_collect(entry, false, crossing_payee)).await?;
+            return Ok(latest.as_ref() != Some(&confirmed));
+        }
+        Ok(true)
+    }
+
+    /// An unfunded period started by policy must still be authorized by both current
+    /// records at resume and immediately before the rail call (Paykit spec 8.2, 8.3).
+    async fn policy_period_conditions(
+        &mut self,
+        entry: &JournalEntry,
+        parent: &ActivityTarget,
+        period: PeriodRef,
+        crossing_payee: Option<[u8; 32]>,
+    ) -> Result<Option<Box<[crate::periods::PolicyPeriodWrite; 2]>>> {
+        let occurrence = ActivityTarget::payer(entry.natural_key.clone());
+        let Some(parent) =
+            Box::pin(self.policy_period_condition(parent, None, crossing_payee)).await?
+        else {
+            return Ok(None);
+        };
+        let Some(current) =
+            Box::pin(self.policy_period_condition(&occurrence, Some(period), None)).await?
+        else {
+            return Ok(None);
+        };
+        if Box::pin(self.divergent_withholds(entry)).await? {
+            return Ok(None);
+        }
+        Ok(Some(Box::new([parent, current])))
     }
 
     /// One read of the identity's state an automatic dispatch of `entry` is judged by
@@ -4490,6 +4545,7 @@ impl Paykit {
         &mut self,
         entry: &JournalEntry,
         judge: bool,
+        crossing_payee: Option<[u8; 32]>,
     ) -> Result<Option<SharedState>> {
         let Ok(deny) = self.deny_list_now().await else {
             return Ok(None);
@@ -4502,9 +4558,24 @@ impl Paykit {
                 deny,
                 record: None,
                 floor: None,
+                policy_period: None,
             }));
         };
         let target = ActivityTarget::payer(natural);
+        if let Some(period) = entry.period()?.filter(|_| !entry.user_started) {
+            let Some(conditions) =
+                Box::pin(self.policy_period_conditions(entry, &target, period, crossing_payee))
+                    .await?
+            else {
+                return Ok(None);
+            };
+            return Ok(Some(SharedState {
+                deny,
+                record: None,
+                floor: None,
+                policy_period: Some(conditions),
+            }));
+        }
         let (record, stamp) = match self.fresh_request_stamped(&target).await {
             Ok((Fresh::Held(record), Some(stamp))) => (*record, stamp),
             Ok(_) | Err(_) => return Ok(None),
@@ -4520,6 +4591,7 @@ impl Paykit {
                 deny,
                 record: Some(stamp),
                 floor: None,
+                policy_period: None,
             }));
         }
         let stored = stored.clone();
@@ -4533,6 +4605,7 @@ impl Paykit {
             deny,
             record: Some(stamp),
             floor: Some(floor.as_ref().map(WriteStamp::of)),
+            policy_period: None,
         }))
     }
 
@@ -4707,6 +4780,19 @@ impl Paykit {
             Dispatch::First { answered, .. } => {
                 if let Err(refusal) = self.within_budget(&answered, now) {
                     return Ok(FinalCheck::Refused(refusal));
+                }
+                if automatic_first
+                    && entry.period()?.is_some_and(|period| {
+                        crate::periods::automatic_window_ended(
+                            &period,
+                            entry.deadline,
+                            self.service_time(),
+                        )
+                    })
+                {
+                    return Ok(FinalCheck::Refused(Refusal::NotAutomatic(
+                        "the Billing Period's automatic window ended before dispatch".into(),
+                    )));
                 }
             }
         }
@@ -4980,6 +5066,7 @@ struct SharedState {
     deny: Vec<[u8; 32]>,
     record: Option<WriteStamp>,
     floor: Option<Option<WriteStamp>>,
+    policy_period: Option<Box<[crate::periods::PolicyPeriodWrite; 2]>>,
 }
 
 #[cfg(test)]

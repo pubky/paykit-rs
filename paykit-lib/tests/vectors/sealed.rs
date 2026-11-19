@@ -1,6 +1,8 @@
 //! `sealed.json`: record values a reader binds to their keys, the rejections, the labelled
-//! payee record, the activity records a reader takes or refuses and the settlement marks
-//! (Paykit wire 5, 5.1, 5.3, 5.4, 5.5, 5.7).
+//! payee record, activity and settlement marks, and signed list publication counters
+//! (Paykit wire 5, 5.1, 5.3, 5.4, 5.5, 5.7, 5.8).
+
+pub(crate) mod publications;
 
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::{
@@ -47,6 +49,7 @@ pub(crate) fn check() {
     check_allowance_records(&keys, &v);
     check_pending_proposals(&keys, &v["allowance_proposals"]);
     check_settlement_marks(&keys, &v["settlement_marks"]);
+    publications::check(&keys, &v["private_list_publications"]);
 }
 
 /// Own cases on activity records (Paykit wire 5.3), built from the vectors' messages: the
@@ -1362,6 +1365,10 @@ pub(crate) fn generate(keys: &Keys) {
             pending_proposals(keys),
         ),
         (Place::Member("/settlement_marks"), settlement_marks(keys)),
+        (
+            Place::Member("/private_list_publications"),
+            publications::cases(keys),
+        ),
     ];
     cases.extend(binding_cases(keys));
     cases.extend(labelled_cases(keys));

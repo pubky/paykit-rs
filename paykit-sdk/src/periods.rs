@@ -43,7 +43,8 @@ use crate::paykit::Paykit;
 use crate::receipts::{period_request_target, received_receipt, ReceivedReceipt};
 use crate::records::{conflict, KeptMessage};
 use crate::requests::{
-    cancelled, payment_ended, rejected, request_of, MessageDelivery, RequestRef, SentMessage,
+    accepted, cancelled, payment_ended, rejected, request_of, MessageDelivery, RequestRef,
+    SentMessage,
 };
 
 /// How many times a payee's write of period details is built again after its record changed
@@ -793,7 +794,72 @@ fn bare_period_record(request: &RequestRef, period: &PeriodRef) -> ActivityRecor
     record
 }
 
+fn policy_withheld(record: &ActivityRecord) -> bool {
+    record.manual_only || record.allowance_id.is_some()
+}
+
+pub(crate) fn automatic_window_ended(
+    period: &PeriodRef,
+    deadline: Option<u64>,
+    time: Option<u64>,
+) -> bool {
+    time.is_none_or(|now| now >= deadline.unwrap_or(period.ends_at).min(period.ends_at))
+}
+
+/// The physical write checked by an app paying under its policy, and whether it held
+/// the payee's signed stop that crosses this first dispatch (Paykit spec 8.1, 8.2).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PolicyPeriodWrite {
+    condition: Condition,
+    pub(crate) crossed_stop: bool,
+}
+
 impl Paykit {
+    /// Read a record used to authorize an automatic period payment from its current
+    /// physical application. Applying the read can itself reveal a restricted write.
+    pub(crate) async fn policy_period_condition(
+        &mut self,
+        target: &ActivityTarget,
+        period: Option<PeriodRef>,
+        crossing_payee: Option<[u8; 32]>,
+    ) -> Result<Option<PolicyPeriodWrite>> {
+        let Ok(RecordRead::Fresh(held)) = self.app.read_record_fresh(&target.record_target()).await
+        else {
+            return Ok(None);
+        };
+        if held.doubtful || self.pause_of(&held).await?.blocks_automatic() {
+            return Ok(None);
+        }
+        let Ok(record) = self.checked_period_activity(target, &held) else {
+            return Ok(None);
+        };
+        if record.billing_period != period
+            || policy_withheld(&record)
+            || payment_ended(&record, crossing_payee)
+        {
+            return Ok(None);
+        }
+        if period.is_none()
+            && (request_of(&record).is_none_or(|(_, request)| !request.is_recurring())
+                || !accepted(&record)
+                || !held.authenticated
+                || held.written_at_ms.is_none()
+                || self
+                    .kept_stop_message(target)
+                    .await?
+                    .is_some_and(|stop| Some(stop.sender()) != crossing_payee)
+                || self
+                    .held_across_payee_stop(&held.key, &record, crossing_payee)
+                    .await?)
+        {
+            return Ok(None);
+        }
+        Ok(Some(PolicyPeriodWrite {
+            condition: self.app.record_condition(&held.key).await?,
+            crossed_stop: record.cancellation.is_some(),
+        }))
+    }
+
     /// Pay one Billing Period, `period`, of the subscription `request` by hand, to the
     /// request's own destination (Paykit spec 7.2, 8.2): the paying order of every payment,
     /// on the period's obligation, its proof naming the period and going into the payer's
@@ -840,9 +906,45 @@ impl Paykit {
         period: &PeriodRef,
         options: PayOptions,
     ) -> PayResult {
+        self.pay_selected_period(request, period, Initiator::User, options)
+            .await
+    }
+
+    /// Pay one Billing Period selected by the host's own recurring-payment policy (Paykit
+    /// spec 8.2, "Paying periods"). The host supplies the accepted subscription and the
+    /// period its policy authorizes. Accepting a subscription schedules no payment.
+    ///
+    /// The request and period must be open, eligible for automatic payment, and free of
+    /// Allowance funding. The SDK checks the automatic window before opening the attempt
+    /// and again immediately before its first dispatch. The proof names only this period
+    /// and attempt. Each new payment during a restore or missed-item hold requires the
+    /// ordinary reconciliation or confirmation that clears that hold.
+    ///
+    /// # Errors
+    ///
+    /// As [`Paykit::pay_period`]. [`Refusal::ManualOnly`] holds a marked or
+    /// Allowance-funded request or period. [`Refusal::NotAutomatic`] holds a period
+    /// outside its automatic window or whose acceptance time cannot be verified.
+    pub async fn pay_period_automatically(
+        &mut self,
+        request: &RequestRef,
+        period: &PeriodRef,
+    ) -> PayResult {
+        self.pay_selected_period(request, period, Initiator::Automatic, PayOptions::default())
+            .await
+    }
+
+    async fn pay_selected_period(
+        &mut self,
+        request: &RequestRef,
+        period: &PeriodRef,
+        by: Initiator,
+        options: PayOptions,
+    ) -> PayResult {
         let mut public_failures = Vec::new();
         let outcome =
-            Box::pin(self.pay_period_inner(request, period, options, &mut public_failures)).await;
+            Box::pin(self.pay_period_inner(request, period, by, options, &mut public_failures))
+                .await;
         PayResult {
             outcome,
             public_failures,
@@ -853,6 +955,7 @@ impl Paykit {
         &mut self,
         request: &RequestRef,
         period: &PeriodRef,
+        by: Initiator,
         options: PayOptions,
         public_failures: &mut Vec<PublicAppFailure>,
     ) -> Result<PayOutcome> {
@@ -861,7 +964,10 @@ impl Paykit {
         self.refresh_own()?;
         self.records_known().await?;
         self.require_pay()?;
-        self.app.may_attempt(false).map_err(crate::pay::not_now)?;
+        let automatic = by == Initiator::Automatic;
+        self.app
+            .may_attempt(automatic)
+            .map_err(crate::pay::not_now)?;
         self.refuse_while_payer_pass_owed().await?;
         let parent = ActivityTarget::payer(natural_key::request_record(
             &request.payee,
@@ -902,6 +1008,18 @@ impl Paykit {
         if held_period.as_ref().is_some_and(ActivityRecord::shows_paid) {
             return Err(Refusal::AlreadyPaid.into());
         }
+        if automatic
+            && (policy_withheld(&record) || held_period.as_ref().is_some_and(policy_withheld))
+        {
+            return Err(Refusal::ManualOnly.into());
+        }
+        if automatic
+            && held_period
+                .as_ref()
+                .is_some_and(|held| held.billing_period != Some(period))
+        {
+            return Err(period_record_unread());
+        }
         // With `per_period_endpoints`, the request's destination serves only its first
         // period: a later one is paid to its period details' destination, which this call
         // doesn't pay (Paykit spec 8.2, "Destinations per period").
@@ -926,7 +1044,13 @@ impl Paykit {
         // checks below, and one whose destination's app is no longer current, or that
         // requires an app the payee removed, is refused for that.
         let deadline = body.attempt_deadline(Some(&billing))?;
-        if !self.deadline_passed(deadline) {
+        if automatic {
+            for key in [record_key, period_record_key] {
+                if Box::pin(self.pause_at(&key)).await?.blocks_automatic() {
+                    return Err(self.divergent_refusal(key).await?);
+                }
+            }
+        } else if !self.deadline_passed(deadline) {
             let mut paused = false;
             for key in [record_key, period_record_key] {
                 paused |= Box::pin(self.pause_at(&key)).await?.blocks_by_hand();
@@ -952,7 +1076,11 @@ impl Paykit {
             )
             .await?;
         // A blocked payee's period is paid only once the user confirms it (Paykit spec 8.1).
-        let blocked = self.denied_for_user(&request.payee).await?;
+        let blocked = if automatic {
+            self.denied(&request.payee).await?
+        } else {
+            self.denied_for_user(&request.payee).await?
+        };
         let obligation =
             self.obligation(&request.payee, &request.request_hash, period.start_secs());
         let restored = self.restored_attempts(&obligation).await?;
@@ -964,15 +1092,37 @@ impl Paykit {
                 deadline,
                 restored,
                 &options,
-                Initiator::User,
+                by,
             )
             .await?;
         if self.deadline_passed(deadline) {
             return Err(self.past_deadline(&target, None).await?);
         }
+        if automatic {
+            let held = self.app.shared_record(&record_key).await?;
+            let accepted_at = held
+                .filter(|r| r.authenticated && !r.doubtful)
+                .and_then(|r| r.written_at_ms)
+                .ok_or_else(|| {
+                    Refusal::NotAutomatic("no proof dates the accepted subscription's write".into())
+                })?;
+            if accepted_at >= period.ends_at {
+                return Err(Refusal::NotAutomatic(
+                    "the Billing Period ended before the verified subscription acceptance".into(),
+                )
+                .into());
+            }
+            let verified = self.service_time().map(|time| time.max(accepted_at));
+            if automatic_window_ended(&period, deadline, verified) {
+                return Err(Refusal::NotAutomatic(
+                    "the Billing Period's automatic window has ended".into(),
+                )
+                .into());
+            }
+        }
         // The claim was read just before: the service time it verified is current.
         let mut conditions = vec![self.not_before(&period, &options)?];
-        let pricing = self.period_pricing(request, &body, held_period.as_ref(), &options)?;
+        let pricing = self.period_pricing(request, &body, held_period.as_ref(), by, &options)?;
         let Chosen {
             destination,
             carrier,
@@ -1017,14 +1167,14 @@ impl Paykit {
         // its mark, and a batch refused or in conflict writes neither (Paykit spec 8.3,
         // "Manual only").
         match self
-            .hand_period_mark(&period_target, held_period.as_ref(), request, &period)
+            .period_attempt_write(&period_target, held_period.as_ref(), request, &period, by)
             .await?
         {
             Some(write) => record_writes.push(write),
             None => conditions.push(self.app.record_condition(&period_record_key).await?),
         }
         let entry = JournalEntry {
-            user_started: true,
+            user_started: by == Initiator::User,
             attempt_id: AttemptId::generate()?.to_text(),
             obligation,
             payee: request.payee,
@@ -1069,7 +1219,7 @@ impl Paykit {
             reserve,
             create: None,
             on_record: true,
-            by: Initiator::User,
+            by,
             unconfirmed: options.unconfirmed_identity_confirmed,
             blocked_confirmed: options.blocked_confirmed,
             end_hold,
@@ -1086,14 +1236,10 @@ impl Paykit {
         request: &RequestRef,
         body: &'a PaymentRequest,
         held: Option<&'a ActivityRecord>,
+        by: Initiator,
         options: &PayOptions,
     ) -> Result<Pricing<'a>> {
-        let pricing = Pricing::of_request(
-            &body.amount,
-            *request,
-            body.conversion.as_ref(),
-            Initiator::User,
-        );
+        let pricing = Pricing::of_request(&body.amount, *request, body.conversion.as_ref(), by);
         let named = options.selected_period_rate();
         if !matches!(
             body.conversion,
@@ -1141,25 +1287,24 @@ impl Paykit {
         })
     }
 
-    /// The period record's write in the batch of an attempt on `period` the user started by
-    /// hand (Paykit spec 8.3, "Manual only"; Paykit wire 5.3): the record `held` with
-    /// `manual_only`, every other member kept, at the version read, or, with none, created
-    /// holding the mark and no message, built on no version. `None` for a record holding
-    /// the mark already, which the attempt is only conditioned on.
+    /// Write the period at the version the attempt judged (Paykit spec 8.2, 8.3).
+    /// An attempt by hand sets the manual-only mark. When it is already marked the
+    /// exact current write can be conditioned on directly.
     ///
     /// # Errors
     ///
     /// [`Refusal::NotNow`] for a period record held whose value doesn't read, never written
     /// over; the client's errors.
-    async fn hand_period_mark(
+    async fn period_attempt_write(
         &mut self,
         target: &ActivityTarget,
         held: Option<&ActivityRecord>,
         request: &RequestRef,
         period: &PeriodRef,
+        by: Initiator,
     ) -> Result<Option<(Vec<Condition>, OpKind)>> {
         let mut next = match held {
-            Some(record) if record.manual_only => return Ok(None),
+            Some(record) if record.manual_only && by == Initiator::User => return Ok(None),
             Some(record) => record.clone(),
             None => {
                 let content = self
@@ -1173,7 +1318,11 @@ impl Paykit {
                 bare_period_record(request, period)
             }
         };
-        next.manual_only = true;
+        if by == Initiator::User {
+            next.manual_only = true;
+        } else if !next.stored().is_empty() {
+            next.status = Some("paying".into());
+        }
         Ok(Some(
             self.app
                 .record_op(&target.record_target(), Some(&next.to_json()?), Vec::new())

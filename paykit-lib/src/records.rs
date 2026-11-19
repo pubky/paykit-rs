@@ -2684,6 +2684,152 @@ impl BlockFloorRecord {
     }
 }
 
+/// A `private_list_publications` record value (Paykit wire 5.8): a publishing app's counter
+/// of the Private Payment Lists it sends one recipient in one generation of its identity,
+/// naming the newest list reserved.
+///
+/// Security: a list's `version` is `{generation, counter}` of the write that reserved it, so
+/// the counter only rises while the account is in that generation. A reader that holds a
+/// write ignores a later one with a lower counter, or the same counter with another message
+/// ([`ListPublicationRecord::check_later_write`]): an app that saw a counter never reserves
+/// below it again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListPublicationRecord {
+    /// The publishing app.
+    pub publisher: [u8; 16],
+    /// The recipient identity.
+    pub recipient: [u8; 32],
+    /// The publishing identity's generation the counter counts in.
+    pub generation: u64,
+    /// The counter of the newest list reserved: that list's `version` is `{generation,
+    /// counter}`.
+    pub counter: u64,
+    /// That list message's `msg_id`.
+    pub msg_id: String,
+    /// That list message's hash (Paykit wire 1.5).
+    pub message_hash: [u8; 32],
+    /// The members the writer doesn't know, kept as read (Paykit wire 5).
+    pub unknown: UnknownMembers,
+}
+
+const PUBLICATIONS: &str = "Paykit wire 5.8: private_list_publications";
+
+/// A `private_list_publications` record value (Paykit wire 5.8).
+static PUBLICATION_SHAPE: Shape = Shape {
+    name: "private_list_publications",
+    id: &[],
+    carried: false,
+    members: &[
+        ("v", Member::Leaf),
+        ("publisher", Member::Leaf),
+        ("recipient", Member::Leaf),
+        ("generation", Member::Leaf),
+        ("counter", Member::Leaf),
+        ("msg_id", Member::Leaf),
+        ("message_hash", Member::Leaf),
+    ],
+};
+
+#[derive(Serialize)]
+struct PublicationOut<'a> {
+    v: u64,
+    publisher: String,
+    recipient: String,
+    generation: u64,
+    counter: u64,
+    msg_id: &'a str,
+    message_hash: String,
+}
+
+impl ListPublicationRecord {
+    /// Read a `private_list_publications` value (Paykit wire 5.8).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] naming the rule.
+    pub fn read(json: &[u8]) -> Result<Self> {
+        let map = parse_object(json, PUBLICATIONS)?;
+        let obj = Obj::new(&map, PUBLICATIONS);
+        check_v1(&obj)?;
+        let (unknown, _) = UnknownMembers::read(&map, &PUBLICATION_SHAPE);
+        let record = Self {
+            publisher: obj.req_app_id("publisher")?,
+            recipient: obj.req_pubky("recipient")?,
+            generation: obj.req_int("generation")?,
+            counter: obj.req_int("counter")?,
+            msg_id: obj.req_str("msg_id")?.to_owned(),
+            message_hash: obj.req_b64::<32>("message_hash")?,
+            unknown,
+        };
+        record.check()?;
+        Ok(record)
+    }
+
+    /// The record's rules (Paykit wire 5.8), the same for the reader and the writer: a
+    /// generation and a counter from 1, and a `msg_id` that is a lower-case UUID v4.
+    fn check(&self) -> Result<()> {
+        ensure(
+            self.generation >= 1 && self.counter >= 1,
+            "Paykit wire 5.8: generation and counter start at 1",
+        )?;
+        ensure(
+            pubky_switch_core::json::check_uuid_v4(&self.msg_id).is_ok(),
+            "Paykit wire 5.8: msg_id isn't a lower-case UUID v4",
+        )
+    }
+
+    /// The seen-counters rule (Paykit wire 5.8, Switch spec 8.2): a reader that holds `self`
+    /// ignores, and shows with its writer, a later write of a lower counter, or of the same
+    /// counter naming another message. A later write of a higher counter, or the very write
+    /// held, is taken.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] naming the rule `later` breaks.
+    pub fn check_later_write(&self, later: &ListPublicationRecord) -> Result<()> {
+        ensure(
+            later.publisher == self.publisher && later.recipient == self.recipient && later.generation == self.generation,
+            "Paykit wire 5.8: a later write changes the publisher, recipient or generation of the key",
+        )?;
+        let same = later.msg_id == self.msg_id && later.message_hash == self.message_hash;
+        ensure(
+            later.counter > self.counter || (later.counter == self.counter && same),
+            "Paykit wire 5.8: a later write lowers the counter, or names another list at it",
+        )
+    }
+
+    /// Write the record value, with the members it doesn't know as it read them (Paykit wire
+    /// 5, 5.8), after the record's rules, as a reader checks them; the value written reads
+    /// back.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a record that breaks a rule of Paykit wire 5.8, or whose
+    /// counter or generation is past the largest Switch integer; [`Error::Invalid`] if the
+    /// value can't be written.
+    pub fn to_json(&self) -> Result<Vec<u8>> {
+        self.check().map_err(Error::into_validation)?;
+        let out = PublicationOut {
+            v: 1,
+            publisher: zbase32_encode(&self.publisher),
+            recipient: pubky_id(&self.recipient),
+            generation: self.generation,
+            counter: self.counter,
+            msg_id: &self.msg_id,
+            message_hash: b64(&self.message_hash),
+        };
+        let json = serde_json::to_vec(&out)
+            .map_err(|_| Error::Invalid(format!("{PUBLICATIONS}: can't be written")))?;
+        let json = self.unknown.write_into(json, &PUBLICATION_SHAPE, &[])?;
+        match Self::read(&json) {
+            Ok(_) => Ok(json),
+            Err(_) => Err(Error::Validation(format!(
+                "{PUBLICATIONS}: the value written doesn't read back"
+            ))),
+        }
+    }
+}
+
 /// The most marks a `settlements` bucket holds (Paykit wire 5.7).
 pub const MAX_SETTLEMENT_MARKS: usize = 9_000;
 
@@ -5139,6 +5285,81 @@ mod tests {
             none.write_into(b"{\"v\":1}".to_vec(), &OUTER, &[]).unwrap(),
             b"{\"v\":1}"
         );
+    }
+
+    /// A counter record of counter `counter` naming message `i`.
+    fn publication(counter: u64, i: u64) -> ListPublicationRecord {
+        ListPublicationRecord {
+            publisher: [5; 16],
+            recipient: [6; 32],
+            generation: 2,
+            counter,
+            msg_id: uuid(i),
+            message_hash: [i as u8; 32],
+            unknown: UnknownMembers::default(),
+        }
+    }
+
+    #[test]
+    fn test_list_publication_round_trips_and_keeps_unknown_members() {
+        let record = publication(7, 1);
+        let json = record.to_json().unwrap();
+        let read = ListPublicationRecord::read(&json).unwrap();
+        assert_eq!((read.counter, read.msg_id), (7, uuid(1)));
+        let mut value: Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(value["generation"], 2);
+        assert_eq!(value["counter"], 7);
+        value["note"] = serde_json::json!({"by": "a later version"});
+        let read = ListPublicationRecord::read(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let next = ListPublicationRecord { counter: 8, ..read };
+        let written: Value = serde_json::from_slice(&next.to_json().unwrap()).unwrap();
+        assert_eq!(written["note"]["by"], "a later version");
+        assert_eq!(written["counter"], 8);
+    }
+
+    #[test]
+    fn test_list_publication_refuses_a_value_that_breaks_its_rules() {
+        let good: Value = serde_json::from_slice(&publication(7, 1).to_json().unwrap()).unwrap();
+        let max = pubky_switch_core::json::MAX_INT;
+        for (member, bad) in [
+            ("v", serde_json::json!(2)),
+            ("generation", serde_json::json!(0)),
+            ("counter", serde_json::json!(0)),
+            ("counter", serde_json::json!(max + 1)),
+            (
+                "msg_id",
+                serde_json::json!("123E4567-E89B-42D3-A456-426614174000"),
+            ),
+            ("message_hash", serde_json::json!(b64(&[1; 31]))),
+            ("publisher", serde_json::json!(pubky_id(&[6; 32]))),
+            ("recipient", Value::Null),
+        ] {
+            let mut value = good.clone();
+            value[member] = bad;
+            let json = serde_json::to_vec(&value).unwrap();
+            assert!(ListPublicationRecord::read(&json).is_err(), "{member}");
+        }
+        // The writer holds itself to the same rules.
+        for record in [publication(0, 1), publication(max + 1, 1)] {
+            assert!(matches!(record.to_json(), Err(Error::Validation(_))));
+        }
+    }
+
+    #[test]
+    fn test_list_publication_later_write_never_lowers_the_counter() {
+        let held = publication(7, 1);
+        let mut other = publication(8, 2);
+        other.recipient = [9; 32];
+        assert!(held.check_later_write(&other).is_err());
+        assert!(held.check_later_write(&publication(7, 1)).is_ok());
+        assert!(held.check_later_write(&publication(8, 2)).is_ok());
+        assert!(held.check_later_write(&publication(6, 3)).is_err());
+        assert!(held.check_later_write(&publication(7, 2)).is_err());
+        let other_hash = ListPublicationRecord {
+            message_hash: [9; 32],
+            ..publication(7, 1)
+        };
+        assert!(held.check_later_write(&other_hash).is_err());
     }
 
     #[test]
