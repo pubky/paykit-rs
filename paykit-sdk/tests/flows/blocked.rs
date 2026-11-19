@@ -2924,12 +2924,9 @@ async fn test_blocked_subscription_cancellation_and_rejection_refused_with_nothi
 
 #[tokio::test]
 async fn test_blocked_restore_reports_a_held_rejection_once_its_record_reads() {
-    // The wallet's rejection is recorded and held while bob is blocked, and the wallet is
-    // backed up. After the backup the phone writes the request record as a value no reader
-    // reads. The restored wallet, bob unblocked, sends nothing while the record doesn't
-    // read: the held answer and the restore's re-send both stay owed. Once the phone writes
-    // the record back, the rejection goes, once (Paykit spec 7.2, "What a restore loses";
-    // 8.1, Blocked counterparties).
+    // The backup carries a rejection held while Bob was blocked. The restored wallet
+    // keeps the answer while its request record is unreadable. Once the phone restores
+    // the record, the wallet reports the rejection as possibly delivered (Paykit spec 7.2).
     let w = World::new();
     let (mut wallet, _, request) = received(&w, PaykitConfig::default()).await;
     let mut phone = w.wallet("phone").await;

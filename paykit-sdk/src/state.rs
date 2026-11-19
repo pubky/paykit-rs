@@ -2470,7 +2470,14 @@ mod tests {
         assert!(reads::<KeptSide>(&key::side(id), side(id)));
         assert!(!reads::<KeptSide>(&key::side(id), side(other)));
         // A held answer of the payee and message its key names.
-        let held = |payee: &str, msg_id: &str| serde_json::json!({ "payee": payee, "msg_id": msg_id, "request_hash": sender });
+        let held = |payee: &str, msg_id: &str| {
+            serde_json::json!({
+                "payee": payee,
+                "msg_id": msg_id,
+                "request_hash": sender,
+                "restored": false,
+            })
+        };
         assert!(reads::<HeldAnswer>(
             &key::held_answer(&pubky, id),
             held(&sender, id)

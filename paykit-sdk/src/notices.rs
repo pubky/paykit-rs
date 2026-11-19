@@ -825,6 +825,41 @@ mod tests {
         }
         notice.kind = NoticeKind::MessageGivenUp;
         assert!(bind_notice(&key, &notice).is_err());
+        notice.kind = NoticeKind::PossiblyDelivered;
+        notice.message_hash = None;
+        assert!(bind_notice(&key, &notice).is_err());
+    }
+
+    #[test]
+    fn test_notices_only_possibly_delivered_carries_a_message_hash() {
+        let attempt = AttemptId::from_bytes([5; 16]);
+        let paid = kept(&attempt);
+        let held = KeptNotice {
+            kind: NoticeKind::HeldWithoutPay,
+            ..paid.clone()
+        };
+        let peer = [1; 32];
+        let id = "123e4567-e89b-42d3-a456-426614174000";
+        let given_up = KeptNotice::given_up(
+            peer,
+            id,
+            None,
+            3,
+            GivenUpFrom::Origin(GivenUpOrigin::KeyWait),
+        );
+        for (key, mut notice) in [
+            (key::notice(&attempt, paid.kind), paid),
+            (key::notice(&attempt, held.kind), held),
+            (key::message_notice(&peer, id), given_up),
+            (
+                key::blocked_lost(&peer, 3),
+                KeptNotice::blocked_lost(peer, 3, 4, 5),
+            ),
+        ] {
+            assert!(bind_notice(&key, &notice).is_ok());
+            notice.message_hash = Some(pubky_switch_core::enc::b64(&[7; 32]));
+            assert!(bind_notice(&key, &notice).is_err());
+        }
     }
 
     #[test]

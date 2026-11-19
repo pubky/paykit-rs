@@ -1033,7 +1033,7 @@ impl Paykit {
         let owed = self
             .local_get::<OwnResendOwed>(key::OWN_RESEND_OWED)
             .await?;
-        let mut held: std::collections::BTreeMap<String, HeldAnswer> = self
+        let held: std::collections::BTreeMap<String, HeldAnswer> = self
             .local_scan::<HeldAnswer>(key::HELD_ANSWERS)
             .await?
             .into_iter()
@@ -1041,17 +1041,6 @@ impl Paykit {
             .collect();
         if owed.is_none() && held.is_empty() {
             return Ok(());
-        }
-        // An older installation did not distinguish a new held answer from an imported one.
-        // A wallet that has ever restored cannot establish custody for such an answer.
-        if held.values().any(|answer| answer.restored.is_none()) {
-            let restored = self
-                .local_get::<RestoreHold>(key::RESTORE_HOLD)
-                .await?
-                .is_some();
-            for answer in held.values_mut() {
-                answer.restored.get_or_insert(restored);
-            }
         }
         if self.copy_awaits_key().await? {
             return Ok(());
@@ -1111,9 +1100,9 @@ impl Paykit {
                         .as_ref()
                         .is_none_or(|waiting| waiting.binary_search(&counterparty).is_ok())
                 });
-                // Period details go again only while no later stop covers them: one their
-                // request record can't show yet holds them, unless the client would refuse
-                // them by now anyway.
+                // Only open period details can raise a delivery notice. If the request
+                // record cannot establish whether they are open, check again while an
+                // original is still within its replay window.
                 let details = if restore_owes {
                     own_details(&record, &own, &app_id)
                 } else {
@@ -1142,7 +1131,7 @@ impl Paykit {
                 for stored in messages {
                     let msg_id = &stored.message().msg_id;
                     let answer = held.get(msg_id);
-                    if answer.is_none_or(|answer| answer.restored != Some(false)) {
+                    if answer.is_none_or(|answer| answer.restored) {
                         self.note_restored_delivery(stored).await?;
                         if answer.is_some() {
                             done.insert(msg_id.clone());
@@ -1227,7 +1216,7 @@ impl Paykit {
                 AnswerRecord::Undecided => {}
                 AnswerRecord::Gone | AnswerRecord::Covered => gone.push(answer.clone()),
                 AnswerRecord::Lacks => {
-                    if answer.restored == Some(false) {
+                    if !answer.restored {
                         given_up.push(answer.clone());
                     }
                     gone.push(answer.clone());
@@ -1660,8 +1649,7 @@ enum AnswerRecord {
 #[serde(deny_unknown_fields)]
 pub(crate) struct HeldAnswer {
     /// A backup carried this answer. Its signed record does not show its delivery outcome.
-    #[serde(default)]
-    pub(crate) restored: Option<bool>,
+    pub(crate) restored: bool,
     /// The payee it goes to.
     #[serde(with = "pubky_switch_core::enc::serde_b64")]
     pub(crate) payee: [u8; 32],
@@ -1926,7 +1914,7 @@ mod tests {
     #[test]
     fn test_recovery_state_held_answer_rejects_unknown() {
         extra(HeldAnswer {
-            restored: Some(false),
+            restored: false,
             payee: [7; 32],
             msg_id: "223e4567-e89b-42d3-a456-426614174000".into(),
             request_hash: [8; 32],
@@ -1936,7 +1924,7 @@ mod tests {
     #[test]
     fn test_recovery_state_held_answer_round_trip() {
         let value = HeldAnswer {
-            restored: Some(false),
+            restored: false,
             payee: [7; 32],
             msg_id: "223e4567-e89b-42d3-a456-426614174000".into(),
             request_hash: [8; 32],
@@ -1993,7 +1981,7 @@ mod tests {
         )
         .is_err());
         let answer = HeldAnswer {
-            restored: Some(false),
+            restored: false,
             payee: [7; 32],
             msg_id: "223e4567-e89b-42d3-a456-426614174000".into(),
             request_hash: [8; 32],
@@ -2023,7 +2011,7 @@ mod tests {
         }))
         .is_err());
         let answer = HeldAnswer {
-            restored: Some(false),
+            restored: false,
             payee: [7; 32],
             msg_id: "223e4567-e89b-42d3-a456-426614174000".into(),
             request_hash: [8; 32],
