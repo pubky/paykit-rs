@@ -8945,6 +8945,14 @@ async fn test_pending_reply_stop_never_deletes_a_recreated_proposal_for_an_earli
 }
 
 #[tokio::test]
+async fn test_pending_reply_stop_keeps_a_recreation_first_read_after_the_rejection() {
+    Box::pin(held_pending_replies(
+        PendingReplyCase::RejectionReadsRecreation,
+    ))
+    .await;
+}
+
+#[tokio::test]
 async fn test_pending_reply_stop_does_not_hide_the_give_up_of_a_lone_acceptance() {
     Box::pin(held_pending_replies(PendingReplyCase::LoneAcceptance)).await;
 }
@@ -9443,6 +9451,7 @@ enum PendingReplyCase {
     RejectionFirst,
     RejectionRetry,
     RejectionReopened,
+    RejectionReadsRecreation,
     LoneAcceptance,
 }
 
@@ -9532,6 +9541,7 @@ async fn held_pending_replies(by: PendingReplyCase) {
         PendingReplyCase::RejectionFirst
             | PendingReplyCase::RejectionRetry
             | PendingReplyCase::RejectionReopened
+            | PendingReplyCase::RejectionReadsRecreation
     );
     let (first_kind, second_kind) = if rejection_first {
         ("paykit.allowance_rejection", "paykit.allowance_acceptance")
@@ -9634,7 +9644,12 @@ async fn held_pending_replies(by: PendingReplyCase) {
             1
         );
         Box::pin(write_record(&mut phone, &target, Some(&original))).await;
-        wallet.app_mut().read_record_fresh(&target).await.unwrap();
+        let reopened = wallet.app_mut().read_record_fresh(&target).await.unwrap();
+        let pubky_switch_client::app::RecordRead::Fresh(reopened) = reopened else {
+            panic!("current recreated proposal")
+        };
+        assert!(reopened.authenticated && reopened.version > selected.version);
+        assert_eq!(reopened.content.value(), Some(original.as_slice()));
         inject_with_id(
             &w,
             &w.bob,
@@ -9649,7 +9664,14 @@ async fn held_pending_replies(by: PendingReplyCase) {
             wallet.receive(None).await.unwrap();
         }
         let now = wallet.app().shared_record(&key).await.unwrap().unwrap();
-        assert_eq!(now.content.value(), Some(original.as_slice()));
+        // This rejection arrived after the recreation. It is the first reply to that
+        // lifetime; the earlier acceptance cannot pair with it to keep the proposal open.
+        assert!(now.authenticated && now.version > reopened.version);
+        assert_eq!(
+            now.content,
+            pubky_switch_client::app::RecordContent::Deleted
+        );
+        assert!(!Box::pin(keeps(&wallet, b"pr/", SENT_SECOND)).await);
         assert!(wallet
             .app()
             .protocol_scan("paykit", b"pc/")
@@ -9686,6 +9708,30 @@ async fn held_pending_replies(by: PendingReplyCase) {
             json!({"allowance_id":id.as_str()}),
             SENT_SECOND,
         );
+    }
+    if matches!(by, PendingReplyCase::RejectionReadsRecreation) {
+        Box::pin(write_record(&mut phone, &target, None)).await;
+        Box::pin(write_record(&mut phone, &target, Some(&original))).await;
+        // The pending key GET observes the new write, with no intervening read of the delete.
+        let new = wallet.app_mut().read_record_fresh(&target).await.unwrap();
+        let pubky_switch_client::app::RecordRead::Fresh(live) = new else {
+            panic!("current recreation")
+        };
+        assert!(live.version > selected.version);
+        for _ in 0..2 {
+            wallet.receive(None).await.unwrap();
+        }
+        let still_live = wallet.app().shared_record(&key).await.unwrap().unwrap();
+        assert_eq!(still_live.version, live.version);
+        assert_eq!(still_live.content.value(), Some(original.as_slice()));
+        assert!(wallet
+            .app()
+            .records_of("allowances")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(w.rail.all_executions().is_empty());
+        return;
     }
     if matches!(
         by,

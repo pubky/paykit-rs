@@ -193,10 +193,15 @@ impl PendingConflict {
                     _ => return Opposed::Unknown,
                 }
             }
-            if reply.position.is_none()
-                || reply.source.is_some_and(|s| {
-                    s.record_version() != held.version && Some(s.record_version()) != previous
-                })
+            let Some(position) = reply.position else {
+                return Opposed::Unknown;
+            };
+            let source = reply
+                .source
+                .map_or(held.version, SeenVersion::record_version);
+            if (source != held.version && Some(source) != previous)
+                || (matches!(reply.message.body(), Body::AllowanceRejection(_))
+                    && !precedes_reply(source, position, &order))
             {
                 return Opposed::Unknown;
             }
@@ -389,6 +394,22 @@ pub(super) enum PendingReply {
     Stopped,
 }
 
+/// The proposer records P before sending it. A live version first seen after the
+/// original reply can instead be a recreation that reused the same signed P.
+fn precedes_reply(
+    version: RecordVersion,
+    reply: FeedPosition,
+    order: impl Fn(FeedPosition, FeedPosition) -> Option<Ordering>,
+) -> bool {
+    order(
+        FeedPosition {
+            generation: version.generation,
+            seq: version.version,
+        },
+        reply,
+    ) == Some(Ordering::Less)
+}
+
 pub(super) fn observe(
     cx: &mut ReceiveContext<'_>,
     held: &SharedRecord,
@@ -411,6 +432,9 @@ pub(super) fn observe(
     };
     let p = pending.proposal();
     let rejected = matches!(answer.body(), Body::AllowanceRejection(_));
+    if rejected && !precedes_reply(held.version, position, |a, b| cx.received_order(a, b)) {
+        return Ok(PendingReply::Undecided);
+    }
     let a = super::allowance_target(&peer, id);
     let kept = super::step_answers_kept(cx, &a, answer)?;
     let current = HeldAnswer::new(answer.clone(), &KeptMessage::taken_at(answer, position))
