@@ -976,7 +976,9 @@ async fn reconcile_with_marks(
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    let other = w.labelled_shop("other", "other").await;
+    let other = w
+        .join(&w.bob, "other", AppScopes::new().request().build().unwrap())
+        .await;
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
     let version = list_version(1, 3);
     list_from(&w, "shop", wallet.app_id(), version);
