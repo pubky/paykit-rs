@@ -1,0 +1,14 @@
+{
+  "name": "paykit-browser-rig",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Runs the paykit-browser wasm32 tests in Playwright's Chromium, Firefox and WebKit",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "playwright": "1.62.1"
+  }
+}
