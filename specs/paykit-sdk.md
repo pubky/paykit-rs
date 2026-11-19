@@ -1427,12 +1427,21 @@ on first start, after Paykit identity key rotation, or after a homeserver move,
 is not replayed from the beginning of its private-directory history. Before
 subscribing, the supervisor makes one non-live, newest-first request limited to
 one event for those peers and subscribes them from that event. The startup
-audit runs after the subscription and reconciles every slot written at or
-before that event. The cursor is stored only after that audit finds the
-expected slot absent; otherwise the next connect repeats the request. If the
-request fails or returns no event, those peers subscribe from the beginning as
-before. Audits, not events, guarantee delivery: a packet whose event the stream
-skips is fetched by the next audit.
+audit runs after the subscription and reconciles every slot announced by an
+event the request could see. Event IDs come from a sequence assigned at
+insert, so an event at or before the returned one can commit after the
+request. The stream skips it, and the next audit fetches its slot: the
+jittered in-stream audit, then each healthy audit. Every audit on that
+connection runs after the request, so the first one that finds a peer's
+expected slot absent stores that peer's cursor, and no later audit on the
+connection writes it again. If no audit does, later connects of the same
+subscription group reuse the event from its last successful request instead of
+repeating it. This stays safe because each connection runs its startup audit
+after subscribing. If the request fails or returns no event, those peers
+subscribe from the beginning as before, and the next connect requests again.
+Stopping the supervisor or restarting the subscription topology abandons a
+pending request. Audits, not events, guarantee delivery: a packet whose event
+the stream skips is fetched by the next audit.
 
 `PrivateIntakeSupervisor::health` reports per-peer transport state and last
 successful absent-slot audit. `subscribe_work` is a coalesced local hint, not a

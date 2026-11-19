@@ -1310,10 +1310,10 @@ async fn test_private_intake_seeds_cursor_without_replaying_history() {
 
 /// Guards seed persistence by in-stream audits: when the startup audit cannot
 /// prove Bob's next expected slot absent, an in-stream audit, which also runs
-/// after the seed read, must persist the seed; otherwise every reconnect
-/// repeats the seed query. The startup audit fails because its packet buffer
-/// commit is rejected. No private event follows the seed, so no stream event
-/// can store a cursor: only a seed commit can.
+/// after the seed read, must persist the seed; otherwise it stays unpersisted
+/// for as long as the stream stays connected. The startup audit fails because
+/// its packet buffer commit is rejected. No private event follows the seed,
+/// so no stream event can store a cursor: only a seed commit can.
 #[tokio::test]
 async fn test_private_intake_in_stream_audit_persists_seed_after_failed_startup_audit() {
     let pair = linked_two_party().await;
