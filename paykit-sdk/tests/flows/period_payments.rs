@@ -2408,49 +2408,58 @@ async fn test_period_payments_restore_refuses_a_period_in_a_payment_without_a_re
 }
 
 #[tokio::test]
-async fn test_period_payments_provider_loss_leaves_only_periods_started_before_it_in_doubt() {
-    // After a provider loss, January, payable before it, may have been paid at the old
-    // service: paying it by hand needs the user's confirmation of that doubt. A period that
-    // starts after the residual window can't have been, and is paid without one (Paykit spec
-    // 7.3).
+async fn test_period_payments_prior_subscription_keeps_future_periods_in_doubt_after_loss() {
     let w = World::new();
     let mut shop = w.shop().await;
     let mut wallet = w.wallet("wallet").await;
     let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
-    // An attempt on January before the loss fails: January stays listed.
     w.rail.next(Behaviour::Fail);
     let failed = by_user(&mut wallet, &request, january(), PayOptions::default())
         .await
         .unwrap();
     assert!(matches!(failed, PayOutcome::Failed { .. }), "{failed:?}");
+    let executions = w.rail.all_executions();
     w.clock.advance_ms(60_000);
     crate::provider_loss::declare_loss(&w);
     let until = crate::provider_loss::follow_loss(&mut wallet).await;
     assert!(until < february().starts_at);
-    let refused = by_user(&mut wallet, &request, january(), PayOptions::default()).await;
-    let doubt = crate::provider_loss::doubt_of(&refused);
-    assert!(doubt.before_loss.is_some(), "{doubt:?}");
+
+    let january_refused = by_user(&mut wallet, &request, january(), PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(refusal(&january_refused),
+        Refusal::MayBePaid { reason, doubt: None } if reason.contains("provider loss")));
+    let obligation = |start| {
+        paykit_lib::derive::request_obligation(
+            wallet.app().naming_key(),
+            &request.payee,
+            &request.request_hash,
+            start,
+        )
+    };
+    let jan_key = obligation(january().start_secs());
+    let feb_key = obligation(february().start_secs());
+    assert_ne!(jan_key, feb_key);
     let report = wallet.reconcile().await.unwrap();
     wallet.end_reconcile(UserConfirmed::new()).await.unwrap();
-    assert!(
-        report
-            .doubtful
-            .iter()
-            .any(|d| d.obligation == doubt.obligation && d.before_loss.is_some()),
-        "{report:?}"
-    );
-    let outcome = by_user(&mut wallet, &request, february(), early())
+    let loss = report
+        .doubtful
+        .iter()
+        .find(|d| d.obligation == jan_key)
+        .and_then(|d| d.before_loss)
+        .expect("the January occurrence reports the provider loss");
+    let february_refused = by_user(&mut wallet, &request, february(), early())
+        .await
+        .unwrap_err();
+    assert!(matches!(refusal(&february_refused),
+        Refusal::MayBePaid { reason, doubt: None } if reason.contains("provider loss")));
+    wallet
+        .confirm_not_paid_before_loss(&feb_key, &loss, UserConfirmed::new())
         .await
         .unwrap();
-    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
-    let outcome = by_user(
-        &mut wallet,
-        &request,
-        january(),
-        PayOptions::default().with_may_be_paid_confirmed(doubt),
-    )
-    .await
-    .unwrap();
-    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
-    assert_eq!(w.rail.all_executions().len(), 2);
+    let retry = by_user(&mut wallet, &request, february(), early())
+        .await
+        .unwrap_err();
+    assert_eq!(refusal(&retry), refusal(&february_refused));
+    assert_eq!(w.rail.all_executions(), executions);
 }

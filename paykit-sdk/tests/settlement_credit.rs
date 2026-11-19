@@ -1240,3 +1240,359 @@ async fn test_absent_settlement_bucket_without_a_loss_keeps_the_wallet_stopped()
     world.close().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn test_restored_receipt_delivery_after_a_recovered_request_was_cancelled() -> TestResult {
+    receipt_after_recovery(ReceiptHistory::Original).await
+}
+
+#[tokio::test]
+async fn test_restored_receipt_waits_when_its_original_application_was_unavailable() -> TestResult {
+    receipt_after_recovery(ReceiptHistory::Unavailable).await
+}
+
+#[tokio::test]
+async fn test_restored_receipt_at_the_last_millisecond_of_the_writers_standing() -> TestResult {
+    receipt_after_recovery(ReceiptHistory::AtRemoval).await
+}
+
+#[tokio::test]
+async fn test_restored_receipt_after_the_writers_removal_cutoff_is_held() -> TestResult {
+    receipt_after_recovery(ReceiptHistory::AfterRemoval).await
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReceiptHistory {
+    Original,
+    Unavailable,
+    AtRemoval,
+    AfterRemoval,
+}
+
+async fn receipt_after_recovery(history: ReceiptHistory) -> TestResult {
+    for backend in [Backend::Scripted, Backend::Service] {
+        let Some(world) = World::start(backend)? else {
+            continue;
+        };
+        let result = Box::pin(restored_receipt_delivery_after_cancellation(
+            &world, history,
+        ))
+        .await;
+        world.close().await?;
+        result?;
+    }
+    Ok(())
+}
+
+async fn restored_receipt_delivery_after_cancellation(
+    world: &World,
+    history: ReceiptHistory,
+) -> TestResult {
+    use paykit_lib::records::{ActivityRecord, ActivitySide};
+    use paykit_sdk::NoticeKind;
+
+    let mut tills = Box::pin(enrolled_tills(world)).await?;
+    let (mut peer, signer) = Box::pin(join(
+        world,
+        *tills.signer,
+        "shop",
+        "other-shop",
+        AppScopes::new().request().manage_contacts().build()?,
+        Arc::new(MemoryStore::new()),
+        &tills.rail,
+    ))
+    .await?;
+    let (mut buyer, request, key) = Box::pin(paid_request(
+        &mut tills.till,
+        tills.buyer,
+        "btc-lightning-bolt11",
+        "ln-receipt-before-shop-recovery",
+    ))
+    .await?;
+    let shop_id = tills.till.app_id();
+    world.lose_answer("POST", "/ops");
+    if history == ReceiptHistory::Unavailable {
+        world.unreachable(
+            "GET",
+            &format!("/records/{}", pubky_switch_core::enc::b64(&key)),
+        );
+    }
+    let kept = tills
+        .till
+        .confirm_payment_with(&key, ReceiptDetails::new())
+        .await
+        .unwrap_err()
+        .kept_batch()
+        .ok_or("missing unanswered receipt batch")?;
+    assert_eq!(world.faults_left(), 0);
+    let original = tills
+        .till
+        .app()
+        .queued_messages("paykit")
+        .await?
+        .into_iter()
+        .find(|message| message.kept_batch == Some(kept))
+        .ok_or("missing original receipt intent")?;
+    assert_eq!(original.to, buyer.identity());
+    assert_eq!(original.kind, paykit_lib::Kind::PaymentReceipt.as_str());
+    let backup = tills.till.backup().await?;
+    drop(tills.till);
+    peer.receive(None).await?;
+    let first = peer
+        .app()
+        .shared_record(&key)
+        .await?
+        .ok_or("missing credit")?;
+    assert!(first.authenticated);
+    let receipt = |value: &[u8]| -> TestResult<_> {
+        ActivityRecord::read(value, &peer.identity(), ActivitySide::Payee)?
+            .receipt
+            .ok_or_else(|| "missing receipt".into())
+    };
+    let issued = receipt(first.content.value().ok_or("unreadable credit")?)?;
+    assert_eq!(issued.hash(), original.hash);
+    assert_eq!(issued.message().msg_id, original.msg_id);
+    assert_eq!(issued.cert().app_id(), shop_id);
+    if matches!(
+        history,
+        ReceiptHistory::AtRemoval | ReceiptHistory::AfterRemoval
+    ) {
+        let written = first.written_at_ms.ok_or("undated issued receipt")?;
+        let cutoff = if history == ReceiptHistory::AtRemoval {
+            written
+        } else {
+            written - 1
+        };
+        let mut signer = signer;
+        let historical = Box::pin(signer.revoke(
+            shop_id,
+            Some(cutoff),
+            pubky_switch_signer::UserConfirmed::shown_and_confirmed(),
+        ))
+        .await?;
+        assert_eq!(
+            historical.standing(&shop_id, &issued.cert().hash()),
+            pubky_switch_core::records::Standing::Removed {
+                distrust_from: cutoff
+            }
+        );
+        Box::pin(check_receipt_at_removal(
+            world,
+            &backup,
+            &historical,
+            issued.cert(),
+            &original,
+            &tills.rail,
+            cutoff == written,
+        ))
+        .await?;
+        assert_eq!(tills.rail.all_executions().values().sum::<u64>(), 1);
+        return Ok(());
+    }
+    Box::pin(declare_shop_loss(world, Box::new(signer))).await?;
+    Box::pin(follow_recovered_shop(&mut peer)).await?;
+    peer.cancel_sent_request(&key, None).await?;
+    let successor = peer
+        .app()
+        .shared_record(&key)
+        .await?
+        .ok_or("missing cancellation")?;
+    assert!(successor.authenticated && successor.version.generation > first.version.generation);
+    assert_eq!(successor.writer, peer.app_id());
+    let current = ActivityRecord::read(
+        successor.content.value().ok_or("unreadable cancellation")?,
+        &peer.identity(),
+        ActivitySide::Payee,
+    )?;
+    assert!(current.cancellation.is_some());
+    assert_eq!(
+        current
+            .receipt
+            .ok_or("cancellation lost the receipt")?
+            .hash(),
+        original.hash
+    );
+    let store = Arc::new(MemoryStore::new());
+    let mut restored = Box::pin(Paykit::restore(
+        world.app_env(store.clone()),
+        Default::default(),
+        &backup,
+        tills.rail.clone(),
+        Arc::new(TestTimer),
+    ))
+    .await?;
+    Box::pin(follow_recovered_shop(&mut restored)).await?;
+    let unresolved: Vec<_> = restored
+        .notices()
+        .await?
+        .into_iter()
+        .filter(|n| n.kind == NoticeKind::PossiblyDelivered)
+        .collect();
+    let markers = restored.app().protocol_scan("paykit", b"ir/").await?;
+    let notice_id = if history != ReceiptHistory::Unavailable {
+        let [notice] = unresolved.as_slice() else {
+            return Err("expected one uncertain receipt delivery".into());
+        };
+        assert_eq!(notice.counterparty, Some(buyer.identity()));
+        assert_eq!(notice.msg_id.as_deref(), Some(original.msg_id.as_str()));
+        assert_eq!(notice.message_hash, Some(original.hash));
+        assert!(markers.is_empty());
+        Some(notice.id.clone())
+    } else {
+        assert!(unresolved.is_empty());
+        let [(_, id)] = markers.as_slice() else {
+            return Err("expected the unanswered original marker".into());
+        };
+        assert_eq!(id.as_slice(), kept);
+        None
+    };
+    drop(restored);
+    let mut reopened = Box::pin(Paykit::load(
+        world.app_env(store),
+        Default::default(),
+        shop_id,
+        tills.rail.clone(),
+        Arc::new(TestTimer),
+    ))
+    .await?;
+    reopened.receive(None).await?;
+    if let Some(notice_id) = notice_id {
+        assert_eq!(
+            reopened
+                .notices()
+                .await?
+                .iter()
+                .filter(|n| n.id == notice_id)
+                .count(),
+            1
+        );
+        reopened.acknowledge_notice(&notice_id).await?;
+        reopened.receive(None).await?;
+        assert!(reopened.notices().await?.iter().all(|n| n.id != notice_id));
+    } else {
+        assert!(reopened
+            .notices()
+            .await?
+            .iter()
+            .all(|n| n.kind != NoticeKind::PossiblyDelivered));
+        assert_eq!(
+            reopened.app().protocol_scan("paykit", b"ir/").await?,
+            markers
+        );
+    }
+    assert!(reopened.app().delivery(&original.msg_id).await?.is_none());
+    buyer.receive(None).await?;
+    assert!(buyer
+        .receipts(ReceiptsOf::Request(request))
+        .await?
+        .is_empty());
+    assert_eq!(tills.rail.all_executions().values().sum::<u64>(), 1);
+    Ok(())
+}
+
+async fn check_receipt_at_removal(
+    world: &World,
+    backup: &paykit_sdk::PaykitBackup,
+    historical: &pubky_switch_core::records::IdentityDoc,
+    cert: &pubky_switch_core::records::AppCert,
+    original: &pubky_switch_client::app::QueuedMessage,
+    rail: &Arc<FakeRail>,
+    valid: bool,
+) -> TestResult {
+    assert!(paykit_lib::scopes::certificate_in_force_at_write(
+        historical,
+        cert,
+        cert.issued_at()
+    ));
+    assert!(!paykit_lib::scopes::certificate_in_force_at_write(
+        historical,
+        cert,
+        cert.issued_at() - 1
+    ));
+    let selected = receipt_backup_with_historical_identity(backup, historical)?;
+    let store = Arc::new(MemoryStore::new());
+    let restored = Box::pin(Paykit::restore(
+        world.app_env(store.clone()),
+        Default::default(),
+        &selected,
+        rail.clone(),
+        Arc::new(TestTimer),
+    ))
+    .await;
+    if valid {
+        let restored = restored?;
+        let markers = restored.app().protocol_scan("paykit", b"ir/").await?;
+        let [(key, marker)] = markers.as_slice() else {
+            return Err("missing verified imported receipt".into());
+        };
+        let application: serde_json::Value = serde_json::from_slice(marker)?;
+        assert_eq!(
+            application["d"]["batch"],
+            serde_json::to_value(original.kept_batch.ok_or("missing original batch")?)?
+        );
+        let receipt = format!(
+            "/{}/{}",
+            pubky_switch_core::enc::b64(&original.hash),
+            original.msg_id
+        );
+        assert!(key.ends_with(receipt.as_bytes()));
+        assert_eq!(
+            application["d"]["identity"],
+            serde_json::to_value(historical.signed())?
+        );
+    } else {
+        assert!(
+            matches!(
+                restored,
+                Err(paykit_sdk::PaykitError::Client(
+                    pubky_switch_client::app::AppError::InvalidData(_)
+                ))
+            ),
+            "the later write has no valid historical authorization"
+        );
+        let namespace = pubky_switch_client::store::client_namespace(&cert.app_id());
+        assert!(pubky_switch_client::store::StateStore::scan(
+            store.as_ref(),
+            &namespace,
+            b"",
+            None,
+            1
+        )?
+        .is_empty());
+    }
+    Ok(())
+}
+
+/// Select a later, identity-signed document from the same historical service generation.
+/// The original signed operation, certificate, service proof and receipt stay byte-identical.
+fn receipt_backup_with_historical_identity(
+    backup: &paykit_sdk::PaykitBackup,
+    historical: &pubky_switch_core::records::IdentityDoc,
+) -> TestResult<paykit_sdk::PaykitBackup> {
+    use pubky_switch_client::app::{decode_local_state, encode_local_state};
+    use pubky_switch_core::enc::{b64, unb64};
+    use pubky_switch_core::records::IdentityDoc;
+
+    let mut selected: serde_json::Value = serde_json::from_slice(&backup.to_bytes()?)?;
+    let layer = &mut selected["layers"][0];
+    assert_eq!(layer["name"], "paykit");
+    let raw = unb64(layer["data"].as_str().ok_or("missing owner layer")?)?;
+    let mut entries = decode_local_state(&raw).ok_or("unreadable owner layer")?;
+    let (_, value) = entries
+        .iter_mut()
+        .find(|(k, _)| k.starts_with(b"ri/"))
+        .ok_or("missing original receipt intent")?;
+    let mut application: serde_json::Value = serde_json::from_slice(value)?;
+    let previous = IdentityDoc::verify(
+        &serde_json::from_value(application["d"]["identity"].clone())?,
+        &historical.identity(),
+    )?;
+    previous.check_successor(historical)?;
+    assert_eq!(previous.generation(), historical.generation());
+    application["d"]["identity"] = serde_json::to_value(historical.signed())?;
+    *value = serde_json::to_vec(&application)?;
+    layer["data"] = b64(&encode_local_state(&entries)).into();
+    Ok(paykit_sdk::PaykitBackup::from_bytes(&serde_json::to_vec(
+        &selected,
+    )?)?)
+}

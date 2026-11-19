@@ -17,10 +17,10 @@
 //! After a provider loss, a reconcile also lists each one-time request, and each Billing
 //! Period of a subscription that may have been attempted, of the payer's records still in
 //! doubt from before the loss ([`Doubtful::before_loss`], Paykit spec 7.3, "After a
-//! provider loss"), with no attempt when the new service holds none: the user pays it by hand
-//! over the doubt or states it wasn't paid before the loss
-//! ([`Paykit::confirm_not_paid_before_loss`]). One whose claim there is SETTLED, or that the
-//! user's statement for that loss covers, isn't listed.
+//! provider loss"), with no attempt when the new service holds none. A SETTLED claim
+//! resolves the doubt. A Billing Period of an earlier subscription stays held while its
+//! payment history is incomplete. For a one-time request the user can confirm the doubt
+//! or state it wasn't paid before that loss ([`Paykit::confirm_not_paid_before_loss`]).
 //!
 //! The payer pass, the reading of the payer's obligations above, needs `paykit_pay`: without it the
 //! switch answers no claim read. After a restore, no new attempt is made and nothing is
@@ -89,7 +89,8 @@ pub struct Doubtful {
     /// hand over the doubt ([`crate::PayOptions::with_may_be_paid_confirmed`], with the
     /// doubt [`Paykit::pay_request`] refuses it with) or states it wasn't paid
     /// ([`Paykit::confirm_not_paid_before_loss`], with this loss). A newer loss lists it
-    /// again, under that loss. `None` for an obligation no provider loss leaves in doubt.
+    /// again, under that loss. A Billing Period of an earlier subscription stays held while
+    /// its payment history is incomplete. `None` for an obligation no provider loss leaves in doubt.
     pub before_loss: Option<crate::LossBoundary>,
 }
 
@@ -218,7 +219,7 @@ impl Paykit {
     /// the caller judges first: as the request's status reads
     /// [`crate::RequestStatus::MayBePaid`] for the loss, the request record showing it neither
     /// rejected nor cancelled, and the record of the occurrence not showing it paid. A Billing
-    /// Period that starts after the end of the residual window is never in doubt.
+    /// Period may have been paid early, before the signed subscription's service was lost.
     async fn request_loss_doubt(
         &self,
         obligation: &Obligation,
@@ -247,7 +248,7 @@ impl Paykit {
         self.loss_doubt(
             &obligation.claim_key,
             Some(stored),
-            obligation.period.map(|period| period.starts_at),
+            obligation.period.map(PeriodRef::from),
         )
         .await
     }
@@ -304,7 +305,7 @@ impl Paykit {
         // asked to re-send from the backup's cursor time, once (`hold.rs`, Paykit spec 7.2);
         // what isn't sent now goes at the next receive.
         self.queue_restore_asks().await?;
-        let _ = self.send_asks().await;
+        let _ = self.send_asks(&mut None).await;
         let payer_pass = self.holds("paykit_pay");
         let mut report = ReconcileReport {
             resolved: self.resume_payments().await?,
@@ -905,7 +906,7 @@ impl Paykit {
             self.list_records("Call end_reconcile again").await?;
             self.queue_restore_asks().await?;
             // Queued: what isn't sent now goes at the next receive.
-            let _ = self.send_asks().await;
+            let _ = self.send_asks(&mut None).await;
         }
         self.app
             .end_reconcile_for(crate::protocol::BACKUP_NAME, confirmed)

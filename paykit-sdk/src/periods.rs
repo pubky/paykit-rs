@@ -816,8 +816,9 @@ impl Paykit {
     ///   (Paykit spec 8.3, "Manual only"): no app pays that period automatically after it,
     ///   whatever the attempt's outcome. A record holding the mark already is only
     ///   conditioned on.
-    /// - A provider loss leaves the period in doubt only when it started before the end of
-    ///   the residual window (Paykit spec 7.3).
+    /// - After payer-provider loss, a period of an earlier subscription may already have
+    ///   been paid early. It stays held while its payment history is incomplete, including
+    ///   when the user confirms paying it early (Paykit spec 7.3, 8.2).
     /// - A payee's cancellation prevents opening a new attempt. If it arrives after the
     ///   attempt batch succeeds, that attempt finishes and sends its proof (Paykit spec 8.1).
     ///
@@ -959,7 +960,7 @@ impl Paykit {
             .claim_step(
                 &obligation,
                 &stored,
-                Some(period.starts_at),
+                Some(period),
                 deadline,
                 restored,
                 &options,
