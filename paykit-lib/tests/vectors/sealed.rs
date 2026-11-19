@@ -2164,23 +2164,7 @@ fn evidence_cases(keys: &Keys) -> (Vec<ActivityCase>, Vec<ActivityCase>) {
     (accepted, refused)
 }
 
-const ALLOWANCE_RECORDS_DESCRIPTION: &str = "Wire 4.16, 5.4: allowances record values of \
-alice's, built from binding_accepted's record and messages.json's Allowance messages, some \
-signed again by their sender with refs or sides changed, at the record key binding_accepted \
-gives. A response refers to the proposal; an end refers to the proposal and the stored \
-acceptance; an end referring to the proposal alone is its sender's withdrawal, before any \
-response; a rejected Allowance has no end; executor_app_id comes only in an acceptance, from \
-the allower; conflicted is a second proposal under the record's allowance_id, from either \
-side, with valid terms and another hash than the record's proposal, or, beside the record's \
-response, a second acceptance or rejection from the proposal's recipient, referring to the \
-proposal, with another hash than the record's response (spec 8.3). accepted are \
-records a reader binds; refused are those it refuses, the last two records whose stored \
-message check 10 drops: a rejection carrying executor_app_id, and a conflicting proposal \
-whose terms aren't valid. Among them, an Allowance handed on from alice's executor to her \
-wallet, its grant history with both grants, and the executor's ledger_handoff for the \
-wallet's grant, which a reader binds, and the same ledger_handoff naming a ledger version no \
-write gives, signed by the executor over that version, so it fails only that rule, which it \
-binds too, the ledger_handoff counting for nothing. reason is paykit-lib's wording.";
+const ALLOWANCE_RECORDS_DESCRIPTION: &str = "Wire 5.4. A permanent Allowance holds the original signed proposal and its recipient's signed acceptance. An end names both. A conflict retains a second proposal or response alongside that original pair. The grant history and the executor's signed ledger handoff bind to the same Allowance.";
 
 /// A case of `allowance_records`: its name and the record.
 type AllowanceCase = (&'static str, AllowanceRecord);
@@ -2205,11 +2189,25 @@ fn allowance_cases(keys: &Keys) -> (Vec<AllowanceCase>, Vec<AllowanceCase>) {
     let rejection = resigned(keys, "allowance_rejection", Some(vec![proposal]), |b| {
         b.insert("allowance_id".into(), serde_json::json!(ALLOWANCE_ID));
     });
-    let accepted = vec![
+    let accepted = vec![(
+        "the accepted Allowance with its end",
+        AllowanceRecord {
+            end: Some(end),
+            ..base.clone()
+        },
+    )];
+    let refused = vec![
         (
-            "the accepted Allowance with its end",
+            "an unanswered proposal at the permanent key",
             AllowanceRecord {
-                end: Some(end),
+                response: None,
+                ..base.clone()
+            },
+        ),
+        (
+            "a rejection as the first response at the permanent key",
+            AllowanceRecord {
+                response: Some(rejection.clone()),
                 ..base.clone()
             },
         ),
@@ -2221,8 +2219,6 @@ fn allowance_cases(keys: &Keys) -> (Vec<AllowanceCase>, Vec<AllowanceCase>) {
                 ..base.clone()
             },
         ),
-    ];
-    let refused = vec![
         (
             "an end referring to the proposal alone after the acceptance",
             AllowanceRecord {
@@ -2274,34 +2270,23 @@ fn allowance_cases(keys: &Keys) -> (Vec<AllowanceCase>, Vec<AllowanceCase>) {
             .unwrap()
             .insert("lifetime_amount_limit".into(), serde_json::json!("0.20"));
     });
-    let crossing = resign_with(keys, "allowance_proposal", |m| {
-        m.msg_id = CROSSING_PROPOSAL.into();
-        m.from = pubky_switch_core::message::Sender {
-            identity: alice,
-            app_id: keys.app("phone").keys.app_id_bytes(),
-        };
-        m.to = pubky(BOB);
-        m.body
-            .insert("proposer_role".into(), serde_json::json!("allower"));
-    });
+    let crossing = crossing_proposal(keys);
     let mut accepted = accepted;
-    accepted.extend([
-        (
-            "an accepted Allowance conflicted by a second proposal from the counterparty",
-            AllowanceRecord {
-                conflicted: Some(second),
-                ..base.clone()
-            },
-        ),
-        (
-            "a proposal conflicted by a crossing proposal from this identity",
-            AllowanceRecord {
-                response: None,
-                conflicted: Some(crossing),
-                ..base.clone()
-            },
-        ),
-    ]);
+    accepted.extend([(
+        "an accepted Allowance conflicted by a second proposal from the counterparty",
+        AllowanceRecord {
+            conflicted: Some(second),
+            ..base.clone()
+        },
+    )]);
+    refused.push((
+        "a pending proposal with a crossing proposal at the permanent key",
+        AllowanceRecord {
+            response: None,
+            conflicted: Some(crossing),
+            ..base.clone()
+        },
+    ));
     // executor_app_id only in an acceptance from the allower (Paykit wire 4.16).
     let allower_proposal = resigned(keys, "allowance_proposal", None, |b| {
         b.insert("proposer_role".into(), serde_json::json!("allower"));
@@ -3684,18 +3669,20 @@ fn test_allowance_record_conflicted_is_never_dropped() {
         ..conflicted.clone()
     };
     assert!(conflicted.check_later_write(&replaced).is_err());
+    let other_answer = resigned(
+        &keys,
+        "allowance_acceptance",
+        Some(vec![second.hash()]),
+        |_| {},
+    );
     let swapped = AllowanceRecord {
         proposal: second,
         conflicted: Some(conflicted.proposal.clone()),
-        response: None,
+        response: Some(other_answer),
         ..conflicted.clone()
     };
     swapped.to_json().unwrap();
-    let held = AllowanceRecord {
-        response: None,
-        ..conflicted.clone()
-    };
-    assert!(held.check_later_write(&swapped).is_err());
+    assert!(conflicted.check_later_write(&swapped).is_err());
 }
 
 #[test]

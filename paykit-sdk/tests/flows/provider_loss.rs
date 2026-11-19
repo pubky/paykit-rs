@@ -37,6 +37,11 @@ pub(super) fn declare_second_loss(w: &World) -> Arc<ScriptedSwitch> {
     declare_loss_of(w, SWITCH_ORIGIN, LATER_SECRET)
 }
 
+/// The signer replaces the second recovery service with a new service key.
+pub(super) fn declare_third_loss(w: &World) -> Arc<ScriptedSwitch> {
+    declare_loss_of(w, SWITCH_ORIGIN, [123; 32])
+}
+
 /// [`declare_loss`] of the service at `lost_origin`, the new one under `secret`.
 fn declare_loss_of(w: &World, lost_origin: &str, secret: [u8; 32]) -> Arc<ScriptedSwitch> {
     let lost_generation = w

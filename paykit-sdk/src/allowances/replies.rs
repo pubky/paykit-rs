@@ -75,7 +75,7 @@ impl PendingRetirement {
         Ok(())
     }
 
-    fn compare(
+    pub(super) fn compare(
         &self,
         source: Option<SeenVersion>,
         position: Option<FeedPosition>,
@@ -596,7 +596,7 @@ pub(super) enum PendingReply {
 
 /// The proposer records P before sending it. A live version first seen after the
 /// original reply can instead be a recreation that reused the same signed P.
-fn precedes_reply(
+pub(super) fn precedes_reply(
     version: RecordVersion,
     reply: FeedPosition,
     order: impl Fn(FeedPosition, FeedPosition) -> Option<Ordering>,
@@ -792,11 +792,11 @@ pub(crate) fn lifetime_ended(
 impl Paykit {
     /// If a first attempt was stored before the pending offer could be used,
     /// the later read must still place the second proposal at that pending key.
-    pub(super) async fn place_stored_second(
+    pub(super) async fn place_received_second(
         &mut self,
         message: &StoredMessage,
         evidence: &KeptMessage,
-        stored_id: u64,
+        stored_id: Option<u64>,
     ) -> Result<Option<crate::stored::Placed>> {
         use crate::stored::Placed;
         use pubky_switch_client::app::RecordContent;
@@ -829,17 +829,19 @@ impl Paykit {
             .local_get::<PendingRetirement>(&key::pending_retirement(&key))
             .await?
         {
-            let Some(entry) = self.app.parked_entry(stored_id).await? else {
-                return Ok(Some(Placed::Waits));
-            };
-            if !entry.sender_verified
-                || entry.sender != peer
-                || &entry.plaintext != message.plaintext()
-                || entry.generation != position.generation
-                || entry.seq != position.seq
-                || Some(entry.accepted_at_ms) != message.accepted_at()
-            {
-                return Ok(Some(Placed::Waits));
+            if let Some(stored_id) = stored_id {
+                let Some(entry) = self.app.parked_entry(stored_id).await? else {
+                    return Ok(Some(Placed::Waits));
+                };
+                if !entry.sender_verified
+                    || entry.sender != peer
+                    || &entry.plaintext != message.plaintext()
+                    || entry.generation != position.generation
+                    || entry.seq != position.seq
+                    || Some(entry.accepted_at_ms) != message.accepted_at()
+                {
+                    return Ok(Some(Placed::Waits));
+                }
             }
             match end.compare(evidence.pending_source, Some(position), |a, b| {
                 self.app.received_order(a, b)

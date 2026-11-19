@@ -2516,9 +2516,8 @@ impl Paykit {
             // corrupt store, so the receive fails rather than drop, give up or place it.
             let reply = kept.stored(&own)?;
             let kept_key = format!("{}{rest}", key::KEPT_REPLIES);
-            // An Allowance's answer goes by its own placement
-            // (`Paykit::place_kept_allowance_responses`).
-            if crate::allowances::is_allowance_response(reply.body()) {
+            // Kept Allowance proposals and answers are placed against their own records.
+            if crate::allowances::placed_with_allowance(reply.body()) {
                 continue;
             }
             let (Some(role), Some(accepted_at)) =
@@ -3164,6 +3163,11 @@ impl Paykit {
         pubky: &[u8; 32],
     ) -> crate::error::Result<()> {
         self.refresh_lists_when_due().await?;
+        self.require_sends_allowed(pubky).await
+    }
+
+    /// Check the deny list after this operation has already tried its due read.
+    pub(crate) async fn require_sends_allowed(&self, pubky: &[u8; 32]) -> crate::error::Result<()> {
         if self.sends_held(pubky).await? {
             return Err(crate::error::Refusal::NotNow(
                 "Paykit spec 8.1: sends to the counterparty are held while the deny list holds \

@@ -775,6 +775,9 @@ impl Stored for KeptMessage {
         } else if self.seq().is_some() {
             return corrupt();
         }
+        if self.pending_create.is_some() && !matches!(family, StateKey::AllowanceEnd { .. }) {
+            return corrupt();
+        }
         let message = self.stored(&binder.own)?;
         if (matches!(family, StateKey::KeptReply { .. })
             || (matches!(family, StateKey::Conflict(_))
@@ -855,6 +858,19 @@ impl Stored for KeptMessage {
                     list_target(&message.sender(), &message.message().from.app_id),
                     record_key,
                 )
+            }
+            (
+                StateKey::KeptReply {
+                    sender,
+                    record,
+                    msg_id,
+                },
+                Body::AllowanceProposal(proposal),
+            ) if message.sender() == *sender
+                && message.message().msg_id == *msg_id
+                && message.accepted_at().is_some() =>
+            {
+                (allowance_target(sender, &proposal.allowance_id), record)
             }
             (
                 StateKey::KeptReply {
@@ -1326,6 +1342,46 @@ impl Stored for OwedEnd {
     }
 }
 
+impl sealed::Sealed for crate::allowances::PreparedPendingReply {}
+
+impl Stored for crate::allowances::PreparedPendingReply {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let StateKey::PendingReply(key) = family else {
+            return corrupt();
+        };
+        let reply = self.message.stored(&self.peer)?;
+        let id =
+            crate::allowances::named_allowance(reply.body()).ok_or_else(PaykitError::corrupt)?;
+        let target = crate::allowances::allowance_target(&self.peer, id);
+        if reply.sender() != binder.own
+            || binder
+                .cert
+                .is_none_or(|cert| reply.message().from.app_id != cert.app_id())
+            || reply.accepted_at().is_some()
+            || reply.message().refs.len() != 1
+            || !matches!(
+                reply.body(),
+                Body::AllowanceRejection(_) | Body::AllowanceEnd(_)
+            )
+            || binder.record_key(&target)? != *key
+        {
+            return corrupt();
+        }
+        Ok(())
+    }
+}
+
+impl sealed::Sealed for crate::allowances::AppliedReply {}
+
+impl Stored for crate::allowances::AppliedReply {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::AppliedReply(hash) if self.reply == *hash => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
 impl sealed::Sealed for NoticeTarget {}
 
 impl sealed::Sealed for EndOrigin {}
@@ -1534,6 +1590,17 @@ pub(crate) mod key {
     }
 
     pub(crate) const PENDING_CONFLICTS: &str = "pc/";
+
+    pub(crate) const PENDING_REPLIES: &str = "ap/";
+    pub(crate) const APPLIED_REPLIES: &str = "aq/";
+
+    pub(crate) fn pending_reply(record: &[u8; 32]) -> String {
+        format!("{PENDING_REPLIES}{}", b64(record))
+    }
+
+    pub(crate) fn applied_reply(hash: &[u8; 32]) -> String {
+        format!("{APPLIED_REPLIES}{}", b64(hash))
+    }
 
     pub(crate) const PENDING_RETIREMENTS: &str = "pce/";
 
@@ -1941,6 +2008,10 @@ pub(crate) enum StateKey {
     Consent([u8; 32]),
     /// `pc/<record key>`: a conflict kept for one pending Allowance lifetime.
     PendingConflict([u8; 32]),
+    /// An original reply prepared for this canonical Allowance key.
+    PendingReply([u8; 32]),
+    /// A signed reply whose exact proposal deletion was applied.
+    AppliedReply([u8; 32]),
     /// The latest verified end of a conflict at the named pending key.
     PendingRetirement([u8; 32]),
     /// `cf/<record key>`: a conflicting proposal or response kept as the stop.
@@ -2103,6 +2174,8 @@ impl StateKey {
                     }
                     "ac" => Self::Consent(b64_32(rest)?),
                     "pc" => Self::PendingConflict(b64_32(rest)?),
+                    "ap" => Self::PendingReply(b64_32(rest)?),
+                    "aq" => Self::AppliedReply(b64_32(rest)?),
                     "pce" => Self::PendingRetirement(b64_32(rest)?),
                     "cf" => Self::Conflict(b64_32(rest)?),
                     "en" => Self::NoticeTarget(msg_id(rest)?),
@@ -3138,6 +3211,8 @@ mod tests {
                 key::pending_retirement(&pubky),
                 StateKey::PendingRetirement(pubky),
             ),
+            (key::pending_reply(&pubky), StateKey::PendingReply(pubky)),
+            (key::applied_reply(&pubky), StateKey::AppliedReply(pubky)),
             (key::conflict(&pubky), StateKey::Conflict(pubky)),
             (key::notice_target(id), StateKey::NoticeTarget(id.into())),
             (key::end_origin(id), StateKey::EndOrigin(id.into())),

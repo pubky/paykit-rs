@@ -819,7 +819,10 @@ impl Paykit {
     /// messages are taken in the order their inbox accepted them, by acceptance time and
     /// then by the feed `seq` their entries were read at, as the kept replies are, never in
     /// the order of their `msg_id`s nor of their entries' local IDs.
-    pub(crate) async fn place_stored(&mut self) -> Result<()> {
+    pub(crate) async fn place_stored(
+        &mut self,
+        pending_read: Option<&pubky_switch_client::app::ReceiveReport>,
+    ) -> Result<()> {
         let own = self.identity();
         // Every note in the order its inbox accepted its message, never in the order of the
         // keys, which end in a `msg_id` its sender chooses: by acceptance time, then by the
@@ -849,6 +852,7 @@ impl Paykit {
                             stored.clone(),
                             &note.message,
                             note.stored_id,
+                            pending_read,
                         ))
                         .await?
                     }

@@ -823,6 +823,18 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
+            StateKey::PendingReply(_) => {
+                state::restored::<crate::allowances::PreparedPendingReply>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::AppliedReply(_) => {
+                state::restored::<crate::allowances::AppliedReply>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
             StateKey::EndBatch(_) => {
                 // A backup omits the unresolved Switch batch. Its signed end's origin
                 // can survive independently of the outcome of its counterparty delivery.
@@ -1194,7 +1206,9 @@ impl Protocol for PaykitProtocol {
             _ => false,
         };
         if pending
-            && crate::allowances::pending_conflict_holds_delivery(delivery).map_err(view_failure)?
+            && (crate::allowances::pending_conflict_holds_delivery(delivery)
+                .map_err(view_failure)?
+                || !crate::allowances::reply_is_applied(delivery)?)
         {
             return Ok(false);
         }
@@ -1215,6 +1229,24 @@ impl Protocol for PaykitProtocol {
             ) => may_deliver_to_contact(delivery).map_err(view_failure),
             _ => Ok(true),
         }
+    }
+
+    fn append_records(
+        &self,
+        delivery: &pubky_switch_client::app::DeliveryView<'_>,
+    ) -> Result<Vec<pubky_switch_client::app::RecordTarget>, StoreFailure> {
+        crate::allowances::append_records(delivery)
+    }
+
+    fn judge_append(
+        &self,
+        delivery: &pubky_switch_client::app::DeliveryView<'_>,
+        records: &[(
+            pubky_switch_client::app::RecordTarget,
+            pubky_switch_client::app::RecordRead,
+        )],
+    ) -> Result<pubky_switch_client::app::AppendDecision, StoreFailure> {
+        crate::allowances::judge_append(delivery, records)
     }
 
     fn opaque_members(&self) -> Vec<OpaqueRule> {
