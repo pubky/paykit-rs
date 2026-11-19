@@ -7,6 +7,10 @@ them byte for byte. The conformance scope is described below.
 
 **This set builds on no vector of [the Switch's set](https://github.com/pubky/pubky-switch/tree/5f3209aae28d1b538a31c8ce43506b39df828b61/spec/vectors), at pubky-switch commit `5f3209aae28d1b538a31c8ce43506b39df828b61`, the normative baseline of Paykit's spec**: its fixed keys, certificates and records are its own (`keys.json`, `documents.json` `certificates`), and its seeds, encodings and times follow that set's conventions. The stored Paykit JSON files are unchanged by this baseline adoption. Their stated format coverage does not establish the newly adopted client contracts or outstanding protected-record paths; additional generated cases accompany their implementing code.
 
+## App-record format coverage
+
+The checked-in `documents.json` `app_records` corpus has 12 accepted and 10 refused cases. Its signed outer bodies still carry a display `label`; they do not establish conformance to the host-local display-name adoption in the spec's introduction and wire 3.2. Rebuilding the signed app-record envelopes with the implementing library remains outstanding. The replacement envelopes are not included in this revision. The labelled selling scopes, signed message labels and reply-routing cases keep their separate meaning under wire 4.3.
+
 ## Allowance usage conformance
 
 `allowance_usage.json` checks the counting and limit rules of wire 5.5 and spec 8.3, including failed attempts and compacted `totals.failed` items. Every failed attempt counts immediately, while its claim remains and after it is gone, unless durable journal evidence proves that it ended before dispatch and cannot dispatch later. A `done` or matching paid proof always spends.
