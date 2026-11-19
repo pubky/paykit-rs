@@ -1,7 +1,8 @@
 //! A publisher's bounded replies to one chosen recipient (Paykit spec 8.4).
 
 use super::{
-    counter_unavailable, target, ListRecipient, ListReservation, ListSettings, COLLECTION, SCOPE,
+    counter_unavailable, target, ListRecipient, ListReservation, ListSettings, COLLECTION, DAY,
+    HOUR, SCOPE,
 };
 use crate::error::{PaykitError, Result};
 use crate::receive::{keep_local, local, Fail};
@@ -15,8 +16,6 @@ use pubky_switch_client::app::{
 };
 use serde::{Deserialize, Serialize};
 
-const HOUR: u64 = 60 * 60 * 1000;
-const DAY: u64 = 24 * HOUR;
 const DAILY: usize = 4;
 const OTHER: usize = 16;
 

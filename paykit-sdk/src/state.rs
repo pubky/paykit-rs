@@ -45,6 +45,7 @@
 //! | `mu` | set by a `missed` item whose end isn't known: every open request is held, as after a restore, until a read that completes bounds the hold by the service time verified then, into `mh`, and clears it (`hold.rs`) | |
 //! | `ml` | set by a `missed` item: the shared records aren't listed by Paykit since, so a record's absence means nothing yet; cleared by Paykit's next listing (`hold.rs`); never restored | |
 //! | `lp/<recipient>/<generation>/<message hash>` | outstanding original publication batch IDs, kept atomically before submission and retained across restore | yes |
+//! | `lres/<recipient>` | the applied list, its publisher and original signed message, first non-delivery, prior offers' latest possible expiry, and the interval of an outstanding withdrawal | yes |
 //! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read: never written over it, which could drop its single-use marks, until the record reads | |
 //! | `kc/<record key>` | a payee's cancellation of a request, kept until it is placed in the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
@@ -738,7 +739,11 @@ impl sealed::Sealed for crate::publish::ListReservation {}
 impl Stored for crate::publish::ListReservation {
     fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
         match family {
-            StateKey::ListReservation(id) if self.recipient == *id && id != binder.identity() => {
+            StateKey::ListReservation(id)
+                if self.recipient == *id
+                    && id != binder.identity()
+                    && binder.app_id().is_none_or(|app| self.publisher == app) =>
+            {
                 self.check()
             }
             _ => corrupt(),
