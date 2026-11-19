@@ -143,9 +143,12 @@ Rust integrations that own a long-lived runtime can opt into SSE-assisted
 private intake. SSE is only a wake-up hint: the SDK derives and fetches the next
 expected immutable Noise slot, stores ciphertext and the per-user replay cursor
 atomically, and advances the Noise receive checkpoint only when the application
-explicitly drains buffered work. A healthy stream still audits expected slots
-about every 60 seconds by default, so a skipped or missed event does not become
-permanent message loss.
+explicitly drains buffered work. For an established Encrypted Link, the SDK
+ignores deletes and files outside that link's read folder, such as Receipts or
+other links' messages, except Encrypted Link Handshake slots; ignored events
+trigger no fetch and do not move the replay cursor. A healthy stream still
+audits expected slots about every 60 seconds by default, so a skipped, missed,
+or ignored event does not become permanent message loss.
 
 ```rust,no_run
 use std::sync::Arc;

@@ -1375,10 +1375,18 @@ The Rust SDK has two explicit receive modes per Linked Peer:
   explicit `receive_buffered_private_messages` calls.
 
 SSE-assisted intake treats each event as an untrusted hint. It validates the
-subscribed owner, derives the expected immutable Noise resource independently
-of the event path, fetches only that resource, and atomically stores ciphertext
-with the relevant per-user cursor. It does not decrypt application data or
-advance the Noise receive checkpoint in the background. Explicit buffered
+subscribed owner. For a Linked Peer with an established Encrypted Link, it
+ignores DELETEs and every PUT that is neither under that link's current read
+folder nor at an Encrypted Link Handshake slot. An ignored event triggers
+no fetch and changes neither health nor the stored per-user cursor. Peers with
+a pending Encrypted Link Handshake, and peers whose read folder cannot be
+derived, are not filtered. For a relevant event, the SDK still derives the
+expected immutable Noise resource independently of the event path, fetches only
+that resource, and atomically stores ciphertext with the relevant per-user
+cursor. The read folders are refreshed after each audit. Audits remain the
+delivery guarantee, so a hint dropped through a stale read folder only adds
+latency, up to the audit interval. Intake does not decrypt application data
+or advance the Noise receive checkpoint in the background. Explicit buffered
 drain commits plaintext stream records, Event Message dedupe, the advanced
 Noise snapshot, queue removal, and retained packet generations together.
 Failure leaves the packet and checkpoint unchanged.
