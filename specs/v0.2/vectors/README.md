@@ -13,6 +13,8 @@ them byte for byte. The conformance scope is described below.
 
 The `failure_evidence` cases supply already validated counting evidence to the pure library. Callers must bind that evidence to the attempt, obligation, Allowance, amount, asset and owner. These cases do not establish the SDK's authority to obtain or persist the evidence, reconstruct a ledger, release a reservation, or dispatch a payment. The generator checks exact expected lifetime amounts before regenerating the vectors.
 
+The `allowance_proposals` cases in `sealed.json` give the pending record for a proposal sent or received and for two proposals that cross under one ID. Each case includes the record key and the signed messages in the value.
+
 ## Settlement marks
 
 `sealed.json` `settlement_marks` and `identifiers.json` use the earlier settlement policy without `permanent`. Their bucket keys, sealed values and deletion-boundary cases describe the earlier format. The vectors for permanent bucket keys and sealed values are pending. Spec Section 18 describes the wallet checks for first credit and retry.
