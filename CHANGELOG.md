@@ -155,7 +155,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   event stream, intake now checks the Linked Peer's next expected slot at once.
   Health returns to `CaughtUp`, and packets written back to back are buffered
   together. Previously health reported the Linked Peer as `Replaying` until
-  the next healthy audit.
+  the next healthy audit. An intake fetch that fails because the app's drain
+  advanced the Encrypted Link meanwhile is now retried instead of marking the
+  Linked Peer `Stale`.
 
 ### Integration
 

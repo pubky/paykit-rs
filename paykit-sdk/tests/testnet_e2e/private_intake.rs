@@ -990,8 +990,8 @@ async fn test_private_intake_buffers_new_packet_from_live_event_stream() {
 /// `CaughtUp` without the hour-long healthy audit. The drain also releases
 /// capacity, which restarts the stream epoch with a startup audit, so this
 /// test guards the combined outcome; the unit test
-/// `test_live_insert_probe_recovers_from_a_concurrent_drain` covers the probe's
-/// retry alone.
+/// `test_live_insert_probe_recovers_from_a_concurrent_drain` covers the
+/// acquisition's retry alone.
 #[tokio::test]
 async fn test_private_intake_live_insert_settles_while_consumer_drains() {
     let pair = linked_two_party().await;
@@ -1063,14 +1063,17 @@ async fn test_private_intake_live_insert_settles_while_consumer_drains() {
 
     publish_private_lists(&pair.bob, &pair.alice, 1).await;
 
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while consumed.load(Ordering::SeqCst) == 0 {
-            assert!(!consumer.is_finished(), "consumer stopped early");
+    let drained = tokio::time::timeout(Duration::from_secs(10), async {
+        while consumed.load(Ordering::SeqCst) == 0 && !consumer.is_finished() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
-    .await
-    .expect("the woken consumer should drain the live packet");
+    .await;
+    if consumer.is_finished() {
+        abort_and_resume_panic(consumer).await;
+        panic!("consumer stopped early");
+    }
+    drained.expect("the woken consumer should drain the live packet");
     assert_eq!(consumed.load(Ordering::SeqCst), 1);
     let state = pair.alice.storage.snapshot().unwrap();
     assert!(state
@@ -1090,13 +1093,19 @@ async fn test_private_intake_live_insert_settles_while_consumer_drains() {
         "health should return to CaughtUp while the consumer drains, not wait for the audit",
     )
     .await;
-    consumer.abort();
-    if let Err(error) = consumer.await {
+    abort_and_resume_panic(consumer).await;
+    supervisor.stop().await;
+}
+
+/// Aborts `task` and waits for it, resuming its panic if it panicked, so a
+/// failed background task fails the test with its own message.
+async fn abort_and_resume_panic(task: tokio::task::JoinHandle<()>) {
+    task.abort();
+    if let Err(error) = task.await {
         if error.is_panic() {
             std::panic::resume_unwind(error.into_panic());
         }
     }
-    supervisor.stop().await;
 }
 
 /// Build a path under the private directory with the homeserver's maximum

@@ -36,11 +36,6 @@ const SUPERVISOR_LEASE_TIMEOUT: chrono::Duration = chrono::Duration::minutes(2);
 const SUPERVISOR_LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_AUDIT_ACQUISITIONS_PER_PEER: usize =
     crate::storage::PRIVATE_INTAKE_MAX_PACKETS_PER_PEER + 1;
-/// Probe attempts after a live insert. The consumer is woken before the probe,
-/// and its drain moves the buffered link generation, which fails a probe
-/// acquisition still holding the old one. A retry reads the post-drain state.
-/// The small bound keeps a failing peer from holding up the event loop.
-const LIVE_INSERT_PROBE_ATTEMPTS: usize = 3;
 
 /// Validated limits for SSE-assisted private intake.
 #[derive(Clone, Debug)]
@@ -93,7 +88,9 @@ pub enum PrivateIntakeTransportState {
     Connecting,
     /// Replaying from durable per-user cursor.
     Replaying,
-    /// Startup or healthy audit reached absent next expected slot.
+    /// An audit, a stream event, or the probe after a live insert found the
+    /// next expected slot absent. Only audits record
+    /// [`PrivateIntakeHealth::last_successful_audit_at`].
     CaughtUp,
     /// Audit or stream failed, or the Linked Peer's Pubky homeserver could not
     /// be resolved; remote absence cannot be claimed.
@@ -113,7 +110,9 @@ pub struct PrivateIntakeHealth {
     pub peers: HashMap<PubkyPublicKey, PrivateIntakeTransportState>,
     /// Number of reserved homeserver stream connections.
     pub reserved_streams: usize,
-    /// Last successful expected-slot audit for each Linked Peer.
+    /// Last expected-slot audit that proved the next expected slot absent, for
+    /// each Linked Peer. Stream events and the probe after a live insert do not
+    /// update it.
     pub last_successful_audit_at: HashMap<PubkyPublicKey, DateTime<Utc>>,
 }
 
@@ -122,7 +121,8 @@ pub struct PrivateIntakeHealth {
 pub struct PrivateIntakePeerFreshness {
     /// Current SSE transport and reconciliation state.
     pub transport_state: PrivateIntakeTransportState,
-    /// Last audit that proved the next expected slot absent.
+    /// Last expected-slot audit that proved the next expected slot absent.
+    /// Stream events and the probe after a live insert do not update it.
     pub last_successful_audit_at: Option<DateTime<Utc>>,
 }
 
@@ -575,28 +575,88 @@ where
 /// audit.
 ///
 /// The consumer was already woken for the event's packet and may drain while
-/// the probe runs. A drain moves the buffered link generation and fails an
-/// acquisition still holding the old one, so a failed attempt is retried, up
-/// to [`LIVE_INSERT_PROBE_ATTEMPTS`]. Each attempt reads the link state again.
-/// `inserted` reports whether any attempt buffered another packet.
+/// the probe runs. An acquisition that races that drain is retried by
+/// [`PaykitSdk::acquire_expected_private_packet`], not here.
 async fn probe_private_intake_peer_after_live_insert(
     peer: PubkyPublicKey,
     acquire: &PrivateIntakeAcquire,
 ) -> PrivateIntakePeerAudit {
-    let mut inserted = false;
-    let mut attempt = 0;
+    audit_private_intake_peer(peer, |peer, cursor| acquire(peer, cursor)).await
+}
+
+/// Runs `attempt` again while a failed attempt raced Encrypted Link progress.
+///
+/// A consumer drain commits one Encrypted Link generation per packet and
+/// rebases the buffered intake to it, and a handshake step also moves the
+/// generation. An acquisition that read the previous generation then fails,
+/// although nothing is wrong with the peer. So when an attempt fails and
+/// `read_generation` reports a different generation than it did just before
+/// that attempt, the next attempt runs and reads the new state. A failure
+/// with an unchanged generation is real and is returned as is, so errors are
+/// never matched by kind or text.
+///
+/// Every retry needs a generation change, so this never busy-loops, and the
+/// attempts are bounded by [`MAX_AUDIT_ACQUISITIONS_PER_PEER`] in case the
+/// generation keeps moving; the last error is returned then. An error from
+/// the first `read_generation` is returned without an attempt; an error from
+/// a later one returns the attempt's error.
+async fn retry_while_generation_advances<T, G, R, RFut, A, AFut>(
+    mut read_generation: R,
+    mut attempt: A,
+) -> Result<T>
+where
+    G: PartialEq,
+    R: FnMut() -> RFut,
+    RFut: Future<Output = Result<G>>,
+    A: FnMut() -> AFut,
+    AFut: Future<Output = Result<T>>,
+{
+    let mut generation = read_generation().await?;
+    let mut attempts = 0;
     loop {
-        attempt += 1;
-        let probe =
-            audit_private_intake_peer(peer.clone(), |peer, cursor| acquire(peer, cursor)).await;
-        inserted |= probe.inserted;
-        if probe.outcome.is_ok() || attempt == LIVE_INSERT_PROBE_ATTEMPTS {
-            return PrivateIntakePeerAudit {
-                outcome: probe.outcome,
-                inserted,
-            };
+        attempts += 1;
+        let error = match attempt().await {
+            Ok(value) => return Ok(value),
+            Err(error) => error,
+        };
+        if attempts == MAX_AUDIT_ACQUISITIONS_PER_PEER {
+            return Err(error);
+        }
+        match read_generation().await {
+            Ok(current) if current != generation => generation = current,
+            _ => return Err(error),
         }
     }
+}
+
+/// Runs an expected-slot acquisition `attempt` for `counterparty` under
+/// [`retry_while_generation_advances`].
+///
+/// The generation is the stored Encrypted Link state's `generation`, the one
+/// an attempt reads from its receive snapshot and checks the buffered intake
+/// against. It is `None` while no link state is stored.
+async fn retry_acquisition_while_link_advances<S, A, Fut>(
+    storage: &S,
+    counterparty: &PubkyPublicKey,
+    attempt: A,
+) -> Result<PrivatePacketAcquisition>
+where
+    S: StorageAdapter,
+    A: FnMut() -> Fut,
+    Fut: Future<Output = Result<PrivatePacketAcquisition>>,
+{
+    retry_while_generation_advances(
+        || {
+            let counterparty = counterparty.clone();
+            storage.transaction(move |tx| {
+                Ok(tx
+                    .encrypted_link_state(&counterparty)
+                    .map(|state| state.generation))
+            })
+        },
+        attempt,
+    )
+    .await
 }
 
 #[derive(Debug)]
@@ -804,24 +864,14 @@ async fn run_connected_private_intake_stream(
                             let probe =
                                 probe_private_intake_peer_after_live_insert(peer.clone(), &acquire)
                                     .await;
-                            if probe.inserted {
-                                work.notify_waiters();
-                            }
-                            match probe.outcome {
-                                Ok(outcome) => {
-                                    set_peer_state(health, peer, transport_state_after_acquisition(&outcome)).await;
-                                    match outcome {
-                                        PrivatePacketAcquisition::InsertedAtCapacity
-                                        | PrivatePacketAcquisition::CapacityReached => {
-                                            return PrivateIntakeEventLoopExit::Backpressured;
-                                        }
-                                        PrivatePacketAcquisition::PendingHandshake => {
-                                            handshake_pending = true;
-                                        }
-                                        PrivatePacketAcquisition::Absent
-                                        | PrivatePacketAcquisition::Inserted
-                                        | PrivatePacketAcquisition::AlreadyBuffered => {}
+                            match apply_private_intake_peer_audit(health, work, peer.clone(), probe, None)
+                                .await
+                            {
+                                Ok(effect) => {
+                                    if effect.backpressured {
+                                        return PrivateIntakeEventLoopExit::Backpressured;
                                     }
+                                    handshake_pending |= effect.handshake_pending;
                                 }
                                 // The event's packet is durably buffered, so
                                 // the peer stays `Replaying`, not `Stale`; the
@@ -831,19 +881,19 @@ async fn run_connected_private_intake_stream(
                                 }
                             }
                         }
-                        Some((peer, Ok(PrivatePacketAcquisition::InsertedAtCapacity))) => {
+                        Some((peer, Ok(outcome @ PrivatePacketAcquisition::InsertedAtCapacity))) => {
                             work.notify_waiters();
-                            set_peer_state(health, peer, PrivateIntakeTransportState::Backpressured).await;
+                            set_peer_state(health, peer, transport_state_after_acquisition(&outcome)).await;
                             return PrivateIntakeEventLoopExit::Backpressured;
                         }
-                        Some((peer, Ok(PrivatePacketAcquisition::AlreadyBuffered))) => {
-                            set_peer_state(health, peer, PrivateIntakeTransportState::Replaying).await;
+                        Some((peer, Ok(outcome @ PrivatePacketAcquisition::AlreadyBuffered))) => {
+                            set_peer_state(health, peer, transport_state_after_acquisition(&outcome)).await;
                         }
-                        Some((peer, Ok(PrivatePacketAcquisition::Absent))) => {
-                            set_peer_state(health, peer, PrivateIntakeTransportState::CaughtUp).await;
+                        Some((peer, Ok(outcome @ PrivatePacketAcquisition::Absent))) => {
+                            set_peer_state(health, peer, transport_state_after_acquisition(&outcome)).await;
                         }
-                        Some((peer, Ok(PrivatePacketAcquisition::CapacityReached))) => {
-                            set_peer_state(health, peer.clone(), PrivateIntakeTransportState::Backpressured).await;
+                        Some((peer, Ok(outcome @ PrivatePacketAcquisition::CapacityReached))) => {
+                            set_peer_state(health, peer, transport_state_after_acquisition(&outcome)).await;
                             return PrivateIntakeEventLoopExit::Backpressured;
                         }
                         Some((peer, Ok(PrivatePacketAcquisition::PendingHandshake))) => {
@@ -1607,22 +1657,18 @@ where
                 self.acquire_expected_private_packet(peer, cursor)
             })
             .await;
-            if peer_audit.inserted {
-                work.notify_waiters();
-            }
-            match peer_audit.outcome {
-                Ok(outcome) => {
-                    audit.handshake_pending |=
-                        matches!(&outcome, PrivatePacketAcquisition::PendingHandshake);
-                    audit.backpressured |= matches!(
-                        &outcome,
-                        PrivatePacketAcquisition::InsertedAtCapacity
-                            | PrivatePacketAcquisition::CapacityReached
-                    );
-                    if matches!(&outcome, PrivatePacketAcquisition::PendingHandshake) {
-                        work.notify_waiters();
-                    }
-                    set_peer_audit_outcome(health, peer.clone(), outcome, self.clock.now()).await;
+            match apply_private_intake_peer_audit(
+                health,
+                work,
+                peer.clone(),
+                peer_audit,
+                Some(self.clock.now()),
+            )
+            .await
+            {
+                Ok(effect) => {
+                    audit.handshake_pending |= effect.handshake_pending;
+                    audit.backpressured |= effect.backpressured;
                 }
                 Err(_) => {
                     set_peer_state(health, peer.clone(), PrivateIntakeTransportState::Stale).await
@@ -1632,7 +1678,27 @@ where
         audit
     }
 
+    /// Acquires the next expected private packet for `counterparty`.
+    ///
+    /// Live events, the probe after a live insert, and audits all acquire
+    /// through this method. A consumer drain or handshake step can move the
+    /// Encrypted Link generation while an attempt runs and fail it, so an
+    /// attempt that fails after the generation moved is retried, see
+    /// [`retry_acquisition_while_link_advances`].
     async fn acquire_expected_private_packet(
+        &self,
+        counterparty: PubkyPublicKey,
+        cursor: Option<PrivateIntakeCursorRecord>,
+    ) -> Result<PrivatePacketAcquisition> {
+        retry_acquisition_while_link_advances(&self.storage, &counterparty, || {
+            self.acquire_expected_private_packet_once(counterparty.clone(), cursor.clone())
+        })
+        .await
+    }
+
+    /// One acquisition attempt; it reads the link state and buffered intake
+    /// afresh.
+    async fn acquire_expected_private_packet_once(
         &self,
         counterparty: PubkyPublicKey,
         cursor: Option<PrivateIntakeCursorRecord>,
@@ -1773,6 +1839,44 @@ fn transport_state_after_acquisition(
             PrivateIntakeTransportState::Replaying
         }
     }
+}
+
+/// Applies one peer's expected-slot audit, or the probe after a live insert,
+/// to health and wakeups.
+///
+/// Wakes the consumer when the audit buffered a packet or found a pending
+/// handshake, and sets the peer's transport state for the outcome. Pass
+/// `audited_at` for an audit: an absent next slot then also records
+/// `last_successful_audit_at`, which a probe leaves alone. The returned flags
+/// tell the caller to back off or to retry the handshake. A failed audit is
+/// returned unapplied, because the audit and the probe report it differently.
+async fn apply_private_intake_peer_audit(
+    health: &Arc<AsyncRwLock<PrivateIntakeHealth>>,
+    work: &Notify,
+    peer: PubkyPublicKey,
+    peer_audit: PrivateIntakePeerAudit,
+    audited_at: Option<DateTime<Utc>>,
+) -> Result<PrivateIntakeAuditOutcome> {
+    if peer_audit.inserted {
+        work.notify_waiters();
+    }
+    let outcome = peer_audit.outcome?;
+    let effect = PrivateIntakeAuditOutcome {
+        handshake_pending: matches!(&outcome, PrivatePacketAcquisition::PendingHandshake),
+        backpressured: matches!(
+            &outcome,
+            PrivatePacketAcquisition::InsertedAtCapacity
+                | PrivatePacketAcquisition::CapacityReached
+        ),
+    };
+    if effect.handshake_pending {
+        work.notify_waiters();
+    }
+    match audited_at {
+        Some(audited_at) => set_peer_audit_outcome(health, peer, outcome, audited_at).await,
+        None => set_peer_state(health, peer, transport_state_after_acquisition(&outcome)).await,
+    }
+    Ok(effect)
 }
 
 async fn set_peer_audit_outcome(
@@ -3959,16 +4063,23 @@ mod tests {
     #[tokio::test]
     async fn test_live_insert_event_probe_failure_keeps_peer_replaying() {
         let peer = users(1).remove(0);
-        let mut outcomes = vec![Ok(PrivatePacketAcquisition::Inserted)];
-        outcomes.extend((0..LIVE_INSERT_PROBE_ATTEMPTS).map(|_| probe_fetch_error()));
 
-        let run = run_live_insert_event(&peer, outcomes).await;
+        let run = run_live_insert_event(
+            &peer,
+            vec![
+                Ok(PrivatePacketAcquisition::Inserted),
+                probe_fetch_error(),
+                // Left unused: the stream loop does not retry the probe.
+                Ok(PrivatePacketAcquisition::Absent),
+            ],
+        )
+        .await;
 
         assert!(matches!(run.exit, PrivateIntakeEventLoopExit::Ended));
         assert_eq!(
             run.observed.len(),
-            1 + LIVE_INSERT_PROBE_ATTEMPTS,
-            "every probe attempt must run once, and no more"
+            2,
+            "the probe makes one acquisition; retries belong to the acquisition itself"
         );
         assert_eq!(
             run.health.peers[&peer],
@@ -3982,27 +4093,121 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_live_insert_event_probe_retries_after_a_failed_attempt() {
+    async fn test_live_insert_event_probe_pending_handshake_wakes_consumer() {
         let peer = users(1).remove(0);
 
         let run = run_live_insert_event(
             &peer,
             vec![
                 Ok(PrivatePacketAcquisition::Inserted),
-                probe_fetch_error(),
-                Ok(PrivatePacketAcquisition::Absent),
+                Ok(PrivatePacketAcquisition::PendingHandshake),
             ],
         )
         .await;
 
         assert!(matches!(run.exit, PrivateIntakeEventLoopExit::Ended));
-        assert_eq!(run.observed.len(), 3);
+        assert_eq!(run.observed.len(), 2);
         assert_eq!(
             run.health.peers[&peer],
-            PrivateIntakeTransportState::CaughtUp,
-            "a retry that finds the next slot absent proves the peer is caught up"
+            PrivateIntakeTransportState::Replaying
         );
-        assert!(!run.woken_after_probe);
+        assert!(
+            run.woken_after_probe,
+            "a probe that finds a pending handshake must wake the consumer, as the audit does"
+        );
+    }
+
+    fn generation_race_error() -> PaykitSdkError {
+        PaykitSdkError::RecoveryRequired {
+            context: "buffered private intake generation does not match Encrypted Link".into(),
+            source: None,
+        }
+    }
+
+    /// Runs [`retry_while_generation_advances`] over scripted generations and
+    /// attempt results, returning its result, the number of attempts, and the
+    /// number of generation reads.
+    async fn run_generation_retry(
+        generations: Vec<u64>,
+        results: Vec<Result<u32>>,
+    ) -> (Result<u32>, usize, usize) {
+        let generations = StdMutex::new(VecDeque::from(generations));
+        let results = StdMutex::new(VecDeque::from(results));
+        let reads = AtomicUsize::new(0);
+        let attempts = AtomicUsize::new(0);
+        let result = retry_while_generation_advances(
+            || {
+                reads.fetch_add(1, Ordering::SeqCst);
+                let generation = generations
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("unexpected generation read");
+                async move { Ok(generation) }
+            },
+            || {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                let result = results
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("unexpected attempt");
+                async move { result }
+            },
+        )
+        .await;
+        (
+            result,
+            attempts.load(Ordering::SeqCst),
+            reads.load(Ordering::SeqCst),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_generation_retry_returns_error_when_generation_unchanged() {
+        let (result, attempts, _) =
+            run_generation_retry(vec![7, 7], vec![Err(generation_race_error())]).await;
+
+        assert!(matches!(
+            result,
+            Err(PaykitSdkError::RecoveryRequired { .. })
+        ));
+        assert_eq!(attempts, 1, "a failure without link progress is real");
+    }
+
+    #[tokio::test]
+    async fn test_generation_retry_retries_after_generation_advance() {
+        let (result, attempts, _) =
+            run_generation_retry(vec![7, 8], vec![Err(generation_race_error()), Ok(5)]).await;
+
+        assert_eq!(result.unwrap(), 5);
+        assert_eq!(attempts, 2);
+    }
+
+    #[tokio::test]
+    async fn test_generation_retry_stops_at_bound_while_generation_advances() {
+        let generations = (0..=MAX_AUDIT_ACQUISITIONS_PER_PEER as u64).collect();
+        let mut results: Vec<Result<u32>> = (1..MAX_AUDIT_ACQUISITIONS_PER_PEER)
+            .map(|_| Err(generation_race_error()))
+            .collect();
+        results.push(probe_fetch_error().map(|_| 0));
+
+        let (result, attempts, _) = run_generation_retry(generations, results).await;
+
+        assert!(
+            matches!(result, Err(PaykitSdkError::Transport { .. })),
+            "the last attempt's error must be returned"
+        );
+        assert_eq!(attempts, MAX_AUDIT_ACQUISITIONS_PER_PEER);
+    }
+
+    #[tokio::test]
+    async fn test_generation_retry_returns_first_success() {
+        let (result, attempts, reads) = run_generation_retry(vec![7], vec![Ok(5)]).await;
+
+        assert_eq!(result.unwrap(), 5);
+        assert_eq!(attempts, 1);
+        assert_eq!(reads, 1, "a success needs no generation read after it");
     }
 
     #[tokio::test]
@@ -4456,8 +4661,9 @@ mod tests {
 
     /// The consumer is woken before the probe, so its drain can persist the
     /// next link generation while the probe's first attempt still holds the
-    /// generation it read. That attempt fails; the retry reads the post-drain
-    /// link state, finds the next slot absent, and settles the peer `CaughtUp`.
+    /// generation it read. That attempt fails, and because the stored
+    /// generation moved, the acquisition retries: it reads the post-drain link
+    /// state, finds the next slot absent, and settles the peer `CaughtUp`.
     #[tokio::test]
     async fn test_live_insert_probe_recovers_from_a_concurrent_drain() {
         let storage = crate::storage::InMemoryStorage::new();
@@ -4476,7 +4682,7 @@ mod tests {
             .unwrap()
             .0;
         let drained_snapshot_bytes = drained_snapshot.serialize();
-        let acquisitions = Arc::new(AtomicUsize::new(0));
+        let attempts = Arc::new(AtomicUsize::new(0));
         let generation_races = Arc::new(AtomicUsize::new(0));
         let observed_resources = Arc::new(StdMutex::new(Vec::new()));
         let group = SubscriptionGroup {
@@ -4496,7 +4702,7 @@ mod tests {
         let acquire: PrivateIntakeAcquire = Arc::new({
             let storage = storage.clone();
             let local = local.clone();
-            let acquisitions = Arc::clone(&acquisitions);
+            let attempts = Arc::clone(&attempts);
             let generation_races = Arc::clone(&generation_races);
             let observed_resources = Arc::clone(&observed_resources);
             let expected_resource = expected_resource.clone();
@@ -4504,64 +4710,89 @@ mod tests {
                 let storage = storage.clone();
                 let local = local.clone();
                 let drained_snapshot_bytes = drained_snapshot_bytes.clone();
+                let attempts = Arc::clone(&attempts);
                 let generation_races = Arc::clone(&generation_races);
                 let observed_resources = Arc::clone(&observed_resources);
                 let expected_resource = expected_resource.clone();
-                let first_probe_attempt = acquisitions.fetch_add(1, Ordering::SeqCst) == 1;
                 Box::pin(async move {
-                    // Each acquisition reads the current link state, as
-                    // `acquire_expected_private_packet` does.
-                    let link =
-                        storage.snapshot().unwrap().encrypted_link_states[&requested_peer].clone();
-                    if first_probe_attempt {
-                        // The woken consumer drains the event's packet the
-                        // way `private_stream` does, after the probe read
-                        // generation 7 and its snapshot.
-                        let drained_peer = requested_peer.clone();
-                        storage
-                            .transaction(move |tx| {
-                                tx.save_encrypted_link_state(
-                                    crate::storage::EncryptedLinkStateRecord {
-                                        counterparty: drained_peer.clone(),
-                                        link_snapshot: Some(drained_snapshot_bytes),
-                                        handshake_snapshot: None,
-                                        handshake_role: None,
-                                        generation: 8,
-                                        checkpointed_at: Utc::now(),
-                                    },
-                                );
-                                tx.remove_buffered_private_intake_packet(&drained_peer, 7, 3)?;
-                                tx.rebase_buffered_private_intake_generation(&drained_peer, 7, 8)
-                            })
-                            .await?;
-                    }
-                    let snapshot = paykit_lib::EncryptedLinkSnapshot::deserialize(
-                        link.link_snapshot.as_ref().unwrap(),
-                    )?;
-                    let outcome = acquire_expected_private_packet_with_fetch(
-                        &storage,
-                        requested_peer,
-                        &snapshot,
-                        &local,
-                        &secret,
-                        link.generation,
-                        cursor,
-                        Utc::now(),
-                        move |resource| {
-                            // The peer published only the event's slot.
-                            let published = resource == expected_resource;
-                            observed_resources.lock().unwrap().push(resource);
-                            async move {
-                                Ok(published
-                                    .then(|| vec![9; crate::storage::PRIVATE_INTAKE_PACKET_BYTES]))
+                    // One attempt reads the current link state, as
+                    // `acquire_expected_private_packet_once` does.
+                    let attempt = || {
+                        let storage = storage.clone();
+                        let local = local.clone();
+                        let requested_peer = requested_peer.clone();
+                        let cursor = cursor.clone();
+                        let drained_snapshot_bytes = drained_snapshot_bytes.clone();
+                        let generation_races = Arc::clone(&generation_races);
+                        let observed_resources = Arc::clone(&observed_resources);
+                        let expected_resource = expected_resource.clone();
+                        let first_probe_attempt = attempts.fetch_add(1, Ordering::SeqCst) == 1;
+                        async move {
+                            let link = storage.snapshot().unwrap().encrypted_link_states
+                                [&requested_peer]
+                                .clone();
+                            if first_probe_attempt {
+                                // The woken consumer drains the event's packet
+                                // the way `private_stream` does, after the
+                                // probe read generation 7 and its snapshot.
+                                let drained_peer = requested_peer.clone();
+                                storage
+                                    .transaction(move |tx| {
+                                        tx.save_encrypted_link_state(
+                                            crate::storage::EncryptedLinkStateRecord {
+                                                counterparty: drained_peer.clone(),
+                                                link_snapshot: Some(drained_snapshot_bytes),
+                                                handshake_snapshot: None,
+                                                handshake_role: None,
+                                                generation: 8,
+                                                checkpointed_at: Utc::now(),
+                                            },
+                                        );
+                                        tx.remove_buffered_private_intake_packet(
+                                            &drained_peer,
+                                            7,
+                                            3,
+                                        )?;
+                                        tx.rebase_buffered_private_intake_generation(
+                                            &drained_peer,
+                                            7,
+                                            8,
+                                        )
+                                    })
+                                    .await?;
                             }
-                        },
-                    )
-                    .await;
-                    if matches!(outcome, Err(PaykitSdkError::RecoveryRequired { .. })) {
-                        generation_races.fetch_add(1, Ordering::SeqCst);
-                    }
-                    outcome
+                            let snapshot = paykit_lib::EncryptedLinkSnapshot::deserialize(
+                                link.link_snapshot.as_ref().unwrap(),
+                            )?;
+                            let outcome = acquire_expected_private_packet_with_fetch(
+                                &storage,
+                                requested_peer,
+                                &snapshot,
+                                &local,
+                                &secret,
+                                link.generation,
+                                cursor,
+                                Utc::now(),
+                                move |resource| {
+                                    // The peer published only the event's slot.
+                                    let published = resource == expected_resource;
+                                    observed_resources.lock().unwrap().push(resource);
+                                    async move {
+                                        Ok(published.then(|| {
+                                            vec![9; crate::storage::PRIVATE_INTAKE_PACKET_BYTES]
+                                        }))
+                                    }
+                                },
+                            )
+                            .await;
+                            if matches!(outcome, Err(PaykitSdkError::RecoveryRequired { .. })) {
+                                generation_races.fetch_add(1, Ordering::SeqCst);
+                            }
+                            outcome
+                        }
+                    };
+                    // The same retry `acquire_expected_private_packet` runs.
+                    retry_acquisition_while_link_advances(&storage, &requested_peer, attempt).await
                 })
             }
         });
@@ -4590,7 +4821,7 @@ mod tests {
             "a retry after a drain must settle the peer"
         );
         assert_eq!(
-            acquisitions.load(Ordering::SeqCst),
+            attempts.load(Ordering::SeqCst),
             3,
             "the event, the probe attempt that lost the race, and its retry"
         );
