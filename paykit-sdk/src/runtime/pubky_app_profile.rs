@@ -2,11 +2,10 @@ use super::*;
 use crate::domain::contacts::{
     merge_pubky_profile_json, pubky_app_avatar_file_json, pubky_app_blob_id,
     pubky_app_timestamp_id, social_v1_file_name, PubkyProfileSnapshot, PubkyProfileUpdate,
-    SocialVersion, AVATAR_FILE_NAME, PUBKY_APP_BLOB_PATH_PREFIX, PUBKY_APP_FILE_PATH_PREFIX,
+    SocialVersion, PUBKY_APP_BLOB_PATH_PREFIX, PUBKY_APP_FILE_PATH_PREFIX,
     PUBKY_APP_PROFILE_SESSION_CAPABILITIES, SOCIAL_V1_FILE_PATH_PREFIX,
     SOCIAL_V1_MIGRATION_FLAG_CAPABILITY, SOCIAL_V1_MIGRATION_FLAG_PATH, SOCIAL_V1_PROFILE_PATH,
 };
-use crate::parse_pubky_resource;
 
 const MAX_PUBKY_PROFILE_BYTES: usize = 256 * 1024;
 // The flag lists every migrated object path; the pubky.app migrator reads it up to 64 MiB.
@@ -131,14 +130,13 @@ where
     ///
     /// The whole delete holds the homeserver locks of both profile paths,
     /// pubky.app (v0) first, so a profile write that takes the lock on either
-    /// layout waits for it; an unlocked write already in flight can still land. An absent profile is already deleted. A profile whose bytes changed
-    /// since `expected_revision` returns [`PaykitSdkError::ConcurrentUpdate`]
-    /// before anything is deleted. A social v1 identity's pubky.app (v0) copy is
-    /// deleted first and its social v1 profile after it, in the order of the
-    /// spec's `deletionPaths`. Then the avatars the deleted profiles named in
-    /// this identity's own storage are deleted, best effort: a social v1 file,
-    /// or a pubky.app `avatar` file and its blob. An avatar that cannot be read
-    /// or deleted is logged and left, since the profile is already gone. The
+    /// layout waits for it; an unlocked write already in flight can still
+    /// land. An absent profile is already deleted. A profile whose bytes
+    /// changed since `expected_revision` returns
+    /// [`PaykitSdkError::ConcurrentUpdate`] before anything is deleted. A
+    /// social v1 identity's pubky.app (v0) copy is deleted first and its social
+    /// v1 profile after it, in the order of the spec's `deletionPaths`. The
+    /// avatar is left in place, since other files may share its content. The
     /// session must hold [`PUBKY_APP_PROFILE_SESSION_CAPABILITIES`].
     pub async fn delete_pubky_profile(&self, expected_revision: String) -> Result<()> {
         let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
@@ -146,11 +144,10 @@ where
             context: "no Pubky session available for Pubky profile deletion".into(),
             source: None,
         })?;
-        let public_key = session_access.public_key()?;
         let version = own_social_version(&session_access).await?;
         let session = &session_access.session;
         let storage = session.storage();
-        let (public_key, storage, expected_revision) = (&public_key, &storage, &expected_revision);
+        let (storage, expected_revision) = (&storage, &expected_revision);
         paykit_lib::with_write_lock(session, PUBKY_PROFILE_PATH, |v0_lock| async move {
             let v0_lock = &v0_lock;
             paykit_lib::with_write_lock(session, SOCIAL_V1_PROFILE_PATH, |v1_lock| async move {
@@ -158,7 +155,6 @@ where
                     SocialVersion::V1 => (&v1_lock, Some(v0_lock)),
                     SocialVersion::V0 => (v0_lock, None),
                 };
-                let mut images = Vec::new();
                 let current = match storage.get(version.profile_path()).await {
                     Ok(response) => {
                         read_public_response(
@@ -175,24 +171,6 @@ where
                     if paykit_lib::content_revision(raw) != *expected_revision {
                         return Err(pubky_profile_changed());
                     }
-                    images.extend(profile_image(raw));
-                }
-                if copy_lock.is_some() {
-                    match self
-                        .fetch_pubky_profile_raw(public_key, PUBKY_PROFILE_PATH)
-                        .await
-                    {
-                        Ok(Some((raw, _))) => images.extend(profile_image(&raw)),
-                        Ok(None) => {}
-                        Err(err) => {
-                            tracing::warn!(%err, "could not read the v0 profile's avatar")
-                        }
-                    }
-                }
-                images.dedup();
-                let mut avatar_paths = Vec::new();
-                for image in &images {
-                    avatar_paths.extend(self.own_avatar_paths(public_key, image).await);
                 }
                 if let Some(copy_lock) = copy_lock {
                     match storage.delete_locked(copy_lock).await {
@@ -207,46 +185,11 @@ where
                         .await
                         .map_err(|err| put_error("delete Pubky profile", err))?;
                 }
-                for path in avatar_paths {
-                    match storage.delete(path.as_str()).await {
-                        Ok(_) => {}
-                        Err(err) if is_pubky_not_found(&err) => {}
-                        Err(err) => {
-                            tracing::warn!(%path, %err, "could not delete Pubky profile avatar")
-                        }
-                    }
-                }
                 Ok(())
             })
             .await
         })
         .await
-    }
-
-    /// The paths of the avatar `image` names in this identity's own storage: a
-    /// social v1 file, or a pubky.app `avatar` file and the blob it points at.
-    /// Anything else, or a pubky.app file that cannot be read, gives none.
-    async fn own_avatar_paths(&self, public_key: &PubkyPublicKey, image: &str) -> Vec<String> {
-        if let Some(path) = own_file_path(public_key, image, SOCIAL_V1_FILE_PATH_PREFIX) {
-            return vec![path];
-        }
-        let Some(file_path) = own_file_path(public_key, image, PUBKY_APP_FILE_PATH_PREFIX) else {
-            return Vec::new();
-        };
-        let file = match self.fetch_pubky_profile_raw(public_key, &file_path).await {
-            Ok(Some((raw, _))) => raw,
-            Ok(None) => return Vec::new(),
-            Err(err) => {
-                tracing::warn!(%file_path, %err, "could not read the Pubky app avatar file");
-                return Vec::new();
-            }
-        };
-        match pubky_app_avatar_blob(&file)
-            .and_then(|src| own_file_path(public_key, &src, PUBKY_APP_BLOB_PATH_PREFIX))
-        {
-            Some(blob_path) => vec![file_path, blob_path],
-            None => Vec::new(),
-        }
     }
 
     /// Upload avatar bytes and return the file URI to set as the profile `image`.
@@ -429,34 +372,6 @@ async fn has_pubky_app_data(session_access: &PubkySessionAccess) -> Result<bool>
     }
 }
 
-/// The `image` URI a stored profile names, if any.
-fn profile_image(raw: &[u8]) -> Option<String> {
-    serde_json::from_slice::<serde_json::Value>(raw)
-        .ok()?
-        .get("image")?
-        .as_str()
-        .map(str::to_owned)
-}
-
-/// This identity's own file at `uri` directly under `prefix`, else `None`.
-/// Only plain names qualify, so the path needs no further encoding.
-fn own_file_path(public_key: &PubkyPublicKey, uri: &str, prefix: &str) -> Option<String> {
-    let resource = parse_pubky_resource(uri).ok()?;
-    let name = resource.path.strip_prefix(prefix)?;
-    let plain = !name.is_empty()
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
-    (resource.public_key == *public_key && plain).then_some(resource.path)
-}
-
-/// The blob URI of a pubky.app file object written as a profile avatar.
-fn pubky_app_avatar_blob(raw: &[u8]) -> Option<String> {
-    let file = serde_json::from_slice::<serde_json::Value>(raw).ok()?;
-    (file.get("name")?.as_str()? == AVATAR_FILE_NAME)
-        .then(|| file.get("src")?.as_str().map(str::to_owned))?
-}
-
 fn pubky_app_image_content_type(content_type: &str) -> Result<&'static str> {
     match content_type.trim().to_ascii_lowercase().as_str() {
         "image/jpeg" | "image/jpg" => Ok("image/jpeg"),
@@ -511,58 +426,5 @@ fn pubky_profile_changed() -> PaykitSdkError {
     PaykitSdkError::ConcurrentUpdate {
         context: "Pubky profile changed since it was read; reload it and retry".into(),
         source: None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn key() -> PubkyPublicKey {
-        PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
-    }
-
-    #[test]
-    fn own_file_path_takes_only_plain_names_of_this_identity() {
-        let me = key();
-        let other = key();
-        let v1 = SOCIAL_V1_FILE_PATH_PREFIX;
-        let uri = |owner: &PubkyPublicKey, path: &str| format!("pubky://{owner}{path}");
-        assert_eq!(
-            own_file_path(&me, &uri(&me, &format!("{v1}0ABC.jpg")), v1),
-            Some(format!("{v1}0ABC.jpg"))
-        );
-        for rejected in [
-            uri(&other, &format!("{v1}0ABC.jpg")),
-            uri(&me, &format!("{v1}keep/avatar.jpg")),
-            uri(&me, v1),
-            uri(&me, &format!("{v1}a%2541")),
-            uri(&me, &format!("{v1}%2e%2e")),
-            uri(&me, &format!("{v1}..%2Fprofile.json")),
-            uri(&me, "/pub/social/v1/profile.json"),
-            format!("https://example.com{v1}0ABC.jpg"),
-            "not a uri".into(),
-        ] {
-            assert_eq!(own_file_path(&me, &rejected, v1), None, "{rejected}");
-        }
-    }
-
-    #[test]
-    fn profile_image_and_avatar_blob_read_only_what_they_name() {
-        assert_eq!(
-            profile_image(br#"{"name":"A","image":"pubky://k/x"}"#),
-            Some("pubky://k/x".into())
-        );
-        assert_eq!(profile_image(br#"{"name":"A"}"#), None);
-        assert_eq!(profile_image(b"\xff"), None);
-        assert_eq!(
-            pubky_app_avatar_blob(br#"{"name":"avatar","src":"pubky://k/b"}"#),
-            Some("pubky://k/b".into())
-        );
-        assert_eq!(
-            pubky_app_avatar_blob(br#"{"name":"photo.jpg","src":"pubky://k/b"}"#),
-            None
-        );
-        assert_eq!(pubky_app_avatar_blob(br#"{"name":"avatar"}"#), None);
     }
 }

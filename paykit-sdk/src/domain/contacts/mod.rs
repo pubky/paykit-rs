@@ -14,7 +14,7 @@ pub use profiles::{
 };
 pub(crate) use pubky_app::{
     merge_pubky_profile_json, pubky_app_avatar_file_json, pubky_app_blob_id,
-    pubky_app_timestamp_id, social_v1_file_name, SocialVersion, AVATAR_FILE_NAME,
+    pubky_app_timestamp_id, social_v1_file_name, SocialVersion,
     SOCIAL_V1_MIGRATION_FLAG_CAPABILITY,
 };
 pub use pubky_app::{
