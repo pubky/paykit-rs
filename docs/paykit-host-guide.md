@@ -7,17 +7,6 @@ for store guarantees, approval and client outcomes. Keep app keys and backups in
 host-protected storage and serialize operations on the handle. A memory store
 cannot preserve unanswered writes or payments across a restart.
 
-## Outgoing payment history and payer access
-
-An app granted `paykit_pay` can make payments and read the identity's past and
-future outgoing Paykit history. This includes earlier payments made by other
-wallets under the same identity and payments made without a request.
-
-We recommend that the signer or host explain this access in its own words
-before the user approves the grant. This applies to direct payer grants,
-Allowance executor grants with payer access, and grants that bundle payer
-access with another protocol.
-
 ## Open a wallet and pay a one-time request
 
 Use `Paykit::join` with a signer-approved `JoinRequest` at enrollment. On an
@@ -116,10 +105,25 @@ rail's capabilities before the App is saved. Open backups with
 journal before any restore write. If an SDK-restored store is still in
 reconciliation on startup, reopen it with the SDK load constructors.
 
+## Outgoing payment history and payer access
+
+An app granted `paykit_pay` can make payments and read the identity's past and
+future outgoing Paykit history. This includes earlier payments made by other
+wallets under the same identity and payments made without a request.
+
+We recommend that the signer or host explain this access in its own words
+before the user approves the grant. This applies to direct payer grants,
+Allowance executor grants with payer access, and grants that bundle payer
+access with another protocol.
+
 ## Payment and delivery progress
 
+Use the SDK states below to explain payment progress in the wallet's own words.
+The wallet chooses how to present each state. While a payment may already have
+gone through, keep that uncertainty clear and follow the reconciliation rules.
+
 After loading, read the durable journal with `Paykit::payments()`. Match the
-existing `PaymentView::attempt_id` and display its `stage`. A durable
+existing `PaymentView::attempt_id` and use its `stage` to track progress. A durable
 `Stage::RailPaid` entry means the rail paid, with outcome reporting still
 pending. Use `resume_payments` to progress outstanding work, then read
 `payments()` again to refresh the journal view.
@@ -209,7 +213,7 @@ shared record.
 | `PaykitError::Client` | Handle the enclosed Switch outcome. Preserve any kept batch and its ID. |
 | `PaykitError::Lib` | Use the rule error to distinguish invalid input from invalid network or shared data. |
 | `PaykitError::Rail` | Preserve any unresolved attempt unless the method established definitive refusal. |
-| `PaykitError::Homeserver` | Show the read failure and retry discovery when the Homeserver is available. |
+| `PaykitError::Homeserver` | Retry discovery when the Homeserver is available. If the user is waiting, explain that discovery could not finish. |
 | `PaykitError::Refused` | Follow the specific refusal below. |
 | `PaykitError::Conflict` | Read the current state and decide again. |
 | `RailError::Unavailable` | Preserve the open attempt. Submission may have happened. |
@@ -219,9 +223,9 @@ shared record.
 | `RailOutcome::Failed` | Report only a definitive failure. |
 | `RailOutcome::Pending` | Leave the attempt open while its result is unknown. |
 | `PublicAppFailureReason::Homeserver` | Retry reading the affected app's Homeserver record. |
-| `PublicAppFailureReason::Refused` | Exclude the unusable record and show its rule failure. |
+| `PublicAppFailureReason::Refused` | Exclude the unusable record. Its rule failure can help diagnose the lookup. |
 | `PublicAppFailureReason::Expired` | Wait for a current record from that app. |
-| `PublicAppFailureReason::OverBound` | Show that this app's endpoints did not fit within the lookup bounds. |
+| `PublicAppFailureReason::OverBound` | This app's endpoints did not fit within the lookup bounds. Use the reason when explaining an incomplete lookup. |
 
 ## Refusals
 
