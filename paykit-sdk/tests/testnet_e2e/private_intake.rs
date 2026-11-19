@@ -911,9 +911,11 @@ async fn test_buffered_receive_retention_refusal_keeps_packet_and_checkpoint() {
 /// group must still be `CaughtUp` at publish time; a failed subscribe would
 /// have moved it to `Stale` or `Unsupported`. Only stream delivery records an
 /// event cursor on the buffered packet, and that cursor must be newer than the
-/// last event intake handled before the publish. So the fetch was triggered by
-/// a stream event recorded after that point, not by an audit or by a replayed
-/// earlier event.
+/// last event intake handled before the publish. That baseline cursor must
+/// exist: the first subscribe has no cursor, so it replays Bob's Encrypted Link
+/// Handshake files under the private directory, and intake stores the cursor of
+/// those events. So the fetch was triggered by a stream event recorded after
+/// that point, not by an audit or by a replayed earlier event.
 #[tokio::test]
 async fn test_private_intake_buffers_new_packet_from_live_event_stream() {
     let pair = linked_two_party().await;
@@ -947,7 +949,8 @@ async fn test_private_intake_buffers_new_packet_from_live_event_stream() {
         .unwrap()
         .private_intake_cursors
         .get(&pair.bob.public_key)
-        .cloned();
+        .cloned()
+        .expect("startup replay should have advanced the private intake cursor before the publish");
 
     publish_private_lists(&pair.bob, &pair.alice, 1).await;
 
@@ -960,15 +963,10 @@ async fn test_private_intake_buffers_new_packet_from_live_event_stream() {
         .as_ref()
         .expect("packet must arrive through the live event stream, not an audit");
     assert_eq!(source_cursor.subscribed_user, pair.bob.public_key);
-    match &baseline_cursor {
-        Some(baseline) => {
-            assert!(
-                source_cursor.event_id > baseline.event_id,
-                "packet must come from a stream event newer than the pre-publish cursor"
-            );
-            assert_eq!(source_cursor.homeserver, baseline.homeserver);
-        }
-        None => assert!(!source_cursor.homeserver.is_empty()),
-    }
+    assert!(
+        source_cursor.event_id > baseline_cursor.event_id,
+        "packet must come from a stream event newer than the pre-publish cursor"
+    );
+    assert_eq!(source_cursor.homeserver, baseline_cursor.homeserver);
     supervisor.stop().await;
 }
