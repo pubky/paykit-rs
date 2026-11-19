@@ -1716,6 +1716,56 @@ async fn test_publication_answers_only_its_chosen_contact_and_resends_the_same_l
 }
 
 #[tokio::test]
+async fn test_publication_request_for_an_unchanged_offer_uses_the_active_generation() {
+    use crate::common::BOB_ORIGIN;
+    use paykit_lib::ListVersion;
+    use pubky_switch_core::records::Inbox;
+
+    for moved in [false, true] {
+        for names_offer in [true, false] {
+            let w = World::new();
+            let mut wallet = w.wallet("wallet").await;
+            let mut shop = w.shop().await;
+            let app = shop.app_id();
+            shop.app_mut().invite(&wallet.identity()).await.unwrap();
+            shop.set_list_endpoints(offered("lno1current"))
+                .await
+                .unwrap();
+            shop.publish_list_to(wallet.identity()).await.unwrap();
+            let first = ListVersion::new(1, 1).unwrap();
+            assert_eq!(published(&shop, &wallet).await[0].version, first);
+
+            if moved {
+                let service = w.bob.switch().change_key_into([74; 32]);
+                w.router.add_switch(BOB_ORIGIN, &service);
+                let current = w
+                    .bob
+                    .sign_next(|body| {
+                        body.generation = 2;
+                        body.inbox = Inbox::new(BOB_ORIGIN, service.service_key());
+                    })
+                    .unwrap();
+                service.deliver_identity(&current).unwrap();
+                shop.app_mut().refresh_identity().await.unwrap();
+                shop.app_mut().follow_provider().await.unwrap();
+            }
+
+            request_list(&mut wallet, &mut shop, app, names_offer.then_some(first)).await;
+            let expected = if moved { (2, 1) } else { (1, 2) };
+            let next = ListVersion::new(expected.0, expected.1).unwrap();
+            let sent = published(&shop, &wallet).await;
+            assert_eq!(
+                sent.iter().map(|issue| issue.version).collect::<Vec<_>>(),
+                [first, next]
+            );
+            assert!(!sent[1].withdrawn);
+            shop.receive(None).await.unwrap();
+            assert_eq!(published(&shop, &wallet).await, sent);
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_publication_restored_answers_use_the_retained_request_and_current_sharing_choice() {
     use crate::common::{store, BOB_ORIGIN};
     use paykit_sdk::{AppScopes, PaykitConfig};

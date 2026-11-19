@@ -744,9 +744,15 @@ impl Paykit {
         let target = target(&publisher, &recipient, generation);
         let key = self.app.record_key(&target)?;
 
+        let previous = self
+            .local_get::<ListReservation>(&key::list_reservation(&recipient))
+            .await?;
         let (counter, unknown) = match self.app.read_record_fresh(&target).await? {
             RecordRead::Fresh(held) => {
                 let current = self.publication_at(&held).await?;
+                if requested && !previous.as_ref().is_some_and(|r| r.matches(&current)) {
+                    return Err(counter_unavailable().into());
+                }
                 (current.counter, current.unknown)
             }
             RecordRead::Kept {
@@ -756,19 +762,15 @@ impl Paykit {
                 .local_get::<PublicationHistory>(&key::publication_history(&key))
                 .await?
                 .is_none()
-                && self
-                    .local_get::<ListReservation>(&key::list_reservation(&recipient))
-                    .await?
-                    .is_none_or(|issue| issue.generation != generation)
+                && previous
+                    .as_ref()
+                    .is_none_or(|issue| issue.generation < generation)
                 && self.app.record_seen(&key).await?.is_none() =>
             {
                 (0, UnknownMembers::default())
             }
             _ => return Err(counter_unavailable().into()),
         };
-        let previous = self
-            .local_get::<ListReservation>(&key::list_reservation(&recipient))
-            .await?;
         let now = self.service_time().ok_or_else(counter_unavailable)?;
         if choice.await_repeat_time {
             // A repeat after the backup advances no permanent counter. This covering read
@@ -784,14 +786,6 @@ impl Paykit {
             .is_some_and(|r| choice.answers.first(r).is_some());
         let missing =
             answers::MissingAnswers::after(previous.as_ref(), generation, counter, now, accepted)?;
-        if requested
-            && previous
-                .as_ref()
-                .is_none_or(|r| r.generation != generation || r.counter != counter)
-        {
-            // This installation has no accepted signed original for the newly visible counter.
-            return Err(counter_unavailable().into());
-        }
         let version = ListVersion::new(generation, counter + 1)?;
         let list = PrivatePaymentList {
             version,
