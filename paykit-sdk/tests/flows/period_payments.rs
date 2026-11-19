@@ -373,6 +373,91 @@ async fn test_period_payments_refused_before_acceptance_and_for_what_isnt_a_peri
 }
 
 #[tokio::test]
+async fn test_period_payments_credit_a_late_proof_settled_at_the_deadline() {
+    Box::pin(confirm_period_settlement(Some(60), 60_000, true)).await;
+}
+
+#[tokio::test]
+async fn test_period_payments_keep_a_payment_settled_after_the_deadline_uncredited() {
+    Box::pin(confirm_period_settlement(Some(60), 60_001, false)).await;
+}
+
+#[tokio::test]
+async fn test_period_payments_credit_a_later_settlement_without_a_deadline() {
+    Box::pin(confirm_period_settlement(None, 60_001, true)).await;
+}
+
+async fn confirm_period_settlement(deadline_s: Option<u64>, after_start_ms: u64, credited: bool) {
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut payer = w.wallet("wallet").await;
+    let mut draft = monthly();
+    if let Some(seconds) = deadline_s {
+        draft = draft.with_period_deadline_s(seconds);
+    }
+    let request = requested(&w, &mut shop, &mut payer, draft).await;
+    payer.accept_subscription(&request).await.unwrap();
+    shop.receive(None).await.unwrap();
+
+    w.rail.next(Behaviour::Hang);
+    let pending = by_user(&mut payer, &request, january(), PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(pending, PayOutcome::Pending { .. }));
+    let attempt = pending.attempt_id();
+    let paid_at = january().starts_at + after_start_ms;
+    w.clock.advance_ms(paid_at - w.clock.now_ms());
+    w.rail.settle(&attempt, true);
+    // The payer first learns the result after the deadline, even when it was paid on time.
+    w.clock.advance_ms(1_000);
+    let outcome = payer.resume_payments().await.unwrap();
+    assert!(matches!(outcome.as_slice(), [PayOutcome::Paid { .. }]));
+
+    let mut second = w
+        .join(
+            &w.bob,
+            "till",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    let mut issued = None;
+    for till in [&mut shop, &mut second] {
+        till.receive(None).await.unwrap();
+        let activity = till.payee_activity().await.unwrap();
+        let period = &activity[0].periods[0];
+        assert_eq!(period.billing_period, january());
+        assert!(period.paid);
+        assert_eq!(
+            till.verify_payment(&period.record).await.unwrap(),
+            credited.then_some(paid_at)
+        );
+        let receipt = till.confirm_payment(&period.record).await.unwrap();
+        assert_eq!(receipt.is_some(), credited);
+        if let Some(previous) = &issued {
+            assert_eq!(receipt.as_ref(), Some(previous));
+        }
+        issued = receipt;
+        assert_eq!(till.confirm_payment(&period.record).await.unwrap(), issued);
+        let activity = till.payee_activity().await.unwrap();
+        assert_eq!(activity[0].periods[0].credited, credited);
+        assert_eq!(
+            activity[0].periods[0].receipt.as_ref().map(|r| &r.msg_id),
+            issued.as_ref()
+        );
+    }
+    payer.receive(None).await.unwrap();
+    let receipts = payer
+        .receipts(paykit_sdk::ReceiptsOf::Period(request, january()))
+        .await
+        .unwrap();
+    assert_eq!(
+        receipts.iter().map(|r| &r.msg_id).collect::<Vec<_>>(),
+        issued.iter().collect::<Vec<_>>()
+    );
+    assert_eq!(w.rail.pay_calls(&attempt), 1);
+}
+
+#[tokio::test]
 async fn test_period_payments_refused_for_what_stops_the_period() {
     // A rejected subscription pays no period; a period past its payment deadline isn't
     // paid; a blocked payee's period is paid only once the user confirms that exact payment,
