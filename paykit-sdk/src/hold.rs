@@ -85,6 +85,10 @@ pub struct HeldRequest {
 pub(crate) struct HoldEpoch(#[serde(with = "serde_b64")] [u8; 16]);
 
 impl HoldEpoch {
+    pub(crate) fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
+
     pub(crate) fn new() -> pubky_switch_core::Result<Self> {
         pubky_switch_core::enc::random_bytes().map(Self)
     }
@@ -601,6 +605,17 @@ impl Paykit {
         record_key: &[u8; 32],
         record: &ActivityRecord,
     ) -> Result<bool> {
+        self.held_across_payee_stop(record_key, record, None).await
+    }
+
+    /// A seller stop crossing an accepted first dispatch leaves any restore or missed-item
+    /// hold in force (Paykit spec 7.2, 8.1).
+    pub(crate) async fn held_across_payee_stop(
+        &self,
+        record_key: &[u8; 32],
+        record: &ActivityRecord,
+        crossing_payee: Option<[u8; 32]>,
+    ) -> Result<bool> {
         let hold = self.local_get::<RestoreHold>(key::RESTORE_HOLD).await?;
         let own = hold.as_ref().is_some_and(RestoreHold::in_force);
         let unbounded = hold.as_ref().is_some_and(RestoreHold::holds_all)
@@ -619,7 +634,7 @@ impl Paykit {
                 return Ok(false);
             }
         }
-        if payment_ended(record, None) {
+        if payment_ended(record, crossing_payee) {
             return Ok(false);
         }
         if self
@@ -813,46 +828,33 @@ impl Paykit {
             }
         }
         // So is the raise of the block floor owed (`crate::floor`).
-        if let Some(floor) = self.local_get::<u64>(key::BLOCK_FLOOR).await? {
-            if floor > bound {
-                tx.put(key::BLOCK_FLOOR, &bound)?;
+        if let Some(mut pending) = self
+            .local_get::<crate::floor::PendingUnblocks>(key::BLOCK_FLOOR)
+            .await?
+        {
+            if pending.to_ms > bound {
+                pending.to_ms = bound;
+                tx.put(key::BLOCK_FLOOR, &pending)?;
             }
         }
         // A missed item's window and a restore's first list read have independent effects
         // even when their start times coincide.
-        let mut at_bound = None::<u64>;
-        for (_, window) in self
-            .local_scan::<crate::marks::BlockedWindow>(key::BLOCKED_WIDENINGS)
+        for (_, mut widening) in self
+            .local_scan::<crate::marks::MissedWidening>(key::BLOCKED_WIDENINGS)
             .await?
         {
-            let end = if window.until_ms == crate::marks::BlockedWindow::TO_NOW {
-                window.until_ms
-            } else {
-                window.until_ms.min(bound)
-            };
-            if window.from_ms >= bound {
-                if window.from_ms > bound {
-                    tx.delete(&key::blocked_widening(window.from_ms));
+            let mut changed = false;
+            for window in &mut widening.windows {
+                if window.until_ms > bound {
+                    window.from_ms = window.from_ms.min(bound);
+                    window.until_ms = bound;
+                    window.floor_ms = window.floor_ms.min(bound);
+                    changed = true;
                 }
-                at_bound = Some(at_bound.map_or(end, |previous| previous.max(end)));
-            } else if end != window.until_ms {
-                tx.put(
-                    &key::blocked_widening(window.from_ms),
-                    &crate::marks::BlockedWindow {
-                        until_ms: end,
-                        ..window
-                    },
-                )?;
             }
-        }
-        if let Some(until_ms) = at_bound {
-            tx.put(
-                &key::blocked_widening(bound),
-                &crate::marks::BlockedWindow {
-                    from_ms: bound,
-                    until_ms,
-                },
-            )?;
+            if changed {
+                tx.put(&key::blocked_widening(widening.id.as_bytes()), &widening)?;
+            }
         }
         if let Some(hold) = hold.as_mut() {
             hold.widening_from_ms = hold.widening_from_ms.map(|start| start.min(bound));
@@ -1527,6 +1529,9 @@ impl Paykit {
         };
         let mut tx = Tx::default();
         let mut lists_due = false;
+        if self.floor_write_is_kept().await? {
+            return Ok(false);
+        }
         match (hold.verdict, clean) {
             (RestoreVerdict::Open, true) => {
                 let missed = self

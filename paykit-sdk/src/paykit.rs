@@ -1095,7 +1095,10 @@ impl Paykit {
             });
         }
         self.refresh_own()?;
-        if self.first_read_pending() {
+        // The client retries kept batches before the feed. Until a floor batch settles,
+        // its local mark and restore updates still belong to that batch. Hand the host
+        // the read normally and leave those updates and outgoing asks for the next pass.
+        if self.first_read_pending() || self.floor_write_is_kept().await? {
             let applied = report
                 .events
                 .iter()
@@ -1216,7 +1219,7 @@ impl Paykit {
         // read's events were taken.
         Box::pin(self.end_confirmed_marks()).await?;
         let divergent = Box::pin(self.newly_paused(&paused_before)).await?;
-        Box::pin(self.tend_private_lists()).await?;
+        Box::pin(self.tend_private_lists(Some(&report))).await?;
         Ok(ReceiveSummary {
             report,
             applied,
