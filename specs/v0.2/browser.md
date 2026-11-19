@@ -176,7 +176,7 @@ v0.2 freezes when five items are done (`v02:specs/v0.2/spec.md:3`,
 
 **Open note N2 (waiting on v0.2): the freeze items.** Undecided: the outcomes
 of the five items above. Resolved by: the team's freeze review. Blocks:
-rollout steps 1 to 3.
+merging rollout steps 1 to 3 (see [Rollout](#rollout)).
 
 The release date is not set. It waits on the freeze items (N2) and the dates in
 Paykit decision 20's phased plan (N1). Rollout also has gates on #537
@@ -1489,8 +1489,10 @@ that waits on open note N8.
 
 ## Rollout
 
-Each step waits on the one before. Steps 1 to 3 wait on the v0.2 freeze, so
-they build on a stable spec. Step 3 also waits on the v0.2 release. The asks
+Each step waits on the one before. Work on steps 1 to 3 may start before the
+v0.2 freeze, as stacked pull requests on the `v0.2` branch that are rebased as
+it moves. None of them merges before the freeze, so what merges is built on a
+stable spec. Step 3's release also waits on the v0.2 release. The asks
 in [Before the v0.2 freeze](#before-the-v02-freeze) gate the steps as follows.
 Gates on #537:
 
