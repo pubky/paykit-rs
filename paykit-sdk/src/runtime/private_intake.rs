@@ -608,7 +608,7 @@ enum PrivateIntakeEventRoute {
     Hint(PrivateIntakeCursorRecord),
     /// The event cannot announce a packet. Its cursor is only committed after
     /// a later successful audit of the same peer.
-    Ignored(PrivateIntakeCursorRecord),
+    Ignored { peer: PubkyPublicKey, event_id: u64 },
 }
 
 /// Route an event to its subscribed peer's replay cursor, or `None` when the
@@ -636,15 +636,15 @@ fn route_private_intake_event(
             &event,
         )
     });
-    let cursor = PrivateIntakeCursorRecord {
-        subscribed_user: peer,
-        homeserver: group.homeserver_name.clone(),
-        event_id: event.cursor.id(),
-    };
+    let event_id = event.cursor.id();
     Some(if is_hint {
-        PrivateIntakeEventRoute::Hint(cursor)
+        PrivateIntakeEventRoute::Hint(PrivateIntakeCursorRecord {
+            subscribed_user: peer,
+            homeserver: group.homeserver_name.clone(),
+            event_id,
+        })
     } else {
-        PrivateIntakeEventRoute::Ignored(cursor)
+        PrivateIntakeEventRoute::Ignored { peer, event_id }
     })
 }
 
@@ -978,11 +978,26 @@ where
     match route_private_intake_event(group, scopes, event)? {
         PrivateIntakeEventRoute::Hint(cursor) => {
             let peer = cursor.subscribed_user.clone();
+            let event_id = cursor.event_id;
             let outcome = acquire(peer.clone(), Some(cursor)).await;
+            // A successful acquisition for this event supersedes the peer's
+            // earlier ignored events, so a later audit does not write a
+            // cursor behind the one this acquisition may have stored, which
+            // storage rejects as a regression after a wasted transaction.
+            // Dropping an ignored ID can only mean committing less: the
+            // worst case is replaying irrelevant events after a reconnect,
+            // never a skipped packet. A failed acquisition keeps the entry.
+            if outcome.is_ok()
+                && ignored
+                    .get(&peer)
+                    .is_some_and(|&ignored_id| ignored_id <= event_id)
+            {
+                ignored.remove(&peer);
+            }
             Some((peer, outcome))
         }
-        PrivateIntakeEventRoute::Ignored(cursor) => {
-            record_ignored_private_intake_event(ignored, cursor.subscribed_user, cursor.event_id);
+        PrivateIntakeEventRoute::Ignored { peer, event_id } => {
+            record_ignored_private_intake_event(ignored, peer, event_id);
             None
         }
     }
@@ -4074,8 +4089,8 @@ mod tests {
             let event_id = event.cursor.id();
             assert!(matches!(
                 route_private_intake_event(&group, &scopes, event),
-                Some(PrivateIntakeEventRoute::Ignored(cursor))
-                    if cursor.subscribed_user == scoped_peer && cursor.event_id == event_id
+                Some(PrivateIntakeEventRoute::Ignored { peer, event_id: ignored_id })
+                    if peer == scoped_peer && ignored_id == event_id
             ));
         }
         for event in irrelevant_intake_events(&fixture) {
@@ -4540,19 +4555,19 @@ mod tests {
                 event_id,
             )
         };
+        // Sync points come from a second, unfiltered peer, so their
+        // successful acquisitions never supersede `peer`'s ignored cursors.
+        let sync_owner = pubky::Keypair::random().public_key();
         let hint = |event_id| {
             put_event(
-                peer_resource(
-                    &fixture.remote,
-                    &format!("{}/{event_id}", fixture.read_folder),
-                ),
+                peer_resource(&sync_owner, &format!("{}/{event_id}", fixture.read_folder)),
                 event_id,
             )
         };
         let group = SubscriptionGroup {
             homeserver: pubky::Keypair::random().public_key(),
             homeserver_name: "homeserver-a".into(),
-            peers: vec![peer.clone()],
+            peers: vec![peer.clone(), PubkyPublicKey::from_public_key(&sync_owner)],
         };
         let scopes = StdMutex::new(PrivateIntakeEventScopes {
             read_folders: HashMap::from([(peer.clone(), fixture.read_folder.clone())]),
@@ -4679,6 +4694,128 @@ mod tests {
                 .unwrap(),
             PrivateIntakeEventLoopExit::Stopped
         ));
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_successful_hint_supersedes_earlier_ignored_cursor() {
+        let fixture = scoped_intake_fixture();
+        let peer = PubkyPublicKey::from_public_key(&fixture.remote);
+        let other_folder = other_link_folder(&fixture.read_folder);
+        let ignored_event = |event_id| {
+            put_event(
+                peer_resource(&fixture.remote, &format!("{other_folder}/{event_id}")),
+                event_id,
+            )
+        };
+        let hint_event = |event_id| {
+            put_event(
+                peer_resource(
+                    &fixture.remote,
+                    &format!("{}/{event_id}", fixture.read_folder),
+                ),
+                event_id,
+            )
+        };
+        let group = SubscriptionGroup {
+            homeserver: pubky::Keypair::random().public_key(),
+            homeserver_name: "homeserver-a".into(),
+            peers: vec![peer.clone()],
+        };
+        let scopes = StdMutex::new(PrivateIntakeEventScopes {
+            read_folders: HashMap::from([(peer.clone(), fixture.read_folder.clone())]),
+        });
+        let audit: PrivateIntakeAudit = Arc::new({
+            let peer = peer.clone();
+            move || {
+                let audited = PrivateIntakeAuditOutcome {
+                    audited_peers: HashSet::from([peer.clone()]),
+                    ..PrivateIntakeAuditOutcome::default()
+                };
+                Box::pin(async move { audited })
+            }
+        });
+        let commits = Arc::new(StdMutex::new(Vec::<Vec<u64>>::new()));
+        let commit_cursors: PrivateIntakeCommitCursors = Arc::new({
+            let commits = Arc::clone(&commits);
+            move |cursors: Vec<PrivateIntakeCursorRecord>| {
+                commits
+                    .lock()
+                    .unwrap()
+                    .push(cursors.iter().map(|cursor| cursor.event_id).collect());
+                Box::pin(async {})
+            }
+        });
+        let mut succeed = |_: PubkyPublicKey, _: Option<PrivateIntakeCursorRecord>| async {
+            Ok(PrivatePacketAcquisition::Absent)
+        };
+        let mut fail = |_: PubkyPublicKey, _: Option<PrivateIntakeCursorRecord>| async {
+            Err(PaykitSdkError::Transport {
+                context: "fetch expected private intake slot".into(),
+                source: None,
+            })
+        };
+        let mut ignored = PrivateIntakeIgnoredCursors::new();
+        let committed_ids = || std::mem::take(&mut *commits.lock().unwrap());
+
+        // A successful hint supersedes the ignored event before it, so the
+        // next audit commits nothing for the peer.
+        process_private_intake_event(
+            &group,
+            &scopes,
+            &mut ignored,
+            ignored_event(10),
+            &mut succeed,
+        )
+        .await;
+        assert_eq!(ignored, HashMap::from([(peer.clone(), 10)]));
+        process_private_intake_event(&group, &scopes, &mut ignored, hint_event(11), &mut succeed)
+            .await;
+        assert!(ignored.is_empty());
+        audit_private_intake_stream(&audit, "homeserver-a", &mut ignored, &commit_cursors).await;
+        assert!(committed_ids().is_empty());
+
+        // An ignored event after the hint still commits, and so does one
+        // with a higher ID than a successful hint.
+        process_private_intake_event(
+            &group,
+            &scopes,
+            &mut ignored,
+            ignored_event(12),
+            &mut succeed,
+        )
+        .await;
+        audit_private_intake_stream(&audit, "homeserver-a", &mut ignored, &commit_cursors).await;
+        assert_eq!(committed_ids(), vec![vec![12]]);
+        process_private_intake_event(
+            &group,
+            &scopes,
+            &mut ignored,
+            ignored_event(14),
+            &mut succeed,
+        )
+        .await;
+        process_private_intake_event(&group, &scopes, &mut ignored, hint_event(13), &mut succeed)
+            .await;
+        assert_eq!(ignored, HashMap::from([(peer.clone(), 14)]));
+        audit_private_intake_stream(&audit, "homeserver-a", &mut ignored, &commit_cursors).await;
+        assert_eq!(committed_ids(), vec![vec![14]]);
+
+        // A hint whose acquisition fails keeps the ignored event.
+        process_private_intake_event(
+            &group,
+            &scopes,
+            &mut ignored,
+            ignored_event(20),
+            &mut succeed,
+        )
+        .await;
+        let failed =
+            process_private_intake_event(&group, &scopes, &mut ignored, hint_event(21), &mut fail)
+                .await;
+        assert!(matches!(failed, Some((_, Err(_)))));
+        assert_eq!(ignored, HashMap::from([(peer.clone(), 20)]));
+        audit_private_intake_stream(&audit, "homeserver-a", &mut ignored, &commit_cursors).await;
+        assert_eq!(committed_ids(), vec![vec![20]]);
     }
 
     #[tokio::test]

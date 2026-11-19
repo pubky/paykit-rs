@@ -1402,7 +1402,8 @@ group's stream, and a topology change, such as a homeserver move, or a restart
 after buffer capacity is released starts a new task with no recorded folders.
 
 The connected stream remembers the highest ignored event per peer in memory.
-After an audit that finds the peer's next expected slot absent, it advances
+A later relevant event from that peer whose acquisition succeeds drops it,
+which only means committing less. After an audit that finds the peer's next expected slot absent, it advances
 the stored per-user cursor to that event unless the cursor is already past it,
 so a reconnect does not replay it. Any audit outcome other than an absent
 expected slot, such as a pending Encrypted Link Handshake, an already buffered
