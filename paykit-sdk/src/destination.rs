@@ -614,7 +614,7 @@ pub(crate) fn carries(
 
 /// A public endpoint's record carries it (Paykit spec 4, Paykit wire 3.2): the payee's
 /// record of the app the destination names, whose Paykit member reads and lists the
-/// endpoint with its payload, that has its `expires_at` after `now` and whose `updated_at`
+/// endpoint with its payload, that is before any signed deadline and whose `updated_at`
 /// isn't ahead of the payer's clock.
 fn record_carries(
     payee: &[u8; 32],
@@ -640,11 +640,20 @@ fn record_carries(
     {
         return Err("Paykit spec 7.2: the record doesn't carry the destination".into());
     }
+    check_record_time(record, now).map_err(str::to_owned)
+}
+
+/// Time limits signed into the record itself (Paykit spec 4). The identity document
+/// supplies the additional age limit when the payer checks the publishing app.
+pub(crate) fn check_record_time(
+    record: &AppRecord,
+    now: u64,
+) -> std::result::Result<(), &'static str> {
     if record.is_ahead(now) {
-        return Err("Paykit spec 4: the record's updated_at is ahead of the clock".into());
+        return Err("Paykit spec 4: the record's updated_at is ahead of the clock");
     }
-    if record.expires_at().is_none_or(|at| at <= now) {
-        return Err("Paykit spec 4: the record has expired".into());
+    if record.expires_at().is_some_and(|at| at <= now) {
+        return Err("Paykit spec 4: the record is past its expires_at");
     }
     Ok(())
 }

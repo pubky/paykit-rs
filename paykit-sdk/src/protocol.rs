@@ -713,13 +713,6 @@ pub(crate) fn restore_paykit_layer(
                 }
                 continue;
             }
-            // A restored app applies the owed expiry policy to its current member after
-            // its confirmed first read (`own_record.rs`).
-            StateKey::RecordExpiryOwed => {
-                state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
-                writes.push(LocalWrite::Put { key, value });
-                continue;
-            }
             StateKey::LossBoundary => {
                 state::restored::<crate::LossBoundary>(&key, &value, &binder)
                     .map_err(|_| unread())?;

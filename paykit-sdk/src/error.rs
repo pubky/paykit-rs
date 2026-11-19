@@ -300,6 +300,10 @@ pub enum PaykitError {
     /// own refusals.
     #[error(transparent)]
     Client(AppError),
+    /// The requested public endpoint edit is durable but has no signed record yet.
+    /// The reported signing refusal must be resolved before the client can publish it.
+    #[error("public endpoint change pending: {0}")]
+    PublicEndpointChangePending(#[source] AppError),
     /// A Paykit rule of `paykit-lib`: caller input that fails a structural check
     /// (`Validation`), or network or shared data that breaks a rule (`Invalid`).
     #[error(transparent)]

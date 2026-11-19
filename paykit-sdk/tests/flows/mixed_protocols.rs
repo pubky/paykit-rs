@@ -377,76 +377,284 @@ async fn test_mixed_protocols_join_counts_only_owned_kinds() {
 }
 
 #[tokio::test]
-async fn test_mixed_protocols_withdrawal_refused_by_a_lapsed_expiry_keeps_the_member_readable() {
+async fn test_mixed_protocols_expired_public_offer_and_chat_resume_after_reopen(
+) -> Result<(), Box<dyn std::error::Error>> {
+    use pubky_switch_harness::{Backend, World};
+
+    for backend in [Backend::Scripted, Backend::Service] {
+        for (paykit_first, withdraw_early) in [(true, false), (false, false), (true, true)] {
+            let Some(world) = World::start(backend)? else {
+                continue;
+            };
+            let result =
+                Box::pin(withdraw_public_offer(&world, paykit_first, withdraw_early)).await;
+            world.close().await?;
+            result?;
+        }
+    }
+    Ok(())
+}
+
+async fn withdraw_public_offer(
+    world: &pubky_switch_harness::World,
+    paykit_first: bool,
+    withdraw_early: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use paykit_lib::{app_record::PaykitMember, PaymentEndpointPayload};
+    use paykit_sdk::{rail::FakeRail, PaykitError};
+    use pubky_switch_client::app::{AppConfig, Publication, RecordExpiry};
+    use pubky_switch_core::records::{app_record_path, AppRecord};
+    use pubky_switch_core::sig::SignedDoc;
+    use pubky_switch_harness::parties::{Asking, Sample, CHAT};
+    use pubky_switch_signer::{Protocols, Signer};
+
+    let seller = world.identity("seller")?;
+    let origin = "https://seller.public-endpoints.test";
+    world.add_switch(origin, &[&seller]).await?;
+    let mut signer_env = world.signer_env(&seller, store())?;
+    signer_env.protocols = Protocols::new(vec![
+        Arc::new(paykit_lib::signer::PaykitProtocol),
+        Arc::new(Sample(CHAT)),
+    ])?;
+    let mut signer = Box::pin(Signer::create(signer_env, world.keyring(&seller)?, origin)).await?;
+    signer.resume().await?;
+    let mut scopes = AppScopes::new().request().pay().build()?.scopes;
+    scopes.push(CHAT.into());
+    let scopes: Vec<_> = scopes.iter().map(String::as_str).collect();
+    let asking = Asking::for_scopes_with_paths(
+        world.app_keys(&seller, "shop")?,
+        &scopes,
+        &[],
+        pubky_switch_core::enc::hash(b"shop"),
+    )?;
+    let approval = signer.review(asking.request.signed(), &asking.auth)?;
+    let approved = Box::pin(signer.approve(approval)).await?;
+    signer.claim_delivered(&approved.request).await?;
+    let storage = store();
+    let rail: Arc<dyn Rail> = Arc::new(FakeRail::with_clock(world.clock().clone()));
+    let timer: Arc<dyn paykit_sdk::Timer> = Arc::new(crate::common::TestTimer {
+        clock: world.clock().clone(),
+    });
+    let config = PaykitConfig::default().with_app(AppConfig {
+        publishes_record: true,
+        ..AppConfig::default()
+    });
+    world.advance_ms(1_000);
+    let mut wallet = Box::pin(Paykit::join_with_protocols(
+        world.app_env(storage.clone()),
+        config.clone(),
+        asking.join_request(seller.public(), &approved)?,
+        rail.clone(),
+        timer.clone(),
+        register,
+    ))
+    .await?;
+    let id = crate::common::endpoint("btc-lightning-bolt12");
+    let hour = crate::common::HOUR_MS;
+    let cutoff = world.now_ms() + 2 * hour;
+    let endpoints =
+        std::collections::BTreeMap::from([(id.clone(), PaymentEndpointPayload::new("lno1tips")?)]);
+    wallet.set_public_endpoints(endpoints, Some(cutoff)).await?;
+    wallet
+        .app_mut()
+        .set_protocol_member(CHAT, chat_member(), Some(cutoff - hour))
+        .await?;
+    let app_id = wallet.app_id();
+    let path = app_record_path(&app_id);
+    let old = world
+        .files()
+        .file(seller.public(), &path)
+        .ok_or("missing published record")?;
+    let desired = wallet.app_mut().protocol_record("paykit").await?;
+    assert_eq!(desired.expiry, RecordExpiry::At(cutoff));
+    let boundary = if withdraw_early {
+        cutoff - hour
+    } else {
+        cutoff
+    };
+    world.advance_ms(boundary - world.now_ms());
+    let chat_cutoff = cutoff + hour;
+    let mut chat = chat_member().unwrap();
+    chat.insert("room".into(), serde_json::json!("garden"));
+    if paykit_first {
+        let error = wallet.remove_public_endpoint(&id).await.unwrap_err();
+        assert!(
+            matches!(error, PaykitError::PublicEndpointChangePending(_)),
+            "{error:?}"
+        );
+        let desired = wallet.app_mut().protocol_record("paykit").await?;
+        assert!(desired.pending);
+        assert_eq!(desired.expiry, RecordExpiry::Never);
+        assert!(PaykitMember::from_member(desired.member.as_ref())?
+            .public_endpoints
+            .is_empty());
+    } else {
+        wallet
+            .app_mut()
+            .set_protocol_member(CHAT, Some(chat.clone()), Some(chat_cutoff))
+            .await
+            .unwrap_err();
+        assert!(wallet.app_mut().protocol_record(CHAT).await?.pending);
+    }
+    assert!(wallet.own_public_endpoints()?.contains_key(&id));
+    assert_eq!(
+        world.files().file(seller.public(), &path).as_ref(),
+        Some(&old)
+    );
+    drop(wallet);
+    let mut wallet = Box::pin(Paykit::load_with_protocols(
+        world.app_env(storage),
+        config,
+        app_id,
+        rail,
+        timer,
+        register,
+    ))
+    .await?;
+    let publication = if paykit_first {
+        assert!(wallet.app_mut().protocol_record("paykit").await?.pending);
+        if withdraw_early {
+            world.lose_answer("POST", "/ops");
+        }
+        let sent = wallet
+            .app_mut()
+            .set_protocol_member(CHAT, Some(chat.clone()), Some(chat_cutoff))
+            .await;
+        if withdraw_early {
+            assert!(matches!(sent, Err(AppError::Transport(_))), "{sent:?}");
+            assert!(!wallet.app_mut().protocol_record("paykit").await?.pending);
+            assert!(wallet.own_public_endpoints()?.is_empty());
+            let withdrawn = wallet.app().record().clone();
+            assert_eq!(
+                world.files().file(seller.public(), &path).as_ref(),
+                Some(&old)
+            );
+            let delivered = wallet.update_own_record().await?;
+            assert_eq!(wallet.app().record(), &withdrawn);
+            delivered
+        } else {
+            sent?
+        }
+    } else {
+        wallet.update_own_record().await?
+    };
+    assert_eq!(publication, Publication::Published);
+    let current = AppRecord::verify(wallet.app().record(), &seller.public())?;
+    assert_eq!(current.expires_at(), Some(chat_cutoff));
+    assert_eq!(current.body().protocol(CHAT), Some(&chat));
+    let paykit = PaykitMember::read(&current)?;
+    assert!(paykit.public_endpoints.is_empty());
+    assert!(!paykit.endpoint_identifiers.is_empty());
+    let bytes = world
+        .files()
+        .file(seller.public(), &path)
+        .ok_or("missing withdrawn record")?;
+    assert_ne!(bytes, old);
+    assert_eq!(
+        &serde_json::from_slice::<SignedDoc>(&bytes)?,
+        current.signed()
+    );
+    let desired = wallet.app_mut().protocol_record("paykit").await?;
+    assert!(!desired.pending);
+    assert_eq!(desired.expiry, RecordExpiry::Never);
+    wallet.receive(None).await?;
+    assert_eq!(wallet.app().record(), current.signed());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_mixed_protocols_full_null_record_keeps_the_unchanged_payer_capabilities() {
+    use paykit_sdk::PaykitError;
+    use pubky_switch_client::app::AppConfig;
+    use pubky_switch_core::ops::{sign_batch, OpKind, MAX_OP_BYTES};
+    use pubky_switch_core::records::AppRecord;
+    use serde_json::{Map, Value};
+
     let w = world();
-    let mut scopes = AppScopes::new().request().build().unwrap();
-    scopes.scopes.push("chat".into());
-    let mut app = Paykit::join_with_protocols(
+    w.rail
+        .set_endpoint_identifiers(vec![crate::common::endpoint("btc")]);
+    let mut wallet = Box::pin(Paykit::join_with_protocols(
         w.env(&w.alice, store()),
-        PaykitConfig::default().with_app(pubky_switch_client::app::AppConfig {
+        PaykitConfig::default().with_app(AppConfig {
             publishes_record: true,
-            ..pubky_switch_client::app::AppConfig::default()
+            ..AppConfig::default()
         }),
-        w.approve(&w.alice, "mixed", &scopes),
+        w.approve(&w.alice, "mixed", &scopes()),
         Arc::clone(&w.rail) as Arc<dyn Rail>,
         w.timer(),
         register,
-    )
+    ))
     .await
     .unwrap();
-    let id = paykit_lib::PaymentEndpointIdentifier::new("btc-lightning-bolt12").unwrap();
-    app.set_public_endpoint(
-        id.clone(),
-        paykit_lib::PaymentEndpointPayload::new("lno1tips").unwrap(),
-    )
-    .await
-    .unwrap();
-    // Chat's member asks for a fixed expiry, an hour on, which then lapses.
-    let chat = || {
-        let mut member = serde_json::Map::new();
-        member.insert("room".into(), serde_json::json!("lobby"));
-        Some(member)
+    let key = w.alice.identity().app_keys("mixed");
+    let signed = AppRecord::verify(wallet.app().record(), &w.alice_id()).unwrap();
+    let app_id = wallet.app_id();
+    let generation = wallet.app().own_identity().generation();
+    let padding = |bytes| Map::from_iter([("text".into(), Value::String("x".repeat(bytes)))]);
+    let fits = |bytes, expiry| {
+        let mut body = signed.body().clone();
+        body.protocols.insert("chat".into(), padding(bytes));
+        body.updated_at = signed.updated_at() + 1;
+        body.expires_at = expiry;
+        AppRecord::sign(&key, body).is_ok_and(|record| {
+            sign_batch(
+                &key,
+                &w.alice_id(),
+                Some(app_id),
+                generation,
+                [0; 16],
+                vec![(
+                    Vec::new(),
+                    OpKind::AppPut {
+                        record: record.signed().clone(),
+                    },
+                )],
+            )
+            .is_ok()
+        })
     };
-    let hour = 3_600_000;
-    let deadline = pubky_switch_client::clock::Clock::now_ms(w.clock.as_ref()) + hour;
-    app.app_mut()
-        .set_protocol_member("chat", chat(), Some(deadline))
+    let mut low = 0;
+    let mut high = MAX_OP_BYTES;
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        if fits(middle, None) {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    assert!(fits(low, None));
+    assert!(!fits(low + 1, None));
+    assert!(!fits(
+        low,
+        Some(signed.updated_at() + crate::common::HOUR_MS)
+    ));
+    wallet
+        .app_mut()
+        .set_protocol_member("chat", Some(padding(low)), None)
         .await
         .unwrap();
-    w.clock.advance_ms(2 * hour);
-    // The last withdrawal can't be signed while chat's expiry has lapsed: the endpoint stays
-    // under Paykit's lifetime, and the record still reads.
-    assert!(app.remove_public_endpoint(&id).await.is_err());
-    assert_eq!(app.own_public_endpoints().unwrap().len(), 1);
-    // Chat asks for no expiry: the record signed then carries Paykit's lifetime with the
-    // endpoint, so it still reads, and a receive goes through.
-    app.app_mut()
-        .set_protocol_member("chat", chat(), None)
-        .await
-        .unwrap();
-    assert_eq!(app.own_public_endpoints().unwrap().len(), 1);
-    app.receive(None).await.unwrap();
-    let held =
-        pubky_switch_core::records::AppRecord::verify(app.app().record(), &w.alice_id()).unwrap();
-    assert!(held.expires_at().is_some());
-    // The withdrawal goes through now, and Paykit's ask goes with it: no expiry is left.
-    app.remove_public_endpoint(&id).await.unwrap();
-    assert!(app.own_public_endpoints().unwrap().is_empty());
-    let held =
-        pubky_switch_core::records::AppRecord::verify(app.app().record(), &w.alice_id()).unwrap();
-    assert_eq!(held.expires_at(), None);
-    app.receive(None).await.unwrap();
-    // Chat asks for an expiry again: a record without public endpoints whose expiry is
-    // chat's alone is left as it is, receive after receive.
-    let deadline = pubky_switch_client::clock::Clock::now_ms(w.clock.as_ref()) + 2 * hour;
-    app.app_mut()
-        .set_protocol_member("chat", chat(), Some(deadline))
-        .await
-        .unwrap();
-    let signed = app.app().record().clone();
-    app.receive(None).await.unwrap();
-    app.receive(None).await.unwrap();
-    assert_eq!(app.app().record(), &signed);
+    let full = wallet.app().record().clone();
+    wallet.update_own_record().await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().record(), &full);
+
+    w.rail
+        .set_endpoint_identifiers(vec![crate::common::endpoint("btc-lightning-bolt12")]);
+    let error = wallet.update_own_record().await.unwrap_err();
+    assert!(matches!(
+        error,
+        PaykitError::Client(AppError::Refused(Refusal::Usage(_)))
+    ));
+    assert_eq!(wallet.app().record(), &full);
+    assert!(
+        !wallet
+            .app_mut()
+            .protocol_record("paykit")
+            .await
+            .unwrap()
+            .pending
+    );
 }
 
 /// Alice's app owning chat and Paykit, holding `paykit_request`, publishing its record.
@@ -558,13 +766,13 @@ async fn test_mixed_protocols_member_expiry_repair_survives_reload_and_final_wit
         } else if publishing {
             second.update_own_record().await.unwrap();
         } else {
-            // An unchanged endpoint edit also owes the policy-only repair.
+            // Re-offering the empty set after reopen keeps the withdrawal.
             second
-                .set_public_endpoints(Default::default())
+                .set_public_endpoints(Default::default(), None)
                 .await
                 .unwrap();
         }
-        assert_ne!(second.app().record(), &before);
+        assert_eq!(second.app().record(), &before);
         let repaired = second.app().record().clone();
         second.receive(None).await.unwrap();
         assert_eq!(second.app().record(), &repaired);
@@ -578,7 +786,14 @@ async fn test_mixed_protocols_member_expiry_repair_survives_reload_and_final_wit
             .await
             .unwrap();
         let record = AppRecord::verify(second.app().record(), &w.alice_id()).unwrap();
-        assert_eq!(record.expires_at().is_some(), publishing);
+        assert_eq!(record.expires_at(), None);
+        assert_eq!(
+            !paykit_lib::app_record::PaykitMember::read(&record)
+                .unwrap()
+                .public_endpoints
+                .is_empty(),
+            publishing
+        );
     }
 }
 
