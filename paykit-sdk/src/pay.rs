@@ -107,6 +107,7 @@ pub struct PayOptions {
     /// gave it (Paykit spec 7.1, 7.2). Only that same doubt is passed: the SDK reads the
     /// claim again, and a doubt that changed since, such as another own app's attempt turned
     /// `unknown` or flagged `possibly_duplicate`, is refused again with the new one.
+    /// A Billing Period with incomplete pre-loss payment history stays held.
     pub may_be_paid_confirmed: Option<PaymentDoubt>,
     /// The transfer the user was shown and chose to pay anyway, as a refusal for another
     /// amount, or a fee above the app's cap, gave it ([`Refusal::Transfer`]; Paykit spec 7.2
@@ -302,8 +303,9 @@ pub struct PaymentDoubt {
     /// service, and nothing of that reaches the new one (Paykit spec 7.3). It names the loss
     /// that decides the doubt now, so a confirmation of a doubt shown under an older loss
     /// is refused again once a newer one decides. The host shows the user that it may
-    /// already be paid; the user pays over it, or states that it wasn't paid before that
-    /// loss ([`Paykit::confirm_not_paid_before_loss`], with it), which ends it.
+    /// already be paid. For a one-time request the user can pay over the doubt or state
+    /// that it wasn't paid before that loss ([`Paykit::confirm_not_paid_before_loss`]).
+    /// A Billing Period with incomplete pre-loss payment history stays held.
     pub before_loss: Option<crate::LossBoundary>,
 }
 
@@ -1595,15 +1597,16 @@ impl Paykit {
     /// SETTLED claim is paid; another open attempt is another wallet's; a pinned deadline
     /// other than this app's may already be paid, with no confirmation passing it. Otherwise
     /// the doubt, `restored` with the claim's and a provider loss's for `request`, or its
-    /// Billing Period starting at `period_starts_at_ms`, read now: a doubtful one is refused
+    /// Billing Period named by `period`, read now: a doubtful one is refused
     /// with it ([`PaymentDoubt`]) unless the user confirmed exactly it, and one a provider
     /// loss leaves in doubt is refused an automatic payment `by` whatever was confirmed.
+    /// A Billing Period with unresolved pre-loss history also holds a manual payment.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn claim_step(
         &mut self,
         obligation: &[u8; 32],
         request: &StoredMessage,
-        period_starts_at_ms: Option<u64>,
+        period: Option<PeriodRef>,
         deadline: Option<u64>,
         restored: Vec<AttemptId>,
         options: &PayOptions,
@@ -1637,9 +1640,7 @@ impl Paykit {
             );
         }
         // A SETTLED claim is refused above.
-        let before_loss = self
-            .loss_doubt(obligation, Some(request), period_starts_at_ms)
-            .await?;
+        let before_loss = self.loss_doubt(obligation, Some(request), period).await?;
         let doubt = PaymentDoubt {
             obligation: *obligation,
             step: view.as_ref().map(|v| v.step),
@@ -1653,8 +1654,9 @@ impl Paykit {
             early_pin: kept.early_pin,
             before_loss,
         };
-        let automatic_over_loss = before_loss.is_some() && by == Initiator::Automatic;
-        if automatic_over_loss
+        let held_after_loss =
+            before_loss.is_some() && (period.is_some() || by == Initiator::Automatic);
+        if held_after_loss
             || doubt.doubtful() && options.may_be_paid_confirmed.as_ref() != Some(&doubt)
         {
             let reason = if !doubt.restored.is_empty() {
@@ -2645,6 +2647,9 @@ impl Paykit {
         let mut attempted = entry.clone();
         attempted.stage = Stage::Attempted;
         batch = batch.local(journal_write(&attempted)?);
+        if Box::pin(self.period_recovery_held(&entry)).await? {
+            return Err(Refusal::NotNow(crate::loss::LOSS_DOUBT.into()).into());
+        }
         // The attempt ID is journaled before the write (Paykit spec 7.2), once the batch is
         // built: a batch that can't be built leaves no open entry behind it.
         self.save(&entry).await?;
@@ -3096,7 +3101,11 @@ impl Paykit {
         // and accepting only its bound consent ([`Paykit::dispatch_held`]). A first
         // dispatch goes back to `Attempted`, known unsubmitted, as it does when the fence
         // stops it; a repeat stays open.
-        if self.dispatch_held(&entry, by, kind).await.unwrap_or(true) {
+        if self.dispatch_held(&entry, by, kind).await.unwrap_or(true)
+            || Box::pin(self.period_recovery_held(&entry))
+                .await
+                .unwrap_or(true)
+        {
             return self
                 .stopped_before_the_call(entry, kind, FinalCheck::Hold)
                 .await;
