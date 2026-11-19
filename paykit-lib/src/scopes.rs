@@ -16,7 +16,7 @@
 //! that fails them is invalid at Paykit's verifiers even though the switch takes it and
 //! enforces its signed `permissions` (Paykit wire 3.1).
 
-use pubky_switch_core::records::AppCert;
+use pubky_switch_core::records::{AppCert, IdentityDoc, Standing};
 use pubky_switch_core::scopes::{self as switch_scopes, Permission};
 use pubky_switch_core::sig::SignedDoc;
 
@@ -491,6 +491,22 @@ pub fn verify_certificate(signed: &SignedDoc, identity: &[u8; 32]) -> Result<App
     let cert = AppCert::verify(signed, identity)?;
     check_certificate(&cert)?;
     Ok(cert)
+}
+
+/// Whether a verified certificate was in force at the service-authenticated time of a
+/// record write (Switch wire 6.2, step 4). A removal includes its cutoff and a closed
+/// renewal excludes its end.
+pub fn certificate_in_force_at_write(identity: &IdentityDoc, cert: &AppCert, written: u64) -> bool {
+    let counts = match identity.standing(&cert.app_id(), &cert.hash()) {
+        Standing::Listed | Standing::RenewedOpen => true,
+        Standing::RenewedClosed { until } => written < until,
+        Standing::Removed { distrust_from } => written <= distrust_from,
+        Standing::None => false,
+    };
+    counts
+        && cert.identity() == identity.identity()
+        && cert.issued_at() <= written
+        && !cert.expired_at(written)
 }
 
 /// The scopes among `scopes` that have scope keys (Paykit spec 3.5), in order: Paykit's

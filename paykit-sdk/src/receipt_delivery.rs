@@ -60,8 +60,7 @@ impl ReceiptApplication {
             || op.body().generation != doc.generation()
             || op.body().batch.id != self.batch
             || cert.app_id() != *app_id
-            || !doc.standing(app_id, &cert.hash()).counts_at(dated.time)
-            || cert.expired_at(dated.time)
+            || !paykit_lib::scopes::certificate_in_force_at_write(&doc, &cert, dated.time)
             || put.key != *record
             || put.collection != collection_id(Collection::PayeeActivity.name(), identity)
             || put.value_sealed.scope != put.policy.read_scope
