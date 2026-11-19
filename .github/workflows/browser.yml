@@ -29,6 +29,13 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo clippy --locked --target wasm32-unknown-unknown -p paykit-browser --all-targets -- -D warnings
+      # The library alone: `--all-targets` above also turns on the test-only features of the
+      # dev-dependencies, which the library must build without.
+      - run: cargo check --locked --target wasm32-unknown-unknown -p paykit-browser --lib
+      # The host pieces exist only on wasm32, so the native docs job never builds their docs.
+      - run: cargo doc --locked --no-deps --target wasm32-unknown-unknown -p paykit-browser
+        env:
+          RUSTDOCFLAGS: -D warnings
       - name: No native-only networking or TLS crates in the wasm32 graph
         run: paykit-browser/rig/check-wasm-deps.sh
 
