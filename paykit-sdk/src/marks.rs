@@ -5,16 +5,11 @@
 //! names:
 //!
 //! - **Replies dropped for the bounds on kept replies** (`pd/<sender>`, `receive.rs`): a
-//!   payer's replies at a payee app, and receipts and period details at a payer app. Once
-//!   the app holds the record of a request, of either side, whose counterparty holds such
-//!   a mark (not that of
-//!   a Billing Period or of a payment without a request), it asks that sender to re-send
-//!   what its inbox accepted from the mark's earliest time (`resend_request` with
-//!   `accepted_from`). The client marked such a reply processed when it was kept, so the
-//!   step that drops it forgets its pair, and a re-sent copy is taken as a new message. A
-//!   payee's cancellation kept as a stop for a request the app holds no record of, dropped
-//!   for the bounds on those stops, counts in the same mark, which is then due at once: the
-//!   request it cancels may come at any time.
+//!   payer's replies at a payee app, and receipts and period details at a payer app. The
+//!   app asks the sender to re-send from the mark's earliest acceptance time as soon as
+//!   sending is allowed, including while the record is missing. A payee's cancellation
+//!   dropped for the bound on stops counts in the same mark. The step that drops a kept
+//!   reply forgets its processed pair so that a re-sent copy can be taken again.
 //! - **Entries dropped unverified** (`ud/<sender>`, `stored.rs`). The app asks that sender
 //!   at once to re-send what its inbox accepted from the mark's earliest time to its latest
 //!   (`accepted_from` and `accepted_until`).
@@ -68,8 +63,9 @@
 //! **Cadence.** Once asked, a sender is asked again at most once in any 24 hours while its
 //! mark lives, on the device clock. Asking doesn't change the mark's times. A request that
 //! doesn't reach the sender's inbox counts as not sent: one still queued is tried again at
-//! the next receive, one refused for good, or no longer kept, is asked anew, and the 24 hours
-//! count from the last request the outbox delivered.
+//! the next receive. A request for dropped replies can be replaced after confirmed first
+//! non-delivery. If the outcome is uncertain, overlapping asks wait for reconciliation.
+//! The 24 hours count from the last request the outbox delivered.
 //!
 //! **Expiry and bounds.** A mark goes [`crate::KEPT_MESSAGE_MS`] after its latest time, on the
 //! highest service time verified, once its sender keeps none of the messages it covers.
@@ -92,7 +88,7 @@ use pubky_switch_core::enc::serde_b64;
 use pubky_switch_core::records::DAY_MS;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{PaykitError, Result};
+use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
 use crate::resend::ResendSelection;
 use crate::state::key;
@@ -142,11 +138,8 @@ pub(crate) struct DropMark {
     pub(crate) earliest_ms: u64,
     /// The latest: what the mark expires by.
     pub(crate) latest_ms: u64,
-    /// Whether asking is due: for replies, once the app holds the record of a request, of
-    /// either side, whose counterparty is the sender, or at once once a stop of the sender's
-    /// is dropped for the bounds; for entries dropped unverified, from the start. A mark of
-    /// key waits keeps it `false`: it is due while the app holds the keys it waits for
-    /// ([`KeyWaitMark`]).
+    /// Whether the mark was recorded as due. Reply marks ask as soon as sends are
+    /// permitted. A key wait is due when the app holds its keys ([`KeyWaitMark`]).
     pub(crate) due: bool,
     /// When the outbox last delivered a request for this mark, on the device clock.
     #[serde(deserialize_with = "Option::deserialize")]
@@ -194,6 +187,12 @@ pub(crate) struct QueuedRequest {
     /// anew. `None` for a request queued at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) kept_batch: Option<[u8; 16]>,
+}
+
+impl QueuedRequest {
+    fn matches_signed_request(&self, kind: &str, hash: [u8; 32]) -> bool {
+        kind == paykit_lib::kinds::Kind::ResendRequest.as_str() && self.hash == hash
+    }
 }
 
 /// The most notices of lost messages the app keeps owed (`bl/`, [`LostOwed`]): past it, the
@@ -602,17 +601,16 @@ impl Paykit {
             .all(|scope| self.app.scope_key(epoch, scope).is_some())
     }
 
-    /// Ask on the marks, at a receive (module docs): a reply mark becomes due once the app
-    /// holds the record of a request, of either side, whose counterparty is its sender; a
-    /// mark past its expiry goes; each due mark asks its sender when its cadence allows.
+    /// Ask on live marks at a receive, subject to the sender's holds and the mark's cadence.
     /// Returns how many requests were queued.
-    pub(crate) async fn ask_on_marks(&mut self) -> Result<u64> {
-        self.note_requests_held().await?;
+    pub(crate) async fn ask_on_marks(&mut self, refused: &mut Option<Refusal>) -> Result<u64> {
+        self.reconcile_reply_asks().await?;
         let mut asked = 0u64;
         for family in [MarkFamily::Replies, MarkFamily::Unverified] {
             for (rest, mark) in self.local_scan::<DropMark>(family.prefix()).await? {
-                let due = mark.due;
-                asked = asked.saturating_add(self.on_mark(family, &rest, mark, due).await?);
+                let due = family == MarkFamily::Replies || mark.due;
+                asked =
+                    asked.saturating_add(self.on_mark(family, &rest, mark, due, refused).await?);
             }
         }
         // A mark of key waits asks only while the app holds every key its messages waited
@@ -623,9 +621,9 @@ impl Paykit {
                 .epochs
                 .iter()
                 .all(|epoch| self.holds_epoch_keys(*epoch));
-            asked = asked.saturating_add(self.on_mark(family, &rest, held, due).await?);
+            asked = asked.saturating_add(self.on_mark(family, &rest, held, due, refused).await?);
         }
-        asked = asked.saturating_add(Box::pin(self.ask_on_block_marks()).await?);
+        asked = asked.saturating_add(Box::pin(self.ask_on_block_marks(refused)).await?);
         Ok(asked)
     }
 
@@ -641,7 +639,7 @@ impl Paykit {
     /// a service time. The copy kept from a read under [`crate::LISTS_REFRESH_MS`] old only
     /// spares the read: while it shows every such sender denied or flagged, the read isn't
     /// made, as its answer could only hold the ask. It never decides that a mark asks.
-    async fn ask_on_block_marks(&mut self) -> Result<u64> {
+    async fn ask_on_block_marks(&mut self, refused: &mut Option<Refusal>) -> Result<u64> {
         let family = MarkFamily::Blocked;
         let now = self.now();
         // The raise owed goes first, so the floor every payer app reads covers the marks gone
@@ -682,7 +680,7 @@ impl Paykit {
                 && flagged
                     .as_ref()
                     .is_some_and(|flagged| !flagged.contains(&mark.sender));
-            asked = asked.saturating_add(self.on_mark(family, &rest, mark, due).await?);
+            asked = asked.saturating_add(self.on_mark(family, &rest, mark, due, refused).await?);
         }
         Ok(asked)
     }
@@ -925,6 +923,7 @@ impl Paykit {
         rest: &str,
         mut mark: M,
         due: bool,
+        refused: &mut Option<Refusal>,
     ) -> Result<u64> {
         let key = format!("{}{rest}", family.prefix());
         if mark.drop_mark().expired(self.service_time()) {
@@ -944,6 +943,20 @@ impl Paykit {
                 let floor = self.local_get::<u64>(key::BLOCK_FLOOR).await?;
                 fold_into_floor(&mut tx, floor, gone.latest_ms)?;
             }
+            if family == MarkFamily::Replies {
+                let gone = mark.drop_mark();
+                if !self
+                    .record_expired_reply_loss(
+                        &mut tx,
+                        &gone.sender,
+                        gone.earliest_ms,
+                        gone.latest_ms,
+                    )
+                    .await?
+                {
+                    return Ok(0);
+                }
+            }
             self.local_commit(tx).await?;
             return Ok(0);
         }
@@ -951,7 +964,7 @@ impl Paykit {
         // A sender blocked is asked nothing while it is, nor while the copy of the deny list
         // isn't known (Paykit spec 8.1); its mark stays, and asks once it is unblocked, on
         // its cadence, until it expires.
-        if !due || self.sends_held(&sender).await? {
+        if !due || self.resend_held(&sender, refused).await? {
             return Ok(0);
         }
         self.ask_on_mark(family, &key, mark).await
@@ -965,7 +978,16 @@ impl Paykit {
         key: &str,
         mut held: M,
     ) -> Result<u64> {
-        let sender = held.drop_mark().sender;
+        let mark = held.drop_mark();
+        let sender = mark.sender;
+        let selection = family.selection(mark);
+        let pending = mark.queued.as_ref().map(|q| (q.msg_id.as_str(), q.hash));
+        if !self
+            .recovery_request_permitted(&sender, &selection.request(), pending)
+            .await?
+        {
+            return Ok(0);
+        }
         if let Some(queued) = held.drop_mark().queued.clone() {
             let msg_id = &queued.msg_id;
             // The batch that queues it with the raise is still kept by the client, to send
@@ -982,8 +1004,21 @@ impl Paykit {
                 self.app.delivery(msg_id).await?,
                 Some(Delivery::Queued { .. })
             ) {
-                // Queued, it is tried again now; one that fails stays queued for the next
-                // receive.
+                // A corrupt mark must not flush another signed message.
+                let pending = self
+                    .app
+                    .queued_messages(crate::protocol::BACKUP_NAME)
+                    .await?;
+                if !pending
+                    .iter()
+                    .find(|message| &message.msg_id == msg_id)
+                    .is_some_and(|message| {
+                        message.to == sender
+                            && queued.matches_signed_request(&message.kind, message.hash)
+                    })
+                {
+                    return Err(PaykitError::corrupt());
+                }
                 let _ = self.send_message(msg_id).await;
             }
             match self.app.delivery(msg_id).await? {
@@ -993,9 +1028,16 @@ impl Paykit {
                 // request delivered.
                 Some(Delivery::Accepted { .. }) => {
                     self.delivered_request(&sender, &queued).await?;
+                    if family == MarkFamily::Replies {
+                        self.reconcile_reply_asks().await?;
+                        return Ok(0);
+                    }
                     held.drop_mark().asked_at_ms = Some(self.now());
                 }
-                // Refused for good, or no longer kept: not sent, so asked anew below.
+                // A reply ask waits for its exact first-delivery duty. A later refusal,
+                // or an absent queue entry after a crash, cannot establish non-delivery.
+                _ if family == MarkFamily::Replies => return Ok(0),
+                // Other marks follow their usual retry rule.
                 _ => {}
             }
             held.drop_mark().queued = None;
@@ -1034,10 +1076,13 @@ impl Paykit {
             }
         }
         let selection = family.selection(held.drop_mark());
+        if family == MarkFamily::Replies {
+            return self
+                .queue_reply_ask(held.drop_mark().clone(), selection)
+                .await;
+        }
         let signed = self.resend_request_message(sender, selection)?;
         let msg_id = signed.msg_id().to_owned();
-        // Kept before it is queued: a crash between the two finds the request not kept by
-        // the outbox, and asks anew.
         let hash = signed.hash();
         held.drop_mark().queued = Some(QueuedRequest {
             msg_id: msg_id.clone(),
@@ -1068,7 +1113,7 @@ impl Paykit {
                 if crate::floor::floor_write_waits(&error)
                     || error.code() == Some(pubky_switch_core::http::ErrorCode::Conflict) =>
             {
-                return Ok(0)
+                return Ok(0);
             }
             Err(error) => return Err(error),
         }
@@ -1189,84 +1234,17 @@ impl Paykit {
         queued: &QueuedRequest,
     ) -> Result<()> {
         let sent = self.app.sent_to(sender, 0, u64::MAX).await?;
-        if sent.iter().any(|message| {
-            message.msg_id == queued.msg_id
-                && message.kind == paykit_lib::kinds::Kind::ResendRequest.as_str()
-                && message.plaintext.hash() == queued.hash
-        }) {
+        if sent
+            .iter()
+            .find(|message| message.msg_id == queued.msg_id)
+            .is_some_and(|message| {
+                queued.matches_signed_request(&message.kind, message.plaintext.hash())
+            })
+        {
             Ok(())
         } else {
             Err(PaykitError::corrupt())
         }
-    }
-
-    /// Make due the reply mark of each sender the record of a request names, of either side
-    /// (Paykit spec 8.1, "Replies before their record"): a request record, read as its side,
-    /// whose counterparty the mark names, one held before the reply was dropped included. On
-    /// the payee's side that is the record of a request to the sender, which a payee app's
-    /// kept replies wait for; on the payer's, of the sender's request, which a payer app's
-    /// kept receipts and period details wait for. A record of a Billing Period or of a
-    /// payment without a request makes no mark due, nor does one that doesn't read. An
-    /// Allowance record whose counterparty the mark names, which reads and binds, makes it due
-    /// too (Paykit spec 8.1, "the record of a request, or an Allowance record"): an Allowance
-    /// answer kept before its record is dropped for the same bounds (`allowances.rs`). The
-    /// records are read only while a mark waits, and a failed read fails the pass.
-    async fn note_requests_held(&mut self) -> Result<()> {
-        use paykit_lib::collections::Collection;
-        use paykit_lib::records::{ActivitySide, RecordBinding};
-        let own = self.identity();
-        let family = MarkFamily::Replies;
-        let mut waiting = std::collections::BTreeMap::new();
-        for (rest, mark) in self.local_scan::<DropMark>(family.prefix()).await? {
-            let key = format!("{}{rest}", family.prefix());
-            if !mark.due {
-                waiting.insert(mark.sender, (key, mark));
-            }
-        }
-        if waiting.is_empty() {
-            return Ok(());
-        }
-        let mut tx = crate::state::Tx::default();
-        for (collection, side) in [
-            (Collection::PayeeActivity, ActivitySide::Payee),
-            (Collection::PayerActivity, ActivitySide::Payer),
-        ] {
-            for held in self.app.records_of(collection.name()).await? {
-                let Some(value) = held.content.value() else {
-                    continue;
-                };
-                // A record that doesn't read shows no counterparty: it makes no mark due.
-                let Ok(read) = paykit_lib::records::ActivityRecord::read(value, &own, side) else {
-                    continue;
-                };
-                // Only the record of a request makes a mark due: one of a Billing Period or of
-                // a payment without a request names its counterparty too, but isn't one.
-                if !matches!(read.binding(), Ok(RecordBinding::Request { .. })) {
-                    continue;
-                }
-                if let Some((key, mut mark)) = waiting.remove(&read.counterparty) {
-                    mark.due = true;
-                    tx.put(&key, &mark)?;
-                }
-            }
-        }
-        if !waiting.is_empty() {
-            let allowances = self
-                .app
-                .records_of(paykit_lib::collections::Collection::Allowances.name())
-                .await?;
-            for held in allowances {
-                // A record that doesn't read or bind shows no counterparty.
-                let Some(record) = Box::pin(self.held_allowance(&held.key)).await? else {
-                    continue;
-                };
-                if let Some((key, mut mark)) = waiting.remove(&record.counterparty) {
-                    mark.due = true;
-                    tx.put(&key, &mark)?;
-                }
-            }
-        }
-        self.local_commit(tx).await
     }
 }
 
