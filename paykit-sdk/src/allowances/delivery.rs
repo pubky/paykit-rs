@@ -1,23 +1,24 @@
-//! Current pending and permanent records for one proposal or rejection delivery.
+//! Current pending and permanent records for a proposal, rejection or withdrawal.
 
 use super::{allowance_record_target, allowance_target, bind_at, named_allowance};
+use crate::divergent::SeenVersion;
 use crate::protocol::view_failure;
 use crate::records::KeptMessage;
 use crate::state::{self, key, Binder};
 use paykit_lib::bodies::check_body;
 use paykit_lib::collections::Collection;
 use paykit_lib::kinds::Kind;
-use paykit_lib::records::PendingAllowanceRecord;
+use paykit_lib::records::{PendingAllowanceRecord, StoredMessage};
 use paykit_lib::AllowanceId;
 use pubky_switch_client::app::{
     AppendDecision, DeliveryView, KeptReason, RecordContent, RecordRead, RecordTarget, StoreFailure,
 };
 use pubky_switch_client::error::StoreError;
-use pubky_switch_core::enc::serde_b64;
+use pubky_switch_core::{enc::serde_b64, message::Message, ops::RecordVersion};
 use serde::{Deserialize, Serialize};
 
-/// Committed with the queued reply only when the batch that deletes its exact pending
-/// proposal applies. The signed reply hash identifies its kind, parties, ID and proposal.
+/// The applied delete of the exact proposal this signed answer names. A withdrawal
+/// also binds its release to that deletion's authenticated generation and version.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AppliedReply {
@@ -27,6 +28,28 @@ pub(crate) struct AppliedReply {
     pub(crate) reply: [u8; 32],
     #[serde(with = "serde_b64")]
     pub(crate) proposal: [u8; 32],
+    #[serde(deserialize_with = "Option::deserialize")]
+    retirement: Option<SeenVersion>,
+}
+
+impl AppliedReply {
+    pub(super) fn new(reply: &StoredMessage, retirement: Option<RecordVersion>) -> Self {
+        Self {
+            created_at_ms: reply.message().created_at_ms,
+            reply: reply.hash(),
+            proposal: reply.message().refs[0],
+            retirement: retirement.map(Into::into),
+        }
+    }
+}
+
+/// A two-reference end belongs to an accepted Allowance and uses its own delivery rule.
+pub(crate) fn pending_delivery(msg: &Message) -> bool {
+    match Kind::from_kind(&msg.kind) {
+        Some(Kind::AllowanceProposal | Kind::AllowanceRejection) => true,
+        Some(Kind::AllowanceEnd) => msg.refs.len() == 1,
+        _ => false,
+    }
 }
 
 fn corrupt() -> StoreFailure {
@@ -63,10 +86,7 @@ fn targets(to: &[u8; 32], id: &AllowanceId) -> [RecordTarget; 2] {
 
 pub(crate) fn append_records(d: &DeliveryView<'_>) -> Result<Vec<RecordTarget>, StoreFailure> {
     let msg = d.message();
-    if matches!(
-        Kind::from_kind(&msg.kind),
-        Some(Kind::AllowanceProposal | Kind::AllowanceRejection)
-    ) {
+    if pending_delivery(msg) {
         return Ok(targets(&msg.to, &allowance_id(d)?).into());
     }
     Ok(Vec::new())
@@ -156,6 +176,20 @@ pub(crate) fn judge_append(
         },
         None => None,
     };
+    if Kind::from_kind(&msg.kind) == Some(Kind::AllowanceEnd) {
+        if pending.is_some() || permanent.is_some() {
+            return Ok(Withdraw);
+        }
+        let applied = state::delivery_get::<AppliedReply>(d, &key::applied_reply(&d.hash()))
+            .map_err(view_failure)?;
+        let retired =
+            state::delivery_get::<super::PendingRetirement>(d, &key::pending_retirement(&p_key))
+                .map_err(view_failure)?;
+        return Ok(match (applied.and_then(|r| r.retirement), retired) {
+            (Some(original), Some(current)) => current.withdrawal_after(original),
+            _ => Hold,
+        });
+    }
     if pending.as_ref().is_some_and(|r| r.conflicted().is_some())
         || permanent
             .as_ref()
