@@ -27,6 +27,7 @@ use crate::common::{btc, endpoint, list_version, store, World};
 struct LedgerRail {
     fake: Arc<FakeRail>,
     last: Mutex<Option<Map<String, Value>>>,
+    supplies_id: bool,
     /// The most the ledger may charge on top of a payment.
     fee: Option<paykit_lib::Decimal>,
 }
@@ -116,6 +117,9 @@ impl Rail for LedgerRail {
 
     /// The ledger's entry names its settlement.
     fn settlement_id(&self, proof: &Map<String, Value>) -> Option<Vec<u8>> {
+        if !self.supplies_id {
+            return None;
+        }
         (proof.get("type")?.as_str()? == "x-ledger")
             .then(|| proof.get("entry")?.as_str().map(|e| e.as_bytes().to_vec()))
             .flatten()
@@ -182,6 +186,7 @@ async fn test_custom_rail_proof_credited_once_per_settlement() {
     let rail = Arc::new(LedgerRail {
         fake: Arc::clone(&w.rail),
         last: Mutex::new(None),
+        supplies_id: true,
         fee: None,
     });
     let mut wallet = joined(
@@ -305,6 +310,7 @@ async fn test_custom_rail_zero_fee_needs_no_cap() {
     let rail = Arc::new(LedgerRail {
         fake: Arc::clone(&w.rail),
         last: Mutex::new(None),
+        supplies_id: true,
         fee: Some(paykit_lib::Decimal::zero()),
     });
     let outcome = pay_through(&w, &rail).await.unwrap();
@@ -314,6 +320,7 @@ async fn test_custom_rail_zero_fee_needs_no_cap() {
     let rail = Arc::new(LedgerRail {
         fake: Arc::clone(&w.rail),
         last: Mutex::new(None),
+        supplies_id: true,
         fee: Some(paykit_lib::Decimal::parse("0.00000001").unwrap()),
     });
     let refused = pay_through(&w, &rail).await.unwrap_err();
@@ -351,6 +358,7 @@ async fn test_custom_rail_fee_cap_is_per_asset() {
         let rail = Arc::new(LedgerRail {
             fake: Arc::clone(&w.rail),
             last: Mutex::new(None),
+            supplies_id: true,
             fee: fee(),
         });
         let outcome = pay_through_with(&w, &rail, config).await;
@@ -379,6 +387,7 @@ async fn test_payee_deletion_a_restored_custom_receipt_waits_for_its_payment_met
     let rail = Arc::new(LedgerRail {
         fake: Arc::clone(&w.rail),
         last: Mutex::new(None),
+        supplies_id: true,
         fee: None,
     });
     let mut wallet = joined(
@@ -471,4 +480,105 @@ async fn test_payee_deletion_a_restored_custom_receipt_waits_for_its_payment_met
     assert_eq!(receipts.len(), 1);
     assert_eq!(receipts[0].record, key);
     assert_eq!(receipts[0].receipt.message().msg_id, receipt);
+}
+
+#[tokio::test]
+async fn test_custom_rail_requested_proof_without_a_settlement_id_keeps_its_own_warning() {
+    use paykit_sdk::{NoticeKind, ReceiptDetails, Refusal, SettlementSubject};
+    use pubky_switch_client::app::UserConfirmed;
+    use pubky_switch_client::clock::Clock;
+    let w = World::new();
+    let rail = Arc::new(LedgerRail {
+        fake: w.rail.clone(),
+        last: Mutex::new(None),
+        supplies_id: false,
+        fee: None,
+    });
+    let mut buyer = joined(
+        &w,
+        &w.alice,
+        "wallet",
+        AppScopes::new().pay().manage_contacts().build().unwrap(),
+        &rail,
+    )
+    .await;
+    let mut shop = joined(
+        &w,
+        &w.bob,
+        "shop",
+        AppScopes::new()
+            .request()
+            .manage_contacts()
+            .build()
+            .unwrap(),
+        &rail,
+    )
+    .await;
+    buyer.app_mut().invite(&w.bob_id()).await.unwrap();
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    let mut prior = None;
+    for _ in 0..2 {
+        let sent = shop
+            .send_request(w.alice_id(), crate::common::draft("1", w.clock.now_ms()))
+            .await
+            .unwrap()
+            .request
+            .unwrap();
+        buyer.receive(None).await.unwrap();
+        assert!(matches!(
+            Box::pin(buyer.pay_request(&sent, PayOptions::default()))
+                .await
+                .outcome
+                .unwrap(),
+            PayOutcome::Paid { .. }
+        ));
+        shop.receive(None).await.unwrap();
+        let record = shop
+            .payee_activity()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|v| v.request_hash == Some(sent.request_hash))
+            .unwrap()
+            .record;
+        for _ in 0..2 {
+            assert_eq!(
+                shop.confirm_payment(&record).await.unwrap_err().refusal(),
+                Some(&Refusal::MaybeCredited)
+            );
+        }
+        let warnings = shop.notices().await.unwrap();
+        assert_eq!(warnings.len(), 1);
+        let warning = &warnings[0];
+        assert_eq!(warning.kind, NoticeKind::CreditNeedsUser);
+        assert!(
+            matches!(warning.settlement,Some(SettlementSubject::RequestedProof {record: key,..}) if key == record)
+        );
+        assert_ne!(prior.as_ref(), Some(&warning.id));
+        shop.acknowledge_notice(&warning.id).await.unwrap();
+        prior = Some(warning.id.clone());
+        let backup = shop.backup().await.unwrap();
+        drop(shop);
+        shop = Paykit::restore(
+            w.env(&w.bob, store()),
+            PaykitConfig::default(),
+            &backup,
+            Arc::clone(&rail) as Arc<dyn Rail>,
+            w.timer(),
+        )
+        .await
+        .unwrap();
+        shop.receive(None).await.unwrap();
+        assert!(shop.notices().await.unwrap().is_empty());
+        let id = shop
+            .confirm_payment_with(
+                &record,
+                ReceiptDetails::new().with_maybe_credited_confirmed(UserConfirmed::new()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(shop.confirm_payment(&record).await.unwrap(), Some(id));
+    }
+    assert_eq!(w.rail.all_executions().values().sum::<u64>(), 2);
 }

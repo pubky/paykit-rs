@@ -134,6 +134,11 @@ A missing receipt or an unavailable provider can leave the outcome unresolved.
 Read `Paykit::notices()` after the first receive and on subsequent loads. A
 `PossiblyDelivered` notice identifies an outgoing message whose recipient may
 already have it. Reconcile it using the message ID, recipient and signed hash.
+A receipt can still raise this notice after a provider loss and a later request
+cancellation. The wallet verifies the original receipt write with the service
+identity from that generation, then matches it to the signed receipt still held
+for the same request. An unresolved receipt stays pending when that evidence
+is unavailable.
 The original wallet can resume an outstanding delivery when reopened from its
 current store.
 
@@ -207,8 +212,12 @@ qualified roles and supplies no new proposal to act on.
 
 Read `notices` and `payee_deletion_notices` by their stable identities. Acknowledge
 each through its matching SDK API after recording or showing it. Handle Switch
-duty events from `ReceiveSummary::report`. After a receive error, read and
-retain committed duties from `wallet.app_mut().unacknowledged_events()`.
+duty events from `ReceiveSummary::report`. If `records_unlisted` says the listing
+has more to read, call `receive(None)` again. The wallet can still be listing
+collections after the Switch has finished its feed read. An explicit `reconcile` or
+`end_reconcile` can also run its own listing. Follow the action named in its
+`NotNow` result to resume that scan. After a receive error,
+read and retain committed duties from `wallet.app_mut().unacknowledged_events()`.
 Wait for a later successful `receive` so the SDK can process its duties, then
 acknowledge for `"paykit"` with `App::ack_events_for` up to the last duty in
 that successful report. Use the app-wide `App::ack_events` only after the
@@ -223,6 +232,10 @@ shared record.
 | `NoticeKind::MessageGivenUp` | Show the message or request whose effect or delivery was given up. Acknowledgment can also retire the stored entry. |
 | `NoticeKind::PossiblyDelivered` | Reconcile the original message with its recipient using its ID and signed hash. Acknowledging the notice records that the host has seen it. It authorizes no send or replacement. |
 | `NoticeKind::BlockedMessagesLost` | Show the affected counterparty and acceptance-time range. Consult the payment method for payments that may have been among the lost messages. |
+| `NoticeKind::SettlementBucketFull` | Show that the payee cannot add a mark to this bucket. A warning from a bucket read has no payer. Explain that issuing a receipt without a mark can let another till credit the same settlement again. |
+| `NoticeKind::SettlementMarksChanged` | Show the bucket and the own app that signed its current value. The wallet checks the current write again and restores the retained marks that fit. |
+| `NoticeKind::SettlementCreditedTwice` | Show the conflicting occurrence marks. Acknowledging the notice records that the user saw it. Every retained mark continues to prevent another credit. |
+| `NoticeKind::CreditNeedsUser` | Show the user which settlement or requested proof needs a credit decision. Acknowledging the warning leaves the credit decision open. |
 | `NoticeKind::DroppedMessagesLost` | Show the counterparty and the acceptance-time range for which the wallet stopped requesting dropped replies. Check the payment method for any payment whose outcome is still unknown. Acknowledge the notice after showing it. With 64 distinct loss windows retained, an input that would add another waits for space. |
 | `PaykitError::Client` | Handle the enclosed Switch outcome. Preserve any kept batch and its ID. |
 | `PaykitError::Lib` | Use the rule error to distinguish invalid input from invalid network or shared data. |
@@ -262,6 +275,7 @@ shared record.
 | `Refusal::DeadlinePassed` | Show the expired deadline and stop the old attempt. |
 | `Refusal::Recurring` | Use subscription and Billing Period APIs for this request. |
 | `Refusal::MaybeCredited` | Show that the occurrence may already be credited. Wait for evidence or the supported explicit confirmation. |
+| `Refusal::SettlementBucketFull` | Wait for the payee to decide whether to issue an unmarked receipt. Pass the explicit choice through `ReceiptDetails::with_unmarked_credit_confirmed`. |
 | `Refusal::Subscribed` | Show that the recurring request is already accepted. |
 | `Refusal::NotSubscribed` | Wait until the payer accepts the recurring request. |
 | `Refusal::Destination` | Show the failed destination check and refresh when the payee has a usable endpoint. |

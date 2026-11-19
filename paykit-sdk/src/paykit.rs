@@ -231,10 +231,9 @@ pub struct ReceiveSummary {
     /// gives it: the read went on, holding Paykit's entries unprocessed, and none of the
     /// Paykit steps after it ran.
     pub certificate_refused: Option<Refusal>,
-    /// A certificate taken is another than the one the records were last listed under, and
-    /// the listing this read made under it failed: the text says why, without content. The
-    /// records stay unlisted, so the calls that only read are refused as not now, and the
-    /// next receive or write lists them again.
+    /// The wallet's required listing under a new certificate or after a missed feed is
+    /// incomplete. The reason indicates when to call `receive` again to continue a
+    /// bounded listing or why it failed. Read-only activity views wait for completion.
     pub records_unlisted: Option<String>,
     /// A certificate taken is another than the one the records were last listed under, and
     /// the app waits for its scope keys, which the signer stores when it is next
@@ -1168,6 +1167,7 @@ impl Paykit {
                 _ => None,
             })
             .collect();
+        Box::pin(self.repair_settlement_buckets()).await?;
         let answered = Box::pin(self.answer_kept_resends()).await?;
         // Open records resolve re-send requests and locally held answers. After a restore,
         // signed records also identify outgoing messages whose outcome the host must check.
@@ -1176,6 +1176,7 @@ impl Paykit {
         {
             Box::pin(self.queue_restore_asks()).await?;
             Box::pin(self.queue_own_again()).await?;
+            Box::pin(self.note_imported_receipt_batches()).await?;
         }
         let asked = Box::pin(self.send_asks(&mut resend_refused)).await?;
         Box::pin(self.retire_end_origins()).await?;

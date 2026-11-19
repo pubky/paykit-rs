@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 use crate::activity::ActivityTarget;
 use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
+use crate::protocol::step_failure;
 use crate::protocol::view_failure;
+use crate::receipts::{receipt_binding, ReceiptBinding};
 use crate::receive::{Fail, Settlement};
 use crate::state::{self, key};
 
@@ -393,37 +395,6 @@ fn signed_request(parent: &ActivityRecord) -> Result<Vec<u8>> {
     Ok(signed.to_json()?)
 }
 
-/// A signed pair that disagrees with its signed request is invalid. If the
-/// request is unavailable, its Billing Period cannot yet be decided.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ReceiptBinding {
-    Verified,
-    MissingRequest,
-    Invalid,
-}
-
-fn receipt_binding(record: &ActivityRecord, parent: Option<&ActivityRecord>) -> ReceiptBinding {
-    if record.proof.is_none() || record.receipt.is_none() {
-        return ReceiptBinding::Invalid;
-    }
-    let Ok(binding) = record.binding() else {
-        return ReceiptBinding::Invalid;
-    };
-    let parent = match binding {
-        RecordBinding::Unrequested => return ReceiptBinding::Verified,
-        RecordBinding::Request { .. } => record,
-        RecordBinding::Period { .. } => match parent {
-            Some(p) if crate::requests::request_of(p).is_some() => p,
-            _ => return ReceiptBinding::MissingRequest,
-        },
-    };
-    if crate::periods::request_for_payment(parent, record, &binding).is_some() {
-        ReceiptBinding::Verified
-    } else {
-        ReceiptBinding::Invalid
-    }
-}
-
 /// Observe a deletion. The signed record and the credit hold stay on this app.
 pub(crate) fn observe_payee_deletion(
     deletion: &RecordDeletion<'_>,
@@ -444,8 +415,7 @@ pub(crate) fn observe_payee_deletion(
         receipt: None,
     };
     let local_key = observation.key();
-    let previous =
-        state::cx_get::<PayeeDeletion>(cx, &local_key).map_err(Fail::into_store_failure)?;
+    let previous = state::cx_get::<PayeeDeletion>(cx, &local_key).map_err(step_failure)?;
     let label = match deletion.policy {
         Some(policy) => {
             let Some(label) = Collection::PayeeActivity.policy_label(policy) else {
@@ -479,9 +449,9 @@ pub(crate) fn observe_payee_deletion(
             if exact
                 && record.receipt.is_none()
                 && record.lost_to_delete.is_none()
-                && !held_on_receive(cx, deletion.key).map_err(Fail::into_store_failure)?
+                && !held_on_receive(cx, deletion.key).map_err(step_failure)?
                 && !state::cx_scan::<ReceiptEvidence>(cx, key::RETAINED_RECEIPTS)
-                    .map_err(Fail::into_store_failure)?
+                    .map_err(step_failure)?
                     .iter()
                     .any(|(_, r)| r.source.bound() == Some(*deletion.key))
             {
@@ -533,8 +503,8 @@ pub(crate) fn observe_payee_deletion(
                 if protected != ReceiptBinding::Invalid {
                     observation.receipt = Some(evidence.hash);
                     let k = evidence.key();
-                    let existing = state::cx_get::<ReceiptEvidence>(cx, &k)
-                        .map_err(Fail::into_store_failure)?;
+                    let existing =
+                        state::cx_get::<ReceiptEvidence>(cx, &k).map_err(step_failure)?;
                     if existing.as_ref().is_none_or(|e| {
                         e.source.bound() != evidence.source.bound()
                             || (e.parent.is_empty() && !evidence.parent.is_empty())

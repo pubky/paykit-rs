@@ -20,11 +20,11 @@ The design may still change before it is frozen. The spec's Section 17 lists the
 
 The spec's Status paragraph is the full statement of implementation status; this section summarizes its settlement part.
 
-`paykit-lib` on `v0.2` implements settlement marks and the earlier bucket format with deletion boundaries. Its vectors use the earlier policy without `permanent`. It checks that plain and labelled selling certificates hold `paykit_settlements` and `paykit_contacts`.
+`paykit-lib` derives settlement bucket keys under the permanent policy. Its vectors cover the policy hash, blinded bucket key, sealed bucket and marks. It checks that plain and labelled selling certificates hold `paykit_settlements` and `paykit_contacts`.
 
-Wire Section 5 describes how a payee can retain a receipt it already issued when it observes a deletion. Section 18 lists the SDK cases for receipt verification, attribution, credit restrictions and restore. The SDK on `v0.2` implements these receipt checks and preserves the installation’s verified receipt and credit restriction across an in-place restore. Shared replacement of a deleted record remains outstanding.
+Wire Section 5 describes how a payee can retain a receipt it already issued when it observes a deletion. Section 18 lists the SDK cases for receipt verification, attribution, credit restrictions and restore. The SDK on `v0.2` implements these receipt checks and preserves the installation’s verified receipt and credit restriction across an in-place restore. Wire Section 5 also defines publication of a receipt for a one-time request within one service generation. This shared replacement and its service-cursor hold still require SDK and Switch integration.
 
-Wire 5.7 uses a permanent bucket for each group of settlements. The Switch supports the policy. Paykit still needs to use it to derive the bucket key, publish its vectors and write the mark with the signed receipt in the same conditional batch. Sections 8.1 and 18 specify concurrent first credit, retry and provider loss. Wire Section 5 continues to govern protective publication for other record families.
+The SDK writes a settlement mark and the signed receipt in the same conditional batch and queues delivery only when requested. Two payee apps that confirm the same settlement concurrently can apply one marked credit, including when they name different occurrences. The wallet tests exercise both the first write and an existing bucket, with the scripted and PostgreSQL services. Section 18 also requires repair after provider loss. Wire Section 5 governs protective publication for other record families.
 
 ## Bounded message recovery
 

@@ -96,14 +96,6 @@ pub(crate) enum Fail {
 }
 
 impl Fail {
-    /// Preserve a store failure when a record callback must retain its local effects.
-    pub(crate) fn into_store_failure(self) -> StoreFailure {
-        match self {
-            Self::Store(error) => error,
-            _ => StoreFailure::unavailable(StoreError::Unavailable),
-        }
-    }
-
     /// Local data of the SDK's own that doesn't read: retrying on the feed can't mend it,
     /// so the entry is parked at once.
     pub(crate) fn corrupt() -> Self {

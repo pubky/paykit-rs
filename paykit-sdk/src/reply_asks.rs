@@ -242,7 +242,7 @@ fn loss_windows_fit<'a>(
     });
     let shown = notices
         .filter(|n| n.kind == NoticeKind::DroppedMessagesLost)
-        .filter_map(|n| n.lost.map(|(from, _)| (b64(&n.counterparty), from)));
+        .filter_map(|n| Some((n.counterparty.clone()?, n.lost?.0)));
     let new = new.map(|(sender, from)| (b64(sender), from));
     let mut windows = BTreeSet::new();
     pending.chain(shown).chain(new).all(|window| {

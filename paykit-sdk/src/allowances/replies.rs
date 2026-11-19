@@ -3,7 +3,7 @@
 use super::{allowance_record_target, named_allowance, HeldAnswer, Paykit};
 use crate::divergent::SeenVersion;
 use crate::error::{PaykitError, Result};
-use crate::protocol::{store_failure, view_failure};
+use crate::protocol::{step_failure, store_failure, view_failure};
 use crate::receive::{self, Fail};
 use crate::records::KeptMessage;
 use crate::state::{self, key, Binder, StateKey};
@@ -612,7 +612,7 @@ pub(crate) fn lifetime_ended(
         return Ok(Vec::new());
     }
     let at = key::pending_retirement(&record.key);
-    let previous = state::cx_get::<PendingRetirement>(cx, &at).map_err(Fail::into_store_failure)?;
+    let previous = state::cx_get::<PendingRetirement>(cx, &at).map_err(step_failure)?;
     if previous.is_some_and(|old| old.version.record_version() >= version) {
         return Ok(Vec::new());
     }
@@ -624,7 +624,7 @@ pub(crate) fn lifetime_ended(
     };
     let mut writes = vec![state::local_put(&at, &end).map_err(view_failure)?];
     let stop = state::cx_get::<PendingConflict>(cx, &key::pending_conflict(&record.key))
-        .map_err(Fail::into_store_failure)?;
+        .map_err(step_failure)?;
     if let Some(stop) = stop.filter(|stop| stop.source() < version) {
         let pending = stop.original(&own).map_err(view_failure)?;
         let peer = pending.counterparty();
@@ -632,9 +632,9 @@ pub(crate) fn lifetime_ended(
             .record_key(&super::allowance_target(peer, pending.allowance_id()))
             .map_err(store_failure)?;
         let held = state::cx_scan::<KeptMessage>(cx, &key::kept_reply(peer, &permanent, ""))
-            .map_err(Fail::into_store_failure)?;
-        let stored = state::cx_scan::<StoredNote>(cx, &key::stored_notes_of(peer))
-            .map_err(Fail::into_store_failure)?;
+            .map_err(step_failure)?;
+        let stored =
+            state::cx_scan::<StoredNote>(cx, &key::stored_notes_of(peer)).map_err(step_failure)?;
         let earlier = |message: &KeptMessage| {
             end.compare(message.pending_source, message.position(), |a, b| {
                 cx.received_order(a, b)

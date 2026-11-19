@@ -2443,7 +2443,7 @@ async fn test_restore_unanswered_request_from_a_shared_record_is_possibly_delive
     assert_eq!(notices.len(), 1);
     let notice = &notices[0];
     assert_eq!(notice.kind, paykit_sdk::NoticeKind::PossiblyDelivered);
-    assert_eq!(notice.counterparty, w.alice_id());
+    assert_eq!(notice.counterparty, Some(w.alice_id()));
     assert!(notice.msg_id.is_some() && notice.message_hash.is_some());
     assert!(shop
         .app()
@@ -2512,7 +2512,7 @@ async fn test_restore_late_first_read_keeps_an_original_delivery_with_its_wallet
     assert_eq!(notices.len(), 1);
     let notice = &notices[0];
     assert_eq!(notice.kind, paykit_sdk::NoticeKind::PossiblyDelivered);
-    assert_eq!(notice.counterparty, w.alice_id());
+    assert_eq!(notice.counterparty, Some(w.alice_id()));
     assert_eq!(notice.msg_id.as_deref(), Some(sent.msg_id.as_str()));
     assert_eq!(notice.message_hash, Some(hash));
     assert!(restored
@@ -2586,8 +2586,83 @@ async fn restored_unreceived(
 }
 
 #[tokio::test]
-async fn test_restore_shared_receipt_alone_does_not_create_a_delivery() {
-    // The shared receipt survives restore. Its presence alone cannot establish an original delivery.
+async fn test_restore_live_store_delivers_the_original_kept_receipt_once() {
+    use pubky_switch_client::app::{Delivery, DeliveryOrigin, KeptBatchStatus};
+
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let original = store();
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default(),
+            Arc::clone(&original),
+        )
+        .await;
+    let app_id = shop.app_id();
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let PayOutcome::Paid { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap()
+    else {
+        panic!("payment must finish");
+    };
+    shop.receive(None).await.unwrap();
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+            path: "/ops".into(),
+        });
+    let batch_id = shop
+        .confirm_payment(&record)
+        .await
+        .unwrap_err()
+        .kept_batch()
+        .expect("the original batch is still in this store");
+    let receipts = shop.app().queued_messages("paykit").await.unwrap();
+    let receipt = receipts
+        .iter()
+        .find(|r| r.kept_batch == Some(batch_id))
+        .expect("receipt kept with the write");
+    assert_eq!(receipt.kind, paykit_lib::Kind::PaymentReceipt.as_str());
+    assert_eq!(receipt.to, w.alice_id());
+    assert_eq!(receipt.origin, DeliveryOrigin::Original);
+    let msg_id = receipt.msg_id.clone();
+    drop(shop);
+    let mut shop = w
+        .load_on_clock(&w.bob, original, app_id, Arc::clone(&w.clock))
+        .await;
+    shop.receive(None).await.unwrap();
+    shop.flush().await.unwrap();
+    assert!(matches!(
+        shop.app().kept_batch(batch_id).await.unwrap(),
+        Some(KeptBatchStatus::Applied { .. })
+    ));
+    assert!(matches!(
+        shop.app().delivery(&msg_id).await.unwrap(),
+        Some(Delivery::Accepted { .. })
+    ));
+    wallet.receive(None).await.unwrap();
+    let received = wallet.request(&request).await.unwrap().receipt.unwrap();
+    assert_eq!(received.msg_id, msg_id);
+    assert_eq!(received.attempt_id, attempt_id);
+    let count = w.alice.switch().entries_from(&w.bob_id());
+    assert_eq!(shop.confirm_payment(&record).await.unwrap(), Some(msg_id));
+    shop.flush().await.unwrap();
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), count);
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_restore_fresh_store_keeps_an_issued_receipt_without_assuming_delivery() {
+    // The signed receipt proves credit. After the original batch loses its answer, a
+    // fresh installation cannot tell whether another copy finished the delivery.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -2605,12 +2680,177 @@ async fn test_restore_shared_receipt_alone_does_not_create_a_delivery() {
         .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
+    let kept = shop
+        .confirm_payment_with(&record, paykit_sdk::ReceiptDetails::new())
+        .await
+        .unwrap_err()
+        .kept_batch()
+        .unwrap();
+    let original = shop
+        .app()
+        .queued_messages("paykit")
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|message| message.kept_batch == Some(kept))
+        .unwrap();
+    assert_eq!(original.kind, paykit_lib::Kind::PaymentReceipt.as_str());
+    assert_eq!(original.to, w.alice_id());
+    let kept_receipts = shop.app().protocol_scan("paykit", b"ri/").await.unwrap();
+    assert_eq!(kept_receipts.len(), 1);
+    assert!(std::str::from_utf8(&kept_receipts[0].0)
+        .unwrap()
+        .ends_with(&original.msg_id));
+    assert!(matches!(
+        shop.app().kept_batch(kept).await.unwrap(),
+        Some(pubky_switch_client::app::KeptBatchStatus::Kept { .. })
+    ));
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.request(&request).await.unwrap().receipt.is_none());
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    let mut shop = restored_unreceived(&w, &w.bob, &backup).await;
+    shop.receive(None).await.unwrap();
+    let notices = shop.notices().await.unwrap();
+    let uncertain: Vec<_> = notices
+        .iter()
+        .filter(|notice| {
+            notice.kind == paykit_sdk::NoticeKind::PossiblyDelivered
+                && notice.msg_id.as_deref() == Some(original.msg_id.as_str())
+        })
+        .collect();
+    let [notice] = uncertain.as_slice() else {
+        panic!("expected one notice about the original receipt: {notices:?}");
+    };
+    assert_eq!(notice.counterparty, Some(w.alice_id()));
+    assert_eq!(notice.message_hash, Some(original.hash));
+    shop.acknowledge_notice(&notice.id).await.unwrap();
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.request(&request).await.unwrap().receipt.is_none());
+    assert_eq!(
+        shop.confirm_payment(&record).await.unwrap(),
+        Some(original.msg_id.clone())
+    );
+    assert!(shop
+        .app()
+        .delivery(&original.msg_id)
+        .await
+        .unwrap()
+        .is_none());
+    shop.receive(None).await.unwrap();
+    shop.flush().await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.request(&request).await.unwrap().receipt.is_none());
+    assert!(shop
+        .notices()
+        .await
+        .unwrap()
+        .iter()
+        .all(|n| { n.msg_id.as_deref() != Some(original.msg_id.as_str()) }));
+    assert!(shop
+        .app()
+        .delivery(&original.msg_id)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn test_an_unanswered_receipt_keeps_its_batch_id_when_saving_the_application_fails() {
+    use pubky_switch_client::store::{Fault, FaultStore};
+
+    let w = World::new();
+    let mut buyer = w.wallet("wallet").await;
+    let store = Arc::new(FaultStore::new(store(), Fault::None));
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default(),
+            store.clone(),
+        )
+        .await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    buyer.receive(None).await.unwrap();
+    buyer
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    // The native first keep fits. The write preserving its signed application does not.
+    store.refuse_puts_as_too_large_over(Some(b"p/paykit/ri/"), 16);
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+            path: "/ops".into(),
+        });
+    let err = shop
+        .confirm_payment_with(&record, paykit_sdk::ReceiptDetails::new())
+        .await
+        .unwrap_err();
+    let batch = err
+        .kept_batch()
+        .expect("the unanswered submission names its original kept batch");
+    let pending = shop.app().protocol_scan("paykit", b"ri/").await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].1, batch);
+    let app_id = shop.app_id();
+    drop(shop);
+    store.refuse_puts_as_too_large_over(None, 0);
+    let shop = Box::pin(Paykit::load(
+        w.env(&w.bob, store),
+        PaykitConfig::default(),
+        app_id,
+        w.rail.clone(),
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    let queued = shop.app().queued_messages("paykit").await.unwrap();
+    let receipt = queued.iter().find(|m| m.kept_batch == Some(batch)).unwrap();
+    assert_eq!(receipt.kind, paykit_lib::Kind::PaymentReceipt.as_str());
+    assert_eq!(receipt.to, w.alice_id());
+    assert!(pending[0].0.ends_with(receipt.msg_id.as_bytes()));
+    assert!(buyer.request(&request).await.unwrap().receipt.is_none());
+    buyer.receive(None).await.unwrap();
+    assert!(buyer.request(&request).await.unwrap().receipt.is_none());
+}
+
+#[tokio::test]
+async fn test_restore_shared_receipt_alone_does_not_create_a_delivery() {
+    // The shared receipt survives restore. Its presence alone cannot establish an original delivery.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    let backup = shop.backup().await.unwrap();
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+            path: "/ops".into(),
+        });
     let _ = shop
         .confirm_payment_with(&record, paykit_sdk::ReceiptDetails::new())
         .await;
     wallet.receive(None).await.unwrap();
     assert!(wallet.request(&request).await.unwrap().receipt.is_none());
-    let backup = shop.backup().await.unwrap();
     drop(shop);
     let mut shop = restored_unreceived(&w, &w.bob, &backup).await;
     shop.receive(None).await.unwrap();
@@ -2622,7 +2862,13 @@ async fn test_restore_shared_receipt_alone_does_not_create_a_delivery() {
         .is_none());
     wallet.receive(None).await.unwrap();
     assert!(wallet.request(&request).await.unwrap().receipt.is_none());
-    assert!(shop.notices().await.unwrap().is_empty());
+    let issued = shop.confirm_payment(&record).await.unwrap().unwrap();
+    assert!(shop
+        .notices()
+        .await
+        .unwrap()
+        .iter()
+        .all(|notice| { notice.msg_id.as_deref() != Some(issued.as_str()) }));
     let before = w.alice.switch().entries_from(&w.bob_id());
     shop.receive(None).await.unwrap();
     assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);

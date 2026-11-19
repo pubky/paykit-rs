@@ -1362,7 +1362,7 @@ async fn test_stored_refused_note_given_up_past_its_window() {
     let notices = wallet.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
-    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert_eq!(notices[0].counterparty, Some(w.bob_id()));
     assert_eq!(notices[0].request_hash, Some(request.request_hash));
     assert!(notices[0].msg_id.is_some());
     // Acknowledged, it goes at once with its stored entry: nothing raises it again.
@@ -1878,7 +1878,7 @@ async fn given_up_after_30_days(
     let notices = wallet.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
-    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert_eq!(notices[0].counterparty, Some(w.bob_id()));
     assert_eq!(notices[0].request_hash, Some(request.request_hash));
 }
 
@@ -2302,7 +2302,7 @@ async fn test_stored_key_wait_dropped_given_up_once_and_asked_again_once_the_key
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
     assert_eq!(notices[0].msg_id.as_deref(), Some(msg_id.as_str()));
-    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert_eq!(notices[0].counterparty, Some(w.bob_id()));
     assert_eq!(notices[0].request_hash, None);
     // Its own mark, with the epoch it waited for; none of entries dropped unverified, which
     // would ask at once.
@@ -2376,7 +2376,7 @@ async fn test_stored_key_wait_dropped_while_the_records_are_not_listed_given_up_
     let notices = wallet.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
-    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert_eq!(notices[0].counterparty, Some(w.bob_id()));
     assert_eq!(key_wait_marks(&wallet).await.len(), 1);
 }
 
@@ -2561,7 +2561,7 @@ async fn receipt_over_unread_record(unread: Unread, reads: bool) {
         let notices = wallet.notices().await.unwrap();
         assert_eq!(notices.len(), 1, "{notices:?}");
         assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
-        assert_eq!(notices[0].counterparty, w.bob_id());
+        assert_eq!(notices[0].counterparty, Some(w.bob_id()));
         return;
     }
     phone.receive(None).await.unwrap();
@@ -2730,7 +2730,7 @@ async fn test_stored_request_over_an_unread_record_held_then_given_up_at_30_days
     let notices = phone.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
-    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert_eq!(notices[0].counterparty, Some(w.bob_id()));
     assert_eq!(notices[0].msg_id.as_deref(), Some(sent.msg_id.as_str()));
 }
 
