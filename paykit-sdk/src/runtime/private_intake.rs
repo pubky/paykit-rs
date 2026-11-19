@@ -1703,7 +1703,9 @@ where
         // connection's subscribed peers, and a peer without an entry stays
         // unfiltered. A stale folder only delays a packet: handshake slots in
         // any folder still pass, audits still fetch the expected slot, and
-        // every acquisition that derives the slot replaces the entry.
+        // every acquisition that derives the slot replaces the entry. The
+        // acquisition and cursor-commit callbacks hold no per-connection
+        // state, so they are also built once per task.
         let event_scopes = Arc::new(std::sync::Mutex::new(PrivateIntakeEventScopes::default()));
         let acquire = scoped_private_intake_acquire(Arc::clone(&event_scopes), {
             let sdk = Arc::clone(&self);
@@ -1712,6 +1714,15 @@ where
                 Box::pin(async move { sdk.acquire_expected_private_packet(peer, cursor).await })
             }
         });
+        let commit_cursors: PrivateIntakeCommitCursors = {
+            let sdk = Arc::clone(&self);
+            Arc::new(move |cursors| {
+                let sdk = Arc::clone(&sdk);
+                Box::pin(async move {
+                    commit_ignored_private_intake_cursors(&sdk.storage, cursors).await;
+                })
+            })
+        };
         loop {
             if *stop.borrow() {
                 break;
@@ -1906,15 +1917,6 @@ where
                     })
                 })
             };
-            let commit_cursors: PrivateIntakeCommitCursors = {
-                let sdk = Arc::clone(&self);
-                Arc::new(move |cursors| {
-                    let sdk = Arc::clone(&sdk);
-                    Box::pin(async move {
-                        commit_ignored_private_intake_cursors(&sdk.storage, cursors).await;
-                    })
-                })
-            };
             let exit = run_connected_private_intake_stream(
                 &active_group,
                 stream,
@@ -1926,7 +1928,7 @@ where
                 Arc::clone(&acquire),
                 audit_group,
                 &event_scopes,
-                commit_cursors,
+                Arc::clone(&commit_cursors),
                 audit_outcome.handshake_pending,
             )
             .await;
