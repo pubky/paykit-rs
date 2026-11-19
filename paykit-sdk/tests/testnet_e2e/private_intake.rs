@@ -1089,10 +1089,7 @@ async fn test_private_intake_stream_ignores_unrelated_private_events() {
     let unrelated_paths: Vec<String> = (3..8)
         .flat_map(|slot| {
             [
-                format!(
-                    "{}/receipts/unrelated-{slot}",
-                    paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX
-                ),
+                paykit_lib::ReceiptAccess::location_for(&paykit_lib::ReceiptId::new_v4()),
                 format!("{other_link_folder}/{slot}"),
             ]
         })
@@ -1102,11 +1099,6 @@ async fn test_private_intake_stream_ignores_unrelated_private_events() {
         bob_storage.put(path, b"x".to_vec()).await.unwrap();
     }
     bob_storage.delete(&unrelated_paths[0]).await.unwrap();
-    assert_eq!(
-        supervisor.health().await.peers.get(&pair.bob.public_key),
-        Some(&PrivateIntakeTransportState::CaughtUp),
-        "private intake stream must stay connected through the unrelated events"
-    );
 
     publish_private_lists(&pair.bob, &pair.alice, 1).await;
 
@@ -1127,10 +1119,12 @@ async fn test_private_intake_stream_ignores_unrelated_private_events() {
         advances <= 1,
         "unrelated private events must not start an acquisition, got {advances} cursor-only advances"
     );
+    // The stream has handled every unrelated event by now. The live insert
+    // sets `Replaying`, so only `Stale` is ruled out.
     assert_ne!(
         supervisor.health().await.peers.get(&pair.bob.public_key),
         Some(&PrivateIntakeTransportState::Stale),
-        "private intake stream must not fall back to audits"
+        "private intake stream must stay connected through the unrelated events and not fall back to audits"
     );
     supervisor.stop().await;
 }

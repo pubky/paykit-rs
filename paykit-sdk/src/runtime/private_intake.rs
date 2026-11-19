@@ -676,7 +676,14 @@ fn record_ignored_private_intake_event(
 /// Moving the stored cursor past those events only skips replaying them on
 /// reconnect. Ignored events seen after the audit starts wait for the next
 /// audit, and peers whose audit failed or stopped before finding an absent
-/// slot (pending handshake, capacity, acquisition cap) keep theirs.
+/// slot (pending handshake, capacity, acquisition cap) stay in `ignored`.
+///
+/// `ignored` lives only as long as the connected stream. A pending handshake,
+/// the acquisition cap or a failed audit keeps the cursor for the next audit
+/// on that stream. An audit that stops at capacity makes the caller exit with
+/// backpressure, which drops `ignored` like any other disconnect; the
+/// homeserver then replays those events after reconnect and they are filtered
+/// again.
 async fn audit_private_intake_stream(
     audit_group: &PrivateIntakeAudit,
     ignored: &mut PrivateIntakeIgnoredCursors,
@@ -3913,10 +3920,7 @@ mod tests {
         let owner = &fixture.remote;
         let folder = &fixture.read_folder;
         let other_folder = other_link_folder(folder);
-        let receipt = format!(
-            "{}/receipts/receipt-1",
-            paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX
-        );
+        let receipt = paykit_lib::ReceiptAccess::location_for(&paykit_lib::ReceiptId::new_v4());
         vec![
             put_event(peer_resource(owner, &format!("{other_folder}/3")), 10),
             put_event(peer_resource(owner, &receipt), 11),
@@ -4099,10 +4103,7 @@ mod tests {
             Some(folder.clone())
         );
         for path in [
-            format!(
-                "{}/receipts/receipt-1",
-                paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX
-            ),
+            paykit_lib::ReceiptAccess::location_for(&paykit_lib::ReceiptId::new_v4()),
             format!("{}/3", folder.to_uppercase()),
             format!("{folder}/0/3"),
         ] {
@@ -4397,8 +4398,9 @@ mod tests {
         let outcome = audit_private_intake_stream(&audit, &mut ignored, &commit_cursors).await;
 
         // Only the peer whose expected slot was absent counts as audited;
-        // a pending handshake, full capacity or the acquisition cap keep
-        // the ignored cursor for a later audit.
+        // a pending handshake, full capacity or the acquisition cap leave
+        // the ignored cursor in the stream's map (a capacity stop then ends
+        // the stream, which drops it).
         assert_eq!(outcome.audited_peers, HashSet::from([absent.clone()]));
         assert_eq!(
             std::mem::take(&mut *batches.lock().unwrap()),

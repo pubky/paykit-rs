@@ -1389,12 +1389,16 @@ previously recorded folder and the handshake-slot rule apply. A link that moves
 to a new folder, for example through a recovery or a relink finished outside
 intake, is followed from its next acquisition, at the latest the next audit.
 
-The stream remembers the highest ignored event per peer in memory. After an
-audit that finds the peer's next expected slot absent, it advances the stored
-per-user cursor to that event unless the cursor is already past it, so a
-reconnect does not replay it. An audit that stops at a pending Encrypted Link
-Handshake, at capacity, or at the per-peer acquisition limit, or that fails,
-keeps the ignored event for a later audit. This is safe because the stream
+The connected stream remembers the highest ignored event per peer in memory.
+After an audit that finds the peer's next expected slot absent, it advances
+the stored per-user cursor to that event unless the cursor is already past it,
+so a reconnect does not replay it. An audit that stops at a pending Encrypted
+Link Handshake or at the per-peer acquisition limit, or that fails, keeps the
+ignored event for the next audit on the same stream. Ignored events live only
+as long as the connected stream: an audit that stops at capacity ends the
+stream with backpressure, and that or any other disconnect drops them. After
+reconnect the homeserver replays those events from the stored cursor and
+intake filters them again. This is safe because the stream
 delivers a homeserver's events in cursor order and the audit fetched the peer's
 expected slot after every event seen before the audit started and found it
 absent: an ignored event either cannot announce a packet the expected-slot
