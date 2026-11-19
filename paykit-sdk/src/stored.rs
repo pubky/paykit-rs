@@ -218,6 +218,12 @@ impl StoredNote {
             return Err(PaykitError::corrupt());
         };
         let stored = self.message.stored(own)?;
+        if (matches!(stored.body(), Body::AllowanceProposal(_))
+            || crate::allowances::is_allowance_response(stored.body()))
+            && self.message.position().is_none()
+        {
+            return Err(PaykitError::corrupt());
+        }
         if self.sender != sender
             || self.msg_id != msg_id
             || stored.sender() != sender
@@ -299,6 +305,21 @@ pub(crate) enum PeriodPlace {
     /// acceptance among them, so the records the copy holds decide nothing then (Paykit spec
     /// 8.1, "Records not listed yet"). They wait, never given up meanwhile.
     Undecided,
+}
+
+/// Bind a parked message to the original admitted sender, recipient and service time.
+pub(crate) fn parked_message(
+    entry: &pubky_switch_client::app::ParkedMessage,
+    own: &[u8; 32],
+) -> Option<StoredMessage> {
+    StoredMessage::new(
+        entry.sender,
+        &entry.cert,
+        entry.plaintext.clone(),
+        Some(entry.accepted_at_ms),
+        own,
+    )
+    .ok()
 }
 
 impl Paykit {
@@ -495,13 +516,7 @@ impl Paykit {
         let Some(entry) = self.app.parked_entry(stored_id).await? else {
             return Ok(false);
         };
-        let Ok(stored) = StoredMessage::new(
-            entry.sender,
-            &entry.cert,
-            entry.plaintext.clone(),
-            Some(entry.accepted_at_ms),
-            &own,
-        ) else {
+        let Some(stored) = parked_message(&entry, &own) else {
             return Ok(false);
         };
         let notice_key = key::message_notice(&entry.sender, &stored.message().msg_id);
@@ -559,7 +574,22 @@ impl Paykit {
             hash: stored.hash(),
             sender: entry.sender,
             msg_id: stored.message().msg_id.clone(),
-            message: KeptMessage::taken(&stored, entry.seq),
+            message: if matches!(
+                stored.body(),
+                Body::AllowanceProposal(_)
+                    | Body::AllowanceAcceptance(_)
+                    | Body::AllowanceRejection(_)
+            ) {
+                KeptMessage::taken_at(
+                    &stored,
+                    pubky_switch_client::app::FeedPosition {
+                        generation: entry.generation,
+                        seq: entry.seq,
+                    },
+                )
+            } else {
+                KeptMessage::taken(&stored, entry.seq)
+            },
             placed: false,
         };
         tx.put(&note_key, &note)?;
@@ -807,7 +837,10 @@ impl Paykit {
     /// messages are taken in the order their inbox accepted them, by acceptance time and
     /// then by the feed `seq` their entries were read at, as the kept replies are, never in
     /// the order of their `msg_id`s nor of their entries' local IDs.
-    pub(crate) async fn place_stored(&mut self) -> Result<()> {
+    pub(crate) async fn place_stored(
+        &mut self,
+        pending_read: Option<&pubky_switch_client::app::ReceiveReport>,
+    ) -> Result<()> {
         let own = self.identity();
         // Every note in the order its inbox accepted its message, never in the order of the
         // keys, which end in a `msg_id` its sender chooses: by acceptance time, then by the
@@ -833,7 +866,13 @@ impl Paykit {
                         Placed::Done
                     }
                     Some(Place::Allowance) => {
-                        Box::pin(self.place_allowance_note(stored.clone(), order)).await?
+                        Box::pin(self.place_allowance_note(
+                            stored.clone(),
+                            &note.message,
+                            note.stored_id,
+                            pending_read,
+                        ))
+                        .await?
                     }
                     Some(Place::Record {
                         target,

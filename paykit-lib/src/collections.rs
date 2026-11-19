@@ -78,7 +78,9 @@ impl Collection {
                 Policy::new("paykit_pay", &["paykit_pay"])
             }
             Self::PayeeActivity => Policy::new("paykit_request", &["paykit_request"]),
-            Self::Allowances => Policy::new("paykit_allowance", &["paykit_allowance"]),
+            Self::Allowances => {
+                Policy::new("paykit_allowance", &["paykit_allowance"]).permanent(None)
+            }
             Self::AllowanceProposals => Policy::new("paykit_allowance", &["paykit_allowance"]),
             Self::AllowanceLedgers => {
                 Policy::new("paykit_allowance", &["paykit_allowance_execute"])
@@ -151,6 +153,14 @@ mod tests {
         assert_eq!(
             Collection::PayerActivity.fixed_policy(),
             Policy::new("paykit_pay", &["paykit_pay"])
+        );
+        assert_eq!(
+            Collection::AllowanceProposals.fixed_policy(),
+            Policy::new("paykit_allowance", &["paykit_allowance"])
+        );
+        assert_eq!(
+            Collection::Allowances.fixed_policy(),
+            Policy::new("paykit_allowance", &["paykit_allowance"]).permanent(None)
         );
         assert_eq!(
             Collection::AllowanceLedgers.fixed_policy(),

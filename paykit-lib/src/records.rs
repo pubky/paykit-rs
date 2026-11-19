@@ -3708,8 +3708,8 @@ fn allowance_message(
 
 impl AllowanceRecord {
     /// Read an `allowances` value held by `own` (Paykit wire 5.4 "Binding"): there is a
-    /// proposal, with valid terms; the response comes from the proposal's recipient and the
-    /// end from either side, each addressed to the other; `conflicted`, when present, is
+    /// proposal with valid terms and its original signed acceptance from the recipient. The
+    /// end comes from either side and addresses the other. `conflicted`, when present, is
     /// another proposal, with valid terms and another hash, from either side, or, beside a
     /// response, another response, with another hash, from the proposal's recipient; every
     /// stored message names `allowance_id`; and the response, the end and a conflicting
@@ -3752,7 +3752,7 @@ impl AllowanceRecord {
                     own,
                     &counterparty,
                     Some(&responder),
-                    &[Kind::AllowanceAcceptance, Kind::AllowanceRejection],
+                    &[Kind::AllowanceAcceptance],
                     &allowance_id,
                 )
             })
@@ -3854,12 +3854,12 @@ impl AllowanceRecord {
     ///
     /// [`Error::Invalid`] naming the rule.
     fn check(&self) -> Result<()> {
+        let Some(response) = &self.response else {
+            return invalid("Paykit wire 5.4: a permanent Allowance holds its signed acceptance");
+        };
         let members: [(Option<&StoredMessage>, &[Kind]); 4] = [
             (Some(&self.proposal), &[Kind::AllowanceProposal]),
-            (
-                self.response.as_ref(),
-                &[Kind::AllowanceAcceptance, Kind::AllowanceRejection],
-            ),
+            (Some(response), &[Kind::AllowanceAcceptance]),
             (self.end.as_ref(), &[Kind::AllowanceEnd]),
             (self.conflicted.as_ref(), &CONFLICTING),
         ];
@@ -3895,14 +3895,16 @@ impl AllowanceRecord {
                 "Paykit wire 5.4: a stored message names another Allowance",
             )?;
         }
-        if let Some(response) = &self.response {
-            ensure(
-                response.sender == self.proposal.message.to,
-                "Paykit wire 5.4: a stored message isn't from the side its kind requires",
-            )?;
-            self.check_executor_app_id(response)?;
-        }
+        ensure(
+            response.sender == self.proposal.message.to,
+            "Paykit wire 5.4: a stored message isn't from the side its kind requires",
+        )?;
+        self.check_executor_app_id(response)?;
         let proposal = self.proposal.hash();
+        ensure(
+            response.message.refs == [proposal],
+            "Paykit wire 4.16: a response or an end refers to the proposal in refs",
+        )?;
         if let Some(conflicted) = &self.conflicted {
             // Paykit spec 8.3: a conflict is a second, different proposal, or a second,
             // different response. The same message again, a re-send, is the original one.
@@ -3912,11 +3914,6 @@ impl AllowanceRecord {
                     "Paykit wire 5.4: conflicted holds another proposal than the record's",
                 )?;
             } else {
-                let Some(response) = &self.response else {
-                    return invalid(
-                        "Paykit wire 5.4: a conflicting response comes beside the record's response",
-                    );
-                };
                 ensure(
                     conflicted.hash() != response.hash(),
                     "Paykit wire 5.4: conflicted holds another response than the record's",
@@ -3932,29 +3929,11 @@ impl AllowanceRecord {
                 self.check_executor_app_id(conflicted)?;
             }
         }
-        if let Some(response) = &self.response {
-            ensure(
-                response.message.refs == [proposal],
-                "Paykit wire 4.16: a response or an end refers to the proposal in refs",
-            )?;
-        }
         if let Some(end) = &self.end {
-            // Paykit wire 4.16: an end refers to the proposal and the acceptance; one that
-            // refers to the proposal alone is its sender's withdrawal, before any response.
-            let refs = &end.message.refs;
-            match self.response.as_ref() {
-                Some(acceptance) if acceptance.body.kind() == Kind::AllowanceAcceptance => ensure(
-                    *refs == [proposal, acceptance.hash()],
-                    "Paykit wire 4.16: an end refers to the proposal and the stored acceptance",
-                )?,
-                Some(_) => {
-                    return invalid("Paykit wire 4.16: a rejected Allowance has no end");
-                }
-                None => ensure(
-                    *refs == [proposal] && end.sender == self.proposal.sender,
-                    "Paykit wire 4.16: an end before any response is the proposal's withdrawal by its sender",
-                )?,
-            }
+            ensure(
+                end.message.refs == [proposal, response.hash()],
+                "Paykit wire 4.16: an end refers to the proposal and the stored acceptance",
+            )?;
         }
         if let Some(handoff) = &self.ledger_handoff {
             handoff.check()?;

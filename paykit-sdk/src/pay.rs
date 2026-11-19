@@ -2873,7 +2873,7 @@ impl Paykit {
         // journaled just before the payment method's call ([`Paykit::dispatch`]). The
         // acceptance is signed and journaled now, and sendable only once that call is made.
         let acceptance = self.journal_acceptance(&mut entry).await?;
-        self.dispatch(
+        Box::pin(self.dispatch(
             entry,
             doc,
             by,
@@ -2883,7 +2883,7 @@ impl Paykit {
                 blocked_confirmed,
             },
             acceptance,
-        )
+        ))
         .await
     }
 

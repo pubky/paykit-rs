@@ -36,6 +36,15 @@ use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
 use crate::receive::Settlement;
 
+/// The pending write prepared from an inbox proposal while its signed withdrawal was already held.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PendingCreate {
+    pub(crate) proposal_at: pubky_switch_client::app::FeedPosition,
+    #[serde(with = "serde_b64")]
+    pub(crate) operation: [u8; 32],
+}
+
 /// A verified message kept in Paykit's local state, to be stored in a record later: its
 /// sender, the certificate it was received with, its signed plaintext and its acceptance
 /// time. It is verified again when it is taken back ([`KeptMessage::stored`]).
@@ -60,6 +69,16 @@ pub(crate) struct KeptMessage {
     /// carries none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     seq: Option<u64>,
+    /// The feed generation of a pooled reply. Its sequence alone cannot
+    /// order entries on opposite sides of a provider loss.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generation: Option<u64>,
+    /// The selected version of the pending proposal this answer was matched against.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) pending_source: Option<crate::divergent::SeenVersion>,
+    /// Retained with a withdrawal only when the same batch places its earlier proposal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) pending_create: Option<PendingCreate>,
 }
 
 /// The order the inbox accepted a kept message in (Paykit spec 8.1): by acceptance time,
@@ -67,10 +86,42 @@ pub(crate) struct KeptMessage {
 /// inbox gives each entry as it accepts it, whoever sent it (Switch spec 8.3), never by its
 /// `msg_id`, which its sender chooses, nor by the store that keeps it. A stored entry keeps
 /// the `seq` it was read at when the client tries it again, so a message keeps its position
-/// whichever store keeps it and however often it is taken. The `seq` starts again at a
-/// provider change, and the entry's generation is not handed to the receive step: two
-/// messages of one millisecond accepted under two generations are ordered by their `seq`s.
+/// whichever store keeps it and however often it is taken. Pending Allowance replies retain
+/// their complete feed position and use the client's feed order across generations.
 pub(crate) type KeptOrder = (u64, u64);
+
+/// Compare inbox acceptance times, using the verified feed order to break a tie.
+pub(crate) fn compare_received(
+    a: (u64, pubky_switch_client::app::FeedPosition),
+    b: (u64, pubky_switch_client::app::FeedPosition),
+    order: impl Fn(
+        pubky_switch_client::app::FeedPosition,
+        pubky_switch_client::app::FeedPosition,
+    ) -> Option<std::cmp::Ordering>,
+) -> Option<std::cmp::Ordering> {
+    match a.0.cmp(&b.0) {
+        std::cmp::Ordering::Equal => order(a.1, b.1),
+        distinct => Some(distinct),
+    }
+}
+
+/// The first item only when every relevant comparison proves it.
+pub(crate) fn first_received<T>(
+    items: &[T],
+    compare: impl Fn(&T, &T) -> Option<std::cmp::Ordering>,
+) -> Option<usize> {
+    items.first()?;
+    let mut first = 0;
+    for (index, item) in items.iter().enumerate().skip(1) {
+        if compare(item, &items[first]) == Some(std::cmp::Ordering::Less) {
+            first = index;
+        }
+    }
+    items
+        .iter()
+        .all(|other| compare(&items[first], other).is_some_and(|o| !o.is_gt()))
+        .then_some(first)
+}
 
 impl std::fmt::Debug for KeptMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -87,6 +138,9 @@ impl KeptMessage {
             plaintext: message.plaintext().encode(),
             accepted_at: None,
             seq: None,
+            generation: None,
+            pending_source: None,
+            pending_create: None,
         }
     }
 
@@ -98,6 +152,9 @@ impl KeptMessage {
             plaintext: message.plaintext.encode(),
             accepted_at: Some(message.accepted_at_ms),
             seq: Some(message.seq),
+            generation: Some(message.generation),
+            pending_source: None,
+            pending_create: None,
         }
     }
 
@@ -138,6 +195,9 @@ impl KeptMessage {
             plaintext: stored.plaintext().encode(),
             accepted_at: stored.accepted_at(),
             seq: None,
+            generation: None,
+            pending_source: None,
+            pending_create: None,
         }
     }
 
@@ -147,6 +207,22 @@ impl KeptMessage {
             seq: Some(seq),
             ..Self::of(stored)
         }
+    }
+
+    pub(crate) fn taken_at(
+        stored: &StoredMessage,
+        at: pubky_switch_client::app::FeedPosition,
+    ) -> Self {
+        let mut held = Self::taken(stored, at.seq);
+        held.generation = Some(at.generation);
+        held
+    }
+
+    pub(crate) fn position(&self) -> Option<pubky_switch_client::app::FeedPosition> {
+        Some(pubky_switch_client::app::FeedPosition {
+            generation: self.generation?,
+            seq: self.seq?,
+        })
     }
 
     /// The feed `seq` its entry was read at, for a message ordered among others
@@ -187,14 +263,39 @@ impl KeptMessage {
     pub(crate) fn stored(&self, recipient: &[u8; 32]) -> Result<StoredMessage> {
         let plaintext =
             MessagePlaintext::decode(&self.plaintext).map_err(|_| PaykitError::corrupt())?;
-        StoredMessage::new(
+        let message = StoredMessage::new(
             self.sender,
             &self.cert,
             plaintext,
             self.accepted_at,
             recipient,
         )
-        .map_err(|_| PaykitError::corrupt())
+        .map_err(|_| PaykitError::corrupt())?;
+        if let Some(create) = &self.pending_create {
+            if !matches!(message.body(), paykit_lib::Body::AllowanceEnd(_))
+                || message.message().refs.len() != 1
+                || self.position().is_none()
+                || create.proposal_at.generation == 0
+                || create.proposal_at.seq == 0
+            {
+                return Err(PaykitError::corrupt());
+            }
+        }
+        if let Some(source) = self.pending_source {
+            if source.record_version().is_none()
+                || self.position().is_none()
+                || self.order().is_err()
+                || !matches!(
+                    message.body(),
+                    paykit_lib::Body::AllowanceProposal(_)
+                        | paykit_lib::Body::AllowanceAcceptance(_)
+                        | paykit_lib::Body::AllowanceRejection(_)
+                )
+            {
+                return Err(PaykitError::corrupt());
+            }
+        }
+        Ok(message)
     }
 }
 
@@ -634,13 +735,28 @@ mod extension_tests {
         )
         .unwrap();
         let signed = original.sign(&sender.keys).unwrap();
-        let mut kept = KeptMessage {
+        let received = ReceivedMessage {
+            receipt: pubky_switch_client::app::EntryReceipt {
+                entry_id: [1; 16],
+                service_key: [2; 32],
+                read_at_ms: NOW,
+            },
+            generation: 2,
+            seq: 3,
             sender: sender.id(),
-            cert: sender.cert.signed().clone(),
-            plaintext: signed.encode(),
-            accepted_at: Some(NOW),
-            seq: Some(3),
+            accepted_at_ms: NOW,
+            message: original.clone(),
+            plaintext: signed.clone(),
+            cert: sender.cert.clone(),
+            standing: pubky_switch_core::records::Standing::Listed,
+            context: None,
+            parked: false,
+            released: false,
+            conflict: None,
         };
+        let mut kept = KeptMessage::received(&received);
+        assert_eq!(kept.position(), Some(received.position()));
+        assert!(kept.pending_source.is_none() && kept.pending_create.is_none());
         assert_eq!(kept.extension_for(&recipient).unwrap(), original);
         assert!(kept.extension_for(&[9; 32]).is_err());
 
@@ -756,6 +872,7 @@ mod own_message_tests {
             count("self.own_copy("),
             named(&[
                 ("allowances.rs", 3),
+                ("allowances/pending.rs", 1),
                 ("pay.rs", 1),
                 ("records.rs", 2),
                 ("requests.rs", 2),
@@ -763,7 +880,7 @@ mod own_message_tests {
             "an own message's stored copy is made somewhere new: queue it in the same batch"
         );
         // Every stored message is built in one of these: a received message kept
-        // (`KeptMessage::stored`) or stored by the client (`note_stored`), an own message's
+        // (`KeptMessage::stored`) or parked by the client (`parked_message`), an own message's
         // copy (`own_copy`), an acceptance journaled (`acceptance_message`), and the unit
         // tests' parties and copies (`as_read`). A copy built anywhere else could store an own message unqueued.
         assert_eq!(
@@ -780,7 +897,8 @@ mod own_message_tests {
         assert!(body(text("records.rs"), "own_copy").contains("StoredMessage::new("));
         assert!(body(text("allowances.rs"), "as_read").contains("StoredMessage::new("));
         assert!(body(text("journal.rs"), "acceptance_message").contains("StoredMessage::new("));
-        assert!(body(text("stored.rs"), "note_stored").contains("StoredMessage::new("));
+        assert!(body(text("stored.rs"), "note_stored").contains("parked_message(&entry, &own)"));
+        assert!(body(text("stored.rs"), "parked_message").contains("StoredMessage::new("));
         // Each requested delivery is queued with the write of the signed message.
         let send = body(text("records.rs"), "send_with_record");
         assert!(send.contains("self.own_copy(&signed)"));
@@ -813,6 +931,13 @@ mod own_message_tests {
         let propose = body(allowances, "propose_allowance_inner");
         assert!(propose.contains("self.own_copy(&signed)"));
         assert!(propose.contains(".queue(signed)"));
+        let pending = body(text("allowances/pending.rs"), "answer_pending");
+        assert!(pending.contains("self.own_copy(&reply)"));
+        assert!(pending.contains("message: KeptMessage::of(&q)"));
+        assert!(
+            pending.contains("OpBatch::for_protocol(crate::protocol::BACKUP_NAME).entry(delete)")
+        );
+        assert!(pending.contains("self.submit(batch.queue(reply))"));
         let answer = body(allowances, "answer_allowance");
         assert!(answer.contains("self.own_copy(&signed)"));
         assert!(answer.contains("let mut queue = vec![signed];"));
