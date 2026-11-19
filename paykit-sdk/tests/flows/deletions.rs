@@ -104,7 +104,19 @@ async fn test_payee_deletion_observation_displays_the_original_receipt_and_prese
             .hash(),
         prior.hash()
     );
-    assert_eq!(w.record_writes(&w.bob, &key), writes);
+    assert_eq!(w.record_writes(&w.bob, &key), writes + 1);
+    let pubky_switch_client::app::RecordRead::Fresh(published) =
+        till.app_mut().read_record_fresh(&target).await.unwrap()
+    else {
+        panic!("the switch must return the published receipt");
+    };
+    let published = paykit_lib::records::ActivityRecord::read(
+        published.content.value().unwrap(),
+        &w.bob_id(),
+        paykit_lib::records::ActivitySide::Payee,
+    )
+    .unwrap();
+    assert_eq!(published.receipt.unwrap().hash(), prior.hash());
     till.app_mut()
         .put_record(&target, original.value().unwrap(), Vec::new())
         .await
@@ -120,7 +132,7 @@ async fn test_payee_deletion_observation_displays_the_original_receipt_and_prese
             .hash(),
         prior.hash()
     );
-    assert_eq!(w.record_writes(&w.bob, &key), writes + 1);
+    assert_eq!(w.record_writes(&w.bob, &key), writes + 2);
     shop.receive(None).await.unwrap();
     let full = shop.app().protocol_scan("paykit", b"rc/").await.unwrap();
     assert_eq!(full.len(), 1);
@@ -148,6 +160,7 @@ async fn test_payee_deletion_observation_displays_the_original_receipt_and_prese
             .iter()
             .all(|(_, value)| value.len() < original.value().unwrap().len()));
         assert_eq!(shop.payee_deletion_notices().await.unwrap().len(), 1);
+        till.app_mut().read_record_fresh(&target).await.unwrap();
         till.app_mut()
             .put_record(&target, original.value().unwrap(), Vec::new())
             .await
@@ -318,6 +331,7 @@ async fn test_payee_deletion_an_older_receipt_survives_without_naming_the_writer
     assert_eq!(exact[0].writer, Some(till.app_id()));
     let older_layer = shop.backup().await.unwrap();
     shop.acknowledge_payee_deletion(&exact[0]).await.unwrap();
+    till.app_mut().read_record_fresh(&target).await.unwrap();
     till.app_mut()
         .put_record(&target, older.value().unwrap(), Vec::new())
         .await
@@ -469,6 +483,7 @@ async fn receipt_on_older_restore(when: BeforeRestore) {
             backup = shop.backup().await.unwrap();
             shop.acknowledge_payee_deletion(&notices[0]).await.unwrap();
         }
+        till.app_mut().read_record_fresh(&target).await.unwrap();
         observed = Some(notices[0].clone());
     }
     till.app_mut()
