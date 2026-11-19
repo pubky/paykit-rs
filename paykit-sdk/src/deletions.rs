@@ -480,8 +480,8 @@ fn can_publish(deletion: &RecordDeletion<'_>, cx: &ReceiveContext<'_>) -> bool {
         && paykit_lib::scopes::check_certificate(cx.cert()).is_ok()
 }
 
-/// Compare the applied successor with the issued receipt. If its direct predecessor
-/// is the deletion, both records can contribute to a conditional repair (Paykit wire 5).
+/// Compare the applied successor with the issued receipt. A conditional repair
+/// preserves the signed roles, restrictions and opaque fields of both (Paykit wire 5).
 pub(crate) fn receipt_publication(
     deletion: &RecordDeletion<'_>,
     successor: &RecordSuccessor<'_>,
@@ -530,10 +530,8 @@ pub(crate) fn receipt_publication(
     let mut repaired_marker = None;
     let merged;
     let later = if needs_repair {
-        if successor.expected_version != deletion.version {
-            return Ok(PutBackSuccessor::Wait);
-        }
-        let answers_delete = successor.conditions.iter().any(|condition| {
+        let answers_delete = successor.expected_version == deletion.version
+            && successor.conditions.iter().any(|condition| {
             matches!(condition, pubky_switch_core::ops::Condition::RecordCurrent { key, revision, deleted: true }
                 if key == deletion.key && revision.generation == deletion.version.generation
                     && revision.seq == deletion.version.version && revision.item_hash == deletion.item_hash)

@@ -157,6 +157,7 @@ enum Restart {
 enum Shared {
     Deleted,
     ProofOnly,
+    ExtendedProof,
     Issued,
 }
 
@@ -169,6 +170,11 @@ async fn test_reopened_shop_conditionally_publishes_over_the_exact_deletion() ->
 async fn test_reopened_shop_conditionally_adds_its_receipt_to_the_other_tills_record() -> TestResult
 {
     on_both_services(Shared::ProofOnly, Restart::Cold).await
+}
+
+#[tokio::test]
+async fn test_reopened_shop_preserves_a_later_update_to_the_other_tills_proof() -> TestResult {
+    on_both_services(Shared::ExtendedProof, Restart::Cold).await
 }
 
 #[tokio::test]
@@ -375,7 +381,30 @@ async fn publish_after_restart(world: &World, shared: Shared, restart: Restart) 
             seq: eager.version.version,
             item_hash: op.item_hash()?,
         };
-        (eager.version, reference)
+        if shared == Shared::ExtendedProof {
+            value["proof"]["cert"]["shipment_id"] = "package-5".into();
+            let updated = till
+                .app_mut()
+                .put_record(
+                    &target,
+                    &serde_json::to_vec(&value)?,
+                    vec![Condition::RecordCurrent {
+                        key,
+                        revision: reference,
+                        deleted: false,
+                    }],
+                )
+                .await?;
+            let op = record_op(&till, key, till.app().cert()).await?;
+            let reference = ApplicationRef {
+                generation: updated.version.generation,
+                seq: updated.version.version,
+                item_hash: op.item_hash()?,
+            };
+            (updated.version, reference)
+        } else {
+            (eager.version, reference)
+        }
     };
     drop(shop);
     let mut shop = match restart {
@@ -426,6 +455,9 @@ async fn publish_after_restart(world: &World, shared: Shared, restart: Restart) 
     assert_eq!(published["proof"]["cert"]["merchant_note"], "collected");
     if shared != Shared::Deleted {
         assert_eq!(published["proof"]["cert"]["shipping_note"], "delivered");
+    }
+    if shared == Shared::ExtendedProof {
+        assert_eq!(published["proof"]["cert"]["shipment_id"], "package-5");
     }
     if shared == Shared::Issued {
         assert_eq!(final_record.version, current);
