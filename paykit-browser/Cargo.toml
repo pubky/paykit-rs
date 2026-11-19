@@ -114,3 +114,5 @@ wasm-bindgen-test = "0.3.80"
 # when a target that needs them, such as this crate's tests, is built.
 paykit-sdk = { path = "../paykit-sdk", features = ["test-support"] }
 pubky-switch-client = { workspace = true, features = ["test-support"] }
+# The tests remove the stores they create from the Origin Private File System.
+web-sys = { version = "0.3.107", features = ["FileSystemRemoveOptions"] }
