@@ -19,7 +19,7 @@ The `failure_evidence` cases supply already validated counting evidence to the p
 
 The `allowance_proposals` cases in `sealed.json` give the pending record for a proposal sent or received and for two proposals that cross under one ID. Each case includes the record key and the signed messages in the value. The permanent `allowances` cases require the original signed proposal and its matching acceptance. The accepted Allowance and the ordinary pending proposal have distinct policy hashes and record keys. The signed `executor_notice` names the permanent key.
 
-The `allowance_ledgers` policy and record keys in `identifiers.json` use the permanent execute-writable policy in wire 5.1. In `sealed.json`, `allowance_initial_ledger` gives the exact initial bytes for each proposer role, the original signed acceptance and three invalid acceptance fields. The ledger in `binding_accepted` shows the populated form with that acceptance hash, entries and totals. `allowance_usage.json` checks the hash in subsequent ledger values alongside their usage.
+The `allowance_ledgers` policy and record keys in `identifiers.json` use the permanent execute-writable policy in wire 5.1. In `sealed.json`, `allowance_initial_ledger` gives the exact initial ledger bytes for each proposer role and three invalid acceptance fields. Each initial ledger contains the hash of the signed acceptance message held in the corresponding Allowance record. The ledger in `binding_accepted` shows the populated form with that acceptance hash, entries and totals. `allowance_usage.json` checks the hash in subsequent ledger values alongside their usage.
 
 ## Settlement marks
 
