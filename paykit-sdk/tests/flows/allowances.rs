@@ -1775,9 +1775,8 @@ async fn answer_over_a_record_that_doesnt_read(w: &World) -> (Paykit, [u8; 32], 
     Box::pin(answer_after_a_value_that_doesnt_read(w, true)).await
 }
 
-/// As [`answer_over_a_record_that_doesnt_read`]; with `phone_reads_first` false, the phone
-/// reads only once bob has rejected, so the rejection comes in the read that first holds
-/// the record.
+/// With `phone_reads_first`, the phone already holds the unreadable record when bob rejects.
+/// Without it, the phone keeps bob's rejection while the original record is still absent.
 async fn answer_after_a_value_that_doesnt_read(
     w: &World,
     phone_reads_first: bool,
@@ -1787,49 +1786,63 @@ async fn answer_after_a_value_that_doesnt_read(
     let both = || AppScopes::new().pay().allowance().build().unwrap();
     let mut tool = Box::pin(alice_app(w, "tool", both())).await;
     let mut phone = Box::pin(alice_app(w, "phone", both())).await;
-    let sent = wallet
-        .propose_allowance(w.bob_id(), AllowanceRole::Allower, terms())
-        .await
-        .unwrap();
-    let written = serde_json::to_vec(&Box::pin(value(&wallet, &sent.record)).await).unwrap();
-    let target = pubky_switch_client::app::RecordTarget::new(
-        pubky_switch_client::app::Collection::new(
-            "allowances",
-            paykit_lib::Collection::Allowances.fixed_policy(),
-        ),
-        &paykit_lib::derive::natural_key::allowance(&w.bob_id(), &sent.allowance_id),
-    );
-    tool.app_mut().read_record(&target).await.unwrap();
-    let op = tool
-        .app_mut()
-        .record_op(
-            &target,
-            Some(b"{\"not\":\"an allowance record\"}"),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
-    tool.app_mut()
-        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
-        .await
-        .unwrap();
-    if phone_reads_first {
-        phone.receive(None).await.unwrap();
-        let held = phone
+    let (record, id) = if phone_reads_first {
+        let sent = wallet
+            .propose_allowance(w.bob_id(), AllowanceRole::Allower, terms())
+            .await
+            .unwrap();
+        (sent.record, sent.allowance_id)
+    } else {
+        let (proposal, id) = unrecorded_proposal(w, &wallet);
+        let msg_id = wallet
+            .app_mut()
+            .queue_stored(proposal.plaintext())
+            .await
+            .unwrap();
+        wallet.app_mut().flush_message(&msg_id).await.unwrap();
+        let answer = Box::pin(reject_received_proposal(&mut shop)).await;
+        let record = phone
             .app()
-            .shared_record(&sent.record)
+            .record_key(&allowances_target(&w.bob_id(), &id))
+            .unwrap();
+        phone.receive(None).await.unwrap();
+        let kept = format!(
+            "pr/{}/{}/{answer}",
+            pubky_switch_core::enc::b64(&w.bob_id()),
+            pubky_switch_core::enc::b64(&record)
+        );
+        assert!(phone
+            .app()
+            .protocol_get("paykit", kept.as_bytes())
             .await
             .unwrap()
-            .unwrap();
+            .is_some());
         assert_eq!(
-            held.content.value(),
-            Some(&b"{\"not\":\"an allowance record\"}"[..])
+            Box::pin(records_proposal(w, &mut wallet, &proposal, &id)).await,
+            record
         );
+        (record, id)
+    };
+    let written = Box::pin(raw(&wallet, &record)).await;
+    let unreadable = br#"{"not":"an allowance record"}"#;
+    Box::pin(write_record(
+        &mut tool,
+        &allowances_target(&w.bob_id(), &id),
+        Some(unreadable),
+    ))
+    .await;
+    if phone_reads_first {
+        phone.receive(None).await.unwrap();
+        assert_eq!(Box::pin(raw(&phone, &record)).await, unreadable);
+        Box::pin(reject_received_proposal(&mut shop)).await;
     }
+    (phone, record, written)
+}
+
+async fn reject_received_proposal(shop: &mut Paykit) -> String {
     shop.receive(None).await.unwrap();
     let theirs = shop.allowances().await.unwrap()[0].record;
-    shop.reject_allowance(&theirs).await.unwrap();
-    (phone, sent.record, written)
+    shop.reject_allowance(&theirs).await.unwrap()
 }
 
 /// The value of the record at `record` as `app` holds it, as bytes.
