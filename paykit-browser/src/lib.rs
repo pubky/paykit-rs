@@ -21,13 +21,13 @@
 //!   in a dedicated worker only, with every snapshot sealed under a data key kept wrapped in
 //!   IndexedDB. Its docs say what sealing protects against and what it does not.
 //!
-//! The tests under `tests/` run a subset of Paykit's vectors, the random generator, signing,
-//! and sealing natively and in browser engines. In browser engines only, they run the host
-//! pieces, and the SDK's Payment Request and pay flows with no network; and, against a real
-//! Switch service behind a local TLS and CORS rig, `FetchTransport` and the one-time Payment
-//! Request flow. The store's format and logic have unit tests in `src/store/`, which run
-//! natively and in browser engines. The crate's README lists what is covered, what is not run
-//! in a browser yet, the limits of the network tests, and the known run-time hazards on wasm32.
+//! The tests under `tests/` run Paykit's vectors, the random generator, signing, and sealing
+//! natively and in browser engines. In browser engines only, they run the host pieces, and the
+//! SDK's Payment Request and pay flows with no network; and, against a real Switch service
+//! behind a local TLS and CORS rig, `FetchTransport` and the one-time Payment Request flow.
+//! The store's format and logic have unit tests in `src/store/`, which run natively and in
+//! browser engines. The crate's README lists what is covered, what is not run in a browser yet,
+//! the limits of the network tests, and the known run-time hazards on wasm32.
 //!
 //! On any other target the crate builds as an empty crate, so workspace-wide commands keep
 //! working.
