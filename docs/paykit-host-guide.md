@@ -225,6 +225,14 @@ other responsible protocols have handled their duties too. Keep the deletion
 notice and any surviving confirmed receipt together when showing a missing
 shared record.
 
+For a one-time request, continue calling `receive(None)` after a restart or
+backup restore. A wallet that verifies the original deletion and the preceding
+record in the current service generation can restore its issued receipt to
+shared data. It preserves compatible fields added by another till. If that
+till has already published the complete record, the wallet accepts it without
+another write. The next scheduled poll can report the new cursor to the
+service. Acknowledging the deletion notice leaves the credit restriction in force.
+
 | Case | What to show or do |
 |---|---|
 | `NoticeKind::PaidAfterFailed` | Show that a verified receipt arrived for an attempt previously shown as failed. |

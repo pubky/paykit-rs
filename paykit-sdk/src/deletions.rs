@@ -9,7 +9,10 @@ use crate::divergent::SeenVersion;
 use paykit_lib::collections::Collection;
 use paykit_lib::records::{ActivityRecord, ActivitySide, RecordBinding};
 use paykit_lib::{derive::natural_key, Label};
-use pubky_switch_client::app::{PutBack, ReceiveContext, RecordDeletion, StoreFailure};
+use pubky_switch_client::app::{
+    PutBack, PutBackSuccessor, ReceiveContext, RecordDeletion, RecordRepair, RecordSuccessor,
+    StoreFailure,
+};
 use pubky_switch_core::enc::{b64, serde_b64, serde_b64_vec};
 use serde::{Deserialize, Serialize};
 
@@ -395,6 +398,165 @@ fn signed_request(parent: &ActivityRecord) -> Result<Vec<u8>> {
     Ok(signed.to_json()?)
 }
 
+fn issued_one_time(record: &ActivityRecord) -> bool {
+    crate::requests::request_of(record).is_some_and(|(_, request)| request.recurrence.is_none())
+        && receipt_binding(record, None) == ReceiptBinding::Verified
+}
+
+fn original_marker(
+    prior: &ActivityRecord,
+    eager: &ActivityRecord,
+    later: &ActivityRecord,
+    deletion: [u8; 32],
+) -> bool {
+    eager.lost_to_delete == Some(deletion) && later.lost_to_delete == prior.lost_to_delete
+}
+
+/// A reader may use the original marker only for the proved repair of the very
+/// eager write it saw. Its ordinary signed-role checks still apply (Paykit wire 5).
+pub(crate) fn restores_payee_marker(
+    repair: &RecordRepair,
+    seen: &[u8],
+    later: &ActivityRecord,
+    own: &[u8; 32],
+) -> bool {
+    if repair.held_value != seen {
+        return false;
+    }
+    let Ok(prior) = ActivityRecord::read(&repair.prior_value, own, ActivitySide::Payee) else {
+        return false;
+    };
+    let Ok(eager) = ActivityRecord::read(seen, own, ActivitySide::Payee) else {
+        return false;
+    };
+    original_marker(&prior, &eager, later, repair.deletion.item_hash)
+        && issued_one_time(&prior)
+        && issued_one_time(later)
+        && prior.check_receipt_publication(later).is_ok()
+        && eager.check_receipt_publication(later).is_ok()
+}
+
+fn can_publish(deletion: &RecordDeletion<'_>, cx: &ReceiveContext<'_>) -> bool {
+    deletion.original_in_current_generation
+        && deletion.exact_version_authenticated
+        && deletion.version.generation == deletion.base.expected_version.generation
+        && paykit_lib::scopes::check_certificate(cx.cert()).is_ok()
+}
+
+/// Compare the applied successor with the issued receipt. A conditional repair
+/// preserves the signed roles, restrictions and opaque fields of both (Paykit wire 5).
+pub(crate) fn receipt_publication(
+    deletion: &RecordDeletion<'_>,
+    successor: &RecordSuccessor<'_>,
+    cx: &ReceiveContext<'_>,
+    settlement: Settlement<'_>,
+) -> std::result::Result<PutBackSuccessor, StoreFailure> {
+    let collection = Collection::PayeeActivity;
+    let Some(label) = collection.policy_label(successor.policy) else {
+        return Ok(PutBackSuccessor::Wait);
+    };
+    if deletion.collection != collection.name()
+        || !can_publish(deletion, cx)
+        || successor.version.generation != deletion.version.generation
+        || deletion.policy != Some(successor.policy)
+        || *successor.policy != collection.policy(label.as_ref())
+    {
+        return Ok(PutBackSuccessor::Wait);
+    }
+    let bind = |bytes: &[u8]| {
+        crate::records::bind_activity(
+            bytes,
+            &cx.identity(),
+            ActivitySide::Payee,
+            label.as_ref(),
+            deletion.key,
+            |target| cx.record_key(target).ok(),
+            settlement,
+        )
+    };
+    let Some(exact) = deletion.exact_value else {
+        return Ok(PutBackSuccessor::Wait);
+    };
+    let Some(prior) = bind(exact).filter(issued_one_time) else {
+        return Ok(PutBackSuccessor::Wait);
+    };
+    let Some(current) = bind(successor.value) else {
+        return Ok(PutBackSuccessor::Wait);
+    };
+    let covers_prior = |record: &ActivityRecord| {
+        prior.check_receipt_publication(record).is_ok()
+            && (prior.lost_to_delete == record.lost_to_delete
+                || prior.lost_to_delete.is_none()
+                    && record.lost_to_delete != Some(deletion.item_hash))
+    };
+    let needs_repair = !covers_prior(&current);
+    let mut repaired_marker = None;
+    let merged;
+    let later = if needs_repair {
+        let answers_delete = successor.expected_version == deletion.version
+            && successor.conditions.iter().any(|condition| {
+            matches!(condition, pubky_switch_core::ops::Condition::RecordCurrent { key, revision, deleted: true }
+                if key == deletion.key && revision.generation == deletion.version.generation
+                    && revision.seq == deletion.version.version && revision.item_hash == deletion.item_hash)
+        });
+        let Ok(value) =
+            prior.merge_issued_payee_receipt(&current, &deletion.item_hash, answers_delete)
+        else {
+            return Ok(PutBackSuccessor::Wait);
+        };
+        if answers_delete && original_marker(&prior, &current, &value, deletion.item_hash) {
+            repaired_marker = Some(successor.value);
+        }
+        merged = value;
+        &merged
+    } else {
+        &current
+    };
+    if !issued_one_time(later) || (needs_repair && !covers_prior(later)) {
+        return Ok(PutBackSuccessor::Wait);
+    }
+    if let Some(repair) = successor.repair {
+        let Some(eager) = bind(&repair.held_value) else {
+            return Ok(PutBackSuccessor::Wait);
+        };
+        if repair.key != *deletion.key
+            || repair.deletion.item_hash != deletion.item_hash
+            || repair.prior_value != exact
+            || repair.policy != *successor.policy
+            || eager.check_receipt_publication(later).is_err()
+        {
+            return Ok(PutBackSuccessor::Wait);
+        }
+        if eager.lost_to_delete.is_some() && eager.lost_to_delete != later.lost_to_delete {
+            if !original_marker(&prior, &eager, later, deletion.item_hash) {
+                return Ok(PutBackSuccessor::Wait);
+            }
+            repaired_marker = Some(repair.held_value.as_slice());
+        }
+    }
+    if let Some(seen) = cx
+        .record_seen(deletion.key)
+        .map_err(crate::protocol::store_failure)?
+    {
+        let Some(held) = bind(&seen) else {
+            return Ok(PutBackSuccessor::Wait);
+        };
+        if held.check_receipt_publication(later).is_err()
+            || held.lost_to_delete.is_some()
+                && held.lost_to_delete != later.lost_to_delete
+                && repaired_marker != Some(seen.as_slice())
+        {
+            return Ok(PutBackSuccessor::Wait);
+        }
+    }
+    if needs_repair {
+        let value = later.to_json().map_err(|e| view_failure(e.into()))?;
+        Ok(PutBackSuccessor::Merge { value })
+    } else {
+        Ok(PutBackSuccessor::Covered)
+    }
+}
+
 /// Observe a deletion. The signed record and the credit hold stay on this app.
 pub(crate) fn observe_payee_deletion(
     deletion: &RecordDeletion<'_>,
@@ -429,6 +591,7 @@ pub(crate) fn observe_payee_deletion(
         None => None,
     };
     let mut observed = Vec::new();
+    let mut publication = None;
     if let Some(label) = label {
         let read = |bytes: &[u8]| {
             crate::records::bind_activity(
@@ -513,6 +676,19 @@ pub(crate) fn observe_payee_deletion(
                     }
                 }
             }
+            if exact
+                && can_publish(deletion, cx)
+                && issued_one_time(&record)
+                && deletion.seen.is_none_or(|seen| {
+                    read(seen).is_some_and(|held| {
+                        held.check_receipt_publication(&record).is_ok()
+                            && (held.lost_to_delete.is_none()
+                                || held.lost_to_delete == record.lost_to_delete)
+                    })
+                })
+            {
+                publication = deletion.exact_value;
+            }
             observation.notice = Some(Notice::Pending);
             observation.protected =
                 exact && (protected == ReceiptBinding::Verified || record.lost_to_delete.is_some());
@@ -526,7 +702,13 @@ pub(crate) fn observe_payee_deletion(
         observation = previous;
     }
     observed.push(state::local_put(&local_key, &observation).map_err(view_failure)?);
-    Ok(Some(PutBack::Observe { observed }))
+    Ok(Some(match publication {
+        Some(value) => PutBack::Write {
+            observed,
+            value: value.to_vec(),
+        },
+        None => PutBack::Prepare { observed },
+    }))
 }
 
 fn usable(r: &pubky_switch_client::app::SharedRecord, label: Option<&Label>) -> bool {

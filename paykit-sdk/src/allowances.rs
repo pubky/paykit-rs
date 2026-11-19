@@ -87,7 +87,9 @@ use crate::state::{self, key, Tx};
 use crate::stored::{Placed, StoredNote};
 
 pub(crate) use replies::holds_delivery as pending_conflict_holds_delivery;
-pub(crate) use replies::{lifetime_ended, restore_conflicts, PendingConflict, PendingRetirement};
+pub(crate) use replies::{
+    lifetime_ended, observe_reopened, restore_conflicts, PendingConflict, PendingRetirement,
+};
 mod pending;
 mod replies;
 
