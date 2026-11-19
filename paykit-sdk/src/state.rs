@@ -47,7 +47,7 @@
 //! | `lp/<recipient>/<generation>/<message hash>` | outstanding original publication batch IDs, kept atomically before submission and retained across restore | yes |
 //! | `lres/<recipient>` | the applied list, its publisher and original signed message, first non-delivery, prior offers' latest possible expiry, and the interval of an outstanding withdrawal | yes |
 //! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read: never written over it, which could drop its single-use marks, until the record reads | |
-//! | `kc/<record key>` | a payee's cancellation of a request, kept until it is placed in the payer's request record | |
+//! | `kc/<record key>/<app ID>` | a payee's cancellation of a request, kept until it is placed in the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
 //! | `lr` | when the app last read the lists, on the device clock; absent before the first read and after a due read failed, when new activity waits (Paykit wire 4.1); never restored, so a restored app reads the deny list again before any payment | |
 //! | `spam/<pubky>` | how many messages from a blocked or flagged sender only were counted (Paykit wire 4.1) | |
@@ -838,7 +838,7 @@ impl sealed::Sealed for KeptMessage {}
 
 /// A message kept: verified for this app, and of the record its key names.
 ///
-/// - At `kc/<record key>`, a `paykit.payment_request_cancellation` its inbox accepted, kept
+/// - At `kc/<record key>/<app ID>`, a `paykit.payment_request_cancellation` its inbox accepted, kept
 ///   under the record key of the payer's record of the request it cancels, from its sender
 ///   and the first of its `refs` (Paykit spec 8.1).
 /// - At `pr/<sender>/<record key>/<msg_id>`, a payer's acceptance, rejection, cancellation
