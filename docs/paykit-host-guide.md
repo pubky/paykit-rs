@@ -168,6 +168,13 @@ current store.
 
 ## Request and Allowance status
 
+A wallet with `paykit_allowance` receives pending proposal records from other
+apps on its account. A host inspecting an `allowance_proposals` record can use
+`PendingAllowanceRecord::read` and `bind` to check its signed proposal against
+the account and record key (Paykit wire 5.4). A verified current deletion ends
+that proposal’s lifetime. An unreadable or flagged value keeps the last
+qualified roles and supplies no new proposal to act on.
+
 | Case | What to show or do |
 |---|---|
 | `RequestStatus::Open` | Show the request and the current conditions for acting on it. |

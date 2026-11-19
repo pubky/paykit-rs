@@ -473,7 +473,7 @@ async fn own_acceptance_through_a_restore(how: Option<SendsHeld>) {
     drop(wallet);
     let mut wallet = Box::pin(restored_unreceived(&w, &backup)).await;
     match how {
-        Some(SendsHeld::Blocked) => wallet.block(&w.bob_id()).await.unwrap(),
+        Some(SendsHeld::Blocked) => Box::pin(block_during_restore(&mut wallet, &w.bob_id())).await,
         Some(SendsHeld::Unknown) => fail_list_read(&w),
         None => {}
     }
@@ -488,6 +488,8 @@ async fn own_acceptance_through_a_restore(how: Option<SendsHeld>) {
             Box::pin(sends_no_acceptance(&mut wallet, &mut shop, "released")).await;
         }
     }
+    Box::pin(read_restored_records(&mut wallet)).await;
+    Box::pin(sends_no_acceptance(&mut wallet, &mut shop, "listed")).await;
     assert_eq!(Box::pin(raw(&wallet, &mine)).await, before);
     let view = wallet.allowance(&mine).await.unwrap();
     assert_eq!(view.status, AllowanceStatus::Accepted);
@@ -1027,7 +1029,7 @@ async fn restored_consent(clean: bool) {
     if !clean {
         crate::common::restore_with_unknown_cursor(&mut restored).await;
     }
-    restored.receive(None).await.unwrap();
+    Box::pin(read_restored_records(&mut restored)).await;
     let expected = if clean {
         pubky_switch_client::app::HeldCursor::Clean
     } else {
@@ -1053,7 +1055,7 @@ async fn restored_consent(clean: bool) {
     ))
     .await
     .unwrap();
-    again.receive(None).await.unwrap();
+    Box::pin(read_restored_records(&mut again)).await;
     assert_eq!(
         Box::pin(consent_entry(&again, &mine)).await,
         Some(json!({ "removed": { "reason": "ended" } }))
@@ -1775,9 +1777,8 @@ async fn answer_over_a_record_that_doesnt_read(w: &World) -> (Paykit, [u8; 32], 
     Box::pin(answer_after_a_value_that_doesnt_read(w, true)).await
 }
 
-/// As [`answer_over_a_record_that_doesnt_read`]; with `phone_reads_first` false, the phone
-/// reads only once bob has rejected, so the rejection comes in the read that first holds
-/// the record.
+/// With `phone_reads_first`, the phone already holds the unreadable record when bob rejects.
+/// Without it, the phone keeps bob's rejection while the original record is still absent.
 async fn answer_after_a_value_that_doesnt_read(
     w: &World,
     phone_reads_first: bool,
@@ -1787,49 +1788,63 @@ async fn answer_after_a_value_that_doesnt_read(
     let both = || AppScopes::new().pay().allowance().build().unwrap();
     let mut tool = Box::pin(alice_app(w, "tool", both())).await;
     let mut phone = Box::pin(alice_app(w, "phone", both())).await;
-    let sent = wallet
-        .propose_allowance(w.bob_id(), AllowanceRole::Allower, terms())
-        .await
-        .unwrap();
-    let written = serde_json::to_vec(&Box::pin(value(&wallet, &sent.record)).await).unwrap();
-    let target = pubky_switch_client::app::RecordTarget::new(
-        pubky_switch_client::app::Collection::new(
-            "allowances",
-            paykit_lib::Collection::Allowances.fixed_policy(),
-        ),
-        &paykit_lib::derive::natural_key::allowance(&w.bob_id(), &sent.allowance_id),
-    );
-    tool.app_mut().read_record(&target).await.unwrap();
-    let op = tool
-        .app_mut()
-        .record_op(
-            &target,
-            Some(b"{\"not\":\"an allowance record\"}"),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
-    tool.app_mut()
-        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
-        .await
-        .unwrap();
-    if phone_reads_first {
-        phone.receive(None).await.unwrap();
-        let held = phone
+    let (record, id) = if phone_reads_first {
+        let sent = wallet
+            .propose_allowance(w.bob_id(), AllowanceRole::Allower, terms())
+            .await
+            .unwrap();
+        (sent.record, sent.allowance_id)
+    } else {
+        let (proposal, id) = unrecorded_proposal(w, &wallet);
+        let msg_id = wallet
+            .app_mut()
+            .queue_stored(proposal.plaintext())
+            .await
+            .unwrap();
+        wallet.app_mut().flush_message(&msg_id).await.unwrap();
+        let answer = Box::pin(reject_received_proposal(&mut shop)).await;
+        let record = phone
             .app()
-            .shared_record(&sent.record)
+            .record_key(&allowances_target(&w.bob_id(), &id))
+            .unwrap();
+        phone.receive(None).await.unwrap();
+        let kept = format!(
+            "pr/{}/{}/{answer}",
+            pubky_switch_core::enc::b64(&w.bob_id()),
+            pubky_switch_core::enc::b64(&record)
+        );
+        assert!(phone
+            .app()
+            .protocol_get("paykit", kept.as_bytes())
             .await
             .unwrap()
-            .unwrap();
+            .is_some());
         assert_eq!(
-            held.content.value(),
-            Some(&b"{\"not\":\"an allowance record\"}"[..])
+            Box::pin(records_proposal(w, &mut wallet, &proposal, &id)).await,
+            record
         );
+        (record, id)
+    };
+    let written = Box::pin(raw(&wallet, &record)).await;
+    let unreadable = br#"{"not":"an allowance record"}"#;
+    Box::pin(write_record(
+        &mut tool,
+        &allowances_target(&w.bob_id(), &id),
+        Some(unreadable),
+    ))
+    .await;
+    if phone_reads_first {
+        phone.receive(None).await.unwrap();
+        assert_eq!(Box::pin(raw(&phone, &record)).await, unreadable);
+        Box::pin(reject_received_proposal(&mut shop)).await;
     }
+    (phone, record, written)
+}
+
+async fn reject_received_proposal(shop: &mut Paykit) -> String {
     shop.receive(None).await.unwrap();
     let theirs = shop.allowances().await.unwrap()[0].record;
-    shop.reject_allowance(&theirs).await.unwrap();
-    (phone, sent.record, written)
+    shop.reject_allowance(&theirs).await.unwrap()
 }
 
 /// The value of the record at `record` as `app` holds it, as bytes.
@@ -2042,9 +2057,7 @@ async fn test_allowances_restore_after_an_undelivered_proposal_proposes_once() {
     ))
     .await
     .unwrap();
-    for _ in 0..2 {
-        restored.receive(None).await.unwrap();
-    }
+    Box::pin(read_restored_records(&mut restored)).await;
     restored.flush().await.unwrap();
     let proposals = Box::pin(taken(&mut shop, "paykit.allowance_proposal")).await
         + Box::pin(taken(&mut shop, "paykit.allowance_proposal")).await;
@@ -2560,22 +2573,22 @@ fn missed_and_listing_fails(w: &World) {
 }
 
 /// How many collections the client lists for an app of alice's holding `paykit_pay` and
-/// `paykit_allowance`: the payer's side, `payment_lists`, `block_floor` and `allowances`.
-const WALLET_COLLECTIONS: usize = 4;
+/// `paykit_allowance`: the payer's side, payment lists, block floor, proposals and Allowances.
+const WALLET_COLLECTIONS: usize = 5;
 
 /// How many collections the client lists for bob's shop, holding `paykit_request` and
-/// `paykit_allowance`: the payee's side and `allowances`.
-const SHOP_COLLECTIONS: usize = 2;
+/// `paykit_allowance`: the payee's side, proposals and Allowances.
+const SHOP_COLLECTIONS: usize = 3;
 
 /// Fail Paykit's own listing at the end of the next receive of `party`'s app after a
-/// `missed` item: the client's listing after the item, of the app's `collections`, goes
-/// through first. A listing that fails inside the client's read fails the read.
+/// `missed` item: the client lists up to its page budget before Paykit takes over.
+/// A listing that fails inside the client's read fails the read.
 fn fail_paykit_listing(party: &pubky_switch_client::testing::TestSigner, collections: usize) {
     party
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Unreachable {
             path: "records?collection".into(),
-            after: collections,
+            after: collections.min(pubky_switch_client::app::LISTING_PAGES_PER_READ as usize),
         });
 }
 
@@ -2688,7 +2701,7 @@ async fn test_allowances_stored_proposal_neither_opened_nor_given_up_while_unlis
         1
     );
     assert!(wallet.notices().await.unwrap().is_empty());
-    wallet.receive(None).await.unwrap();
+    Box::pin(read_listed_records(&mut wallet)).await;
     assert_eq!(wallet.allowances().await.unwrap().len(), 1);
 }
 
@@ -3516,8 +3529,10 @@ async fn test_allowances_end_over_a_deleted_record_kept_as_a_stop_once_listed() 
         .await
         .unwrap()
         .is_empty());
-    wallet.receive(None).await.unwrap();
-    wallet.receive(None).await.unwrap();
+    Box::pin(read_listed_records(&mut wallet)).await;
+    // Intake ran before the last listing page completed. The next read can take the end.
+    let next = wallet.receive(None).await.unwrap();
+    assert!(received(&next, "paykit.allowance_end"), "{next:?}");
     assert_eq!(
         wallet
             .app()
@@ -4136,9 +4151,7 @@ async fn test_allowances_restore_keeps_the_recorded_crossing_end() {
     let previous = shop.allowance(&theirs).await.unwrap().status;
     drop(wallet);
     let mut restored = Box::pin(restored_unreceived(&w, &backup)).await;
-    for _ in 0..2 {
-        restored.receive(None).await.unwrap();
-    }
+    Box::pin(read_restored_records(&mut restored)).await;
     assert!(restored
         .app()
         .protocol_scan("paykit", b"eo/")
@@ -4222,7 +4235,7 @@ async fn test_allowances_crossing_end_after_an_unanswered_write_reports_its_unkn
         .await
         .unwrap()
         .is_some());
-    restored.receive(None).await.unwrap();
+    Box::pin(read_restored_records(&mut restored)).await;
     assert!(Box::pin(ends_naming_both(&restored, &mine)).await);
     assert!(restored
         .app()
@@ -4406,6 +4419,59 @@ async fn backed_up_with_its_answer_unqueued(
     (mine, theirs, wallet.backup().await.unwrap())
 }
 
+/// Finish the client's owed listing and Paykit's listing under the certificate now held.
+async fn read_listed_records(wallet: &mut Paykit) {
+    Box::pin(read_listed_records_while(wallet, || {})).await;
+}
+
+async fn read_listed_records_while(wallet: &mut Paykit, before_read: impl Fn()) {
+    for _ in 0..4 {
+        before_read();
+        let summary = wallet.receive(None).await.unwrap();
+        if summary.records_unlisted.is_some() || wallet.app().listing_owed().await.unwrap() {
+            continue;
+        }
+        match wallet.allowances().await {
+            Ok(_) => return,
+            Err(error) => assert!(
+                matches!(error.refusal(), Some(Refusal::NotNow(_))),
+                "{error:?}"
+            ),
+        }
+    }
+    panic!("the wallet's Allowance records are still unlisted");
+}
+
+async fn read_restored_records(wallet: &mut Paykit) {
+    Box::pin(read_listed_records(wallet)).await;
+    assert!(wallet.app().restore_held_cursor().is_some());
+}
+
+/// The user's block is already durable when the first page has not finished the restore.
+async fn block_during_restore(wallet: &mut Paykit, peer: &[u8; 32]) {
+    let result = wallet.block(peer).await;
+    if let Err(error) = result {
+        assert!(
+            matches!(
+                error,
+                paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::Refused(
+                    pubky_switch_client::app::Refusal::NotNow(_)
+                ))
+            ),
+            "{error:?}"
+        );
+        let mark = format!("bk/{}", pubky_switch_core::enc::b64(peer));
+        assert!(wallet
+            .app()
+            .protocol_get("paykit", mark.as_bytes())
+            .await
+            .unwrap()
+            .is_some());
+        Box::pin(read_restored_records(wallet)).await;
+        wallet.block(peer).await.unwrap();
+    }
+}
+
 /// Restore `backup` onto a new store as an app of alice's, without a receive.
 async fn restored_unreceived(w: &World, backup: &paykit_sdk::PaykitBackup) -> Paykit {
     Box::pin(Paykit::restore(
@@ -4434,7 +4500,7 @@ async fn restored_answer(kind: &str) {
     let previous = shop.allowance(&theirs).await.unwrap().status;
     drop(wallet);
     let mut wallet = Box::pin(restored_unreceived(&w, &backup)).await;
-    wallet.receive(None).await.unwrap();
+    Box::pin(read_restored_records(&mut wallet)).await;
     assert!(wallet
         .app()
         .protocol_get("paykit", b"ro")
@@ -4470,7 +4536,7 @@ async fn restored_rejection_stays_uncertain(how: SendsHeld) {
     let mut shop = Box::pin(shop(&w)).await;
     let mut wallet = Box::pin(keeper(&w)).await;
     let kind = "paykit.allowance_rejection";
-    let (_, theirs, backup) = Box::pin(backed_up_with_its_answer_unqueued(
+    let (mine, theirs, backup) = Box::pin(backed_up_with_its_answer_unqueued(
         &w,
         &mut wallet,
         &mut shop,
@@ -4480,14 +4546,20 @@ async fn restored_rejection_stays_uncertain(how: SendsHeld) {
     let previous = shop.allowance(&theirs).await.unwrap().status;
     drop(wallet);
     let mut wallet = Box::pin(restored_unreceived(&w, &backup)).await;
-    match how {
-        SendsHeld::Blocked => wallet.block(&w.bob_id()).await.unwrap(),
-        SendsHeld::Unknown => fail_list_read(&w),
-    }
-    wallet.receive(None).await.unwrap();
     if let SendsHeld::Blocked = how {
-        wallet.receive(None).await.unwrap();
+        Box::pin(block_during_restore(&mut wallet, &w.bob_id())).await;
     }
+    Box::pin(read_listed_records_while(&mut wallet, || {
+        if let SendsHeld::Unknown = how {
+            fail_list_read(&w);
+        }
+    }))
+    .await;
+    let blocked = match how {
+        SendsHeld::Blocked => Some(true),
+        SendsHeld::Unknown => None,
+    };
+    assert_eq!(wallet.allowance(&mine).await.unwrap().blocked, blocked);
     assert_eq!(Box::pin(taken(&mut shop, kind)).await, 0, "{how:?}");
     assert!(wallet
         .app()
@@ -4496,7 +4568,7 @@ async fn restored_rejection_stays_uncertain(how: SendsHeld) {
         .unwrap()
         .is_none());
     Box::pin(release_sends(&w, &mut wallet, how)).await;
-    wallet.receive(None).await.unwrap();
+    Box::pin(read_restored_records(&mut wallet)).await;
     assert!(wallet
         .app()
         .protocol_get("paykit", b"ro")
@@ -4633,8 +4705,7 @@ async fn restored_after(
     drop(wallet);
     between(w, &mine, &id, app_id).await;
     let mut restored = Box::pin(restored_unreceived(w, &backup)).await;
-    restored.receive(None).await.unwrap();
-    restored.receive(None).await.unwrap();
+    Box::pin(read_restored_records(&mut restored)).await;
     (restored, theirs, mine)
 }
 
@@ -4737,8 +4808,7 @@ async fn test_allowances_restore_sends_no_proposal_after_the_counterpartys_answe
     );
     drop(wallet);
     let mut restored = Box::pin(restored_unreceived(&w, &backup)).await;
-    restored.receive(None).await.unwrap();
-    restored.receive(None).await.unwrap();
+    Box::pin(read_restored_records(&mut restored)).await;
     assert!(!Box::pin(value(&restored, &sent.record)).await["response"].is_null());
     assert!(restored
         .app()
@@ -8012,6 +8082,291 @@ async fn test_consent_state_owed_end_body_discarded_restore_recovers_signed_end(
     assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
 }
 
+/// A proposal signed and stored by its sender, as the sender's record would hold it.
+fn signed_pending_proposal(
+    app: &Paykit,
+    to: [u8; 32],
+    id: &paykit_lib::AllowanceId,
+    proposer_role: &str,
+) -> StoredMessage {
+    let body = json!({
+        "allowance_id": id.as_str(),
+        "proposer_role": proposer_role,
+        "allower_generation": 1,
+        "terms": terms().to_json().unwrap()
+    });
+    let signed = app
+        .app()
+        .sign_message(OutgoingMessage::new(
+            to,
+            "paykit.allowance_proposal",
+            body.as_object().unwrap().clone(),
+        ))
+        .unwrap();
+    StoredMessage::new(
+        app.identity(),
+        app.app().cert().signed(),
+        signed.plaintext().clone(),
+        None,
+        &to,
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_pending_record_keeps_the_first_proposal_and_conflict_until_its_verified_deletion() {
+    use paykit_lib::records::PendingAllowanceRecord;
+    use pubky_switch_client::app::{Collection, RecordContent, RecordTarget};
+    use pubky_switch_client::testing::Fault;
+
+    let w = World::new();
+    let shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(wallet(&w)).await;
+    let mut phone = Box::pin(alice_app(
+        &w,
+        "phone",
+        AppScopes::new().pay().allowance().build().unwrap(),
+    ))
+    .await;
+    let id = paykit_lib::AllowanceId::generate().unwrap();
+    let incoming = signed_pending_proposal(&shop, w.alice_id(), &id, "allowee");
+    let outgoing = signed_pending_proposal(&phone, w.bob_id(), &id, "allower");
+    let collection = paykit_lib::Collection::AllowanceProposals;
+    let target = RecordTarget::new(
+        Collection::new(collection.name(), collection.fixed_policy()),
+        &paykit_lib::derive::natural_key::allowance(&w.bob_id(), &id),
+    );
+    let key = wallet.app().record_key(&target).unwrap();
+    let own = w.alice_id();
+    let mut record = PendingAllowanceRecord::new(&own, incoming.clone()).unwrap();
+    let first_value = record.to_json().unwrap();
+    Box::pin(write_record(&mut phone, &target, Some(&first_value))).await;
+    let first = wallet.receive(None).await.unwrap();
+    assert!(first
+        .report
+        .events
+        .iter()
+        .any(|event| matches!(event, AppEvent::RecordChanged { key: changed } if changed == &key)));
+    let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    let read = PendingAllowanceRecord::read(held.content.value().unwrap(), &own).unwrap();
+    assert_eq!(read.proposal().hash(), incoming.hash());
+    assert_eq!(read.counterparty(), &w.bob_id());
+    assert_eq!(read.allowance_id(), &id);
+    assert!(wallet.allowances().await.unwrap().is_empty());
+    let original_mark = wallet.app().record_seen(&key).await.unwrap().unwrap();
+    assert_eq!(
+        phone.app().record_seen(&key).await.unwrap().as_ref(),
+        Some(&original_mark)
+    );
+
+    assert!(record.note_proposal(outgoing.clone()).unwrap());
+    Box::pin(write_record(
+        &mut phone,
+        &target,
+        Some(&record.to_json().unwrap()),
+    ))
+    .await;
+    wallet.receive(None).await.unwrap();
+    let mark = wallet.app().record_seen(&key).await.unwrap().unwrap();
+    assert_ne!(original_mark, mark);
+    assert_eq!(
+        phone.app().record_seen(&key).await.unwrap().as_ref(),
+        Some(&mark)
+    );
+
+    // The writer has seen both roles. Its older copy is refused before signing.
+    let before = phone.app().shared_record(&key).await.unwrap().unwrap();
+    let refused = phone
+        .app_mut()
+        .record_op(&target, Some(&first_value), Vec::new())
+        .await
+        .unwrap_err();
+    assert!(refused
+        .to_string()
+        .contains("does not preserve the roles at this key"));
+    let current = phone.app().shared_record(&key).await.unwrap().unwrap();
+    assert_eq!(current.version, before.version);
+    assert_eq!(current.content, before.content);
+    assert_eq!(wallet.app().record_seen(&key).await.unwrap().unwrap(), mark);
+    Box::pin(write_record(
+        &mut phone,
+        &target,
+        Some(&record.to_json().unwrap()),
+    ))
+    .await;
+    wallet.receive(None).await.unwrap();
+    assert!(
+        !wallet
+            .app()
+            .shared_record(&key)
+            .await
+            .unwrap()
+            .unwrap()
+            .flagged
+    );
+
+    // A network interruption does not end the lifetime of either signed role.
+    w.alice.switch().fail_next(Fault::Unreachable {
+        path: "/records/".into(),
+        after: 0,
+    });
+    let uncertain = wallet.app_mut().read_record_fresh(&target).await.unwrap();
+    assert!(matches!(
+        uncertain,
+        pubky_switch_client::app::RecordRead::Kept {
+            reason: pubky_switch_client::app::KeptReason::Unreachable(_),
+            ..
+        }
+    ));
+    assert_eq!(wallet.app().record_seen(&key).await.unwrap().unwrap(), mark);
+
+    // Only the writer receives this epoch's key. Its later write is genuine but
+    // the wallet must retain the conflict while it cannot open the new value.
+    w.alice.next_doc(|doc| doc.data_epoch += 1).unwrap();
+    crate::unrequested::store_bundle(&w, phone.app_id(), &phone.app().cert().clone());
+    phone.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    Box::pin(write_record(
+        &mut phone,
+        &target,
+        Some(&record.to_json().unwrap()),
+    ))
+    .await;
+    w.alice.next_doc(|doc| doc.data_epoch += 1).unwrap();
+    let epoch = w.alice.switch().identity_doc().unwrap().data_epoch();
+    crate::unrequested::store_bundle_from(&w, wallet.app_id(), &wallet.app().cert().clone(), epoch);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    assert!(matches!(held.content, RecordContent::Unreadable(_)));
+    assert_eq!(wallet.app().record_seen(&key).await.unwrap().unwrap(), mark);
+
+    crate::unrequested::store_bundle(&w, phone.app_id(), &phone.app().cert().clone());
+    phone.receive(None).await.unwrap();
+    Box::pin(write_record(&mut phone, &target, None)).await;
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().record_seen(&key).await.unwrap().is_none());
+    assert!(wallet.allowances().await.unwrap().is_empty());
+    let next = PendingAllowanceRecord::new(&own, outgoing.clone()).unwrap();
+    Box::pin(write_record(
+        &mut phone,
+        &target,
+        Some(&next.to_json().unwrap()),
+    ))
+    .await;
+    wallet.receive(None).await.unwrap();
+    let reopened_mark = wallet.app().record_seen(&key).await.unwrap().unwrap();
+    assert_ne!(reopened_mark, original_mark);
+    assert_ne!(reopened_mark, mark);
+    assert_eq!(
+        phone.app().record_seen(&key).await.unwrap().as_ref(),
+        Some(&reopened_mark)
+    );
+    let reopened = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    let read = PendingAllowanceRecord::read(reopened.content.value().unwrap(), &own).unwrap();
+    assert_eq!(read.proposal().hash(), outgoing.hash());
+    assert!(read.conflicted().is_none());
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_pending_proposals_remain_bound_to_their_own_records_after_a_restart() {
+    use paykit_lib::{derive::natural_key, records::PendingAllowanceRecord, AllowanceId};
+    use pubky_switch_client::app::{Collection, RecordTarget};
+
+    let w = World::new();
+    let shop = Box::pin(shop(&w)).await;
+    let storage = crate::common::store();
+    let mut wallet = Box::pin(w.join_with(
+        &w.alice,
+        "wallet",
+        AppScopes::new().allowance().build().unwrap(),
+        Default::default(),
+        storage.clone(),
+    ))
+    .await;
+    let mut phone = Box::pin(alice_app(
+        &w,
+        "phone",
+        AppScopes::new().pay().allowance().build().unwrap(),
+    ))
+    .await;
+    let own = w.alice_id();
+    let peer = w.bob_id();
+    let first_id = AllowanceId::generate().unwrap();
+    let second_id = AllowanceId::generate().unwrap();
+    let first = signed_pending_proposal(&shop, own, &first_id, "allowee");
+    let second = signed_pending_proposal(&phone, peer, &second_id, "allower");
+    let collection = paykit_lib::Collection::AllowanceProposals;
+    let target = |id| {
+        RecordTarget::new(
+            Collection::new(collection.name(), collection.fixed_policy()),
+            &natural_key::allowance(&peer, id),
+        )
+    };
+    let first_target = target(&first_id);
+    let second_target = target(&second_id);
+    let first_key = wallet.app().record_key(&first_target).unwrap();
+    let second_key = wallet.app().record_key(&second_target).unwrap();
+    assert_ne!(first_key, second_key);
+    let first_value = PendingAllowanceRecord::new(&own, first.clone())
+        .unwrap()
+        .to_json()
+        .unwrap();
+    let second_value = PendingAllowanceRecord::new(&own, second.clone())
+        .unwrap()
+        .to_json()
+        .unwrap();
+    // Both values are signed for this wallet. Selecting another Allowance's target
+    // cannot establish a mark or prepare a record operation there.
+    let refused = wallet
+        .app_mut()
+        .record_op(&first_target, Some(&second_value), Vec::new())
+        .await
+        .unwrap_err();
+    assert!(refused
+        .to_string()
+        .contains("signed proposal belongs to another record"));
+    assert!(wallet
+        .app()
+        .record_seen(&first_key)
+        .await
+        .unwrap()
+        .is_none());
+    Box::pin(write_record(&mut phone, &first_target, Some(&first_value))).await;
+    Box::pin(write_record(
+        &mut wallet,
+        &second_target,
+        Some(&second_value),
+    ))
+    .await;
+    wallet.receive(None).await.unwrap();
+    let marks = [
+        wallet.app().record_seen(&first_key).await.unwrap().unwrap(),
+        wallet
+            .app()
+            .record_seen(&second_key)
+            .await
+            .unwrap()
+            .unwrap(),
+    ];
+    assert_ne!(marks[0], marks[1]);
+    let app = wallet.app_id();
+    drop(wallet);
+    let wallet = Box::pin(w.load_on_clock(&w.alice, storage, app, w.clock.clone())).await;
+    for ((key, message), mark) in [(first_key, first), (second_key, second)]
+        .into_iter()
+        .zip(marks)
+    {
+        let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
+        assert!(held.authenticated && !held.flagged && !held.not_taken);
+        let qualified = PendingAllowanceRecord::read(held.content.value().unwrap(), &own).unwrap();
+        assert_eq!(qualified.proposal().hash(), message.hash());
+        assert_eq!(wallet.app().record_seen(&key).await.unwrap(), Some(mark));
+    }
+    assert!(w.rail.all_executions().is_empty());
+}
+
 #[tokio::test]
 async fn test_allowances_receive_only_app_can_read_a_proposal_and_cannot_send_or_answer() {
     let w = World::new();
@@ -8409,7 +8764,7 @@ async fn test_allowances_an_owed_end_without_its_origin_stays_held_after_restore
     let backup = payer.backup().await.unwrap();
     drop(payer);
     let mut payer = Box::pin(restored_unreceived(&w, &backup)).await;
-    payer.receive(None).await.unwrap();
+    Box::pin(read_restored_records(&mut payer)).await;
     payer.app_mut().release_queued(&w.bob_id()).await.unwrap();
     payer.app_mut().flush_outbox().await.unwrap();
     assert_eq!(

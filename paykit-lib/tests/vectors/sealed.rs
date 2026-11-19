@@ -10,7 +10,8 @@ use paykit_lib::derive::{
 use paykit_lib::identifiers::PaymentEndpointIdentifier;
 use paykit_lib::records::{
     bind_ledger, ActivityRecord, ActivitySide, AllowanceRecord, OccurrenceKind, PaymentListRecord,
-    SeenMerge, SettlementBoundary, SettlementBucket, SettlementMark, MAX_SETTLEMENT_MARKS,
+    PendingAllowanceRecord, SeenMerge, SettlementBoundary, SettlementBucket, SettlementMark,
+    MAX_SETTLEMENT_MARKS,
 };
 use paykit_lib::scopes::{Label, PaykitScope, ScopeName, SETTLEMENTS};
 use pubky_switch_core::enc::b64;
@@ -45,6 +46,7 @@ pub(crate) fn check() {
     check_later_writes(&keys, &v);
     check_msg_ids_bounds(&keys, &v);
     check_allowance_records(&keys, &v);
+    check_pending_proposals(&keys, &v["allowance_proposals"]);
     check_settlement_marks(&keys, &v["settlement_marks"]);
 }
 
@@ -1356,6 +1358,10 @@ pub(crate) fn generate(keys: &Keys) {
         (Place::Member("/activity_records"), member),
         (Place::Member("/msg_ids_bounds"), msg_ids_bounds(keys)),
         (Place::Member("/allowance_records"), allowance_records(keys)),
+        (
+            Place::Member("/allowance_proposals"),
+            pending_proposals(keys),
+        ),
         (Place::Member("/settlement_marks"), settlement_marks(keys)),
     ];
     cases.extend(binding_cases(keys));
@@ -3149,6 +3155,136 @@ fn test_allowance_later_write_keeps_the_current_grant_the_last_entry() {
     handed.check_later_write(&handed).unwrap();
     let (back, _) = handed_back(&keys, &handed);
     handed.check_later_write(&back).unwrap();
+}
+
+/// Alice's phone proposes an Allowance to Bob while Bob is proposing under the same ID.
+fn crossing_proposal(keys: &Keys) -> paykit_lib::records::StoredMessage {
+    resign_with(keys, "allowance_proposal", |m| {
+        m.msg_id = CROSSING_PROPOSAL.into();
+        m.from = pubky_switch_core::message::Sender {
+            identity: pubky(ALICE),
+            app_id: keys.app("phone").keys.app_id_bytes(),
+        };
+        m.to = pubky(BOB);
+        m.body
+            .insert("proposer_role".into(), serde_json::json!("allower"));
+    })
+}
+
+fn pending_proposals(keys: &Keys) -> Value {
+    let own = pubky(ALICE);
+    let nk = keys.identity(&own).naming_key();
+    let incoming = stored_message(keys, "allowance_proposal");
+    let outgoing = crossing_proposal(keys);
+    let mut pending = PendingAllowanceRecord::new(&own, incoming).unwrap();
+    let sent = PendingAllowanceRecord::new(&own, outgoing.clone()).unwrap();
+    let encode = |name: &str, record: &PendingAllowanceRecord| {
+        serde_json::json!({
+            "name": name,
+            "record_key": b64(&record.record_key(&nk).unwrap()),
+            "value": String::from_utf8(record.to_json().unwrap()).unwrap(),
+        })
+    };
+    let received = encode("the proposal Alice received from Bob", &pending);
+    let allowance_key = Collection::Allowances
+        .record_key(
+            &nk,
+            &natural_key::allowance(pending.counterparty(), pending.allowance_id()),
+            None,
+        )
+        .unwrap();
+    let mut wrong_key = received.clone();
+    wrong_key["name"] = serde_json::json!("a pending proposal at its allowances key");
+    wrong_key["record_key"] = serde_json::json!(b64(&allowance_key));
+    let mut repeated = received.clone();
+    let mut payload: Value = serde_json::from_slice(value(&received)).unwrap();
+    payload["conflicted"] = payload["proposal"].clone();
+    repeated["name"] = serde_json::json!("the original proposal also held as its conflict");
+    repeated["value"] = serde_json::json!(serde_json::to_string(&payload).unwrap());
+    assert!(pending.note_proposal(outgoing).unwrap());
+    serde_json::json!({
+        "description": "Wire 5.4: pending Allowance proposals held by Alice at the same ordinary record key. The crossing proposal has the same ID and different signed bytes. A reader retains the first proposal and any conflict until the pending record is deleted.",
+        "accepted": [received, encode("the proposal Alice sent to Bob", &sent),
+            encode("Bob's proposal with Alice's crossing proposal", &pending)],
+        "refused": [wrong_key, repeated],
+    })
+}
+
+fn check_pending_proposals(keys: &Keys, cases: &Value) {
+    let own = pubky(ALICE);
+    let nk = keys.identity(&own).naming_key();
+    for case in arr(cases, "refused") {
+        assert!(
+            PendingAllowanceRecord::bind(value(case), &own, &nk, &key(case)).is_err(),
+            "{}",
+            st(case, "name")
+        );
+    }
+    let records: Vec<_> = arr(cases, "accepted")
+        .iter()
+        .map(|case| {
+            let record = PendingAllowanceRecord::bind(value(case), &own, &nk, &key(case)).unwrap();
+            assert_eq!(record.to_json().unwrap(), value(case));
+            assert_eq!(record.counterparty(), &pubky(BOB));
+            assert_eq!(record.allowance_id().as_str(), ALLOWANCE_ID);
+            record
+        })
+        .collect();
+    let [received, sent, conflicted] = records.as_slice() else {
+        panic!("three pending records");
+    };
+    assert_ne!(received.proposal().hash(), sent.proposal().hash());
+    assert_eq!(
+        conflicted.conflicted().unwrap().hash(),
+        sent.proposal().hash()
+    );
+    received.check_later_write(conflicted).unwrap();
+    conflicted.check_later_write(conflicted).unwrap();
+    assert!(conflicted.check_later_write(received).is_err());
+    assert!(received.check_later_write(sent).is_err());
+    let mut again = received.clone();
+    assert!(!again.note_proposal(received.proposal().clone()).unwrap());
+    let third = resign_with(keys, "allowance_proposal", |m| {
+        m.msg_id = SECOND_PROPOSAL.into()
+    });
+    assert!(again.note_proposal(third).unwrap());
+    assert!(!again.note_proposal(sent.proposal().clone()).unwrap());
+    assert!(conflicted.check_later_write(&again).is_err());
+}
+
+#[test]
+fn test_pending_proposal_binds_its_signed_messages_and_keeps_unknown_members() {
+    let keys = Keys::from_seeds();
+    let own = pubky(ALICE);
+    let nk = keys.identity(&own).naming_key();
+    let proposal = stored_message(&keys, "allowance_proposal");
+    let response = stored_message(&keys, "allowance_acceptance");
+    assert!(PendingAllowanceRecord::new(&[0; 32], proposal.clone()).is_err());
+    assert!(PendingAllowanceRecord::new(&own, response.clone()).is_err());
+    let mut pending = PendingAllowanceRecord::new(&own, proposal.clone()).unwrap();
+    assert!(pending.note_proposal(response).is_err());
+    let key = pending.record_key(&nk).unwrap();
+    let other_side = PendingAllowanceRecord::new(&pubky(BOB), proposal).unwrap();
+    assert!(pending.check_later_write(&other_side).is_err());
+    let mut fields: Value = serde_json::from_slice(&pending.to_json().unwrap()).unwrap();
+    for member in ["v", "counterparty", "allowance_id", "proposal"] {
+        let mut missing = fields.clone();
+        missing.as_object_mut().unwrap().remove(member);
+        assert!(
+            PendingAllowanceRecord::read(&serde_json::to_vec(&missing).unwrap(), &own).is_err(),
+            "{member}"
+        );
+    }
+    let extended = |v: &Value| serde_json::to_vec(v).unwrap();
+    fields["future"] = serde_json::json!(["one", 2]);
+    fields["proposal"]["future"] = serde_json::json!(3);
+    let mut read = PendingAllowanceRecord::bind(&extended(&fields), &own, &nk, &key).unwrap();
+    read.note_proposal(crossing_proposal(&keys)).unwrap();
+    let wrote: Value = serde_json::from_slice(&read.to_json().unwrap()).unwrap();
+    assert_eq!(wrote["future"], fields["future"]);
+    assert_eq!(wrote["proposal"], fields["proposal"]);
+    fields["allowance_id"] = serde_json::json!("55de1f16-1a9e-4504-bc9c-57efc3a2b38c");
+    assert!(PendingAllowanceRecord::read(&extended(&fields), &own).is_err());
 }
 
 /// `allowance_records`, as paykit-lib generates it.
