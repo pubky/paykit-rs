@@ -1201,6 +1201,7 @@ impl Paykit {
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
+        Box::pin(self.refresh_lists_when_due()).await?;
         self.send_outbox().await?;
         Ok(())
     }
