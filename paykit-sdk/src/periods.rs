@@ -123,6 +123,14 @@ pub(crate) fn rate_window(details: &StoredMessage) -> Option<(u64, u64)> {
     ))
 }
 
+/// Whether both payer clocks are inside the signed rate interval (Paykit wire 4.9).
+pub(crate) fn rates_current(details: &StoredMessage, device: u64, service: Option<u64>) -> bool {
+    rate_window(details).is_some_and(|(start, end)| {
+        service
+            .is_some_and(|time| paykit_lib::periods::payer_may_use_rates(start, end, device, time))
+    })
+}
+
 /// A requested payment must belong to the signed request and its payer. A bound
 /// activity already requires all its signed messages to name the same occurrence;
 /// the record key alone identifies only the start of a Billing Period (Paykit wire 4.4, 5.3).
@@ -857,7 +865,9 @@ impl Paykit {
     /// on the period's obligation, its proof naming the period and going into the payer's
     /// period record. Accepting a subscription pays nothing: the host calls this for each
     /// period its user confirms paying, with the confirmations of [`Paykit::pay_request`] in
-    /// `options`.
+    /// `options`. A payment priced by this period's signed details shows its rate and exact
+    /// rounded amount for confirmation. The proof names the details used. The device and
+    /// verified service clocks must still be inside their validity at dispatch.
     ///
     /// - The attempt carries `server_time_in(s, null)`: `s` the period's start, or, for a
     ///   period that hasn't started on the latest service time verified, that time, once the
@@ -1112,7 +1122,7 @@ impl Paykit {
         }
         // The claim was read just before: the service time it verified is current.
         let mut conditions = vec![self.not_before(&period, &options)?];
-        let pricing = Pricing::of_request(&body.amount, *request, body.conversion.as_ref(), by);
+        let pricing = self.period_pricing(request, &body, held_period.as_ref(), by, &options)?;
         let Chosen {
             destination,
             carrier,
@@ -1217,6 +1227,47 @@ impl Paykit {
             record_writes,
         }))
         .await
+    }
+
+    /// Select the eligible signed rate sources from this occurrence's bounded period record.
+    /// The destination's endpoint then picks the newest of them that actually prices it.
+    fn period_pricing<'a>(
+        &self,
+        request: &RequestRef,
+        body: &'a PaymentRequest,
+        held: Option<&'a ActivityRecord>,
+        by: Initiator,
+        options: &PayOptions,
+    ) -> Result<Pricing<'a>> {
+        let pricing = Pricing::of_request(&body.amount, *request, body.conversion.as_ref(), by);
+        let named = options.selected_period_rate();
+        if !matches!(
+            body.conversion,
+            Some(paykit_lib::bodies::Conversion::PerPeriod)
+        ) {
+            return if named.is_none() {
+                Ok(pricing)
+            } else {
+                Err(
+                    Refusal::Usage("Paykit spec 8.2: this request has no per-period rates".into())
+                        .into(),
+                )
+            };
+        }
+        let service = self.service_time();
+        let device = self.now();
+        // A quote held by this occurrence can still be used until its signed expiry.
+        let mut details = held.map_or_else(Vec::new, |record| valid_details(record, body));
+        details.retain(|signed| {
+            matches!(signed.body(), Body::PaymentPeriodDetails(details) if details.rates.is_some())
+                && named.is_none_or(|id| signed.message().msg_id == id)
+                && rates_current(signed, device, service)
+        });
+        if named.is_some() && details.is_empty() {
+            return Err(Refusal::NoDestination("Paykit spec 8.2: the selected period rates are unavailable or outside their validity".into()).into());
+        }
+        details.sort_by(|a, b| period_details_order(b.message(), a.message()));
+        Ok(pricing.with_period_rates(details))
     }
 
     /// The attempt's `server_time_in(s, null)` on a Billing Period (Paykit spec 8.2, "Not

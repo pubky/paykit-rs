@@ -2665,7 +2665,11 @@ async fn test_replies_dropped_restore_in_place_uses_the_identified_first_deliver
     }
 }
 
-fn loss_notice(sender: &[u8; 32], from: u64, until: u64) -> (Vec<u8>, serde_json::Value) {
+pub(super) fn loss_notice(
+    sender: &[u8; 32],
+    from: u64,
+    until: u64,
+) -> (Vec<u8>, serde_json::Value) {
     let sender = pubky_switch_core::enc::b64(sender);
     (
         format!("nt/{sender}/dropped-pd-{from:020}").into_bytes(),
@@ -2689,7 +2693,7 @@ fn retired_windows(
     )
 }
 
-async fn keep_loss_fixture(app: &mut Paykit, keys: Vec<(Vec<u8>, serde_json::Value)>) {
+pub(super) async fn keep_loss_fixture(app: &mut Paykit, keys: Vec<(Vec<u8>, serde_json::Value)>) {
     let writes = keys
         .into_iter()
         .map(|(key, value)| pubky_switch_client::app::LocalWrite::Put {

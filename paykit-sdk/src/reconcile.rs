@@ -565,6 +565,15 @@ impl Paykit {
                 found
             }
         };
+        // The rail's history establishes an outcome but cannot identify the signed rate
+        // details the user selected. A cross-asset period proof needs their exact hash.
+        if matches!(
+            body.conversion,
+            Some(paykit_lib::bodies::Conversion::PerPeriod)
+        ) && destination.endpoint_id()?.asset_segment() != Some(body.amount.asset.as_str())
+        {
+            return Ok(None);
+        }
         let mut entry = JournalEntry {
             // The claim alone cannot establish that the user started this payment.
             user_started: false,

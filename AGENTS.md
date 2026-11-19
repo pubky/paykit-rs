@@ -58,7 +58,7 @@
 
 ## Paths and Labels
 - The Switch's paths are the Switch's (Switch spec 4.1): `identity.json`, app records and app backups live under `/pub/pubky-switch/v1/` and `/priv/pubky-switch/v1/`. Take them from the Switch crates; never build them here.
-- Paykit's own Homeserver file is the Paykit Profile, at `/pub/paykit/profile.json` (Paykit spec 4). Build it in one place, never at call sites.
+- Paykit uses the Switch app record and optional backup paths. Each app manages its own contact details (Paykit spec 2, 3.4, 17.10).
 - Paykit's own signed formats and derivations use labels under `paykit/v1/`, such as `paykit/v1/executor-grant` and `paykit/v1/obligation` (Paykit spec 10, Paykit wire 1.5). Never sign or derive a Paykit format under a `pubky-switch/v1/` label (Switch spec 1).
 
 ## Messages and Shared State

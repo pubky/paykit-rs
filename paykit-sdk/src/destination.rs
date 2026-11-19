@@ -663,13 +663,48 @@ pub(crate) fn current(
     now: u64,
 ) -> std::result::Result<(), String> {
     let cert = carrier.cert();
-    check_certificate(cert).map_err(|error| error.to_string())?;
     let allowed = match carrier {
-        // StoredMessage checked the signing scope for its kind, including plain
-        // paykit_request for a list. All message destinations also require a payee.
         Carrier::Message(_) => acts_as_payee(cert.scopes()),
         Carrier::Record(_) => holds(cert.scopes(), &PaykitScope::Request),
     };
+    current_app(doc, app_id, cert, allowed, carrier.counts_at(now), now)?;
+    // The record age limit is the identity's (Paykit spec 4): a record is used only until
+    // its `updated_at` plus `record_max_age`, whatever `expires_at` it signed.
+    if let Carrier::Record(record) = carrier {
+        if now >= record.trusted_until(doc.record_max_age_ms() / 1000) {
+            return Err("Paykit spec 4: the record is past the identity's record age limit".into());
+        }
+    }
+    Ok(())
+}
+
+/// A rates-only Period Details message can be signed by a different payee app than
+/// the destination. It must still count in the same payee identity (Paykit spec 8.2).
+pub(crate) fn current_rate_source(
+    doc: &IdentityDoc,
+    details: &StoredMessage,
+    now: u64,
+) -> std::result::Result<(), String> {
+    let cert = details.cert();
+    current_app(
+        doc,
+        &details.message().from.app_id,
+        cert,
+        acts_as_payee(cert.scopes()),
+        details.accepted_at().unwrap_or(now),
+        now,
+    )
+}
+
+fn current_app(
+    doc: &IdentityDoc,
+    app_id: &[u8; 16],
+    cert: &AppCert,
+    allowed: bool,
+    at: u64,
+    now: u64,
+) -> std::result::Result<(), String> {
+    check_certificate(cert).map_err(|error| error.to_string())?;
     if !allowed {
         return Err("Paykit spec 4: the certificate doesn't allow this destination".into());
     }
@@ -677,18 +712,10 @@ pub(crate) fn current(
     if standing == Standing::Listed && cert.expired_at(now) {
         return Err("Paykit spec 4: the sending app's listed certificate has expired".into());
     }
-    let at = carrier.counts_at(now);
     if doc.listed_cert(app_id).is_none() || !standing.counts_at(at) {
         return Err(
             "Paykit spec 4: the sending app isn't current in the payee's identity.json".into(),
         );
-    }
-    // The record age limit is the identity's (Paykit spec 4): a record is used only until
-    // its `updated_at` plus `record_max_age`, whatever `expires_at` it signed.
-    if let Carrier::Record(record) = carrier {
-        if now >= record.trusted_until(doc.record_max_age_ms() / 1000) {
-            return Err("Paykit spec 4: the record is past the identity's record age limit".into());
-        }
     }
     Ok(())
 }

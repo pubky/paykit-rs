@@ -392,6 +392,9 @@ fn body_label(message: &Message) -> Result<Option<&str>> {
 pub fn check_sender_scopes(message: &Message, sender: &[String]) -> Result<()> {
     let kind = match MessageKind::parse(&message.kind)? {
         MessageKind::Extension(ext) => {
+            if !sender.iter().any(|scope| scope == scopes::CONTACTS) {
+                return invalid("Paykit spec 3.3: an extension sender needs paykit_contacts");
+            }
             if !sender.contains(&ext.prefix().scope()) {
                 return invalid(
                     "Paykit wire 4.1 check 8: an extension kind needs paykit_ext:<prefix> in both certificates",
@@ -717,7 +720,7 @@ mod tests {
         let ext = message("paykit-cap.offer", json!({}));
         check_kind_scopes(
             &ext,
-            &owned(&["paykit_ext:paykit-cap"]),
+            &owned(&["paykit_ext:paykit-cap", "paykit_contacts"]),
             &owned(&["paykit_ext:paykit-cap"]),
         )
         .unwrap();
@@ -772,7 +775,7 @@ mod tests {
         let ext = message("paykit-cap.offer", json!({}));
         assert!(check_kind_scopes(
             &ext,
-            &owned(&["paykit_ext:paykit-cap"]),
+            &owned(&["paykit_ext:paykit-cap", "paykit_contacts"]),
             &owned(&["paykit_ext:paykit-other"])
         )
         .is_err());
@@ -880,7 +883,8 @@ mod tests {
         check_sender_scopes(&cancel, &owned(&["paykit_pay"])).unwrap();
         assert!(check_sender_scopes(&cancel, &owned(&["paykit_request:shop1"])).is_err());
         let ext = message("paykit-cap.offer", json!({}));
-        check_sender_scopes(&ext, &owned(&["paykit_ext:paykit-cap"])).unwrap();
+        check_sender_scopes(&ext, &owned(&["paykit_ext:paykit-cap", "paykit_contacts"])).unwrap();
+        assert!(check_sender_scopes(&ext, &owned(&["paykit_ext:paykit-cap"])).is_err());
         assert!(check_sender_scopes(&ext, &owned(&["paykit_request"])).is_err());
     }
 

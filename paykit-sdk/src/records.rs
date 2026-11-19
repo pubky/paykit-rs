@@ -20,11 +20,12 @@ use paykit_lib::kinds::Kind;
 use paykit_lib::records::{ActivityRecord, ActivitySide, PaymentListRecord, StoredMessage};
 use paykit_lib::Label;
 use pubky_switch_client::app::{
-    LocalWrite, OpBatch, OutgoingMessage, RecordTarget, SharedRecord, SignedMessage,
+    LocalWrite, OpBatch, OutgoingMessage, ReceivedMessage, RecordTarget, SharedRecord,
+    SignedMessage,
 };
 use pubky_switch_core::enc::{serde_b64, serde_b64_vec};
 use pubky_switch_core::http::ErrorCode;
-use pubky_switch_core::message::MessagePlaintext;
+use pubky_switch_core::message::{Message, MessagePlaintext, VerifiedSender};
 use pubky_switch_core::ops::{Condition, OpKind, RecordVersion};
 use pubky_switch_core::sig::SignedDoc;
 use serde::{Deserialize, Serialize};
@@ -141,6 +142,46 @@ impl KeptMessage {
             pending_source: None,
             pending_create: None,
         }
+    }
+
+    /// The authenticated carrier and inbox metadata of a delivered extension.
+    pub(crate) fn received(message: &ReceivedMessage) -> Self {
+        Self {
+            sender: message.sender,
+            cert: message.cert.signed().clone(),
+            plaintext: message.plaintext.encode(),
+            accepted_at: Some(message.accepted_at_ms),
+            seq: Some(message.seq),
+        }
+    }
+
+    /// Verify the remote app's signed message for this recipient (Switch wire 5.1,
+    /// Paykit wire 4.3). An extension's body has only the common message checks.
+    pub(crate) fn extension_for(&self, recipient: &[u8; 32]) -> Result<Message> {
+        let (accepted, _) = self.order()?;
+        let cert = paykit_lib::scopes::verify_certificate(&self.cert, &self.sender)
+            .map_err(|_| PaykitError::corrupt())?;
+        if cert.expired_at(accepted) {
+            return Err(PaykitError::corrupt());
+        }
+        let message = MessagePlaintext::decode(&self.plaintext)
+            .and_then(|plaintext| {
+                plaintext.check(
+                    recipient,
+                    &self.sender,
+                    &VerifiedSender::from_cert(&cert),
+                    paykit_lib::kinds::OPAQUE_MEMBERS,
+                )
+            })
+            .map_err(|_| PaykitError::corrupt())?;
+        if message.is_from_own_app()
+            || paykit_lib::kinds::ExtensionKind::parse(&message.kind).is_err()
+        {
+            return Err(PaykitError::corrupt());
+        }
+        paykit_lib::kinds::check_sender_scopes(&message, cert.scopes())
+            .map_err(|_| PaykitError::corrupt())?;
+        Ok(message)
     }
 
     /// Keep `stored`.
@@ -614,6 +655,66 @@ pub(crate) fn conflict(error: PaykitError) -> PaykitError {
         PaykitError::Conflict("the record changed meanwhile".into())
     } else {
         error
+    }
+}
+
+#[cfg(test)]
+mod extension_tests {
+    use super::*;
+    use crate::testkit::{object, Party, NOW};
+    use pubky_switch_core::message::Sender;
+    use serde_json::json;
+
+    #[test]
+    fn test_extension_signature_covers_sender_app_kind_refs_and_body_for_the_recipient() {
+        let scopes = ["paykit_contacts", "paykit_ext:paykit-cap"];
+        let sender = Party::new("shop", "desk", &scopes);
+        let other_app = Party::new("shop", "phone", &scopes);
+        let recipient = Party::new("buyer", "wallet", &scopes).id();
+        let original = Message::new(
+            "paykit-cap.offer",
+            Sender::of_app(sender.id(), &sender.keys),
+            recipient,
+            NOW,
+            vec![[1; 32]],
+            object(json!({"price": "2"})),
+        )
+        .unwrap();
+        let signed = original.sign(&sender.keys).unwrap();
+        let mut kept = KeptMessage {
+            sender: sender.id(),
+            cert: sender.cert.signed().clone(),
+            plaintext: signed.encode(),
+            accepted_at: Some(NOW),
+            seq: Some(3),
+        };
+        assert_eq!(kept.extension_for(&recipient).unwrap(), original);
+        assert!(kept.extension_for(&[9; 32]).is_err());
+
+        for field in ["sender_app", "kind", "refs", "body"] {
+            let mut different = original.clone();
+            match field {
+                "sender_app" => different.from = Sender::of_app(sender.id(), &other_app.keys),
+                "kind" => different.kind = "paykit-cap.quote".into(),
+                "refs" => different.refs = vec![[2; 32]],
+                "body" => different.body = object(json!({"price": "3"})),
+                _ => unreachable!(),
+            }
+            let keys = if field == "sender_app" {
+                &other_app.keys
+            } else {
+                &sender.keys
+            };
+            let other = different.sign(keys).unwrap();
+            kept.plaintext = MessagePlaintext::from_parts(
+                other.sender_app_id(),
+                signed.signature(),
+                other.json().to_vec(),
+            )
+            .unwrap()
+            .encode();
+            assert!(kept.extension_for(&recipient).is_err(), "{field}");
+        }
     }
 }
 
