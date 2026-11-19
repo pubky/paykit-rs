@@ -565,6 +565,238 @@ async fn test_replies_dropped_ask_not_delivered_tried_again_its_day_counted_from
 }
 
 #[tokio::test]
+async fn test_replies_dropped_first_ask_reopens_after_its_outbox_commit_failed() {
+    use pubky_switch_client::store::{Fault as StoreFault, FaultStore};
+
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let fault = Arc::new(FaultStore::new(store(), StoreFault::None));
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default(),
+            fault.clone(),
+        )
+        .await;
+    let (_, at) = unmatched_after_payment(
+        &w,
+        &mut wallet,
+        &mut shop,
+        paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER,
+    )
+    .await;
+    let id = shop.app_id();
+    fault.fail_put_once(b"out/");
+    shop.receive(None).await.unwrap_err();
+    assert!(asked(&shop, &w.alice_id()).await.is_empty());
+    drop(shop);
+    let mut shop = w
+        .load_on_clock(&w.bob, fault.inner(), id, w.clock.clone())
+        .await;
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert_eq!(asked(&shop, &w.alice_id()).await, vec![(Some(at), None)]);
+    assert_eq!(marks(&shop).await, vec![(at, at)]);
+}
+
+#[tokio::test]
+async fn test_replies_dropped_floor_first_keep_can_retry_only_on_the_original_store() {
+    for restore in [false, true] {
+        let w = World::new();
+        let (mut shop, store, from) = dropped_reply_behind_floor(&w).await;
+        let app_id = shop.app_id();
+        store.fail_put_once(b"p/paykit/rb/");
+        shop.receive(None).await.unwrap_err();
+        assert!(shop
+            .app()
+            .protocol_scan("paykit", b"rb/")
+            .await
+            .unwrap()
+            .is_empty());
+        let selected = shop.backup().await.unwrap();
+        drop(shop);
+        let mut shop = if restore {
+            Paykit::restore(
+                w.env(&w.bob, crate::common::store()),
+                PaykitConfig::default(),
+                &selected,
+                w.rail.clone(),
+                w.timer(),
+            )
+            .await
+            .unwrap()
+        } else {
+            w.load_on_clock(&w.bob, store.inner(), app_id, w.clock.clone())
+                .await
+        };
+        shop.receive(None).await.unwrap();
+        shop.receive(None).await.unwrap();
+        let asks: Vec<_> = asked(&shop, &w.alice_id())
+            .await
+            .into_iter()
+            .filter(|(_, until)| until.is_none())
+            .collect();
+        if restore {
+            assert!(asks.is_empty());
+        } else {
+            assert_eq!(asks, [(Some(from), None)]);
+            assert!(!shop
+                .app()
+                .records_of("block_floor")
+                .await
+                .unwrap()
+                .is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_replies_dropped_applied_floor_reopens_the_same_original() {
+    let w = World::new();
+    let (mut shop, store, from) = dropped_reply_behind_floor(&w).await;
+    let app_id = shop.app_id();
+    store.fail_put_once(b"out/");
+    // The native batch is kept, although this pass failed to commit its applied outbox item.
+    assert_eq!(shop.receive(None).await.unwrap().resends, 1);
+    let mark = mark_values(&shop).await.pop().unwrap();
+    let original = mark["queued"]["msg_id"].as_str().unwrap();
+    let marker = shop.app().protocol_scan("paykit", b"rb/").await.unwrap();
+    assert_eq!(marker.len(), 1);
+    assert_eq!(marker[0].1.len(), 16);
+    assert!(asked(&shop, &w.alice_id()).await.is_empty());
+    drop(shop);
+    let mut shop = w
+        .load_on_clock(&w.bob, store.inner(), app_id, w.clock.clone())
+        .await;
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    let asks: Vec<_> = asked(&shop, &w.alice_id())
+        .await
+        .into_iter()
+        .filter(|(_, until)| until.is_none())
+        .collect();
+    assert_eq!(asks, [(Some(from), None)]);
+    assert!(matches!(
+        shop.app().delivery(original).await.unwrap(),
+        Some(pubky_switch_client::app::Delivery::Accepted { .. })
+    ));
+    assert!(!shop
+        .app()
+        .records_of("block_floor")
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(shop
+        .app()
+        .protocol_scan("paykit", b"rb/")
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn test_replies_dropped_refused_original_floor_permits_a_new_ask() {
+    let w = World::new();
+    let (mut shop, store, from) = dropped_reply_behind_floor(&w).await;
+    w.bob.switch().fail_next(Fault::Error {
+        path: "/ops".into(),
+        code: ErrorCode::Conflict,
+        current: serde_json::Value::Null,
+    });
+    shop.receive(None).await.unwrap();
+    assert!(asked(&shop, &w.alice_id()).await.is_empty());
+    let mark = mark_values(&shop).await.pop().unwrap();
+    let first = mark["queued"]["msg_id"].as_str().unwrap();
+    let marker = shop.app().protocol_scan("paykit", b"rb/").await.unwrap();
+    let batch = marker.first().unwrap().1.as_slice().try_into().unwrap();
+    assert!(matches!(
+        shop.app().kept_batch(batch).await.unwrap(),
+        Some(pubky_switch_client::app::KeptBatchStatus::Dropped {
+            reason: pubky_switch_client::app::KeptBatchDrop::Refused { .. },
+            ..
+        })
+    ));
+    let id = shop.app_id();
+    drop(shop);
+    let mut shop = w
+        .load_on_clock(&w.bob, store.inner(), id, w.clock.clone())
+        .await;
+    shop.receive(None).await.unwrap();
+    assert!(matches!(
+        shop.app().delivery(first).await.unwrap(),
+        Some(pubky_switch_client::app::Delivery::Failed { .. })
+    ));
+    let asks: Vec<_> = asked(&shop, &w.alice_id())
+        .await
+        .into_iter()
+        .filter(|(_, until)| until.is_none())
+        .collect();
+    assert_eq!(asks, [(Some(from), None)]);
+    assert!(shop
+        .app()
+        .protocol_scan("paykit", b"rb/")
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+/// The seller has dropped a paid reply and separately dropped a later entry for a block.
+/// Its first ask after the unblock must carry the floor raise.
+async fn dropped_reply_behind_floor(
+    w: &World,
+) -> (Paykit, Arc<pubky_switch_client::store::FaultStore>, u64) {
+    use pubky_switch_client::store::{Fault as StoreFault, FaultStore};
+    let mut wallet = w.wallet("wallet").await;
+    let storage = Arc::new(FaultStore::new(store(), StoreFault::None));
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            paykit_sdk::AppScopes::new()
+                .pay()
+                .request()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+            PaykitConfig::default(),
+            storage.clone(),
+        )
+        .await;
+    let (_, at) = unmatched_after_payment(
+        w,
+        &mut wallet,
+        &mut shop,
+        paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER,
+    )
+    .await;
+    shop.app_mut().receive(None).await.unwrap();
+    assert_eq!(marks(&shop).await, [(at, at)]);
+    unmatched_replies(w, &shop, 1);
+    shop.block(&w.alice_id()).await.unwrap();
+    shop.app_mut().receive(None).await.unwrap();
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"bd/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(mark_values(&shop).await[0]["queued"].is_null());
+    assert!(asked(&shop, &w.alice_id()).await.is_empty());
+    assert!(shop
+        .app()
+        .records_of("block_floor")
+        .await
+        .unwrap()
+        .is_empty());
+    shop.unblock(&w.alice_id()).await.unwrap();
+    (shop, storage, at)
+}
+
+#[tokio::test]
 async fn test_replies_dropped_terminal_refusal_of_a_sealed_ask_keeps_the_window_held() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;

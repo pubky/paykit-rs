@@ -428,7 +428,7 @@ impl Stored for [u8; 16] {
 
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
-            StateKey::OfflineBatch(_) => Ok(()),
+            StateKey::OfflineBatch(_) | StateKey::ReplyFloorBatch { .. } => Ok(()),
             _ => corrupt(),
         }
     }
@@ -1278,6 +1278,11 @@ pub(crate) mod key {
     pub(crate) const STORED_NOTES: &str = "se/";
     pub(crate) const KEPT_REPLIES: &str = "pr/";
     pub(crate) const REPLY_ASKS: &str = "ra/";
+    pub(crate) const REPLY_FLOOR_BATCHES: &str = "rb/";
+
+    pub(crate) fn reply_floor_batch(hash: &[u8; 32]) -> String {
+        format!("{REPLY_FLOOR_BATCHES}{}", b64(hash))
+    }
     pub(crate) const DROPPED_REPLIES: &str = "pd/";
     pub(crate) const DROPPED_UNVERIFIED: &str = "ud/";
     pub(crate) const DROPPED_BLOCKED: &str = "bd/";
@@ -1657,6 +1662,8 @@ pub(crate) enum StateKey {
     DroppedReplies { sender: [u8; 32] },
     /// Outstanding and last settled requests for a sender's dropped replies.
     ReplyAsks { sender: [u8; 32] },
+    /// The original floor batch for the signed recovery request of this hash.
+    ReplyFloorBatch { hash: [u8; 32] },
     /// `ud/<sender>`: the mark of a sender's entries dropped unverified.
     DroppedUnverified { sender: [u8; 32] },
     /// `bd/<sender>`: the mark of a sender's messages dropped for the user's block.
@@ -1882,6 +1889,9 @@ impl StateKey {
                     }
                     "ra" => Self::ReplyAsks {
                         sender: b64_32(rest)?,
+                    },
+                    "rb" => Self::ReplyFloorBatch {
+                        hash: b64_32(rest)?,
                     },
                     "pd" => Self::DroppedReplies {
                         sender: b64_32(rest)?,
@@ -2782,6 +2792,10 @@ mod tests {
             (
                 key::reply_asks(&pubky),
                 StateKey::ReplyAsks { sender: pubky },
+            ),
+            (
+                key::reply_floor_batch(&pubky),
+                StateKey::ReplyFloorBatch { hash: pubky },
             ),
             (
                 key::dropped_lost(&pubky, "pd", 7),

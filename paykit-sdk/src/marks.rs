@@ -1058,26 +1058,20 @@ impl Paykit {
             }
         }
         let selection = family.selection(held.drop_mark());
+        if family == MarkFamily::Replies {
+            return self
+                .queue_reply_ask(held.drop_mark().clone(), selection)
+                .await;
+        }
         let signed = self.resend_request_message(sender, selection)?;
         let msg_id = signed.msg_id().to_owned();
-        // Keep the signed reply ask with its mark before handing it to the outbox.
-        // If the handoff is interrupted, a missing queue entry cannot authorize a second ask.
         let hash = signed.hash();
         held.drop_mark().queued = Some(QueuedRequest {
             msg_id: msg_id.clone(),
             hash,
             kept_batch: None,
         });
-        let mut tx = crate::state::Tx::default();
-        if family == MarkFamily::Replies
-            && !self
-                .reserve_reply_ask(&mut tx, held.drop_mark(), &signed)
-                .await?
-        {
-            return Ok(0);
-        }
-        tx.put(key, &held)?;
-        self.local_commit(tx).await?;
+        self.local_put(key, &held).await?;
         // With the raise of the block floor its mark needs, in one batch: a floor that can't
         // be read, the switch's refusal of the raise, or a conflict, leaves the request kept
         // as queued and not sent, so the next pass asks anew (`crate::floor`). A failure of
@@ -1101,9 +1095,6 @@ impl Paykit {
                 if crate::floor::floor_write_waits(&error)
                     || error.code() == Some(pubky_switch_core::http::ErrorCode::Conflict) =>
             {
-                if family == MarkFamily::Replies {
-                    self.reply_ask_not_queued(&sender, &msg_id).await?;
-                }
                 return Ok(0);
             }
             Err(error) => return Err(error),
@@ -1113,14 +1104,10 @@ impl Paykit {
             self.app.delivery(&msg_id).await?,
             Some(Delivery::Accepted { .. })
         ) {
-            if family == MarkFamily::Replies {
-                self.reconcile_reply_asks().await?;
-            } else {
-                let mark = held.drop_mark();
-                mark.queued = None;
-                mark.asked_at_ms = Some(self.now());
-                self.local_put(key, &held).await?;
-            }
+            let mark = held.drop_mark();
+            mark.queued = None;
+            mark.asked_at_ms = Some(self.now());
+            self.local_put(key, &held).await?;
         }
         Ok(1)
     }

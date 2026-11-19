@@ -4,12 +4,14 @@
 use std::collections::BTreeMap;
 
 use paykit_lib::bodies::{Body, ResendRequest};
-use pubky_switch_client::app::{AppEvent, Delivery, LocalWrite, RestoreContext, SignedMessage};
+use pubky_switch_client::app::{
+    AppEvent, Delivery, KeptBatchDrop, KeptBatchStatus, LocalWrite, RestoreContext,
+};
 use pubky_switch_core::enc::serde_b64;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{PaykitError, Result};
-use crate::marks::{DropMark, MAX_DROPPED_MARKS};
+use crate::marks::{DropMark, QueuedRequest, MAX_DROPPED_MARKS};
 use crate::records::KeptMessage;
 use crate::state::{self, key, Binder, Tx};
 use crate::Paykit;
@@ -54,6 +56,7 @@ struct Original {
     from_ms: u64,
     latest_ms: u64,
     generation: u64,
+    with_floor: bool,
     outcome: Outcome,
 }
 
@@ -206,6 +209,7 @@ impl ReplyAsks {
                 if existing.hash != incoming.hash
                     || existing.latest_ms != incoming.latest_ms
                     || existing.generation != incoming.generation
+                    || existing.with_floor != incoming.with_floor
                 {
                     return Err(PaykitError::corrupt());
                 }
@@ -280,15 +284,60 @@ pub(crate) fn restore(
             held.hold_unidentified(mark.earliest_ms);
         }
     }
-    requests
-        .into_iter()
-        .map(|(sender, held)| {
-            held.check(&sender, binder)
-                .map_err(|_| "invalid merged recovery request evidence")?;
+    let previous_markers = restoring
+        .previous_local_scan(key::REPLY_FLOOR_BATCHES.as_bytes())
+        .map_err(|_| "the original floor batches cannot be read")?;
+    let floor_requests: BTreeMap<_, _> = requests
+        .values()
+        .flat_map(|r| &r.originals)
+        .filter(|o| o.with_floor)
+        .map(|o| (o.hash, o.outcome))
+        .collect();
+    let mut markers = BTreeMap::<[u8; 32], Option<[u8; 16]>>::new();
+    for (k, value) in previous_markers
+        .iter()
+        .chain(state)
+        .filter(|(k, _)| k.starts_with(key::REPLY_FLOOR_BATCHES.as_bytes()))
+    {
+        let Some(state::StateKey::ReplyFloorBatch { hash }) = state::StateKey::parse(k) else {
+            return Err("invalid recovery request floor batch key".into());
+        };
+        let id = state::restored::<[u8; 16]>(k, value, binder)
+            .map_err(|_| "invalid recovery request floor batch ID")?;
+        if !floor_requests.contains_key(&hash) {
+            return Err("the floor batch has no signed recovery request".into());
+        }
+        markers
+            .entry(hash)
+            .and_modify(|held| {
+                if *held != Some(id) {
+                    *held = None;
+                }
+            })
+            .or_insert(Some(id));
+    }
+    let mut writes = Vec::new();
+    for (hash, outcome) in floor_requests {
+        if let Some(id) = markers
+            .remove(&hash)
+            .flatten()
+            .filter(|_| !outcome.settled())
+        {
+            writes.push(LocalWrite::Put {
+                key: key::reply_floor_batch(&hash).into_bytes(),
+                value: id.to_vec(),
+            });
+        }
+    }
+    for (sender, held) in requests {
+        held.check(&sender, binder)
+            .map_err(|_| "invalid merged recovery request evidence")?;
+        writes.push(
             state::local_put(&key::reply_asks(&sender), &held)
-                .map_err(|_| "recovery request evidence cannot be written".into())
-        })
-        .collect()
+                .map_err(|_| "recovery request evidence cannot be written")?,
+        );
+    }
+    Ok(writes)
 }
 
 impl Paykit {
@@ -302,22 +351,25 @@ impl Paykit {
         Ok(held.is_none_or(|held| held.permits(body, original)))
     }
 
-    /// Reserve the identified first attempt in the same commit as the mark's pointer.
-    pub(crate) async fn reserve_reply_ask(
-        &self,
-        tx: &mut Tx,
-        mark: &DropMark,
-        signed: &SignedMessage,
-    ) -> Result<bool> {
+    /// Enlist the exact signed request with its mark, optionally behind a floor raise.
+    pub(crate) async fn queue_reply_ask(
+        &mut self,
+        mut mark: DropMark,
+        selection: crate::ResendSelection,
+    ) -> Result<u64> {
+        let batch = match self.resend_floor_batch(&mark.sender).await {
+            Ok(batch) => batch,
+            Err(error) if crate::floor::floor_write_waits(&error) => return Ok(0),
+            Err(error) => return Err(error),
+        };
         let k = key::reply_asks(&mark.sender);
         let mut held = self.local_get::<ReplyAsks>(&k).await?.unwrap_or_default();
-        let message = self.own_copy(signed)?;
-        let Body::ResendRequest(body) = message.body() else {
-            return Err(PaykitError::corrupt());
-        };
-        if !held.permits(body, None) {
-            return Ok(false);
+        if !held.permits(&selection.request(), None) {
+            return Ok(0);
         }
+        let signed = self.resend_request_message(mark.sender, selection)?;
+        let id = signed.msg_id().to_owned();
+        let hash = signed.hash();
         // Retain the last positive coverage if another ask becomes uncertain.
         let covered = std::mem::take(&mut held.originals).into_iter().rfind(|o| {
             matches!(o.outcome, Outcome::Accepted { .. })
@@ -325,16 +377,57 @@ impl Paykit {
         });
         held.originals.extend(covered);
         held.originals.push(Original {
-            id: signed.msg_id().into(),
-            hash: signed.hash(),
-            message: KeptMessage::of(&message),
+            id: id.clone(),
+            hash,
+            message: KeptMessage::signed(self.identity(), self.app.cert().signed(), &signed),
             from_ms: mark.earliest_ms,
             latest_ms: mark.latest_ms,
             generation: self.app.own_identity().generation(),
+            with_floor: batch.is_some(),
             outcome: Outcome::Pending,
         });
+        mark.queued = Some(QueuedRequest {
+            msg_id: id.clone(),
+            hash,
+            kept_batch: None,
+        });
+        let mut tx = Tx::default();
+        tx.put(&key::dropped_replies(&mark.sender), &mark)?;
         tx.put(&k, &held)?;
-        Ok(true)
+        if let Some(batch) = batch {
+            // Only the first keep can enlist the floor write. Its marker survives until
+            // this original is settled, including a lost local response to that keep.
+            self.local_commit(tx).await?;
+            let batch = batch
+                .keep_id_at(key::reply_floor_batch(&hash).into_bytes())
+                .queue(signed);
+            if let Err(error) = self
+                .submit_floor(batch)
+                .await
+                .map_err(crate::floor::floor_write_error)
+            {
+                if error.kept_batch().is_some() {
+                    return Ok(1);
+                }
+                if crate::floor::floor_write_waits(&error)
+                    || error.code() == Some(pubky_switch_core::http::ErrorCode::Conflict)
+                {
+                    return Ok(0);
+                }
+                return Err(error);
+            }
+        } else {
+            self.app
+                .queue_signed_with(crate::protocol::BACKUP_NAME, signed, &tx.into_writes())
+                .await?;
+        }
+        if matches!(
+            self.send_message(&id).await,
+            Ok(Some(Delivery::Accepted { .. }))
+        ) {
+            self.reconcile_reply_asks().await?;
+        }
+        Ok(1)
     }
 
     /// Bring the mark and its delivery evidence up to date together. An absent sent row
@@ -373,31 +466,34 @@ impl Paykit {
                             };
                             changed = true;
                         }
-                        Some(Delivery::Failed { .. })
-                            if original.outcome != Outcome::Unknown
+                        delivery @ (None | Some(Delivery::Failed { .. }))
+                            if original.with_floor
+                                && original.outcome != Outcome::Unknown
                                 && original.generation == self.app.own_identity().generation() =>
                         {
-                            use pubky_switch_client::app::{KeptBatchDrop, KeptBatchStatus};
-                            if let Some(batch) = mark
-                                .as_ref()
-                                .and_then(|m| m.queued.as_ref())
-                                .filter(|q| q.msg_id == original.id && q.hash == original.hash)
-                                .and_then(|q| q.kept_batch)
-                            {
-                                if matches!(
+                            let marker = key::reply_floor_batch(&original.hash);
+                            let unsent = match self.local_get::<[u8; 16]>(&marker).await? {
+                                Some(batch) => matches!(
                                     self.app.kept_batch(batch).await?,
                                     Some(KeptBatchStatus::Dropped {
                                         reason: KeptBatchDrop::Unsent
                                             | KeptBatchDrop::Refused { .. },
                                         ..
                                     })
-                                ) {
-                                    original.outcome = Outcome::Undelivered;
-                                    changed = true;
-                                }
+                                ),
+                                // This installation kept the intent but never enlisted its batch.
+                                // A restore changes Pending to Restored even in place.
+                                None => delivery.is_none() && original.outcome == Outcome::Pending,
+                            };
+                            if unsent {
+                                original.outcome = Outcome::Undelivered;
+                                changed = true;
                             }
                         }
                         _ => {}
+                    }
+                    if original.with_floor && original.outcome.settled() {
+                        tx.delete(&key::reply_floor_batch(&original.hash));
                     }
                 }
                 if let Some(mark) = mark.as_mut() {
@@ -458,28 +554,15 @@ impl Paykit {
                 let observed = original.outcome.with(outcome);
                 if original.outcome != observed {
                     original.outcome = observed;
+                    if original.with_floor && observed.settled() {
+                        tx.delete(&key::reply_floor_batch(&original.hash));
+                    }
                     tx.put(&format!("{}{peer}", key::REPLY_ASKS), &held)?;
                 }
                 return Ok(true);
             }
         }
         Ok(false)
-    }
-
-    /// The floor write was refused before Switch enqueued any bytes.
-    pub(crate) async fn reply_ask_not_queued(&mut self, sender: &[u8; 32], id: &str) -> Result<()> {
-        let key = key::reply_asks(sender);
-        let mut held = self
-            .local_get::<ReplyAsks>(&key)
-            .await?
-            .ok_or_else(PaykitError::corrupt)?;
-        let original = held
-            .originals
-            .iter_mut()
-            .find(|o| o.id == id)
-            .ok_or_else(PaykitError::corrupt)?;
-        original.outcome = Outcome::Undelivered;
-        self.local_put(&key, &held).await
     }
 }
 

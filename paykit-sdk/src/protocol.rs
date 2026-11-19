@@ -538,7 +538,7 @@ pub(crate) fn restore_paykit_layer(
         let unread = || String::from("Paykit's local state in the backup doesn't read");
         bounded.count(&family)?;
         let attempt = match family {
-            StateKey::ReplyAsks { .. } => continue, // Merged with the installation above.
+            StateKey::ReplyAsks { .. } | StateKey::ReplyFloorBatch { .. } => continue, // Merged above.
             StateKey::RestoreHold => continue, // Validated above before reading its confirmations.
             StateKey::MissedHold => {
                 state::restored::<crate::hold::MissedHold>(&key, &value, &binder)
