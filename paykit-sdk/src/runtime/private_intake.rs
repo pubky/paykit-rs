@@ -95,7 +95,10 @@ impl PrivateIntakeConfig {
 pub enum PrivateIntakeTransportState {
     /// Connecting or reconnecting to homeserver SSE.
     Connecting,
-    /// Replaying from durable per-user cursor.
+    /// Replaying from durable per-user cursor, or a live event buffered a
+    /// packet and intake has not yet proven the next expected slot absent.
+    /// After a live insert this lasts while intake probes the next expected
+    /// slots, and after a failed probe until the next event or audit.
     Replaying,
     /// An audit, a stream event, or the probe after a live insert found the
     /// next expected slot absent. Only audits record
@@ -609,21 +612,20 @@ impl From<paykit_lib::PaykitError> for LinkAttemptError {
     }
 }
 
-/// Whether the stored Encrypted Link generation of `counterparty` is no longer
-/// `generation`, or no link state is stored. The buffer insert runs this
-/// first, inside its own transaction, see
+/// Whether the `stored` Encrypted Link generation is no longer the `used`
+/// one an attempt started from. No stored link state counts as moved. Each
+/// generation-checked step runs this first, inside its own transaction, see
 /// [`retry_while_link_generation_moves`].
-fn link_generation_moved(
-    tx: &dyn StorageTransaction,
-    counterparty: &PubkyPublicKey,
-    generation: u64,
-) -> bool {
-    // Mirrors the Encrypted Link generation check of the storage adapter's
-    // `buffer_private_intake_packet`, so that a mismatch is reported as
-    // `GenerationMoved` before the adapter's untyped error. Keep the two in
-    // sync.
-    tx.encrypted_link_state(counterparty)
-        .is_none_or(|link| link.generation != generation)
+fn link_generation_moved(stored: Option<u64>, used: u64) -> bool {
+    stored != Some(used)
+}
+
+/// The counter read's and the absent check's error for a moved generation.
+fn buffered_generation_moved() -> LinkAttemptError {
+    LinkAttemptError::GenerationMoved(PaykitSdkError::RecoveryRequired {
+        context: BUFFERED_PRIVATE_INTAKE_GENERATION_MISMATCH.into(),
+        source: None,
+    })
 }
 
 /// Runs an expected-slot acquisition `attempt` again while the stored
@@ -635,10 +637,10 @@ fn link_generation_moved(
 /// rebase the buffered intake to the new generation in the same transaction.
 /// An attempt reads the link state and its generation once, at its start, so
 /// a change committed after that leaves the attempt's snapshot and receive
-/// counter stale although nothing is wrong with the peer. The attempt's two
-/// storage steps that check the buffered intake against its generation, the
-/// counter read and the buffer insert, therefore first compare the stored
-/// Encrypted Link generation with the attempt's in the same transaction (see
+/// counter stale although nothing is wrong with the peer. The attempt's
+/// storage steps, the counter read, the buffer insert, and the absent check
+/// before the cursor advance, therefore first compare the stored Encrypted
+/// Link generation with the attempt's in the same transaction (see
 /// [`link_generation_moved`]). When it moved, the step does not run and the
 /// attempt reports [`LinkAttemptError::GenerationMoved`]. Only that outcome is
 /// retried, and the next attempt reads the link state afresh.
@@ -748,10 +750,11 @@ where
 /// Fetches the next expected slot of `counterparty` at link `generation` and
 /// buffers the packet, or advances `cursor` when the slot is absent.
 ///
-/// The counter read and the buffer insert check the buffered intake against
-/// `generation`. Each first reports [`LinkAttemptError::GenerationMoved`],
-/// without running, when the stored Encrypted Link generation moved away from
-/// `generation`, see [`retry_while_link_generation_moves`]. Every other
+/// The counter read, the buffer insert, and the absent check each first report
+/// [`LinkAttemptError::GenerationMoved`], without running, when the stored
+/// Encrypted Link generation moved away from `generation`, see
+/// [`retry_while_link_generation_moves`]. A moved generation after an absent
+/// fetch neither advances `cursor` nor reports the slot absent. Every other
 /// failure is [`LinkAttemptError::Failed`].
 #[allow(
     clippy::too_many_arguments,
@@ -784,7 +787,7 @@ where
                 .encrypted_link_states
                 .get(&counterparty_for_tail)
                 .map(|link| link.generation);
-            if stored_generation != Some(generation) {
+            if link_generation_moved(stored_generation, generation) {
                 return Ok(None);
             }
             next_private_intake_counter(
@@ -797,20 +800,31 @@ where
         })
         .await?;
     let Some(receive_counter) = receive_counter else {
-        return Err(LinkAttemptError::GenerationMoved(
-            PaykitSdkError::RecoveryRequired {
-                context: BUFFERED_PRIVATE_INTAKE_GENERATION_MISMATCH.into(),
-                source: None,
-            },
-        ));
+        return Err(buffered_generation_moved());
     };
     let (resource, receive_counter) =
         snapshot.private_application_message_resource_at_counter(local, secret, receive_counter)?;
     let Some(ciphertext) = fetch(resource).await? else {
-        if let Some(cursor) = cursor {
-            storage
-                .transaction(move |tx| tx.advance_private_intake_cursor(cursor))
-                .await?;
+        // A link replacement or recovery can commit a new generation during
+        // the GET, so the absent slot may belong to a superseded snapshot.
+        // Check before advancing the cursor or reporting absence.
+        let counterparty_for_absent = counterparty.clone();
+        let moved = storage
+            .transaction(move |tx| {
+                let stored_generation = tx
+                    .encrypted_link_state(&counterparty_for_absent)
+                    .map(|link| link.generation);
+                if link_generation_moved(stored_generation, generation) {
+                    return Ok(true);
+                }
+                if let Some(cursor) = cursor {
+                    tx.advance_private_intake_cursor(cursor)?;
+                }
+                Ok(false)
+            })
+            .await?;
+        if moved {
+            return Err(buffered_generation_moved());
         }
         return Ok(PrivatePacketAcquisition::Absent);
     };
@@ -825,7 +839,14 @@ where
     let acquisition = storage
         .transaction(move |tx| {
             let counterparty = packet.counterparty.clone();
-            if link_generation_moved(tx, &counterparty, packet.link_generation) {
+            // Mirrors the Encrypted Link generation check of the storage
+            // adapter's `buffer_private_intake_packet`, so that a mismatch is
+            // reported as `GenerationMoved` before the adapter's untyped
+            // error. Keep the two in sync.
+            let stored_generation = tx
+                .encrypted_link_state(&counterparty)
+                .map(|link| link.generation);
+            if link_generation_moved(stored_generation, packet.link_generation) {
                 return Ok(None);
             }
             let outcome = tx.buffer_private_intake_packet(packet)?;
@@ -4172,28 +4193,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_live_insert_probe_sets_health_before_waking_consumer() {
-        let peer = users(1).remove(0);
-
-        let run = run_live_insert_event(
-            &peer,
-            vec![
-                Ok(PrivatePacketAcquisition::Inserted),
-                Ok(PrivatePacketAcquisition::Inserted),
-                Ok(PrivatePacketAcquisition::Absent),
-            ],
-        )
-        .await;
-
-        assert!(matches!(run.exit, PrivateIntakeEventLoopExit::Ended));
-        assert_eq!(
-            run.state_when_woken,
-            Some(PrivateIntakeTransportState::CaughtUp),
-            "the consumer woken for the probe's packet must read the probe's outcome"
-        );
-    }
-
-    #[tokio::test]
     async fn test_live_event_pending_handshake_sets_health_before_waking_consumer() {
         let peer = users(1).remove(0);
 
@@ -4311,6 +4310,11 @@ mod tests {
             run.woken_after_probe,
             "a probe that buffered a packet must wake the consumer again"
         );
+        assert_eq!(
+            run.state_when_woken,
+            Some(PrivateIntakeTransportState::CaughtUp),
+            "the consumer woken for the probe's packet must read the probe's outcome"
+        );
     }
 
     #[tokio::test]
@@ -4409,14 +4413,6 @@ mod tests {
         }
     }
 
-    /// The error the counter read reports when the generation moved.
-    fn counter_generation_moved() -> LinkAttemptError {
-        LinkAttemptError::GenerationMoved(PaykitSdkError::RecoveryRequired {
-            context: BUFFERED_PRIVATE_INTAKE_GENERATION_MISMATCH.into(),
-            source: None,
-        })
-    }
-
     /// Runs [`retry_while_link_generation_moves`] over scripted attempt
     /// results, returning its result and the number of attempts.
     async fn run_generation_retry(
@@ -4440,7 +4436,7 @@ mod tests {
     #[tokio::test]
     async fn test_generation_retry_retries_when_generation_moved() {
         let (result, attempts) = run_generation_retry(vec![
-            Err(counter_generation_moved()),
+            Err(buffered_generation_moved()),
             Ok(PrivatePacketAcquisition::Absent),
         ])
         .await;
@@ -4469,7 +4465,7 @@ mod tests {
     #[tokio::test]
     async fn test_generation_retry_stops_at_bound_while_generation_moves() {
         let mut results: Vec<_> = (1..LINK_ADVANCE_RETRY_ATTEMPTS)
-            .map(|_| Err(counter_generation_moved()))
+            .map(|_| Err(buffered_generation_moved()))
             .collect();
         results.push(Err(LinkAttemptError::GenerationMoved(
             PaykitSdkError::Storage {
@@ -5044,6 +5040,124 @@ mod tests {
         let state = storage.snapshot().unwrap();
         assert_eq!(state.private_intake_cursors[&peer], cursor);
         assert!(!state.private_intake_peers.contains_key(&peer));
+    }
+
+    #[tokio::test]
+    async fn test_absent_expected_slot_after_generation_move_keeps_cursor() {
+        let storage = crate::storage::InMemoryStorage::new();
+        let local = pubky::Keypair::random().public_key();
+        let remote = pubky::Keypair::random().public_key();
+        let peer = PubkyPublicKey::from_public_key(&remote);
+        let (snapshot, secret) = intake_snapshot(&local, &remote, 3);
+        seed_intake_link(&storage, peer.clone(), &snapshot, 7).await;
+        let cursor = PrivateIntakeCursorRecord {
+            subscribed_user: peer.clone(),
+            homeserver: "homeserver-a".into(),
+            event_id: 42,
+        };
+
+        // The generation moves while the GET is in flight, so the absent slot
+        // belongs to a superseded snapshot.
+        let outcome = acquire_expected_private_packet_with_fetch(
+            &storage,
+            peer.clone(),
+            &snapshot,
+            &local,
+            &secret,
+            7,
+            Some(cursor),
+            Utc::now(),
+            |_| async {
+                commit_drain_generation(&storage, &peer, &snapshot).await;
+                Ok(None)
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(
+                outcome,
+                Err(LinkAttemptError::GenerationMoved(
+                    PaykitSdkError::RecoveryRequired { .. }
+                ))
+            ),
+            "an absent slot of a superseded generation must report the move"
+        );
+        assert!(
+            !storage
+                .snapshot()
+                .unwrap()
+                .private_intake_cursors
+                .contains_key(&peer),
+            "the cursor must not advance past a superseded snapshot's slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_absent_expected_slot_without_cursor_after_generation_move() {
+        let storage = crate::storage::InMemoryStorage::new();
+        let local = pubky::Keypair::random().public_key();
+        let remote = pubky::Keypair::random().public_key();
+        let peer = PubkyPublicKey::from_public_key(&remote);
+        let (snapshot, secret) = intake_snapshot(&local, &remote, 3);
+        seed_intake_link(&storage, peer.clone(), &snapshot, 7).await;
+
+        let outcome = acquire_expected_private_packet_with_fetch(
+            &storage,
+            peer.clone(),
+            &snapshot,
+            &local,
+            &secret,
+            7,
+            None,
+            Utc::now(),
+            |_| async {
+                commit_drain_generation(&storage, &peer, &snapshot).await;
+                Ok(None)
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(
+                outcome,
+                Err(LinkAttemptError::GenerationMoved(
+                    PaykitSdkError::RecoveryRequired { .. }
+                ))
+            ),
+            "a probe must not report a superseded snapshot's slot absent"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_absent_expected_slot_without_cursor_reports_absent() {
+        let storage = crate::storage::InMemoryStorage::new();
+        let local = pubky::Keypair::random().public_key();
+        let remote = pubky::Keypair::random().public_key();
+        let peer = PubkyPublicKey::from_public_key(&remote);
+        let (snapshot, secret) = intake_snapshot(&local, &remote, 3);
+        seed_intake_link(&storage, peer.clone(), &snapshot, 7).await;
+
+        let outcome = acquire_expected_private_packet_with_fetch(
+            &storage,
+            peer.clone(),
+            &snapshot,
+            &local,
+            &secret,
+            7,
+            None,
+            Utc::now(),
+            |_| async { Ok(None) },
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, PrivatePacketAcquisition::Absent));
+        assert!(!storage
+            .snapshot()
+            .unwrap()
+            .private_intake_cursors
+            .contains_key(&peer));
     }
 
     #[tokio::test]

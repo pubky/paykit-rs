@@ -153,18 +153,21 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - In the Rust-only SSE-assisted private intake API (`start_private_intake` and
   `PrivateIntakeSupervisor`), after a packet arrives through the homeserver
   event stream, intake now checks the Linked Peer's next expected slot at once.
-  Health reports `Replaying` while that check runs and then returns to
-  `CaughtUp`, and packets written back to back are buffered together.
-  Previously health reported the Linked Peer as `Replaying` until the next
-  healthy audit. A drain woken by the packet can still report the `Replaying`
-  freshness it started with, and no further wakeup follows when the check
-  settles the Linked Peer, so read `PrivateIntakeSupervisor::health()` for the
-  current state. When the stored Encrypted Link generation changes while
-  intake reads or stores a buffered packet, for example because the app drains
-  a packet, sends a private message, or advances a handshake, intake now
-  retries with the new generation instead of marking the Linked Peer `Stale`.
-  Other failures, such as network errors or a packet that fails the buffer's
-  integrity checks, are not retried.
+  Health reports `Replaying` while that check runs, then `CaughtUp` when the
+  next slot is absent or `Backpressured` when the check fills capacity. If the
+  check fails, health stays `Replaying` until the next event or audit. Packets
+  written back to back are buffered together. Previously health reported the
+  Linked Peer as `Replaying` until the next healthy audit. A drain woken by the
+  packet can still report the `Replaying` freshness it started with, and no
+  further wakeup follows when the check settles the Linked Peer, so read
+  `PrivateIntakeSupervisor::health()` for the current state. When the stored
+  Encrypted Link generation changes while intake fetches the next expected
+  slot and buffers its packet or finds it absent, for example because the app
+  drains a packet, sends a private message, or advances a handshake, intake
+  now retries with the new generation, up to 8 attempts, before failing as
+  before. An absent slot no longer advances the cursor or reports `CaughtUp`
+  after such a change. Other failures, such as network errors or a packet that
+  fails the buffer's integrity checks, are not retried.
 
 ### Integration
 
