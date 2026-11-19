@@ -2036,17 +2036,24 @@ async fn test_publication_waits_for_an_unknown_counter_key_before_repeating_an_o
             .alice
             .sign_next(|body| {
                 body.generation = generation;
-                body.data_epoch = generation;
                 body.inbox = Inbox::new(ALICE_ORIGIN, service.service_key());
             })
             .unwrap();
         service.deliver_identity(&doc).unwrap();
         service
     };
+    let rotate = |service: &ScriptedSwitch, epoch| {
+        let doc = w.alice.sign_next(|body| body.data_epoch = epoch).unwrap();
+        service.deliver_identity(&doc).unwrap();
+    };
     let middle = move_to(w.alice.switch(), 2, [74; 32]);
+    for seller in [&mut shop, &mut other] {
+        seller.app_mut().refresh_identity().await.unwrap();
+        seller.app_mut().follow_provider().await.unwrap();
+    }
+    rotate(&middle, 2);
     store_bundle_at(&w, &middle, other.app_id(), other.app().cert(), 1);
-    other.app_mut().refresh_identity().await.unwrap();
-    other.app_mut().follow_provider().await.unwrap();
+    shop.app_mut().refresh_identity().await.unwrap();
     other.receive(None).await.unwrap();
     other.receive(None).await.unwrap();
     other.app_mut().invite(&recipient).await.unwrap();
@@ -2067,9 +2074,10 @@ async fn test_publication_waits_for_an_unknown_counter_key_before_repeating_an_o
     );
 
     let latest = move_to(&middle, 3, [75; 32]);
-    store_bundle_at(&w, &latest, publisher, shop.app().cert(), 3);
     shop.app_mut().refresh_identity().await.unwrap();
     shop.app_mut().follow_provider().await.unwrap();
+    rotate(&latest, 3);
+    store_bundle_at(&w, &latest, publisher, shop.app().cert(), 3);
     let family = Collection::with_permanent_generations(
         "private_list_publications",
         "paykit_request",
