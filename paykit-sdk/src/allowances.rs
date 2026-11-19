@@ -690,6 +690,19 @@ enum Held {
     Unreadable,
 }
 
+/// A signed answer can be the protected first reply to the pending proposal at this account.
+pub(crate) fn holds_pending_answer(
+    cx: &ReceiveContext<'_>,
+    reply: &StoredMessage,
+) -> std::result::Result<bool, Fail> {
+    let id = named_allowance(reply.body()).ok_or_else(Fail::corrupt)?;
+    let target = allowance_record_target(Collection::AllowanceProposals, &reply.sender(), id);
+    let key = cx.record_key(&target)?;
+    Ok(cx.record_at(&key)?.is_some_and(|held| {
+        replies::original_for(&held, &target, &key, &cx.identity(), reply).is_some()
+    }))
+}
+
 /// The receive step of a proposal, an acceptance, a rejection or an end that passed check
 /// 10, at an app holding `paykit_allowance` (module docs). The entry of a proposal or an answer is
 /// held while the record waits for its scope key or the copy of `allowances` isn't listed
@@ -727,7 +740,7 @@ pub(crate) fn receive_effect(
                     }
                     replies::PendingReply::Unrelated => {}
                     replies::PendingReply::Waits(version) => {
-                        keep_answer(cx, &target, stored, position, true, Some(version))?;
+                        keep_answer(cx, &target, stored, position, true, version)?;
                         return receive::note_peer(cx, &sender, stored);
                     }
                     replies::PendingReply::Stopped => {
@@ -824,26 +837,9 @@ fn keep_answer(
     let record = cx.record_key(target)?;
     let kept = key::kept_reply(&sender, &record, &stored.message().msg_id);
     if state::cx_get::<KeptMessage>(cx, &kept)?.is_none() {
-        let order = (
-            stored.accepted_at().ok_or_else(Fail::corrupt)?,
-            position.seq,
-        );
-        let earliest = over_held && {
-            let mut earlier = false;
-            for (_, other) in
-                state::cx_scan::<KeptMessage>(cx, &key::kept_reply(&sender, &record, ""))?
-            {
-                let answer = other.stored(&cx.identity()).map_err(|_| Fail::corrupt())?;
-                let at = other.order().map_err(|_| Fail::corrupt())?;
-                earlier |= is_allowance_response(answer.body()) && at < order;
-            }
-            !earlier
-        };
-        if !earliest {
-            receive::make_room_for_reply(cx, &sender, order)?;
-        }
         let mut message = KeptMessage::taken_at(stored, position);
         message.pending_source = source;
+        receive::make_room_for_reply(cx, stored, &message, over_held.then_some(record))?;
         receive::keep_local(cx, receive::local(&kept, &message)?);
     }
     Ok(())
@@ -2596,10 +2592,12 @@ impl Paykit {
                 replies::PendingReply::Waits(version) => {
                     if crate::stored::past_window(accepted_at, self.service_time()) {
                         self.give_up(kept_key, &reply).await?;
-                    } else if let Some(mut kept) = self.local_get::<KeptMessage>(kept_key).await? {
-                        if kept.pending_source.is_none_or(|source| source < version) {
-                            kept.pending_source = Some(version);
-                            self.local_put(kept_key, &kept).await?;
+                    } else if let Some(version) = version {
+                        if let Some(mut kept) = self.local_get::<KeptMessage>(kept_key).await? {
+                            if kept.pending_source.is_none_or(|source| source < version) {
+                                kept.pending_source = Some(version);
+                                self.local_put(kept_key, &kept).await?;
+                            }
                         }
                     }
                     return Ok(());

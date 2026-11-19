@@ -740,8 +740,9 @@ impl Stored for KeptMessage {
             return corrupt();
         }
         let message = self.stored(&binder.own)?;
-        if matches!(family, StateKey::KeptReply { .. } | StateKey::Conflict(_))
-            && crate::allowances::is_allowance_response(message.body())
+        if (matches!(family, StateKey::KeptReply { .. })
+            || (matches!(family, StateKey::Conflict(_))
+                && crate::allowances::is_allowance_response(message.body())))
             && self.position().is_none()
         {
             return corrupt();

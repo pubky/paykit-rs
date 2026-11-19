@@ -145,25 +145,15 @@ impl PendingConflict {
             }
             matching.push(reply);
         }
-        let compare = |a: &HeldAnswer, b: &HeldAnswer| match a.order.0.cmp(&b.order.0) {
-            Ordering::Equal => order(a.position?, b.position?),
-            distinct => Some(distinct),
+        let compare = |a: &HeldAnswer, b: &HeldAnswer| {
+            crate::records::compare_received(
+                (a.order.0, a.position?),
+                (b.order.0, b.position?),
+                &order,
+            )
         };
-        let earliest = |items: &[&HeldAnswer]| {
-            if items.is_empty() {
-                return None;
-            }
-            let mut first = 0;
-            for (index, item) in items.iter().enumerate().skip(1) {
-                if compare(item, items[first]) == Some(Ordering::Less) {
-                    first = index;
-                }
-            }
-            items
-                .iter()
-                .all(|other| compare(items[first], other).is_some_and(|o| !o.is_gt()))
-                .then_some(first)
-        };
+        let earliest =
+            |items: &[&HeldAnswer]| crate::records::first_received(items, |a, b| compare(a, b));
         let Some(index) = earliest(&matching) else {
             return Opposed::Unknown;
         };
@@ -224,7 +214,7 @@ impl PendingConflict {
         } else if matches!(answer.body(), Body::AllowanceRejection(_)) {
             PendingReply::Stopped
         } else {
-            PendingReply::Waits(self.source)
+            PendingReply::Waits(Some(self.source))
         })
     }
 
@@ -283,7 +273,7 @@ impl PendingConflict {
 
 /// Only a qualified original can establish a new stop. A previously acquired stop
 /// survives an uncertain or unreadable current record.
-fn original_for(
+pub(super) fn original_for(
     held: &SharedRecord,
     target: &pubky_switch_client::app::RecordTarget,
     key: &[u8; 32],
@@ -330,7 +320,8 @@ pub(super) fn before_retirement(
 pub(super) enum PendingReply {
     Undecided,
     Unrelated,
-    Waits(SeenVersion),
+    /// Matched and unplaced. A proven source can be retained for the next retry.
+    Waits(Option<SeenVersion>),
     Stopped,
 }
 
@@ -370,10 +361,10 @@ pub(super) fn observe(
         return Ok(if rejected {
             PendingReply::Stopped
         } else {
-            PendingReply::Waits(held.version.into())
+            PendingReply::Waits(Some(held.version.into()))
         });
     }
-    Ok(PendingReply::Waits(held.version.into()))
+    Ok(PendingReply::Waits(Some(held.version.into())))
 }
 
 /// The exact discard also settles held replies to its P. A stored entry must still go
@@ -543,6 +534,11 @@ impl Paykit {
             }) {
                 Some(Ordering::Less) => return Ok(PendingReply::Stopped),
                 Some(Ordering::Greater) => (),
+                _ if evidence.pending_source.is_some()
+                    && matches!(message.body(), Body::AllowanceAcceptance(_)) =>
+                {
+                    return Ok(PendingReply::Waits(None))
+                }
                 _ => return Ok(PendingReply::Undecided),
             }
         }
@@ -576,11 +572,14 @@ impl Paykit {
                 self.local_put(&at, &*stop).await?;
                 return stop.reply(&own, message);
             }
+            Opposed::Unknown if matches!(message.body(), Body::AllowanceAcceptance(_)) => {
+                return Ok(PendingReply::Waits(None));
+            }
             Opposed::Unknown => return Ok(PendingReply::Undecided),
             Opposed::Waiting => (),
         }
         Ok(if matches!(message.body(), Body::AllowanceAcceptance(_)) {
-            PendingReply::Waits(held.version.into())
+            PendingReply::Waits(Some(held.version.into()))
         } else {
             PendingReply::Unrelated
         })

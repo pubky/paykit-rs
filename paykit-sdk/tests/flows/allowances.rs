@@ -8959,16 +8959,50 @@ async fn test_pending_reply_stop_excludes_a_parked_acceptance_before_deletion_an
 
 #[tokio::test]
 async fn test_pending_reply_stop_orders_equal_millisecond_replies_across_a_known_loss() {
-    Box::pin(pending_replies_across_loss(false)).await;
+    Box::pin(pending_replies_across_loss(false, ReplyJourney::Placement)).await;
 }
 
 #[tokio::test]
 async fn test_pending_reply_stop_holds_equal_millisecond_replies_when_another_loss_obscures_order()
 {
-    Box::pin(pending_replies_across_loss(true)).await;
+    Box::pin(pending_replies_across_loss(true, ReplyJourney::Placement)).await;
 }
 
-async fn pending_replies_across_loss(another_loss: bool) {
+#[tokio::test]
+async fn test_pending_reply_stop_counts_replies_in_proven_feed_order_at_the_sender_bound() {
+    Box::pin(pending_replies_across_loss(
+        false,
+        ReplyJourney::BeforeProposal,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn test_pending_reply_stop_keeps_indeterminate_replies_at_the_sender_bound() {
+    Box::pin(pending_replies_across_loss(
+        true,
+        ReplyJourney::BeforeProposal,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn test_pending_reply_stop_protects_the_proven_first_answer_over_a_held_proposal_at_the_bound(
+) {
+    Box::pin(pending_replies_across_loss(
+        false,
+        ReplyJourney::OverProposal,
+    ))
+    .await;
+}
+
+enum ReplyJourney {
+    Placement,
+    BeforeProposal,
+    OverProposal,
+}
+
+async fn pending_replies_across_loss(another_loss: bool, journey: ReplyJourney) {
     use paykit_lib::records::PendingAllowanceRecord;
     use pubky_switch_client::app::{Collection, FeedPosition, RecordTarget};
     use pubky_switch_client::testing::ScriptedSwitch;
@@ -9082,10 +9116,13 @@ async fn pending_replies_across_loss(another_loss: bool) {
     let (r_ms, r_pos) = receipt(&r);
     assert_eq!(q_ms, r_ms);
     assert!(q_pos.generation < r_pos.generation && q_pos.seq > r_pos.seq);
-    if another_loss {
-        crate::provider_loss::declare_second_loss(&w);
+    let replacement = if another_loss {
+        let next = crate::provider_loss::declare_second_loss(&w);
         Box::pin(crate::provider_loss::follow_generation(&mut wallet)).await;
-    }
+        next
+    } else {
+        replacement
+    };
     let backup = wallet.backup().await.unwrap();
     drop(wallet);
     let mut restored = Box::pin(restore_pending_wallet(&w, store, &backup)).await;
@@ -9094,6 +9131,114 @@ async fn pending_replies_across_loss(another_loss: bool) {
         restored.app().received_order(q_pos, r_pos),
         (!another_loss).then_some(std::cmp::Ordering::Less)
     );
+    if !matches!(journey, ReplyJourney::Placement) {
+        let bound = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
+        let protected = matches!(journey, ReplyJourney::OverProposal);
+        if protected {
+            let current = PendingAllowanceRecord::new(&w.alice_id(), p.clone())
+                .unwrap()
+                .to_json()
+                .unwrap();
+            Box::pin(write_record(&mut restored, &pending(&id), Some(&current))).await;
+        }
+        let mut last = String::new();
+        let mut first_offer = None;
+        for _ in 0..(bound - 1 + usize::from(protected)) {
+            w.clock.advance_ms(1);
+            let offer_id = paykit_lib::AllowanceId::generate().unwrap();
+            let offer = signed_pending_proposal(&restored, w.bob_id(), &offer_id, "allower");
+            w.bob
+                .switch()
+                .send_plaintext(
+                    w.alice_id(),
+                    restored.app().cert(),
+                    offer.plaintext(),
+                    &[shop.app_id()],
+                )
+                .unwrap();
+            let seen = shop.app_mut().receive(None).await.unwrap();
+            assert!(seen.events.iter().any(|event| matches!(event, AppEvent::MessageReceived {msg_id,..} if msg_id == &offer.message().msg_id)));
+            let mut reply = OutgoingMessage::new(
+                w.alice_id(),
+                "paykit.allowance_acceptance",
+                json!({"allowance_id":offer_id.as_str()})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            );
+            reply.refs = vec![offer.hash()];
+            if first_offer.is_none() {
+                first_offer = Some((offer_id, offer));
+            }
+            let signed = shop.app().sign_message(reply).unwrap();
+            replacement
+                .send_plaintext(
+                    w.bob_id(),
+                    shop.app().cert(),
+                    signed.plaintext(),
+                    &[restored.app_id()],
+                )
+                .unwrap();
+            last = signed.msg_id().to_owned();
+        }
+        for _ in 0..4 {
+            restored.app_mut().receive(None).await.unwrap();
+        }
+        assert_eq!(
+            Box::pin(kept_under(&restored, b"pr/")).await,
+            bound + usize::from(protected)
+        );
+        assert_eq!(
+            Box::pin(keeps(&restored, b"pr/", &q)).await,
+            another_loss || protected
+        );
+        assert_eq!(Box::pin(keeps(&restored, b"pr/", &r)).await, !protected);
+        assert_eq!(
+            Box::pin(keeps(&restored, b"pr/", &last)).await,
+            !another_loss
+        );
+        if another_loss {
+            let waiting = restored.app_mut().parked_entries().await.unwrap();
+            assert_eq!(waiting.len(), 1);
+            assert_eq!(
+                waiting[0].reason,
+                pubky_switch_client::app::ParkReason::AwaitingAdmission
+            );
+            let parked = restored
+                .app_mut()
+                .parked_entry(waiting[0].stored_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(parked.sender, w.bob_id());
+            assert_eq!(parked.message.unwrap().msg_id, last);
+            let (offer_id, offer) = first_offer.unwrap();
+            let current = PendingAllowanceRecord::new(&w.alice_id(), offer)
+                .unwrap()
+                .to_json()
+                .unwrap();
+            Box::pin(write_record(
+                &mut restored,
+                &pending(&offer_id),
+                Some(&current),
+            ))
+            .await;
+            for _ in 0..3 {
+                restored.app_mut().receive(None).await.unwrap();
+            }
+            assert!(restored
+                .app_mut()
+                .parked_entries()
+                .await
+                .unwrap()
+                .is_empty());
+            assert!(Box::pin(keeps(&restored, b"pr/", &last)).await);
+            assert!(Box::pin(keeps(&restored, b"pr/", &q)).await);
+            assert!(Box::pin(keeps(&restored, b"pr/", &r)).await);
+            assert_eq!(Box::pin(kept_under(&restored, b"pr/")).await, bound + 1);
+        }
+        return;
+    }
     let value = PendingAllowanceRecord::new(&w.alice_id(), p)
         .unwrap()
         .to_json()
@@ -9116,6 +9261,33 @@ async fn pending_replies_across_loss(another_loss: bool) {
         .await
         .unwrap()
         .is_empty());
+    if another_loss {
+        w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS - 1);
+        restored.receive(None).await.unwrap();
+        assert!(Box::pin(keeps(&restored, b"pr/", &q)).await);
+        w.clock.advance_ms(1);
+        restored.receive(None).await.unwrap();
+        assert!(!Box::pin(keeps(&restored, b"pr/", &q)).await);
+        let notices = restored.notices().await.unwrap();
+        let matches: Vec<_> = notices
+            .iter()
+            .filter(|n| {
+                n.kind == paykit_sdk::NoticeKind::MessageGivenUp
+                    && n.msg_id.as_deref() == Some(q.as_str())
+                    && n.counterparty == w.bob_id()
+            })
+            .collect();
+        assert_eq!(matches.len(), 1);
+        restored.acknowledge_notice(&matches[0].id).await.unwrap();
+        restored.receive(None).await.unwrap();
+        assert!(restored
+            .notices()
+            .await
+            .unwrap()
+            .iter()
+            .all(|n| n.msg_id.as_deref() != Some(q.as_str())));
+        assert_eq!(Box::pin(kept_under(&restored, b"pc/")).await, 0);
+    }
     assert!(w.rail.all_executions().is_empty());
 }
 

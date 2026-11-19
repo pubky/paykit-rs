@@ -2226,7 +2226,14 @@ mod receive_tests {
             vec![[4; 32]],
             object(json!({})),
         );
-        let value = state::encode(&KeptMessage::taken(&reply, 0)).unwrap();
+        let value = state::encode(&KeptMessage::taken_at(
+            &reply,
+            pubky_switch_client::app::FeedPosition {
+                generation: 1,
+                seq: 1,
+            },
+        ))
+        .unwrap();
         let target = ActivityTarget::payee(natural_key::request_record(&bob.id(), &[4; 32]), None);
         (reply, value, fake_key(&target.record_target()))
     }
@@ -2628,7 +2635,14 @@ mod receive_tests {
             vec![[4; 32], [5; 32]],
             object(json!({ "attempt_id": "DgCVYQKL1eyDacZvG6YhZg" })),
         );
-        let value = state::encode(&KeptMessage::taken(&receipt, 0)).unwrap();
+        let value = state::encode(&KeptMessage::taken_at(
+            &receipt,
+            pubky_switch_client::app::FeedPosition {
+                generation: 1,
+                seq: 1,
+            },
+        ))
+        .unwrap();
         let at = key::kept_reply(&carol.id(), &record, &receipt.message().msg_id);
         assert!(!restores::<KeptMessage>(&bob, at.as_bytes(), &value));
     }

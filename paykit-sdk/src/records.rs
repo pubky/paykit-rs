@@ -59,7 +59,7 @@ pub(crate) struct KeptMessage {
     /// carries none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     seq: Option<u64>,
-    /// The feed generation of an Allowance answer. Its sequence alone cannot
+    /// The feed generation of a pooled reply. Its sequence alone cannot
     /// order entries on opposite sides of a provider loss.
     #[serde(skip_serializing_if = "Option::is_none")]
     generation: Option<u64>,
@@ -77,6 +77,39 @@ pub(crate) struct KeptMessage {
 /// their complete feed position and use the client's feed order across generations.
 pub(crate) type KeptOrder = (u64, u64);
 
+/// Compare inbox acceptance times, using the verified feed order to break a tie.
+pub(crate) fn compare_received(
+    a: (u64, pubky_switch_client::app::FeedPosition),
+    b: (u64, pubky_switch_client::app::FeedPosition),
+    order: impl Fn(
+        pubky_switch_client::app::FeedPosition,
+        pubky_switch_client::app::FeedPosition,
+    ) -> Option<std::cmp::Ordering>,
+) -> Option<std::cmp::Ordering> {
+    match a.0.cmp(&b.0) {
+        std::cmp::Ordering::Equal => order(a.1, b.1),
+        distinct => Some(distinct),
+    }
+}
+
+/// The first item only when every relevant comparison proves it.
+pub(crate) fn first_received<T>(
+    items: &[T],
+    compare: impl Fn(&T, &T) -> Option<std::cmp::Ordering>,
+) -> Option<usize> {
+    items.first()?;
+    let mut first = 0;
+    for (index, item) in items.iter().enumerate().skip(1) {
+        if compare(item, &items[first]) == Some(std::cmp::Ordering::Less) {
+            first = index;
+        }
+    }
+    items
+        .iter()
+        .all(|other| compare(&items[first], other).is_some_and(|o| !o.is_gt()))
+        .then_some(first)
+}
+
 impl std::fmt::Debug for KeptMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("KeptMessage(..)")
@@ -92,6 +125,8 @@ impl KeptMessage {
             plaintext: message.plaintext().encode(),
             accepted_at: None,
             seq: None,
+            generation: None,
+            pending_source: None,
         }
     }
 
