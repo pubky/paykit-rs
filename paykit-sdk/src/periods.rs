@@ -1594,8 +1594,8 @@ mod tests {
 
     #[test]
     fn test_periods_receive_places_nothing_from_another_label() {
-        // The one rule of the receive step and the later writes: another label's period
-        // details go into no record, and its receipt finds nothing in the request record.
+        // Check each original signer against the request. The period receipt belongs
+        // beside the payer's signed proof, with the recurring request as its parent.
         let (alice, _) = parties();
         let shop1 = labelled("shop1");
         let mut body = json!({
@@ -1613,6 +1613,41 @@ mod tests {
         let mut record = empty(ActivitySide::Payer, shop1.id());
         assert!(place(&mut record, Role::Request, request.clone()));
         let target = ActivityTarget::payer(vec![1]);
+        let terms = details(&shop1, &alice, request.hash(), "2026-03-01T00:00:00.000Z");
+        let billing_period = terms.body().billing_period().copied();
+        let attempt_id = paykit_lib::AttemptId::from_bytes([9; 16]);
+        let (_, parent) = request_of(&record).unwrap();
+        let proof_body = paykit_lib::bodies::PaymentProof {
+            attempt_id,
+            billing_period,
+            payment_endpoint_identifier: PaymentEndpointIdentifier::new("btc-lightning-bolt11")
+                .unwrap(),
+            payment_app_id: shop1.app_id(),
+            list_version: None,
+            amount: None,
+            allowance_id: None,
+            label: parent.label.clone(),
+            payment_reference: Some(parent.payment_reference.clone()),
+            proof: object(json!({ "preimage": "00" })),
+        };
+        let proof = alice.message(
+            &shop1,
+            "paykit.payment_proof",
+            vec![request.hash(), terms.hash()],
+            proof_body.to_body(2).unwrap(),
+        );
+        let proof_hash = proof.hash();
+        let mut period = empty(ActivitySide::Payer, shop1.id());
+        assert!(place(&mut period, Role::PeriodDetails, terms));
+        assert!(place(&mut period, Role::Proof, proof));
+        let receipt_body = paykit_lib::bodies::PaymentReceipt {
+            attempt_id,
+            billing_period,
+            metadata: None,
+            payment_reference: None,
+        }
+        .to_body(2)
+        .unwrap();
         for (sender, taken) in [(shop1, true), (labelled("shop2"), false)] {
             let held = details(&sender, &alice, request.hash(), "2026-03-01T00:00:00.000Z");
             let into = crate::receive::period_or_request(
@@ -1626,17 +1661,15 @@ mod tests {
             let receipt = sender.message(
                 &alice,
                 "paykit.payment_receipt",
-                vec![[3; 32], request.hash()],
-                object(json!({
-                    "attempt_id": "DgCVYQKL1eyDacZvG6YhZg",
-                    "billing_period": {
-                        "starts_at": "2026-02-28T00:00:00.000Z",
-                        "ends_at": "2026-03-31T00:00:00.000Z"
-                    }
-                })),
+                vec![proof_hash, request.hash()],
+                receipt_body.clone(),
             );
+            assert!(crate::receive::receipt_on_record(&record, &receipt).is_none());
             assert_eq!(
-                crate::receive::receipt_on_record(&record, &receipt).is_some(),
+                matches!(
+                    crate::receive::period_receipt(&receipt, &period, &record),
+                    crate::receive::PeriodReceipt::Matched
+                ),
                 taken
             );
         }
