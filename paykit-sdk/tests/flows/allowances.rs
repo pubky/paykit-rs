@@ -2569,21 +2569,26 @@ async fn test_allowances_kept_answer_over_a_record_that_doesnt_read_given_up_wit
 /// the records counts as not listed until a listing of Paykit's own.
 fn missed_and_listing_fails(w: &World, wallet: &Paykit) {
     missed(w);
-    fail_paykit_listing(&w.alice, wallet);
+    fail_paykit_listing(
+        &w.alice,
+        crate::certificate::client_listing_requests(wallet.app().cert()),
+    );
 }
 
 /// Fail Paykit's own listing at the end of the next receive of `party`'s app after a
-/// `missed` item: the client's listing after the item, of the app's `collections`, goes
-/// through first, up to the client's page budget. Paykit then continues the same
-/// listing. A failure inside the client's read would instead fail the read.
-fn fail_paykit_listing(party: &pubky_switch_client::testing::TestSigner, app: &Paykit) {
-    party
-        .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
-            path: "records?collection".into(),
-            after: crate::certificate::client_listing_requests(app.app().cert())
-                .min(pubky_switch_client::app::LISTING_PAGES_PER_READ as usize),
-        });
+/// `missed` item: the client lists up to its page budget before Paykit takes over.
+/// A listing that fails inside the client's read fails the read.
+fn fail_paykit_listing(party: &pubky_switch_client::testing::TestSigner, collections: usize) {
+    // A longer native listing already holds Paykit through this read. A fault then
+    // would interrupt the next native read instead of Paykit's subsequent listing.
+    if collections <= pubky_switch_client::app::LISTING_PAGES_PER_READ as usize {
+        party
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+                path: "records?collection".into(),
+                after: collections,
+            });
+    }
 }
 
 #[tokio::test]
@@ -2640,7 +2645,10 @@ async fn test_allowances_kept_answer_past_30_days_kept_while_unlisted() {
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
     let now = w.clock.now_ms();
     w.bob.switch().push_missed(1, now - 1_000, now);
-    fail_paykit_listing(&w.bob, &shop);
+    fail_paykit_listing(
+        &w.bob,
+        crate::certificate::client_listing_requests(shop.app().cert()),
+    );
     let got = shop.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_some(), "{got:?}");
     assert_eq!(
