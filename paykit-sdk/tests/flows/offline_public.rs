@@ -79,6 +79,9 @@ async fn pay_public(disconnect: bool) {
     let mut wallet = world.wallet("wallet").await;
     let chosen = endpoint("btc-lightning-bolt12");
     let mut shop = shop_with_endpoint(&world).await;
+    let offer = pubky_switch_core::records::AppRecord::verify(shop.app().record(), &world.bob_id())
+        .unwrap();
+    assert_eq!(offer.expires_at(), None);
     wallet.receive(None).await.unwrap();
     if disconnect {
         world.router.remove(world.alice.origin());

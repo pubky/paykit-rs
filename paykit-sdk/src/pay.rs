@@ -3,8 +3,8 @@
 //! 1. **Attempt.** The transfer is checked first: the payment method must transfer exactly
 //!    the amount paid, which the payer computes before paying ([`crate::conversion`]): the
 //!    request's amount, or, to an endpoint a rate of the request's conversion terms prices,
-//!    the amount its user confirmed ([`PricedPayment`]), which an automatic payment never
-//!    pays. Then, before any write, the own `identity.json` (read again, and confirmed within
+//!    the exact amount authorized for the payment ([`PricedPayment`]). An automatic
+//!    rate-priced payment requires an eligible own-policy period. Then, before any write, the own `identity.json` (read again, and confirmed within
 //!    the last 60 s) and the payee's; the payment is journaled; then the `attempt` is
 //!    written on the obligation's claim, conditioned on the version of the request record
 //!    the app read and carrying the request's deadline. A payment without a request writes
@@ -119,18 +119,13 @@ pub struct PayOptions {
     /// when they called pay, as in v0.1, where the wallet paid the target it resolved. The
     /// confirmed quote is then not used.
     pub transfer_confirmed: Option<TransferQuote>,
-    /// The amount of a payment priced by a rate that the user was shown and confirmed, as a
-    /// [`Refusal::PricedByRate`] gave it (Paykit spec 7.2 step 1, 8.2). It lets only that
-    /// destination be paid, at exactly that amount, by that rate: the SDK computes the
-    /// amount again, and one computed differently since, another amount, rate, endpoint or
-    /// payload, is refused again with what it would pay now. An automatic payment never takes
-    /// it.
-    ///
-    /// A destination no rate prices, of the requested asset, is paid the request's amount
-    /// without it, on a call carrying a confirmation too, as [`Self::transfer_confirmed`]
-    /// says. A Billing Period previously confirmed at its signed period rate waits for a
-    /// new choice if that rate becomes unusable (Paykit spec 8.2).
-    pub rate_confirmed: Option<PricedPayment>,
+    /// The exact quote authorized by the user or by a bounded payment policy the user
+    /// approved (Paykit spec 7.2 step 1, 8.2). Return the quote from
+    /// [`Refusal::PricedByRate`] for this request and occurrence. The SDK checks its
+    /// destination, signed source, rate and resulting amount again before paying.
+    pub rate_authorized: Option<PricedPayment>,
+    /// Inspect the selected endpoint without opening an attempt or asking for a list.
+    pub(crate) quote_only: bool,
     /// The signed rate details to use for a Billing Period, identified by their message ID.
     /// By default the latest usable details that price the chosen endpoint are used.
     pub period_details: Option<String>,
@@ -192,12 +187,11 @@ impl PayOptions {
         self
     }
 
-    /// The amount of a payment priced by a rate that the user was shown and confirmed, as a
-    /// [`Refusal::PricedByRate`] gave it (Paykit spec 7.2 step 1, 8.2): only that destination
-    /// is paid, at exactly that amount.
+    /// Authorize the exact quote from [`Refusal::PricedByRate`] for this payment,
+    /// after user confirmation or under a bounded policy the user approved.
     #[must_use]
-    pub fn with_rate_confirmed(mut self, payment: PricedPayment) -> Self {
-        self.rate_confirmed = Some(payment);
+    pub fn with_rate_authorized(mut self, payment: PricedPayment) -> Self {
+        self.rate_authorized = Some(payment);
         self
     }
 
@@ -212,7 +206,7 @@ impl PayOptions {
     pub(crate) fn selected_period_rate(&self) -> Option<&str> {
         self.period_details
             .as_deref()
-            .or_else(|| match &self.rate_confirmed.as_ref()?.source {
+            .or_else(|| match &self.rate_authorized.as_ref()?.source {
                 RateSource::PeriodDetails { msg_id } => Some(msg_id.as_str()),
                 RateSource::Request => None,
             })
@@ -613,6 +607,7 @@ pub(crate) struct Pricing<'a> {
     requested: &'a PaymentAmount,
     /// The request paid; `None` for a payment without a request, which pays its own amount.
     request: Option<RequestRef>,
+    period: Option<PeriodRef>,
     rates: Rates<'a>,
     by: Initiator,
 }
@@ -630,6 +625,7 @@ impl<'a> Pricing<'a> {
         Self {
             requested: amount,
             request: None,
+            period: None,
             rates: Rates::None,
             by: Initiator::User,
         }
@@ -638,6 +634,7 @@ impl<'a> Pricing<'a> {
     pub(crate) fn of_request(
         requested: &'a PaymentAmount,
         request: RequestRef,
+        period: Option<PeriodRef>,
         conversion: Option<&'a paykit_lib::bodies::Conversion>,
         by: Initiator,
     ) -> Self {
@@ -649,6 +646,7 @@ impl<'a> Pricing<'a> {
         Self {
             requested,
             request: Some(request),
+            period,
             rates,
             by,
         }
@@ -744,25 +742,20 @@ fn transfer_refused(
         .then_some("a fee above the app's cap")
 }
 
-/// Whether the confirmed rate can be used at dispatch (Paykit spec 7.2, 8.2).
 /// A fixed rate lasts as long as its request. A period rate needs both clocks.
 fn rates_usable(
-    price: Option<&RateSource>,
-    automatic_first: bool,
+    source: &RateSource,
     selected: Option<&StoredMessage>,
     device: u64,
     service: Option<u64>,
 ) -> bool {
-    price.is_none_or(|source| {
-        !automatic_first
-            && match source {
-                RateSource::Request => true,
-                RateSource::PeriodDetails { msg_id } => selected.is_some_and(|details| {
-                    &details.message().msg_id == msg_id
-                        && crate::periods::rates_current(details, device, service)
-                }),
-            }
-    })
+    match source {
+        RateSource::Request => true,
+        RateSource::PeriodDetails { msg_id } => selected.is_some_and(|details| {
+            &details.message().msg_id == msg_id
+                && crate::periods::rates_current(details, device, service)
+        }),
+    }
 }
 
 /// The amount a payment of a request that no rate prices pays now, `priced` without rates,
@@ -1162,7 +1155,8 @@ impl Paykit {
         }
         // The amount to each endpoint, by the request's fixed rates under conversion terms
         // (Paykit spec 7.2 step 1); a one-time request has no period details to price it.
-        let pricing = Pricing::of_request(&body.amount, *request, body.conversion.as_ref(), by);
+        let pricing =
+            Pricing::of_request(&body.amount, *request, None, body.conversion.as_ref(), by);
         let Chosen {
             destination,
             carrier,
@@ -2085,7 +2079,7 @@ impl Paykit {
         // list isn't paused, and merely expired or is used up, is asked as without a paused
         // list.
         if !paused_lists.is_empty() {
-            if !held.is_empty() && !unsupported_only && !unusable {
+            if !options.quote_only && !held.is_empty() && !unsupported_only && !unusable {
                 self.ask_for_lists(payee, app, &held, &installed).await?;
             }
             Box::pin(self.refuse_while_paused(&paused_lists)).await?;
@@ -2098,6 +2092,12 @@ impl Paykit {
                 "Paykit spec 8.4: the payee's Private Payment List has no endpoint this payment \
                  may use"
                     .into(),
+            )
+            .into());
+        }
+        if options.quote_only {
+            return Err(Refusal::NotNow(
+                "a current Private Payment List is needed to quote this endpoint".into(),
             )
             .into());
         }
@@ -2244,15 +2244,14 @@ impl Paykit {
     /// ([`conversion::price`]): a payment without a request, its own amount; a payment of a
     /// request to an endpoint of the requested asset no rate prices, the amount asked,
     /// rounded up to the endpoint's smallest unit; for one a rate prices, the amount
-    /// computed, only once its user has confirmed exactly that
-    /// ([`PayOptions::rate_confirmed`]), and never for an automatic payment; for a request
+    /// computed, once the host authorizes this exact quote ([`PayOptions::rate_authorized`])
+    /// for a payment by hand or an eligible own-policy period; for a request
     /// without conversion terms to an endpoint of another asset, the amount asked, only by
     /// hand ([`Taken::ByHand`]), and unusable for an automatic payment; else unusable.
     ///
     /// # Errors
     ///
-    /// [`Refusal::PricedByRate`] with what the user is shown, for a payment priced by a rate
-    /// that isn't confirmed so, or is automatic.
+    /// [`Refusal::PricedByRate`] carries the quote when this payment lacks its authorization.
     fn price_choice(
         &self,
         destination: &Destination,
@@ -2280,6 +2279,13 @@ impl Paykit {
                     "Paykit spec 8.2: the selected period rate does not price this endpoint",
                 ));
             }
+            Priced::Plain(_) | Priced::ByHand(_)
+                if options.quote_only || options.rate_authorized.is_some() =>
+            {
+                return Ok(Taken::Unusable(
+                    "Paykit spec 7.2: this endpoint is not priced by the requested signed rate",
+                ));
+            }
             Priced::Plain(amount) => return Ok(Taken::Pay(amount, None)),
             // Never paid automatically, whatever the method would transfer (Paykit spec 7.2
             // step 1): a method that converts by itself would report the requested amount.
@@ -2296,6 +2302,8 @@ impl Paykit {
         let payload = destination.payload()?;
         let shown = PricedPayment {
             request,
+            billing_period: pricing.period,
+            rate_source_hash: details.map_or(request.request_hash, StoredMessage::hash),
             app_id: destination.app_id,
             endpoint_id,
             payload_hash: pubky_switch_core::enc::hash(payload.as_str().as_bytes()),
@@ -2304,8 +2312,9 @@ impl Paykit {
             rate,
             amount,
         };
-        // A payment priced by a rate is made only by hand (Paykit spec 8.2, 8.3).
-        if pricing.by == Initiator::User && options.rate_confirmed.as_ref() == Some(&shown) {
+        if shown.may_authorize_rate(pricing.by == Initiator::User)
+            && options.rate_authorized.as_ref() == Some(&shown)
+        {
             return Ok(Taken::Pay(
                 shown.amount.clone(),
                 Some(KeptPrice::of(&shown, details)),
@@ -2468,7 +2477,7 @@ impl Paykit {
 
     /// The transfer check again, at the final payment check just before the call, a
     /// repeat's included (Paykit spec 7.2 step 1): the method's transfer now of the amount
-    /// paid, the one its user confirmed for a payment priced by a rate, must still be
+    /// paid, the one its host authorized for a payment priced by a rate, must still be
     /// within the bound the attempt was journaled with, so a fee estimate that grew, or an
     /// amount that changed, since the attempt was planned is never paid. A transfer that is
     /// what the user asked for, within the cap at planning, passes; a confirmed one passes
@@ -2537,9 +2546,8 @@ impl Paykit {
     /// repeat's included (Paykit spec 7.2 step 1, 8.2): the amount the entry keeps must be
     /// the one the same rule gives now, with the payment method's unit now, so a kept amount
     /// that no rule gives, or one the method's unit no longer gives, is never paid. For a
-    /// payment priced by a rate, the rates it was confirmed by must still be usable
-    /// ([`rates_usable`]), and the kept rate must give exactly the amount its user
-    /// confirmed; for another payment of a request, the amount the selection gives without
+    /// payment priced by a rate, the authorized rate must still be usable
+    /// ([`rates_usable`]) and give exactly the originally authorized amount; for another payment of a request, the amount the selection gives without
     /// a rate must be the kept one, and one made only by hand ([`Priced::ByHand`]) is never
     /// a first dispatch of an automatic payment; a payment without a request pays its own
     /// amount, which [`JournalEntry::check`] holds. `Ok` inside says whether the payment is
@@ -2584,7 +2592,13 @@ impl Paykit {
                 }),
             }));
         };
-        let mut shown = entry.priced_payment()?.ok_or_else(PaykitError::corrupt)?;
+        let selected = match self.current_rate_details(entry, payee)? {
+            Ok(details) => details,
+            Err(refusal) => return Ok(Err(refusal)),
+        };
+        let mut shown = entry
+            .priced_payment(selected.as_ref())?
+            .ok_or_else(PaykitError::corrupt)?;
         let rate = price.rate()?;
         let priced = conversion::price(
             &*self.rail,
@@ -2600,14 +2614,10 @@ impl Paykit {
             }
             Priced::Plain(_) | Priced::ByHand(_) | Priced::Unusable(_) => false,
         };
-        let selected = match self.current_rate_details(entry, payee)? {
-            Ok(details) => details,
-            Err(refusal) => return Ok(Err(refusal)),
-        };
         if holds
+            && shown.may_authorize_rate(entry.user_started)
             && rates_usable(
-                Some(&shown.source),
-                automatic_first,
+                &shown.source,
                 selected.as_ref(),
                 self.now(),
                 self.service_time(),
@@ -5192,7 +5202,7 @@ mod tests {
             request_hash: [2; 32],
         };
         let terms = paykit_lib::bodies::Conversion::PerPeriod;
-        let pricing = Pricing::of_request(&requested, request, Some(&terms), Initiator::User);
+        let pricing = Pricing::of_request(&requested, request, None, Some(&terms), Initiator::User);
         let rail = crate::rail::FakeRail::new();
         let own = PaymentEndpointIdentifier::new("usd-ach-account").unwrap();
         let other = PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
@@ -5204,7 +5214,7 @@ mod tests {
             pricing.price(&rail, &other, |_| true).0,
             Priced::Unusable(_)
         ));
-        let plain = Pricing::of_request(&requested, request, None, Initiator::User);
+        let plain = Pricing::of_request(&requested, request, None, None, Initiator::User);
         assert!(matches!(
             plain.price(&rail, &other, |_| true).0,
             Priced::ByHand(_)
@@ -5252,26 +5262,12 @@ mod tests {
     }
 
     #[test]
-    fn test_dispatch_rates_require_a_manual_payment_and_the_signed_source() {
-        assert!(rates_usable(None, true, None, 0, None));
-        assert!(rates_usable(
-            Some(&RateSource::Request),
-            false,
-            None,
-            0,
-            None
-        ));
-        assert!(!rates_usable(
-            Some(&RateSource::Request),
-            true,
-            None,
-            0,
-            None
-        ));
+    fn test_dispatch_period_rates_require_the_signed_source() {
+        assert!(rates_usable(&RateSource::Request, None, 0, None));
         let details = RateSource::PeriodDetails {
             msg_id: "details".into(),
         };
-        assert!(!rates_usable(Some(&details), false, None, 0, None));
+        assert!(!rates_usable(&details, None, 0, None));
     }
 
     #[test]

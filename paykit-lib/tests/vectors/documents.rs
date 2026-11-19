@@ -21,8 +21,8 @@ use serde_json::{json, Value};
 
 use crate::common::{
     arr, b64n, base_cert, beyond_paykit, body_text, cap_app_record, cert, cert_doc, executor_cert,
-    generated, paykit, phone_cert, pubky, quoted, recertified, reissued, shop_app_record, signed,
-    signed_json, st, writing, Keys, Place, ALICE, ALLOWANCE_ID, BOB,
+    generated, paykit, phone_cert, pubky, quoted, reissued, shop_app_record, signed, signed_json,
+    st, writing, Keys, Place, ALICE, ALLOWANCE_ID, BOB,
 };
 
 #[test]
@@ -259,14 +259,15 @@ protocols (Switch wire 3.2). accepted are records a Paykit reader takes, the fir
 shop's record as it is; reads is what the reader takes from each: the Payment Endpoint \
 Identifiers of capabilities.endpoint_identifiers, and the public endpoints. A missing or null \
 paykit member, capabilities, endpoint_identifiers or public_endpoints reads as empty, and \
-unknown members are ignored. refused are records Paykit's readers refuse, though the switch \
+unknown members are ignored. The reader accepts public endpoints with expires_at null. \
+refused are records Paykit's readers refuse, though the switch \
 takes them (switch_accepts): a capabilities or public_endpoints that isn't an object, an \
-endpoint_identifiers that isn't an array of strings, a payload that isn't a string, public \
-endpoints with expires_at null, and, last, four that break wire 1.4: an endpoint identifier \
+endpoint_identifiers that isn't an array of strings, a payload that isn't a string, and, last, \
+four that break wire 1.4: an endpoint identifier \
 in capabilities that isn't a Payment Endpoint Identifier (btc-lightning/bolt11), a public \
 endpoint key that isn't one (..), the reserved key private, and an empty payload. protocols \
-and expires_at are the record's as signed. reason is the wording at a Paykit reader: the \
-prototype's, and paykit-lib's for the last four.";
+and expires_at are the record's as signed. reason is the wording from the current \
+paykit-lib reader.";
 
 /// One certificate case of `multi_protocol_certificates`: its name, the app whose
 /// certificate it changes, its scopes and permissions.
@@ -737,7 +738,7 @@ extension app cap. certificate is its certificate of certificates, holding payki
 beside the extension scope paykit_ext:paykit-cap. app_record is its app record, signed by its signing key \
 under pubky-switch/v1/app-record: it carries that certificate, accepts the kinds a payee \
 app takes from payers and the extension kind paykit-cap.offer, and its Paykit member states \
-its endpoint identifiers and no public endpoints; its label is bob cap, its updated_at its \
+its endpoint identifiers and no public endpoints; its updated_at its \
 certificate's issued_at, and its expires_at null. The switch takes the record, and a Paykit \
 reader reads its member.";
 
@@ -843,7 +844,8 @@ pub(crate) fn generate(keys: &Keys) {
         Place::Member("/labelled_scope_rejections/cases"),
         Value::Array(labelled_scope_rejections(keys)),
     ));
-    cases.extend(app_record_signatures(keys, &file));
+    let records = crate::common::with_generated("documents.json", &cases);
+    cases.extend(app_record_cases(keys, &records));
     generated("documents.json", &cases);
 }
 
@@ -973,49 +975,63 @@ fn labelled_scope_rejections(keys: &Keys) -> Vec<Value> {
         .collect()
 }
 
-/// Every `app_records` case's record: its body as the file holds it, the shop's app record
-/// with the case's `protocols` and `expires_at`, carrying the shop's certificate of this set,
-/// signed by the shop's signing key (Switch wire 3.2).
-fn app_record_signatures(keys: &Keys, file: &Value) -> Vec<(Place<'static>, Value)> {
-    let mut out = Vec::new();
-    for list in ["accepted", "refused"] {
-        for (i, case) in arr(&file["app_records"], list).iter().enumerate() {
-            let text = recertified(keys, st(case, "body"));
-            let doc = keys.app("shop").keys.sign_doc(
-                labels::sig::APP_RECORD,
-                &[],
-                text.as_bytes().to_vec(),
-            );
-            let at = format!("/app_records/{list}/{i}");
-            out.push((Place::At(format!("{at}/body")), json!(text)));
-            out.push((Place::At(format!("{at}/signed")), signed_json(&doc)));
-            let record = AppRecord::verify(&doc, &pubky(BOB));
-            if list == "refused" {
-                out.push((
-                    Place::At(format!("{at}/switch_accepts")),
-                    json!(record.is_ok()),
-                ));
-                continue;
+/// Write each authored member in the current shop envelope, sign it, and classify it.
+fn app_record_cases(keys: &Keys, file: &Value) -> [(Place<'static>, Value); 2] {
+    let records = &file["app_records"];
+    let mut accepted = Vec::new();
+    let mut refused = Vec::new();
+    for original in arr(records, "accepted")
+        .iter()
+        .chain(arr(records, "refused"))
+    {
+        let text = crate::common::app_record_case_text(
+            keys,
+            &original["protocols"],
+            &original["expires_at"],
+        );
+        let doc =
+            keys.app("shop")
+                .keys
+                .sign_doc(labels::sig::APP_RECORD, &[], text.as_bytes().to_vec());
+        let record = AppRecord::verify(&doc, &pubky(BOB)).unwrap();
+        let mut case = original.as_object().unwrap().clone();
+        case.insert("body".into(), json!(text));
+        case.insert("signed".into(), signed_json(&doc));
+        match PaykitMember::read(&record) {
+            Ok(member) => {
+                let ids: Vec<&str> = member
+                    .endpoint_identifiers
+                    .iter()
+                    .map(|id| id.as_str())
+                    .collect();
+                let endpoints: serde_json::Map<String, Value> = member
+                    .public_endpoints
+                    .iter()
+                    .map(|(id, payload)| (id.as_str().to_owned(), json!(payload.as_str())))
+                    .collect();
+                case.insert(
+                    "reads".into(),
+                    json!({ "endpoint_identifiers": ids, "public_endpoints": endpoints }),
+                );
+                case.remove("reason");
+                case.remove("switch_accepts");
+                accepted.push(Value::Object(case));
             }
-            // What a Paykit reader takes from an accepted record's member.
-            let read = PaykitMember::read(&record.unwrap()).unwrap();
-            let endpoints: serde_json::Map<String, Value> = read
-                .public_endpoints
-                .iter()
-                .map(|(i, p)| (i.as_str().to_owned(), json!(p.as_str())))
-                .collect();
-            let ids: Vec<&str> = read
-                .endpoint_identifiers
-                .iter()
-                .map(|i| i.as_str())
-                .collect();
-            out.push((
-                Place::At(format!("{at}/reads")),
-                json!({ "endpoint_identifiers": ids, "public_endpoints": endpoints }),
-            ));
+            Err(error) => {
+                assert!(case["reason"].is_string());
+                case.insert("reason".into(), json!(quoted(&error.to_string())));
+                case.insert("switch_accepts".into(), json!(true));
+                refused.push(Value::Object(case));
+            }
         }
     }
-    out
+    [
+        (
+            Place::Member("/app_records/accepted"),
+            Value::Array(accepted),
+        ),
+        (Place::Member("/app_records/refused"), Value::Array(refused)),
+    ]
 }
 
 /// `multi_protocol_certificates` (Paykit wire 3.1, Switch wire 3.1 "Several protocols"):
@@ -1125,11 +1141,13 @@ fn check_app_records(keys: &Keys, d: &Value) {
                         "{name}"
                     );
                 }
-                (Err(_), false) => {}
+                (Err(error), false) => {
+                    assert_eq!(quoted(&error.to_string()), st(case, "reason"), "{name}");
+                }
                 (verdict, _) => panic!("{name}: {verdict:?}"),
             }
         }
     }
-    assert_eq!(arr(records, "accepted").len(), 12);
-    assert_eq!(arr(records, "refused").len(), 10);
+    assert_eq!(arr(records, "accepted").len(), 13);
+    assert_eq!(arr(records, "refused").len(), 9);
 }

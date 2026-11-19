@@ -8,13 +8,14 @@
 //! **Publishing.** Each public endpoint is one entry of the record's `public_endpoints`, by
 //! its Payment Endpoint Identifier; [`Paykit::set_public_endpoint`],
 //! [`Paykit::remove_public_endpoint`] and [`Paykit::set_public_endpoints`] change them, and
-//! [`Paykit::own_public_endpoints`] lists the ones the app's record holds. Every change
-//! signs a new record, which the Switch client keeps, delivers to the own switch with
+//! [`Paykit::own_public_endpoints`] lists the ones the app's record holds. Once a change can be signed,
+//! the Switch client keeps the new record, delivers it to the own switch with
 //! `app.put` and then writes to the own Homeserver, in that order and in the same bytes
-//! (Switch spec 4.2, [`pubky_switch_client::app::App::set_protocol_member_with_lifetime`]). A delivery
+//! (Switch spec 4.2, [`pubky_switch_client::app::App::set_protocol_member_with_expiry`]). A delivery
 //! or a Homeserver write that fails stays owed by the client and goes again at the next
 //! read; until then readers of the Homeserver see the record published before. The client's
-//! record is the only copy of the public endpoints: Paykit keeps none of its own, and
+//! signed record shows the last signed endpoints. The client can also retain an unsigned
+//! member edit when a sibling protocol blocks signing. Paykit keeps no separate copy, and
 //! nothing is issued, reserved or released for them, since a public endpoint is reusable.
 //!
 //! Only an app holding `paykit_request` itself, configured to publish its record
@@ -27,20 +28,13 @@
 //! nothing to the Homeserver: withdraw endpoints before disabling it to update that copy. Stale copies remain payable until
 //! expiry or until a payer sees the app revoked (Paykit spec 4).
 //!
-//! **Expiry and renewal.** A record with public endpoints carries `expires_at`, at its
-//! `updated_at` plus the shorter of [`RECORD_LIFETIME_MS`] and the identity's
-//! `record_max_age`, which readers would cut it to anyway: that is what Paykit asks for, and
-//! the `expires_at` signed is the earliest any protocol of the app asks for. The client derives that expiry
-//! at the actual signing timestamp, including after clock rollback or a conflict retry;
-//! one without public endpoints asks for none (Paykit wire 3.2). At every receive, once
-//! less than half of the record's trusted lifetime is left on the later of the device
-//! clock and verified service time, the app renews it with the client's
-//! [`renew_record_with_lifetime`](pubky_switch_client::app::App::renew_record_with_lifetime).
-//! The trusted lifetime ends at the earlier of `expires_at` and `updated_at` plus
-//! `record_max_age`. A record with more left isn't signed again. A renewal the switch
-//! hasn't accepted yet is
-//! the record the app holds, pending, and the client sends it again at the next read: the
-//! check reads the record held, so nothing counts as renewed that isn't kept.
+//! **Expiry and renewal.** The default public offer has no Paykit deadline. A host can
+//! use [`Paykit::set_public_endpoints`] to set a fixed Unix-millisecond cutoff
+//! for all its public endpoints. The signed app record uses the earliest deadline
+//! requested by any protocol. Readers also enforce the signer-selected record age
+//! limit (90 days by default). Upkeep past half this effective lifetime refreshes
+//! the timestamp and preserves a fixed cutoff. Once the cutoff is reached, upkeep
+//! withdraws the endpoints. A sibling protocol may still require the record.
 //!
 //! **Capabilities.** `capabilities.endpoint_identifiers` lists what this app's payment
 //! method pays ([`crate::Rail::endpoint_identifiers`]) at an app holding `paykit_pay`, and
@@ -61,23 +55,16 @@ use std::collections::BTreeMap;
 
 use paykit_lib::app_record::{PaykitMember, PROTOCOL_NAME};
 use paykit_lib::{PaymentEndpointIdentifier, PaymentEndpointPayload};
-use pubky_switch_client::app::{AppError, Publication, RecordExpiry};
+use pubky_switch_client::app::{AppError, ProtocolRecord, Publication, RecordExpiry};
 use pubky_switch_client::error::StoreError;
-use pubky_switch_core::json::MAX_INT;
 use pubky_switch_core::ops::{sign_batch, OpKind};
 use pubky_switch_core::records::{AppCert, AppRecord, AppRecordBody};
 use pubky_switch_core::sig::SignedDoc;
 use pubky_switch_core::signing::Signs;
-use pubky_switch_core::time::MAX_TIME_MS;
 
 use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
 use crate::rail::Rail;
-use crate::state::key;
-
-/// The lifetime of a record with public endpoints the SDK signs: 30 days, the recommended
-/// most, unless the identity's `record_max_age` is shorter (Paykit spec 4, Paykit wire 3.2).
-pub const RECORD_LIFETIME_MS: u64 = 30 * 86_400_000;
 
 /// The most public endpoints the app publishes: a payer's read takes at most this many over
 /// all of a payee's apps, so a record with more would never be paid (Paykit spec 4).
@@ -112,11 +99,7 @@ impl Paykit {
         endpoint: PaymentEndpointIdentifier,
         payload: PaymentEndpointPayload,
     ) -> Result<Publication> {
-        self.own_record_known()?;
-        Box::pin(self.first_read_before_writing()).await?;
-        let mut endpoints = self.own_public_endpoints()?;
-        endpoints.insert(endpoint, payload);
-        self.set_public_endpoints(endpoints).await
+        Box::pin(self.edit_public_endpoint(endpoint, Some(payload))).await
     }
 
     /// Stop publishing the app's public endpoint `endpoint`; one the record doesn't hold is
@@ -131,49 +114,75 @@ impl Paykit {
         &mut self,
         endpoint: &PaymentEndpointIdentifier,
     ) -> Result<Publication> {
-        self.own_record_known()?;
-        Box::pin(self.first_read_before_writing()).await?;
-        let mut endpoints = self.own_public_endpoints()?;
-        endpoints.remove(endpoint);
-        self.set_public_endpoints(endpoints).await
+        Box::pin(self.edit_public_endpoint(endpoint.clone(), None)).await
     }
 
-    /// Publish exactly `endpoints` as the app's public endpoints, none to publish none
-    /// (module docs): a new record is signed, kept, delivered to the own switch and written
-    /// to the own Homeserver. When the record already holds them, the client finishes owed
-    /// delivery. It signs again when this device owes an expiry policy change or the
-    /// restored record was never accepted.
+    async fn edit_public_endpoint(
+        &mut self,
+        endpoint: PaymentEndpointIdentifier,
+        payload: Option<PaymentEndpointPayload>,
+    ) -> Result<Publication> {
+        let desired = Box::pin(self.publication_for_edit()).await?;
+        let member = PaykitMember::from_member(desired.member.as_ref())?;
+        let (mut endpoints, expiry) = if Self::cutoff_reached(desired.expiry, self.record_time()) {
+            (BTreeMap::new(), RecordExpiry::Never)
+        } else {
+            (member.public_endpoints, desired.expiry)
+        };
+        if let Some(payload) = payload {
+            endpoints.insert(endpoint, payload);
+        } else {
+            endpoints.remove(&endpoint);
+        }
+        Box::pin(self.offer_endpoints(endpoints, desired, expiry)).await
+    }
+
+    /// Offer exactly these public endpoints with an optional fixed cutoff in Unix
+    /// milliseconds. An empty map withdraws the offer and clears Paykit's deadline.
+    /// Renewal, single-endpoint edits and reopen preserve an existing offer's cutoff.
+    /// Other protocols can ask for an earlier deadline for the signed record.
     ///
     /// # Errors
     ///
-    /// [`Refusal::CertificateRefused`]; [`Refusal::IdentityUnavailable`] while a restore's
-    /// first read cannot confirm the own identity; the client's first-read errors;
-    /// [`Refusal::NotNow`] after a write of the own record whose store result was unknown,
-    /// until the app is loaded again ([`Paykit::load`]): the record this handle holds may not
-    /// be the one stored, and an edit built on it could publish an endpoint withdrawn;
-    /// [`Refusal::ScopeMissing`] without `paykit_request`,
-    /// unless the call only removes endpoints; [`Refusal::Usage`] for an app that doesn't
-    /// publish its record, unless the call only removes endpoints, or more than
-    /// [`MAX_OWN_PUBLIC_ENDPOINTS`] endpoints. The client's refusal for a record the switch
-    /// would refuse, such as one over its size bound. Nothing is signed or kept for these
-    /// refusals. After the record is kept, the client's delivery error leaves the record
-    /// owed for the next read. A Homeserver failure is returned as [`Publication::Owed`] or
-    /// [`Publication::Unchecked`], and the client retries it. Removing endpoints while the
-    /// app doesn't publish signs a held record with none, as the upkeep would, without
-    /// writing to the Homeserver.
+    /// An unavailable first read after restore, a missing selling grant or publication
+    /// setting, too many endpoints, a cutoff outside the writable time range, or a
+    /// client error. A valid edit waiting for a sibling to renew its record is
+    /// reported as [`PaykitError::PublicEndpointChangePending`].
     pub async fn set_public_endpoints(
         &mut self,
         endpoints: BTreeMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
+        expires_at_ms: Option<u64>,
     ) -> Result<Publication> {
+        let desired = Box::pin(self.publication_for_edit()).await?;
+        let expiry = expires_at_ms.map_or(RecordExpiry::Never, RecordExpiry::At);
+        Box::pin(self.offer_endpoints(endpoints, desired, expiry)).await
+    }
+
+    async fn publication_for_edit(&mut self) -> Result<ProtocolRecord> {
         self.own_record_known()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
+        self.desired_record().await
+    }
+
+    async fn desired_record(&mut self) -> Result<ProtocolRecord> {
+        let read = self.app.protocol_record(PROTOCOL_NAME).await;
+        self.note_own_record_write(&read);
+        Ok(read?)
+    }
+
+    async fn offer_endpoints(
+        &mut self,
+        endpoints: BTreeMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
+        desired: ProtocolRecord,
+        expiry: RecordExpiry,
+    ) -> Result<Publication> {
         // Fewer endpoints, none included, are always the app's to publish: an app that lost
         // `paykit_request` or stopped publishing can still clear its held endpoints.
-        let held = self.own_public_endpoints()?;
+        let held = PaykitMember::from_member(desired.member.as_ref())?;
         let removes_only = endpoints
             .iter()
-            .all(|(id, payload)| held.get(id) == Some(payload));
+            .all(|(id, payload)| held.public_endpoints.get(id) == Some(payload));
         if !self.holds("paykit_request") && !removes_only {
             return Err(Refusal::ScopeMissing("paykit_request".into()).into());
         }
@@ -190,8 +199,8 @@ impl Paykit {
             ))
             .into());
         }
-        let member = self.own_member_with(endpoints)?;
-        Box::pin(self.put_member(member)).await
+        let member = self.own_member_with(endpoints);
+        Box::pin(self.put_member(member, desired, expiry)).await
     }
 
     /// Bring the app's record up to date now (module docs), as each receive and the join do:
@@ -202,8 +211,10 @@ impl Paykit {
     ///
     /// Returns where the record stands on the Homeserver after the call, as
     /// [`Paykit::set_public_endpoints`] does: [`Publication::Owed`] when the Homeserver write
-    /// failed, which the client retries at the next read or update, and
+    /// failed, which the client retries at the next read or update, or
     /// [`Publication::Unchecked`] when the read that checks the Homeserver copy failed.
+    /// [`Publication::AwaitingRecord`] means the client retains a newer record choice
+    /// and is waiting for it to settle before repairing the public copy.
     ///
     /// # Errors
     ///
@@ -211,8 +222,8 @@ impl Paykit {
     /// first read cannot confirm the own identity; the client's refusal, store failure,
     /// alarm, first-read or delivery error; [`Refusal::NotNow`] after an unknown store
     /// result, until the app is loaded again, as [`Paykit::set_public_endpoints`] says. A
-    /// record refused before it is kept leaves the
-    /// held record unchanged, and so does a capabilities list the record can't carry
+    /// deferred endpoint withdrawal is reported as [`PaykitError::PublicEndpointChangePending`].
+    /// A capabilities list the record can't carry leaves the signed record unchanged
     /// (module docs). A delivery that fails stays owed by the client and goes again at the
     /// next read or update.
     pub async fn update_own_record(&mut self) -> Result<Publication> {
@@ -240,42 +251,69 @@ impl Paykit {
     /// # Errors
     ///
     /// The client's refusal, store failure, alarm or delivery error; the refusal of a
-    /// capabilities list the record can't carry ([`capabilities_for`]).
+    /// capabilities list the resolved record cannot carry (Switch wire 6.1).
     pub(crate) async fn tend_own_record(&mut self) -> Result<Option<Publication>> {
         // Nothing is signed while the record this handle holds may not be the one stored:
         // the next load reads it again (`own_record_known`).
         if self.own_record_unknown {
             return Ok(None);
         }
-        let held = self.own_member()?;
-        let wanted = self.own_member_with(held.public_endpoints.clone())?;
-        let publication = if wanted != held {
-            Box::pin(self.put_member(wanted)).await?
-        } else if self.record_expiry_owed().await? {
-            let lifetime = (!held.public_endpoints.is_empty()).then(|| self.record_lifetime());
-            return Box::pin(self.finish_record_expiry(lifetime)).await;
-        } else if !held.public_endpoints.is_empty() && self.renewal_due()? {
-            let lifetime = Some(self.record_lifetime());
-            let renewed =
-                Box::pin(self.app.renew_record_with_lifetime(PROTOCOL_NAME, lifetime)).await;
-            self.note_own_record_write(&renewed);
-            renewed?
+        let desired = self.desired_record().await?;
+        let held = PaykitMember::from_member(desired.member.as_ref())?;
+        // The cutoff and half-life checks share one observation, even if the host clock
+        // rolls back before the client signs the renewed record.
+        let now = self.record_time();
+        let endpoints = if Self::cutoff_reached(desired.expiry, now) {
+            BTreeMap::new()
         } else {
-            // The member unchanged still goes to the client: a restored record the switch
-            // never accepted, such as a withdrawal whose `app.put` failed before the backup,
-            // is signed anew, and not left for the accepted record before it to be
-            // published. An accepted or pending record keeps its bytes. The member goes as
-            // the record holds it, not rebuilt from what Paykit reads of it, so a member
-            // carrying what this version doesn't read, or leaving out an optional part, is
-            // the same member to the client and is never signed again for that.
-            let record = AppRecord::verify(self.app.record(), &self.identity())
-                .map_err(|_| PaykitError::corrupt())?;
-            let value = record.body().protocols.get(PROTOCOL_NAME).cloned();
-            let lifetime = (!held.public_endpoints.is_empty()).then(|| self.record_lifetime());
-            Box::pin(self.put_member_value(value, lifetime)).await?;
-            return Ok(None);
+            held.public_endpoints.clone()
         };
-        Ok(Some(publication))
+        let wanted = self.own_member_with(endpoints);
+        let expiry = if wanted.public_endpoints.is_empty() {
+            RecordExpiry::Never
+        } else {
+            desired.expiry
+        };
+        if desired.pending || wanted != held || expiry != desired.expiry {
+            return Box::pin(self.put_member(wanted, desired, expiry))
+                .await
+                .map(Some);
+        }
+        if !held.public_endpoints.is_empty() && self.renewal_due(now)? {
+            let renewed = match expiry {
+                RecordExpiry::Never => self.app.renew_record(PROTOCOL_NAME, None).await,
+                RecordExpiry::At(at) => self.app.renew_record(PROTOCOL_NAME, Some(at)).await,
+                RecordExpiry::Lifetime(ms) => {
+                    self.app
+                        .renew_record_with_lifetime(PROTOCOL_NAME, Some(ms))
+                        .await
+                }
+                _ => {
+                    return Err(
+                        Refusal::NotNow("unknown Switch app-record expiry policy".into()).into(),
+                    );
+                }
+            };
+            self.note_own_record_write(&renewed);
+            return Ok(Some(renewed?));
+        }
+        // The unchanged-member call retains the exact policy and optional fields. A
+        // restored record never accepted by the service still gets its required new delivery.
+        let result = self
+            .app
+            .set_protocol_member_with_lifetime(PROTOCOL_NAME, desired.member, None)
+            .await;
+        self.note_own_record_write(&result);
+        result?;
+        Ok(None)
+    }
+
+    fn record_time(&self) -> u64 {
+        self.now().max(self.app.highest_service_time().unwrap_or(0))
+    }
+
+    fn cutoff_reached(expiry: RecordExpiry, now: u64) -> bool {
+        matches!(expiry, RecordExpiry::At(at) if now >= at)
     }
 
     /// The Paykit member every path that signs the app's own record puts, with `endpoints`
@@ -285,16 +323,19 @@ impl Paykit {
     fn own_member_with(
         &self,
         endpoints: BTreeMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
-    ) -> Result<PaykitMember> {
+    ) -> PaykitMember {
         let publishes = holds_public_endpoints(self.app.cert(), self.app.publishes_record());
-        Ok(PaykitMember {
-            endpoint_identifiers: self.capabilities()?,
+        let endpoint_identifiers = self.capability_snapshot.clone().unwrap_or_else(|| {
+            capabilities_for(self.rail.as_ref(), holds_capabilities(self.app.cert()))
+        });
+        PaykitMember {
+            endpoint_identifiers,
             public_endpoints: if publishes {
                 endpoints
             } else {
                 BTreeMap::new()
             },
-        })
+        }
     }
 
     /// The Paykit member of the record the app holds, empty when it has none.
@@ -304,126 +345,35 @@ impl Paykit {
         PaykitMember::read(&record).map_err(|_| PaykitError::corrupt())
     }
 
-    /// `capabilities.endpoint_identifiers` for this app, checked against the record it
-    /// holds ([`capabilities_for`]).
-    /// During the join's first update, the list the join checked before anything was written,
-    /// as it was read then.
-    fn capabilities(&self) -> Result<Vec<PaymentEndpointIdentifier>> {
-        if let Some(snapshot) = &self.capability_snapshot {
-            return Ok(snapshot.clone());
-        }
-        let held = AppRecord::verify(self.app.record(), &self.identity())
-            .map_err(|_| PaykitError::corrupt())?;
-        capabilities_for(
-            self.rail.as_ref(),
-            holds_capabilities(self.app.cert()),
-            held.body(),
-        )
-    }
-
-    /// Sign `member` into the app's record, with `expires_at` when it carries public
-    /// endpoints and none when it doesn't, and send it as the client orders (module docs).
-    /// Returns where the last record the call signed stands on the Homeserver.
-    ///
-    /// The last withdrawal, a member without public endpoints over one with some, goes in two
-    /// steps, so the member and its expiry ask are never apart: the client keeps a protocol's
-    /// ask even when another protocol's lapsed expiry refuses the signing, so asking for no
-    /// expiry with the change itself could leave the endpoints held with none, a member no
-    /// reader takes (Paykit wire 3.2). First Paykit's durable mark that the second step is
-    /// owed is written, and the withdrawal is signed with Paykit's lifetime ask kept, the
-    /// member staying in the record (with the capabilities of an app that pays, or empty).
-    /// Then the second step asks for no expiry ([`Paykit::finish_record_expiry`]).
-    async fn put_member(&mut self, member: PaykitMember) -> Result<Publication> {
-        self.own_record_known()?;
-        let held = self.own_member()?;
-        let unchanged = member == held;
-        let has_endpoints = !member.public_endpoints.is_empty();
-        let withdraws_last = !has_endpoints && !held.public_endpoints.is_empty();
-        let expiry_owed = self.record_expiry_owed().await?;
-        if withdraws_last {
-            self.local_put(key::RECORD_EXPIRY_OWED, &true).await?;
-        }
-        if unchanged && expiry_owed {
-            let lifetime = has_endpoints.then(|| self.record_lifetime());
-            if let Some(publication) = Box::pin(self.finish_record_expiry(lifetime)).await? {
-                return Ok(publication);
-            }
-            let published = self.app.publish_record().await;
-            self.note_own_record_write(&published);
-            return Ok(published?);
-        }
-        let lifetime = (has_endpoints || withdraws_last).then(|| self.record_lifetime());
-        // A member that changes nothing goes as the record holds it, so what this version
-        // doesn't read is kept and nothing is signed for it. The client asks for no expiry
-        // for a member it removes: through the last withdrawal the member stays.
-        let value = if unchanged {
-            AppRecord::verify(self.app.record(), &self.identity())
-                .map_err(|_| PaykitError::corrupt())?
-                .body()
-                .protocols
-                .get(PROTOCOL_NAME)
-                .cloned()
-        } else {
-            (member != PaykitMember::default() || withdraws_last).then(|| member.to_member())
-        };
-        let publication = Box::pin(self.put_member_value(value, lifetime)).await?;
-        if withdraws_last {
-            if let Some(cleaned) = Box::pin(self.finish_record_expiry(None)).await? {
-                return Ok(cleaned);
-            }
-        } else if expiry_owed {
-            // The changed member and its desired expiry policy were kept together.
-            self.local_delete(key::RECORD_EXPIRY_OWED).await?;
-        }
-        Ok(publication)
-    }
-
-    /// Whether this device owes Paykit's expiry policy for its current member.
-    async fn record_expiry_owed(&self) -> Result<bool> {
-        Ok(self
-            .local_get::<bool>(key::RECORD_EXPIRY_OWED)
-            .await?
-            .unwrap_or(false))
-    }
-
-    /// Reconcile this device's expiry policy after a member change or the last withdrawal.
-    /// The client keeps the signed record before delivery. A refusal before signing leaves
-    /// the obligation for the next upkeep, and an unknown store result requires a reload.
-    async fn finish_record_expiry(&mut self, lifetime: Option<u64>) -> Result<Option<Publication>> {
-        self.own_record_known()?;
-        let before = self.app.record().clone();
-        let renewed = Box::pin(self.app.renew_record_with_lifetime(PROTOCOL_NAME, lifetime)).await;
-        self.note_own_record_write(&renewed);
-        if self.own_record_unknown {
-            return Err(renewed
-                .err()
-                .map_or_else(PaykitError::corrupt, PaykitError::from));
-        }
-        if self.app.record() != &before {
-            self.local_delete(key::RECORD_EXPIRY_OWED).await?;
-        }
-        match renewed {
-            Ok(publication) => Ok(Some(publication)),
-            Err(AppError::Refused(_)) if lifetime.is_none() && self.app.record() == &before => {
-                Ok(None)
-            }
-            Err(error) => Err(error.into()),
-        }
-    }
-
-    /// Put `value` as the record's Paykit member, `None` for none, asking for `lifetime`.
-    async fn put_member_value(
+    async fn put_member(
         &mut self,
-        value: Option<serde_json::Map<String, serde_json::Value>>,
-        lifetime: Option<u64>,
+        member: PaykitMember,
+        desired: ProtocolRecord,
+        expiry: RecordExpiry,
     ) -> Result<Publication> {
-        self.own_record_known()?;
-        let put = self
+        let expiry = if member.public_endpoints.is_empty() {
+            RecordExpiry::Never
+        } else {
+            expiry
+        };
+        let previous = PaykitMember::from_member(desired.member.as_ref())?;
+        let value = if previous == member {
+            desired.member
+        } else {
+            (member != PaykitMember::default()).then(|| member.to_member())
+        };
+        let result = self
             .app
-            .set_protocol_member_with_lifetime(PROTOCOL_NAME, value, lifetime)
+            .set_protocol_member_with_expiry(PROTOCOL_NAME, value.clone(), expiry)
             .await;
-        self.note_own_record_write(&put);
-        Ok(put?)
+        self.note_own_record_write(&result);
+        if let Err(error @ AppError::Refused(_)) = &result {
+            let kept = self.desired_record().await?;
+            if kept.pending && kept.member == value && kept.expiry == expiry {
+                return Err(PaykitError::PublicEndpointChangePending(error.clone()));
+            }
+        }
+        Ok(result?)
     }
 
     /// After a client call that can change the own record (a write of it, a delivery, or a
@@ -450,21 +400,14 @@ impl Paykit {
         Ok(())
     }
 
-    /// The requested lifetime; the client caps it again at the current identity limit
-    /// after readiness and binds it to the exact timestamp it signs (Paykit wire 3.2).
-    fn record_lifetime(&self) -> u64 {
-        RECORD_LIFETIME_MS.min(self.app.own_identity().record_max_age_ms())
-    }
-
     /// Whether less than half of the held record's trusted lifetime is left on the device
     /// clock or the highest verified service time (module docs).
-    fn renewal_due(&self) -> Result<bool> {
+    fn renewal_due(&self, now: u64) -> Result<bool> {
         let record = AppRecord::verify(self.app.record(), &self.identity())
             .map_err(|_| PaykitError::corrupt())?;
         let max_age_s = self.app.own_identity().record_max_age_ms() / 1000;
         let updated = record.updated_at();
         let lifetime = record.trusted_until(max_age_s).saturating_sub(updated);
-        let now = self.now().max(self.app.highest_service_time().unwrap_or(0));
         Ok(now > updated.saturating_add(lifetime / 2))
     }
 }
@@ -517,14 +460,12 @@ pub(crate) fn member_under(
         out.get("public_endpoints"),
         Some(serde_json::Value::Object(endpoints)) if !endpoints.is_empty()
     );
-    // Asks are each device's own: a member with endpoints this device took from another
-    // device's record may come with no ask here, so it gets Paykit's lifetime, never a
-    // record with endpoints and no `expires_at` (Paykit wire 3.2). The client caps it at the
-    // identity's record age limit.
-    let ask = match (endpoints_left, ask) {
-        (false, _) => RecordExpiry::Never,
-        (true, RecordExpiry::Never) => RecordExpiry::Lifetime(RECORD_LIFETIME_MS),
-        (true, ask) => ask,
+    // A retained member keeps the protocol's own cutoff through certificate renewal.
+    // An app with no Paykit deadline leaves the other protocols' requests to the client.
+    let ask = if endpoints_left {
+        ask
+    } else {
+        RecordExpiry::Never
     };
     if out.is_empty() {
         return (None, RecordExpiry::Never);
@@ -532,69 +473,48 @@ pub(crate) fn member_under(
     (Some(out), ask)
 }
 
-/// `capabilities.endpoint_identifiers` for an app whose record is `base`: what its payment
-/// method pays, sorted and without repeats, at an app holding `paykit_pay` (`pays`), and
-/// nothing at one without (Paykit wire 3.2). [`Rail::endpoint_identifiers`] enters the SDK
-/// here alone, so a list the record can't carry is refused the same way at the join, a
-/// receive, [`Paykit::update_own_record`] and [`Paykit::set_public_endpoints`].
-///
-/// # Errors
-///
-/// The client's `Usage` refusal for a list that `base`, with it as its only Paykit member,
-/// can't carry ([`check_member_fits`]).
-pub(crate) fn capabilities_for(
-    rail: &dyn Rail,
-    pays: bool,
-    base: &AppRecordBody,
-) -> Result<Vec<PaymentEndpointIdentifier>> {
+/// The sorted, distinct identifiers the method pays under this certificate (Paykit wire 3.2).
+pub(crate) fn capabilities_for(rail: &dyn Rail, pays: bool) -> Vec<PaymentEndpointIdentifier> {
     if !pays {
-        return Ok(Vec::new());
+        return Vec::new();
     }
     let mut ids = rail.endpoint_identifiers();
     ids.sort();
     ids.dedup();
-    check_member_fits(
-        base,
-        &PaykitMember {
-            endpoint_identifiers: ids.clone(),
-            public_endpoints: BTreeMap::new(),
-        },
-    )?;
-    Ok(ids)
+    ids
 }
 
-/// Refuse `member` when the record `base`, with it as its Paykit member, would make an
-/// `app.put` over the Switch's cap on a signed operation (Switch wire 6.1): the cap at
-/// which the client refuses the record before signing or keeping anything. The record and
-/// its `app.put` are built by the same core functions the client uses, with what the client
-/// fills in at signing at its widest (the times and the generation) and a placeholder for
-/// each signature, which is always 64 bytes. So a member this passes is one the client
-/// signs, for a record with the same certificate, label and no wider `accepts`.
+/// Check the first capabilities against the approved generation and the initial
+/// record's null deadline before joining. Later changes are checked by the Switch
+/// client against the resolved record, including the other protocols' actual members.
 ///
 /// # Errors
 ///
-/// The client's `Usage` refusal, in the client's words, for a record over the cap.
-fn check_member_fits(base: &AppRecordBody, member: &PaykitMember) -> Result<()> {
+/// A client usage refusal if the initial app record cannot fit in an `app.put`.
+pub(crate) fn check_join_capabilities(
+    mut body: AppRecordBody,
+    ids: &[PaymentEndpointIdentifier],
+    generation: u64,
+) -> Result<()> {
     let refused = |error: pubky_switch_core::Error| {
         PaykitError::from(AppError::from(pubky_switch_client::app::Refusal::Usage(
             format!("the app record: {error}"),
         )))
     };
-    let mut body = base.clone();
-    if *member == PaykitMember::default() {
-        body.protocols.remove(PROTOCOL_NAME);
-    } else {
+    if !ids.is_empty() {
+        let member = PaykitMember {
+            endpoint_identifiers: ids.to_vec(),
+            public_endpoints: BTreeMap::new(),
+        };
         body.protocols
             .insert(PROTOCOL_NAME.to_owned(), member.to_member());
     }
-    body.updated_at = MAX_TIME_MS;
-    body.expires_at = Some(MAX_TIME_MS);
     let record = SignedDoc::from_parts(&body.to_json().map_err(refused)?, &[0; 64]);
     sign_batch(
         &Measure(body.signing_key),
         &body.identity,
         Some(body.app_id),
-        MAX_INT,
+        generation,
         [0; 16],
         vec![(Vec::new(), OpKind::AppPut { record })],
     )
@@ -650,10 +570,10 @@ mod renewal_tests {
             member_under(Some(&member), RecordExpiry::At(5_000), &cert, Some(true)),
             (Some(member.clone()), RecordExpiry::At(5_000))
         );
-        // Endpoints with no ask of this device get Paykit's lifetime.
+        // Public endpoints can have no Paykit deadline.
         assert_eq!(
             member_under(Some(&member), RecordExpiry::Never, &cert, Some(true)).1,
-            RecordExpiry::Lifetime(RECORD_LIFETIME_MS)
+            RecordExpiry::Never
         );
     }
 
@@ -661,7 +581,7 @@ mod renewal_tests {
     fn test_member_for_of_a_host_built_protocol_keeps_an_endpoint_its_scopes_allow() {
         let cert = cert(&["paykit_request", "paykit_pay"]);
         let member = object(json!({ "public_endpoints": { "btc-lightning-bolt12": "lno1" } }));
-        let ask = RecordExpiry::Lifetime(RECORD_LIFETIME_MS);
+        let ask = RecordExpiry::At(5_000);
         // Not told whether the app publishes, the scopes alone decide.
         let protocol = crate::protocol::PaykitProtocol::new();
         assert_eq!(

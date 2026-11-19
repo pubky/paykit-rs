@@ -2,6 +2,8 @@
 //! a payee app that publishes its record, with `expires_at` and renewal past half its
 //! lifetime, and the capabilities of a paying app.
 
+mod restored_publication;
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -9,7 +11,7 @@ use paykit_lib::app_record::PaykitMember;
 use paykit_lib::PaymentEndpointPayload;
 use paykit_sdk::{
     AppScopes, PayOptions, PayOutcome, PayeeStatus, Paykit, PaykitConfig, PaykitError, PaymentMode,
-    Refusal, UnrequestedPayment, RECORD_LIFETIME_MS,
+    Refusal, UnrequestedPayment,
 };
 use pubky_switch_client::app::{AppConfig, UserConfirmed};
 use pubky_switch_client::clock::Clock;
@@ -84,6 +86,8 @@ async fn test_own_record_public_endpoint_published_paid_and_credited() {
         member.public_endpoints
     );
 
+    assert_eq!(published.expires_at(), None);
+    w.clock.set_ms(published.updated_at() + 31 * DAY_MS);
     let outcome = wallet
         .pay_without_request(public_to_bob(&w))
         .await
@@ -97,6 +101,27 @@ async fn test_own_record_public_endpoint_published_paid_and_credited() {
     let sales = shop.payee_activity().await.unwrap();
     assert_eq!(sales.len(), 1, "{sales:?}");
     assert_eq!(sales[0].status, PayeeStatus::ProofReceived);
+    assert_eq!(
+        on_homeserver(&w, &shop).unwrap().signed(),
+        published.signed()
+    );
+
+    w.clock.set_ms(published.updated_at() + 90 * DAY_MS);
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert!(read.endpoints.is_empty());
+    assert!(read.failures.iter().any(|failure| {
+        failure.app_id == shop.app_id()
+            && matches!(
+                failure.reason,
+                paykit_sdk::app_records::PublicAppFailureReason::Expired(_)
+            )
+    }));
+    let refused = wallet.pay_without_request(public_to_bob(&w)).await;
+    assert!(matches!(
+        refused.outcome.unwrap_err().refusal(),
+        Some(Refusal::NoDestination(_))
+    ));
+    assert_eq!(w.rail.all_executions().len(), 1);
 }
 
 #[tokio::test]
@@ -184,7 +209,7 @@ async fn test_own_record_public_endpoints_past_the_read_bound_refused() {
         .map(|i| (endpoint(&format!("btc-lightning-x{i}")), payload("lno1")))
         .collect();
     let before = shop.app().record().clone();
-    let refused = shop.set_public_endpoints(over).await.unwrap_err();
+    let refused = shop.set_public_endpoints(over, None).await.unwrap_err();
     assert!(
         matches!(refused, PaykitError::Refused(Refusal::Usage(_))),
         "{refused:?}"
@@ -193,18 +218,32 @@ async fn test_own_record_public_endpoints_past_the_read_bound_refused() {
 }
 
 #[tokio::test]
-async fn test_own_record_expiry_set_with_public_endpoints() {
+async fn test_own_record_public_deadline_is_optional_and_can_be_set_explicitly() {
     let w = World::new();
     let mut shop = publishing_shop(&w).await;
     shop.set_public_endpoint(endpoint("btc-lightning-bolt12"), payload("lno1tips"))
         .await
         .unwrap();
     let record = held(&shop, w.bob_id());
-    // 30 days, under the default record age limit of 90 days.
-    let expires_at = record.expires_at().expect("expires_at");
-    assert!(expires_at > w.clock.now_ms());
-    assert!(expires_at <= record.updated_at() + RECORD_LIFETIME_MS);
-    assert!(expires_at + HOUR_MS > record.updated_at() + RECORD_LIFETIME_MS);
+    assert_eq!(record.expires_at(), None);
+    let cutoff = w.clock.now_ms() + 3 * DAY_MS;
+    shop.set_public_endpoints(shop.own_public_endpoints().unwrap(), Some(cutoff))
+        .await
+        .unwrap();
+    assert_eq!(on_homeserver(&w, &shop).unwrap().expires_at(), Some(cutoff));
+    shop.set_public_endpoint(endpoint("btc-onchain-address"), payload("bc1q"))
+        .await
+        .unwrap();
+    assert_eq!(held(&shop, w.bob_id()).expires_at(), Some(cutoff));
+    w.clock.advance_ms(2 * DAY_MS);
+    shop.update_own_record().await.unwrap();
+    let renewed = held(&shop, w.bob_id());
+    assert!(renewed.updated_at() > record.updated_at());
+    assert_eq!(renewed.expires_at(), Some(cutoff));
+    w.clock.set_ms(cutoff);
+    shop.update_own_record().await.unwrap();
+    assert!(shop.own_public_endpoints().unwrap().is_empty());
+    assert_eq!(on_homeserver(&w, &shop).unwrap().expires_at(), None);
 }
 
 #[tokio::test]
@@ -215,17 +254,16 @@ async fn test_own_record_renewed_past_half_its_lifetime_only() {
         .await
         .unwrap();
     let first = held(&shop, w.bob_id());
-    // With more than half its 30 days left, a receive signs nothing.
-    w.clock.advance_ms(14 * DAY_MS);
+    // With more than half the identity's 90 days left, a receive signs nothing.
+    w.clock.advance_ms(44 * DAY_MS);
     shop.receive(None).await.unwrap();
     assert_eq!(held(&shop, w.bob_id()).signed(), first.signed());
-    // Past half, it is renewed: a later `updated_at` and `expires_at`, the same endpoints,
-    // published.
+    // Past half the identity trust window, the same endpoints receive a fresh signature.
     w.clock.advance_ms(2 * DAY_MS);
     shop.receive(None).await.unwrap();
     let renewed = held(&shop, w.bob_id());
     assert!(renewed.updated_at() > first.updated_at());
-    assert!(renewed.expires_at().unwrap() > first.expires_at().unwrap());
+    assert_eq!(renewed.expires_at(), None);
     assert_eq!(
         PaykitMember::read(&renewed).unwrap(),
         PaykitMember::read(&first).unwrap()
@@ -313,7 +351,7 @@ async fn test_own_record_disabling_publication_clears_only_the_held_endpoints() 
             .get(&id),
         Some(&payload("lno1tips"))
     );
-    assert!(published.expires_at().is_some());
+    assert_eq!(published.expires_at(), None);
 }
 
 /// Bob's publishing shop with two public endpoints, loaded again without publishing.
@@ -382,7 +420,7 @@ async fn test_own_record_set_without_publishing_withdraws_every_endpoint() {
     let mut shop = shop_no_longer_publishing(&w).await;
     let mut kept = BTreeMap::new();
     kept.insert(endpoint("btc-onchain-address"), payload("bc1q"));
-    shop.set_public_endpoints(kept).await.unwrap();
+    shop.set_public_endpoints(kept, None).await.unwrap();
     holds_none_published_two(&w, &shop);
 }
 
@@ -665,7 +703,7 @@ async fn test_own_record_unknown_identity_refresh_stops_edits_and_upkeep() {
     // A renewal is due, and bob's identity.json is newer than the one restored. The first
     // read's refresh of the own identity, which can take a renewal into the own record,
     // takes the newer copy, applied but the store can't tell.
-    w.clock.advance_ms(16 * DAY_MS);
+    w.clock.advance_ms(46 * DAY_MS);
     let _till = w
         .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
         .await;
@@ -697,19 +735,23 @@ async fn test_own_record_unknown_identity_refresh_stops_edits_and_upkeep() {
 }
 
 #[tokio::test]
-async fn test_own_record_withdrawal_reports_its_second_delivery() {
+async fn test_own_record_withdrawal_reports_its_unanswered_delivery() {
     let w = World::new();
     let mut shop = publishing_shop(&w).await;
     let id = endpoint("btc-lightning-bolt12");
-    shop.set_public_endpoint(id.clone(), payload("lno1tips"))
-        .await
-        .unwrap();
-    // The withdrawal is delivered; its second step, asking for no expiry, is not.
+    shop.set_public_endpoints(
+        BTreeMap::from([(id.clone(), payload("lno1tips"))]),
+        Some(w.clock.now_ms() + DAY_MS),
+    )
+    .await
+    .unwrap();
+    // The withdrawal signs with its cleared policy. A delivery failure leaves the
+    // previous offer on the Homeserver until the next read.
     w.bob
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
-            after: 1,
+            after: 0,
         });
     let error = shop.remove_public_endpoint(&id).await.unwrap_err();
     assert!(
@@ -719,14 +761,13 @@ async fn test_own_record_withdrawal_reports_its_second_delivery() {
         ),
         "{error:?}"
     );
-    // The withdrawal stands, and the second record is held, owed to the switch.
     assert!(shop.own_public_endpoints().unwrap().is_empty());
     assert_eq!(held(&shop, w.bob_id()).expires_at(), None);
     let published = on_homeserver(&w, &shop).unwrap();
     assert!(PaykitMember::read(&published)
         .unwrap()
         .public_endpoints
-        .is_empty());
+        .contains_key(&id));
     assert_ne!(published.signed(), shop.app().record());
     // The next receive delivers it.
     shop.receive(None).await.unwrap();
@@ -772,15 +813,17 @@ async fn test_own_record_restored_before_a_withdrawal_has_nothing_owed() {
 }
 
 #[tokio::test]
-async fn test_own_record_restored_between_the_withdrawal_steps_finishes_after_the_first_read() {
+async fn test_own_record_restored_withdrawal_finishes_delivery_after_the_first_read() {
     let w = World::new();
     let mut shop = publishing_shop(&w).await;
     let id = endpoint("btc-lightning-bolt12");
-    shop.set_public_endpoint(id.clone(), payload("lno1tips"))
-        .await
-        .unwrap();
-    // The withdrawal is signed but reaches no switch, so its second step isn't made; the
-    // backup taken then holds the withdrawal and the step owed.
+    shop.set_public_endpoints(
+        BTreeMap::from([(id.clone(), payload("lno1tips"))]),
+        Some(w.clock.now_ms() + DAY_MS),
+    )
+    .await
+    .unwrap();
+    // The backup retains the signed withdrawal whose delivery failed.
     w.bob
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Unreachable {
@@ -788,7 +831,7 @@ async fn test_own_record_restored_between_the_withdrawal_steps_finishes_after_th
             after: 0,
         });
     shop.remove_public_endpoint(&id).await.unwrap_err();
-    assert!(held(&shop, w.bob_id()).expires_at().is_some());
+    assert_eq!(held(&shop, w.bob_id()).expires_at(), None);
     let backup = shop.backup().await.unwrap();
     drop(shop);
     let mut restored = Paykit::restore(
@@ -811,7 +854,7 @@ async fn test_own_record_restored_between_the_withdrawal_steps_finishes_after_th
         });
     assert!(restored.receive(None).await.is_err());
     assert_eq!(restored.app().record(), &restored_record);
-    // After it, the second step goes: no endpoint and no expiry, published.
+    // The restored app can now publish the withdrawal.
     restored.receive(None).await.unwrap();
     assert_ne!(restored.app().record(), &restored_record);
     assert!(restored.own_public_endpoints().unwrap().is_empty());
@@ -931,7 +974,7 @@ async fn test_own_record_update_returns_the_renewal_and_publication_status() {
         .await
         .unwrap();
     // A renewal due whose Homeserver write fails: owed.
-    w.clock.advance_ms(16 * DAY_MS);
+    w.clock.advance_ms(46 * DAY_MS);
     let before = shop.app().record().clone();
     w.homeserver.fail_writes(1, false);
     let publication = shop.update_own_record().await.unwrap();
@@ -1437,7 +1480,7 @@ async fn test_own_record_half_lifetime_boundary() {
         .await
         .unwrap();
     let first = held(&shop, w.bob_id());
-    let halfway = first.updated_at() + (first.expires_at().unwrap() - first.updated_at()) / 2;
+    let halfway = first.updated_at() + 45 * DAY_MS;
     w.clock.set_ms(halfway);
     shop.receive(None).await.unwrap();
     assert_eq!(shop.app().record(), first.signed());
@@ -1462,7 +1505,7 @@ async fn change_record(shop: &mut Paykit, change: RecordChange) -> Result<(), Pa
             .await
             .map(|_| ()),
         RecordChange::Replace => shop
-            .set_public_endpoints(BTreeMap::from([(id, payload("lno1changed"))]))
+            .set_public_endpoints(BTreeMap::from([(id, payload("lno1changed"))]), None)
             .await
             .map(|_| ()),
         RecordChange::Remove => shop.remove_public_endpoint(&id).await.map(|_| ()),
@@ -1580,7 +1623,7 @@ async fn test_own_record_restored_upkeep_waits_for_a_completed_read() {
     .await
     .unwrap();
     let before = restored.app().record().clone();
-    w.clock.advance_ms(16 * DAY_MS);
+    w.clock.advance_ms(46 * DAY_MS);
     w.bob
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Error {
@@ -1621,7 +1664,11 @@ async fn test_own_record_shortened_age_limit_controls_renewal_and_expiry() {
     shop.receive(None).await.unwrap();
     let renewed = held(&shop, w.bob_id());
     assert!(renewed.updated_at() > first.updated_at());
-    assert!(renewed.expires_at().unwrap() <= renewed.updated_at() + 10 * DAY_MS);
+    assert_eq!(renewed.expires_at(), None);
+    assert_eq!(
+        renewed.trusted_until(10 * 86_400),
+        renewed.updated_at() + 10 * DAY_MS
+    );
     assert_eq!(
         PaykitMember::read(&renewed).unwrap(),
         PaykitMember::read(&first).unwrap()
@@ -1743,7 +1790,7 @@ async fn test_own_record_renewal_keeping_request_scope_keeps_the_member() {
     raw.insert("future_field".into(), serde_json::json!("kept"));
     wallet
         .app_mut()
-        .set_protocol_member_with_lifetime("paykit", Some(raw), Some(RECORD_LIFETIME_MS))
+        .set_protocol_member_with_lifetime("paykit", Some(raw), Some(30 * DAY_MS))
         .await
         .unwrap();
     let member = |wallet: &Paykit| {
@@ -1810,21 +1857,18 @@ async fn wallet_on_two_devices(w: &World) -> (Paykit, Paykit) {
 }
 
 #[tokio::test]
-async fn test_own_record_endpoint_from_another_device_gets_this_devices_expiry() {
+async fn test_own_record_endpoint_from_another_device_keeps_its_null_deadline() {
     let w = World::new();
     let (mut first, mut second) = wallet_on_two_devices(&w).await;
-    // The first device adds the first endpoint. The second takes its record, whose
-    // endpoint came with no expiry ask of the second's own: its upkeep renews the record
-    // with Paykit's lifetime ask.
+    // Neither device selected a public deadline. The second takes the signed record.
     first
         .set_public_endpoint(endpoint("btc-lightning-bolt12"), payload("lno1tips"))
         .await
         .unwrap();
     second.receive(None).await.unwrap();
     assert_eq!(second.own_public_endpoints().unwrap().len(), 1);
-    assert_ne!(second.app().record(), first.app().record());
-    assert!(held(&second, w.alice_id()).expires_at().is_some());
-    // A renewal the second device takes later signs the endpoint with an expiry.
+    assert_eq!(held(&second, w.alice_id()).expires_at(), None);
+    // A certificate renewal keeps the endpoint without adding a deadline.
     let old = second.app().cert().clone();
     let renewed = crate::certificate::renew(
         &w,
@@ -1838,11 +1882,11 @@ async fn test_own_record_endpoint_from_another_device_gets_this_devices_expiry()
     let held = held(&second, w.alice_id());
     assert_eq!(held.cert().hash(), renewed.hash());
     assert_eq!(PaykitMember::read(&held).unwrap().public_endpoints.len(), 1);
-    assert!(held.expires_at().is_some());
+    assert_eq!(held.expires_at(), None);
 }
 
 #[tokio::test]
-async fn test_own_record_renewal_over_another_devices_endpoint_signs_an_expiry() {
+async fn test_own_record_renewal_over_another_devices_endpoint_preserves_its_null_deadline() {
     let w = World::new();
     let (mut first, mut second) = wallet_on_two_devices(&w).await;
     first
@@ -1854,7 +1898,7 @@ async fn test_own_record_renewal_over_another_devices_endpoint_signs_an_expiry()
     w.rail.set_endpoint_identifiers(oversized_capabilities());
     assert!(second.receive(None).await.is_err());
     assert_eq!(second.own_public_endpoints().unwrap().len(), 1);
-    // The renewal it takes signs the endpoint with Paykit's lifetime, not with no expiry.
+    // Renewal preserves the endpoint without assigning a deadline.
     let old = second.app().cert().clone();
     let renewed = crate::certificate::renew(
         &w,
@@ -1868,7 +1912,7 @@ async fn test_own_record_renewal_over_another_devices_endpoint_signs_an_expiry()
     let held = held(&second, w.alice_id());
     assert_eq!(held.cert().hash(), renewed.hash());
     assert_eq!(PaykitMember::read(&held).unwrap().public_endpoints.len(), 1);
-    assert!(held.expires_at().is_some());
+    assert_eq!(held.expires_at(), None);
 }
 
 #[tokio::test]
@@ -1892,7 +1936,7 @@ async fn test_own_record_renewal_without_pay_scope_signs_no_capabilities() {
     let member = held.body().protocols.get("paykit").unwrap();
     assert!(!member.contains_key("capabilities"), "{member:?}");
     assert_eq!(PaykitMember::read(&held).unwrap().public_endpoints.len(), 1);
-    assert!(held.expires_at().is_some());
+    assert_eq!(held.expires_at(), None);
 }
 
 #[tokio::test]
@@ -1920,7 +1964,7 @@ async fn test_own_record_member_another_device_changed_is_taken() {
         .unwrap();
     other.receive(None).await.unwrap();
     assert_eq!(other.own_public_endpoints().unwrap().len(), 2);
-    assert!(held(&other, w.bob_id()).expires_at().is_some());
+    assert_eq!(held(&other, w.bob_id()).expires_at(), None);
     let events = other.app_mut().unacknowledged_events().await.unwrap();
     assert!(
         !events.iter().any(|event| matches!(
@@ -1939,7 +1983,7 @@ async fn test_own_record_failed_renewal_keeps_exact_bytes_until_delivery() {
         .await
         .unwrap();
     let published = on_homeserver(&w, &shop).unwrap();
-    w.clock.advance_ms(16 * DAY_MS);
+    w.clock.advance_ms(46 * DAY_MS);
     w.bob
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Error {
@@ -2073,10 +2117,7 @@ async fn test_own_record_mutation_after_clock_rollback_stays_payable() {
     assert!(read.failures.is_empty(), "{read:?}");
     assert_eq!(read.endpoints[0].endpoint_id, id);
     assert_eq!(read.endpoints[0].payload, payload("lno1changed"));
-    assert_eq!(
-        changed.expires_at(),
-        Some(changed.updated_at() + RECORD_LIFETIME_MS)
-    );
+    assert_eq!(changed.expires_at(), None);
     let signed = shop.app().record().clone();
     shop.update_own_record().await.unwrap();
     assert_eq!(shop.app().record(), &signed);
@@ -2093,7 +2134,7 @@ async fn test_own_record_renewal_during_clock_rollback_stays_payable() {
         .await
         .unwrap();
     let first = held(&shop, w.bob_id());
-    w.clock.advance_ms(16 * DAY_MS);
+    w.clock.advance_ms(46 * DAY_MS);
     // The half-life check observes the current time; before the writer signs, the host
     // clock rolls back. The payer and the service keep their current wall time.
     clock.roll_back_after_read(w.clock.now_ms(), first.updated_at() - 40 * DAY_MS);
@@ -2110,10 +2151,45 @@ async fn test_own_record_renewal_during_clock_rollback_stays_payable() {
     assert!(read.failures.is_empty(), "{read:?}");
     assert_eq!(read.endpoints[0].endpoint_id, id);
     assert_eq!(read.endpoints[0].payload, payload("lno1tips"));
+    assert_eq!(renewed.expires_at(), None);
+    let signed = shop.app().record().clone();
+    shop.update_own_record().await.unwrap();
+    assert_eq!(shop.app().record(), &signed);
+}
+
+#[tokio::test]
+async fn test_own_record_fixed_deadline_renewal_during_clock_rollback_stays_payable() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let clock = Arc::new(PublisherClock::new(w.clock.now_ms()));
+    let mut shop = Box::pin(shop_on_clock(&w, Arc::clone(&clock))).await;
+    let id = endpoint("btc-lightning-bolt12");
+    shop.set_public_endpoint(id.clone(), payload("lno1tips"))
+        .await
+        .unwrap();
+    let cutoff = w.clock.now_ms() + 60 * DAY_MS;
+    shop.set_public_endpoints(shop.own_public_endpoints().unwrap(), Some(cutoff))
+        .await
+        .unwrap();
+    let first = held(&shop, w.bob_id());
+    w.clock.advance_ms(46 * DAY_MS);
+    // The half-life check observes the current time; before the writer signs, the host
+    // clock rolls back. The payer and the service keep their current wall time.
+    clock.roll_back_after_read(w.clock.now_ms(), first.updated_at() - 40 * DAY_MS);
+    shop.update_own_record().await.unwrap();
+    let renewed = on_homeserver(&w, &shop).unwrap();
+    assert!(renewed.updated_at() > first.updated_at());
+    assert_eq!(renewed.signed(), shop.app().record());
     assert_eq!(
-        renewed.expires_at(),
-        Some(renewed.updated_at() + RECORD_LIFETIME_MS)
+        PaykitMember::read(&renewed).unwrap(),
+        PaykitMember::read(&first).unwrap()
     );
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(read.endpoints.len(), 1, "{read:?}");
+    assert!(read.failures.is_empty(), "{read:?}");
+    assert_eq!(read.endpoints[0].endpoint_id, id);
+    assert_eq!(read.endpoints[0].payload, payload("lno1tips"));
+    assert_eq!(renewed.expires_at(), Some(cutoff));
     let signed = shop.app().record().clone();
     shop.update_own_record().await.unwrap();
     assert_eq!(shop.app().record(), &signed);
@@ -2130,7 +2206,7 @@ async fn test_own_record_completed_read_renews_after_clock_rollback() {
         .await
         .unwrap();
     let first = held(&shop, w.bob_id());
-    w.clock.advance_ms(31 * DAY_MS);
+    w.clock.advance_ms(46 * DAY_MS);
     *clock.times.lock().unwrap() = (first.updated_at() - 40 * DAY_MS, None);
     shop.receive(None).await.unwrap();
     assert!(shop.app().highest_service_time().unwrap() >= w.clock.now_ms());
@@ -2142,10 +2218,7 @@ async fn test_own_record_completed_read_renews_after_clock_rollback() {
     let renewed = on_homeserver(&w, &shop).unwrap();
     assert!(renewed.updated_at() >= before_payer_read);
     assert_eq!(renewed.signed(), shop.app().record());
-    assert_eq!(
-        renewed.expires_at(),
-        Some(renewed.updated_at() + RECORD_LIFETIME_MS)
-    );
+    assert_eq!(renewed.expires_at(), None);
     let signed = shop.app().record().clone();
     shop.receive(None).await.unwrap();
     assert_eq!(shop.app().record(), &signed);
@@ -2199,10 +2272,7 @@ async fn test_own_record_restored_endpoint_after_clock_rollback_stays_payable() 
     let published = on_homeserver(&w, &restored).unwrap();
     assert!(published.updated_at() >= before_payer_read);
     assert_eq!(published.signed(), restored.app().record());
-    assert_eq!(
-        published.expires_at(),
-        Some(published.updated_at() + RECORD_LIFETIME_MS)
-    );
+    assert_eq!(published.expires_at(), None);
     restored
         .set_public_endpoint(id, payload("lno1restored"))
         .await

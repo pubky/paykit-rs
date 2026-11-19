@@ -361,7 +361,6 @@ fn bob_app_record(
         .unwrap()
         .clone(),
     );
-    body.label = Some(format!("bob {app}"));
     body.expires_at = expires_at.map(time);
     AppRecord::sign(&keys.app(app).keys, body).unwrap()
 }
@@ -382,6 +381,25 @@ pub fn shop_app_record(keys: &Keys) -> AppRecord {
         "2025-12-31T00:00:00.000Z",
         Some("2026-01-30T00:00:00.000Z"),
     )
+}
+
+/// The Switch's current shop-record envelope, varying only the members an app-record
+/// case tests. Substitute their JSON in the writer's bytes to retain its field order,
+/// including an explicit null protocol member which the typed reader normalizes.
+pub fn app_record_case_text(keys: &Keys, protocols: &Value, expires_at: &Value) -> String {
+    let mut text = body_text(shop_app_record(keys).signed());
+    let base: Value = serde_json::from_str(&text).unwrap();
+    for (name, value) in [("protocols", protocols), ("expires_at", expires_at)] {
+        let before = format!("\"{name}\":{}", base[name]);
+        let after = format!("\"{name}\":{value}");
+        assert_eq!(
+            text.matches(&before).count(),
+            1,
+            "{name}: one writer member"
+        );
+        text = text.replacen(&before, &after, 1);
+    }
+    text
 }
 
 /// The `cap` app's record: [`PAYEE_ACCEPTS`] and its extension kind [`CAP_EXTENSION_KIND`],
