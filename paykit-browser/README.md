@@ -290,6 +290,8 @@ in a dedicated worker, with the same result in each:
 | `tests/pay_flow/` | `--release` | 192 KiB | 160 KiB |
 | `tests/switch_flow/` | debug (`cargo test`) | 1216 KiB | 1152 KiB |
 | `tests/switch_flow/` | `--release` | 192 KiB | 160 KiB |
+| `tests/vectors/` | debug (`cargo test`) | 512 KiB | 448 KiB |
+| `tests/vectors/` | `--release` | 320 KiB | 288 KiB |
 
 The debug builds of the pay flow and of the network flow do not fit the default, so `build.rs`
 gives this crate's wasm32 test binaries a 2 MiB stack, about 68 percent above the largest need
@@ -540,18 +542,98 @@ faster there, but pays about 18 percent slower. Runs spread within 15 percent.
 
 ## Tests
 
-There are fourteen test targets, and the library has unit tests. Five of the targets,
+There are fifteen test targets, and the library has unit tests. Five of the targets,
 `tests/fetch_transport/`, `tests/switch_flow/`, `tests/transport_faults/`,
 `tests/switch_faults/` and `tests/switch_http/`, are network targets: they need a real Switch
 service, and run only as [Run the network tests](#run-the-network-tests) describes. The others
 need no network, no database and no service. The hosted harness in `rig/harness/` is not a
 test target: see [Hosting](#hosting) and [Run the hosted harness](#run-the-hosted-harness).
 
-The tests in `tests/conformance/` build for both the host and wasm32, with the same test
-bodies, so a browser result is compared with the native result by construction. They cover:
+The tests in `tests/vectors/` check every file of Paykit's normative vectors,
+`specs/v0.2/vectors/`, with paykit-lib's own vector checks: the target compiles the sources of
+`paykit-lib/tests/vectors/` unchanged, and runs each file's check on both the host and wasm32,
+with the same test bodies and the same expectations. The build script lists the folder and
+builds the files into the test binary, since a browser has no file system; when the folder is
+missing, it warns, and the vector tests fail. The checks rebuild every generated case and
+compare it with the file, and check each rejection as paykit-lib's native tests do: by its
+exact reason, by the rule its error names, or as a refusal. The target compares each
+generated value with its file itself, exactly as paykit-lib's helper does natively; its
+module documentation says why its verdicts are those of the native tests.
 
-- a subset of Paykit's normative vectors in `specs/v0.2/vectors/`, compared byte for byte
-  (paykit-lib's native tests check the complete set);
+The table gives the cases each file held when it was written. To print the current counts,
+run:
+
+```sh
+cargo test -p paykit-browser --test vectors -- --nocapture test_vector_set_every_checked_file_holds_cases
+```
+
+| File | Cases |
+| --- | --- |
+| `allowance_usage.json` | 38 |
+| `documents.json` | 53 |
+| `encoding.json` | 17 |
+| `identifiers.json` | 29 |
+| `keys.json` | 12 |
+| `messages.json` | 90 |
+| `periods.json` | 17 |
+| `sealed.json` | 132 |
+| `signatures.json` | 7 |
+| All nine files | 395 |
+
+A case is one element of a file's case lists, or one case the file writes as a single object;
+members that are data of a case are not counted. The target names each checked file's case
+lists and data members as JSON pointers. It fails when the folder holds a file it neither
+checks nor names as not run, when a checked file holds an array, anywhere below its objects,
+that it names neither as a case list nor as data, when a checked file holds another member
+outside every named object that it does not name (descriptions aside), when a name points at
+nothing in its file, or when a checked file holds no case. An array inside a named object
+must be named too; a member other than an array inside a named object, and anything inside
+an element of an array, are not checked this way. It also fails when
+`paykit-lib/tests/vectors/` holds a top-level source, a `.rs` file or a folder's `mod.rs`,
+that it neither includes nor names as not included.
+
+The target counts the cases each file holds, and requires each file's check to compare at
+least one generated value of that file, which shows that each test runs its own file's
+check; natively, `--nocapture` prints the number of places each check compares. It cannot
+count the cases inside paykit-lib's checks without changing paykit-lib. One test changes one
+generated value of `keys.json` and shows that the comparison with the file reports it;
+another shows that a check that wrote into the in-memory set instead of comparing would fail.
+With `PAYKIT_WRITE_VECTORS` set, which makes paykit-lib's own vector tests write the set again,
+the tests of this target that check vector values fail: write the set with `cargo test -p paykit-lib --test vectors`,
+then run this target without it.
+
+Because this target builds, lints and runs paykit-lib's vector test sources for wasm32, a
+change to those sources alone can fail the `Browser` workflow. Code reachable from a file's
+check must not read the clock through `std::time` (the wasm32 lint refuses it, and it panics
+in a browser), start threads, read files other than through paykit-lib's `paykit` helper,
+rely on catching a panic, which does not unwind on wasm32, or need more than the test
+binaries' 2 MiB stack ("Stack" above).
+
+The target also checks a few values that paykit-lib's checks do not: a scope key changes with
+the data epoch, the terms hash changes with the order of its two messages, the policy hash of
+`payee_activity` under the label `shop1` differs from its fixed policy hash, and the executor
+grant's signature does not verify under the ledger handoff's label.
+
+Not run in a browser:
+
+- `README.md` of the folder, which describes the set and holds no vectors;
+- paykit-lib's regeneration check (`regenerate.rs`), which lists, reads and, when asked,
+  writes the folder on disk. It also builds the whole set twice in dependency order and
+  compares it with the files byte for byte; the browser run compares each generated case with
+  its file as a JSON value instead;
+- the other tests in paykit-lib's `sealed.rs`, which check record rules on records built in
+  code from the vectors' inputs, not cases of the files; they are not reachable from a file's
+  check;
+- two unit tests in paykit-sdk that read the vector files, because they call private SDK
+  items: `test_publication_binds_the_signed_record_vectors` (`src/publish.rs`) and
+  `test_restored_payment_compares_the_signed_occurrence_and_method_result` (`src/pay.rs`).
+
+Natively, `cargo test -p paykit-browser` also runs the `#[test]` functions of the included
+paykit-lib files, as paykit-lib's own vector tests do; that adds under a second.
+
+The tests in `tests/conformance/` also build for both the host and wasm32, with the same test
+bodies. They cover:
+
 - the operating system random generator, through both getrandom versions in the graph;
 - signing and verifying, sealing and opening record values, and sealing and opening
   envelopes.
