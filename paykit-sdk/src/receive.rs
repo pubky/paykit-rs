@@ -302,10 +302,9 @@ pub(crate) fn effect(
         Body::ExecutorNotice(notice) if scopes.iter().any(|s| s == "paykit_allowance_execute") => {
             crate::allowances::notice_effect(cx, notice)?;
         }
-        // A publishing app answers a request naming a used version with its current list
-        // (Paykit spec 8.4, "Publishing"). This SDK publishes no list at all yet, so the
-        // request is taken with no effect; the answer comes with list publishing.
-        Body::PrivatePaymentListRequest(_) => {}
+        Body::PrivatePaymentListRequest(request) => {
+            crate::publish::answers::note(cx, stored, &scopes, request, seq)?;
+        }
         _ => {}
     }
     Ok(())

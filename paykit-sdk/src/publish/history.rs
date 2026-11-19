@@ -34,6 +34,10 @@ pub struct PublicationConflict {
 pub(crate) struct PublicationHistory {
     #[serde(with = "issue")]
     pub(crate) floor: ListPublicationRecord,
+    /// First verified service time at which a request found this exact counter
+    /// ahead of the local signed publication. Reading it again cannot renew the gap.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(super) missing_since: Option<u64>,
     conflict: Option<PublicationConflict>,
     acknowledged: bool,
 }
@@ -74,6 +78,7 @@ impl PublicationHistory {
     fn new(floor: ListPublicationRecord) -> Self {
         Self {
             floor,
+            missing_since: None,
             conflict: None,
             acknowledged: false,
         }
@@ -129,6 +134,9 @@ impl PublicationHistory {
 
     fn observe(&mut self, current: ListPublicationRecord, application_hash: [u8; 32]) {
         if self.floor.check_later_write(&current).is_ok() {
+            if self.floor.counter != current.counter {
+                self.missing_since = None;
+            }
             self.floor = current;
         } else if self
             .conflict
@@ -148,6 +156,14 @@ impl PublicationHistory {
     pub(crate) fn merge(&mut self, other: Self) -> Result<()> {
         if self.floor.counter <= other.floor.counter {
             self.floor.check_later_write(&other.floor)?;
+            self.missing_since = if self.floor.counter == other.floor.counter {
+                self.missing_since
+                    .into_iter()
+                    .chain(other.missing_since)
+                    .min()
+            } else {
+                other.missing_since
+            };
             self.floor = other.floor;
         } else {
             other.floor.check_later_write(&self.floor)?;
@@ -220,6 +236,7 @@ pub(crate) fn observe(
     });
     if let Some(applied) = applied.filter(|issue| issue.counter > next.floor.counter) {
         next.floor = applied;
+        next.missing_since = None;
     }
     next.observe(current, observation.application.item_hash);
     if previous.as_ref() == Some(&next) {
@@ -390,6 +407,9 @@ mod tests {
         let mut actual = issue(9, false);
         actual.publisher = publisher.cert.app_id();
         let reservation = ListReservation {
+            answer: Default::default(),
+            missing: None,
+            expires: 1000,
             recipient: actual.recipient,
             choice: [7; 16],
             revision: None,

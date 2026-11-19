@@ -65,10 +65,10 @@ use crate::records::KeptMessage;
 use crate::state::{self, key, StateKey};
 
 /// The kinds this SDK handles (Paykit wire 4.3): the one-time request flow, recurring
-/// requests' acceptance and period details, payments without a request, the payer's side of
-/// Private Payment Lists, re-sends, and the Allowance messages with `executor_notice`.
-/// Chosen recipients get reusable Private Payment Lists. An incoming
-/// `private_payment_list_request` currently has no effect.
+/// requests' acceptance and period details, payments without a request, Private Payment Lists,
+/// re-sends, and the Allowance messages with `executor_notice`. A publisher answers
+/// `private_payment_list_request` from chosen contacts for reusable lists within the hourly
+/// and rolling 24-hour limits (Paykit spec 8.4.1).
 pub const HANDLED_KINDS: [Kind; 15] = [
     Kind::PaymentRequest,
     Kind::PaymentRequestAcceptance,
@@ -480,6 +480,7 @@ pub(crate) fn restore_paykit_layer(
         key::PUBLICATIONS,
         key::LIST_RESERVATIONS,
         key::PUBLICATION_HISTORY,
+        key::LIST_RECIPIENTS,
     ] {
         for (key, value) in restoring
             .previous_local_scan(prefix.as_bytes())
@@ -488,6 +489,10 @@ pub(crate) fn restore_paykit_layer(
             match prefix {
                 key::PUBLICATIONS => publications.pending(&key, &value, &binder),
                 key::LIST_RESERVATIONS => publications.applied(&key, &value, &binder),
+                key::LIST_RECIPIENTS => {
+                    state::restored::<crate::publish::ListRecipient>(&key, &value, &binder)
+                        .and_then(|recipient| publications.recipient(recipient))
+                }
                 _ => publications.observed(&key, &value, &binder),
             }
             .map_err(|err| format!("invalid retained private list publication: {err}"))?;
@@ -844,7 +849,9 @@ pub(crate) fn restore_paykit_layer(
                 let recipient =
                     state::restored::<crate::publish::ListRecipient>(&key, &value, &binder)
                         .map_err(|_| unread())?;
-                publications.recipient(recipient);
+                publications
+                    .recipient(recipient)
+                    .map_err(|err| err.to_string())?;
                 continue;
             }
             StateKey::Publication(_) => {

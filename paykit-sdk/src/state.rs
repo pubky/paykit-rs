@@ -755,7 +755,7 @@ impl Stored for crate::publish::ListRecipient {
     fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
         match family {
             StateKey::ListRecipient(id) if self.recipient == *id && id != binder.identity() => {
-                Ok(())
+                self.check()
             }
             _ => corrupt(),
         }
