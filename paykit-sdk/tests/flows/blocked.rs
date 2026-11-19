@@ -2392,7 +2392,7 @@ async fn test_blocked_held_rejection_past_its_window_given_up_with_a_notice() {
     let notices = wallet.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
-    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert_eq!(notices[0].counterparty, Some(w.bob_id()));
     assert_eq!(notices[0].msg_id.as_deref(), Some(msg_id.as_str()));
     assert_eq!(notices[0].request_hash, Some(request.request_hash));
     // Raised once: a later receive neither raises it again nor sends anything.

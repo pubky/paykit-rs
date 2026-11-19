@@ -21,6 +21,7 @@ thiserror = "2"
 pubky-switch-core = { git = "https://github.com/pubky/pubky-switch", rev = "4dd3e941d28aa27337cf534beb994c5e1135cd7b" }
 pubky-switch-client = { git = "https://github.com/pubky/pubky-switch", rev = "4dd3e941d28aa27337cf534beb994c5e1135cd7b" }
 pubky-switch-signer = { git = "https://github.com/pubky/pubky-switch", rev = "4dd3e941d28aa27337cf534beb994c5e1135cd7b" }
+pubky-switch-harness = { git = "https://github.com/pubky/pubky-switch", rev = "4dd3e941d28aa27337cf534beb994c5e1135cd7b" }
 
 [patch.crates-io]
 rustls-platform-verifier-android = { path = "vendor/rustls-platform-verifier-android" }
