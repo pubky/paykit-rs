@@ -583,9 +583,15 @@ pub(crate) fn cancelled(record: &ActivityRecord) -> bool {
     record.cancellation.is_some()
 }
 
-/// The activity already shows a paid, cancelled or rejected payment (Paykit spec 7.2).
-pub(crate) fn payment_ended(record: &ActivityRecord) -> bool {
-    record.shows_paid() || cancelled(record) || rejected(record)
+/// A payment stops for a proof, rejection or cancellation. An accepted attempt finishes
+/// across its payee's cancellation of the parent request (Paykit spec 8.1).
+pub(crate) fn payment_ended(record: &ActivityRecord, crossing_payee: Option<[u8; 32]>) -> bool {
+    record.shows_paid()
+        || rejected(record)
+        || record
+            .cancellation
+            .as_ref()
+            .is_some_and(|stop| Some(stop.sender()) != crossing_payee)
 }
 
 impl Paykit {

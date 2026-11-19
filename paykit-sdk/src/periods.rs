@@ -383,7 +383,7 @@ impl Paykit {
         if let Some(held) = self.app.shared_record(&self.activity_key(target)?).await? {
             return self.checked_period_activity(target, &held).map(Some);
         }
-        Box::pin(self.current_period_activity(target)).await
+        Box::pin(self.current_period_activity(target, None)).await
     }
 
     /// Recheck the parent's and period's payment restrictions before calling the method.
@@ -391,11 +391,12 @@ impl Paykit {
     pub(crate) async fn current_period_activity(
         &mut self,
         target: &ActivityTarget,
+        crossing_payee: Option<[u8; 32]>,
     ) -> Result<Option<ActivityRecord>> {
         if let Some(held) = self.app.shared_record(&self.activity_key(target)?).await? {
             let record = self.checked_period_activity(target, &held)?;
             self.pause_of(&held).await?;
-            if payment_ended(&record) {
+            if payment_ended(&record, crossing_payee) {
                 return Ok(Some(record));
             }
         }
@@ -807,6 +808,8 @@ impl Paykit {
     ///   conditioned on.
     /// - A provider loss leaves the period in doubt only when it started before the end of
     ///   the residual window (Paykit spec 7.3).
+    /// - A payee's cancellation prevents opening a new attempt. If it arrives after the
+    ///   attempt batch succeeds, that attempt finishes and sends its proof (Paykit spec 8.1).
     ///
     /// # Errors
     ///

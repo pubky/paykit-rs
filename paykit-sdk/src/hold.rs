@@ -604,7 +604,7 @@ impl Paykit {
                 return Ok(false);
             }
         }
-        if payment_ended(record) {
+        if payment_ended(record, None) {
             return Ok(false);
         }
         if self

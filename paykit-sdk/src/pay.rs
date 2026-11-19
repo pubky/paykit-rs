@@ -4305,9 +4305,11 @@ impl Paykit {
             let parent =
                 ActivityTarget::payer(entry.request_record()?.ok_or_else(PaykitError::corrupt)?);
             let period = ActivityTarget::payer(entry.natural_key.clone());
-            for target in [&parent, &period] {
-                match Box::pin(self.current_period_activity(target)).await {
-                    Ok(Some(record)) if !payment_ended(&record) => {}
+            let crossing_payee = (by == Initiator::User && matches!(kind, Dispatch::First { .. }))
+                .then_some(entry.payee);
+            for (target, crossing) in [(&parent, crossing_payee), (&period, None)] {
+                match Box::pin(self.current_period_activity(target, crossing)).await {
+                    Ok(Some(record)) if !payment_ended(&record, crossing) => {}
                     Ok(_) | Err(PaykitError::Refused(_)) => return Ok(true),
                     Err(error) => return Err(error),
                 }
