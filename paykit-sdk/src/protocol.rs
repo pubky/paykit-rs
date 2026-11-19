@@ -851,12 +851,15 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::PendingReply(record) => {
+            StateKey::PendingReply {
+                record,
+                reply: hash,
+            } => {
                 let reply = state::restored::<crate::allowances::PreparedPendingReply>(
                     &key, &value, &binder,
                 )
                 .map_err(|_| unread())?;
-                prepared_replies.insert(record, reply);
+                prepared_replies.insert((record, hash), reply);
                 continue;
             }
             StateKey::AppliedReply(_) => {

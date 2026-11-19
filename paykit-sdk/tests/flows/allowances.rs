@@ -11645,3 +11645,155 @@ async fn test_prepared_allowance_rejection_survives_an_older_in_place_import() {
 async fn test_prepared_allowance_withdrawal_survives_an_older_in_place_import() {
     Box::pin(resume_prepared_answer(true, true)).await;
 }
+
+/// The same explicit decision can continue on renewal, but it cannot delete a later
+/// incarnation created after an enrolled sibling closed the selected original.
+async fn prepared_answer_after_change(withdraw: bool, renew_certificate: bool) {
+    use pubky_switch_client::app::Delivery;
+    use std::sync::Arc;
+
+    let w = World::new();
+    let store = Arc::new(crate::common::FailNextKeep::default());
+    let scopes = AppScopes::new().pay().allowance().build().unwrap();
+    let mut payer = Box::pin(alice_on(&w, "wallet", scopes.clone(), store.clone())).await;
+    let mut peer = Box::pin(shop(&w)).await;
+    let canonical = if withdraw {
+        let sent = payer
+            .propose_allowance(w.bob_id(), AllowanceRole::Allower, terms())
+            .await
+            .unwrap();
+        peer.receive(None).await.unwrap();
+        sent.record
+    } else {
+        Box::pin(proposed(&w, &mut peer, &mut payer)).await.1
+    };
+    let pending = Box::pin(pending_at(&payer, &canonical)).await;
+    let target = pending_target(&w.bob_id(), pending.allowance_id());
+    let key = payer.app().record_key(&target).unwrap();
+    let before = w.record_writes(&w.alice, &key);
+    let (original, hash) =
+        Box::pin(unsubmitted_answer(&mut payer, &store, &canonical, withdraw)).await;
+    assert_eq!(w.record_writes(&w.alice, &key), before);
+    if renew_certificate {
+        let id = payer.app_id();
+        if !withdraw {
+            let original_cert = payer.app().cert().clone();
+            let receive_only = AppScopes::new().allowance().build().unwrap();
+            let restricted = renew(&w, id, &receive_only, 1000);
+            list(&w, id, &original_cert, &restricted);
+            w.clock.advance_ms(2000);
+            payer.receive(None).await.unwrap();
+            assert_eq!(payer.app().cert().hash(), restricted.hash());
+            assert!(payer.reject_allowance(&canonical).await.is_err());
+            assert_eq!(w.record_writes(&w.alice, &key), before);
+            assert!(payer.app().delivery(&original).await.unwrap().is_none());
+        }
+        let previous = payer.app().cert().clone();
+        let renewed = renew(&w, id, &scopes, 1000);
+        list(&w, id, &previous, &renewed);
+        w.clock.advance_ms(2000);
+        payer.receive(None).await.unwrap();
+        assert_ne!(payer.app().cert().hash(), previous.hash());
+        assert_eq!(payer.app().cert().signing_key(), previous.signing_key());
+    } else {
+        Box::pin(delete_pending_record(&w, pending.allowance_id())).await;
+        let deleted = payer.app_mut().read_record_fresh(&target).await.unwrap();
+        assert!(
+            matches!(deleted,pubky_switch_client::app::RecordRead::Fresh(ref r) if r.content==pubky_switch_client::app::RecordContent::Deleted && r.authenticated && !r.divergent)
+        );
+        assert!(payer
+            .app()
+            .protocol_get(
+                "paykit",
+                format!("pce/{}", pubky_switch_core::enc::b64(&key)).as_bytes()
+            )
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            Box::pin(records_proposal(
+                &mut payer,
+                pending.proposal(),
+                pending.allowance_id()
+            ))
+            .await,
+            canonical
+        );
+        assert_eq!(w.record_writes(&w.alice, &key), before + 2);
+    }
+    let app_id = payer.app_id();
+    drop(payer);
+    let mut payer = Box::pin(Paykit::load(
+        w.env(&w.alice, store),
+        Default::default(),
+        app_id,
+        w.rail.clone(),
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    let id = if withdraw {
+        payer.end_allowance(&canonical).await
+    } else {
+        payer.reject_allowance(&canonical).await
+    }
+    .unwrap();
+    assert!(matches!(
+        payer.app().delivery(&id).await.unwrap(),
+        Some(Delivery::Accepted { .. })
+    ));
+    let sent = payer.app().sent_to(&w.bob_id(), 0, u64::MAX).await.unwrap();
+    if renew_certificate {
+        assert_eq!(id, original);
+        assert_eq!(
+            sent.iter()
+                .find(|item| item.msg_id == id)
+                .unwrap()
+                .plaintext
+                .hash(),
+            hash
+        );
+        assert_eq!(w.record_writes(&w.alice, &key), before + 1);
+    } else {
+        assert_ne!(id, original);
+        assert!(sent.iter().all(|item| item.msg_id != original));
+        assert_eq!(w.record_writes(&w.alice, &key), before + 3);
+        assert!(payer.app().delivery(&original).await.unwrap().is_none());
+        // An outstanding earlier outcome cannot release a message merely because a
+        // sibling deleted the old proposal. Its original replay window still applies.
+        w.clock
+            .advance_ms(pubky_switch_client::app::SENT_RETENTION_MS + 1);
+        payer.receive(None).await.unwrap();
+        assert!(payer
+            .app()
+            .protocol_scan("paykit", b"ap/")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(payer
+            .notices()
+            .await
+            .unwrap()
+            .iter()
+            .any(|notice| notice.msg_id.as_deref() == Some(original.as_str())
+                && notice.kind == paykit_sdk::NoticeKind::MessageGivenUp));
+    }
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_prepared_rejection_allows_an_answer_after_a_sibling_retires_its_proposal() {
+    Box::pin(prepared_answer_after_change(false, false)).await;
+}
+#[tokio::test]
+async fn test_prepared_withdrawal_allows_an_answer_after_a_sibling_retires_its_proposal() {
+    Box::pin(prepared_answer_after_change(true, false)).await;
+}
+#[tokio::test]
+async fn test_prepared_rejection_uses_its_original_signature_after_certificate_renewal() {
+    Box::pin(prepared_answer_after_change(false, true)).await;
+}
+#[tokio::test]
+async fn test_prepared_withdrawal_uses_its_original_signature_after_certificate_renewal() {
+    Box::pin(prepared_answer_after_change(true, true)).await;
+}

@@ -1450,7 +1450,11 @@ impl sealed::Sealed for crate::allowances::PreparedPendingReply {}
 
 impl Stored for crate::allowances::PreparedPendingReply {
     fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
-        let StateKey::PendingReply(key) = family else {
+        let StateKey::PendingReply {
+            record,
+            reply: hash,
+        } = family
+        else {
             return corrupt();
         };
         let reply = self.message.stored(&self.peer)?;
@@ -1458,8 +1462,16 @@ impl Stored for crate::allowances::PreparedPendingReply {
             crate::allowances::named_allowance(reply.body()).ok_or_else(PaykitError::corrupt)?;
         let target = crate::allowances::allowance_target(&self.peer, id);
         if self.source.record_version().is_none()
+            || reply.hash() != *hash
             || !self.sealed_delete.looks_like_delete()
-            || self.sealed_delete.check_shape("paykit_allowance").is_err()
+            || self
+                .sealed_delete
+                .check_shape(
+                    &paykit_lib::collections::Collection::AllowanceProposals
+                        .fixed_policy()
+                        .read_scope,
+                )
+                .is_err()
             || reply.sender() != binder.own
             || binder
                 .cert
@@ -1470,7 +1482,7 @@ impl Stored for crate::allowances::PreparedPendingReply {
                 reply.body(),
                 Body::AllowanceRejection(_) | Body::AllowanceEnd(_)
             )
-            || binder.record_key(&target)? != *key
+            || binder.record_key(&target)? != *record
         {
             return corrupt();
         }
@@ -1758,8 +1770,12 @@ pub(crate) mod key {
     pub(crate) const PENDING_REPLIES: &str = "ap/";
     pub(crate) const APPLIED_REPLIES: &str = "aq/";
 
-    pub(crate) fn pending_reply(record: &[u8; 32]) -> String {
-        format!("{PENDING_REPLIES}{}", b64(record))
+    pub(crate) fn pending_replies(record: &[u8; 32]) -> String {
+        format!("{PENDING_REPLIES}{}/", b64(record))
+    }
+
+    pub(crate) fn pending_reply(record: &[u8; 32], reply: &[u8; 32]) -> String {
+        format!("{}{}", pending_replies(record), b64(reply))
     }
 
     pub(crate) fn applied_reply(hash: &[u8; 32]) -> String {
@@ -2244,7 +2260,10 @@ pub(crate) enum StateKey {
     /// `pc/<record key>`: a conflict kept for one pending Allowance lifetime.
     PendingConflict([u8; 32]),
     /// An original reply prepared for this canonical Allowance key.
-    PendingReply([u8; 32]),
+    PendingReply {
+        record: [u8; 32],
+        reply: [u8; 32],
+    },
     /// A signed reply whose exact proposal deletion was applied.
     AppliedReply([u8; 32]),
     /// The latest verified end of a conflict at the named pending key.
@@ -2427,7 +2446,13 @@ impl StateKey {
                     }
                     "ac" => Self::Consent(b64_32(rest)?),
                     "pc" => Self::PendingConflict(b64_32(rest)?),
-                    "ap" => Self::PendingReply(b64_32(rest)?),
+                    "ap" => {
+                        let (record, reply) = rest.split_once('/')?;
+                        Self::PendingReply {
+                            record: b64_32(record)?,
+                            reply: b64_32(reply)?,
+                        }
+                    }
                     "aq" => Self::AppliedReply(b64_32(rest)?),
                     "pce" => Self::PendingRetirement(b64_32(rest)?),
                     "cf" => Self::Conflict(b64_32(rest)?),
@@ -3507,7 +3532,13 @@ mod tests {
                 key::pending_retirement(&pubky),
                 StateKey::PendingRetirement(pubky),
             ),
-            (key::pending_reply(&pubky), StateKey::PendingReply(pubky)),
+            (
+                key::pending_reply(&pubky, &pubky),
+                StateKey::PendingReply {
+                    record: pubky,
+                    reply: pubky,
+                },
+            ),
             (key::applied_reply(&pubky), StateKey::AppliedReply(pubky)),
             (key::conflict(&pubky), StateKey::Conflict(pubky)),
             (key::notice_target(id), StateKey::NoticeTarget(id.into())),
