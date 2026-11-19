@@ -1169,11 +1169,8 @@ impl Paykit {
             })
             .collect();
         let answered = Box::pin(self.answer_kept_resends()).await?;
-        // A restore's asks that waited for a record's key are queued at the receive that
-        // opens it, once the records are listed (`hold.rs`), and so are, once, this app's own
-        // messages the records store to be sent that no outbox holds, and at every receive the
-        // rejections and payer's cancellations recorded while sends to their payee were held,
-        // once they aren't.
+        // Open records resolve re-send requests and locally held answers. After a restore,
+        // signed records also identify outgoing messages whose outcome the host must check.
         if Box::pin(self.unlisted()).await?.is_none()
             && Box::pin(self.scope_keys_awaited()).await?.is_none()
         {
@@ -1181,6 +1178,7 @@ impl Paykit {
             Box::pin(self.queue_own_again()).await?;
         }
         let asked = Box::pin(self.send_asks(&mut resend_refused)).await?;
+        Box::pin(self.retire_end_origins()).await?;
         // A confirmed mark goes once its record's view isn't divergent any more, after this
         // read's events were taken.
         Box::pin(self.end_confirmed_marks()).await?;
@@ -1208,11 +1206,7 @@ impl Paykit {
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
-        // When the host took the restored App's first page itself, Paykit has not had
-        // its usual opportunity to read the lists before trying contact deliveries.
-        if self.app.reconcile_mode() && !self.first_read_done && !self.deny_copy_known().await? {
-            Box::pin(self.refresh_lists_when_due()).await?;
-        }
+        Box::pin(self.refresh_lists_when_due()).await?;
         self.send_outbox().await?;
         Ok(())
     }

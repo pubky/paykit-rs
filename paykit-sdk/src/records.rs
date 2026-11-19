@@ -8,16 +8,11 @@
 //! message go in one batch ([`Paykit::send_with_record`]): the message is queued only if
 //! the write is applied, and the write is never made without the message (Switch spec 8.2).
 //!
-//! **An own message in a record is one to send.** No path stores a message this app signed
-//! in a record without queuing it or owing it: a request and the replies go with
-//! [`Paykit::send_with_record`] or the request's own batch, a proof in the outcome's batch
-//! that queues it, and an acceptance only once it was queued with its payment
-//! (`acceptance_released`). The one exception is a rejection or payer's cancellation to a
-//! payee whose sends are held ([`Paykit::record_held`]): its batch queues nothing and writes
-//! the held answer that names it (`ha/`), from which [`Paykit::queue_own_again`] queues it
-//! once sends to the payee aren't held. So a message in a record signed by this app means
-//! one to be sent, which the re-send after a restore reads it as;
-//! `test_records_own_message_written_only_where_it_is_queued` guards it.
+//! A request, reply or proof records original delivery intent when its batch queues it.
+//! For a rejection or cancellation held locally, the batch writes a held answer
+//! ([`Paykit::record_held`]). Its original installation can send it after release.
+//! A restored wallet reconciles the signed message's disposition through its notices
+//! (Paykit spec 7.2). A receipt may also be recorded without requesting delivery.
 
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::natural_key;
@@ -416,9 +411,8 @@ impl Paykit {
     /// `conditions` on the record write, the local writes `local`, and the held answer that
     /// names it ([`crate::hold::HeldAnswer`]) for `request_hash` (Paykit spec 8.1, "Blocked
     /// counterparties"). The record then stops every own app from paying or accepting the
-    /// request, and the message goes from the record once sends to the payee aren't held
-    /// ([`Paykit::queue_own_again`]): an own message in a record is still one to be sent
-    /// (module docs). Returns the `msg_id`. Nothing is queued, so no flush sends it.
+    /// request. The wallet that wrote the held answer can deliver it once sends to the
+    /// payee resume ([`Paykit::queue_own_again`]). Returns the `msg_id`.
     ///
     /// # Errors
     ///
@@ -437,6 +431,7 @@ impl Paykit {
         local.push(crate::state::local_put(
             &crate::state::key::held_answer(&payee, &msg_id),
             &crate::hold::HeldAnswer {
+                restored: false,
                 payee,
                 msg_id: msg_id.clone(),
                 request_hash,

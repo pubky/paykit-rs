@@ -1418,8 +1418,79 @@ async fn may_send(wallet: &Paykit, id: &str) -> bool {
         .unwrap()
         .into_iter()
         .find(|message| message.msg_id == id)
-        .expect("queued re-send request")
+        .expect("queued message")
         .may_send
+}
+
+#[tokio::test]
+async fn test_blocked_direct_delivery_requires_a_current_deny_list() {
+    use paykit_lib::scopes::ExtensionPrefix;
+    use pubky_switch_client::app::OutgoingMessage;
+
+    let w = World::new();
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    let scopes = AppScopes::new()
+        .pay()
+        .manage_contacts()
+        .extension(&ExtensionPrefix::parse("paykit-cap").unwrap())
+        .build()
+        .unwrap();
+    let mut wallet = w.join(&w.alice, "wallet", scopes.clone()).await;
+    let mut phone = w.join(&w.alice, "phone", scopes).await;
+    let bob = w.bob_id();
+    let ask = Box::pin(queued_resend(&w, &mut wallet)).await;
+    let offer = wallet
+        .app_mut()
+        .queue(OutgoingMessage::new(
+            bob,
+            "paykit-cap.offer",
+            serde_json::Map::new(),
+        ))
+        .await
+        .unwrap();
+
+    let read = w.clock.now_ms();
+    let before = w.bob.switch().entries_from(&w.alice_id());
+    w.clock.set_ms(read - 1);
+    wallet.app_mut().flush_outbox().await.unwrap();
+    for id in [&ask, &offer] {
+        assert!(!may_send(&wallet, id).await);
+    }
+    w.clock.set_ms(read + paykit_sdk::LISTS_REFRESH_MS - 1);
+    for id in [&ask, &offer] {
+        assert!(may_send(&wallet, id).await);
+    }
+    phone.block(&bob).await.unwrap();
+    w.clock.advance_ms(1);
+    for id in [&ask, &offer] {
+        wallet.app_mut().flush_message(id).await.unwrap();
+        assert!(!may_send(&wallet, id).await);
+    }
+    fail_list_read(&w);
+    wallet.flush().await.unwrap();
+    wallet.app_mut().flush_outbox().await.unwrap();
+    for id in [&ask, &offer] {
+        wallet.app_mut().resend(id).await.unwrap();
+        assert!(!may_send(&wallet, id).await);
+    }
+    wallet.flush().await.unwrap();
+    for id in [&ask, &offer] {
+        assert!(!may_send(&wallet, id).await);
+    }
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+
+    phone.unblock(&bob).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    // Keep the extension available for inspecting its permission after the wallet read.
+    wallet
+        .app_mut()
+        .hold_message("paykit", &offer)
+        .await
+        .unwrap();
+    wallet.flush().await.unwrap();
+    assert!(may_send(&wallet, &offer).await);
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
 }
 
 #[tokio::test]
@@ -2034,14 +2105,20 @@ enum Between {
     Restore,
 }
 
-/// The wallet's receive and flush while its sends to bob are still `held`: a read of the
-/// lists fails first while the copy isn't known.
+/// Hold every due list read during a flush that exercises the unavailable-list case.
+async fn flush_held(w: &World, wallet: &mut Paykit, held: Held) {
+    if let Held::Unknown = held {
+        fail_list_read(w);
+    }
+    wallet.flush().await.unwrap();
+}
+
 async fn receive_held(w: &World, wallet: &mut Paykit, held: Held) {
     if let Held::Unknown = held {
         fail_list_read(w);
     }
     wallet.receive(None).await.unwrap();
-    wallet.flush().await.unwrap();
+    flush_held(w, wallet, held).await;
 }
 
 /// Bob's request is held by alice's wallet, and its sends to bob are then `held`. The
@@ -2102,7 +2179,7 @@ async fn answer_held(held: Held, answer: Answer, between: Between) {
     let entries = w.bob.switch().entries_from(&w.alice_id());
 
     let msg_id = answer.give(&mut wallet, &request).await.unwrap();
-    wallet.flush().await.unwrap();
+    flush_held(&w, &mut wallet, held).await;
     assert_eq!(
         counts.outbox.load(std::sync::atomic::Ordering::SeqCst),
         queued,
@@ -2199,6 +2276,12 @@ async fn answer_held(held: Held, answer: Answer, between: Between) {
         wallet.unblock(&w.bob_id()).await.unwrap();
     }
     wallet.receive(None).await.unwrap();
+    if matches!(between, Between::Restore) {
+        assert!(crate::common::possibly_delivered(&wallet, &msg_id).await);
+        wallet.flush().await.unwrap();
+        assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+        return;
+    }
     // Once bob can receive, the held answer goes once. A clean restore owes no block ask.
     let asks = crate::common::asked(&wallet, &w.bob_id()).await.len();
     assert_eq!(asks, 0);
@@ -2427,12 +2510,12 @@ async fn test_blocked_held_cancellation_sent_once_after_a_restart_while_the_deny
 }
 
 #[tokio::test]
-async fn test_blocked_held_rejection_sent_once_after_a_restore() {
+async fn test_blocked_restore_reports_a_held_rejection() {
     answer_held(Held::Blocked, Answer::Reject, Between::Restore).await;
 }
 
 #[tokio::test]
-async fn test_blocked_held_cancellation_sent_once_after_a_restore_while_the_deny_list_is_unknown() {
+async fn test_blocked_restore_reports_a_cancellation_while_the_deny_list_is_unknown() {
     answer_held(Held::Unknown, Answer::Cancel, Between::Restore).await;
 }
 
@@ -3022,14 +3105,10 @@ async fn test_blocked_subscription_cancellation_and_rejection_refused_with_nothi
 }
 
 #[tokio::test]
-async fn test_blocked_held_rejection_over_a_record_left_unreadable_after_a_restore_sent_once_it_reads(
-) {
-    // The wallet's rejection is recorded and held while bob is blocked, and the wallet is
-    // backed up. After the backup the phone writes the request record as a value no reader
-    // reads. The restored wallet, bob unblocked, sends nothing while the record doesn't
-    // read: the held answer and the restore's re-send both stay owed. Once the phone writes
-    // the record back, the rejection goes, once (Paykit spec 7.2, "What a restore loses";
-    // 8.1, Blocked counterparties).
+async fn test_blocked_restore_reports_a_held_rejection_once_its_record_reads() {
+    // The backup carries a rejection held while Bob was blocked. The restored wallet
+    // keeps the answer while its request record is unreadable. Once the phone restores
+    // the record, the wallet reports the rejection as possibly delivered (Paykit spec 7.2).
     let w = World::new();
     let (mut wallet, _, request) = received(&w, PaykitConfig::default()).await;
     let mut phone = w.wallet("phone").await;
@@ -3100,8 +3179,8 @@ async fn test_blocked_held_rejection_over_a_record_left_unreadable_after_a_resto
     );
     crate::periods::writes_value(&mut phone, &target, &good).await;
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().delivery(&rejection).await.unwrap().is_some());
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), after_asks + 1);
+    assert!(crate::common::possibly_delivered(&wallet, &rejection).await);
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), after_asks);
     assert!(wallet
         .app()
         .protocol_get("paykit", b"ro")
@@ -3115,5 +3194,5 @@ async fn test_blocked_held_rejection_over_a_record_left_unreadable_after_a_resto
         .unwrap()
         .is_empty());
     wallet.receive(None).await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), after_asks + 1);
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), after_asks);
 }

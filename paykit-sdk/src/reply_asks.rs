@@ -340,6 +340,28 @@ pub(crate) fn restore(
     Ok(writes)
 }
 
+/// A queued re-send request may proceed when the sender has no overlapping uncertainty,
+/// or when the mark still identifies this exact pending original (Paykit spec 7.2).
+pub(crate) fn may_deliver_request(
+    delivery: &pubky_switch_client::app::DeliveryView<'_>,
+) -> Result<bool> {
+    let message = delivery.message();
+    let Some(asks) = state::delivery_get::<ReplyAsks>(delivery, &key::reply_asks(&message.to))?
+    else {
+        return Ok(true);
+    };
+    let body = ResendRequest::from_body(&message.body).map_err(|_| PaykitError::corrupt())?;
+    if asks.permits(&body, None) {
+        return Ok(true);
+    }
+    let mark = state::delivery_get::<DropMark>(delivery, &key::dropped_replies(&message.to))?;
+    Ok(mark.and_then(|m| m.queued).is_some_and(|q| {
+        q.msg_id == message.msg_id
+            && q.hash == delivery.hash()
+            && asks.permits(&body, Some((&q.msg_id, q.hash)))
+    }))
+}
+
 impl Paykit {
     pub(crate) async fn recovery_request_permitted(
         &self,

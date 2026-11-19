@@ -1604,7 +1604,15 @@ async fn test_replies_given_up_stay_given_up_after_a_restore_and_a_resend() {
         .await
         .unwrap()
         .is_empty());
-    assert_eq!(shop.notices().await.unwrap().len(), 2);
+    assert_eq!(
+        shop.notices()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|notice| notice.kind == paykit_sdk::NoticeKind::MessageGivenUp)
+            .count(),
+        2
+    );
     assert_eq!(
         shop.payee_activity().await.unwrap()[0].status,
         PayeeStatus::Requested

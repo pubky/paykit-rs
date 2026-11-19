@@ -81,10 +81,10 @@ impl Paykit {
         self.transfer_holds(entry, false)??;
         self.app.may_attempt(false).map_err(not_now)?;
         let (now, own_fresh) = self.dispatch_time();
-        let Some((_, denied)) = read.zip(copy).filter(|(at, _)| {
-            now.checked_sub(*at)
-                .is_some_and(|age| age < crate::receive::LISTS_REFRESH_MS)
-        }) else {
+        let Some((_, denied)) = read
+            .zip(copy)
+            .filter(|(at, _)| crate::receive::lists_read_is_fresh(*at, now))
+        else {
             return Err(
                 Refusal::SwitchUnavailable("the current deny list is unavailable".into()).into(),
             );
