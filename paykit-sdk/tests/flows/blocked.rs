@@ -2243,6 +2243,12 @@ async fn answer_held(held: Held, answer: Answer, between: Between) {
         wallet.unblock(&w.bob_id()).await.unwrap();
     }
     wallet.receive(None).await.unwrap();
+    if matches!(between, Between::Restore) {
+        assert!(crate::common::possibly_delivered(&wallet, &msg_id).await);
+        wallet.flush().await.unwrap();
+        assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+        return;
+    }
     // Once bob can receive, the held answer goes once. A clean restore owes no block ask.
     let asks = crate::common::asked(&wallet, &w.bob_id()).await.len();
     assert_eq!(asks, 0);
@@ -2471,12 +2477,12 @@ async fn test_blocked_held_cancellation_sent_once_after_a_restart_while_the_deny
 }
 
 #[tokio::test]
-async fn test_blocked_held_rejection_sent_once_after_a_restore() {
+async fn test_blocked_restore_reports_a_held_rejection() {
     answer_held(Held::Blocked, Answer::Reject, Between::Restore).await;
 }
 
 #[tokio::test]
-async fn test_blocked_held_cancellation_sent_once_after_a_restore_while_the_deny_list_is_unknown() {
+async fn test_blocked_restore_reports_a_cancellation_while_the_deny_list_is_unknown() {
     answer_held(Held::Unknown, Answer::Cancel, Between::Restore).await;
 }
 
@@ -3066,14 +3072,10 @@ async fn test_blocked_subscription_cancellation_and_rejection_refused_with_nothi
 }
 
 #[tokio::test]
-async fn test_blocked_held_rejection_over_a_record_left_unreadable_after_a_restore_sent_once_it_reads(
-) {
-    // The wallet's rejection is recorded and held while bob is blocked, and the wallet is
-    // backed up. After the backup the phone writes the request record as a value no reader
-    // reads. The restored wallet, bob unblocked, sends nothing while the record doesn't
-    // read: the held answer and the restore's re-send both stay owed. Once the phone writes
-    // the record back, the rejection goes, once (Paykit spec 7.2, "What a restore loses";
-    // 8.1, Blocked counterparties).
+async fn test_blocked_restore_reports_a_held_rejection_once_its_record_reads() {
+    // The backup carries a rejection held while Bob was blocked. The restored wallet
+    // keeps the answer while its request record is unreadable. Once the phone restores
+    // the record, the wallet reports the rejection as possibly delivered (Paykit spec 7.2).
     let w = World::new();
     let (mut wallet, _, request) = received(&w, PaykitConfig::default()).await;
     let mut phone = w.wallet("phone").await;
@@ -3144,8 +3146,8 @@ async fn test_blocked_held_rejection_over_a_record_left_unreadable_after_a_resto
     );
     crate::periods::writes_value(&mut phone, &target, &good).await;
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().delivery(&rejection).await.unwrap().is_some());
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), after_asks + 1);
+    assert!(crate::common::possibly_delivered(&wallet, &rejection).await);
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), after_asks);
     assert!(wallet
         .app()
         .protocol_get("paykit", b"ro")
@@ -3159,5 +3161,5 @@ async fn test_blocked_held_rejection_over_a_record_left_unreadable_after_a_resto
         .unwrap()
         .is_empty());
     wallet.receive(None).await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), after_asks + 1);
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), after_asks);
 }

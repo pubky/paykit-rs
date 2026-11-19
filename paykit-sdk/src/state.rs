@@ -51,10 +51,11 @@
 //! | `rsd/<pubky>/<day>` | how many messages were re-sent to a requester that day | |
 //! | `nl` | set by a restore: the shared records aren't listed since, so the client's copy is empty and a record's absence means nothing yet; cleared once they are listed; never restored | |
 //! | `lc` | the certificate the shared records were last listed under, signed: a certificate held now other than it means the copy may lack records until Paykit lists them, since one held between may have read less (`hold.rs`); written only by a Paykit listing, in its commit; absent from a join or a restore until that listing, which leaves the records unlisted; never restored | |
-//! | `ro` | set by a restore: this app's own messages its activity and Allowance records store to be sent are queued again once the records are listed (`hold.rs`, `Paykit::queue_own_again`); after a pass, the counterparties whose messages wait: those whose sends were held then, and those whose period details wait for their request record to show whether a later stop covers them; or none named, every record judged again at the next receive, after a pass that found an activity or Allowance record it couldn't read within 30 days of the restore; and the restore's time, which `Paykit::restore` writes right after the restore and the mark keeps; never restored | |
-//! | `ha/<payee>/<msg_id>` | a rejection or payer's cancellation recorded while sends to its payee were held, its message stored in the request record and not queued, written with the record's batch: queued from the record once sends to the payee aren't held, or given up with a notice past its window (`hold.rs`, `Paykit::queue_own_again`) | |
+//! | `ro` | records to check after a restore for possibly delivered messages, with the time limit for unreadable records and any counterparties waiting for their period's request | |
+//! | `ha/<payee>/<msg_id>` | the wallet's held answer and request. A backup marks it restored so it cannot authorize delivery | |
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `paykit_pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
+//! | `nt/outgoing/<recipient>/<msg_id>/<hash>` | the disposition of an exact original delivery is unknown after restore. Acknowledgment is retained for repeated imports | |
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
 //! | `dl` | the deny list as the app last read it, with this app's blocks kept unanswered (`bk/`), for the views and a payment the user starts (Paykit spec 8.1) | |
 //! | `fg` | the flagged senders as the app last read them, at most `MAX_FLAGGED_COPY`; absent while not known, which holds the asks of block marks (`marks.rs`); never restored | |
@@ -921,9 +922,8 @@ impl Stored for LossBoundary {
 
 impl sealed::Sealed for OwnResendOwed {}
 
-/// The restore's re-send owed: a retained subset of waiting counterparties is nonempty,
-/// ascending, each once; the mark is deleted once none remain (Paykit spec 7.2;
-/// `Paykit::queue_own_again`). Neither the counterparties nor the restore's time name a key.
+/// Counterparties still waiting for the restored-record scan are in ascending order,
+/// each once. The scan clears its mark once all have been checked (Paykit spec 7.2).
 impl Stored for OwnResendOwed {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
@@ -1249,6 +1249,7 @@ pub(crate) mod key {
     pub(crate) const HELD_ANSWERS: &str = "ha/";
     pub(crate) const LISTED_CERT: &str = "lc";
     pub(crate) const NOTICES: &str = "nt/";
+    pub(crate) const RESTORED_DELIVERIES: &str = "nt/outgoing/";
     pub(crate) const STORED_NOTES: &str = "se/";
     pub(crate) const KEPT_REPLIES: &str = "pr/";
     pub(crate) const DROPPED_REPLIES: &str = "pd/";
@@ -1411,6 +1412,11 @@ pub(crate) mod key {
     /// The notice that `sender`'s message `msg_id` was given up.
     pub(crate) fn message_notice(sender: &[u8; 32], msg_id: &str) -> String {
         format!("{NOTICES}{}/{msg_id}", b64(sender))
+    }
+
+    /// A restored outgoing message, bound to its recipient, ID and signed JSON hash.
+    pub(crate) fn restored_delivery(to: &[u8; 32], id: &str, hash: &[u8; 32]) -> String {
+        format!("{RESTORED_DELIVERIES}{}/{id}/{}", b64(to), b64(hash))
     }
 
     /// The notice of `kind` about `attempt`.
@@ -1576,7 +1582,7 @@ pub(crate) enum StateKey {
     PayerPassOwed,
     /// `wc`: the Paykit expiry policy for the own record's current endpoints is owed (`crate::own_record`).
     RecordExpiryOwed,
-    /// `ro`: the restore's re-send of this app's own messages is owed.
+    /// `ro` marks a pending scan for this app's outgoing messages after restore.
     OwnResendOwed,
     /// `lc`: the certificate the shared records were last listed under.
     ListedCert,
@@ -1647,6 +1653,12 @@ pub(crate) enum StateKey {
     },
     /// `se/<sender>/<msg_id>`: a stored entry's message to write later.
     StoredNote { sender: [u8; 32], msg_id: String },
+    /// A notice of a possibly delivered outgoing message (Paykit spec 7.2).
+    RestoredDelivery {
+        to: [u8; 32],
+        msg_id: String,
+        hash: [u8; 32],
+    },
     /// `nt/<sender>/<msg_id>`: a notice for the host about a message given up.
     MessageNotice { sender: [u8; 32], msg_id: String },
     /// `dv/<record key>`: the pause mark of a divergent record.
@@ -1884,6 +1896,15 @@ impl StateKey {
                     }
                     "nt" => {
                         let (attempt, tag) = rest.split_once('/')?;
+                        if attempt == "outgoing" {
+                            let (to, rest) = tag.split_once('/')?;
+                            let (id, hash) = rest.split_once('/')?;
+                            return Some(Self::RestoredDelivery {
+                                to: b64_32(to)?,
+                                msg_id: msg_id(id)?,
+                                hash: b64_32(hash)?,
+                            });
+                        }
                         if let (Some(counterparty), Some(from)) =
                             (b64_32(attempt), tag.strip_prefix("lost-"))
                         {
@@ -2338,7 +2359,7 @@ mod tests {
             serde_json::json!(false)
         ));
         assert!(!reads::<bool>(&key::peer(&pubky), serde_json::json!(true)));
-        // The restore's re-send owed at its key only, its waiting counterparties ascending.
+        // The restored-record scan binds to its own key and keeps counterparties in order.
         let owed = |waiting: serde_json::Value| serde_json::json!({ "waiting": waiting, "restored_at_ms": null });
         assert!(reads::<OwnResendOwed>(
             key::OWN_RESEND_OWED,
@@ -2380,7 +2401,14 @@ mod tests {
         assert!(reads::<KeptSide>(&key::side(id), side(id)));
         assert!(!reads::<KeptSide>(&key::side(id), side(other)));
         // A held answer of the payee and message its key names.
-        let held = |payee: &str, msg_id: &str| serde_json::json!({ "payee": payee, "msg_id": msg_id, "request_hash": sender });
+        let held = |payee: &str, msg_id: &str| {
+            serde_json::json!({
+                "payee": payee,
+                "msg_id": msg_id,
+                "request_hash": sender,
+                "restored": false,
+            })
+        };
         assert!(reads::<HeldAnswer>(
             &key::held_answer(&pubky, id),
             held(&sender, id)
