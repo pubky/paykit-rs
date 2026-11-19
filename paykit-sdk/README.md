@@ -220,7 +220,9 @@ does not implement SSE is `Unsupported`; SSE mode does not fall back to
 continuous slot polling. Already buffered packets remain drainable during an
 outage. Reconnects reuse durable per-user cursors and reconcile expected slots.
 A peer without a stored cursor starts from the newest event instead of
-replaying its history, and the startup audit reconciles its earlier slots.
+replaying its history when the newest-event request succeeds; otherwise it
+replays from the beginning as before. The startup audit reconciles its earlier
+slots.
 Use synchronous `PrivateIntakeSupervisor::is_finished` to detect authoritative
 supervisor task termination, including autonomous lease or topology failure.
 It remains false while any owned task is live and is true after `stop`; do not

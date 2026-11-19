@@ -1190,6 +1190,11 @@ async fn test_private_intake_stream_survives_largest_private_event() {
 
 /// Return the newest homeserver event ID `user` has under the private
 /// directory, read with a one-shot newest-first query.
+///
+/// Mirrors the production seed query (`private_intake_event_query`,
+/// `private_intake_event_path_filter`, and the `reverse().limit(1)` call in
+/// `paykit-sdk/src/runtime/private_intake.rs`), which is private; keep the
+/// path filter and query shape in sync with it.
 async fn newest_private_event_id(pair: &TwoParty, user: &TestUser) -> u64 {
     use futures_util::StreamExt;
 

@@ -1440,7 +1440,9 @@ subscription topology restarts, reuse the event from its last successful
 request instead of repeating it. A new epoch makes the request again. This
 stays safe because each connection runs its startup audit after subscribing.
 If the request fails or returns no event, those peers subscribe from the
-beginning as before, and the next connect requests again.
+beginning as before, and the next connect requests again. Seeding deliberately
+covers only peers without a stored cursor for the current homeserver; a peer
+with a stored cursor resumes from it as before.
 Stopping the supervisor or restarting the subscription topology abandons a
 pending request. Audits, not events, guarantee delivery: a packet whose event
 the stream skips is fetched by the next audit.

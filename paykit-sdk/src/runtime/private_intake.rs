@@ -5,7 +5,7 @@ use crate::storage::{
 };
 use futures_util::StreamExt;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex as StdMutex},
@@ -566,11 +566,35 @@ where
     }
 }
 
-/// Seeds still waiting for their one commit attempt, keyed by peer.
+/// One connection's subscription seed: the newest event its seedless peers
+/// subscribe from, plus the peers still waiting for their one commit attempt.
 ///
-/// A std mutex is enough: it is only locked to take an entry out, never held
-/// across `.await`.
-type PrivateIntakeSeeds = StdMutex<HashMap<PubkyPublicKey, PrivateIntakeCursorRecord>>;
+/// Every seed record shares `homeserver_name` and `event_id`, so the record
+/// is built only at commit time. A std mutex is enough for `pending`: it is
+/// only locked to take a peer out, never held across `.await`.
+struct PrivateIntakeSeeds {
+    homeserver_name: String,
+    event_id: u64,
+    pending: StdMutex<HashSet<PubkyPublicKey>>,
+}
+
+impl PrivateIntakeSeeds {
+    /// Removes `peer` from the pending set and returns its seed record, or
+    /// `None` when it has none left. A poisoned lock only skips the
+    /// optimization.
+    fn take(&self, peer: &PubkyPublicKey) -> Option<PrivateIntakeCursorRecord> {
+        let removed = self
+            .pending
+            .lock()
+            .map(|mut pending| pending.remove(peer))
+            .unwrap_or(false);
+        removed.then(|| PrivateIntakeCursorRecord {
+            subscribed_user: peer.clone(),
+            homeserver: self.homeserver_name.clone(),
+            event_id: self.event_id,
+        })
+    }
+}
 
 /// Audits one peer and persists its subscription seed only when the audit
 /// proves the next expected slot absent.
@@ -589,8 +613,8 @@ type PrivateIntakeSeeds = StdMutex<HashMap<PubkyPublicKey, PrivateIntakeCursorRe
 ///   healthy audit cadence.
 ///
 /// Each seed gets at most one commit attempt: the first `Absent` audit takes
-/// it out of `seeds`, whether the commit then succeeds or is rejected. Any
-/// other outcome leaves it in place. A later audit on the same connection
+/// the peer out of `seeds`, whether the commit then succeeds or is rejected.
+/// Any other outcome leaves it in place. A later audit on the same connection
 /// also runs after the seed read, so it may still persist it; otherwise the
 /// next connect seeds again behind a fresh audit.
 ///
@@ -615,13 +639,14 @@ where
         return audit;
     }
     // Take the seed out before awaiting the commit, so the lock is released
-    // and no later audit commits it again. A poisoned lock only skips the
-    // optimization.
-    let seed = seeds.and_then(|seeds| seeds.lock().ok()?.remove(&peer));
+    // and no later audit commits it again.
+    let seed = seeds.and_then(|seeds| seeds.take(&peer));
     if let Some(seed) = seed {
-        // The cursor is only an optimization: a failed commit (for example a
-        // cursor still recorded for another homeserver) is ignored, health
-        // keeps the audit result, and the next connect seeds again.
+        // The cursor is only an optimization: a failed commit is ignored and
+        // health keeps the audit result. It fails on a transient storage
+        // error, after which the next connect seeds again, or when a stream
+        // event already advanced the cursor past the seed, which storage
+        // rejects as a regression and which leaves the newer cursor in place.
         let _ = storage
             .transaction(move |tx| tx.advance_private_intake_cursor(seed))
             .await;
@@ -635,6 +660,8 @@ where
 /// here. Seeding skips history only up to the newest event this filter
 /// selects, so the skip-safety argument in
 /// [`audit_seeded_private_intake_peer`] relies on both using the same filter.
+/// The testnet e2e helper `newest_private_event_id` mirrors the seed query;
+/// change it together with this one.
 fn private_intake_event_query<'a>(
     client: pubky::PubkyHttpClient,
     homeserver: &pubky::PublicKey,
@@ -663,41 +690,50 @@ where
         .map(|event| event.map(|event| event.cursor))
 }
 
+/// One subscribed peer with its stored event ID for the current homeserver.
+struct StoredPrivateIntakeCursor {
+    peer: PubkyPublicKey,
+    key: pubky::PublicKey,
+    event_id: Option<u64>,
+}
+
 /// Subscription cursors for one stream plus the seeds to persist once an
 /// audit after the seed read proves absence.
+struct SeededPrivateIntakeSubscription {
+    cursors: Vec<(pubky::PublicKey, Option<pubky::EventCursor>)>,
+    /// `None` when no peer is seeded.
+    seeds: Option<PrivateIntakeSeeds>,
+}
+
+/// Builds the subscription cursors for `stored`.
 ///
-/// `stored` lists each peer with its Pubky key and stored event ID. A peer
-/// with a stored cursor resumes from it. Peers without one start from the
-/// newest private event among them and each gets a seed record.
+/// A peer with a stored cursor resumes from it. Peers without one start from
+/// the newest private event among them and each gets a pending seed.
 /// `known_newest` holds the group's newest event from an earlier successful
 /// query: when set, it is reused without calling `query_newest`; otherwise
 /// the seedless peers share one `query_newest` call and a successful result
 /// is stored in it. A failed or empty query leaves them without a cursor,
 /// replaying from the beginning, and the next call queries again.
 async fn private_intake_subscription_cursors<F, Fut>(
-    stored: Vec<(PubkyPublicKey, pubky::PublicKey, Option<u64>)>,
+    stored: Vec<StoredPrivateIntakeCursor>,
     homeserver_name: &str,
     known_newest: &mut Option<u64>,
     query_newest: F,
-) -> (
-    Vec<(pubky::PublicKey, Option<pubky::EventCursor>)>,
-    HashMap<PubkyPublicKey, PrivateIntakeCursorRecord>,
-)
+) -> SeededPrivateIntakeSubscription
 where
     F: FnOnce(Vec<pubky::PublicKey>) -> Fut,
     Fut: Future<Output = std::result::Result<Option<pubky::EventCursor>, pubky::Error>>,
 {
     let seedless = stored
         .iter()
-        .filter(|(_, _, event_id)| event_id.is_none())
-        .map(|(peer, key, _)| (peer, key))
+        .filter(|stored| stored.event_id.is_none())
         .collect::<Vec<_>>();
     let newest = if seedless.is_empty() {
         None
-    } else if known_newest.is_some() {
-        *known_newest
+    } else if let Some(newest) = *known_newest {
+        Some(newest)
     } else {
-        let newest = query_newest(seedless.iter().map(|(_, key)| (*key).clone()).collect())
+        let newest = query_newest(seedless.iter().map(|stored| stored.key.clone()).collect())
             .await
             .ok()
             .flatten()
@@ -705,24 +741,19 @@ where
         *known_newest = newest;
         newest
     };
-    let seeds = newest
-        .into_iter()
-        .flat_map(|event_id| {
-            seedless.iter().map(move |(peer, _)| {
-                let record = PrivateIntakeCursorRecord {
-                    subscribed_user: (*peer).clone(),
-                    homeserver: homeserver_name.to_owned(),
-                    event_id,
-                };
-                ((*peer).clone(), record)
-            })
-        })
-        .collect();
+    let seeds = newest.map(|event_id| PrivateIntakeSeeds {
+        homeserver_name: homeserver_name.to_owned(),
+        event_id,
+        pending: StdMutex::new(seedless.iter().map(|stored| stored.peer.clone()).collect()),
+    });
     let cursors = stored
         .into_iter()
-        .map(|(_, key, stored)| (key, stored.or(newest).map(pubky::EventCursor::new)))
+        .map(|stored| {
+            let cursor = stored.event_id.or(newest).map(pubky::EventCursor::new);
+            (stored.key, cursor)
+        })
         .collect();
-    (cursors, seeds)
+    SeededPrivateIntakeSubscription { cursors, seeds }
 }
 
 /// Runs `future` unless the stop signal fires first; `None` means stopped.
@@ -1583,38 +1614,43 @@ where
                 .into_iter()
                 .filter_map(|(peer, event_id)| {
                     let key = peer.to_public_key().ok()?;
-                    Some((peer, key, event_id))
+                    Some(StoredPrivateIntakeCursor {
+                        peer,
+                        key,
+                        event_id,
+                    })
                 })
                 .collect();
             // A stalled seed query must not delay stop or an epoch restart.
-            let Some((cursors, seeds)) = run_until_private_intake_stop(
-                &mut stop,
-                private_intake_subscription_cursors(
-                    stored_cursors,
-                    &active_group.homeserver_name,
-                    &mut known_newest,
-                    |seedless| {
-                        let query = private_intake_event_query(
-                            client.clone(),
-                            &active_group.homeserver,
-                            seedless.iter().map(|key| (key, None)),
-                            config.max_event_bytes,
-                        );
-                        // A one-shot, non-live query: `reverse` with `live` is
-                        // rejected, and the newest event among the listed users
-                        // ends the stream.
-                        async move {
-                            let stream = query?.reverse().limit(1).subscribe().await?;
-                            newest_private_intake_event_cursor(stream).await
-                        }
-                    },
-                ),
-            )
-            .await
+            let Some(SeededPrivateIntakeSubscription { cursors, seeds }) =
+                run_until_private_intake_stop(
+                    &mut stop,
+                    private_intake_subscription_cursors(
+                        stored_cursors,
+                        &active_group.homeserver_name,
+                        &mut known_newest,
+                        |seedless| {
+                            let query = private_intake_event_query(
+                                client.clone(),
+                                &active_group.homeserver,
+                                seedless.iter().map(|key| (key, None)),
+                                config.max_event_bytes,
+                            );
+                            // A one-shot, non-live query: `reverse` with `live` is
+                            // rejected, and the newest event among the listed users
+                            // ends the stream.
+                            async move {
+                                let stream = query?.reverse().limit(1).subscribe().await?;
+                                newest_private_intake_event_cursor(stream).await
+                            }
+                        },
+                    ),
+                )
+                .await
             else {
                 break;
             };
-            let seeds = Arc::new(StdMutex::new(seeds));
+            let seeds = seeds.map(Arc::new);
             let builder = match private_intake_event_query(
                 client,
                 &active_group.homeserver,
@@ -1664,7 +1700,7 @@ where
             // audit below, cover the history the seeded cursors skip, so they
             // may persist the seeds.
             let audit_outcome = self
-                .audit_private_intake_group(&active_group, &health, &work, Some(&seeds))
+                .audit_private_intake_group(&active_group, &health, &work, seeds.as_deref())
                 .await;
             if audit_outcome.backpressured {
                 topology_changed.notify_one();
@@ -1685,15 +1721,15 @@ where
                 let group = active_group.clone();
                 let health = Arc::clone(&health);
                 let work = Arc::clone(&work);
-                let seeds = Arc::clone(&seeds);
+                let seeds = seeds.clone();
                 Arc::new(move || {
                     let sdk = Arc::clone(&sdk);
                     let group = group.clone();
                     let health = Arc::clone(&health);
                     let work = Arc::clone(&work);
-                    let seeds = Arc::clone(&seeds);
+                    let seeds = seeds.clone();
                     Box::pin(async move {
-                        sdk.audit_private_intake_group(&group, &health, &work, Some(&seeds))
+                        sdk.audit_private_intake_group(&group, &health, &work, seeds.as_deref())
                             .await
                     })
                 })
@@ -4714,11 +4750,25 @@ mod tests {
         }
     }
 
-    fn seed_map(seed: &PrivateIntakeCursorRecord) -> PrivateIntakeSeeds {
-        StdMutex::new(HashMap::from([(
-            seed.subscribed_user.clone(),
-            seed.clone(),
-        )]))
+    fn seeds_for(peer: &PubkyPublicKey, homeserver: &str, event_id: u64) -> PrivateIntakeSeeds {
+        PrivateIntakeSeeds {
+            homeserver_name: homeserver.into(),
+            event_id,
+            pending: StdMutex::new(HashSet::from([peer.clone()])),
+        }
+    }
+
+    /// The shared seed fields and pending peers, for comparison.
+    fn seed_parts(
+        seeds: &Option<PrivateIntakeSeeds>,
+    ) -> Option<(String, u64, HashSet<PubkyPublicKey>)> {
+        seeds.as_ref().map(|seeds| {
+            (
+                seeds.homeserver_name.clone(),
+                seeds.event_id,
+                seeds.pending.lock().unwrap().clone(),
+            )
+        })
     }
 
     fn private_event(event_id: u64) -> pubky::Event {
@@ -4739,14 +4789,16 @@ mod tests {
         })
     }
 
-    fn with_keys(
-        stored: Vec<(PubkyPublicKey, Option<u64>)>,
-    ) -> Vec<(PubkyPublicKey, pubky::PublicKey, Option<u64>)> {
+    fn with_keys(stored: Vec<(PubkyPublicKey, Option<u64>)>) -> Vec<StoredPrivateIntakeCursor> {
         stored
             .into_iter()
             .map(|(peer, event_id)| {
                 let key = peer.to_public_key().unwrap();
-                (peer, key, event_id)
+                StoredPrivateIntakeCursor {
+                    peer,
+                    key,
+                    event_id,
+                }
             })
             .collect()
     }
@@ -4771,28 +4823,29 @@ mod tests {
         let requested = Arc::new(StdMutex::new(Vec::new()));
         let mut known_newest = None;
 
-        let (cursors, seeds) = private_intake_subscription_cursors(
-            with_keys(vec![
-                (peers[0].clone(), None),
-                (peers[1].clone(), Some(5)),
-                (peers[2].clone(), None),
-            ]),
-            "homeserver-a",
-            &mut known_newest,
-            {
-                let requested = Arc::clone(&requested);
-                move |seedless: Vec<pubky::PublicKey>| {
-                    requested.lock().unwrap().push(
-                        seedless
-                            .iter()
-                            .map(PubkyPublicKey::from_public_key)
-                            .collect::<Vec<_>>(),
-                    );
-                    async { Ok(Some(pubky::EventCursor::new(42))) }
-                }
-            },
-        )
-        .await;
+        let SeededPrivateIntakeSubscription { cursors, seeds } =
+            private_intake_subscription_cursors(
+                with_keys(vec![
+                    (peers[0].clone(), None),
+                    (peers[1].clone(), Some(5)),
+                    (peers[2].clone(), None),
+                ]),
+                "homeserver-a",
+                &mut known_newest,
+                {
+                    let requested = Arc::clone(&requested);
+                    move |seedless: Vec<pubky::PublicKey>| {
+                        requested.lock().unwrap().push(
+                            seedless
+                                .iter()
+                                .map(PubkyPublicKey::from_public_key)
+                                .collect::<Vec<_>>(),
+                        );
+                        async { Ok(Some(pubky::EventCursor::new(42))) }
+                    }
+                },
+            )
+            .await;
 
         assert_eq!(
             *requested.lock().unwrap(),
@@ -4807,11 +4860,12 @@ mod tests {
             ]
         );
         assert_eq!(
-            seeds,
-            HashMap::from([
-                (peers[0].clone(), intake_seed(&peers[0], "homeserver-a", 42)),
-                (peers[2].clone(), intake_seed(&peers[2], "homeserver-a", 42)),
-            ])
+            seed_parts(&seeds),
+            Some((
+                "homeserver-a".into(),
+                42,
+                HashSet::from([peers[0].clone(), peers[2].clone()])
+            ))
         );
         assert_eq!(known_newest, Some(42));
     }
@@ -4822,19 +4876,20 @@ mod tests {
         let queries = Arc::new(AtomicUsize::new(0));
         let mut known_newest = Some(42);
 
-        let (cursors, seeds) = private_intake_subscription_cursors(
-            with_keys(vec![(peers[0].clone(), None), (peers[1].clone(), Some(5))]),
-            "homeserver-a",
-            &mut known_newest,
-            {
-                let queries = Arc::clone(&queries);
-                move |_| {
-                    queries.fetch_add(1, Ordering::SeqCst);
-                    async { Ok(Some(pubky::EventCursor::new(99))) }
-                }
-            },
-        )
-        .await;
+        let SeededPrivateIntakeSubscription { cursors, seeds } =
+            private_intake_subscription_cursors(
+                with_keys(vec![(peers[0].clone(), None), (peers[1].clone(), Some(5))]),
+                "homeserver-a",
+                &mut known_newest,
+                {
+                    let queries = Arc::clone(&queries);
+                    move |_| {
+                        queries.fetch_add(1, Ordering::SeqCst);
+                        async { Ok(Some(pubky::EventCursor::new(99))) }
+                    }
+                },
+            )
+            .await;
 
         assert_eq!(queries.load(Ordering::SeqCst), 0);
         assert_eq!(
@@ -4842,8 +4897,8 @@ mod tests {
             vec![(peers[0].clone(), Some(42)), (peers[1].clone(), Some(5))]
         );
         assert_eq!(
-            seeds,
-            HashMap::from([(peers[0].clone(), intake_seed(&peers[0], "homeserver-a", 42))])
+            seed_parts(&seeds),
+            Some(("homeserver-a".into(), 42, HashSet::from([peers[0].clone()])))
         );
         assert_eq!(known_newest, Some(42));
     }
@@ -4891,23 +4946,24 @@ mod tests {
         let queries = Arc::new(AtomicUsize::new(0));
         let stored = vec![(peers[0].clone(), Some(3)), (peers[1].clone(), Some(9))];
 
-        let (cursors, seeds) = private_intake_subscription_cursors(
-            with_keys(stored.clone()),
-            "homeserver-a",
-            &mut None,
-            {
-                let queries = Arc::clone(&queries);
-                move |_| {
-                    queries.fetch_add(1, Ordering::SeqCst);
-                    async { Ok(Some(pubky::EventCursor::new(42))) }
-                }
-            },
-        )
-        .await;
+        let SeededPrivateIntakeSubscription { cursors, seeds } =
+            private_intake_subscription_cursors(
+                with_keys(stored.clone()),
+                "homeserver-a",
+                &mut None,
+                {
+                    let queries = Arc::clone(&queries);
+                    move |_| {
+                        queries.fetch_add(1, Ordering::SeqCst);
+                        async { Ok(Some(pubky::EventCursor::new(42))) }
+                    }
+                },
+            )
+            .await;
 
         assert_eq!(queries.load(Ordering::SeqCst), 0);
         assert_eq!(stored_cursor_ids(&cursors), stored);
-        assert!(seeds.is_empty());
+        assert!(seeds.is_none());
     }
 
     async fn assert_seed_query_falls_back_to_full_replay(
@@ -4915,19 +4971,20 @@ mod tests {
     ) {
         let peers = users(2);
         let mut known_newest = None;
-        let (cursors, seeds) = private_intake_subscription_cursors(
-            with_keys(vec![(peers[0].clone(), None), (peers[1].clone(), Some(7))]),
-            "homeserver-a",
-            &mut known_newest,
-            move |_| async move { newest },
-        )
-        .await;
+        let SeededPrivateIntakeSubscription { cursors, seeds } =
+            private_intake_subscription_cursors(
+                with_keys(vec![(peers[0].clone(), None), (peers[1].clone(), Some(7))]),
+                "homeserver-a",
+                &mut known_newest,
+                move |_| async move { newest },
+            )
+            .await;
 
         assert_eq!(
             stored_cursor_ids(&cursors),
             vec![(peers[0].clone(), None), (peers[1].clone(), Some(7))]
         );
-        assert!(seeds.is_empty());
+        assert!(seeds.is_none());
         // Only a successful result is remembered, so the next connect retries.
         assert_eq!(known_newest, None);
     }
@@ -4983,7 +5040,7 @@ mod tests {
         let fetched = Arc::new(AtomicUsize::new(0));
         let snapshot_bytes = snapshot.serialize();
 
-        let seeds = seed_map(&seed);
+        let seeds = seeds_for(&peer, "homeserver-a", 42);
 
         let audit = audit_seeded_private_intake_peer(&storage, peer.clone(), Some(&seeds), {
             let storage = storage.clone();
@@ -5051,8 +5108,7 @@ mod tests {
         for outcome in unproven {
             let storage = crate::storage::InMemoryStorage::new();
             let peer = users(1).remove(0);
-            let seed = intake_seed(&peer, "homeserver-a", 42);
-            let seeds = seed_map(&seed);
+            let seeds = seeds_for(&peer, "homeserver-a", 42);
 
             audit_seeded_private_intake_peer(
                 &storage,
@@ -5068,7 +5124,7 @@ mod tests {
                 .private_intake_cursors
                 .contains_key(&peer));
             // The seed stays available for a later audit on the connection.
-            assert_eq!(seeds.lock().unwrap().get(&peer), Some(&seed));
+            assert!(seeds.pending.lock().unwrap().contains(&peer));
         }
     }
 
@@ -5076,6 +5132,9 @@ mod tests {
     async fn test_private_intake_seed_commit_failure_is_ignored() {
         let storage = crate::storage::InMemoryStorage::new();
         let peer = users(1).remove(0);
+        // Any rejected commit works here; a cursor stored for another
+        // homeserver is simply the easiest one to set up. The supervisor
+        // itself never seeds such a peer.
         let existing = intake_seed(&peer, "homeserver-b", 7);
         storage
             .transaction({
@@ -5084,7 +5143,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let seeds = seed_map(&intake_seed(&peer, "homeserver-a", 42));
+        let seeds = seeds_for(&peer, "homeserver-a", 42);
 
         let audit =
             audit_seeded_private_intake_peer(&storage, peer.clone(), Some(&seeds), |_, _| async {
@@ -5101,7 +5160,7 @@ mod tests {
             existing
         );
         // A rejected commit still uses up the seed's one attempt.
-        assert!(seeds.lock().unwrap().is_empty());
+        assert!(seeds.pending.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -5109,7 +5168,7 @@ mod tests {
         let storage = crate::storage::InMemoryStorage::new();
         let peer = users(1).remove(0);
         let seed = intake_seed(&peer, "homeserver-a", 42);
-        let seeds = seed_map(&seed);
+        let seeds = seeds_for(&peer, "homeserver-a", 42);
         let seeded_audit = |outcome: fn() -> Result<PrivatePacketAcquisition>| {
             audit_seeded_private_intake_peer(
                 &storage,
@@ -5147,7 +5206,7 @@ mod tests {
         };
         let peer = users(1).remove(0);
         let seed = intake_seed(&peer, "homeserver-a", 42);
-        let seeds = seed_map(&seed);
+        let seeds = seeds_for(&peer, "homeserver-a", 42);
 
         for _ in 0..2 {
             let audit = audit_seeded_private_intake_peer(
@@ -5165,7 +5224,7 @@ mod tests {
 
         // Only the first `Absent` audit commits; later ones write nothing.
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
-        assert!(seeds.lock().unwrap().is_empty());
+        assert!(seeds.pending.lock().unwrap().is_empty());
         assert_eq!(
             storage.inner.snapshot().unwrap().private_intake_cursors[&peer],
             seed
