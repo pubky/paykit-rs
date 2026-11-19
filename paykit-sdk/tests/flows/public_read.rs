@@ -1247,6 +1247,14 @@ async fn test_public_read_large_records_kept_per_app_within_the_store_bound() {
     assert_eq!(read.failures.len(), 1, "{:?}", read.failures);
     assert_eq!(read.failures[0].app_id, apps[0].1);
     assert_eq!(read.failures[0].reason, PublicAppFailureReason::OverBound);
+    let paid = wallet.pay_without_request(public_to_bob(&w)).await;
+    assert_eq!(paid.public_failures, read.failures);
+    assert!(matches!(paid.outcome.unwrap(), PayOutcome::Paid { .. }));
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
+        "btc-lightning-bolt11"
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
 }
 
 #[tokio::test]
@@ -1292,10 +1300,13 @@ async fn test_public_read_unretained_conflicting_or_expired_record_is_refused() 
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let apps = bob_apps(&w, &["shop", "till"]).await;
-    publish_now(
+    let original_time = w.clock.now_ms();
+    publish_app_at(
         &w,
         apps[0].0,
         one_endpoint("btc-lightning-bolt11", "lnbc1shop"),
+        original_time,
+        Some(original_time + DAY_MS),
     );
     publish_now(
         &w,
@@ -1305,7 +1316,6 @@ async fn test_public_read_unretained_conflicting_or_expired_record_is_refused() 
     let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
     assert_eq!(offering(&read), [apps[0].1, apps[1].1]);
 
-    let original_time = w.clock.now_ms();
     w.clock.advance_ms(1000);
     // The first body conflicts with the shop's retained record. The second is newer but
     // has expired. Neither can supply usable public endpoints, whatever their size.
@@ -1321,7 +1331,7 @@ async fn test_public_read_unretained_conflicting_or_expired_record_is_refused() 
         assert!(
             matches!(&read.failures[0].reason, PublicAppFailureReason::Refused(rule)
             if rule.contains("a reader keeps")),
-            "{:?}",
+            "updated {updated}, expires {expires}, time {original_time}: {:?}",
             read.failures
         );
     }
