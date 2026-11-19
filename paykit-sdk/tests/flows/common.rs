@@ -28,6 +28,20 @@ use pubky_switch_client::transport::Transport;
 use pubky_switch_core::ops::OpKind;
 use serde_json::Value;
 
+/// Complete the bounded client and wallet listings used by these small fixtures.
+pub async fn finish_listing(wallet: &mut Paykit) {
+    for _ in 0..8 {
+        let summary = wallet.receive(None).await.unwrap();
+        if !summary.report.more
+            && summary.records_unlisted.is_none()
+            && !wallet.app().listing_owed().await.unwrap()
+        {
+            return;
+        }
+    }
+    panic!("the test wallet's listing did not finish");
+}
+
 pub const HOUR_MS: u64 = 3_600_000;
 
 /// Where alice's switch is.

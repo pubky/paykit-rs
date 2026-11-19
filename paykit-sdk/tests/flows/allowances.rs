@@ -2554,18 +2554,13 @@ async fn test_allowances_kept_answer_over_a_record_that_doesnt_read_given_up_wit
 
 /// A `missed` item, and Paykit's listing at the end of the next receive fails: the copy of
 /// the records counts as not listed until a listing of Paykit's own.
-fn missed_and_listing_fails(w: &World) {
+fn missed_and_listing_fails(w: &World, wallet: &Paykit) {
     missed(w);
-    fail_paykit_listing(&w.alice, WALLET_COLLECTIONS);
+    fail_paykit_listing(
+        &w.alice,
+        crate::certificate::client_listing_requests(wallet.app().cert()),
+    );
 }
-
-/// How many collections the client lists for an app of alice's holding `paykit_pay` and
-/// `paykit_allowance`: the payer's side, `payment_lists`, `block_floor` and `allowances`.
-const WALLET_COLLECTIONS: usize = 4;
-
-/// How many collections the client lists for bob's shop, holding `paykit_request` and
-/// `paykit_allowance`: the payee's side and `allowances`.
-const SHOP_COLLECTIONS: usize = 2;
 
 /// Fail Paykit's own listing at the end of the next receive of `party`'s app after a
 /// `missed` item: the client's listing after the item, of the app's `collections`, goes
@@ -2592,7 +2587,7 @@ async fn test_allowances_stop_past_30_days_kept_while_unlisted() {
     assert!(Box::pin(keeps_end(&w, &wallet, 0)).await);
     w.clock
         .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
-    missed_and_listing_fails(&w);
+    missed_and_listing_fails(&w, &wallet);
     let got = wallet.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_some(), "{got:?}");
     assert!(Box::pin(keeps_end(&w, &wallet, 0)).await);
@@ -2633,7 +2628,10 @@ async fn test_allowances_kept_answer_past_30_days_kept_while_unlisted() {
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
     let now = w.clock.now_ms();
     w.bob.switch().push_missed(1, now - 1_000, now);
-    fail_paykit_listing(&w.bob, SHOP_COLLECTIONS);
+    fail_paykit_listing(
+        &w.bob,
+        crate::certificate::client_listing_requests(shop.app().cert()),
+    );
     let got = shop.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_some(), "{got:?}");
     assert_eq!(
@@ -2675,7 +2673,7 @@ async fn test_allowances_stored_proposal_neither_opened_nor_given_up_while_unlis
             .len(),
         1
     );
-    missed_and_listing_fails(&w);
+    missed_and_listing_fails(&w, &wallet);
     let got = wallet.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_some(), "{got:?}");
     assert_eq!(
@@ -3507,7 +3505,7 @@ async fn test_allowances_end_over_a_deleted_record_kept_as_a_stop_once_listed() 
     Box::pin(delete_allowance_record(&w, &id)).await;
     wallet.receive(None).await.unwrap();
     assert!(Box::pin(held_deleted(&wallet, &mine)).await);
-    missed_and_listing_fails(&w);
+    missed_and_listing_fails(&w, &wallet);
     shop.end_allowance(&theirs).await.unwrap();
     wallet.receive(None).await.unwrap();
     assert!(wallet

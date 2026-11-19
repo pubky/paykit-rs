@@ -3235,8 +3235,8 @@ async fn test_periods_restore_after_the_payee_cancelled_queues_no_details() {
 #[tokio::test]
 async fn test_periods_restore_after_the_period_is_credited_queues_no_details() {
     // January is credited after its details were sent, its receipt in its period record: a
-    // later stop that covers the details. The restored shop queues the receipt again and
-    // neither details (Paykit spec 7.2, "What a restore loses").
+    // later stop that covers the details. The restored shop retains the receipt and queues
+    // neither it nor the details (Paykit spec 7.2, "What a restore loses").
     let w = World::new();
     let mut shop = w.shop().await;
     let mut wallet = w.wallet("wallet").await;
@@ -3265,11 +3265,11 @@ async fn test_periods_restore_after_the_period_is_credited_queues_no_details() {
         .await
         .unwrap()
         .is_none());
-    assert!(queued(&shop, &receipt).await);
+    assert!(!queued(&shop, &receipt).await);
     for msg_id in &sent {
         assert!(!queued(&shop, msg_id).await, "{msg_id}");
     }
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before + 1);
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
 }
 
 #[tokio::test]
@@ -3559,8 +3559,8 @@ async fn test_periods_credit_stays_given_after_a_restore() {
     .await
     .unwrap();
     shop.receive(None).await.unwrap();
-    // The receipt the period record keeps is queued again, the same message.
-    assert!(queued(&shop, &receipt).await);
+    // The issued receipt stays available, with no delivery created by the restore.
+    assert!(!queued(&shop, &receipt).await);
     assert_eq!(
         shop.confirm_payment(&period).await.unwrap(),
         Some(receipt.clone())
