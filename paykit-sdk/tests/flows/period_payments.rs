@@ -1706,6 +1706,67 @@ async fn test_period_payments_resume_repeats_a_periods_dispatch_unless_cancelled
 }
 
 #[tokio::test]
+async fn test_period_payments_resume_the_users_attempt_on_a_manual_only_subscription() {
+    let w = World::new();
+    w.rail.set_declaration(
+        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true),
+    );
+    let storage = store();
+    let mut wallet = w
+        .wallet_with("wallet", storage.clone(), crate::common::day_window())
+        .await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    w.rail.next(Behaviour::Hang);
+    let pending = by_user(&mut wallet, &request, january(), PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(pending, PayOutcome::Pending { .. }), "{pending:?}");
+    let attempt = pending.attempt_id();
+    let app_id = wallet.app_id();
+    drop(wallet);
+
+    phone.receive(None).await.unwrap();
+    let mut parent = request_record(&w, &phone, &request).await;
+    parent.manual_only = true;
+    write_payer_record(
+        &mut phone,
+        &natural_key::request_record(&request.payee, &request.request_hash),
+        &parent,
+    )
+    .await;
+    // The method settled the original payment. It offers no history lookup, so only an
+    // idempotent repeat under that attempt's key can return its paid result.
+    w.rail.settle(&attempt, true);
+    w.clock.advance_ms(60_000);
+    let mut wallet = w
+        .load_with(
+            &w.alice,
+            storage,
+            app_id,
+            w.clock.clone(),
+            crate::common::day_window(),
+        )
+        .await;
+    wallet.receive(None).await.unwrap();
+    assert!(request_record(&w, &wallet, &request).await.manual_only);
+    let outcomes = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(outcomes.as_slice(), [PayOutcome::Paid { attempt_id, .. }] if *attempt_id == attempt),
+        "{outcomes:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt), 2);
+    assert_eq!(w.rail.all_executions().values().sum::<u64>(), 1);
+    let paid = period_record(&w, &wallet, &request, january())
+        .await
+        .unwrap();
+    assert!(paid.manual_only);
+    assert_eq!(proof_of(&paid).1.billing_period, Some(january()));
+}
+
+#[tokio::test]
 async fn test_period_payments_reconcile_finds_a_period_paid_after_the_backup() {
     // February is paid after the backup and the device lost before its outcome: the restored
     // app finds the attempt on the period the request record lists, from the payment
