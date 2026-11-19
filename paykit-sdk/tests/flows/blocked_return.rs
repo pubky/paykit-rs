@@ -3304,7 +3304,15 @@ async fn test_blocked_return_deleted_floor_holds_an_automatic_repeat() {
         .await
         .unwrap();
     phone.receive(None).await.unwrap();
-    let attempt_id = paid_in_flight(&w, &mut phone, &request).await;
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let outcome = phone
+        .pay_request_automatically(&request, paykit_sdk::PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = outcome else {
+        panic!("expected a pending automatic payment, got {outcome:?}");
+    };
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 
     wallet
