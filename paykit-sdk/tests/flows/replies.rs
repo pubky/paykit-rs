@@ -483,7 +483,7 @@ async fn test_replies_dropped_mark_past_128_the_one_with_the_earliest_latest_tim
         .unwrap()
         .into_iter()
         .filter(|n| {
-            n.kind == paykit_sdk::NoticeKind::DroppedMessagesLost && n.counterparty == held[0]
+            n.kind == paykit_sdk::NoticeKind::DroppedMessagesLost && n.counterparty == Some(held[0])
         })
         .collect();
     assert_eq!(lost.len(), 1);
@@ -2417,7 +2417,7 @@ async fn dropped_before_record_after_unblock(restore: bool) {
             .into_iter()
             .filter(|notice| {
                 notice.kind == paykit_sdk::NoticeKind::DroppedMessagesLost
-                    && notice.counterparty == payer
+                    && notice.counterparty == Some(payer)
             })
             .collect();
         assert_eq!(lost.len(), 1);
@@ -2639,7 +2639,7 @@ async fn test_reply_loss_capacity_keeps_the_rotated_input_until_acknowledgement(
     assert_eq!(shown.len(), 64);
     assert!(shown
         .iter()
-        .any(|n| n.counterparty == marks[0] && n.lost_from_ms == Some(first)));
+        .any(|n| n.counterparty == Some(marks[0]) && n.lost_from_ms == Some(first)));
 }
 
 #[tokio::test]
@@ -2800,7 +2800,10 @@ async fn test_reply_loss_expiry_keeps_an_unreported_mark_and_widens_an_existing_
     assert_eq!(mark_senders(&shop, "pd/").await, [senders[1]]);
     let shown = shop.notices().await.unwrap();
     assert_eq!(shown.len(), 64);
-    let widened = shown.iter().find(|n| n.counterparty == senders[0]).unwrap();
+    let widened = shown
+        .iter()
+        .find(|n| n.counterparty == Some(senders[0]))
+        .unwrap();
     assert_eq!(widened.lost_until_ms, Some(from + 4));
     shop.acknowledge_notice(&widened.id).await.unwrap();
     shop.receive(None).await.unwrap();
@@ -2809,5 +2812,5 @@ async fn test_reply_loss_expiry_keeps_an_unreported_mark_and_widens_an_existing_
     assert_eq!(shown.len(), 64);
     assert!(shown
         .iter()
-        .any(|n| n.counterparty == senders[1] && n.lost_from_ms == Some(from + 1)));
+        .any(|n| n.counterparty == Some(senders[1]) && n.lost_from_ms == Some(from + 1)));
 }
