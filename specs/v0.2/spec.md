@@ -142,7 +142,7 @@ Paykit follows the Switch's authorization rules (Pubky Switch spec, Section 3.4)
 - **Recipients** also drop a payer's reply that the rule for senders above wouldn't have sent them: an acceptance, rejection, cancellation or proof with a label, unless they hold `paykit_request` or that label, and one without a label unless they hold `paykit_request`. A cancellation without a label from an app holding `paykit_request` or a labelled selling scope may be the payee's, and passes at an app holding `paykit_pay` instead; `paykit_pay` to `paykit_pay` and `paykit_request` to `paykit_request` are dropped.
 - **Private Payment Lists.** A payer wraps a list request only to eligible apps holding plain `paykit_request`. When the request names an app, only that app may answer. A selling app with only labelled scopes does not advertise, accept or answer list requests. A payer drops a list, including an empty withdrawal, whose signing certificate lacks plain `paykit_request`. It preserves the installed list and its version. An app with `paykit_pay` may ask for and receive lists as payer whatever its selling scopes.
 - **Homeserver grants.** Paykit uses the Switch grant for the app's record and, if the app keeps its backup on the Homeserver, its backup. Paykit adds no paths of its own. Other protocols may request paths under the Switch's authorization rules (Pubky Switch spec, Section 3.4).
-- **From v0.1:** before the signer publishes an identity's first v0.2 `identity.json`, it revokes each v0.1 `/pub/paykit/:rw` grant or replaces it with one limited to the app's authorized paths (Section 16).
+- **Existing Homeserver grants.** Before the first v0.2 `identity.json` is published, an app must have no live grant that lets it write a v0.2 path outside its authority, such as the signer's identity document or another app's record. If such a grant exists, the account owner or its authorized host revokes or narrows it at the Homeserver. A v0.1 grant limited to `/pub/paykit/` does not cover the Switch identity, app record or backup paths.
 
 ### 3.5 Keys of Paykit's scopes
 
@@ -664,7 +664,7 @@ What the Switch leaves to apps or decides later is in the Pubky Switch spec (Pub
   - a v0.2 ERC-20 Payment Proof profile (Section 15).
   - Allowances that pay requests priced in another asset, for example a subscription priced in usd paid from a btc Allowance. For v0.2 an Allowance pays only requests in its own asset, as in v0.1 (Section 8.3); a payee that wants automatic payment in another asset bills in that asset at its own rate. A later term can widen this without breaking older executors, which keep refusing.
 - **No migration from v0.1.** v0.2 replaces v0.1: v0.1 and v0.2 apps can't pay each other, so the payer and the payee both update to v0.2, and a v0.2 app reads and writes no v0.1 state. What was open under v0.1 is set up again under v0.2:
-  - each identity's Pubky grants of v0.1 are revoked or narrowed before its first v0.2 `identity.json` (Pubky Switch spec, Section 3.4);
+  - each app requests its v0.2 grant under Section 3.4. Neither the app nor the signer searches for, converts or reissues v0.1 grants.
   - public Payment Endpoints are published in each app's v0.2 record (Pubky Switch spec, Section 4.2);
   - Allowances and recurring requests don't carry over: the payee requests and the payer accepts them again under v0.2, and an Allowance's limits count from its v0.2 acceptance;
   - receipts and the rest of the v0.1 payment history stay where the v0.1 app keeps them, and v0.2 doesn't read them;
