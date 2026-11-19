@@ -39,9 +39,23 @@ target feature) is refused at compile time.
 - The `wasm32-unknown-unknown` dependency graph of `paykit-lib` and `paykit-sdk` builds.
 - The tests listed under [Tests](#tests) run in a page and in a dedicated worker, in Chromium,
   Firefox and WebKit.
-- The host pieces above are tested on their own. No Paykit flow uses them in these tests yet.
-- The SDK's flows are not run in a browser by this crate yet.
-- Only a page and a dedicated worker are tested. Service workers and shared workers are not.
+- The host pieces above are tested on their own. The Payment Request flow below gives its apps
+  `JsTimer` as their `Timer`, which it never sleeps on (the SDK waits on its timer only when it
+  pays), and starts its test clock at `JsClock`'s reading.
+- A Payment Request flow of the SDK runs in one WebAssembly instance, with no network: a payer
+  and a payee each join a Paykit App through their signer, on the Switch client's in-memory
+  scripted switches. The payer invites the payee, the payee sends a one-time Payment Request,
+  and the payer receives it and reads it back as open, with the amount, payment reference and
+  expiry that were sent, its activity record holding the payee's signed request with its
+  Payment Endpoint. The flow also shows a request expire, a rejection refused a second
+  time, and a request that waits until the payer admits the payee.
+
+Not run in a browser yet:
+
+- paying a Payment Request, and so Payment Proofs and Receipts (see the hazards below);
+- a real network: the flow's apps reach the scripted switches in memory, and this crate holds
+  no Switch transport;
+- service workers and shared workers: only a page and a dedicated worker are tested.
 
 Two known run-time hazards remain on `wasm32-unknown-unknown`, where the standard library has
 no clock and `std::time::Instant::now()` panics:
@@ -58,9 +72,26 @@ no clock and `std::time::Instant::now()` panics:
   payment that `Paykit::pay_without_request` made to a public endpoint while the payer's switch
   was unavailable. Other writes do not reach it.
 
+## Stack
+
+A `wasm32-unknown-unknown` build gets a 1 MiB stack by default, and a stack overflow there
+traps with an out-of-bounds memory access. The `tests/request_flow/` target passes on that
+default. Measured with `-zstack-size`, in steps of 64 KiB for the debug build and 32 KiB for the
+release build, in Chromium, Firefox and WebKit, in a page and in a dedicated worker, with the
+same result in each:
+
+| Build | Smallest stack that passes | Largest stack that fails |
+| --- | --- | --- |
+| debug (`cargo test`) | 832 KiB | 768 KiB |
+| `--release` | 160 KiB | 128 KiB |
+
+So the debug test build uses most of the default stack. This crate sets no stack size of its
+own. A web app that links Paykit into its own WebAssembly module sets that module's stack size
+when it links it, and should measure its own call paths.
+
 ## Tests
 
-There are three test targets.
+There are four test targets.
 
 The tests in `tests/conformance/` build for both the host and wasm32, with the same test
 bodies, so a browser result is compared with the native result by construction. They cover:
@@ -85,6 +116,20 @@ The test in `tests/panic_report.rs` checks that `install_panic_hook` writes a pa
 message and source location, to `console.error`, and then runs the panic hook installed before
 it, also when it is called twice. It is a target of its own, so that its call is the first in
 its WebAssembly instance, and so that the panic ends an instance no other test shares.
+
+The tests in `tests/request_flow/` run the Payment Request flow described above, so they also
+run only in a browser. They follow the SDK's native flow tests (`paykit-sdk/tests/flows/`),
+on the Switch client's test API (`pubky_switch_client::testing`) and the SDK's `FakeRail`.
+They check that:
+
+- a one-time Payment Request is received once and reads as open, with the amount, payment
+  reference and expiry that were sent, and that the payer's activity record stores the
+  payee's signed request with its Payment Endpoint;
+- a request reads as expired once the service's clock has passed its proposal expiry;
+- a rejected request reads as rejected, a second rejection is refused (`Refusal::Rejected`),
+  and the payee's shop sees the rejection;
+- a request to a payer who has not admitted the payee waits for admission, and is accepted
+  once the payer invites the payee.
 
 ### Run the tests natively
 

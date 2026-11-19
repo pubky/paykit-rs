@@ -18,9 +18,9 @@
 //! - `panic`: `install_panic_hook`, which reports a Rust panic to the browser console.
 //!
 //! The tests under `tests/` run a subset of Paykit's vectors, the random generator, signing,
-//! and sealing natively and in browser engines, and the host pieces in browser engines. The
-//! SDK's flows are not run in a browser yet; the crate's README lists what is covered and the
-//! known run-time hazards on wasm32.
+//! and sealing natively and in browser engines; and, in browser engines only, the host pieces
+//! and a Payment Request flow of the SDK with no network. The crate's README lists what is
+//! covered, what is not run in a browser yet, and the known run-time hazards on wasm32.
 //!
 //! On any other target the crate builds as an empty crate, so workspace-wide commands keep
 //! working.
