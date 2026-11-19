@@ -665,7 +665,7 @@ pub(crate) fn restore_paykit_layer(
             StateKey::HeldAnswer { .. } => {
                 let mut answer = state::restored::<crate::hold::HeldAnswer>(&key, &value, &binder)
                     .map_err(|_| unread())?;
-                answer.restored = Some(true);
+                answer.restored = true;
                 let value = state::encode(&answer).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
