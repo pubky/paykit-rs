@@ -1,1 +1,5 @@
 /node_modules
+# What the network rig could write here: never commit certificates, keys or logs.
+*.pem
+*.log
+/logs/

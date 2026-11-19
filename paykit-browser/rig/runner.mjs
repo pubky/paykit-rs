@@ -14,6 +14,9 @@
 //   PAYKIT_BROWSER_TIMEOUT_SECS  hard limit for the whole run, at most 2147483 (the longest
 //                                timer Node accepts). Default 300.
 //   WASM_BINDGEN_TEST_RUNNER     the wasm-bindgen-test-runner binary. Default: from PATH.
+//   PAYKIT_BROWSER_RIG_ORIGIN    set by `test.sh --switch` for the network tests, whose rig
+//                                (switch-rig.mjs) serves a self-signed certificate. When it is
+//                                set, the page and its worker ignore certificate errors.
 //
 // wasm-bindgen-test-runner runs with NO_HEADLESS=1, so it only generates the bindings and
 // serves the test page on a free loopback port. This script opens that page in the engine,
@@ -201,7 +204,11 @@ async function main() {
   browser = await engine.type.launch({ headless: true, ...engine.options });
   log(`[runner] engine ${engineName} ${browser.version()}, context ${contextName}, ${url}`);
 
-  const page = await browser.newPage();
+  // Only the network tests reach the rig's self-signed certificate; every other run keeps the
+  // engine's certificate checks. The page's setting covers its dedicated worker too.
+  const page = await browser.newPage({
+    ignoreHTTPSErrors: Boolean(process.env.PAYKIT_BROWSER_RIG_ORIGIN),
+  });
   let workers = 0;
   page.on("console", (msg) => {
     // The wasm-bindgen test harness forwards the test worker's console output to the page, so

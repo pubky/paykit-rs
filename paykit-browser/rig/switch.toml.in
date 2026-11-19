@@ -1,0 +1,56 @@
+# Pubky Switch configuration for the paykit-browser test rig. Test rig code only, never for
+# production. `test.sh --switch` fills in the @...@ values, checks the result with
+# `pubky-switch check-config`, and passes the database URL in PUBKY_SWITCH_DATABASE_URL, so no
+# password is written here.
+
+[admin]
+# GET /health/ready answers 200 once the database and the key store are ready.
+listen = "127.0.0.1:@ADMIN_PORT@"
+
+[server]
+# The origin every request signs and identity.json names. switch-rig.mjs terminates TLS on
+# this port and forwards to `listen`; the service never reads the Host header or the scheme.
+origin = "https://localhost:@RIG_PORT@"
+listen = "127.0.0.1:@SWITCH_PORT@"
+
+[log]
+format = "text"
+filter = "info,sqlx::postgres::notice=warn"
+
+# Every request of the rig comes from 127.0.0.1, one network source, and a test run is far
+# busier than one identity on a shared service, so the per-source and per-minute limits are
+# raised. The rig's proxy is not listed in `server.proxy.trusted`: the browser behind it is on
+# 127.0.0.1 as well, so that would change nothing.
+[limits]
+ops_per_min = 1000000
+control_per_min = 1000000
+sender_per_min = 1000000
+sender_app_per_min = 1000000
+invite_reads_per_min = 1000000
+auth_failures_per_source_per_min = 1000000
+stranger_per_min = 1000000
+identity_reads_per_min = 1000000
+identity_reads_per_source_per_min = 1000000
+notify_per_min = 1000000
+connect_per_min = 1000000
+uploads_per_app_per_hour = 1000000
+
+# Rig only: the wall clock is taken as trusted time, so the service needs no time source.
+[trusted_time]
+required = false
+
+# No Roughtime servers: the rig sends nothing off the machine.
+[trusted_time.roughtime]
+servers = []
+min_agreeing = 0
+
+[database]
+max_connections = 8
+
+# A fresh folder for each run, removed afterwards: the service key and the mark store.
+[keys]
+path = "@KEYS_PATH@"
+
+# No push registrations and no webhooks.
+[push]
+enabled = false
