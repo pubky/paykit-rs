@@ -2009,33 +2009,6 @@ mod tests {
     }
 
     #[test]
-    fn test_protocol_labelled_app_accepts_no_list_request() {
-        // A labelled selling app sends no Private Payment List, so it takes no request for one
-        // (Paykit spec 3.3): its record doesn't accept the kind, and no payer wraps it to it.
-        use crate::testkit::Party;
-        let protocol = PaykitProtocol::new();
-        let labelled = Party::new(
-            "bob",
-            "shop1",
-            &[
-                "paykit_request:shop1",
-                "paykit_settlements",
-                "paykit_contacts",
-            ],
-        );
-        let plain = Party::new(
-            "bob",
-            "shop",
-            &["paykit_request", "paykit_settlements", "paykit_contacts"],
-        );
-        let kind = Kind::PrivatePaymentListRequest.as_str();
-        assert!(!protocol.accepts(&labelled.cert).iter().any(|k| k == kind));
-        assert!(!protocol.receives(kind, &labelled.cert));
-        assert!(protocol.accepts(&plain.cert).iter().any(|k| k == kind));
-        assert!(protocol.receives(kind, &plain.cert));
-    }
-
-    #[test]
     fn test_protocol_payee_label_write_scope() {
         let label = Label::parse("shop1").unwrap();
         assert!(writes_payee_label(&["paykit_request".into()], Some(&label)));

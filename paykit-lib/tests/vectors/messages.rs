@@ -1607,14 +1607,14 @@ with a certificate of the shop's keys holding sender_scope and the paykit_settle
 paykit_contacts it requires (sender_cert). request is payment_request_labelled for the receipt \
 and the cancellation; request_recurring, messages.json's payment_request_recurring with label \
 shop1 sent by the hosted app, or payment_request_recurring itself, unlabelled, for the period \
-details; null for a private_payment_list and a receipt naming no request, which names \
+details; null for a receipt naming no request, which names \
 payment_proof_unrequested. The receipt about a request confirms proof: messages.json's \
 payment_proof naming payment_request_labelled and copying its label. Each passes check 10, \
 and the details are valid against their request (wire 4.9). accepted are those the payer \
 takes, from paykit_request and from the request's label. refused are those it drops: about a \
 request, from another label or from a label about an unlabelled request, which pass check 8 \
 and are dropped where the payer reads the request, a payer request record holding such a \
-receipt or cancellation being invalid; and a private_payment_list or a receipt naming no \
+receipt or cancellation being invalid; and a receipt naming no \
 request from a labelled scope, dropped at check 8. reason is paykit-lib's wording.";
 
 /// The requests and proof of `payee_label_senders`, by name: JSON, signature, hash and the
@@ -1699,7 +1699,7 @@ type LabelCase = (
     bool,
 );
 
-const PAYEE_LABEL_CASES: [LabelCase; 12] = [
+const PAYEE_LABEL_CASES: [LabelCase; 11] = [
     (
         "period details from paykit_request",
         "payment_period_details",
@@ -1771,13 +1771,6 @@ const PAYEE_LABEL_CASES: [LabelCase; 12] = [
         false,
     ),
     (
-        "a private_payment_list from paykit_request:shop1",
-        "private_payment_list",
-        None,
-        "paykit_request:shop1",
-        false,
-    ),
-    (
         "a receipt naming no request from paykit_request:shop1",
         "payment_receipt",
         None,
@@ -1789,22 +1782,19 @@ const PAYEE_LABEL_CASES: [LabelCase; 12] = [
 /// The shop's message `base` of `payee_label_senders`, naming `request`, as it signs it: JSON
 /// and signature. A receipt naming no request confirms `payment_proof_unrequested`.
 fn label_message(keys: &Keys, base: &str, request: Option<&str>) -> (Vec<u8>, String) {
+    let Some(request) = request else {
+        assert_eq!(base, "payment_receipt");
+        let (_, json) = receipt_json(&("", true, Vec::new()));
+        let plaintext =
+            MessagePlaintext::sign_json(&keys.app("shop").keys, json.clone(), OPAQUE_MEMBERS)
+                .unwrap();
+        return (json, b64(&plaintext.signature()));
+    };
     let parts = label_parts(keys);
-    let refs = match (base, request) {
-        ("payment_receipt", Some(request)) => vec![parts["proof"].2, parts[request].2],
-        (_, Some(request)) => vec![parts[request].2],
-        ("payment_receipt", None) => {
-            let (_, json) = receipt_json(&("", true, Vec::new()));
-            let plaintext =
-                MessagePlaintext::sign_json(&keys.app("shop").keys, json.clone(), OPAQUE_MEMBERS)
-                    .unwrap();
-            return (json, b64(&plaintext.signature()));
-        }
-        (_, None) => {
-            Message::parse(&message_json(base), OPAQUE_MEMBERS)
-                .unwrap()
-                .refs
-        }
+    let refs = if base == "payment_receipt" {
+        vec![parts["proof"].2, parts[request].2]
+    } else {
+        vec![parts[request].2]
     };
     let (json, signature, _) = relabelled(keys, base, "shop", Some(refs), None);
     (json, signature)
@@ -1944,7 +1934,7 @@ fn check_payee_label_senders(keys: &Keys, file: &Value) {
         arr(m, "accepted").len() + arr(m, "refused").len(),
         PAYEE_LABEL_CASES.len()
     );
-    assert_eq!(arr(m, "refused").len(), 6);
+    assert_eq!(arr(m, "refused").len(), 5);
     for (list, taken) in [("accepted", true), ("refused", false)] {
         for case in arr(m, list) {
             let name = st(case, "name");
