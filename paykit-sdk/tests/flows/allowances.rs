@@ -407,7 +407,7 @@ async fn test_allowances_received_acceptance_kept_unplaced_then_given_up_with_a_
     let notices = shop.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
-    assert_eq!(notices[0].counterparty, w.alice_id());
+    assert_eq!(notices[0].counterparty, Some(w.alice_id()));
     assert_eq!(
         notices[0].msg_id.as_deref(),
         Some(acceptance.message().msg_id.as_str())
@@ -1581,7 +1581,7 @@ async fn test_allowances_missed_item_asks_consent_again_until_the_user_confirms(
     let w = World::new();
     let (_shop, _wallet, mut exec, _phone, _, mine) = Box::pin(executed(&w)).await;
     missed(&w);
-    exec.receive(None).await.unwrap();
+    Box::pin(crate::common::finish_listing(&mut exec)).await;
     assert_eq!(
         Box::pin(consent_entry(&exec, &mine)).await,
         Some(json!({ "held": { "confirm_again": true } }))
@@ -1674,7 +1674,7 @@ async fn test_allowances_stored_proposal_waiting_for_the_current_epochs_key_give
     let notices = wallet.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
-    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert_eq!(notices[0].counterparty, Some(w.bob_id()));
 }
 
 /// Bob's proposal of the Allowance with ID number `i`, entered for alice's `wallet`.
@@ -1937,7 +1937,7 @@ async fn test_allowances_answer_over_a_record_that_doesnt_read_never_written_ove
     let notices = phone.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
-    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert_eq!(notices[0].counterparty, Some(w.bob_id()));
 }
 
 /// Alice's phone proposes an Allowance to bob; her wallet, which takes no message from bob,
@@ -1971,7 +1971,7 @@ async fn test_allowances_missed_item_asks_the_counterparty_of_an_open_one_to_res
     let w = World::new();
     let mut wallet = Box::pin(allowance_seen_by_the_wallet(&w, false)).await;
     missed(&w);
-    wallet.receive(None).await.unwrap();
+    Box::pin(crate::common::finish_listing(&mut wallet)).await;
     assert!(Box::pin(asked_bob(&w, &wallet)).await > 0);
 }
 
@@ -1980,7 +1980,7 @@ async fn test_allowances_missed_item_asks_nothing_for_an_ended_one() {
     let w = World::new();
     let mut wallet = Box::pin(allowance_seen_by_the_wallet(&w, true)).await;
     missed(&w);
-    wallet.receive(None).await.unwrap();
+    Box::pin(crate::common::finish_listing(&mut wallet)).await;
     assert_eq!(Box::pin(asked_bob(&w, &wallet)).await, 0);
 }
 
@@ -2569,21 +2569,26 @@ async fn test_allowances_kept_answer_over_a_record_that_doesnt_read_given_up_wit
 /// the records counts as not listed until a listing of Paykit's own.
 fn missed_and_listing_fails(w: &World, wallet: &Paykit) {
     missed(w);
-    fail_paykit_listing(&w.alice, wallet);
+    fail_paykit_listing(
+        &w.alice,
+        crate::certificate::client_listing_requests(wallet.app().cert()),
+    );
 }
 
 /// Fail Paykit's own listing at the end of the next receive of `party`'s app after a
-/// `missed` item: the client's listing after the item, of the app's `collections`, goes
-/// through first, up to the client's page budget. Paykit then continues the same
-/// listing. A failure inside the client's read would instead fail the read.
-fn fail_paykit_listing(party: &pubky_switch_client::testing::TestSigner, app: &Paykit) {
-    party
-        .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
-            path: "records?collection".into(),
-            after: crate::certificate::client_listing_requests(app.app().cert())
-                .min(pubky_switch_client::app::LISTING_PAGES_PER_READ as usize),
-        });
+/// `missed` item: the client lists up to its page budget before Paykit takes over.
+/// A listing that fails inside the client's read fails the read.
+fn fail_paykit_listing(party: &pubky_switch_client::testing::TestSigner, collections: usize) {
+    // A longer native listing already holds Paykit through this read. A fault then
+    // would interrupt the next native read instead of Paykit's subsequent listing.
+    if collections <= pubky_switch_client::app::LISTING_PAGES_PER_READ as usize {
+        party
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+                path: "records?collection".into(),
+                after: collections,
+            });
+    }
 }
 
 #[tokio::test]
@@ -2640,7 +2645,10 @@ async fn test_allowances_kept_answer_past_30_days_kept_while_unlisted() {
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
     let now = w.clock.now_ms();
     w.bob.switch().push_missed(1, now - 1_000, now);
-    fail_paykit_listing(&w.bob, &shop);
+    fail_paykit_listing(
+        &w.bob,
+        crate::certificate::client_listing_requests(shop.app().cert()),
+    );
     let got = shop.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_some(), "{got:?}");
     assert_eq!(
@@ -4243,7 +4251,7 @@ async fn test_allowances_crossing_end_after_an_unanswered_write_reports_its_unkn
     assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
     assert!(restored.notices().await.unwrap().iter().any(|notice| {
         notice.kind == paykit_sdk::NoticeKind::PossiblyDelivered
-            && notice.counterparty == w.bob_id()
+            && notice.counterparty == Some(w.bob_id())
             && notice.msg_id.as_ref() == Some(&end.message().msg_id)
             && notice.message_hash == Some(end.hash())
     }));

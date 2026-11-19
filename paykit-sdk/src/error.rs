@@ -113,6 +113,13 @@ pub enum Refusal {
         "Paykit spec 8.4: whether this payment is credited to another occurrence can't be told now"
     )]
     MaybeCredited,
+    /// The settlement mark cannot be stored. A receipt without it leaves other
+    /// occurrences at risk of a second credit (Paykit wire 5.7, Full).
+    #[error("Paykit wire 5.7: bucket {bucket} cannot store the mark; this payment may be credited again")]
+    SettlementBucketFull {
+        /// The settlement bucket that could not accept the mark.
+        bucket: u16,
+    },
     /// The recurring request is accepted already, by this app or another own app (Paykit
     /// spec 8.2): it is neither accepted nor rejected again, only cancelled.
     #[error("Paykit spec 8.2: the subscription is accepted already")]

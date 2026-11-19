@@ -303,7 +303,7 @@ pub(crate) fn effect(
             crate::allowances::notice_effect(cx, notice)?;
         }
         Body::PrivatePaymentListRequest(request) => {
-            crate::publish::answers::note(cx, stored, request, seq)?;
+            crate::publish::answers::note(cx, stored, &scopes, request, seq)?;
         }
         _ => {}
     }

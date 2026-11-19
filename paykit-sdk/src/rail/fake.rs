@@ -41,6 +41,8 @@ pub const FAKE_LONGEST_COMPLETION_MS: u64 = 3_600_000;
 pub enum Behaviour {
     /// Paid at once.
     Succeed,
+    /// Paid as an output of this test transaction. Several payments may share its ID.
+    InTransaction([u8; 32]),
     /// Fails at once: no money moved.
     Fail,
     /// Stays in flight until [`FakeRail::settle`].
@@ -335,7 +337,11 @@ impl FakeRail {
 fn paid_outcome(key: &AttemptId, counter: u64, now: Option<u64>) -> RailOutcome {
     let digest =
         pubky_switch_core::enc::hash(&[key.to_bytes().as_slice(), &counter.to_be_bytes()].concat());
-    let txid: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    paid_in_transaction(&digest, now)
+}
+
+fn paid_in_transaction(transaction: &[u8; 32], now: Option<u64>) -> RailOutcome {
+    let txid: String = transaction.iter().map(|b| format!("{b:02x}")).collect();
     let mut proof = Map::new();
     proof.insert("type".into(), Value::String("bitcoin-txid".into()));
     proof.insert("txid".into(), Value::String(txid));
@@ -458,6 +464,7 @@ impl Rail for FakeRail {
                         Behaviour::Succeed | Behaviour::LoseAnswer => {
                             paid_outcome(&key, counter, now)
                         }
+                        Behaviour::InTransaction(txid) => paid_in_transaction(&txid, now),
                         // A refusal was answered above.
                         Behaviour::Fail | Behaviour::Refuse => RailOutcome::Failed,
                         Behaviour::Hang => RailOutcome::Pending,
