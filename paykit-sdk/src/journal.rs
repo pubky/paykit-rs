@@ -468,10 +468,9 @@ impl JournalEntry {
             return Err(PaykitError::corrupt());
         };
         let endpoint = self.destination.endpoint_id()?;
-        let rate = body
-            .rates
-            .as_deref()
-            .and_then(|rates| crate::conversion::rate_for(rates, &endpoint));
+        let rates = body.rates.as_deref().ok_or_else(PaykitError::corrupt)?;
+        let rate =
+            paykit_lib::rate_for_endpoint(rates, &endpoint).map_err(|_| PaykitError::corrupt())?;
         if request.sender() != self.payee
             || Some(request.hash()) != self.request_hash()?
             || signed.sender() != self.payee
