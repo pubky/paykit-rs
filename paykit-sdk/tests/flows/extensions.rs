@@ -784,11 +784,25 @@ async fn test_extensions_kept_messages_carried_through_a_restore() {
     let w = World::new();
     let mut shop = shop_on(&w, handling(), store()).await;
     let mut wallet = sender(&w).await;
-    wallet
-        .send_extension(w.bob_id(), &offer(), Vec::new(), body(1))
+    let refs = vec![[7; 32], [8; 32]];
+    let id = wallet
+        .send_extension(w.bob_id(), &offer(), refs.clone(), body(1))
         .await
         .unwrap();
     shop.receive(None).await.unwrap();
+    let original = shop.extension_messages().await.unwrap();
+    assert_eq!(original.len(), 1);
+    assert_eq!(original[0].sender, w.alice_id());
+    assert_eq!(original[0].sender_app, wallet.app_id());
+    assert_eq!(original[0].kind, offer().as_string());
+    assert_eq!(original[0].msg_id, id);
+    assert_eq!(
+        original[0].refs,
+        refs.iter()
+            .map(|r| pubky_switch_core::enc::b64(r))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(original[0].body, body(1));
     let backup = shop.backup().await.unwrap();
     drop(shop);
     let restored = Paykit::restore(
@@ -800,5 +814,54 @@ async fn test_extensions_kept_messages_carried_through_a_restore() {
     )
     .await
     .unwrap();
-    assert_eq!(restored.extension_messages().await.unwrap().len(), 1);
+    assert_eq!(restored.extension_messages().await.unwrap(), original);
+}
+
+#[tokio::test]
+async fn test_extensions_unverifiable_mailbox_entry_refused_on_read_and_restore() {
+    use pubky_switch_client::app::LocalWrite;
+
+    let w = World::new();
+    let mut shop = shop_on(&w, handling(), store()).await;
+    let mut wallet = sender(&w).await;
+    wallet
+        .send_extension(w.bob_id(), &offer(), Vec::new(), body(2))
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    let backup = shop.backup().await.unwrap();
+    let clean: Value = serde_json::from_slice(&backup.to_bytes().unwrap()).unwrap();
+    let entries = shop.app().protocol_scan("paykit", b"xm/").await.unwrap();
+    let [(key, bytes)] = entries.as_slice() else {
+        panic!("expected one extension")
+    };
+    let mut unreadable: Value = serde_json::from_slice(bytes).unwrap();
+    unreadable["d"]["message"]["plaintext"] = json!("");
+    let write = LocalWrite::Put {
+        key: key.clone(),
+        value: serde_json::to_vec(&unreadable).unwrap(),
+    };
+    shop.app_mut()
+        .protocol_commit("paykit", &[write])
+        .await
+        .unwrap();
+    assert!(shop.extension_messages().await.is_err());
+    assert!(shop.backup().await.is_err());
+    drop(shop);
+
+    let mut layer = crate::restore::layer_of(&clean);
+    let (_, value) = layer.iter_mut().find(|(k, _)| k == key).unwrap();
+    *value = unreadable;
+    let incomplete = crate::restore::with_layer(&clean, layer);
+    let backup =
+        paykit_sdk::PaykitBackup::from_bytes(&serde_json::to_vec(&incomplete).unwrap()).unwrap();
+    let restored = Box::pin(Paykit::restore(
+        w.env(&w.bob, store()),
+        handling(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    ))
+    .await;
+    assert!(matches!(restored, Err(error) if error.to_string().contains("kept extension message")));
 }

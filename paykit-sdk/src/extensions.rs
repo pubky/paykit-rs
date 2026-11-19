@@ -10,7 +10,9 @@
 //!   parses it beyond the common checks, never records it in a collection, and never takes
 //!   it as a destination or an answer. The receive step keeps it for the host
 //!   (`xm/<sender>/<msg_id>`), in the commit that moves the cursor past it, so a crash
-//!   between the read and the host's taking it loses nothing; the host reads it with
+//!   between the read and the host's taking it loses nothing. Reading or restoring a kept
+//!   message verifies its sender certificate and signed plaintext for this recipient.
+//!   The host reads it with
 //!   [`crate::Paykit::extension_messages`] and drops it with
 //!   [`crate::Paykit::acknowledge_extension_message`]. It gives its sender no more than a
 //!   Paykit message would: at an app holding `paykit_contacts`, one from a sender the deny list
@@ -34,12 +36,14 @@ use pubky_switch_client::app::{
 };
 use pubky_switch_client::error::StoreError;
 use pubky_switch_core::enc::serde_b64;
+use pubky_switch_core::message::Message;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::error::{PaykitError, Refusal, Result};
+use crate::error::{Refusal, Result};
 use crate::paykit::Paykit;
 use crate::receive::Fail;
+use crate::records::KeptMessage;
 use crate::state::{self, key};
 
 /// The most extension messages kept untaken from one sender.
@@ -99,29 +103,28 @@ impl ExtensionBody<'_> {
     }
 }
 
-impl ExtensionMessage {
-    /// The message as kept, read whole at the sender and `msg_id` its key names: one naming
-    /// another, or of a kind that isn't an extension kind, is a corrupt store.
-    pub(crate) fn check(&self, sender: &[u8; 32], msg_id: &str) -> Result<()> {
-        let refs_read = self
-            .refs
-            .iter()
-            .all(|r| pubky_switch_core::enc::unb64_array::<32>(r).is_ok());
-        if self.sender != *sender
-            || self.msg_id != msg_id
-            || ExtensionKind::parse(&self.kind).is_err()
-            || !refs_read
-        {
-            return Err(PaykitError::corrupt());
-        }
-        ExtensionBody {
-            kind: &self.kind,
-            body: &self.body,
-        }
-        .check()
-        .map_err(|_| PaykitError::corrupt())
-    }
+/// The signed carrier and its original inbox generation (Switch spec 8.2).
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct KeptExtension {
+    message: KeptMessage,
+    generation: u64,
+}
 
+impl KeptExtension {
+    pub(crate) fn open(&self, recipient: &[u8; 32]) -> Result<ExtensionMessage> {
+        let message = self.message.extension_for(recipient)?;
+        let (accepted_at_ms, seq) = self.message.order()?;
+        Ok(ExtensionMessage::of(
+            message,
+            accepted_at_ms,
+            self.generation,
+            seq,
+        ))
+    }
+}
+
+impl ExtensionMessage {
     fn position(&self) -> FeedPosition {
         FeedPosition {
             generation: self.generation,
@@ -129,23 +132,22 @@ impl ExtensionMessage {
         }
     }
 
-    fn of(message: &ReceivedMessage) -> Self {
+    fn of(message: Message, accepted_at_ms: u64, generation: u64, seq: u64) -> Self {
         Self {
-            sender: message.sender,
-            sender_app: message.message.from.app_id,
-            kind: message.message.kind.clone(),
-            msg_id: message.message.msg_id.clone(),
-            created_at_ms: message.message.created_at_ms,
-            accepted_at_ms: message.accepted_at_ms,
-            generation: message.generation,
-            seq: message.seq,
+            sender: message.from.identity,
+            sender_app: message.from.app_id,
+            kind: message.kind,
+            msg_id: message.msg_id,
+            created_at_ms: message.created_at_ms,
+            accepted_at_ms,
+            generation,
+            seq,
             refs: message
-                .message
                 .refs
                 .iter()
                 .map(|r| pubky_switch_core::enc::b64(r))
                 .collect(),
-            body: message.message.body.clone(),
+            body: message.body,
         }
     }
 }
@@ -164,7 +166,12 @@ pub(crate) fn extension_effect(
     }
     let scopes = cx.cert().scopes().to_vec();
     crate::receive::note_cursor_time_at(cx, message.accepted_at_ms)?;
-    let incoming = ExtensionMessage::of(message);
+    let incoming = ExtensionMessage::of(
+        message.message.clone(),
+        message.accepted_at_ms,
+        message.generation,
+        message.seq,
+    );
     let kept_key = key::extension(&incoming.sender, &incoming.msg_id);
     if state::cx_get::<ExtensionMessage>(cx, &kept_key)?.is_some()
         || !crate::receive::admits_new_state_of(
@@ -204,7 +211,11 @@ pub(crate) fn extension_effect(
             },
         );
     }
-    let write = state::local_put(&kept_key, &incoming).map_err(|_| Fail::corrupt())?;
+    let kept = KeptExtension {
+        message: KeptMessage::received(message),
+        generation: message.generation,
+    };
+    let write = state::local_put(&kept_key, &kept).map_err(|_| Fail::corrupt())?;
     crate::receive::keep_local(cx, write);
     Ok(Outcome::Apply(Effect::default()))
 }

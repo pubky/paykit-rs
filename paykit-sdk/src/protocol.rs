@@ -977,7 +977,9 @@ pub(crate) fn restore_paykit_layer(
             }
             StateKey::Extension { .. } => {
                 state::restored::<crate::extensions::ExtensionMessage>(&key, &value, &binder)
-                    .map_err(|_| unread())?;
+                    .map_err(|_| {
+                        "Paykit wire 4.3: a kept extension message in the backup doesn't verify"
+                    })?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }

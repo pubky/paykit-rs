@@ -374,7 +374,7 @@ mod sealed {
 /// Paykit's state is read anywhere without its binding.
 pub(crate) trait Stored: sealed::Sealed + DeserializeOwned {
     /// Decode the bytes written by the owner of this state family.
-    fn read_bytes(bytes: &[u8]) -> Result<Self> {
+    fn read_bytes(bytes: &[u8], _: &Binder<'_>) -> Result<Self> {
         decode(bytes)
     }
 
@@ -387,7 +387,7 @@ pub(crate) trait Stored: sealed::Sealed + DeserializeOwned {
 fn bound<T: Stored>(key: &[u8], bytes: &[u8], binder: &Binder<'_>) -> Result<T> {
     let text = std::str::from_utf8(key).map_err(|_| PaykitError::corrupt())?;
     let family = StateKey::parse(key).ok_or_else(PaykitError::corrupt)?;
-    let value = T::read_bytes(bytes)?;
+    let value = T::read_bytes(bytes, binder)?;
     value.bind(text, &family, binder)?;
     Ok(value)
 }
@@ -475,7 +475,7 @@ impl sealed::Sealed for [u8; 16] {}
 
 /// The original batch ID is written by the Switch client as exactly sixteen bytes.
 impl Stored for [u8; 16] {
-    fn read_bytes(bytes: &[u8]) -> Result<Self> {
+    fn read_bytes(bytes: &[u8], _: &Binder<'_>) -> Result<Self> {
         bytes.try_into().map_err(|_| PaykitError::corrupt())
     }
 
@@ -492,7 +492,7 @@ impl Stored for [u8; 16] {
 impl sealed::Sealed for crate::receipt_delivery::ReceiptBatch {}
 
 impl Stored for crate::receipt_delivery::ReceiptBatch {
-    fn read_bytes(bytes: &[u8]) -> Result<Self> {
+    fn read_bytes(bytes: &[u8], _: &Binder<'_>) -> Result<Self> {
         match bytes.try_into() {
             Ok(id) => Ok(Self::Awaiting(id)),
             Err(_) => Ok(Self::Applied(decode(bytes)?)),
@@ -589,9 +589,17 @@ impl sealed::Sealed for crate::extensions::ExtensionMessage {}
 /// An extension message kept for the host (`xm/<sender>/<msg_id>`): from the sender and of
 /// the `msg_id` its key names, of an extension kind (Paykit wire 4.3).
 impl Stored for crate::extensions::ExtensionMessage {
+    fn read_bytes(bytes: &[u8], binder: &Binder<'_>) -> Result<Self> {
+        decode::<crate::extensions::KeptExtension>(bytes)?.open(binder.identity())
+    }
+
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
-            StateKey::Extension { sender, msg_id } => self.check(sender, msg_id),
+            StateKey::Extension { sender, msg_id }
+                if *sender == self.sender && msg_id == &self.msg_id =>
+            {
+                Ok(())
+            }
             _ => corrupt(),
         }
     }
