@@ -129,10 +129,11 @@ where
 
     /// Delete this identity's Pubky app profile at the revision it was read at.
     ///
-    /// The whole delete runs under the profile's homeserver lock. An absent
-    /// profile is already deleted. A profile whose bytes changed since
-    /// `expected_revision` returns [`PaykitSdkError::ConcurrentUpdate`] before
-    /// anything is deleted. A social v1 identity's pubky.app (v0) copy is
+    /// The whole delete holds the homeserver locks of both profile paths,
+    /// pubky.app (v0) first, so no profile write on either layout lands during
+    /// it. An absent profile is already deleted. A profile whose bytes changed
+    /// since `expected_revision` returns [`PaykitSdkError::ConcurrentUpdate`]
+    /// before anything is deleted. A social v1 identity's pubky.app (v0) copy is
     /// deleted first and its social v1 profile after it, in the order of the
     /// spec's `deletionPaths`. Then the avatars the deleted profiles named in
     /// this identity's own storage are deleted, best effort: a social v1 file,
@@ -149,60 +150,75 @@ where
         let version = own_social_version(&session_access).await?;
         let session = &session_access.session;
         let storage = session.storage();
-        paykit_lib::with_write_lock(session, version.profile_path(), |lock| async move {
-            let mut images = Vec::new();
-            let current = match storage.get(version.profile_path()).await {
-                Ok(response) => {
-                    read_public_response(response, MAX_PUBKY_PROFILE_BYTES, "read Pubky profile")
+        let (public_key, storage, expected_revision) = (&public_key, &storage, &expected_revision);
+        paykit_lib::with_write_lock(session, PUBKY_PROFILE_PATH, |v0_lock| async move {
+            let v0_lock = &v0_lock;
+            paykit_lib::with_write_lock(session, SOCIAL_V1_PROFILE_PATH, |v1_lock| async move {
+                let (profile_lock, copy_lock) = match version {
+                    SocialVersion::V1 => (&v1_lock, Some(v0_lock)),
+                    SocialVersion::V0 => (v0_lock, None),
+                };
+                let mut images = Vec::new();
+                let current = match storage.get(version.profile_path()).await {
+                    Ok(response) => {
+                        read_public_response(
+                            response,
+                            MAX_PUBKY_PROFILE_BYTES,
+                            "read Pubky profile",
+                        )
                         .await?
+                    }
+                    Err(err) if is_pubky_not_found(&err) => None,
+                    Err(err) => return Err(put_error("read Pubky profile", err)),
+                };
+                if let Some(raw) = &current {
+                    if paykit_lib::content_revision(raw) != *expected_revision {
+                        return Err(pubky_profile_changed());
+                    }
+                    images.extend(profile_image(raw));
                 }
-                Err(err) if is_pubky_not_found(&err) => None,
-                Err(err) => return Err(put_error("read Pubky profile", err)),
-            };
-            if let Some(raw) = &current {
-                if paykit_lib::content_revision(raw) != expected_revision {
-                    return Err(pubky_profile_changed());
-                }
-                images.extend(profile_image(raw));
-            }
-            if version == SocialVersion::V1 {
-                match self
-                    .fetch_pubky_profile_raw(&public_key, PUBKY_PROFILE_PATH)
-                    .await
-                {
-                    Ok(Some((raw, _))) => images.extend(profile_image(&raw)),
-                    Ok(None) => {}
-                    Err(err) => tracing::warn!(%err, "could not read the v0 profile's avatar"),
-                }
-            }
-            images.dedup();
-            let mut avatar_paths = Vec::new();
-            for image in &images {
-                avatar_paths.extend(self.own_avatar_paths(&public_key, image).await);
-            }
-            if version == SocialVersion::V1 {
-                match storage.delete(PUBKY_PROFILE_PATH).await {
-                    Ok(_) => {}
-                    Err(err) if is_pubky_not_found(&err) => {}
-                    Err(err) => return Err(put_error("delete Pubky app (v0) profile", err)),
-                }
-            }
-            if current.is_some() {
-                storage
-                    .delete_locked(&lock)
-                    .await
-                    .map_err(|err| put_error("delete Pubky profile", err))?;
-            }
-            for path in avatar_paths {
-                match storage.delete(path.as_str()).await {
-                    Ok(_) => {}
-                    Err(err) if is_pubky_not_found(&err) => {}
-                    Err(err) => {
-                        tracing::warn!(%path, %err, "could not delete Pubky profile avatar")
+                if copy_lock.is_some() {
+                    match self
+                        .fetch_pubky_profile_raw(public_key, PUBKY_PROFILE_PATH)
+                        .await
+                    {
+                        Ok(Some((raw, _))) => images.extend(profile_image(&raw)),
+                        Ok(None) => {}
+                        Err(err) => {
+                            tracing::warn!(%err, "could not read the v0 profile's avatar")
+                        }
                     }
                 }
-            }
-            Ok(())
+                images.dedup();
+                let mut avatar_paths = Vec::new();
+                for image in &images {
+                    avatar_paths.extend(self.own_avatar_paths(public_key, image).await);
+                }
+                if let Some(copy_lock) = copy_lock {
+                    match storage.delete_locked(copy_lock).await {
+                        Ok(_) => {}
+                        Err(err) if is_pubky_not_found(&err) => {}
+                        Err(err) => return Err(put_error("delete Pubky app (v0) profile", err)),
+                    }
+                }
+                if current.is_some() {
+                    storage
+                        .delete_locked(profile_lock)
+                        .await
+                        .map_err(|err| put_error("delete Pubky profile", err))?;
+                }
+                for path in avatar_paths {
+                    match storage.delete(path.as_str()).await {
+                        Ok(_) => {}
+                        Err(err) if is_pubky_not_found(&err) => {}
+                        Err(err) => {
+                            tracing::warn!(%path, %err, "could not delete Pubky profile avatar")
+                        }
+                    }
+                }
+                Ok(())
+            })
+            .await
         })
         .await
     }
