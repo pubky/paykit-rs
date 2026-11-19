@@ -505,19 +505,126 @@ fn private_intake_event_path_filter() -> String {
     format!("{}/", paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX)
 }
 
+/// Per-peer Encrypted Link read folders used to drop irrelevant event hints.
+///
+/// A read folder ties a pseudorandom storage path to one counterparty, so it
+/// must never be logged or exposed through health or errors. That is why this
+/// type does not derive `Debug`. A peer without an entry is unfiltered: every
+/// event under its private tree is a hint. Only established Encrypted Links
+/// get an entry; a pending Encrypted Link Handshake stays unfiltered.
+#[derive(Default)]
+struct PrivateIntakeEventScopes {
+    read_folders: HashMap<PubkyPublicKey, String>,
+}
+
+/// Return the folder that holds `snapshot`'s expected transport slots, or
+/// `None` (unfiltered) when it cannot be derived.
+fn private_intake_read_folder(
+    snapshot: &paykit_lib::EncryptedLinkSnapshot,
+    local: &paykit_lib::PublicKey,
+    secret: &[u8; 32],
+) -> Option<String> {
+    let (resource, _) = snapshot
+        .next_private_application_message_resource(local, secret)
+        .ok()?;
+    let resource: pubky::PubkyResource = resource.parse().ok()?;
+    let (folder, _) = resource.path.as_str().rsplit_once('/')?;
+    is_private_intake_link_folder(folder).then(|| folder.to_owned())
+}
+
+/// Whether `folder` has the shape of a derived Encrypted Link folder:
+/// the private prefix followed by 64 lowercase hex characters.
+fn is_private_intake_link_folder(folder: &str) -> bool {
+    folder
+        .strip_prefix(paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .is_some_and(|hex| {
+            hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        })
+}
+
+/// Number of messages in a full Encrypted Link Handshake.
+///
+/// pubky-noise 0.1.0 writes handshake message `n` to slot `n` of the writer's
+/// derived folder and starts both transport counters at this count when it
+/// enters transport (`DataLinkContext::transition_to_transport`), so slots
+/// below it are handshake messages and slots at or above it are transport
+/// messages.
+fn encrypted_link_handshake_message_count() -> usize {
+    pubky_noise::snow_crypto::full_handshake_actions(
+        pubky_noise::snow_crypto::HandshakePattern::PatternXX,
+        true,
+    )
+    .map_or(0, |actions| actions.len())
+}
+
+/// Whether `path` is an Encrypted Link Handshake slot in any derived folder.
+///
+/// A relink or recovery derives a new folder, so its handshake reply lands
+/// outside the current read folder and must still be a hint.
+fn is_encrypted_link_handshake_slot(path: &str) -> bool {
+    path.rsplit_once('/').is_some_and(|(folder, slot)| {
+        is_private_intake_link_folder(folder)
+            && (0..encrypted_link_handshake_message_count()).any(|n| slot == n.to_string())
+    })
+}
+
+/// Whether `event` may announce a packet the expected-slot fetch would find.
+///
+/// `read_folder` is `None` for an unfiltered peer: every event is a hint.
+/// Otherwise only a PUT below the read folder, or a PUT at an Encrypted Link
+/// Handshake slot, is a hint. Deletes, Receipts, and other links' slots are
+/// not.
+fn private_intake_event_may_announce_packet(
+    read_folder: Option<&str>,
+    event: &pubky::Event,
+) -> bool {
+    let Some(read_folder) = read_folder else {
+        return true;
+    };
+    if !matches!(event.event_type, pubky::EventType::Put { .. }) {
+        return false;
+    }
+    let path = event.resource.path.as_str();
+    path.strip_prefix(read_folder)
+        .is_some_and(|rest| rest.starts_with('/'))
+        || is_encrypted_link_handshake_slot(path)
+}
+
+/// Route an event to its subscribed peer and replay cursor, or `None` when
+/// the owner is not subscribed or the event cannot announce a packet.
+///
+/// Trust and durability assumptions: the event path is an untrusted hint and
+/// never selects what is fetched; acquisition always derives the next expected
+/// slot from the stored Encrypted Link. Healthy audits remain the delivery
+/// guarantee, so a stale scope can only drop a hint. An ignored event writes
+/// no cursor, so a reconnect replays it from the stored cursor and filters it
+/// again. A poisoned scope lock leaves every peer unfiltered.
 fn route_private_intake_event(
     group: &SubscriptionGroup,
+    scopes: &std::sync::Mutex<PrivateIntakeEventScopes>,
     event: pubky::Event,
 ) -> Option<(PubkyPublicKey, PrivateIntakeCursorRecord)> {
     let peer = PubkyPublicKey::from_public_key(&event.resource.owner);
-    group.peers.contains(&peer).then(|| {
-        let cursor = PrivateIntakeCursorRecord {
-            subscribed_user: peer.clone(),
-            homeserver: group.homeserver_name.clone(),
-            event_id: event.cursor.id(),
-        };
-        (peer, cursor)
-    })
+    if !group.peers.contains(&peer) {
+        return None;
+    }
+    let read_folder = scopes
+        .lock()
+        .ok()
+        .and_then(|scopes| scopes.read_folders.get(&peer).cloned());
+    if !private_intake_event_may_announce_packet(read_folder.as_deref(), &event) {
+        return None;
+    }
+    let cursor = PrivateIntakeCursorRecord {
+        subscribed_user: peer.clone(),
+        homeserver: group.homeserver_name.clone(),
+        event_id: event.cursor.id(),
+    };
+    Some((peer, cursor))
 }
 
 async fn audit_private_intake_peer<F, Fut>(
@@ -614,6 +721,7 @@ type PrivateIntakeAudit = Arc<dyn Fn() -> PrivateIntakeAuditFuture + Send + Sync
 
 async fn process_private_intake_event<F, Fut>(
     group: &SubscriptionGroup,
+    scopes: &std::sync::Mutex<PrivateIntakeEventScopes>,
     event: pubky::Event,
     acquire: &mut F,
 ) -> Option<(PubkyPublicKey, Result<PrivatePacketAcquisition>)>
@@ -621,7 +729,7 @@ where
     F: FnMut(PubkyPublicKey, Option<PrivateIntakeCursorRecord>) -> Fut,
     Fut: Future<Output = Result<PrivatePacketAcquisition>>,
 {
-    let (peer, cursor) = route_private_intake_event(group, event)?;
+    let (peer, cursor) = route_private_intake_event(group, scopes, event)?;
     let outcome = acquire(peer.clone(), Some(cursor)).await;
     Some((peer, outcome))
 }
@@ -723,6 +831,7 @@ async fn run_connected_private_intake_stream(
     work: &Arc<Notify>,
     acquire: PrivateIntakeAcquire,
     audit_group: PrivateIntakeAudit,
+    event_scopes: &std::sync::Mutex<PrivateIntakeEventScopes>,
     mut handshake_pending: bool,
 ) -> PrivateIntakeEventLoopExit {
     let mut audit =
@@ -757,7 +866,7 @@ async fn run_connected_private_intake_stream(
             event = stream.next() => match event {
                 Some(Ok(event)) => {
                     let mut acquire_one = |peer, cursor| acquire(peer, cursor);
-                    match process_private_intake_event(group, event, &mut acquire_one).await {
+                    match process_private_intake_event(group, event_scopes, event, &mut acquire_one).await {
                         Some((peer, Ok(PrivatePacketAcquisition::Inserted))) => {
                             work.notify_waiters();
                             set_peer_state(health, peer, PrivateIntakeTransportState::Replaying).await;
@@ -1453,19 +1562,31 @@ where
                     Box::pin(async move { sdk.acquire_expected_private_packet(peer, cursor).await })
                 })
             };
+            // Scopes are refreshed after every in-stream audit, so a stale
+            // scope lasts at most one audit interval and can only drop a hint.
+            let event_scopes = Arc::new(std::sync::Mutex::new(
+                self.private_intake_event_scopes(&active_group.peers).await,
+            ));
             let audit_group: PrivateIntakeAudit = {
                 let sdk = Arc::clone(&self);
                 let group = active_group.clone();
                 let health = Arc::clone(&health);
                 let work = Arc::clone(&work);
+                let event_scopes = Arc::clone(&event_scopes);
                 Arc::new(move || {
                     let sdk = Arc::clone(&sdk);
                     let group = group.clone();
                     let health = Arc::clone(&health);
                     let work = Arc::clone(&work);
-                    Box::pin(
-                        async move { sdk.audit_private_intake_group(&group, &health, &work).await },
-                    )
+                    let event_scopes = Arc::clone(&event_scopes);
+                    Box::pin(async move {
+                        let outcome = sdk.audit_private_intake_group(&group, &health, &work).await;
+                        let scopes = sdk.private_intake_event_scopes(&group.peers).await;
+                        if let Ok(mut current) = event_scopes.lock() {
+                            *current = scopes;
+                        }
+                        outcome
+                    })
                 })
             };
             let exit = run_connected_private_intake_stream(
@@ -1478,6 +1599,7 @@ where
                 &work,
                 acquire,
                 audit_group,
+                &event_scopes,
                 audit_outcome.handshake_pending,
             )
             .await;
@@ -1561,6 +1683,53 @@ where
             }
         }
         audit
+    }
+
+    /// Derive the read folder of every established Encrypted Link in `peers`.
+    ///
+    /// Best effort: any failure returns empty scopes, which leaves every peer
+    /// unfiltered. Scopes only drop event hints, so they do not validate the
+    /// local Noise key authorization; a snapshot that does not match the
+    /// local Noise key derives no folder and stays unfiltered.
+    async fn private_intake_event_scopes(
+        &self,
+        peers: &[PubkyPublicKey],
+    ) -> PrivateIntakeEventScopes {
+        let Ok((Some(access), _, Some(snapshots))) = self
+            .load_session_access_and_refresh_identity_with(|tx| {
+                let state = tx.export_storage_state();
+                Ok(peers
+                    .iter()
+                    .filter(|peer| {
+                        private_intake_peer_phase(&state, peer)
+                            == Some(PrivateIntakePeerPhase::Established)
+                    })
+                    .filter_map(|peer| {
+                        super::private_stream::associated_link_snapshot(&*tx, peer)
+                            .map(|(_, link, _)| (peer.clone(), link))
+                    })
+                    .collect::<Vec<_>>())
+            })
+            .await
+        else {
+            return PrivateIntakeEventScopes::default();
+        };
+        let Ok(secret) = access
+            .paykit_noise_secret_key()
+            .map(zeroize::Zeroizing::new)
+        else {
+            return PrivateIntakeEventScopes::default();
+        };
+        let session_info = access.session.info();
+        let local = session_info.public_key();
+        PrivateIntakeEventScopes {
+            read_folders: snapshots
+                .into_iter()
+                .filter_map(|(peer, link)| {
+                    Some((peer, private_intake_read_folder(&link, local, &secret)?))
+                })
+                .collect(),
+        }
     }
 
     async fn acquire_expected_private_packet(
@@ -3385,6 +3554,7 @@ mod tests {
                 })
             }
         });
+        let scopes = StdMutex::default();
         let mut running = Box::pin(run_connected_private_intake_stream(
             &active_group,
             Box::pin(stream::pending()),
@@ -3395,6 +3565,7 @@ mod tests {
             &work,
             Arc::new(|_, _| Box::pin(async { Ok(PrivatePacketAcquisition::Absent) })),
             audit,
+            &scopes,
             false,
         ));
 
@@ -3471,7 +3642,7 @@ mod tests {
             cursor: pubky::EventCursor::new(42),
         };
 
-        let routed = route_private_intake_event(&group, event).unwrap();
+        let routed = route_private_intake_event(&group, &StdMutex::default(), event).unwrap();
         assert_eq!(routed.0, peer);
         assert_eq!(routed.1.subscribed_user, routed.0);
         assert_eq!(routed.1.homeserver, "homeserver-a");
@@ -3494,7 +3665,278 @@ mod tests {
             cursor: pubky::EventCursor::new(99),
         };
 
-        assert!(route_private_intake_event(&group, event).is_none());
+        assert!(route_private_intake_event(&group, &StdMutex::default(), event).is_none());
+    }
+
+    fn intake_event(
+        event_type: pubky::EventType,
+        resource: pubky::PubkyResource,
+        event_id: u64,
+    ) -> pubky::Event {
+        pubky::Event {
+            event_type,
+            resource,
+            cursor: pubky::EventCursor::new(event_id),
+        }
+    }
+
+    fn put_event(resource: pubky::PubkyResource, event_id: u64) -> pubky::Event {
+        intake_event(
+            pubky::EventType::Put {
+                content_hash: blake3::Hash::from_bytes([7; 32]),
+            },
+            resource,
+            event_id,
+        )
+    }
+
+    fn peer_resource(owner: &pubky::PublicKey, path: &str) -> pubky::PubkyResource {
+        pubky::PubkyResource::new(owner.clone(), path).unwrap()
+    }
+
+    /// An established link's peer, its read folder, and its expected slot.
+    struct ScopedIntakeFixture {
+        remote: pubky::PublicKey,
+        read_folder: String,
+        expected_slot: pubky::PubkyResource,
+    }
+
+    fn scoped_intake_fixture() -> ScopedIntakeFixture {
+        let local = pubky::Keypair::random().public_key();
+        let remote = pubky::Keypair::random().public_key();
+        let (snapshot, secret) = intake_snapshot(&local, &remote, 3);
+        let read_folder = private_intake_read_folder(&snapshot, &local, &secret).unwrap();
+        let expected_slot = snapshot
+            .private_application_message_resource_at_counter(&local, &secret, 3)
+            .unwrap()
+            .0
+            .parse()
+            .unwrap();
+        ScopedIntakeFixture {
+            remote,
+            read_folder,
+            expected_slot,
+        }
+    }
+
+    fn other_link_folder(read_folder: &str) -> String {
+        let other = format!(
+            "{}/{}",
+            paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX,
+            "ab".repeat(32)
+        );
+        assert_ne!(other, read_folder);
+        other
+    }
+
+    /// Events under a scoped peer's private tree that cannot announce its
+    /// next expected slot.
+    fn irrelevant_intake_events(fixture: &ScopedIntakeFixture) -> Vec<pubky::Event> {
+        let owner = &fixture.remote;
+        let folder = &fixture.read_folder;
+        let other_folder = other_link_folder(folder);
+        let receipt = format!(
+            "{}/receipts/receipt-1",
+            paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX
+        );
+        vec![
+            put_event(peer_resource(owner, &format!("{other_folder}/3")), 10),
+            put_event(peer_resource(owner, &receipt), 11),
+            intake_event(pubky::EventType::Delete, fixture.expected_slot.clone(), 12),
+            put_event(peer_resource(owner, &format!("{folder}0")), 13),
+            put_event(peer_resource(owner, &format!("{folder}0/3")), 14),
+        ]
+    }
+
+    #[test]
+    fn test_private_intake_event_filter_accepts_put_in_read_folder() {
+        let fixture = scoped_intake_fixture();
+        let scope = Some(fixture.read_folder.as_str());
+
+        assert!(private_intake_event_may_announce_packet(
+            scope,
+            &put_event(fixture.expected_slot.clone(), 1),
+        ));
+        let later_slot = peer_resource(&fixture.remote, &format!("{}/4", fixture.read_folder));
+        assert!(private_intake_event_may_announce_packet(
+            scope,
+            &put_event(later_slot, 2),
+        ));
+    }
+
+    #[test]
+    fn test_private_intake_event_filter_ignores_irrelevant_events() {
+        let fixture = scoped_intake_fixture();
+
+        for event in irrelevant_intake_events(&fixture) {
+            assert!(
+                !private_intake_event_may_announce_packet(Some(&fixture.read_folder), &event),
+                "event {} must not be a hint",
+                event.cursor.id()
+            );
+        }
+    }
+
+    #[test]
+    fn test_private_intake_event_filter_accepts_handshake_slot_in_any_folder() {
+        // pubky-noise 0.1.0 XX handshakes use slots 0, 1, and 2; transport
+        // counters start at 3, which the `intake_snapshot` fixture mirrors.
+        assert_eq!(encrypted_link_handshake_message_count(), 3);
+        let fixture = scoped_intake_fixture();
+        let owner = &fixture.remote;
+        let scope = Some(fixture.read_folder.as_str());
+        let other_folder = other_link_folder(&fixture.read_folder);
+
+        for folder in [&fixture.read_folder, &other_folder] {
+            for slot in 0..3 {
+                let resource = peer_resource(owner, &format!("{folder}/{slot}"));
+                assert!(private_intake_event_may_announce_packet(
+                    scope,
+                    &put_event(resource, 1),
+                ));
+            }
+        }
+        let not_handshake_slots = [
+            format!("{other_folder}/3"),
+            format!("{other_folder}/01"),
+            format!("{other_folder}/0/1"),
+            format!("{}/0", other_folder.to_uppercase()),
+            format!("{}/0", &other_folder[..other_folder.len() - 1]),
+        ];
+        for path in not_handshake_slots {
+            assert!(
+                !private_intake_event_may_announce_packet(
+                    scope,
+                    &put_event(peer_resource(owner, &path), 1),
+                ),
+                "{path} must not be a handshake slot"
+            );
+        }
+    }
+
+    #[test]
+    fn test_private_intake_event_route_leaves_unscoped_peer_unfiltered() {
+        let fixture = scoped_intake_fixture();
+        let scoped_peer = PubkyPublicKey::from_public_key(&fixture.remote);
+        let unscoped_owner = pubky::Keypair::random().public_key();
+        let unscoped_peer = PubkyPublicKey::from_public_key(&unscoped_owner);
+        let group = SubscriptionGroup {
+            homeserver: pubky::Keypair::random().public_key(),
+            homeserver_name: "homeserver-a".into(),
+            peers: vec![scoped_peer.clone(), unscoped_peer.clone()],
+        };
+        let scopes = StdMutex::new(PrivateIntakeEventScopes {
+            read_folders: HashMap::from([(scoped_peer, fixture.read_folder.clone())]),
+        });
+
+        for event in irrelevant_intake_events(&fixture) {
+            assert!(route_private_intake_event(&group, &scopes, event).is_none());
+        }
+        for event in irrelevant_intake_events(&fixture) {
+            let event = intake_event(
+                event.event_type,
+                peer_resource(&unscoped_owner, event.resource.path.as_str()),
+                event.cursor.id(),
+            );
+            let event_id = event.cursor.id();
+            let (peer, cursor) = route_private_intake_event(&group, &scopes, event).unwrap();
+            assert_eq!(peer, unscoped_peer);
+            assert_eq!(cursor.event_id, event_id);
+        }
+
+        // A poisoned scope lock leaves even the scoped peer unfiltered.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = scopes.lock().unwrap();
+            panic!("poison private intake event scopes");
+        }));
+        assert!(scopes.is_poisoned());
+        for event in irrelevant_intake_events(&fixture) {
+            assert!(route_private_intake_event(&group, &scopes, event).is_some());
+        }
+    }
+
+    #[test]
+    fn test_private_intake_read_folder_is_expected_slot_parent() {
+        let local = pubky::Keypair::random().public_key();
+        let remote = pubky::Keypair::random().public_key();
+        let (snapshot, secret) = intake_snapshot(&local, &remote, 3);
+        let expected: pubky::PubkyResource = snapshot
+            .next_private_application_message_resource(&local, &secret)
+            .unwrap()
+            .0
+            .parse()
+            .unwrap();
+
+        let folder = private_intake_read_folder(&snapshot, &local, &secret).unwrap();
+
+        assert_eq!(expected.owner, remote);
+        assert_eq!(expected.path.as_str(), format!("{folder}/3"));
+        assert!(is_private_intake_link_folder(&folder));
+        assert_eq!(
+            private_intake_read_folder(&snapshot, &local, &[9; 32]),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn test_production_stream_loop_ignores_irrelevant_events_without_acquisition() {
+        let fixture = scoped_intake_fixture();
+        let peer = PubkyPublicKey::from_public_key(&fixture.remote);
+        let group = SubscriptionGroup {
+            homeserver: pubky::Keypair::random().public_key(),
+            homeserver_name: "homeserver-a".into(),
+            peers: vec![peer.clone()],
+        };
+        let scopes = StdMutex::new(PrivateIntakeEventScopes {
+            read_folders: HashMap::from([(peer.clone(), fixture.read_folder.clone())]),
+        });
+        let observed = Arc::new(StdMutex::new(Vec::new()));
+        let acquire: PrivateIntakeAcquire = Arc::new({
+            let observed = Arc::clone(&observed);
+            move |requested, cursor| {
+                observed.lock().unwrap().push((requested, cursor));
+                Box::pin(async { Ok(PrivatePacketAcquisition::Absent) })
+            }
+        });
+        let audit: PrivateIntakeAudit =
+            Arc::new(|| Box::pin(async { PrivateIntakeAuditOutcome::default() }));
+        let health = Arc::new(AsyncRwLock::new(PrivateIntakeHealth::default()));
+        let work = Arc::new(Notify::new());
+        let (_stop, stop_rx) = watch::channel(false);
+        let run = |events: Vec<pubky::Event>| {
+            run_connected_private_intake_stream(
+                &group,
+                Box::pin(stream::iter(events.into_iter().map(Ok))),
+                Duration::from_secs(60),
+                Duration::from_secs(60),
+                stop_rx.clone(),
+                &health,
+                &work,
+                Arc::clone(&acquire),
+                Arc::clone(&audit),
+                &scopes,
+                false,
+            )
+        };
+
+        let ignored_exit = run(irrelevant_intake_events(&fixture)).await;
+        assert!(matches!(ignored_exit, PrivateIntakeEventLoopExit::Ended));
+        assert!(observed.lock().unwrap().is_empty());
+        assert!(health.read().await.peers.is_empty());
+
+        let mut events = irrelevant_intake_events(&fixture);
+        events.push(put_event(fixture.expected_slot.clone(), 99));
+        let exit = run(events).await;
+
+        assert!(matches!(exit, PrivateIntakeEventLoopExit::Ended));
+        let observed = std::mem::take(&mut *observed.lock().unwrap());
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].0, peer);
+        assert_eq!(observed[0].1.as_ref().unwrap().event_id, 99);
+        assert_eq!(
+            health.read().await.peers[&peer],
+            PrivateIntakeTransportState::CaughtUp
+        );
     }
 
     #[test]
@@ -3632,6 +4074,7 @@ mod tests {
             &work,
             acquire,
             audit,
+            &StdMutex::default(),
             false,
         )
         .await;
@@ -3685,6 +4128,7 @@ mod tests {
                 })
             }
         });
+        let scopes = StdMutex::default();
         let mut running = Box::pin(run_connected_private_intake_stream(
             &group,
             Box::pin(events),
@@ -3695,6 +4139,7 @@ mod tests {
             &work,
             acquire,
             audit,
+            &scopes,
             false,
         ));
 
@@ -4126,6 +4571,7 @@ mod tests {
             &work,
             acquire,
             Arc::new(|| Box::pin(async { PrivateIntakeAuditOutcome::default() })),
+            &StdMutex::default(),
             false,
         )
         .await;
@@ -4319,6 +4765,7 @@ mod tests {
             &work,
             Arc::clone(&acquire),
             Arc::new(|| Box::pin(async { PrivateIntakeAuditOutcome::default() })),
+            &StdMutex::default(),
             false,
         )
         .await;
@@ -4351,6 +4798,7 @@ mod tests {
             &work,
             Arc::clone(&acquire),
             Arc::new(|| Box::pin(async { PrivateIntakeAuditOutcome::default() })),
+            &StdMutex::default(),
             false,
         )
         .await;
@@ -4395,6 +4843,7 @@ mod tests {
             &work,
             acquire,
             Arc::new(|| Box::pin(async { PrivateIntakeAuditOutcome::default() })),
+            &StdMutex::default(),
             false,
         )
         .await;
