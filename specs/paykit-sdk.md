@@ -1422,6 +1422,18 @@ fallback. HTTP 404, 405, and 501 subscription failures are reported as
 are `Stale` and retry. Neither state proves remote absence. Buffered work
 remains drainable during transport failure.
 
+A Linked Peer with no stored intake cursor for its current homeserver, such as
+on first start, after Paykit identity key rotation, or after a homeserver move,
+is not replayed from the beginning of its private-directory history. Before
+subscribing, the supervisor makes one non-live, newest-first request limited to
+one event for those peers and subscribes them from that event. The startup
+audit runs after the subscription and reconciles every slot written at or
+before that event. The cursor is stored only after that audit finds the
+expected slot absent; otherwise the next connect repeats the request. If the
+request fails or returns no event, those peers subscribe from the beginning as
+before. Audits, not events, guarantee delivery: a packet whose event the stream
+skips is fetched by the next audit.
+
 `PrivateIntakeSupervisor::health` reports per-peer transport state and last
 successful absent-slot audit. `subscribe_work` is a coalesced local hint, not a
 durable queue: consumers register first, inspect/drain durable state, wait, then
