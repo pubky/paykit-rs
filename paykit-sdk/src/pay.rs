@@ -2681,7 +2681,7 @@ impl Paykit {
                     self.refuse_claim(&view)?;
                 }
                 // A batch on a Billing Period writes its period record at the version read,
-                // marking it `manual_only`, or is conditioned on it (Paykit spec 8.3, "Manual
+                // marking it `manual_only` when paid by hand, or is conditioned on it (Paykit spec 8.3, "Manual
                 // only"): one another own app wrote since fails it, and is read again, so the
                 // next attempt builds on that write, not on the same stale copy.
                 if entry.period()?.is_some() {
@@ -4143,6 +4143,13 @@ impl Paykit {
             return Ok(false);
         };
         let target = ActivityTarget::payer(natural);
+        if let Some(period) = entry.period()?.filter(|_| !entry.user_started) {
+            return Ok(
+                Box::pin(self.policy_period_conditions(entry, &target, period))
+                    .await?
+                    .is_none(),
+            );
+        }
         if self.kept_stop(&target).await? {
             return Ok(true);
         }
@@ -4405,6 +4412,29 @@ impl Paykit {
         Ok(judged != confirmed)
     }
 
+    /// An unfunded period started by policy must still be authorized by both current
+    /// records at resume and immediately before the rail call (Paykit spec 8.2, 8.3).
+    async fn policy_period_conditions(
+        &mut self,
+        entry: &JournalEntry,
+        parent: &ActivityTarget,
+        period: PeriodRef,
+    ) -> Result<Option<Box<[Condition; 2]>>> {
+        let occurrence = ActivityTarget::payer(entry.natural_key.clone());
+        let Some(parent) = Box::pin(self.policy_period_condition(parent, None)).await? else {
+            return Ok(None);
+        };
+        let Some(current) =
+            Box::pin(self.policy_period_condition(&occurrence, Some(period))).await?
+        else {
+            return Ok(None);
+        };
+        if Box::pin(self.divergent_withholds(entry)).await? {
+            return Ok(None);
+        }
+        Ok(Some(Box::new([parent, current])))
+    }
+
     /// One read of the identity's state an automatic dispatch of `entry` is judged by
     /// ([`Paykit::automatic_dispatch_held`]): the deny list, then the request record, then the
     /// block floor for a one-time request, each from the switch now. `None` when a read fails,
@@ -4433,23 +4463,16 @@ impl Paykit {
         };
         let target = ActivityTarget::payer(natural);
         if let Some(period) = entry.period()?.filter(|_| !entry.user_started) {
-            let occurrence = ActivityTarget::payer(entry.natural_key.clone());
-            let Some(parent) = Box::pin(self.policy_period_condition(&target, None)).await? else {
-                return Ok(None);
-            };
-            let Some(current) =
-                Box::pin(self.policy_period_condition(&occurrence, Some(period))).await?
+            let Some(conditions) =
+                Box::pin(self.policy_period_conditions(entry, &target, period)).await?
             else {
                 return Ok(None);
             };
-            if Box::pin(self.divergent_withholds(entry)).await? {
-                return Ok(None);
-            }
             return Ok(Some(SharedState {
                 deny,
                 record: None,
                 floor: None,
-                policy_period: Some(Box::new([parent, current])),
+                policy_period: Some(conditions),
             }));
         }
         let (record, stamp) = match self.fresh_request_stamped(&target).await {

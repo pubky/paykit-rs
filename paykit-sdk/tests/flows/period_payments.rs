@@ -2162,6 +2162,11 @@ async fn test_period_payments_by_policy_pays_when_every_automatic_rule_holds() {
     let mut shop = w.shop().await;
     let mut wallet = w.wallet("wallet").await;
     let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    let early = by_policy(&mut wallet, &request, february())
+        .await
+        .unwrap_err();
+    assert_eq!(refusal(&early), Refusal::PeriodNotStarted);
+    assert!(w.rail.all_executions().is_empty());
     let outcome = by_policy(&mut wallet, &request, january()).await.unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     let record = period_record(&w, &wallet, &request, january())
@@ -2429,4 +2434,34 @@ async fn test_period_payments_by_policy_resume_honors_a_new_manual_only_mark() {
         .await
         .unwrap();
     assert_period_stays_uncertain(&w, (pending.attempt_id(), resumed, period));
+}
+
+#[tokio::test]
+async fn test_period_payments_by_policy_stops_at_the_earlier_attempt_deadline() {
+    for remaining_ms in [1, 0] {
+        let w = World::new();
+        let mut shop = w.shop().await;
+        let mut wallet = w.wallet("wallet").await;
+        let (request, _) = subscribed_to(
+            &w,
+            &mut shop,
+            &mut wallet,
+            monthly().with_period_deadline_s(60),
+        )
+        .await;
+        w.clock.set_ms(january().starts_at + 60_000 - remaining_ms);
+        let payment = by_policy(&mut wallet, &request, january()).await;
+        if remaining_ms == 0 {
+            let error = payment.unwrap_err();
+            assert!(
+                matches!(refusal(&error), Refusal::NotAutomatic(_)),
+                "{error:?}"
+            );
+            assert!(w.rail.all_executions().is_empty());
+        } else {
+            let outcome = payment.unwrap();
+            assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+            assert_eq!(w.rail.pay_calls(&outcome.attempt_id()), 1);
+        }
+    }
 }

@@ -43,7 +43,8 @@ use crate::paykit::Paykit;
 use crate::receipts::{period_request_target, received_receipt, ReceivedReceipt};
 use crate::records::{conflict, KeptMessage};
 use crate::requests::{
-    cancelled, payment_ended, rejected, request_of, MessageDelivery, RequestRef, SentMessage,
+    accepted, cancelled, payment_ended, rejected, request_of, MessageDelivery, RequestRef,
+    SentMessage,
 };
 
 /// How many times a payee's write of period details is built again after its record changed
@@ -786,7 +787,7 @@ fn bare_period_record(request: &RequestRef, period: &PeriodRef) -> ActivityRecor
 }
 
 fn policy_withheld(record: &ActivityRecord) -> bool {
-    record.manual_only || record.allowance_id.is_some() || !record.reassociations.is_empty()
+    record.manual_only || record.allowance_id.is_some()
 }
 
 pub(crate) fn automatic_window_ended(
@@ -817,14 +818,13 @@ impl Paykit {
         };
         if record.billing_period != period
             || policy_withheld(&record)
-            || record.shows_paid()
             || payment_ended(&record, None)
         {
             return Ok(None);
         }
         if period.is_none()
             && (request_of(&record).is_none_or(|(_, request)| !request.is_recurring())
-                || record.response.is_none()
+                || !accepted(&record)
                 || !held.authenticated
                 || held.written_at_ms.is_none()
                 || self.kept_stop(target).await?

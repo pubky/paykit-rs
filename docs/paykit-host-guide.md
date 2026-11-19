@@ -215,12 +215,12 @@ qualified roles and supplies no new proposal to act on.
 
 ## Scheduling a Billing Period
 
-The host schedules payments and records the user’s recurring-payment policy. After accepting
+The host schedules payments and records the user's recurring-payment policy. After accepting
 a subscription, use its signed recurrence to identify the current Billing Period. If that
 policy authorizes this subscription and it has no Allowance, call
 `pay_period_automatically(&request, &period)` and handle the returned `PayResult`. The SDK
 checks the current payment window, the request and period records, and the usual payment
-restrictions again before dispatch. A period that needs the user’s choice stays available
+restrictions again before dispatch. A period that needs the user's choice stays available
 through `pay_period` when its other payment conditions hold. A missed period is never
 automatically caught up.
 
