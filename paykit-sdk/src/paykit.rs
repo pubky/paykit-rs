@@ -1175,6 +1175,7 @@ impl Paykit {
             Box::pin(self.note_imported_receipt_batches()).await?;
         }
         let asked = Box::pin(self.send_asks()).await?;
+        Box::pin(self.retire_end_origins()).await?;
         // A confirmed mark goes once its record's view isn't divergent any more, after this
         // read's events were taken.
         Box::pin(self.end_confirmed_marks()).await?;
