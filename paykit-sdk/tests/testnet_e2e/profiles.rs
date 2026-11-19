@@ -1090,4 +1090,40 @@ async fn test_pubky_profile_delete_removes_its_own_avatar() {
     ] {
         assert!(!storage.exists(path.as_str()).await.unwrap(), "{path}");
     }
+
+    // A social v1 profile replaced since it was read, even by bytes that are not
+    // UTF-8, deletes nothing, its pubky.app (v0) copy included.
+    let frank = sign_up().await;
+    let storage = frank.access.session.storage();
+    storage
+        .put(paykit_sdk::PUBKY_PROFILE_PATH, r#"{"name":"Frank"}"#)
+        .await
+        .unwrap();
+    storage
+        .put(paykit_sdk::SOCIAL_V1_PROFILE_PATH, r#"{"name":"Frank"}"#)
+        .await
+        .unwrap();
+    let current = frank
+        .sdk
+        .fetch_pubky_profile_with_revision(frank.public_key.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    storage
+        .put(paykit_sdk::SOCIAL_V1_PROFILE_PATH, vec![0xff, 0xfe])
+        .await
+        .unwrap();
+    let error = frank
+        .sdk
+        .delete_pubky_profile(current.revision)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, paykit_sdk::PaykitSdkError::ConcurrentUpdate { .. }),
+        "{error:?}"
+    );
+    assert!(storage
+        .exists(paykit_sdk::PUBKY_PROFILE_PATH)
+        .await
+        .unwrap());
 }
