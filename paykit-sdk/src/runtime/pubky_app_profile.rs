@@ -130,8 +130,8 @@ where
     /// Delete this identity's Pubky app profile at the revision it was read at.
     ///
     /// The whole delete holds the homeserver locks of both profile paths,
-    /// pubky.app (v0) first, so no profile write on either layout lands during
-    /// it. An absent profile is already deleted. A profile whose bytes changed
+    /// pubky.app (v0) first, so a profile write that takes the lock on either
+    /// layout waits for it; an unlocked write already in flight can still land. An absent profile is already deleted. A profile whose bytes changed
     /// since `expected_revision` returns [`PaykitSdkError::ConcurrentUpdate`]
     /// before anything is deleted. A social v1 identity's pubky.app (v0) copy is
     /// deleted first and its social v1 profile after it, in the order of the
