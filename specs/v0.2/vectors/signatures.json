@@ -1,23 +1,264 @@
 {
   "description": "The signatures of Paykit's own labels (wire 2), as the Switch set's signatures.json gives those of the Switch's: Ed25519 over lp(label, field1, ..., fieldn), verified as the Switch's wire format spells out. signed_bytes_hex is that exact input.",
   "recovery_report": {
+    "disclosure": {
+      "anchors": [
+        {
+          "key_hex": "7363616e",
+          "scheme": "org.example.wallet/1",
+          "type": "local",
+          "value_hex": "00ff01"
+        },
+        {
+          "head": {
+            "chain_hash": "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk",
+            "chain_version": 1,
+            "generation": 1,
+            "seq": 258,
+            "sig": "_uNdFSuRA8z9zP2CThIqp3EoMDkvLGe3rKGALPuLuOSNA_J7wxEnyRSiU-7oozejMTf-oYWdCTT47wgGFJ8VCQ"
+          },
+          "type": "head"
+        },
+        {
+          "document": {
+            "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmlkZW50aXR5IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwidmVyc2lvbiI6MSwiZ2VuZXJhdGlvbiI6MSwic2lnbmVyIjoiQkFRRUJBUUVCQVFFQkFRRUJBUUVCQSIsImluYm94Ijp7InVybCI6Imh0dHBzOi8vc3dpdGNoLmV4YW1wbGUiLCJzZXJ2aWNlX2tleSI6IjM0WkdWbVZaTEVhVzlMVi1mdmRocTVMV3N0UGhsakhHYkpnY1FWU1I5RWsifSwicG9saWN5Ijp7ImFkbWlzc2lvbiI6ImNvbnRhY3RzX2FuZF9jb252ZXJzYXRpb25zIiwiY29ubmVjdF9yZXF1ZXN0cyI6eyJlbmFibGVkIjpmYWxzZSwibWF4X3BlbmRpbmciOjUwLCJwdXNoIjpmYWxzZX19LCJhcHBzIjpbXSwicmVtb3ZlZCI6W10sImRhdGFfZXBvY2giOjEsInJlY292ZXJ5X2Zyb20iOm51bGx9",
+            "sig": "OksUapFcZjLb6HfWxCwzcYcxknKfywZe4eaWNd-JtJBc1RZzpE_yhbrLwxiL8puqL-JupHlXv-NaomUVvNI2Dg"
+          },
+          "type": "identity"
+        }
+      ],
+      "decisions": [
+        {
+          "state": "held",
+          "subject": {
+            "key_hex": "1212121212121212121212121212121212121212121212121212121212121212",
+            "kind": "claim"
+          },
+          "witnesses": []
+        },
+        {
+          "state": "held",
+          "subject": {
+            "key_hex": "2121212121212121212121212121212121212121212121212121212121212121",
+            "kind": "record"
+          },
+          "witnesses": []
+        }
+      ],
+      "items": [
+        {
+          "subject": {
+            "key_hex": "2121212121212121212121212121212121212121212121212121212121212121",
+            "kind": "record"
+          },
+          "witnesses": [
+            {
+              "key_hex": "70656e64696e67",
+              "scheme": "org.example.wallet/1",
+              "type": "local",
+              "value_hex": "31"
+            }
+          ]
+        },
+        {
+          "subject": {
+            "key_hex": "1212121212121212121212121212121212121212121212121212121212121212",
+            "kind": "claim"
+          },
+          "witnesses": []
+        }
+      ]
+    },
+    "empty": {
+      "dispositions": "iMpwHoQq9LucjiGoshRpG5fattxPVSo7saxfqEnQNOM",
+      "inventory": "PupXeve_U_ZRPNwR-YSpmpmKRzufI8H7m3wcL-As9JQ"
+    },
     "label": "paykit/v1/recovery-upload",
     "opening": {
       "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmlkZW50aXR5IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwidmVyc2lvbiI6MywiZ2VuZXJhdGlvbiI6Miwic2lnbmVyIjoiQkFRRUJBUUVCQVFFQkFRRUJBUUVCQSIsImluYm94Ijp7InVybCI6Imh0dHBzOi8vc3dpdGNoLmV4YW1wbGUiLCJzZXJ2aWNlX2tleSI6IjM0WkdWbVZaTEVhVzlMVi1mdmRocTVMV3N0UGhsakhHYkpnY1FWU1I5RWsifSwicG9saWN5Ijp7ImFkbWlzc2lvbiI6ImNvbnRhY3RzX2FuZF9jb252ZXJzYXRpb25zIiwiY29ubmVjdF9yZXF1ZXN0cyI6eyJlbmFibGVkIjpmYWxzZSwibWF4X3BlbmRpbmciOjUwLCJwdXNoIjpmYWxzZX19LCJhcHBzIjpbeyJhcHBfaWQiOiJnN3RlaWY5azF1cjc1anJtaWRxazd6N3U2dyIsImNlcnQiOiJpRXFnOFhycW8zb3NPcWhOZWVfLWlMMUoySWljSXZWQURGLWN0SGZEaHRNIn1dLCJyZW1vdmVkIjpbXSwiZGF0YV9lcG9jaCI6MSwicmVjb3ZlcnlfZnJvbSI6MX0",
       "sig": "g-V9EAAy3-5jQmdV4HCuqfUdrM1jobyTBZ24Ro6yoOgYgBvsYcsXZRTcTy7-rA4SEtDcsU5b7m-xINY6kX29Bw"
     },
     "original": "N2KKl-qUyd2ki6jcrt-z9Q",
+    "preimages_hex": [
+      "000000197061796b69742f76312f7265636f766572792d6375746f6666000002e400000094000000046865616400000008000000000000000100000008000000000000000100000008000000000000010200000020090909090909090909090909090909090909090909090909090909090909090900000040fee35d152b9103ccfdccfd824e122aa7712830392f2c67b7aca1802cfb8bb8e48d03f27bc31127c914a253eee8a337a33137fea1859d0934f8ef0806149f150900000030000000056c6f63616c000000146f72672e6578616d706c652e77616c6c65742f31000000047363616e0000000300ff0100000214000000086964656e7469747900000204000001bc7b2276223a312c226b696e64223a227075626b792d7377697463682e6964656e74697479222c226964656e74697479223a22366672616f387739737335636e3534347164363468796e696b7262723937616531733539343163376d6135653165706966686779222c2276657273696f6e223a312c2267656e65726174696f6e223a312c227369676e6572223a2242415145424151454241514542415145424151454241222c22696e626f78223a7b2275726c223a2268747470733a2f2f7377697463682e6578616d706c65222c22736572766963655f6b6579223a2233345a47566d565a4c456157394c562d6676646871354c57737450686c6a4847624a67635156535239456b227d2c22706f6c696379223a7b2261646d697373696f6e223a22636f6e74616374735f616e645f636f6e766572736174696f6e73222c22636f6e6e6563745f7265717565737473223a7b22656e61626c6564223a66616c73652c226d61785f70656e64696e67223a35302c2270757368223a66616c73657d7d2c2261707073223a5b5d2c2272656d6f766564223a5b5d2c22646174615f65706f6368223a312c227265636f766572795f66726f6d223a6e756c6c7d000000403a4b146a915c6632dbe877d6c42c3371873192729fcb065ee1e69635df89b4905cd51673a44ff285bacbc3188bf29baa2fe26ea47957bfe35aa26515bcd2360e",
+      "0000001c7061796b69742f76312f7265636f766572792d696e76656e746f7279000000204a746f79aa3866c87cb3772c782c640b4467aba8a42ae1ce3e73668f930e996e000000a8000000350000002d00000005636c61696d000000201212121212121212121212121212121212121212121212121212121212121212000000000000006b0000002e000000067265636f72640000002021212121212121212121212121212121212121212121212121212121212121210000003500000031000000056c6f63616c000000146f72672e6578616d706c652e77616c6c65742f310000000770656e64696e670000000131",
+      "0000001f7061796b69742f76312f7265636f766572792d646973706f736974696f6e73000000204d901bfe6ca073430a0de959fdaef77bd3a16b402d70d39bcb1a4fabf763d5a9000000830000003d0000002d00000005636c61696d0000002012121212121212121212121212121212121212121212121212121212121212120000000468656c64000000000000003e0000002e000000067265636f72640000002021212121212121212121212121212121212121212121212121212121212121210000000468656c6400000000"
+    ],
+    "rejections": [
+      {
+        "reason": "missing record version",
+        "report": {
+          "author_certificate": {
+            "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoiZzd0ZWlmOWsxdXI3NWpybWlkcWs3ejd1NnciLCJzaWduaW5nX2tleSI6IlVEeVgtTllWbUotZVlfQ1FsRlRNYml2VHVMZ1lwRzhJaHVkSjRwcGtjejQiLCJidW5kbGVfa2V5IjoiS3YxMER0dXlva2FfSDlzTTkteWZwUDNSVU5HM2lSd3ZCSXE1ZWJ3MmRuOCIsInNjb3BlcyI6WyJwYXlraXRfcGF5IiwicGF5a2l0X2FsbG93YW5jZSIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJjbGFpbXMucmVhZCIsImNsYWltcy53cml0ZSIsImxpc3RzLnJlYWQiLCJjb252ZXJzYXRpb24uYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI3LTAxLTAxVDAwOjAwOjAwLjAwMFoifQ",
+            "sig": "RaEOK65vcHJmMb1_aWzFubu-iH0s5X0qb-5uWQ3n-6tVbvEWXXH1f2P2k1VY_pse5xKO-K5wEnikzb2KhW1iAw"
+          },
+          "cutoff": "SnRveao4Zsh8s3cseCxkC0Rnq6ikKuHOPnNmj5MOmW4",
+          "dispositions": "AZqgN_vQvIGDavwjRjoKvADVMu0AirEO0yzIfDhz0dE",
+          "inventory": "TZAb_mygc0MKDelZ_a73e9Oha0AtcNObyxpPq_dj1ak",
+          "signature": "OMvFOAhoPi1qGlLvTdn7NBzgeySk1JOnJ-e3MTcdcjfTeNa8pKDsSd0Sdx9a02zcnutWlPXUR8nxt876A04uCg"
+        }
+      },
+      {
+        "reason": "unsupported record version",
+        "report": {
+          "author_certificate": {
+            "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoiZzd0ZWlmOWsxdXI3NWpybWlkcWs3ejd1NnciLCJzaWduaW5nX2tleSI6IlVEeVgtTllWbUotZVlfQ1FsRlRNYml2VHVMZ1lwRzhJaHVkSjRwcGtjejQiLCJidW5kbGVfa2V5IjoiS3YxMER0dXlva2FfSDlzTTkteWZwUDNSVU5HM2lSd3ZCSXE1ZWJ3MmRuOCIsInNjb3BlcyI6WyJwYXlraXRfcGF5IiwicGF5a2l0X2FsbG93YW5jZSIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJjbGFpbXMucmVhZCIsImNsYWltcy53cml0ZSIsImxpc3RzLnJlYWQiLCJjb252ZXJzYXRpb24uYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI3LTAxLTAxVDAwOjAwOjAwLjAwMFoifQ",
+            "sig": "RaEOK65vcHJmMb1_aWzFubu-iH0s5X0qb-5uWQ3n-6tVbvEWXXH1f2P2k1VY_pse5xKO-K5wEnikzb2KhW1iAw"
+          },
+          "cutoff": "SnRveao4Zsh8s3cseCxkC0Rnq6ikKuHOPnNmj5MOmW4",
+          "dispositions": "AZqgN_vQvIGDavwjRjoKvADVMu0AirEO0yzIfDhz0dE",
+          "inventory": "TZAb_mygc0MKDelZ_a73e9Oha0AtcNObyxpPq_dj1ak",
+          "signature": "OMvFOAhoPi1qGlLvTdn7NBzgeySk1JOnJ-e3MTcdcjfTeNa8pKDsSd0Sdx9a02zcnutWlPXUR8nxt876A04uCg",
+          "v": 2
+        }
+      },
+      {
+        "disclosure": {
+          "anchors": [
+            {
+              "key_hex": "7363616e",
+              "scheme": "org.example.wallet/1",
+              "type": "local",
+              "value_hex": "00ff01"
+            },
+            {
+              "head": {
+                "chain_hash": "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk",
+                "chain_version": 1,
+                "generation": 1,
+                "seq": 258,
+                "sig": "_uNdFSuRA8z9zP2CThIqp3EoMDkvLGe3rKGALPuLuOSNA_J7wxEnyRSiU-7oozejMTf-oYWdCTT47wgGFJ8VCQ"
+              },
+              "type": "head"
+            },
+            {
+              "document": {
+                "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmlkZW50aXR5IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwidmVyc2lvbiI6MSwiZ2VuZXJhdGlvbiI6MSwic2lnbmVyIjoiQkFRRUJBUUVCQVFFQkFRRUJBUUVCQSIsImluYm94Ijp7InVybCI6Imh0dHBzOi8vc3dpdGNoLmV4YW1wbGUiLCJzZXJ2aWNlX2tleSI6IjM0WkdWbVZaTEVhVzlMVi1mdmRocTVMV3N0UGhsakhHYkpnY1FWU1I5RWsifSwicG9saWN5Ijp7ImFkbWlzc2lvbiI6ImNvbnRhY3RzX2FuZF9jb252ZXJzYXRpb25zIiwiY29ubmVjdF9yZXF1ZXN0cyI6eyJlbmFibGVkIjpmYWxzZSwibWF4X3BlbmRpbmciOjUwLCJwdXNoIjpmYWxzZX19LCJhcHBzIjpbXSwicmVtb3ZlZCI6W10sImRhdGFfZXBvY2giOjEsInJlY292ZXJ5X2Zyb20iOm51bGx9",
+                "sig": "OksUapFcZjLb6HfWxCwzcYcxknKfywZe4eaWNd-JtJBc1RZzpE_yhbrLwxiL8puqL-JupHlXv-NaomUVvNI2Dg"
+              },
+              "type": "identity"
+            }
+          ],
+          "decisions": [
+            {
+              "state": "held",
+              "subject": {
+                "key_hex": "1212121212121212121212121212121212121212121212121212121212121212",
+                "kind": "claim"
+              },
+              "witnesses": []
+            },
+            {
+              "state": "held",
+              "subject": {
+                "key_hex": "2121212121212121212121212121212121212121212121212121212121212121",
+                "kind": "record"
+              },
+              "witnesses": []
+            }
+          ],
+          "items": [
+            {
+              "subject": {
+                "key_hex": "2121212121212121212121212121212121212121212121212121212121212121",
+                "kind": "record"
+              },
+              "witnesses": [
+                {
+                  "key_hex": "70656e64696e67",
+                  "scheme": "org.example.wallet/1",
+                  "type": "local",
+                  "value_hex": "32"
+                }
+              ]
+            },
+            {
+              "subject": {
+                "key_hex": "1212121212121212121212121212121212121212121212121212121212121212",
+                "kind": "claim"
+              },
+              "witnesses": []
+            }
+          ]
+        },
+        "reason": "different retained evidence"
+      },
+      {
+        "disclosure": {
+          "anchors": [
+            {
+              "key_hex": "7363616e",
+              "scheme": "org.example.wallet/1",
+              "type": "local",
+              "value_hex": "00ff01"
+            },
+            {
+              "head": {
+                "chain_hash": "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk",
+                "chain_version": 1,
+                "generation": 1,
+                "seq": 258,
+                "sig": "_uNdFSuRA8z9zP2CThIqp3EoMDkvLGe3rKGALPuLuOSNA_J7wxEnyRSiU-7oozejMTf-oYWdCTT47wgGFJ8VCQ"
+              },
+              "type": "head"
+            },
+            {
+              "document": {
+                "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmlkZW50aXR5IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwidmVyc2lvbiI6MSwiZ2VuZXJhdGlvbiI6MSwic2lnbmVyIjoiQkFRRUJBUUVCQVFFQkFRRUJBUUVCQSIsImluYm94Ijp7InVybCI6Imh0dHBzOi8vc3dpdGNoLmV4YW1wbGUiLCJzZXJ2aWNlX2tleSI6IjM0WkdWbVZaTEVhVzlMVi1mdmRocTVMV3N0UGhsakhHYkpnY1FWU1I5RWsifSwicG9saWN5Ijp7ImFkbWlzc2lvbiI6ImNvbnRhY3RzX2FuZF9jb252ZXJzYXRpb25zIiwiY29ubmVjdF9yZXF1ZXN0cyI6eyJlbmFibGVkIjpmYWxzZSwibWF4X3BlbmRpbmciOjUwLCJwdXNoIjpmYWxzZX19LCJhcHBzIjpbXSwicmVtb3ZlZCI6W10sImRhdGFfZXBvY2giOjEsInJlY292ZXJ5X2Zyb20iOm51bGx9",
+                "sig": "OksUapFcZjLb6HfWxCwzcYcxknKfywZe4eaWNd-JtJBc1RZzpE_yhbrLwxiL8puqL-JupHlXv-NaomUVvNI2Dg"
+              },
+              "type": "identity"
+            }
+          ],
+          "decisions": [
+            {
+              "state": "held",
+              "subject": {
+                "key_hex": "1212121212121212121212121212121212121212121212121212121212121212",
+                "kind": "claim"
+              },
+              "witnesses": []
+            }
+          ],
+          "items": [
+            {
+              "subject": {
+                "key_hex": "2121212121212121212121212121212121212121212121212121212121212121",
+                "kind": "record"
+              },
+              "witnesses": [
+                {
+                  "key_hex": "70656e64696e67",
+                  "scheme": "org.example.wallet/1",
+                  "type": "local",
+                  "value_hex": "31"
+                }
+              ]
+            },
+            {
+              "subject": {
+                "key_hex": "1212121212121212121212121212121212121212121212121212121212121212",
+                "kind": "claim"
+              },
+              "witnesses": []
+            }
+          ]
+        },
+        "reason": "missing disposition"
+      }
+    ],
     "report": {
       "author_certificate": {
         "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoiZzd0ZWlmOWsxdXI3NWpybWlkcWs3ejd1NnciLCJzaWduaW5nX2tleSI6IlVEeVgtTllWbUotZVlfQ1FsRlRNYml2VHVMZ1lwRzhJaHVkSjRwcGtjejQiLCJidW5kbGVfa2V5IjoiS3YxMER0dXlva2FfSDlzTTkteWZwUDNSVU5HM2lSd3ZCSXE1ZWJ3MmRuOCIsInNjb3BlcyI6WyJwYXlraXRfcGF5IiwicGF5a2l0X2FsbG93YW5jZSIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJjbGFpbXMucmVhZCIsImNsYWltcy53cml0ZSIsImxpc3RzLnJlYWQiLCJjb252ZXJzYXRpb24uYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI3LTAxLTAxVDAwOjAwOjAwLjAwMFoifQ",
         "sig": "RaEOK65vcHJmMb1_aWzFubu-iH0s5X0qb-5uWQ3n-6tVbvEWXXH1f2P2k1VY_pse5xKO-K5wEnikzb2KhW1iAw"
       },
-      "cutoff": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
-      "dispositions": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
-      "inventory": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
-      "signature": "aKnLkYWHROupFaP5J-yXpkaxqhL6datiBjipBlX8dRpXkfsNbO5RTat9OL2iM1u9PRj5nEw_18_biAdwjMhQCw"
+      "cutoff": "SnRveao4Zsh8s3cseCxkC0Rnq6ikKuHOPnNmj5MOmW4",
+      "dispositions": "AZqgN_vQvIGDavwjRjoKvADVMu0AirEO0yzIfDhz0dE",
+      "inventory": "TZAb_mygc0MKDelZ_a73e9Oha0AtcNObyxpPq_dj1ak",
+      "signature": "OMvFOAhoPi1qGlLvTdn7NBzgeySk1JOnJ-e3MTcdcjfTeNa8pKDsSd0Sdx9a02zcnutWlPXUR8nxt876A04uCg",
+      "v": 1
     },
-    "signed_bytes_hex": "000000197061796b69742f76312f7265636f766572792d75706c6f61640000010400000020f149881e9fb5b6c16f5a70fdae005551024ff70895b7fd499d5e368921b52f0c0000001037628a97ea94c9dda48ba8dcaedfb3f500000008000000000000000100000008000000000000000200000020df86465665592c4696f4b57e7ef761ab92d6b2d3e19631c66c981c415491f4490000002085cfa475dac9b90b7dff09531d5e40c4caa10a47fe8db5e93c22963e6155efbb000000200101010101010101010101010101010101010101010101010101010101010101000000200202020202020202020202020202020202020202020202020202020202020202000000200303030303030303030303030303030303030303030303030303030303030303",
+    "signed_bytes_hex": "000000197061796b69742f76312f7265636f766572792d75706c6f61640000011000000008000000000000000100000020f149881e9fb5b6c16f5a70fdae005551024ff70895b7fd499d5e368921b52f0c0000001037628a97ea94c9dda48ba8dcaedfb3f500000008000000000000000100000008000000000000000200000020df86465665592c4696f4b57e7ef761ab92d6b2d3e19631c66c981c415491f4490000002085cfa475dac9b90b7dff09531d5e40c4caa10a47fe8db5e93c22963e6155efbb000000204a746f79aa3866c87cb3772c782c640b4467aba8a42ae1ce3e73668f930e996e000000204d901bfe6ca073430a0de959fdaef77bd3a16b402d70d39bcb1a4fabf763d5a900000020019aa037fbd0bc81836afc23463a0abc00d532ed008ab10ed32cc87c3873d1d1",
     "written_at_ms": 1764547200000
   },
   "signatures": [

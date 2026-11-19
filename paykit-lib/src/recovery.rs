@@ -1,5 +1,10 @@
 //! The original app's signed report of a recovery upload (Paykit wire 5.10).
 
+mod evidence;
+pub use evidence::{
+    RecoveryDecision, RecoveryItem, RecoveryState, RecoverySubject, RecoveryWitness,
+};
+
 use pubky_switch_core::{
     enc::{lp, unb64_array},
     json::{parse_json_as, Doc},
@@ -26,6 +31,7 @@ pub struct RecoveryCommitments {
 
 #[derive(Deserialize)]
 struct Report {
+    v: u64,
     cutoff: String,
     inventory: String,
     dispositions: String,
@@ -48,6 +54,7 @@ impl RecoveryCommitments {
             "Paykit wire 5.10: the opening does not list the original app",
         )?;
         Ok(lp(&[
+            &1u64.to_be_bytes(),
             &opening.identity(),
             original,
             &lost.to_be_bytes(),
@@ -74,6 +81,10 @@ impl RecoveryCommitments {
         written: u64,
     ) -> Result<Self> {
         let report: Report = parse_json_as(value, Doc::Plain)?;
+        ensure(
+            report.v == 1,
+            "Paykit wire 5.10: unsupported recovery report version",
+        )?;
         let cert = AppCert::verify(&report.author_certificate, &opening.identity())?;
         ensure(
             identity.identity() == opening.identity()

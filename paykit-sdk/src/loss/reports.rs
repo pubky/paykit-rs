@@ -47,6 +47,26 @@ pub struct RecoveryReport {
     pub dispositions: [u8; 32],
 }
 
+impl RecoveryReport {
+    /// Whether the disclosed inputs reproduce the three commitments this original signed.
+    /// The caller checks the authority and meaning of the evidence for the item it concerns.
+    ///
+    /// # Errors
+    ///
+    /// The evidence does not form a valid disclosure under Paykit wire 5.10.
+    pub fn matches_evidence(
+        &self,
+        anchors: &[paykit_lib::recovery::RecoveryWitness<'_>],
+        items: &[paykit_lib::recovery::RecoveryItem<'_>],
+        decisions: &[paykit_lib::recovery::RecoveryDecision<'_>],
+    ) -> Result<bool> {
+        let actual = RecoveryCommitments::from_evidence(anchors, items, decisions)?;
+        Ok(actual.cutoff == self.cutoff
+            && actual.inventory == self.inventory
+            && actual.dispositions == self.dispositions)
+    }
+}
+
 impl Paykit {
     async fn original_report(
         &mut self,
