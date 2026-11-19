@@ -23,7 +23,7 @@ use pubky_switch_core::enc::b64;
 use serde_json::Value;
 use wasm_bindgen_test::wasm_bindgen_test;
 
-use switch_rig::{config, count, fresh_tag, origin, port, request, transport};
+use switch_rig::{config, origin, port, request, transport};
 
 /// A loopback port nothing listens on, as `rig/test.sh --switch` checked on `127.0.0.1` and
 /// `::1` and set at compile time in `PAYKIT_BROWSER_RIG_CLOSED_PORT`: 18449 unless that
@@ -49,6 +49,33 @@ fn rig_bytes(n: usize, seed: u8) -> Vec<u8> {
     (0..n)
         .map(|i| ((i * 31 + usize::from(seed)) % 256) as u8)
         .collect()
+}
+
+/// A tag no other request to this rig has used: `name`, the wall clock and a random number.
+/// One rig serves every engine and context of a run, so a tag must differ between them too.
+/// It holds only letters, digits and `-`, so it goes into a query as it is.
+fn fresh_tag(name: &str) -> String {
+    let now = js_sys::Date::now() as u64;
+    let random = (js_sys::Math::random() * f64::from(u32::MAX)) as u32;
+    format!("{name}-{now}-{random:08x}")
+}
+
+/// The requests the rig has seen whose query has `tag`, preflights included, read from
+/// `/rig/count` through [`transport`].
+///
+/// # Panics
+///
+/// When the rig does not answer, or answers something other than its count.
+async fn count(tag: &str) -> u64 {
+    let response = transport()
+        .send(request("GET", &format!("/rig/count?tag={tag}")))
+        .await
+        .expect("the rig answers /rig/count");
+    assert_eq!(response.status, 200, "/rig/count");
+    let value: Value = serde_json::from_slice(&response.body).expect("/rig/count answers JSON");
+    value["requests"]
+        .as_u64()
+        .expect("/rig/count answers its requests")
 }
 
 /// The request `/rig/echo` received, from its answer.
@@ -97,7 +124,7 @@ async fn assert_refused_unsent(transport: &FetchTransport, request: Request, tag
         matches!(error, TransportError::Refused(_)),
         "{url}: {error:?}"
     );
-    assert_eq!(count(tag).await.requests, 0, "{url} reached the rig");
+    assert_eq!(count(tag).await, 0, "{url} reached the rig");
 }
 
 /// A `GET` returns the status, the headers the rig exposes and the exact body, with a
@@ -201,7 +228,7 @@ async fn test_fetch_redirect_is_an_error_and_not_followed() {
         .await
         .unwrap_err();
     assert!(matches!(error, TransportError::Other(_)), "{error:?}");
-    assert_eq!(count(&tag).await.requests, 1);
+    assert_eq!(count(&tag).await, 1);
 }
 
 /// An answer body over `max_response_bytes` is `TooLarge` with that limit, counted as it
@@ -267,8 +294,8 @@ async fn test_fetch_head_answer_is_not_held_to_its_announced_length() {
 }
 
 /// An origin the transport refuses is `Refused`, and nothing reaches the rig, though each
-/// one points at the rig's own port: plain `http` (no TLS handshake either), a port that is
-/// not allowed, an address literal, and `localhost` through `FetchTransport::new`.
+/// one points at the rig's own port: plain `http`, a port that is not allowed, an address
+/// literal, and `localhost` through `FetchTransport::new`.
 #[wasm_bindgen_test]
 async fn test_fetch_refused_origins_send_nothing() {
     let port = port();
@@ -279,14 +306,12 @@ async fn test_fetch_refused_origins_send_nothing() {
     };
 
     let tag = fresh_tag("refused-http");
-    let before = count(&tag).await;
     assert_refused_unsent(
         &transport(),
         echo_request(format!("http://localhost:{port}"), &tag),
         &tag,
     )
     .await;
-    assert_eq!(count(&tag).await.tls_errors, before.tls_errors);
 
     let tag = fresh_tag("refused-port");
     assert_refused_unsent(

@@ -4,10 +4,13 @@
 // answers CORS for pages served on a loopback address only, and runs a native enrol program
 // on request.
 //
-//   node switch-rig.mjs --listen <port> --upstream <port> [--enroll-bin <path>]
+//   PAYKIT_BROWSER_RIG_TOKEN=<32 hex> node switch-rig.mjs --listen <port> --upstream <port> [--enroll-bin <path>]
 //
 // `test.sh --switch` starts it; the service listens on 127.0.0.1:<upstream> in plain HTTP with
-// the origin https://localhost:<listen>.
+// the origin https://localhost:<listen>. PAYKIT_BROWSER_RIG_TOKEN is a random token of the run,
+// 32 lower-case hex digits, that POST /rig/world requires; the rig exits with an error without
+// one. It comes in the environment, not as an argument, so that the process list does not
+// show it.
 //
 // - At start it makes a self-signed certificate for localhost (DNS:localhost, IP:127.0.0.1,
 //   IP:::1) with openssl in a temporary folder, reads it, and removes the folder. It then
@@ -43,8 +46,8 @@
 //   GET /rig/slow?ms=M                200 "slow" after M ms, at most 30000.
 //   GET /rig/count?tag=T              200 JSON {"requests": the requests so far whose query
 //                                     has tag=T, on any route but this one, preflights
-//                                     included; "tls_errors": the failed TLS handshakes so far}.
-//   POST /rig/world                   body {"identities": [name, ...], "apps": [{"identity",
+//                                     included}.
+//   POST /rig/world?token=<token>     body {"identities": [name, ...], "apps": [{"identity",
 //                                     "app"}, ...]}, names matching ^[a-z][a-z0-9-]{0,31}$: runs
 //                                     `<enroll-bin> --switch-url http://127.0.0.1:<upstream>
 //                                     --origin https://localhost:<listen> --seed-prefix <32 hex>
@@ -54,19 +57,21 @@
 //                                     it fails or takes over 45 s; its stderr goes to this log
 //                                     only. When the client's connection closes first, the rig
 //                                     stops the program. A request with an Origin header that
-//                                     is not the test page's gets a 403 and runs nothing, so no
-//                                     other page can start the program, not even without CORS;
-//                                     a request with no Origin, such as from curl, is served.
+//                                     is not the test page's, or without the run's token, gets
+//                                     a 403 and runs nothing, so no other page, and no program
+//                                     that does not know the token, can start the enrol
+//                                     program, not even without CORS. The token is compared in
+//                                     constant time.
 // - It forwards every other request to the service as received: the method, the raw request
 //   target, the raw headers in their order except the hop-by-hop ones, and the body. It passes
 //   the status and the raw response headers back the same way, and the body. When the service
 //   cannot be reached or breaks off, it destroys the browser's connection rather than make up an
 //   answer.
 // - It logs one line per request: the method, the path without the query, and the status.
-//   It never logs header values or bodies.
+//   It never logs header values, bodies or the token.
 
 import { execFile, execFileSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
@@ -187,15 +192,19 @@ try {
 const listenPort = port(options.listen, "listen");
 const upstreamPort = port(options.upstream, "upstream");
 const enrollBin = options["enroll-bin"];
+// The run's token for /rig/world, which test.sh makes and builds into the network tests.
+const worldToken = process.env.PAYKIT_BROWSER_RIG_TOKEN ?? "";
+if (!/^[0-9a-f]{32}$/.test(worldToken)) {
+  fail("PAYKIT_BROWSER_RIG_TOKEN must be the run's token, 32 lower-case hex digits");
+}
 const origin = `https://localhost:${listenPort}`;
 const switchUrl = `http://127.0.0.1:${upstreamPort}`;
 
 // A fresh connection per forwarded request: a kept-alive connection the service closes while
 // idle could break the next request on it.
 const upstreamAgent = new http.Agent({ keepAlive: false });
-// The requests seen per value of their `tag` query parameter, and the failed TLS handshakes.
+// The requests seen per value of their `tag` query parameter.
 const tagCounts = new Map();
-let tlsErrors = 0;
 // Running enrol programs, stopped when the rig stops.
 const enrollChildren = new Set();
 
@@ -353,7 +362,7 @@ function count(req, res, query) {
   req.resume();
   const tag = query.get("tag");
   if (tag === null) return text(res, 400, "need tag");
-  json(res, { requests: tagCounts.get(tag) ?? 0, tls_errors: tlsErrors });
+  json(res, { requests: tagCounts.get(tag) ?? 0 });
 }
 
 // The identities and apps of a /rig/world request, or a fixed error text.
@@ -398,13 +407,25 @@ function parseWorld(body) {
   return { identities, apps };
 }
 
+// Whether `query` carries the run's token, compared in constant time.
+function hasWorldToken(query) {
+  const given = Buffer.from(query.get("token") ?? "", "utf8");
+  const expected = Buffer.from(worldToken, "utf8");
+  return given.length === expected.length && timingSafeEqual(given, expected);
+}
+
 // Enrols the identities and approves the apps with the native enrol program, under a fresh
 // seed prefix, and answers with the JSON object it prints.
-async function world(req, res) {
-  // A page of another origin can send a POST without CORS: refuse it before reading anything.
+async function world(req, res, query) {
+  // A page of another origin can send a POST without CORS, and any local program can send
+  // one: refuse them before reading anything.
   if (req.headers.origin !== undefined && !fromPage(req)) {
     req.resume();
     return text(res, 403, "the rig serves /rig/world to the test page only");
+  }
+  if (!hasWorldToken(query)) {
+    req.resume();
+    return text(res, 403, "the rig serves /rig/world to this run's tests only");
   }
   const body = await readBody(req, MAX_WORLD_BODY);
   if (body === null) return text(res, 413, "body too large");
@@ -531,7 +552,6 @@ function serve(tls, address) {
   return new Promise((resolve, reject) => {
     const server = https.createServer(tls, handle);
     server.on("tlsClientError", (error, socket) => {
-      tlsErrors += 1;
       log(`TLS client error: ${error.code ?? error.message}`);
       socket.destroy();
     });

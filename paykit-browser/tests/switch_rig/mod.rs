@@ -1,14 +1,13 @@
-//! What the network test targets share: the rig's origin, a `FetchTransport` that may reach
-//! it, and helpers for the rig's own routes under `/rig/` (`rig/switch-rig.mjs`).
+//! What the network test targets share: the rig's origin, and a `FetchTransport` and
+//! requests that reach it (`rig/switch-rig.mjs`).
 //!
 //! `rig/test.sh --switch` starts a real Switch service behind the rig, on
 //! `https://localhost:<rig port>`, and passes that origin to the build in
 //! `PAYKIT_BROWSER_RIG_ORIGIN`. A network test target includes this module with
-//! `#[path = "../switch_rig/mod.rs"]`.
+//! `#[path = "../switch_rig/mod.rs"]`; the `fetch_transport` and `switch_flow` targets both do.
 
 use paykit_browser::fetch::{FetchConfig, FetchTransport};
-use pubky_switch_client::transport::{Request, TimeoutClass, Transport};
-use serde_json::Value;
+use pubky_switch_client::transport::{Request, TimeoutClass};
 
 /// The rig's origin, `https://localhost:<rig port>`, as `rig/test.sh --switch` set it at
 /// compile time.
@@ -63,47 +62,5 @@ pub fn request(method: &str, path_and_query: &str) -> Request {
         headers: Vec::new(),
         body: Vec::new(),
         timeout: TimeoutClass::Ordinary,
-    }
-}
-
-/// A tag no other request to this rig has used: `name`, the wall clock and a random number.
-/// One rig serves every engine and context of a run, so a tag must differ between them too.
-/// It holds only letters, digits and `-`, so it goes into a query as it is.
-pub fn fresh_tag(name: &str) -> String {
-    let now = js_sys::Date::now() as u64;
-    let random = (js_sys::Math::random() * f64::from(u32::MAX)) as u32;
-    format!("{name}-{now}-{random:08x}")
-}
-
-/// What the rig has seen, from `/rig/count`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Count {
-    /// The requests whose query has the tag, preflights included.
-    pub requests: u64,
-    /// The failed TLS handshakes since the rig started, from any client. Browsers make some
-    /// of their own: compare two readings around a probe, never a reading with zero.
-    pub tls_errors: u64,
-}
-
-/// What the rig has seen for `tag`, read through [`transport`].
-///
-/// # Panics
-///
-/// When the rig does not answer, or answers something other than its count.
-pub async fn count(tag: &str) -> Count {
-    let response = transport()
-        .send(request("GET", &format!("/rig/count?tag={tag}")))
-        .await
-        .expect("the rig answers /rig/count");
-    assert_eq!(response.status, 200, "/rig/count");
-    let value: Value = serde_json::from_slice(&response.body).expect("/rig/count answers JSON");
-    let field = |name: &str| {
-        value[name]
-            .as_u64()
-            .unwrap_or_else(|| panic!("/rig/count answers no {name}"))
-    };
-    Count {
-        requests: field("requests"),
-        tls_errors: field("tls_errors"),
     }
 }
