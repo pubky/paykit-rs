@@ -11732,6 +11732,24 @@ async fn prepared_answer_after_change(withdraw: bool, renew_certificate: bool) {
     ))
     .await
     .unwrap();
+    if renew_certificate && !withdraw {
+        // After the receive-only certificate, the renewed wallet still owes a listing.
+        // Its first retry must preserve the signed rejection until the listing finishes.
+        assert!(payer.app().listing_owed().await.unwrap());
+        let prepared = payer.app().protocol_scan("paykit", b"ap/").await.unwrap();
+        let error = payer.reject_allowance(&canonical).await.unwrap_err();
+        assert!(
+            matches!(error.refusal(), Some(Refusal::NotNow(reason)) if reason.contains("Call receive again")),
+            "{error}"
+        );
+        assert_eq!(
+            payer.app().protocol_scan("paykit", b"ap/").await.unwrap(),
+            prepared
+        );
+        assert!(payer.app().delivery(&original).await.unwrap().is_none());
+        assert_eq!(w.record_writes(&w.alice, &key), before);
+        crate::common::finish_listing(&mut payer).await;
+    }
     let id = if withdraw {
         payer.end_allowance(&canonical).await
     } else {
