@@ -88,6 +88,11 @@ jobs:
         working-directory: paykit-browser/rig
       - run: npx playwright install --with-deps ${{ matrix.engine }}
         working-directory: paykit-browser/rig
+      # The store targets run here in a persistent browser context, in a dedicated worker
+      # (store_page in a page; rig/runner.mjs). An engine that gives that context no Origin
+      # Private File System fails the store tests, except Playwright's WebKit for Linux, which
+      # has none: the runner checks that, excludes the store targets, and test.sh prints a
+      # warning annotation for each (NO_OPFS in rig/runner.mjs).
       - run: paykit-browser/rig/test.sh ${{ matrix.engine }} both
 
   # Builds the pubky-switch service binary once per pinned rev, for the network tests below.
