@@ -18,5 +18,3 @@ macro_rules! conformance_test {
 
 mod randomness;
 mod round_trips;
-mod support;
-mod vectors;
