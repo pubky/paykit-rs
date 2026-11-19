@@ -812,6 +812,14 @@ async fn test_blocked_mark_queued_request_naming_another_message_refused_as_corr
         .iter()
         .find(|m| m.kind == "paykit.payment_request")
         .unwrap();
+    point_reply_mark_at(&mut shop, &request.msg_id).await;
+    let failed = shop.receive(None).await.unwrap_err();
+    assert!(crate::common::is_corrupt(&failed), "{failed:?}");
+    assert!(crate::common::asked(&shop, &w.alice_id()).await.is_empty());
+}
+
+/// A corrupted dropped-reply mark points at another message in the same wallet.
+async fn point_reply_mark_at(shop: &mut Paykit, msg_id: &str) {
     let (key, value) = shop
         .app()
         .protocol_scan("paykit", b"pd/")
@@ -820,7 +828,7 @@ async fn test_blocked_mark_queued_request_naming_another_message_refused_as_corr
         .remove(0);
     let mut mark: serde_json::Value = serde_json::from_slice(&value).unwrap();
     mark["d"]["queued"] = serde_json::json!({
-        "msg_id": request.msg_id,
+        "msg_id": msg_id,
         "hash": pubky_switch_core::enc::b64(&[0; 32]),
     });
     shop.app_mut()
@@ -833,9 +841,30 @@ async fn test_blocked_mark_queued_request_naming_another_message_refused_as_corr
         )
         .await
         .unwrap();
-    let failed = shop.receive(None).await.unwrap_err();
-    assert!(crate::common::is_corrupt(&failed), "{failed:?}");
-    assert!(crate::common::asked(&shop, &w.alice_id()).await.is_empty());
+}
+
+#[tokio::test]
+async fn test_blocked_mark_cannot_flush_another_queued_message() {
+    let w = World::new();
+    let mut shop = shop_with_a_due_mark(&w).await;
+    w.alice.switch().fail_next(Fault::Error {
+        path: "/inbox".into(),
+        code: ErrorCode::Unavailable,
+        current: serde_json::Value::Null,
+    });
+    let request = shop
+        .send_request(w.alice_id(), draft("1", w.clock.now_ms()))
+        .await
+        .unwrap();
+    assert!(matches!(
+        request.delivery,
+        paykit_sdk::MessageDelivery::Queued { .. }
+    ));
+    point_reply_mark_at(&mut shop, &request.msg_id).await;
+    let before = w.alice.switch().entries_from(&w.bob_id());
+    let result = shop.receive(None).await;
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    assert!(crate::common::is_corrupt(&result.unwrap_err()));
 }
 
 #[tokio::test]
@@ -2449,7 +2478,7 @@ async fn test_blocked_held_rejection_past_its_window_given_up_with_a_notice() {
     let notices = wallet.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
-    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert_eq!(notices[0].counterparty, Some(w.bob_id()));
     assert_eq!(notices[0].msg_id.as_deref(), Some(msg_id.as_str()));
     assert_eq!(notices[0].request_hash, Some(request.request_hash));
     // Raised once: a later receive neither raises it again nor sends anything.

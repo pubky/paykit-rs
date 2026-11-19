@@ -407,7 +407,7 @@ async fn test_allowances_received_acceptance_kept_unplaced_then_given_up_with_a_
     let notices = shop.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
-    assert_eq!(notices[0].counterparty, w.alice_id());
+    assert_eq!(notices[0].counterparty, Some(w.alice_id()));
     assert_eq!(
         notices[0].msg_id.as_deref(),
         Some(acceptance.message().msg_id.as_str())
@@ -1581,7 +1581,7 @@ async fn test_allowances_missed_item_asks_consent_again_until_the_user_confirms(
     let w = World::new();
     let (_shop, _wallet, mut exec, _phone, _, mine) = Box::pin(executed(&w)).await;
     missed(&w);
-    exec.receive(None).await.unwrap();
+    Box::pin(crate::common::finish_listing(&mut exec)).await;
     assert_eq!(
         Box::pin(consent_entry(&exec, &mine)).await,
         Some(json!({ "held": { "confirm_again": true } }))
@@ -1674,7 +1674,7 @@ async fn test_allowances_stored_proposal_waiting_for_the_current_epochs_key_give
     let notices = wallet.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
-    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert_eq!(notices[0].counterparty, Some(w.bob_id()));
 }
 
 /// Bob's proposal of the Allowance with ID number `i`, entered for alice's `wallet`.
@@ -1937,7 +1937,7 @@ async fn test_allowances_answer_over_a_record_that_doesnt_read_never_written_ove
     let notices = phone.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
-    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert_eq!(notices[0].counterparty, Some(w.bob_id()));
 }
 
 /// Alice's phone proposes an Allowance to bob; her wallet, which takes no message from bob,
@@ -1971,7 +1971,7 @@ async fn test_allowances_missed_item_asks_the_counterparty_of_an_open_one_to_res
     let w = World::new();
     let mut wallet = Box::pin(allowance_seen_by_the_wallet(&w, false)).await;
     missed(&w);
-    wallet.receive(None).await.unwrap();
+    Box::pin(crate::common::finish_listing(&mut wallet)).await;
     assert!(Box::pin(asked_bob(&w, &wallet)).await > 0);
 }
 
@@ -1980,7 +1980,7 @@ async fn test_allowances_missed_item_asks_nothing_for_an_ended_one() {
     let w = World::new();
     let mut wallet = Box::pin(allowance_seen_by_the_wallet(&w, true)).await;
     missed(&w);
-    wallet.receive(None).await.unwrap();
+    Box::pin(crate::common::finish_listing(&mut wallet)).await;
     assert_eq!(Box::pin(asked_bob(&w, &wallet)).await, 0);
 }
 
@@ -2567,29 +2567,28 @@ async fn test_allowances_kept_answer_over_a_record_that_doesnt_read_given_up_wit
 
 /// A `missed` item, and Paykit's listing at the end of the next receive fails: the copy of
 /// the records counts as not listed until a listing of Paykit's own.
-fn missed_and_listing_fails(w: &World) {
+fn missed_and_listing_fails(w: &World, wallet: &Paykit) {
     missed(w);
-    fail_paykit_listing(&w.alice, WALLET_COLLECTIONS);
+    fail_paykit_listing(
+        &w.alice,
+        crate::certificate::client_listing_requests(wallet.app().cert()),
+    );
 }
-
-/// How many collections the client lists for an app of alice's holding `paykit_pay` and
-/// `paykit_allowance`: the payer's side, payment lists, block floor, proposals and Allowances.
-const WALLET_COLLECTIONS: usize = 5;
-
-/// How many collections the client lists for bob's shop, holding `paykit_request` and
-/// `paykit_allowance`: the payee's side, proposals and Allowances.
-const SHOP_COLLECTIONS: usize = 3;
 
 /// Fail Paykit's own listing at the end of the next receive of `party`'s app after a
 /// `missed` item: the client lists up to its page budget before Paykit takes over.
 /// A listing that fails inside the client's read fails the read.
 fn fail_paykit_listing(party: &pubky_switch_client::testing::TestSigner, collections: usize) {
-    party
-        .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
-            path: "records?collection".into(),
-            after: collections.min(pubky_switch_client::app::LISTING_PAGES_PER_READ as usize),
-        });
+    // A longer native listing already holds Paykit through this read. A fault then
+    // would interrupt the next native read instead of Paykit's subsequent listing.
+    if collections <= pubky_switch_client::app::LISTING_PAGES_PER_READ as usize {
+        party
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+                path: "records?collection".into(),
+                after: collections,
+            });
+    }
 }
 
 #[tokio::test]
@@ -2605,7 +2604,7 @@ async fn test_allowances_stop_past_30_days_kept_while_unlisted() {
     assert!(Box::pin(keeps_end(&w, &wallet, 0)).await);
     w.clock
         .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
-    missed_and_listing_fails(&w);
+    missed_and_listing_fails(&w, &wallet);
     let got = wallet.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_some(), "{got:?}");
     assert!(Box::pin(keeps_end(&w, &wallet, 0)).await);
@@ -2646,7 +2645,10 @@ async fn test_allowances_kept_answer_past_30_days_kept_while_unlisted() {
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
     let now = w.clock.now_ms();
     w.bob.switch().push_missed(1, now - 1_000, now);
-    fail_paykit_listing(&w.bob, SHOP_COLLECTIONS);
+    fail_paykit_listing(
+        &w.bob,
+        crate::certificate::client_listing_requests(shop.app().cert()),
+    );
     let got = shop.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_some(), "{got:?}");
     assert_eq!(
@@ -2688,7 +2690,7 @@ async fn test_allowances_stored_proposal_neither_opened_nor_given_up_while_unlis
             .len(),
         1
     );
-    missed_and_listing_fails(&w);
+    missed_and_listing_fails(&w, &wallet);
     let got = wallet.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_some(), "{got:?}");
     assert_eq!(
@@ -3520,7 +3522,7 @@ async fn test_allowances_end_over_a_deleted_record_kept_as_a_stop_once_listed() 
     Box::pin(delete_allowance_record(&w, &id)).await;
     wallet.receive(None).await.unwrap();
     assert!(Box::pin(held_deleted(&wallet, &mine)).await);
-    missed_and_listing_fails(&w);
+    missed_and_listing_fails(&w, &wallet);
     shop.end_allowance(&theirs).await.unwrap();
     wallet.receive(None).await.unwrap();
     assert!(wallet
@@ -4249,7 +4251,7 @@ async fn test_allowances_crossing_end_after_an_unanswered_write_reports_its_unkn
     assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
     assert!(restored.notices().await.unwrap().iter().any(|notice| {
         notice.kind == paykit_sdk::NoticeKind::PossiblyDelivered
-            && notice.counterparty == w.bob_id()
+            && notice.counterparty == Some(w.bob_id())
             && notice.msg_id.as_ref() == Some(&end.message().msg_id)
             && notice.message_hash == Some(end.hash())
     }));
@@ -4279,8 +4281,8 @@ async fn test_allowances_answer_dropped_for_the_bound_taken_again_from_a_resend_
     // Bob's shop sends a proposal alone, without writing its record, as another of bob's apps
     // would before this one holds the record; alice rejects it, and her rejection is kept
     // before its record. Her 64 later rejections of proposals bob never sent drop it for the
-    // bound, its pair forgotten, and it counts in her mark. Once the shop holds the record it
-    // asks her to re-send; the same rejection comes again, is taken as never processed, and
+    // bound, its pair forgotten, and the shop asks her to re-send immediately. When her
+    // rejection comes again it is taken as never processed and
     // is placed in the record (Paykit spec 8.1, "Replies before their record").
     let w = World::new();
     let mut shop = Box::pin(shop(&w)).await;
@@ -4330,7 +4332,7 @@ async fn test_allowances_answer_dropped_for_the_bound_taken_again_from_a_resend_
                 .unwrap(),
         );
     }
-    shop.receive(None).await.unwrap();
+    assert_eq!(shop.receive(None).await.unwrap().resends, 1);
     assert_eq!(
         shop.app()
             .protocol_scan("paykit", b"pr/")
@@ -4372,7 +4374,7 @@ async fn test_allowances_answer_dropped_for_the_bound_taken_again_from_a_resend_
         .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
-    assert_eq!(shop.receive(None).await.unwrap().resends, 1);
+    assert_eq!(shop.receive(None).await.unwrap().resends, 0);
     let theirs = shop.allowances().await.unwrap()[0].record;
     assert_eq!(
         shop.allowance(&theirs).await.unwrap().status,
@@ -4968,7 +4970,7 @@ async fn wallet_answer_dropped_then_recorded(
                 .unwrap(),
         );
     }
-    wallet.receive(None).await.unwrap();
+    wallet.app_mut().receive(None).await.unwrap();
     assert_eq!(
         wallet
             .app()
@@ -5028,8 +5030,8 @@ async fn wallet_answer_dropped_then_recorded(
 #[tokio::test]
 async fn test_allowances_answer_dropped_at_a_payer_app_proposer_asked_again_once_and_placed() {
     // The other side of the dropped-answer test: alice's wallet, holding `paykit_pay` and not
-    // `paykit_request`, proposed as allower. Once it holds the Allowance record, bob's mark is due
-    // from that record alone and asks him once; the same rejection comes again, is taken as
+    // `paykit_request`, proposed as allower. The dropped answer is asked for before the Allowance
+    // record arrives; the same rejection comes again, is taken as
     // never processed, and is placed (Paykit spec 8.1, "Replies before their record").
     let w = World::new();
     let mut shop = Box::pin(shop(&w)).await;
@@ -5038,10 +5040,12 @@ async fn test_allowances_answer_dropped_at_a_payer_app_proposer_asked_again_once
         &w,
         &mut wallet,
         &mut shop,
-        async |_, _, _| {},
+        async |_, wallet, _| {
+            assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
+        },
     ))
     .await;
-    assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
     assert_eq!(
         wallet.allowance(&mine).await.unwrap().status,
         AllowanceStatus::Proposed
@@ -5072,10 +5076,12 @@ async fn test_allowances_answer_dropped_at_a_payer_app_asked_again_only_once_unb
         &w,
         &mut wallet,
         &mut shop,
-        async |_, _, _| {},
+        async |w, wallet, _| {
+            wallet.block(&w.bob_id()).await.unwrap();
+            assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
+        },
     ))
     .await;
-    wallet.block(&w.bob_id()).await.unwrap();
     assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
     assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
     wallet.unblock(&w.bob_id()).await.unwrap();
@@ -5230,12 +5236,9 @@ async fn test_allowances_owed_crossing_end_kept_through_a_store_failure_and_sent
 }
 
 #[tokio::test]
-async fn test_allowances_answer_dropped_mark_not_due_from_a_payment_without_a_request() {
-    // Bob's mark for his dropped Allowance answer waits at alice's wallet. The wallet then pays
-    // bob without a request, which writes a payer record of a payment to him: a record of
-    // bob's, but not a request's, so it makes no mark due, and nothing asks him. Once the
-    // Allowance record arrives the mark is due from it, and asks him once (Paykit spec 8.1,
-    // "Replies before their record").
+async fn test_allowances_dropped_answer_asked_before_payment_and_allowance_records() {
+    // The missing answer is asked for before either record arrives. The payment and
+    // Allowance record each leave that single ask in effect.
     let w = World::new();
     let mut shop = Box::pin(shop(&w)).await;
     let mut wallet = Box::pin(wallet(&w)).await;
@@ -5244,6 +5247,7 @@ async fn test_allowances_answer_dropped_mark_not_due_from_a_payment_without_a_re
         &mut wallet,
         &mut shop,
         async |w, wallet, shop| {
+            assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
             w.list_to_alice(shop, &[wallet.app_id()], list_version(1, 1))
                 .await;
             wallet.receive(None).await.unwrap();
@@ -5269,7 +5273,7 @@ async fn test_allowances_answer_dropped_mark_not_due_from_a_payment_without_a_re
         },
     ))
     .await;
-    assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
     shop.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
     let held = AllowanceRecord::read(
@@ -8898,4 +8902,117 @@ async fn test_allowances_user_end_and_resend_request_apply_their_own_delivery_ru
     assert!(Box::pin(received_originals(&mut shop, &ids))
         .await
         .is_empty());
+}
+
+#[tokio::test]
+async fn test_allowances_dropped_reply_waits_for_contacts_and_a_current_deny_copy() {
+    let w = World::new();
+    let mut shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(alice_app(
+        &w,
+        "wallet",
+        AppScopes::new().allowance().build().unwrap(),
+    ))
+    .await;
+    let mut controller = w
+        .join(
+            &w.alice,
+            "controller",
+            AppScopes::new()
+                .allowance()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+        )
+        .await;
+    let recipient = w.bob_id();
+    let at = w.clock.now_ms();
+    for _ in 0..=paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER {
+        let id = paykit_lib::AllowanceId::generate().unwrap();
+        let proposal = json!({
+            "allowance_id": id.as_str(), "proposer_role": "allower", "allower_generation": 1,
+            "terms": terms().to_json().unwrap(),
+        });
+        let signed = controller
+            .app()
+            .sign_message(OutgoingMessage::new(
+                recipient,
+                "paykit.allowance_proposal",
+                proposal.as_object().cloned().unwrap(),
+            ))
+            .unwrap();
+        w.inject(
+            &w.bob,
+            "shop",
+            &w.alice,
+            &[wallet.app_id()],
+            "paykit.allowance_rejection",
+            vec![signed.hash()],
+            json!({"allowance_id": id.as_str()})
+                .as_object()
+                .cloned()
+                .unwrap(),
+        );
+    }
+    let summary = wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .len(),
+        paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER
+    );
+    assert_eq!(
+        crate::common::mark_senders(&wallet, "pd/").await,
+        [recipient]
+    );
+    assert_eq!(summary.resends, 0);
+    assert!(
+        matches!(summary.resend_refused, Some(Refusal::ScopeMissing(ref scope)) if scope == "paykit_contacts")
+    );
+    let err = wallet
+        .request_resend(
+            recipient,
+            paykit_sdk::ResendSelection::default().with_accepted_from_ms(at),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err.refusal(), Some(Refusal::ScopeMissing(scope)) if scope == "paykit_contacts"),
+        "{err}"
+    );
+    assert!(wallet
+        .app()
+        .queued_messages("paykit")
+        .await
+        .unwrap()
+        .iter()
+        .all(|message| message.kind != "paykit.resend_request"));
+    assert!(crate::common::asked(&wallet, &recipient).await.is_empty());
+    controller.block(&recipient).await.unwrap();
+    let me = wallet.app_id();
+    let old = wallet.app().cert().clone();
+    let wider = renew(
+        &w,
+        me,
+        &AppScopes::new().allowance().contacts().build().unwrap(),
+        1_000,
+    );
+    wallet.receive(None).await.unwrap();
+    list(&w, me, &old, &wider);
+    store_bundle(&w, me, &wider);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().cert().hash(), wider.hash());
+    wallet.app_mut().flush_outbox().await.unwrap();
+    assert!(crate::common::asked(&wallet, &recipient).await.is_empty());
+    controller.unblock(&recipient).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        crate::common::asked(&wallet, &recipient).await,
+        vec![(Some(at), None)]
+    );
+    assert_eq!(Box::pin(taken(&mut shop, "paykit.resend_request")).await, 1);
 }

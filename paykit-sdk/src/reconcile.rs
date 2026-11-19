@@ -212,12 +212,13 @@ impl Paykit {
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
-        self.list_records().await?;
+        self.list_records("Call reconcile again").await?;
+        Box::pin(self.repair_settlement_buckets()).await?;
         // After a restore, the counterparties of the open requests the records now show are
         // asked to re-send from the backup's cursor time, once (`hold.rs`, Paykit spec 7.2);
         // what isn't sent now goes at the next receive.
         self.queue_restore_asks().await?;
-        let _ = self.send_asks().await;
+        let _ = self.send_asks(&mut None).await;
         let payer_pass = self.holds("paykit_pay");
         let mut report = ReconcileReport {
             resolved: self.resume_payments().await?,
@@ -762,10 +763,10 @@ impl Paykit {
             .await?
             .is_some_and(|hold| hold.asks_due());
         if asks_owed {
-            self.list_records().await?;
+            self.list_records("Call end_reconcile again").await?;
             self.queue_restore_asks().await?;
             // Queued: what isn't sent now goes at the next receive.
-            let _ = self.send_asks().await;
+            let _ = self.send_asks(&mut None).await;
         }
         self.app
             .end_reconcile_for(crate::protocol::BACKUP_NAME, confirmed)

@@ -719,7 +719,15 @@ pub(crate) async fn period_proof(
     payee_app: [u8; 16],
     period: PeriodRef,
 ) -> serde_json::Map<String, serde_json::Value> {
-    let attempt = AttemptId::from_bytes([9; 16]);
+    period_proof_for_attempt(w, payee_app, period, AttemptId::from_bytes([9; 16])).await
+}
+
+async fn period_proof_for_attempt(
+    w: &World,
+    payee_app: [u8; 16],
+    period: PeriodRef,
+    attempt: AttemptId,
+) -> serde_json::Map<String, serde_json::Value> {
     let outcome = w
         .rail
         .pay_outside(
@@ -852,7 +860,7 @@ async fn test_periods_proof_for_a_payee_record_not_listed_yet_held_until_listed(
     let before = wallet.receive(None).await.unwrap().report.cursor;
     let till_id = w.alice.identity().app_keys("till").app_id_bytes();
     let body = period_proof(&w, till_id, january()).await;
-    w.inject(
+    let proof = w.inject(
         &w.bob,
         "bwallet",
         &w.alice,
@@ -865,12 +873,8 @@ async fn test_periods_proof_for_a_payee_record_not_listed_yet_held_until_listed(
     assert!(!received(&summary, "paykit.payment_proof"), "{summary:?}");
     assert_eq!(summary.report.cursor, before);
     store_bundle(&w, me, &wider);
-    let mut proofs = 0;
-    for _ in 0..3 {
-        let summary = wallet.receive(None).await.unwrap();
-        proofs += usize::from(received(&summary, "paykit.payment_proof"));
-    }
-    assert_eq!(proofs, 1);
+    crate::common::receive_message(&mut wallet, &proof).await;
+    assert!(!wallet.receive(None).await.unwrap().applied.contains(&proof));
     let sales = wallet.payee_activity().await.unwrap();
     assert_eq!(sales.len(), 1, "{sales:?}");
     assert_eq!(sales[0].periods.len(), 1);
@@ -2581,10 +2585,12 @@ async fn test_periods_no_response_while_the_request_record_is_sealed() {
 }
 
 #[tokio::test]
-async fn test_periods_another_payers_credit_of_a_settlement_leaves_the_payment_credited() {
-    // Carol's proof of the same settlement is credited first, as a payment without a
-    // request: one payment credits one occurrence per payer, so alice's period is still
-    // credited, carol's record not being of her.
+async fn test_periods_credit_a_settlement_once_across_payers() {
+    check_prior_settlement(true).await;
+    check_prior_settlement(false).await;
+}
+
+async fn check_prior_settlement(same_settlement: bool) {
     let w = World::new();
     let mut shop = w.shop().await;
     let mut wallet = w.wallet("wallet").await;
@@ -2593,7 +2599,17 @@ async fn test_periods_another_payers_credit_of_a_settlement_leaves_the_payment_c
         .await;
     let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
     let body = period_proof(&w, shop.app_id(), january()).await;
-    let mut unrequested = body.clone();
+    let mut unrequested = if same_settlement {
+        body.clone()
+    } else {
+        period_proof_for_attempt(
+            &w,
+            shop.app_id(),
+            january(),
+            AttemptId::from_bytes([18; 16]),
+        )
+        .await
+    };
     unrequested.remove("billing_period");
     unrequested.insert("amount".into(), json!({ "asset": "btc", "value": "1" }));
     w.inject(
@@ -2614,7 +2630,7 @@ async fn test_periods_another_payers_credit_of_a_settlement_leaves_the_payment_c
         .find(|s| s.payer == w.carol_id())
         .unwrap()
         .record;
-    assert!(shop.confirm_payment(&carols).await.unwrap().is_some());
+    let first_receipt = shop.confirm_payment(&carols).await.unwrap().unwrap();
     w.inject(
         &w.alice,
         "wallet",
@@ -2632,11 +2648,17 @@ async fn test_periods_another_payers_credit_of_a_settlement_leaves_the_payment_c
         .into_iter()
         .find(|s| s.request_hash == Some(request.request_hash))
         .unwrap();
-    assert!(shop
-        .confirm_payment(&sale.periods[0].record)
-        .await
-        .unwrap()
-        .is_some());
+    let result = shop.confirm_payment(&sale.periods[0].record).await.unwrap();
+    assert_eq!(result.is_some(), !same_settlement);
+    assert_ne!(result.as_ref(), Some(&first_receipt));
+    assert_eq!(
+        shop.confirm_payment(&carols).await.unwrap(),
+        Some(first_receipt)
+    );
+    assert_eq!(
+        w.rail.all_executions().values().sum::<u64>(),
+        if same_settlement { 1 } else { 2 }
+    );
 }
 
 #[tokio::test]
@@ -3196,8 +3218,10 @@ async fn test_periods_restore_cancellation_closes_earlier_details() {
 }
 
 #[tokio::test]
-async fn test_periods_restore_credit_closes_earlier_details() {
-    // Crediting a period closes the earlier details. The stored receipt alone carries no delivery evidence.
+async fn test_periods_restore_after_the_period_is_credited_queues_no_details() {
+    // January is credited after its details were sent, its receipt in its period record: a
+    // later stop that covers the details. The restored shop retains the receipt and queues
+    // neither it nor the details (Paykit spec 7.2, "What a restore loses").
     let w = World::new();
     let mut shop = w.shop().await;
     let mut wallet = w.wallet("wallet").await;
@@ -3516,6 +3540,7 @@ async fn test_periods_credit_stays_given_after_a_restore() {
     .await
     .unwrap();
     shop.receive(None).await.unwrap();
+    // The issued receipt stays available, with no delivery created by the restore.
     assert!(!queued(&shop, &receipt).await);
     assert_eq!(
         shop.confirm_payment(&period).await.unwrap(),
@@ -4473,16 +4498,9 @@ enum RecordWhile {
     Unreadable,
 }
 
-/// Bob's shop sends January's details while alice's wallet holds no record of the
-/// subscription that binds (`record_while`), so they are kept before their record, and then `more`
-/// details of bob's naming a period that isn't the request's are kept after them. Past the
-/// 64 kept per sender the earliest, the shop's, is dropped and marked, and the mark isn't
-/// due. Once the phone writes the record back, the wallet asks bob to send again, once,
-/// from the mark's earliest time, after he is unblocked when `blocked`, and the copy the
-/// shop sends again is stored; with nothing dropped, nothing is asked and the kept details
-/// are stored. With `february`, the wallet holds February's period record of bob's
-/// throughout, which reads and makes no mark due: only a request's record does (Paykit
-/// spec 8.1, "Replies before their record"; Paykit spec 9).
+/// The wallet asks for January's dropped details before their request record reads.
+/// When the payee is blocked before that ask, it waits until the unblock. Once the
+/// request record reads, the wallet can place the re-sent details.
 async fn details_dropped_for_the_bounds(
     record_while: RecordWhile,
     more: usize,
@@ -4565,8 +4583,15 @@ async fn details_dropped_for_the_bounds(
     for _ in 0..more {
         inject_details(&w, &[wallet.app_id()], request.request_hash, off);
     }
-    wallet.receive(None).await.unwrap();
+    if blocked {
+        wallet.app_mut().receive(None).await.unwrap();
+        wallet.block(&w.bob_id()).await.unwrap();
+    }
     let dropped = more + 1 > paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
+    assert_eq!(
+        wallet.receive(None).await.unwrap().resends,
+        u64::from(dropped && !blocked)
+    );
     let marks: Vec<serde_json::Value> = wallet
         .app()
         .protocol_scan("paykit", b"pd/")
@@ -4581,15 +4606,10 @@ async fn details_dropped_for_the_bounds(
         "{record_while:?}: {marks:?}"
     );
     if dropped {
-        assert_eq!(marks[0]["due"], json!(false), "{record_while:?}");
+        assert_eq!(marks[0]["due"], json!(true), "{record_while:?}");
         assert_eq!(marks[0]["earliest_ms"], json!(first_at), "{record_while:?}");
     }
-    // No record of the request reads yet, a period record of bob's included: nothing is
-    // asked.
     assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
-    if blocked {
-        wallet.block(&w.bob_id()).await.unwrap();
-    }
     match record_while {
         RecordWhile::Gone => {
             let op = phone
@@ -4618,7 +4638,11 @@ async fn details_dropped_for_the_bounds(
         wallet.unblock(&w.bob_id()).await.unwrap();
         summary = wallet.receive(None).await.unwrap();
     }
-    assert_eq!(summary.resends, u64::from(dropped), "{record_while:?}");
+    assert_eq!(
+        summary.resends,
+        u64::from(dropped && blocked),
+        "{record_while:?}"
+    );
     shop.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
     // Once: a later receive asks nothing more.
@@ -4694,10 +4718,8 @@ async fn test_periods_details_dropped_for_the_bounds_of_a_blocked_payee_asked_on
 }
 
 #[tokio::test]
-async fn test_periods_details_dropped_for_the_bounds_not_asked_on_a_period_record_alone() {
-    // The wallet holds February's period record of bob's, which reads, while its record of
-    // the request doesn't: only a request's record makes the mark due, so nothing is asked
-    // until that record reads.
+async fn test_periods_details_dropped_for_the_bounds_asked_with_only_a_period_record() {
+    // February's record reads while the request record for the dropped details does not.
     Box::pin(details_dropped_for_the_bounds(
         RecordWhile::Gone,
         64,

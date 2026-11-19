@@ -39,6 +39,9 @@ use crate::journal::JournalEntry;
 use crate::paykit::Paykit;
 use crate::state::{self, key};
 
+mod reports;
+pub use reports::{RecoveryMembers, RecoveryReport};
+
 /// The reason of a [`crate::Refusal::MayBePaid`] for an obligation a provider loss leaves
 /// in doubt.
 pub(crate) const LOSS_DOUBT: &str =
@@ -80,6 +83,11 @@ impl LossBoundary {
     /// authorized at the old service.
     pub fn uncertain_until_ms(&self) -> u64 {
         self.uncertain_until_ms
+    }
+
+    /// The payment method must date a settlement strictly after the residual window.
+    pub(crate) fn settlement_uncertain(&self, paid_at: u64) -> bool {
+        self.declared_at_ms == 0 || paid_at <= self.uncertain_until_ms
     }
 
     /// The boundary of `loss`, as the client tells of it.
@@ -193,6 +201,11 @@ impl Paykit {
             }),
             (None, None) => None,
         })
+    }
+
+    /// The newest declared loss known to this wallet or its current service.
+    pub(crate) async fn settlement_loss(&self) -> Result<Option<LossBoundary>> {
+        Ok(self.decisive_loss().await?.map(|loss| loss.boundary))
     }
 
     /// The provider loss that leaves `obligation`, of `request` or of its Billing Period

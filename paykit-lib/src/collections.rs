@@ -33,11 +33,13 @@ pub enum Collection {
     /// `settlements`: at most 1,024 bucket records, the marks of the settlements any own
     /// payee app has credited (Paykit wire 5.7).
     Settlements,
+    /// One recovery upload report per original app and opening identity document.
+    RecoveryUploads,
 }
 
 impl Collection {
     /// Every collection.
-    pub const ALL: [Collection; 8] = [
+    pub const ALL: [Collection; 9] = [
         Self::PayerActivity,
         Self::PayeeActivity,
         Self::PaymentLists,
@@ -46,6 +48,7 @@ impl Collection {
         Self::AllowanceLedgers,
         Self::BlockFloor,
         Self::Settlements,
+        Self::RecoveryUploads,
     ];
 
     /// The collection's name.
@@ -59,6 +62,7 @@ impl Collection {
             Self::AllowanceLedgers => "allowance_ledgers",
             Self::BlockFloor => "block_floor",
             Self::Settlements => "settlements",
+            Self::RecoveryUploads => "recovery_uploads",
         }
     }
 
@@ -79,7 +83,12 @@ impl Collection {
             Self::AllowanceLedgers => {
                 Policy::new("paykit_allowance", &["paykit_allowance_execute"])
             }
-            Self::Settlements => Policy::new("paykit_settlements", &["paykit_settlements"]),
+            Self::Settlements => {
+                Policy::new("paykit_settlements", &["paykit_settlements"]).permanent(None)
+            }
+            Self::RecoveryUploads => {
+                Policy::new(crate::scopes::RECOVERY, &[crate::scopes::RECOVERY])
+            }
         }
     }
 
@@ -153,7 +162,7 @@ mod tests {
         );
         assert_eq!(
             Collection::Settlements.fixed_policy(),
-            Policy::new("paykit_settlements", &["paykit_settlements"])
+            Policy::new("paykit_settlements", &["paykit_settlements"]).permanent(None)
         );
         for c in Collection::ALL {
             assert_eq!(Collection::from_name(c.name()), Some(c));
@@ -203,6 +212,8 @@ mod tests {
         assert_eq!(Collection::Settlements.policy(Some(&label)), fixed);
         assert_eq!(Collection::Settlements.policy_label(&fixed), Some(None));
         for other in [
+            Policy::new("paykit_settlements", &["paykit_settlements"]),
+            Policy::new("paykit_settlements", &["paykit_settlements"]).permanent(Some(1)),
             Policy::new("paykit_request", &["paykit_request"]),
             Policy::new("paykit_request:shop1", &["paykit_request:shop1"]),
             Policy::new(

@@ -16,7 +16,7 @@
 //! that fails them is invalid at Paykit's verifiers even though the switch takes it and
 //! enforces its signed `permissions` (Paykit wire 3.1).
 
-use pubky_switch_core::records::AppCert;
+use pubky_switch_core::records::{AppCert, IdentityDoc, Standing};
 use pubky_switch_core::scopes::{self as switch_scopes, Permission};
 use pubky_switch_core::sig::SignedDoc;
 
@@ -44,6 +44,8 @@ pub const ALLOWANCE_EXECUTE: &str = "paykit_allowance_execute";
 /// `paykit_settlements`: read and write `settlements`, the marks of the settlements the
 /// identity's payee apps have credited (Paykit spec 3.1, 6).
 pub const SETTLEMENTS: &str = "paykit_settlements";
+/// Read and publish reports from the apps listed at a provider loss.
+pub const RECOVERY: &str = "paykit_recovery";
 /// `paykit_contacts`: read the contacts, conversation entries and deny list (Paykit spec 3.1).
 pub const CONTACTS: &str = "paykit_contacts";
 /// `paykit_manage_contacts`: change the contacts and the deny list (Paykit spec 3.1).
@@ -58,10 +60,11 @@ pub const EXTENSION_PREFIX_START: &str = "paykit-";
 /// The names of Paykit's scopes of spec 3.1, without sub-scopes: the roots the signer knows
 /// for Paykit (Paykit spec 3.1, 3.2). Paykit's roots are more ([`is_paykit_root`]): a name of
 /// one of them that isn't here is Paykit's and ignored.
-pub const PAYKIT_SCOPE_NAMES: [&str; 8] = [
+pub const PAYKIT_SCOPE_NAMES: [&str; 9] = [
     PAY,
     REQUEST,
     SETTLEMENTS,
+    RECOVERY,
     ALLOWANCE,
     ALLOWANCE_EXECUTE,
     CONTACTS,
@@ -205,6 +208,8 @@ pub enum PaykitScope {
     /// `paykit_settlements`: read and write the identity's settlement marks; it has keys of its
     /// own and no switch permission.
     Settlements,
+    /// Read and publish recovery reports under a separate scope key.
+    Recovery,
     /// `paykit_allowance`: Allowance messages and records.
     Allowance,
     /// `paykit_allowance_execute`: act as an Allowance executor; requires `paykit_allowance`,
@@ -249,6 +254,7 @@ impl PaykitScope {
             Self::Request => REQUEST.into(),
             Self::RequestLabel(label) => label.scope(),
             Self::Settlements => SETTLEMENTS.into(),
+            Self::Recovery => RECOVERY.into(),
             Self::Allowance => ALLOWANCE.into(),
             Self::AllowanceExecute => ALLOWANCE_EXECUTE.into(),
             Self::Contacts => CONTACTS.into(),
@@ -276,6 +282,7 @@ impl PaykitScope {
             PAY => ScopeName::Paykit(Self::Pay),
             REQUEST => ScopeName::Paykit(Self::Request),
             SETTLEMENTS => ScopeName::Paykit(Self::Settlements),
+            RECOVERY => ScopeName::Paykit(Self::Recovery),
             ALLOWANCE => ScopeName::Paykit(Self::Allowance),
             ALLOWANCE_EXECUTE => ScopeName::Paykit(Self::AllowanceExecute),
             CONTACTS => ScopeName::Paykit(Self::Contacts),
@@ -303,7 +310,7 @@ impl PaykitScope {
             }
             Self::Contacts => &[Permission::ListsRead],
             Self::ManageContacts => &[Permission::ListsManage],
-            Self::AllowanceExecute | Self::Settlements => &[],
+            Self::AllowanceExecute | Self::Settlements | Self::Recovery => &[],
         }
     }
 
@@ -491,6 +498,22 @@ pub fn verify_certificate(signed: &SignedDoc, identity: &[u8; 32]) -> Result<App
     let cert = AppCert::verify(signed, identity)?;
     check_certificate(&cert)?;
     Ok(cert)
+}
+
+/// Whether a verified certificate was in force at the service-authenticated time of a
+/// record write (Switch wire 6.2, step 4). A removal includes its cutoff and a closed
+/// renewal excludes its end.
+pub fn certificate_in_force_at_write(identity: &IdentityDoc, cert: &AppCert, written: u64) -> bool {
+    let counts = match identity.standing(&cert.app_id(), &cert.hash()) {
+        Standing::Listed | Standing::RenewedOpen => true,
+        Standing::RenewedClosed { until } => written < until,
+        Standing::Removed { distrust_from } => written <= distrust_from,
+        Standing::None => false,
+    };
+    counts
+        && cert.identity() == identity.identity()
+        && cert.issued_at() <= written
+        && !cert.expired_at(written)
 }
 
 /// The scopes among `scopes` that have scope keys (Paykit spec 3.5), in order: Paykit's

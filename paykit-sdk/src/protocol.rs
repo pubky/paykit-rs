@@ -337,6 +337,14 @@ pub(crate) fn store_failure(error: pubky_switch_client::app::AppError) -> StoreF
     }
 }
 
+/// A receive effect exposes its storage failure to the record owner.
+pub(crate) fn step_failure(failure: Fail) -> StoreFailure {
+    match failure {
+        Fail::Store(error) => error,
+        _ => StoreFailure::unavailable(StoreError::Unavailable),
+    }
+}
+
 /// A local read failure keeps its real store error; malformed protocol state is corrupt.
 pub(crate) fn view_failure(error: crate::PaykitError) -> StoreFailure {
     match error {
@@ -467,8 +475,9 @@ pub const BACKUP_NAME: &str = "paykit";
 /// The families whose size the runtime bounds at every write are counted, and a layer
 /// past a bound is refused: the notices of lost messages owed (`bl/`, at most
 /// [`crate::marks::MAX_LOST_OWED`]) and each family of marks (`pd/`, `ud/`, `kw/`, `bd/`, at
-/// most [`crate::marks::MAX_DROPPED_MARKS`] each). No run leaves more, and the runtime
-/// checks the bound only as it adds one, so a restored layer over it would stay over it.
+/// most [`crate::marks::MAX_DROPPED_MARKS`] each). Retired reply windows and their
+/// unacknowledged loss notices together occupy at most [`crate::marks::MAX_LOST_OWED`]
+/// distinct sender and start-time pairs across both histories.
 pub(crate) fn restore_paykit_layer(
     layer: Option<&ProtocolLayer>,
     restoring: &RestoreContext<'_>,
@@ -480,6 +489,34 @@ pub(crate) fn restore_paykit_layer(
     let own_cert = restoring.cert();
     let blind = |input: &[u8]| restoring.blind(input);
     let binder = state::Binder::new(own, own_cert, &blind);
+    let mut settlement_buckets = std::collections::BTreeMap::new();
+    for (key, value) in restoring
+        .previous_local_scan(key::SETTLEMENT_BUCKETS.as_bytes())
+        .map_err(|_| "the settlement bucket history cannot be read")?
+    {
+        let history =
+            state::restored::<crate::settlement_marks::BucketHistory>(&key, &value, &binder)
+                .map_err(|_| "invalid retained settlement bucket history")?;
+        settlement_buckets.insert(key, history);
+    }
+    let mut settlement_marks = std::collections::BTreeMap::new();
+    for (key, value) in restoring
+        .previous_local_scan(key::SETTLEMENT_MARKS.as_bytes())
+        .map_err(|_| "the installation's settlement marks cannot be read")?
+    {
+        state::restored::<crate::settlement_marks::ObservedMark>(&key, &value, &binder)
+            .map_err(|_| "invalid retained settlement mark")?;
+        settlement_marks.insert(key, value);
+    }
+    let mut settlement_notices = std::collections::BTreeMap::new();
+    for (key, value) in restoring
+        .previous_local_scan(key::SETTLEMENT_NOTICES.as_bytes())
+        .map_err(|_| "the installation's settlement notices cannot be read")?
+    {
+        let notice = state::restored::<KeptNotice>(&key, &value, &binder)
+            .map_err(|_| "invalid retained settlement notice")?;
+        settlement_notices.insert(key, notice);
+    }
     // A repeated import on this installation preserves notices the host has already seen,
     // and unresolved ones first observed since the backup (Paykit spec 7.2).
     let mut delivery_notices = std::collections::BTreeMap::new();
@@ -528,10 +565,11 @@ pub(crate) fn restore_paykit_layer(
     let mut confirmed_before = std::collections::BTreeSet::new();
     let mut open = std::collections::BTreeSet::new();
     let mut recordings = std::collections::BTreeSet::new();
+    let mut receipt_batches = std::collections::BTreeMap::new();
     let mut awaiting_recording = std::collections::BTreeSet::new();
     let mut journaled = std::collections::BTreeSet::new();
     let mut acknowledged = Vec::new();
-    let mut writes = Vec::with_capacity(state.len());
+    let mut writes = crate::reply_asks::restore(restoring, &binder, &state)?;
     let mut cursor_time_ms = 0;
     let mut bounded = BoundedFamilies::default();
     for (key, value) in state {
@@ -545,6 +583,9 @@ pub(crate) fn restore_paykit_layer(
         let unread = || String::from("Paykit's local state in the backup doesn't read");
         bounded.count(&family)?;
         let attempt = match family {
+            StateKey::ReplyAsks { .. }
+            | StateKey::ReplyFloorBatch { .. }
+            | StateKey::DroppedLost { .. } => continue, // Merged and bounded together above.
             StateKey::RestoreHold => continue, // Validated above before reading its confirmations.
             StateKey::MissedHold => {
                 state::restored::<crate::hold::MissedHold>(&key, &value, &binder)
@@ -635,6 +676,28 @@ pub(crate) fn restore_paykit_layer(
                 state::restored::<[u8; 16]>(&key, &value, &binder).map_err(|_| unread())?;
                 recordings.insert(attempt);
                 writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::ReceiptBatch {
+                record,
+                hash,
+                msg_id,
+                ..
+            } => {
+                state::restored::<crate::receipt_delivery::ReceiptBatch>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                // The original batch may have finished after this snapshot.
+                let imported = key::receipt_batch(&record, &hash, &msg_id, true).into_bytes();
+                if let Some(previous) = receipt_batches.insert(imported.clone(), value.clone()) {
+                    if previous != value {
+                        return Err(unread());
+                    }
+                } else {
+                    writes.push(LocalWrite::Put {
+                        key: imported,
+                        value,
+                    });
+                }
                 continue;
             }
             StateKey::Journal(attempt) => attempt,
@@ -770,6 +833,38 @@ pub(crate) fn restore_paykit_layer(
             StateKey::ListAsk { .. } => {
                 state::restored::<ListAsk>(&key, &value, &binder).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::SettlementNotice(_) => {
+                let restored = state::restored::<KeptNotice>(&key, &value, &binder)
+                    .map_err(|_| "invalid restored settlement notice")?;
+                settlement_notices
+                    .entry(key)
+                    .and_modify(|current| {
+                        let acknowledged = current.acknowledged || restored.acknowledged;
+                        if restored.raised_at_ms < current.raised_at_ms {
+                            *current = restored.clone();
+                        }
+                        current.acknowledged = acknowledged;
+                    })
+                    .or_insert(restored);
+                continue;
+            }
+            StateKey::SettlementBucket(_) => {
+                let history = state::restored::<crate::settlement_marks::BucketHistory>(
+                    &key, &value, &binder,
+                )
+                .map_err(|_| "invalid restored settlement bucket history")?;
+                settlement_buckets
+                    .entry(key)
+                    .and_modify(|previous| previous.include(history))
+                    .or_insert(history);
+                continue;
+            }
+            StateKey::SettlementMark { .. } => {
+                state::restored::<crate::settlement_marks::ObservedMark>(&key, &value, &binder)
+                    .map_err(|_| "invalid restored settlement mark")?;
+                settlement_marks.insert(key, value);
                 continue;
             }
             family @ (StateKey::PayeeDeletion { .. }
@@ -936,6 +1031,24 @@ pub(crate) fn restore_paykit_layer(
     let resend = state::local_put(key::OWN_RESEND_OWED, &crate::hold::OwnResendOwed::default())
         .map_err(|_| String::from("the restored-record scan mark can't be written"))?;
     writes.push(resend);
+    for (key, mut history) in settlement_buckets {
+        // The selected native layer may hold an older value or none. Only a fresh,
+        // authenticated current bucket can authorize a rewrite.
+        history.repair = true;
+        writes.push(LocalWrite::Put {
+            key,
+            value: state::encode(&history).map_err(|_| "invalid settlement bucket history")?,
+        });
+    }
+    for (key, notice) in settlement_notices {
+        let value = state::encode(&notice).map_err(|_| "invalid saved settlement notice")?;
+        writes.push(LocalWrite::Put { key, value });
+    }
+    writes.extend(
+        settlement_marks
+            .into_iter()
+            .map(|(key, value)| LocalWrite::Put { key, value }),
+    );
     writes.extend(
         history
             .writes()
@@ -1047,10 +1160,14 @@ impl Protocol for PaykitProtocol {
             Ok(MessageKind::Paykit(Kind::AllowanceEnd)) => {
                 crate::allowances::may_deliver_end(delivery).map_err(view_failure)
             }
+            Ok(MessageKind::Paykit(Kind::ResendRequest)) => {
+                if !may_deliver_to_contact(delivery).map_err(view_failure)? {
+                    return Ok(false);
+                }
+                crate::reply_asks::may_deliver_request(delivery).map_err(view_failure)
+            }
             Ok(
-                MessageKind::Paykit(
-                    Kind::AllowanceProposal | Kind::AllowanceRejection | Kind::ResendRequest,
-                )
+                MessageKind::Paykit(Kind::AllowanceProposal | Kind::AllowanceRejection)
                 | MessageKind::Extension(_),
             ) => may_deliver_to_contact(delivery).map_err(view_failure),
             _ => Ok(true),
@@ -1211,6 +1328,7 @@ impl Protocol for PaykitProtocol {
             // entry itself, whatever is returned (Switch spec 3.5).
             Ok(()) | Err(Fail::NotNow) => Outcome::Apply(Effect::default()),
             Err(Fail::Need(needs)) => Outcome::Need(needs),
+            Err(Fail::AwaitAdmission) => Outcome::AwaitAdmission,
             Err(Fail::Drop(reason)) => Outcome::Drop { reason },
             Err(Fail::Store(failure)) => Outcome::Retry(failure),
             // A record value waits for its scope key: the client stores the entry and passes
@@ -1339,6 +1457,14 @@ impl Protocol for PaykitProtocol {
     /// takes every label's records, and one holding `paykit_request:<label>` its label's.
     fn collections(&self) -> Vec<SwitchCollection> {
         crate::hold::RecordSide::All.collections()
+    }
+
+    fn observe_record(
+        &self,
+        observation: &pubky_switch_client::app::RecordObservation<'_>,
+        context: &ReceiveContext<'_>,
+    ) -> Result<Vec<LocalWrite>, StoreFailure> {
+        crate::settlement_marks::observe(observation, context)
     }
 
     fn mark_ends_at_delete(&self, collection: &str) -> bool {
