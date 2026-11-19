@@ -2852,9 +2852,9 @@ async fn test_blocked_chosen_list_keeps_its_update_and_can_withdraw_while_held()
         let sent = shop.app().sent_to(&recipient, 0, u64::MAX).await.unwrap();
         let withdrawal = sent
             .iter()
-            .find_map(|m| {
+            .find(|m| {
                 let msg: serde_json::Value = serde_json::from_slice(m.plaintext.json()).unwrap();
-                (msg["body"]["payment_endpoints"] == serde_json::json!({})).then_some(m)
+                msg["body"]["payment_endpoints"] == serde_json::json!({})
             })
             .expect("the empty withdrawal reached the payer");
         assert!(matches!(
