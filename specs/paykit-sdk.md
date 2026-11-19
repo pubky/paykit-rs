@@ -1389,10 +1389,17 @@ example on a storage, authorization or marker error, or because the peer has
 no private intake checkpoint or no Encrypted Link snapshot, keeps the
 previously recorded folder, or none, so a flaky homeserver does not turn the
 filter off. A stale folder only delays a packet: Encrypted Link Handshake slots
-in any folder still pass, and audits still fetch the expected slot. A link that
-moves to a new folder, for example through a recovery or a relink finished
-outside intake, is followed from its next acquisition that derives the
-expected slot, at the latest the next successful audit.
+in any folder still pass, and audits still fetch the expected slot. Each
+acquisition that derives the expected slot refreshes the folder from the
+snapshot it used. A link that moves to a new folder, for example through a
+recovery or a relink finished outside intake, is followed from the next
+acquisition that starts after the move and derives the expected slot, at the
+latest the next successful audit. A link that moves while an acquisition runs
+is therefore followed from the acquisition after that one, because the running
+one records the folder of the snapshot it read before the move. Recorded
+folders live for the stream group's task: they survive reconnects of that
+group's stream, and a topology change, such as a homeserver move, or a restart
+after buffer capacity is released starts a new task with no recorded folders.
 
 The connected stream remembers the highest ignored event per peer in memory.
 After an audit that finds the peer's next expected slot absent, it advances

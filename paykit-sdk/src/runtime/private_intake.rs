@@ -1690,6 +1690,28 @@ where
         work: Arc<Notify>,
         topology_changed: Arc<Notify>,
     ) {
+        // Event scopes live for this group task, not for one connection, so
+        // read folders recorded on one connection still filter after an SSE
+        // reconnect even when the next startup audit fails before deriving a
+        // slot. The task starts unfiltered; every acquisition, from the first
+        // startup audit on, records the read folder of the snapshot it used.
+        // A topology change, including a homeserver move, or a capacity
+        // release stops this task through its epoch, and the replacement task
+        // starts with an empty map. `group.peers` is fixed for the task; only
+        // its subscribable subset changes between connections. A peer that
+        // drops out keeps an unused entry, because routing only consults the
+        // connection's subscribed peers, and a peer without an entry stays
+        // unfiltered. A stale folder only delays a packet: handshake slots in
+        // any folder still pass, audits still fetch the expected slot, and
+        // every acquisition that derives the slot replaces the entry.
+        let event_scopes = Arc::new(std::sync::Mutex::new(PrivateIntakeEventScopes::default()));
+        let acquire = scoped_private_intake_acquire(Arc::clone(&event_scopes), {
+            let sdk = Arc::clone(&self);
+            move |peer, cursor| {
+                let sdk = Arc::clone(&sdk);
+                Box::pin(async move { sdk.acquire_expected_private_packet(peer, cursor).await })
+            }
+        });
         loop {
             if *stop.borrow() {
                 break;
@@ -1750,16 +1772,6 @@ where
             };
             let client = access.outbox_client.client().clone();
             drop(access);
-            // Start unfiltered; every acquisition, from the startup audit on,
-            // records the read folder of the snapshot it used.
-            let event_scopes = Arc::new(std::sync::Mutex::new(PrivateIntakeEventScopes::default()));
-            let acquire = scoped_private_intake_acquire(Arc::clone(&event_scopes), {
-                let sdk = Arc::clone(&self);
-                move |peer, cursor| {
-                    let sdk = Arc::clone(&sdk);
-                    Box::pin(async move { sdk.acquire_expected_private_packet(peer, cursor).await })
-                }
-            });
             let cursors = match self
                 .storage
                 .transaction({
@@ -1911,7 +1923,7 @@ where
                 stop.clone(),
                 &health,
                 &work,
-                acquire,
+                Arc::clone(&acquire),
                 audit_group,
                 &event_scopes,
                 commit_cursors,
