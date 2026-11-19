@@ -151,8 +151,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   file, so the stream matched no private message, and new messages waited for
   the healthy audit (60 seconds by default).
 - In the Rust-only SSE-assisted private intake API (`start_private_intake` and
-  `PrivateIntakeSupervisor`), a Linked Peer with no stored intake cursor no
-  longer replays its whole private-directory event history, one expected-slot
+  `PrivateIntakeSupervisor`), a supervised peer (a Linked Peer or a peer with
+  a pending Encrypted Link Handshake) with no stored intake cursor no longer
+  replays its whole private-directory event history, one expected-slot
   fetch per event, before live events arrive, when the newest-event request
   succeeds; otherwise it replays from the beginning as before. Intake starts
   from the newest event and the startup audit reconciles earlier slots. The

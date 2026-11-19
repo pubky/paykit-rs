@@ -705,19 +705,29 @@ struct SeededPrivateIntakeSubscription {
     seeds: Option<PrivateIntakeSeeds>,
 }
 
+/// The group's newest private event from an earlier successful seed query,
+/// with the seedless peers that query covered.
+struct KnownPrivateIntakeNewest {
+    event_id: u64,
+    covered: HashSet<PubkyPublicKey>,
+}
+
 /// Builds the subscription cursors for `stored`.
 ///
 /// A peer with a stored cursor resumes from it. Peers without one start from
 /// the newest private event among them and each gets a pending seed.
 /// `known_newest` holds the group's newest event from an earlier successful
-/// query: when set, it is reused without calling `query_newest`; otherwise
-/// the seedless peers share one `query_newest` call and a successful result
-/// is stored in it. A failed or empty query leaves them without a cursor,
-/// replaying from the beginning, and the next call queries again.
+/// query: when that query covered every seedless peer, it is reused without
+/// calling `query_newest`. Otherwise, when `query_allowed`, the seedless
+/// peers share one `query_newest` call and a successful result replaces
+/// `known_newest`. A failed, empty, or skipped query leaves them without a
+/// cursor, replaying from the beginning, and the next allowed call queries
+/// again.
 async fn private_intake_subscription_cursors<F, Fut>(
     stored: Vec<StoredPrivateIntakeCursor>,
     homeserver_name: &str,
-    known_newest: &mut Option<u64>,
+    known_newest: &mut Option<KnownPrivateIntakeNewest>,
+    query_allowed: bool,
     query_newest: F,
 ) -> SeededPrivateIntakeSubscription
 where
@@ -728,17 +738,32 @@ where
         .iter()
         .filter(|stored| stored.event_id.is_none())
         .collect::<Vec<_>>();
+    // A peer the remembered query did not cover, such as one that was not
+    // subscribable at that connect, would replay its events up to the
+    // remembered one, so it needs a fresh query.
+    let reusable = known_newest.as_ref().filter(|known| {
+        seedless
+            .iter()
+            .all(|stored| known.covered.contains(&stored.peer))
+    });
     let newest = if seedless.is_empty() {
         None
-    } else if let Some(newest) = *known_newest {
-        Some(newest)
+    } else if let Some(known) = reusable {
+        Some(known.event_id)
+    } else if !query_allowed {
+        None
     } else {
         let newest = query_newest(seedless.iter().map(|stored| stored.key.clone()).collect())
             .await
             .ok()
             .flatten()
             .map(|cursor| cursor.id());
-        *known_newest = newest;
+        if let Some(event_id) = newest {
+            *known_newest = Some(KnownPrivateIntakeNewest {
+                event_id,
+                covered: seedless.iter().map(|stored| stored.peer.clone()).collect(),
+            });
+        }
         newest
     };
     let seeds = newest.map(|event_id| PrivateIntakeSeeds {
@@ -1509,15 +1534,22 @@ where
         work: Arc<Notify>,
         topology_changed: Arc<Notify>,
     ) {
-        // The newest event from this task's last successful seed query.
-        // Reconnects within this topology epoch reuse it for peers that are
-        // still seedless instead of querying again; a topology restart spawns
-        // a new task that queries again. That stays safe: the skip-safety
-        // argument in [`audit_seeded_private_intake_peer`] holds for any
-        // earlier seed read, because every connection runs its startup audit
-        // after subscribing, and an event at or below it that commits later
-        // is fetched by a later audit.
+        // The newest event from this task's last successful seed query and
+        // the peers it covered. Reconnects within this topology epoch reuse it
+        // while every still-seedless peer is covered instead of querying
+        // again; a topology restart spawns a new task that queries again.
+        // That stays safe: the skip-safety argument in
+        // [`audit_seeded_private_intake_peer`] holds for any earlier seed
+        // read, because every connection runs its startup audit after
+        // subscribing, and an event at or below it that commits later is
+        // fetched by a later audit.
         let mut known_newest = None;
+        // Set while the last live subscribe was rejected as `Unsupported`. A
+        // homeserver without SSE fails the seed query the same way, so each
+        // retry would send two failing requests; skipping the query keeps one,
+        // and seedless peers no remembered query covers subscribe from the
+        // beginning as before. A later successful subscribe clears it.
+        let mut event_stream_unsupported = false;
         loop {
             if *stop.borrow() {
                 break;
@@ -1585,15 +1617,21 @@ where
                     let homeserver = active_group.homeserver_name.clone();
                     move |tx| {
                         let state = tx.export_storage_state();
+                        // Peers whose key does not parse are left out of the stream.
                         Ok(peers
                             .into_iter()
-                            .map(|peer| {
+                            .filter_map(|peer| {
+                                let key = peer.to_public_key().ok()?;
                                 let event_id = state
                                     .private_intake_cursors
                                     .get(&peer)
                                     .filter(|cursor| cursor.homeserver == homeserver)
                                     .map(|cursor| cursor.event_id);
-                                (peer, event_id)
+                                Some(StoredPrivateIntakeCursor {
+                                    peer,
+                                    key,
+                                    event_id,
+                                })
                             })
                             .collect::<Vec<_>>())
                     }
@@ -1609,18 +1647,6 @@ where
                     continue;
                 }
             };
-            // Peers whose key does not parse are left out of the stream.
-            let stored_cursors = stored_cursors
-                .into_iter()
-                .filter_map(|(peer, event_id)| {
-                    let key = peer.to_public_key().ok()?;
-                    Some(StoredPrivateIntakeCursor {
-                        peer,
-                        key,
-                        event_id,
-                    })
-                })
-                .collect();
             // A stalled seed query must not delay stop or an epoch restart.
             let Some(SeededPrivateIntakeSubscription { cursors, seeds }) =
                 run_until_private_intake_stop(
@@ -1629,6 +1655,7 @@ where
                         stored_cursors,
                         &active_group.homeserver_name,
                         &mut known_newest,
+                        !event_stream_unsupported,
                         |seedless| {
                             let query = private_intake_event_query(
                                 client.clone(),
@@ -1669,8 +1696,14 @@ where
                 }
             };
             let stream = match builder.live().subscribe().await {
-                Ok(stream) => stream,
+                Ok(stream) => {
+                    event_stream_unsupported = false;
+                    stream
+                }
                 Err(error) => {
+                    if is_unsupported_event_stream(&error) {
+                        event_stream_unsupported = true;
+                    }
                     // Without a stream no event is skipped, so no seed applies.
                     let (state, retry_after, audit_outcome) =
                         audit_disconnected_private_intake_stream(
@@ -4771,6 +4804,21 @@ mod tests {
         })
     }
 
+    fn known(event_id: u64, covered: &[&PubkyPublicKey]) -> Option<KnownPrivateIntakeNewest> {
+        Some(KnownPrivateIntakeNewest {
+            event_id,
+            covered: covered.iter().map(|&peer| peer.clone()).collect(),
+        })
+    }
+
+    fn known_parts(
+        known: &Option<KnownPrivateIntakeNewest>,
+    ) -> Option<(u64, HashSet<PubkyPublicKey>)> {
+        known
+            .as_ref()
+            .map(|known| (known.event_id, known.covered.clone()))
+    }
+
     fn private_event(event_id: u64) -> pubky::Event {
         let owner = pubky::Keypair::random().public_key();
         pubky::Event {
@@ -4832,6 +4880,7 @@ mod tests {
                 ]),
                 "homeserver-a",
                 &mut known_newest,
+                true,
                 {
                     let requested = Arc::clone(&requested);
                     move |seedless: Vec<pubky::PublicKey>| {
@@ -4867,20 +4916,24 @@ mod tests {
                 HashSet::from([peers[0].clone(), peers[2].clone()])
             ))
         );
-        assert_eq!(known_newest, Some(42));
+        assert_eq!(
+            known_parts(&known_newest),
+            Some((42, HashSet::from([peers[0].clone(), peers[2].clone()])))
+        );
     }
 
     #[tokio::test]
     async fn test_private_intake_seed_reuses_remembered_newest_without_query() {
         let peers = users(2);
         let queries = Arc::new(AtomicUsize::new(0));
-        let mut known_newest = Some(42);
+        let mut known_newest = known(42, &[&peers[0]]);
 
         let SeededPrivateIntakeSubscription { cursors, seeds } =
             private_intake_subscription_cursors(
                 with_keys(vec![(peers[0].clone(), None), (peers[1].clone(), Some(5))]),
                 "homeserver-a",
                 &mut known_newest,
+                true,
                 {
                     let queries = Arc::clone(&queries);
                     move |_| {
@@ -4900,7 +4953,92 @@ mod tests {
             seed_parts(&seeds),
             Some(("homeserver-a".into(), 42, HashSet::from([peers[0].clone()])))
         );
-        assert_eq!(known_newest, Some(42));
+        assert_eq!(
+            known_parts(&known_newest),
+            Some((42, HashSet::from([peers[0].clone()])))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_seed_requeries_for_peer_remembered_query_missed() {
+        let peers = users(2);
+        let requested = Arc::new(StdMutex::new(Vec::new()));
+        // The remembered query covered only peers[0]; peers[1] became
+        // subscribable later in the same epoch.
+        let mut known_newest = known(42, &[&peers[0]]);
+
+        let SeededPrivateIntakeSubscription { cursors, seeds } =
+            private_intake_subscription_cursors(
+                with_keys(vec![(peers[0].clone(), None), (peers[1].clone(), None)]),
+                "homeserver-a",
+                &mut known_newest,
+                true,
+                {
+                    let requested = Arc::clone(&requested);
+                    move |seedless: Vec<pubky::PublicKey>| {
+                        requested.lock().unwrap().push(
+                            seedless
+                                .iter()
+                                .map(PubkyPublicKey::from_public_key)
+                                .collect::<Vec<_>>(),
+                        );
+                        async { Ok(Some(pubky::EventCursor::new(99))) }
+                    }
+                },
+            )
+            .await;
+
+        assert_eq!(
+            *requested.lock().unwrap(),
+            vec![vec![peers[0].clone(), peers[1].clone()]]
+        );
+        assert_eq!(
+            stored_cursor_ids(&cursors),
+            vec![(peers[0].clone(), Some(99)), (peers[1].clone(), Some(99))]
+        );
+        assert_eq!(
+            seed_parts(&seeds),
+            Some((
+                "homeserver-a".into(),
+                99,
+                HashSet::from([peers[0].clone(), peers[1].clone()])
+            ))
+        );
+        assert_eq!(
+            known_parts(&known_newest),
+            Some((99, HashSet::from([peers[0].clone(), peers[1].clone()])))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_seed_query_skipped_after_unsupported_stream() {
+        let peers = users(2);
+        let queries = Arc::new(AtomicUsize::new(0));
+        let mut known_newest = None;
+
+        let SeededPrivateIntakeSubscription { cursors, seeds } =
+            private_intake_subscription_cursors(
+                with_keys(vec![(peers[0].clone(), None), (peers[1].clone(), Some(5))]),
+                "homeserver-a",
+                &mut known_newest,
+                false,
+                {
+                    let queries = Arc::clone(&queries);
+                    move |_| {
+                        queries.fetch_add(1, Ordering::SeqCst);
+                        async { Ok(Some(pubky::EventCursor::new(42))) }
+                    }
+                },
+            )
+            .await;
+
+        assert_eq!(queries.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            stored_cursor_ids(&cursors),
+            vec![(peers[0].clone(), None), (peers[1].clone(), Some(5))]
+        );
+        assert!(seeds.is_none());
+        assert!(known_newest.is_none());
     }
 
     #[tokio::test]
@@ -4915,6 +5053,7 @@ mod tests {
                 with_keys(vec![(peers[0].clone(), None)]),
                 "homeserver-a",
                 &mut known_newest,
+                true,
                 |_| std::future::pending(),
             ),
         );
@@ -4928,7 +5067,7 @@ mod tests {
                 .expect("stop should end a stalled seed query");
 
         assert!(stopped.is_none());
-        assert_eq!(known_newest, None);
+        assert!(known_newest.is_none());
     }
 
     #[tokio::test]
@@ -4951,6 +5090,7 @@ mod tests {
                 with_keys(stored.clone()),
                 "homeserver-a",
                 &mut None,
+                true,
                 {
                     let queries = Arc::clone(&queries);
                     move |_| {
@@ -4976,6 +5116,7 @@ mod tests {
                 with_keys(vec![(peers[0].clone(), None), (peers[1].clone(), Some(7))]),
                 "homeserver-a",
                 &mut known_newest,
+                true,
                 move |_| async move { newest },
             )
             .await;
@@ -4986,7 +5127,7 @@ mod tests {
         );
         assert!(seeds.is_none());
         // Only a successful result is remembered, so the next connect retries.
-        assert_eq!(known_newest, None);
+        assert!(known_newest.is_none());
     }
 
     #[tokio::test]

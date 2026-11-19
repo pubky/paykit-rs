@@ -219,7 +219,8 @@ whose Pubky homeserver could not be resolved. A homeserver that rejects or
 does not implement SSE is `Unsupported`; SSE mode does not fall back to
 continuous slot polling. Already buffered packets remain drainable during an
 outage. Reconnects reuse durable per-user cursors and reconcile expected slots.
-A peer without a stored cursor starts from the newest event instead of
+A supervised peer (a Linked Peer or a peer with a pending Encrypted Link
+Handshake) without a stored cursor starts from the newest event instead of
 replaying its history when the newest-event request succeeds; otherwise it
 replays from the beginning as before. The startup audit reconciles its earlier
 slots.

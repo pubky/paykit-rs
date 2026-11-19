@@ -1282,10 +1282,12 @@ async fn test_private_intake_seeds_cursor_without_replaying_history() {
         "private intake should store a cursor at or past Bob's newest private event",
     )
     .await;
+    // The seed commit is the only cursor change before this point: every
+    // private event is at or before the seed, so the stream delivers none.
     let counted = advances.load(Ordering::SeqCst);
-    assert!(
-        counted <= 2,
-        "history must not be replayed one acquisition per event: {counted} cursor advances"
+    assert_eq!(
+        counted, 1,
+        "only the seed commit may advance the cursor; history must not be replayed one acquisition per event"
     );
     outlast_first_in_stream_audit(
         &supervisor,

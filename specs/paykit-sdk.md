@@ -1422,8 +1422,9 @@ fallback. HTTP 404, 405, and 501 subscription failures are reported as
 are `Stale` and retry. Neither state proves remote absence. Buffered work
 remains drainable during transport failure.
 
-A Linked Peer with no stored intake cursor for its current homeserver, such as
-on first start, after Paykit identity key rotation, or after a homeserver move,
+A supervised peer (a Linked Peer or a peer with a pending Encrypted Link
+Handshake) with no stored intake cursor for its current homeserver, such as on
+first start, after Paykit identity key rotation, or after a homeserver move,
 is not replayed from the beginning of its private-directory history. Before
 subscribing, the supervisor makes one non-live, newest-first request limited to
 one event for those peers and subscribes them from that event. The startup
@@ -1437,10 +1438,14 @@ expected slot absent stores that peer's cursor, and no later audit on the
 connection writes it again. If no audit does, reconnects of the same
 subscription group within one topology epoch, which lasts until the
 subscription topology restarts, reuse the event from its last successful
-request instead of repeating it. A new epoch makes the request again. This
-stays safe because each connection runs its startup audit after subscribing.
-If the request fails or returns no event, those peers subscribe from the
-beginning as before, and the next connect requests again. Seeding deliberately
+request instead of repeating it while that request covered every peer still
+without a cursor; a peer it did not cover makes them request again. A new
+epoch makes the request again. This stays safe because each connection runs
+its startup audit after subscribing. If the request fails or returns no event,
+those peers subscribe from the beginning as before, and the next connect
+requests again. After a live subscription fails as `Unsupported`, later
+connects in the epoch make no new request until a live subscription succeeds
+again; peers without a reusable event subscribe from the beginning. Seeding deliberately
 covers only peers without a stored cursor for the current homeserver; a peer
 with a stored cursor resumes from it as before.
 Stopping the supervisor or restarting the subscription topology abandons a
