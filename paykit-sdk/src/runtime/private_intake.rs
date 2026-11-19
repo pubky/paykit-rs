@@ -1704,7 +1704,11 @@ where
                     if is_unsupported_event_stream(&error) {
                         event_stream_unsupported = true;
                     }
-                    // Without a stream no event is skipped, so no seed applies.
+                    // Deliberately conservative: committing the seed here would
+                    // also be safe, because this audit runs after the seed read.
+                    // Without a stream no event is skipped, so the seed is left
+                    // for an audit on a connected stream (or a later connect)
+                    // to persist.
                     let (state, retry_after, audit_outcome) =
                         audit_disconnected_private_intake_stream(
                             &error,
