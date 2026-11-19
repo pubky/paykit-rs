@@ -1309,6 +1309,7 @@ async fn test_restore_hold_owed_missed_call_with_no_end_bounded_by_the_verified_
     let owed = serde_json::json!({
         "v": pubky_switch_client::app::SCHEMA_VERSION,
         "d": { "to": ["paykit"], "call": { "Missed": {
+            "read_at_ms": w.clock.now_ms(),
             "seq": cursor.seq,
             "entries": 0,
             "accepted_from_ms": w.clock.now_ms() - 1_000,
