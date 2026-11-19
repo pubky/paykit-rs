@@ -955,7 +955,9 @@ impl Paykit {
             self.unlisted().await?,
             Some(Unlisted::Certificate | Unlisted::Missed)
         );
-        if !owed || !self.holds_scope_keys() {
+        // The client and an explicit listing share a continuation. Finish the client's
+        // owed listing before starting Paykit's own pass under the new certificate.
+        if !owed || !self.holds_scope_keys() || self.app.listing_owed().await? {
             return Ok(None);
         }
         match self.list_records().await {

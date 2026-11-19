@@ -73,7 +73,13 @@ pub(super) async fn follow_loss(app: &mut Paykit) -> u64 {
     let info = app.app().recovery_info().await.unwrap().unwrap();
     assert!(info.steps_done, "{info:?}");
     assert!(info.loss.uncertain_until_ms > info.loss.declared_at_ms);
-    app.reconcile().await.unwrap();
+    // Reconciliation starts its own bounded listing even after a receive finished one.
+    let mut result = app.reconcile().await;
+    if matches!(&result, Err(error) if matches!(error.refusal(), Some(Refusal::NotNow(why)) if why.contains("shared records aren't listed")))
+    {
+        result = app.reconcile().await;
+    }
+    result.unwrap();
     app.end_reconcile(UserConfirmed::new()).await.unwrap();
     info.loss.uncertain_until_ms
 }

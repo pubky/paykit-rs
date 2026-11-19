@@ -1366,7 +1366,10 @@ async fn test_certificate_renewal_reading_more_lists_its_records_first() {
             after: client_listing_requests(&wider),
         });
     let mut summary = wallet.receive(None).await.unwrap();
-    while summary.report.more && summary.records_unlisted.is_none() {
+    for _ in 0..8 {
+        if !summary.report.more || summary.records_unlisted.is_some() {
+            break;
+        }
         summary = wallet.receive(None).await.unwrap();
     }
     assert!(summary.records_unlisted.is_some(), "{summary:?}");

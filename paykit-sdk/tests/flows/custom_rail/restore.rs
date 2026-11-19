@@ -347,6 +347,8 @@ async fn test_payee_deletion_a_misplaced_custom_receipt_does_not_count_as_credit
         .is_empty());
     // The permanent mark belongs to the original credit. The misplaced receipt
     // neither supplies its missing signed receipt nor authorizes another credit.
+    let before = w.record_writes(&w.bob, &key);
+    assert_eq!(installed.confirm_payment(&key).await.unwrap(), None);
     let buckets = installed
         .app()
         .records_of(Collection::Settlements.name())
@@ -354,7 +356,5 @@ async fn test_payee_deletion_a_misplaced_custom_receipt_does_not_count_as_credit
         .unwrap();
     assert_eq!(buckets.len(), 1);
     assert_eq!(buckets[0].policy, Collection::Settlements.fixed_policy());
-    let before = w.record_writes(&w.bob, &key);
-    assert_eq!(installed.confirm_payment(&key).await.unwrap(), None);
     assert_eq!(w.record_writes(&w.bob, &key), before);
 }
