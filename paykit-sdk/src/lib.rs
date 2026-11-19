@@ -17,7 +17,7 @@
 //! - [`Paykit`]: one Paykit App, on the client's `App`, with Paykit's API: requests
 //!   ([`Paykit::send_request`], [`Paykit::reject_request`], [`Paykit::confirm_payment`]),
 //!   recurring requests' subscriptions and Billing Periods
-//!   ([`Paykit::accept_subscription`], [`Paykit::send_period_details`]),
+//!   ([`Paykit::accept_subscription`], [`Paykit::send_period_details`], [`Paykit::pay_period`]),
 //!   paying ([`Paykit::pay_request`], [`Paykit::pay_without_request`],
 //!   [`Paykit::resume_payments`]), receiving ([`Paykit::receive`]), reconciliation
 //!   ([`Paykit::reconcile`]) and Allowances ([`Paykit::propose_allowance`],
@@ -32,8 +32,10 @@
 //! - Divergent records after a provider loss: paused until the user confirms
 //!   ([`Paykit::divergent_records`], [`Paykit::confirm_divergent`], [`DivergentRecord`]).
 //!
-//! Paying recurring requests' periods, the Allowance executor with its grant and ledger, and
-//! publishing Private Payment Lists build on the same parts, in their own modules.
+//! A wallet pays each Billing Period on its own claim. Once the attempt opens,
+//! it finishes across a seller cancellation and sends its proof for that period.
+//! The Allowance executor with its grant and ledger, and publishing Private Payment Lists,
+//! build on the same parts in their own modules.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]

@@ -1407,7 +1407,6 @@ async fn test_period_payments_payee_cancellation_crosses_an_accepted_attempt() {
         january().start_secs(),
     );
     let rail = Arc::clone(&w.rail);
-    let original = request.clone();
     let (finished, seller) = std::sync::mpsc::channel();
     base.on_stage("paying", move || {
         // Both apps use their ordinary APIs while the phone is between its commit and call.
@@ -1427,7 +1426,7 @@ async fn test_period_payments_payee_cancellation_crosses_an_accepted_attempt() {
                     shop.cancel_sent_request(&sale, None).await.unwrap();
                     tablet.receive(None).await.unwrap();
                     assert_eq!(
-                        tablet.request(&original).await.unwrap().status,
+                        tablet.request(&request).await.unwrap().status,
                         RequestStatus::Cancelled
                     );
                     shop
