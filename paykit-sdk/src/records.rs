@@ -152,6 +152,9 @@ impl KeptMessage {
             plaintext: message.plaintext.encode(),
             accepted_at: Some(message.accepted_at_ms),
             seq: Some(message.seq),
+            generation: Some(message.generation),
+            pending_source: None,
+            pending_create: None,
         }
     }
 
@@ -681,13 +684,28 @@ mod extension_tests {
         )
         .unwrap();
         let signed = original.sign(&sender.keys).unwrap();
-        let mut kept = KeptMessage {
+        let received = ReceivedMessage {
+            receipt: pubky_switch_client::app::EntryReceipt {
+                entry_id: [1; 16],
+                service_key: [2; 32],
+                read_at_ms: NOW,
+            },
+            generation: 2,
+            seq: 3,
             sender: sender.id(),
-            cert: sender.cert.signed().clone(),
-            plaintext: signed.encode(),
-            accepted_at: Some(NOW),
-            seq: Some(3),
+            accepted_at_ms: NOW,
+            message: original.clone(),
+            plaintext: signed.clone(),
+            cert: sender.cert.clone(),
+            standing: pubky_switch_core::records::Standing::Listed,
+            context: None,
+            parked: false,
+            released: false,
+            conflict: None,
         };
+        let mut kept = KeptMessage::received(&received);
+        assert_eq!(kept.position(), Some(received.position()));
+        assert!(kept.pending_source.is_none() && kept.pending_create.is_none());
         assert_eq!(kept.extension_for(&recipient).unwrap(), original);
         assert!(kept.extension_for(&[9; 32]).is_err());
 
