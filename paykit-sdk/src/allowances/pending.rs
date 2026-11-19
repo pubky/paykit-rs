@@ -311,7 +311,7 @@ impl Paykit {
         Ok(out)
     }
 
-    /// The current service's complete results for this installation's original pending writes.
+    /// Verify each original application with the service key its signed generation names.
     async fn confirmed_pending_writes(
         &self,
         deleted: bool,
@@ -319,10 +319,6 @@ impl Paykit {
         let own = self.identity();
         let app_id = self.app_id();
         let doc = self.app.own_identity();
-        let generation = doc.generation();
-        let Some(service) = doc.service_key_of(generation) else {
-            return Ok(BTreeMap::new());
-        };
         let mut confirmed = BTreeMap::new();
         for held in self.app.shared_evidence().await?.ops {
             let Some(proof) = held.proof else { continue };
@@ -340,8 +336,10 @@ impl Paykit {
             let OpKind::RecordPut(put) = &body.kind else {
                 continue;
             };
-            if body.generation != generation
-                || body.batch.count != 1
+            let Some(service) = doc.service_key_of(body.generation) else {
+                continue;
+            };
+            if body.batch.count != 1
                 || put.policy != Collection::AllowanceProposals.fixed_policy()
                 || put.value_sealed.looks_like_delete() != deleted
             {
@@ -361,7 +359,7 @@ impl Paykit {
             {
                 if let Some(version) = applied_version(proof) {
                     let operation =
-                        prepared_write(own, app_id, generation, &body.conditions, &body.kind)?;
+                        prepared_write(own, app_id, body.generation, &body.conditions, &body.kind)?;
                     confirmed.insert(
                         (put.key, operation),
                         ConfirmedWrite {
@@ -975,7 +973,13 @@ impl Paykit {
                     .confirmed_pending_writes(false)
                     .await?
                     .get(&(key, create.operation))
-                    .is_none_or(|write| write.version != selected.version)
+                    .is_none_or(|write| {
+                        write.version != selected.version
+                            || !super::delivery::deletion_continues(
+                                write.version.generation,
+                                self.app.own_identity().body().recovery_from,
+                            )
+                    })
             {
                 return Ok(Some(Placed::Waits));
             }
