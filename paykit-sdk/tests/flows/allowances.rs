@@ -10723,8 +10723,10 @@ async fn kept_rejection_across_generations(lost: bool) {
         Some(Delivery::Accepted { .. })
     ));
     assert_eq!(
-        Box::pin(received_originals(&mut seller, &[&id])).await,
-        [id.clone()]
+        Box::pin(received_originals(&mut seller, &[&id]))
+            .await
+            .as_slice(),
+        std::slice::from_ref(&id)
     );
     assert!(Box::pin(received_originals(&mut seller, &[&id]))
         .await
