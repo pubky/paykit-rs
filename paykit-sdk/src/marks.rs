@@ -43,17 +43,9 @@
 //!   read separately (`rh`) and applies it only if the held cursor is ahead or unknown,
 //!   including when a later page ends a clean verdict (Paykit spec 7.2 and 8.1).
 //!
-//! **The block floor** (`crate::floor`). The time before which a one-time request is paid
-//! only by hand is the identity's, in its shared `block_floor` record, so every payer app
-//! applies it, one newly added too. Every ask to a sender with a live block mark here raises
-//! it first to the mark's latest time, in the ask's batch. A block mark that goes for the
-//! bound or its own expiry may leave a request of its window still on its way back: an ask
-//! delivered just before is answered later, and another ask can bring it back. So its latest
-//! time folds into the raise this app owes (`bf`), in the commit that drops it, as a
-//! restore's first read of the lists folds that read's time: the backup carries no mark of
-//! a sender blocked and unblocked again since. The raise owed is written before the block
-//! marks ask, and with any ask, and goes in the batch that writes it; meanwhile this app
-//! applies it as a floor. A backup carries it; a restore bounds it as it bounds the marks.
+//! A payer applies the identity's shared block floor when it closes a blocked window or
+//! applies a widening (Paykit spec 8.1 and `crate::floor`). Receiving a blocked message,
+//! retiring its mark and sending its recovery request leave the shared floor alone.
 //!
 //! **Two times.** A mark holds the earliest acceptance time among the messages it covers,
 //! which a re-send asks from, and the latest, which the mark expires by. Each message
@@ -105,18 +97,23 @@ pub const MAX_DROPPED_MARKS: usize = 128;
 /// block mark.
 pub const MAX_FLAGGED_COPY: usize = 4096;
 
-/// A widening of the block marks owed at the next read of the lists (`bw/<from_ms>`): every
-/// counterparty the deny list holds then is marked from `from_ms` to `until_ms`, or to the
-/// time it is applied for [`BlockedWindow::TO_NOW`] when the missed item's end is unknown.
+/// A missed item's acceptance window and the floor covered by its original feed page.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct BlockedWindow {
     pub(crate) from_ms: u64,
     pub(crate) until_ms: u64,
+    pub(crate) floor_ms: u64,
 }
 
-impl BlockedWindow {
-    /// The end of a widening that runs to the time it is applied.
-    pub(crate) const TO_NOW: u64 = u64::MAX;
+/// Before a list read each missed callback owns one window. That read keeps one copy
+/// of its deny list for all windows it observed, including when the shared floor must retry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MissedWidening {
+    pub(crate) id: crate::hold::HoldEpoch,
+    pub(crate) windows: Vec<BlockedWindow>,
+    pub(crate) deny: Option<Vec<[u8; 32]>>,
 }
 
 /// The first list read after a restore, used if the restore requires a block window.
@@ -181,12 +178,6 @@ pub(crate) struct QueuedRequest {
     pub(crate) msg_id: String,
     #[serde(with = "serde_b64")]
     pub(crate) hash: [u8; 32],
-    /// The batch the client kept to send again, when the write that queues the request with
-    /// the raise of the block floor wasn't answered ([`crate::PaykitError::kept_batch`]):
-    /// while the client still keeps it, the request isn't in the outbox yet and isn't asked
-    /// anew. `None` for a request queued at once.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) kept_batch: Option<[u8; 16]>,
 }
 
 impl QueuedRequest {
@@ -206,8 +197,7 @@ pub const MAX_LOST_OWED: usize = 64;
 /// on that request is read in the pass after the read ([`Paykit::settle_lost_owed`]): one
 /// delivered before the mark's expiry tells nothing, as at expiry; any other tells
 /// [`crate::NoticeKind::BlockedMessagesLost`] for the window, raised at `raised_ms`. Written
-/// in the commit that drops the mark and folds its latest time into the raise owed, so the
-/// bound on marks and the block floor hold as when the notice is told at once.
+/// in the commit that drops the mark, so a later delivery can settle the notice.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct LostOwed {
     /// The dropped mark's sender identity.
@@ -642,9 +632,6 @@ impl Paykit {
     async fn ask_on_block_marks(&mut self, refused: &mut Option<Refusal>) -> Result<u64> {
         let family = MarkFamily::Blocked;
         let now = self.now();
-        // The raise owed goes first, so the floor every payer app reads covers the marks gone
-        // before anything this pass asks for comes back (`crate::floor`).
-        self.write_floor_owed().await?;
         let fresh_copy = self
             .local_get::<u64>(key::LISTS_READ)
             .await?
@@ -705,59 +692,6 @@ impl Paykit {
             && !mark.expired(self.service_time()))
     }
 
-    /// Count a widening's window from `from` to `until` in `sender`'s block mark, in `tx`
-    /// ([`count_blocked`]): a mark the bound drops before it asked raises the notice that
-    /// its window can no longer come back. A request the dropped mark still names as queued,
-    /// not yet delivered, is not cancelled: the host's next flush may still deliver it and
-    /// bring the window's messages back after that notice. Returns whether it was counted:
-    /// `false` while no mark may go for it, every one naming pairs still to forget, so the
-    /// widening stays to be applied again.
-    pub(crate) async fn count_widened_blocked(
-        &self,
-        tx: &mut crate::state::Tx,
-        sender: [u8; 32],
-        from: u64,
-        until: u64,
-    ) -> Result<bool> {
-        let family = MarkFamily::Blocked;
-        let held = self.local_get::<DropMark>(&family.key(&sender)).await?;
-        let others: Vec<DropMark> = match held {
-            Some(_) => Vec::new(),
-            None => self
-                .local_scan::<DropMark>(family.prefix())
-                .await?
-                .into_iter()
-                .map(|(_, mark)| mark)
-                .collect(),
-        };
-        let raised = self.service_time().unwrap_or(0);
-        let floor = self.local_get::<u64>(key::BLOCK_FLOOR).await?;
-        match count_blocked(held, &others, sender, (from, until), false) {
-            BlockedCount::Held => return Ok(false),
-            BlockedCount::Dropped => {
-                tx.put(
-                    &key::blocked_lost(&sender, from),
-                    &crate::notices::KeptNotice::blocked_lost(sender, from, until, raised),
-                )?;
-                fold_into_floor(tx, floor, until)?;
-            }
-            BlockedCount::Put { mark, evicted } => {
-                if let Some(mut gone) = evicted {
-                    // A request the mark still names as queued that the outbox shows delivered
-                    // counts as the ask ([`Paykit::delivered_in_time`]), as at expiry.
-                    if gone.asked_at_ms.is_none() {
-                        gone.asked_at_ms = self.delivered_in_time(&gone).await?;
-                    }
-                    tell_lost_if_unasked(tx, &gone, raised)?;
-                    fold_into_floor(tx, floor, gone.latest_ms)?;
-                    tx.delete(&family.key(&gone.sender));
-                }
-                tx.put(&family.key(&sender), &*mark)?;
-            }
-        }
-        Ok(true)
-    }
-
     /// Forget the processed pair of every message a block's mark counted (module docs), each
     /// with the mark's update in one commit ([`pubky_switch_client::app::App::forget_processed`]):
     /// from then on a re-sent copy is a new entry. One the client won't forget yet (an entry
@@ -795,21 +729,27 @@ impl Paykit {
     /// Apply the widenings of the block marks owed (`bw/`), once the deny list has just been
     /// read (`deny`): every counterparty it holds is marked from each widening's start to
     /// its end (module docs), and the widening goes, in one commit.
-    pub(crate) async fn apply_block_widenings(&mut self, deny: &[[u8; 32]]) -> Result<()> {
-        let now = self.service_time().unwrap_or_else(|| self.now());
+    pub(crate) async fn apply_block_widenings(
+        &mut self,
+        deny: &[[u8; 32]],
+        verified: Option<u64>,
+    ) -> Result<()> {
+        let now = verified.unwrap_or_default();
         if let Some(mut hold) = self
             .local_get::<crate::hold::RestoreHold>(key::RESTORE_HOLD)
             .await?
         {
-            let first_read = |from_ms| WideningRead {
-                at_ms: now.max(from_ms),
-                deny: deny.to_vec(),
+            let first_read = || -> Result<WideningRead> {
+                Ok(WideningRead {
+                    at_ms: verified.ok_or_else(crate::floor::unreadable_floor)?,
+                    deny: deny.to_vec(),
+                })
             };
             let mut changed = false;
             if let Some(from_ms) = hold.earlier_unread_from_ms.take() {
                 let owed = crate::hold::OwedWidening {
-                    from_ms,
-                    read: first_read(from_ms),
+                    from_ms: from_ms.min(now),
+                    read: first_read()?,
                 };
                 hold.earlier_widening = Some(match hold.earlier_widening.take() {
                     Some(previous) => previous.covering(owed),
@@ -818,7 +758,8 @@ impl Paykit {
                 changed = true;
             }
             if let (Some(from_ms), None) = (hold.widening_from_ms, &hold.widening_read) {
-                hold.widening_read = Some(first_read(from_ms));
+                hold.widening_read = Some(first_read()?);
+                hold.widening_from_ms = Some(from_ms.min(now));
                 changed = true;
             }
             // Keep the first read before marking anyone. A failed write resumes against the
@@ -828,90 +769,143 @@ impl Paykit {
                 tx.put(key::RESTORE_HOLD, &hold)?;
                 self.local_commit(tx).await?;
             }
-            if let Some(owed) = &hold.earlier_widening {
-                let mut tx = crate::state::Tx::default();
-                if self.apply_owed_widening(&mut tx, owed).await? {
-                    hold.earlier_widening = None;
-                    tx.put(key::RESTORE_HOLD, &hold)?;
-                    self.local_commit(tx).await?;
+            if hold.earlier_widening.is_some() || hold.widening_owed().is_some() {
+                self.local_delete(key::LISTS_READ).await?;
+                if self.holds("paykit_pay") && self.first_read_pending() {
+                    return Err(crate::floor::unreadable_floor());
                 }
             }
-            if let Some(owed) = hold.widening_owed() {
+            if let Some(owed) = hold.earlier_widening.take() {
                 let mut tx = crate::state::Tx::default();
-                if self.apply_owed_widening(&mut tx, &owed).await? {
-                    hold.widening_from_ms = None;
-                    hold.widening_read = None;
-                    tx.put(key::RESTORE_HOLD, &hold)?;
-                    self.local_commit(tx).await?;
-                }
+                tx.put(key::RESTORE_HOLD, &hold)?;
+                self.commit_restore_widening(&owed, tx).await?;
+            }
+            if let Some(owed) = hold.widening_owed() {
+                hold.widening_from_ms = None;
+                hold.widening_read = None;
+                let mut tx = crate::state::Tx::default();
+                tx.put(key::RESTORE_HOLD, &hold)?;
+                self.commit_restore_widening(&owed, tx).await?;
             }
         }
         let widenings = self
-            .local_scan::<BlockedWindow>(key::BLOCKED_WIDENINGS)
+            .local_scan::<MissedWidening>(key::BLOCKED_WIDENINGS)
             .await?;
-        if widenings.is_empty() {
-            return Ok(());
-        }
-        // One commit per counterparty, so the bound on marks counts each mark already put; the
-        // widening goes last, so a failure part way applies it again, which changes nothing.
-        for (_, window) in &widenings {
-            let until = if window.until_ms == BlockedWindow::TO_NOW {
-                now.max(window.from_ms)
-            } else {
-                window.until_ms
-            };
-            let applied = self.widen_marks(deny, window.from_ms, until).await?;
-            // A window some counterparty couldn't be marked for yet stays, for the next read.
-            // A restore's window also raises the block floor to the time it is applied, in
-            // the commit that drops it: a sender blocked and unblocked again after the
-            // backup is in no mark and no longer in the list, so a one-time request of any
-            // sender dated in that stretch that comes back opens paid only by hand.
-            if applied {
+        for (_, mut widening) in widenings {
+            let deny = widening
+                .deny
+                .clone()
+                .ok_or_else(crate::error::PaykitError::corrupt)?;
+            let key = key::blocked_widening(widening.id.as_bytes());
+            if deny.is_empty() {
+                self.local_delete(&key).await?;
+                continue;
+            }
+            self.local_delete(key::LISTS_READ).await?;
+            while let Some(window) = widening.windows.pop() {
                 let mut tx = crate::state::Tx::default();
-                if window.until_ms == BlockedWindow::TO_NOW {
-                    let floor = self.local_get::<u64>(key::BLOCK_FLOOR).await?;
-                    fold_into_floor(&mut tx, floor, until)?;
+                if widening.windows.is_empty() {
+                    tx.delete(&key);
+                } else {
+                    tx.put(&key, &widening)?;
                 }
-                tx.delete(&key::blocked_widening(window.from_ms));
-                self.local_commit(tx).await?;
+                if self
+                    .stage_widening(&deny, window.from_ms, window.until_ms, &mut tx)
+                    .await?
+                {
+                    if self.holds("paykit_pay") && self.first_read_pending() {
+                        return Err(crate::floor::unreadable_floor());
+                    }
+                    self.commit_with_floor(window.floor_ms, tx).await?;
+                } else {
+                    self.local_commit(tx).await?;
+                }
             }
         }
         Ok(())
     }
 
-    /// Apply `owed`, a restore's widening as of a read it kept: each counterparty that read's
-    /// deny list held marked from its start to the read, and, once every one is, the block
-    /// floor raised to the read's time in `tx`, as a restore's window raises it, in the
-    /// commit that drops the widening. Returns whether every one was marked.
-    async fn apply_owed_widening(
-        &mut self,
-        tx: &mut crate::state::Tx,
-        owed: &crate::hold::OwedWidening,
-    ) -> Result<bool> {
-        if !self
-            .widen_marks(&owed.read.deny, owed.from_ms, owed.read.at_ms)
+    /// Retain the first list that follows each missed item before any floor write.
+    pub(crate) async fn keep_missed_list(&mut self, deny: &[[u8; 32]]) -> Result<()> {
+        let mut pending = self
+            .local_scan::<MissedWidening>(key::BLOCKED_WIDENINGS)
             .await?
-        {
-            return Ok(false);
+            .into_iter()
+            .map(|(_, widening)| widening)
+            .filter(|widening| widening.deny.is_none());
+        let Some(mut group) = pending.next() else {
+            return Ok(());
+        };
+        let mut tx = crate::state::Tx::default();
+        for other in pending {
+            tx.delete(&key::blocked_widening(other.id.as_bytes()));
+            group.windows.extend(other.windows);
         }
-        let floor = self.local_get::<u64>(key::BLOCK_FLOOR).await?;
-        fold_into_floor(tx, floor, owed.read.at_ms)?;
-        Ok(true)
+        group.deny = Some(deny.to_vec());
+        tx.put(&key::blocked_widening(group.id.as_bytes()), &group)?;
+        self.local_commit(tx).await
     }
 
-    /// Mark each of `deny` for a widening from `from` to `until`, one commit per counterparty,
-    /// so the bound on marks counts each mark already put. Returns whether every one was
-    /// marked.
-    async fn widen_marks(&mut self, deny: &[[u8; 32]], from: u64, until: u64) -> Result<bool> {
-        let mut applied = true;
-        for counterparty in deny {
-            let mut tx = crate::state::Tx::default();
-            applied &= self
-                .count_widened_blocked(&mut tx, *counterparty, from, until)
-                .await?;
-            self.local_commit(tx).await?;
+    /// A restore that lost entries raises the floor even when its list was empty.
+    async fn commit_restore_widening(
+        &mut self,
+        owed: &crate::hold::OwedWidening,
+        mut tx: crate::state::Tx,
+    ) -> Result<()> {
+        self.stage_widening(&owed.read.deny, owed.from_ms, owed.read.at_ms, &mut tx)
+            .await?;
+        self.commit_with_floor(owed.read.at_ms, tx).await
+    }
+
+    /// Return whether this window made a mark. A missed item whose speculative marks
+    /// were all dropped at the bound records their notices without raising the floor.
+    async fn stage_widening(
+        &self,
+        deny: &[[u8; 32]],
+        from: u64,
+        until: u64,
+        tx: &mut crate::state::Tx,
+    ) -> Result<bool> {
+        let family = MarkFamily::Blocked;
+        let mut marks: Vec<DropMark> = self
+            .local_scan::<DropMark>(family.prefix())
+            .await?
+            .into_iter()
+            .map(|(_, mark)| mark)
+            .collect();
+        let raised = self.service_time().unwrap_or(0);
+        let mut marked = false;
+        for &sender in deny {
+            let existing = marks
+                .iter()
+                .position(|mark| mark.sender == sender)
+                .map(|index| marks.swap_remove(index));
+            match count_blocked(existing, &marks, sender, (from, until), false) {
+                BlockedCount::Held => {
+                    return Err(Refusal::NotNow("the block marks are full".into()).into())
+                }
+                BlockedCount::Dropped => {
+                    tx.put(
+                        &key::blocked_lost(&sender, from),
+                        &crate::notices::KeptNotice::blocked_lost(sender, from, until, raised),
+                    )?;
+                }
+                BlockedCount::Put { mark, evicted } => {
+                    if let Some(mut gone) = evicted {
+                        if gone.asked_at_ms.is_none() {
+                            gone.asked_at_ms = self.delivered_in_time(&gone).await?;
+                        }
+                        tell_lost_if_unasked(tx, &gone, raised)?;
+                        tx.delete(&family.key(&gone.sender));
+                        marks.retain(|m| m.sender != gone.sender);
+                    }
+                    tx.put(&family.key(&sender), &*mark)?;
+                    marks.push(*mark);
+                    marked = true;
+                }
+            }
         }
-        Ok(applied)
+        Ok(marked)
     }
 
     /// Act on `mark`, of `family` at the key whose rest after the prefix is `rest`: it goes
@@ -940,8 +934,6 @@ impl Paykit {
                     gone.asked_at_ms = self.delivered_in_time(&gone).await?;
                 }
                 tell_lost_if_unasked(&mut tx, &gone, self.service_time().unwrap_or(0))?;
-                let floor = self.local_get::<u64>(key::BLOCK_FLOOR).await?;
-                fold_into_floor(&mut tx, floor, gone.latest_ms)?;
             }
             if family == MarkFamily::Replies {
                 let gone = mark.drop_mark();
@@ -990,16 +982,6 @@ impl Paykit {
         }
         if let Some(queued) = held.drop_mark().queued.clone() {
             let msg_id = &queued.msg_id;
-            // The batch that queues it with the raise is still kept by the client, to send
-            // again: the request goes with it, and nothing is asked anew meanwhile.
-            if let Some(batch) = queued.kept_batch {
-                if matches!(
-                    self.app.kept_batch(batch).await?,
-                    Some(pubky_switch_client::app::KeptBatchStatus::Kept { .. })
-                ) {
-                    return Ok(0);
-                }
-            }
             if matches!(
                 self.app.delivery(msg_id).await?,
                 Some(Delivery::Queued { .. })
@@ -1075,48 +1057,46 @@ impl Paykit {
                 }
             }
         }
-        let selection = family.selection(held.drop_mark());
+        let mark = held.drop_mark();
+        let mut selection = family.selection(mark);
         if family == MarkFamily::Replies {
-            return self
-                .queue_reply_ask(held.drop_mark().clone(), selection)
-                .await;
+            return self.queue_reply_ask(mark.clone(), selection).await;
+        }
+        // A missed item can owe both the blocked window and everything from that
+        // same start. Give both duties the same signed request and delivery outcome.
+        let ask_key = key::ask(&sender, mark.earliest_ms);
+        let mut covering = None;
+        if family == MarkFamily::Blocked {
+            covering = self
+                .local_get::<crate::protocol::QueuedAsk>(&ask_key)
+                .await?
+                .filter(|ask| ask.queued.is_none() && ask.until_ms.is_none());
+            if covering.is_some() {
+                selection = ResendSelection::default().with_accepted_from_ms(mark.earliest_ms);
+                if !self
+                    .recovery_request_permitted(&sender, &selection.request(), None)
+                    .await?
+                {
+                    return Ok(0);
+                }
+            }
         }
         let signed = self.resend_request_message(sender, selection)?;
         let msg_id = signed.msg_id().to_owned();
-        let hash = signed.hash();
-        held.drop_mark().queued = Some(QueuedRequest {
+        let queued = QueuedRequest {
             msg_id: msg_id.clone(),
-            hash,
-            kept_batch: None,
-        });
-        self.local_put(key, &held).await?;
-        // With the raise of the block floor its mark needs, in one batch: a floor that can't
-        // be read, the switch's refusal of the raise, or a conflict, leaves the request kept
-        // as queued and not sent, so the next pass asks anew (`crate::floor`). A failure of
-        // the app itself is returned as it is.
-        match self.queue_resend_request(signed, &sender).await {
-            Ok(_) => {}
-            // The client kept the batch to send again: the raise and the request go together
-            // at the app's next write or read. The mark names the batch, so the next pass
-            // waits while the client keeps it, and reads the request's delivery once it
-            // doesn't.
-            Err(error) if error.kept_batch().is_some() => {
-                held.drop_mark().queued = Some(QueuedRequest {
-                    msg_id,
-                    hash,
-                    kept_batch: error.kept_batch(),
-                });
-                self.local_put(key, &held).await?;
-                return Ok(1);
-            }
-            Err(error)
-                if crate::floor::floor_write_waits(&error)
-                    || error.code() == Some(pubky_switch_core::http::ErrorCode::Conflict) =>
-            {
-                return Ok(0);
-            }
-            Err(error) => return Err(error),
+            hash: signed.hash(),
+        };
+        let mut tx = crate::state::Tx::default();
+        if let Some(mut ask) = covering {
+            ask.queued = Some(queued.clone());
+            tx.put(&ask_key, &ask)?;
         }
+        held.drop_mark().queued = Some(queued);
+        tx.put(key, &held)?;
+        self.app
+            .queue_signed_with(crate::protocol::BACKUP_NAME, signed, &tx.into_writes())
+            .await?;
         let _ = self.send_message(&msg_id).await;
         if matches!(
             self.app.delivery(&msg_id).await?,
@@ -1199,7 +1179,6 @@ impl Paykit {
             let queued = QueuedRequest {
                 msg_id: owed.msg_id.clone(),
                 hash: owed.hash,
-                kept_batch: None,
             };
             let delivered = self
                 .delivered_by(&owed.sender, owed.latest_ms, &queued)
@@ -1246,21 +1225,6 @@ impl Paykit {
             Err(PaykitError::corrupt())
         }
     }
-}
-
-/// Fold `latest`, the latest time of a block mark gone for the bound or its own expiry, or a
-/// restore's first read of the lists, into the raise of the block floor this app owes (`bf`)
-/// in `tx`, which `floor` holds now (module docs, "The block floor").
-pub(crate) fn fold_into_floor(
-    tx: &mut crate::state::Tx,
-    floor: Option<u64>,
-    latest: u64,
-) -> Result<()> {
-    let folded = floor.map_or(latest, |floor| floor.max(latest));
-    if floor != Some(folded) {
-        tx.put(key::BLOCK_FLOOR, &folded)?;
-    }
-    Ok(())
 }
 
 /// Tell the host, in `tx`, that `gone`'s window can no longer come back, when `gone` records
@@ -1398,30 +1362,26 @@ mod tests {
         assert!(serde_json::from_str::<KeyWaitMark>(&same).is_err());
     }
 
-    fn queued_request(batch: Option<[u8; 16]>) -> QueuedRequest {
+    fn queued_request() -> QueuedRequest {
         QueuedRequest {
             msg_id: "123e4567-e89b-42d3-a456-426614174000".into(),
             hash: [7; 32],
-            kept_batch: batch,
         }
     }
 
     #[test]
-    fn test_mark_state_queued_request_keeps_current_batch_forms() {
-        for batch in [None, Some([3; 16])] {
-            let request = queued_request(batch);
-            let value = serde_json::to_value(&request).unwrap();
-            assert_eq!(value.get("kept_batch").is_some(), batch.is_some());
-            assert_eq!(
-                serde_json::from_value::<QueuedRequest>(value).unwrap(),
-                request
-            );
-        }
+    fn test_mark_state_queued_request_round_trips() {
+        let request = queued_request();
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            serde_json::from_value::<QueuedRequest>(value).unwrap(),
+            request
+        );
     }
 
     #[test]
     fn test_mark_state_queued_request_refuses_unknown_member() {
-        let mut value = serde_json::to_value(queued_request(None)).unwrap();
+        let mut value = serde_json::to_value(queued_request()).unwrap();
         value["extra"] = serde_json::json!({"nested": [1]});
         assert!(serde_json::from_value::<QueuedRequest>(value).is_err());
     }
@@ -1430,14 +1390,13 @@ mod tests {
     fn test_mark_state_queued_request_requires_identity_members() {
         for member in ["msg_id", "hash"] {
             assert!(
-                serde_json::from_value::<QueuedRequest>(without(queued_request(None), member))
-                    .is_err()
+                serde_json::from_value::<QueuedRequest>(without(queued_request(), member)).is_err()
             );
         }
-        let mut value = serde_json::to_value(queued_request(None)).unwrap();
+        let mut value = serde_json::to_value(queued_request()).unwrap();
         value["kept_batch"] = serde_json::json!([1, 2]);
         assert!(serde_json::from_value::<QueuedRequest>(value).is_err());
-        let value = serde_json::to_string(&queued_request(None)).unwrap();
+        let value = serde_json::to_string(&queued_request()).unwrap();
         let duplicate = value.replacen(
             '{',
             "{\"msg_id\":\"123e4567-e89b-42d3-a456-426614174000\",",
@@ -1478,7 +1437,6 @@ mod tests {
         asked.queued = Some(QueuedRequest {
             msg_id: "m".into(),
             hash: [0; 32],
-            kept_batch: None,
         });
         let BlockedCount::Put {
             mark: next,
@@ -1495,7 +1453,6 @@ mod tests {
         unasked.queued = Some(QueuedRequest {
             msg_id: "m".into(),
             hash: [0; 32],
-            kept_batch: None,
         });
         let BlockedCount::Put { mark: next, .. } =
             count_blocked(Some(unasked), &[], [1; 32], (5, 30), true)
@@ -1506,16 +1463,6 @@ mod tests {
             (next.earliest_ms, next.latest_ms, next.queued),
             (5, 30, None)
         );
-    }
-
-    #[test]
-    fn test_fold_into_floor_keeps_the_latest() {
-        let mut tx = crate::state::Tx::default();
-        fold_into_floor(&mut tx, Some(50), 20).unwrap();
-        assert!(tx.into_writes().is_empty());
-        let mut tx = crate::state::Tx::default();
-        fold_into_floor(&mut tx, Some(50), 80).unwrap();
-        assert_eq!(tx.into_writes().len(), 1);
     }
 
     #[test]
