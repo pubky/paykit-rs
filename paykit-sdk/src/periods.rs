@@ -798,6 +798,14 @@ pub(crate) fn automatic_window_ended(
     time.is_none_or(|now| now >= deadline.unwrap_or(period.ends_at).min(period.ends_at))
 }
 
+/// The physical write checked by an app paying under its policy, and whether it held
+/// the payee's signed stop that crosses this first dispatch (Paykit spec 8.1, 8.2).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PolicyPeriodWrite {
+    condition: Condition,
+    pub(crate) crossed_stop: bool,
+}
+
 impl Paykit {
     /// Read a record used to authorize an automatic period payment from its current
     /// physical application. Applying the read can itself reveal a restricted write.
@@ -805,7 +813,8 @@ impl Paykit {
         &mut self,
         target: &ActivityTarget,
         period: Option<PeriodRef>,
-    ) -> Result<Option<Condition>> {
+        crossing_payee: Option<[u8; 32]>,
+    ) -> Result<Option<PolicyPeriodWrite>> {
         let Ok(RecordRead::Fresh(held)) = self.app.read_record_fresh(&target.record_target()).await
         else {
             return Ok(None);
@@ -818,7 +827,7 @@ impl Paykit {
         };
         if record.billing_period != period
             || policy_withheld(&record)
-            || payment_ended(&record, None)
+            || payment_ended(&record, crossing_payee)
         {
             return Ok(None);
         }
@@ -827,12 +836,20 @@ impl Paykit {
                 || !accepted(&record)
                 || !held.authenticated
                 || held.written_at_ms.is_none()
-                || self.kept_stop(target).await?
-                || self.held(&held.key, &record).await?)
+                || self
+                    .kept_stop_message(target)
+                    .await?
+                    .is_some_and(|stop| Some(stop.sender()) != crossing_payee)
+                || self
+                    .held_across_payee_stop(&held.key, &record, crossing_payee)
+                    .await?)
         {
             return Ok(None);
         }
-        Ok(Some(self.app.record_condition(&held.key).await?))
+        Ok(Some(PolicyPeriodWrite {
+            condition: self.app.record_condition(&held.key).await?,
+            crossed_stop: record.cancellation.is_some(),
+        }))
     }
 
     /// Pay one Billing Period, `period`, of the subscription `request` by hand, to the

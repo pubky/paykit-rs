@@ -1706,7 +1706,10 @@ impl Paykit {
     /// The payee's cancellation kept as the stop for the request record at `target`, read
     /// bound to its key, as a restore reads it (`state::Stored`): one that fails it is a
     /// corrupt store, never no stop.
-    async fn kept_stop_message(&self, target: &ActivityTarget) -> Result<Option<StoredMessage>> {
+    pub(crate) async fn kept_stop_message(
+        &self,
+        target: &ActivityTarget,
+    ) -> Result<Option<StoredMessage>> {
         let kept_key = key::kept_cancellation(&self.activity_key(target)?);
         self.local_get::<KeptMessage>(&kept_key)
             .await?

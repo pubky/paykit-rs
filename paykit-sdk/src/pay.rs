@@ -4145,7 +4145,7 @@ impl Paykit {
         let target = ActivityTarget::payer(natural);
         if let Some(period) = entry.period()?.filter(|_| !entry.user_started) {
             return Ok(
-                Box::pin(self.policy_period_conditions(entry, &target, period))
+                Box::pin(self.policy_period_conditions(entry, &target, period, None))
                     .await?
                     .is_none(),
             );
@@ -4325,12 +4325,13 @@ impl Paykit {
         if self.payment_base_changed(entry).await? {
             return Ok(true);
         }
+        let crossing_payee = (entry.billing_period.is_some()
+            && matches!(kind, Dispatch::First { .. }))
+        .then_some(entry.payee);
         if entry.billing_period.is_some() {
             let parent =
                 ActivityTarget::payer(entry.request_record()?.ok_or_else(PaykitError::corrupt)?);
             let period = ActivityTarget::payer(entry.natural_key.clone());
-            let crossing_payee = (by == Initiator::User && matches!(kind, Dispatch::First { .. }))
-                .then_some(entry.payee);
             for (target, crossing) in [(&parent, crossing_payee), (&period, None)] {
                 match Box::pin(self.current_period_activity(target, crossing)).await {
                     Ok(Some(record)) if !payment_ended(&record, crossing) => {}
@@ -4340,7 +4341,7 @@ impl Paykit {
             }
         }
         if by == Initiator::Automatic {
-            return self.automatic_dispatch_held(entry).await;
+            return self.automatic_dispatch_held(entry, crossing_payee).await;
         }
         if Box::pin(self.divergent_pauses(entry, crate::divergent::Pause::blocks_by_hand)).await? {
             return Ok(true);
@@ -4402,14 +4403,31 @@ impl Paykit {
     /// (for a recurring request, the copy of the record just taken; for a payment without a
     /// request, the commit of the deny list read and the widenings it applies), and then
     /// only code with no await runs before the call.
-    async fn automatic_dispatch_held(&mut self, entry: &JournalEntry) -> Result<bool> {
-        let Some(judged) = Box::pin(self.shared_collect(entry, true)).await? else {
+    async fn automatic_dispatch_held(
+        &mut self,
+        entry: &JournalEntry,
+        crossing_payee: Option<[u8; 32]>,
+    ) -> Result<bool> {
+        let Some(judged) = Box::pin(self.shared_collect(entry, true, crossing_payee)).await? else {
             return Ok(true);
         };
-        let Some(confirmed) = Box::pin(self.shared_collect(entry, false)).await? else {
+        let Some(confirmed) = Box::pin(self.shared_collect(entry, false, crossing_payee)).await?
+        else {
             return Ok(true);
         };
-        Ok(judged != confirmed)
+        if judged == confirmed {
+            return Ok(false);
+        }
+        // A seller's cancellation arrived between the two reads. Confirm the new
+        // parent, unchanged occurrence, deny list and independent holds together.
+        if judged.deny == confirmed.deny
+            && matches!((&judged.policy_period, &confirmed.policy_period),
+            (Some(before), Some(after)) if !before[0].crossed_stop && after[0].crossed_stop && before[1] == after[1])
+        {
+            let latest = Box::pin(self.shared_collect(entry, false, crossing_payee)).await?;
+            return Ok(latest.as_ref() != Some(&confirmed));
+        }
+        Ok(true)
     }
 
     /// An unfunded period started by policy must still be authorized by both current
@@ -4419,13 +4437,16 @@ impl Paykit {
         entry: &JournalEntry,
         parent: &ActivityTarget,
         period: PeriodRef,
-    ) -> Result<Option<Box<[Condition; 2]>>> {
+        crossing_payee: Option<[u8; 32]>,
+    ) -> Result<Option<Box<[crate::periods::PolicyPeriodWrite; 2]>>> {
         let occurrence = ActivityTarget::payer(entry.natural_key.clone());
-        let Some(parent) = Box::pin(self.policy_period_condition(parent, None)).await? else {
+        let Some(parent) =
+            Box::pin(self.policy_period_condition(parent, None, crossing_payee)).await?
+        else {
             return Ok(None);
         };
         let Some(current) =
-            Box::pin(self.policy_period_condition(&occurrence, Some(period))).await?
+            Box::pin(self.policy_period_condition(&occurrence, Some(period), None)).await?
         else {
             return Ok(None);
         };
@@ -4446,6 +4467,7 @@ impl Paykit {
         &mut self,
         entry: &JournalEntry,
         judge: bool,
+        crossing_payee: Option<[u8; 32]>,
     ) -> Result<Option<SharedState>> {
         let Ok(deny) = self.deny_list_now().await else {
             return Ok(None);
@@ -4464,7 +4486,8 @@ impl Paykit {
         let target = ActivityTarget::payer(natural);
         if let Some(period) = entry.period()?.filter(|_| !entry.user_started) {
             let Some(conditions) =
-                Box::pin(self.policy_period_conditions(entry, &target, period)).await?
+                Box::pin(self.policy_period_conditions(entry, &target, period, crossing_payee))
+                    .await?
             else {
                 return Ok(None);
             };
@@ -4965,7 +4988,7 @@ struct SharedState {
     deny: Vec<[u8; 32]>,
     record: Option<WriteStamp>,
     floor: Option<Option<WriteStamp>>,
-    policy_period: Option<Box<[Condition; 2]>>,
+    policy_period: Option<Box<[crate::periods::PolicyPeriodWrite; 2]>>,
 }
 
 #[cfg(test)]

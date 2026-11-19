@@ -1498,9 +1498,46 @@ impl StageStore {
 
 #[tokio::test]
 async fn test_period_payments_payee_cancellation_crosses_an_accepted_attempt() {
+    Box::pin(seller_stop_after_attempt(StopAt::Manual)).await;
+}
+
+#[tokio::test]
+async fn test_period_payments_seller_stop_crosses_the_first_dispatch_by_policy() {
+    Box::pin(seller_stop_after_attempt(StopAt::Policy)).await;
+}
+
+#[tokio::test]
+async fn test_period_payments_seller_stop_between_policy_reads_finishes_the_open_attempt() {
+    Box::pin(seller_stop_after_attempt(StopAt::PolicyRead)).await;
+}
+
+#[tokio::test]
+async fn test_period_payments_seller_stop_between_policy_reads_keeps_an_independent_mark() {
+    Box::pin(seller_stop_after_attempt(StopAt::PolicyReadMarked)).await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StopAt {
+    Manual,
+    Policy,
+    PolicyRead,
+    PolicyReadMarked,
+}
+
+async fn seller_stop_after_attempt(stop_at: StopAt) {
     let w = World::new();
     let base = Arc::new(StageStore::default());
-    let mut payer = w.wallet_on("phone", base.clone()).await;
+    let reads = Arc::new(crate::common::ReadHook::new(w.router.clone()));
+    let mut payer = Box::pin(w.join_through(
+        &w.alice,
+        "phone",
+        paykit_sdk::AppScopes::new().pay().build().unwrap(),
+        PaykitConfig::default(),
+        base.clone(),
+        reads.clone(),
+    ))
+    .await;
+    payer.app_mut().invite(&w.bob_id()).await.unwrap();
     let mut tablet = w.wallet("tablet").await;
     let mut shop = w.shop().await;
     let (request, sale) = subscribed(&w, &mut shop, &mut payer).await;
@@ -1513,7 +1550,7 @@ async fn test_period_payments_payee_cancellation_crosses_an_accepted_attempt() {
     );
     let rail = Arc::clone(&w.rail);
     let (finished, seller) = std::sync::mpsc::channel();
-    base.on_stage("paying", move || {
+    let cancel = move || {
         // Both apps use their ordinary APIs while the phone is between its commit and call.
         let shop = std::thread::spawn(move || {
             tokio::runtime::Builder::new_current_thread()
@@ -1534,16 +1571,63 @@ async fn test_period_payments_payee_cancellation_crosses_an_accepted_attempt() {
                         tablet.request(&request).await.unwrap().status,
                         RequestStatus::Cancelled
                     );
+                    if stop_at == StopAt::PolicyReadMarked {
+                        let natural =
+                            natural_key::request_record(&request.payee, &request.request_hash);
+                        let key = tablet.app().record_key(&natural_target(&natural)).unwrap();
+                        let current = tablet.app().shared_record(&key).await.unwrap().unwrap();
+                        let mut record = ActivityRecord::bind(
+                            current.content.value().unwrap(),
+                            &tablet.identity(),
+                            ActivitySide::Payer,
+                            tablet.app().naming_key(),
+                            &key,
+                            None,
+                        )
+                        .unwrap();
+                        record.manual_only = true;
+                        write_payer_record(&mut tablet, &natural, &record).await;
+                    }
                     shop
                 })
         })
         .join()
         .unwrap();
         assert!(finished.send(shop).is_ok());
-    });
-    let paid = by_user(&mut payer, &request, january(), PayOptions::default())
-        .await
-        .unwrap();
+    };
+    let parent = natural_target(&natural_key::request_record(
+        &request.payee,
+        &request.request_hash,
+    ));
+    let path = format!(
+        "/records/{}",
+        pubky_switch_core::enc::b64(&payer.app().record_key(&parent).unwrap())
+    );
+    if matches!(stop_at, StopAt::PolicyRead | StopAt::PolicyReadMarked) {
+        base.on_stage("paying", move || {
+            let next = reads.clone();
+            reads.after_read("/allow", move || next.after_read(&path, cancel));
+        });
+    } else {
+        base.on_stage("paying", cancel);
+    }
+    let paid = if stop_at == StopAt::Manual {
+        by_user(&mut payer, &request, january(), PayOptions::default()).await
+    } else {
+        by_policy(&mut payer, &request, january()).await
+    }
+    .unwrap();
+    if stop_at == StopAt::PolicyReadMarked {
+        assert!(matches!(paid, PayOutcome::Pending { .. }), "{paid:?}");
+        assert_eq!(w.rail.pay_calls(&paid.attempt_id()), 0);
+        assert!(period_record(&w, &payer, &request, january())
+            .await
+            .unwrap()
+            .proof
+            .is_none());
+        assert!(seller.try_recv().is_ok());
+        return;
+    }
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     assert_eq!(w.rail.pay_calls(&paid.attempt_id()), 1);
     let record = period_record(&w, &payer, &request, january())
@@ -1551,6 +1635,8 @@ async fn test_period_payments_payee_cancellation_crosses_an_accepted_attempt() {
         .unwrap();
     let (proof, body) = proof_of(&record);
     assert_eq!(body.billing_period, Some(january()));
+    assert_eq!(body.attempt_id, paid.attempt_id());
+    assert!(body.allowance_id.is_none());
     assert_eq!(proof.message().refs, [request.request_hash]);
     let mut shop = seller.try_recv().unwrap();
     shop.receive(None).await.unwrap();
@@ -1570,9 +1656,12 @@ async fn test_period_payments_payee_cancellation_crosses_an_accepted_attempt() {
     .unwrap();
     assert_eq!(proof_of(&record).0.hash(), proof.hash());
     payer.receive(None).await.unwrap();
-    let next = by_user(&mut payer, &request, february(), early())
-        .await
-        .unwrap_err();
+    let next = if stop_at == StopAt::Manual {
+        by_user(&mut payer, &request, february(), early()).await
+    } else {
+        by_policy(&mut payer, &request, february()).await
+    }
+    .unwrap_err();
     assert_eq!(refusal(&next), Refusal::Cancelled);
     assert_eq!(w.rail.all_executions().len(), 1);
 }
