@@ -1354,7 +1354,7 @@ async fn test_provider_loss_missing_record_epoch_holds_the_original_request_proo
         .outcome
         .unwrap();
     let bought = request_from(&mut seller, w.alice_id(), draft("2", now)).await;
-    writer.receive(None).await.unwrap();
+    crate::common::finish_listing(&mut writer).await;
     writer
         .pay_request(&bought, PayOptions::default())
         .await
