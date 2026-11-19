@@ -197,6 +197,7 @@ async fn settle_period(world: &World, how: PeriodPayment) -> TestResult {
     if mixed {
         rail.set_endpoint_identifiers(vec![
             PaymentEndpointIdentifier::new("usd-ach-account")?,
+            PaymentEndpointIdentifier::new("btc-lightning-bolt12")?,
             PaymentEndpointIdentifier::new("btc-lightning-bolt11")?,
         ]);
     }
@@ -239,6 +240,21 @@ async fn settle_period(world: &World, how: PeriodPayment) -> TestResult {
                     plain.outcome.unwrap_err().refusal(),
                     Some(paykit_sdk::Refusal::UnsupportedEndpoint(_))
                 ));
+                // This other priced endpoint also works and the method ranks it first.
+                let other = PaymentEndpointIdentifier::new("btc-lightning-bolt12").unwrap();
+                let quote = Box::pin(buyer.pay_period_automatically(
+                    &request,
+                    &period,
+                    PeriodPrice::QuoteFor(other.clone()),
+                ))
+                .await
+                .outcome
+                .unwrap_err();
+                let Some(paykit_sdk::Refusal::PricedByRate { payment }) = quote.refusal() else {
+                    panic!("expected a quote for the other endpoint: {quote:?}");
+                };
+                assert_eq!(payment.endpoint_id, other);
+                assert_eq!(&payment.amount, expected);
             }
             let automatic = Box::pin(buyer.pay_period_automatically(
                 &request,
@@ -377,6 +393,13 @@ async fn settle_period(world: &World, how: PeriodPayment) -> TestResult {
         let credit = record.receipt.as_ref().ok_or("missing signed receipt")?;
         assert_eq!(details.message().msg_id, id);
         assert_eq!(proof.message().refs, [request.request_hash, details.hash()]);
+        let Body::PaymentProof(paid) = proof.body() else {
+            return Err("expected the signed period payment proof".into());
+        };
+        assert_eq!(
+            paid.payment_endpoint_identifier.as_str(),
+            "btc-lightning-bolt11"
+        );
         assert_eq!(credit.message().refs, [proof.hash(), request.request_hash]);
         assert_eq!(rail.paid_amount(&attempt_id), Some(expected));
     } else if how == PeriodPayment::PolicyRequestedAmount {
@@ -702,6 +725,10 @@ async fn subscribe(
         endpoints.insert(
             PaymentEndpointIdentifier::new("usd-ach-account")?,
             PaymentEndpointPayload::new("acct-1")?,
+        );
+        endpoints.insert(
+            PaymentEndpointIdentifier::new("btc-lightning-bolt12")?,
+            PaymentEndpointPayload::new("lno-alternate-period")?,
         );
     }
     let requested = if priced {
