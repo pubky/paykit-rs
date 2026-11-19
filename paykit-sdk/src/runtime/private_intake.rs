@@ -695,7 +695,7 @@ async fn audit_private_intake_stream(
     let outcome = audit_group().await;
     let mut audited = Vec::new();
     ignored.retain(|peer, event_id| {
-        if !outcome.audited_peers.contains(peer) {
+        if !outcome.absent_slot_peers.contains(peer) {
             return true;
         }
         audited.push(PrivateIntakeCursorRecord {
@@ -834,7 +834,7 @@ async fn audit_private_intake_group<S: StorageAdapter, C: Clock>(
                 // Only an absent expected slot proves the audit read past
                 // every earlier event; other outcomes stopped short of it.
                 if matches!(&outcome, PrivatePacketAcquisition::Absent) {
-                    audit.audited_peers.insert(peer.clone());
+                    audit.absent_slot_peers.insert(peer.clone());
                 }
                 set_peer_audit_outcome(health, peer.clone(), outcome, clock.now()).await;
             }
@@ -957,8 +957,11 @@ where
 struct PrivateIntakeAuditOutcome {
     handshake_pending: bool,
     backpressured: bool,
-    /// Peers whose audit found their next expected slot absent.
-    audited_peers: HashSet<PubkyPublicKey>,
+    /// Peers whose audit ended in `PrivatePacketAcquisition::Absent`. Only an
+    /// absent expected slot proves the audit read past every earlier event of
+    /// the peer, which is what lets the caller commit the peer's ignored
+    /// cursor; any other outcome stopped short of that slot.
+    absent_slot_peers: HashSet<PubkyPublicKey>,
 }
 
 type PrivateIntakeAuditFuture = Pin<Box<dyn Future<Output = PrivateIntakeAuditOutcome> + Send>>;
@@ -981,12 +984,14 @@ where
             let event_id = cursor.event_id;
             let outcome = acquire(peer.clone(), Some(cursor)).await;
             // A successful acquisition for this event supersedes the peer's
-            // earlier ignored events, so a later audit does not write a
-            // cursor behind the one this acquisition may have stored, which
-            // storage rejects as a regression after a wasted transaction.
-            // Dropping an ignored ID can only mean committing less: the
-            // worst case is replaying irrelevant events after a reconnect,
-            // never a skipped packet. A failed acquisition keeps the entry.
+            // ignored events, so a later audit does not write a cursor behind
+            // the one this acquisition may have stored, which storage rejects
+            // as a regression after a wasted transaction. Dropping an ignored
+            // ID can only mean committing less: the worst case is replaying
+            // irrelevant events after a reconnect, never a skipped packet. A
+            // failed acquisition keeps the entry. The `<=` check is defensive
+            // only: the stream delivers events in cursor order, so an ignored
+            // ID is never newer than this event.
             if outcome.is_ok()
                 && ignored
                     .get(&peer)
@@ -1005,8 +1010,12 @@ where
 
 /// Acquire the next expected slot of `snapshot`'s link and return the read
 /// folder (the parent of the snapshot's next expected slot) with the outcome.
-/// The folder is `None` only when that slot cannot be derived; a later
-/// failure keeps it.
+/// The folder is `None` when that slot cannot be derived, or when the derived
+/// slot's path does not have the derived Encrypted Link folder shape
+/// (`private_intake_slot_folder` returns `None`). In the second case the
+/// acquisition still runs, and a successful outcome leaves the peer
+/// unfiltered (see `scoped_private_intake_acquire`). A failure after
+/// derivation keeps the folder.
 #[allow(
     clippy::too_many_arguments,
     reason = "expected-slot acquisition keeps routing, generation, cursor, and injected transport explicit"
@@ -1965,8 +1974,10 @@ where
 
     /// Acquire `counterparty`'s next expected slot and return the read folder
     /// of the snapshot it used. The folder is `None` when the peer is pending
-    /// an Encrypted Link Handshake, has no snapshot, or the acquisition failed
-    /// before deriving it.
+    /// an Encrypted Link Handshake, has no snapshot, the acquisition failed
+    /// before deriving the slot, or the derived slot's path does not have the
+    /// derived Encrypted Link folder shape (a successful acquisition then
+    /// leaves the peer unfiltered).
     async fn acquire_expected_private_packet(
         &self,
         counterparty: PubkyPublicKey,
@@ -4405,7 +4416,10 @@ mod tests {
         )
         .await;
 
-        assert_eq!(outcome.audited_peers, HashSet::from([established.clone()]));
+        assert_eq!(
+            outcome.absent_slot_peers,
+            HashSet::from([established.clone()])
+        );
         let scopes = scopes.lock().unwrap();
         assert_eq!(
             scopes.read_folders.get(&established),
@@ -4490,7 +4504,7 @@ mod tests {
         // a pending handshake, full capacity or the acquisition cap leave
         // the ignored cursor in the stream's map (a capacity stop then ends
         // the stream, which drops it).
-        assert_eq!(outcome.audited_peers, HashSet::from([absent.clone()]));
+        assert_eq!(outcome.absent_slot_peers, HashSet::from([absent.clone()]));
         assert_eq!(
             std::mem::take(&mut *batches.lock().unwrap()),
             vec![vec![cursor(&absent, 10)]]
@@ -4606,7 +4620,7 @@ mod tests {
             }
         });
         let audited = PrivateIntakeAuditOutcome {
-            audited_peers: HashSet::from([peer.clone()]),
+            absent_slot_peers: HashSet::from([peer.clone()]),
             ..PrivateIntakeAuditOutcome::default()
         };
         let health = Arc::new(AsyncRwLock::new(PrivateIntakeHealth::default()));
@@ -4728,7 +4742,7 @@ mod tests {
             let peer = peer.clone();
             move || {
                 let audited = PrivateIntakeAuditOutcome {
-                    audited_peers: HashSet::from([peer.clone()]),
+                    absent_slot_peers: HashSet::from([peer.clone()]),
                     ..PrivateIntakeAuditOutcome::default()
                 };
                 Box::pin(async move { audited })
@@ -4831,12 +4845,12 @@ mod tests {
             record_ignored_private_intake_event(&mut ignored, peer.clone(), event_id);
         }
         let audit: PrivateIntakeAudit = Arc::new({
-            let audited_peers = HashSet::from([peers[0].clone(), peers[1].clone()]);
+            let absent_slot_peers = HashSet::from([peers[0].clone(), peers[1].clone()]);
             move || {
-                let audited_peers = audited_peers.clone();
+                let absent_slot_peers = absent_slot_peers.clone();
                 Box::pin(async move {
                     PrivateIntakeAuditOutcome {
-                        audited_peers,
+                        absent_slot_peers,
                         ..PrivateIntakeAuditOutcome::default()
                     }
                 })
