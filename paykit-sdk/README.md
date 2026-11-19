@@ -145,10 +145,11 @@ expected immutable Noise slot, stores ciphertext and the per-user replay cursor
 atomically, and advances the Noise receive checkpoint only when the application
 explicitly drains buffered work. For an established Encrypted Link, the SDK
 ignores deletes and files outside that link's read folder, such as Receipts or
-other links' messages, except Encrypted Link Handshake slots. Every fetch
-refreshes the read folder from the stored link. Ignored events trigger no
-fetch and move the replay cursor only after the next successful audit of that
-peer. A healthy stream still audits expected slots about every 60 seconds by
+other links' messages, except Encrypted Link Handshake slots. Each acquisition
+refreshes the read folder from the stored link, so a link that moves to a new
+folder is followed from its next acquisition. Ignored events trigger no fetch
+and move the replay cursor only after the next successful audit of that peer.
+A healthy stream still audits expected slots about every 60 seconds by
 default, so a skipped, missed, or ignored event does not become permanent
 message loss.
 
