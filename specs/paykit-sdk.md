@@ -1401,21 +1401,21 @@ folders live for the stream group's task: they survive reconnects of that
 group's stream, and a topology change, such as a homeserver move, or a restart
 after buffer capacity is released starts a new task with no recorded folders.
 
-The connected stream remembers the highest ignored event per peer in memory.
-A later relevant event from that peer whose acquisition succeeds drops it,
-which only means committing less. After an audit that finds the peer's next expected slot absent, it advances
-the stored per-user cursor to that event unless the cursor is already past it,
-so a reconnect does not replay it. Any audit outcome other than an absent
-expected slot, such as a pending Encrypted Link Handshake, an already buffered
-packet, capacity, the per-peer acquisition limit or a failure, keeps the
-ignored event for the next in-stream audit while the stream stays connected.
-Ignored events live only as long as the connected stream: an audit that stops
-at capacity ends the stream with backpressure, and that or any other
-disconnect drops them. After reconnect the homeserver replays those events
-from the stored cursor and intake filters them again. The stream handles no
-event while an audit runs, so every remembered event precedes the audit. This
-is safe because the stream delivers a homeserver's events in cursor order and
-the audit fetched the peer's expected slot after every remembered event and
+The connected stream remembers the highest ignored event per peer in memory. A
+later relevant event from that peer whose acquisition succeeds drops it, which
+only means committing less. After an audit that finds the peer's next expected
+slot absent, it advances the stored per-user cursor to that event unless the
+cursor is already past it, so a reconnect does not replay it. Any audit outcome
+other than an absent expected slot, such as a pending Encrypted Link Handshake,
+an already buffered packet, capacity, the per-peer acquisition limit or a
+failure, keeps the ignored event for the next in-stream audit while the stream
+stays connected. Ignored events live only as long as the connected stream: an
+audit that stops at capacity ends the stream with backpressure, and that or any
+other disconnect drops them. After reconnect the homeserver replays those
+events from the stored cursor and intake filters them again. The stream handles
+no event while an audit runs, so every remembered event precedes the audit.
+This is safe because the stream delivers a homeserver's events in cursor order
+and the audit fetched the peer's expected slot after every remembered event and
 found it absent: an ignored event either cannot announce a packet the
 expected-slot fetch would find or, when the recorded folder was stale,
 announced one that the audit fetched. Audits remain the delivery guarantee, so
