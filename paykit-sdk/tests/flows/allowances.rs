@@ -11400,12 +11400,13 @@ async fn applied_answer_before_key_change(withdraw: bool, retain_key: bool) {
     use pubky_switch_core::records::{Inbox, ServiceKeyEntry};
     let w = World::new();
     let fault = std::sync::Arc::new(FaultStore::new(crate::common::store(), Fault::None));
-    let scopes = AppScopes::new()
-        .pay()
-        .allowance()
-        .manage_contacts()
-        .build()
-        .unwrap();
+    let scopes = AppScopes::new().pay().allowance().manage_contacts();
+    let scopes = if withdraw {
+        scopes.allowance_execute()
+    } else {
+        scopes
+    };
+    let scopes = scopes.build().unwrap();
     let mut payer = Box::pin(w.join_with(
         &w.alice,
         "wallet",
