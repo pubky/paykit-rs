@@ -3,10 +3,12 @@
 //! The host traits of the SDK and the Switch client return `Send` futures: for example
 //! `paykit_sdk::Timer::sleep`, `Transport::send` and `HomeserverReader::get` of
 //! `pubky-switch-client`, and `paykit_sdk::Rail::pay`. `Send` means "this value may be moved
-//! to another thread". A future that waits on the browser, such as one that awaits a
-//! JavaScript promise through `JsFuture` or holds a `JsValue`, is not `Send`: a JavaScript
-//! value belongs to the thread (the page or the worker) that made it, and is meaningless on
-//! any other.
+//! to another thread". A future that waits on the browser by awaiting a JavaScript promise
+//! through `JsFuture` is not `Send`: `JsFuture` keeps its state in an `Rc`, a reference count
+//! that is not thread safe. A `JsValue` alone does not make a future non-`Send`: on targets
+//! without threads, as this crate's are, wasm-bindgen marks `JsValue` as `Send` and `Sync`.
+//! Still, a JavaScript value belongs to the thread (the page or the worker) that made it, and
+//! is meaningless on any other.
 //!
 //! [`run_local`] joins the two. It starts the browser future on this thread's event loop with
 //! `wasm_bindgen_futures::spawn_local`, and gives back a different future that only waits for
@@ -78,8 +80,8 @@ impl std::error::Error for LocalTaskDropped {}
 ///   that abort on a panic, so they do not reach this case.
 ///
 /// The output must be `Send`, because it is handed to the returned future, which may be
-/// moved to another thread. A `JsValue` output is therefore refused: convert it to a Rust
-/// value inside `future`.
+/// moved to another thread. A `JsValue` output passes that bound here, since wasm-bindgen
+/// marks `JsValue` as `Send` on targets without threads (see the [module docs](self)).
 ///
 /// Call it on `wasm32` from code that runs in a browser page or worker, where the event loop
 /// drives `spawn_local`'s tasks.
