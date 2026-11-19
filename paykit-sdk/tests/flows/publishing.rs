@@ -8,7 +8,7 @@ use paykit_sdk::{PayOutcome, Paykit, UnrequestedPayment};
 use pubky_switch_client::app::{Collection, KeptReason, RecordRead, RecordTarget};
 use pubky_switch_core::ident::Policy;
 
-fn target(shop: &Paykit, recipient: &[u8; 32], generation: u64) -> RecordTarget {
+pub(super) fn target(shop: &Paykit, recipient: &[u8; 32], generation: u64) -> RecordTarget {
     let policy = Policy::new("paykit_request", &["paykit_request"]).permanent(Some(generation));
     RecordTarget::new(
         Collection::new("private_list_publications", policy),
@@ -16,7 +16,7 @@ fn target(shop: &Paykit, recipient: &[u8; 32], generation: u64) -> RecordTarget 
     )
 }
 
-fn offered(
+pub(super) fn offered(
     offer: &str,
 ) -> std::collections::BTreeMap<paykit_lib::PaymentEndpointIdentifier, PaymentEndpointPayload> {
     [(
