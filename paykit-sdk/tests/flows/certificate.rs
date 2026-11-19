@@ -1604,6 +1604,13 @@ async fn test_certificate_renewal_reading_more_listing_refused_holds_reads_until
     assert_eq!(wallet.app().cert().hash(), wider.hash());
     let refused = wallet.payee_activity().await.unwrap_err();
     assert!(is_not_now(&refused), "{refused:?}");
+    // While Switch still owes this certificate its own listing, receive must go first.
+    assert!(wallet.app().listing_owed().await.unwrap());
+    let waiting = wallet.reconcile().await.unwrap_err();
+    assert!(
+        matches!(waiting.refusal(), Some(Refusal::NotNow(reason)) if reason.contains("Call receive again")),
+        "{waiting:?}"
+    );
     let summary = wallet.receive(None).await.unwrap();
     assert!(
         summary
@@ -3483,9 +3490,17 @@ async fn test_reconcile_waits_for_the_last_collection_of_the_wallet() {
         .count();
     assert!(matches!(
         result.unwrap_err().refusal(),
-        Some(Refusal::NotNow(_))
+        Some(Refusal::NotNow(reason)) if reason.contains("Call reconcile again")
     ));
     assert_eq!(pages, budget);
+
+    // This scan was opened by reconcile. A feed read has no owed listing to finish.
+    let before = w.router.log().len();
+    let read = wallet.receive(None).await.unwrap();
+    assert!(read.records_unlisted.is_none(), "{read:?}");
+    assert!(w.router.log()[before..]
+        .iter()
+        .all(|route| !route.contains("records?collection")));
 
     let id = wallet.app_id();
     drop(wallet);
