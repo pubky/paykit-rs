@@ -22,6 +22,8 @@ pub enum Collection {
     PayeeActivity,
     /// `payment_lists`: one record per payee and publishing app.
     PaymentLists,
+    /// `allowance_proposals`: one ordinary record per pending proposal.
+    AllowanceProposals,
     /// `allowances`: one record per Allowance, on either side.
     Allowances,
     /// `allowance_ledgers`: one ledger per Allowance.
@@ -35,10 +37,11 @@ pub enum Collection {
 
 impl Collection {
     /// Every collection.
-    pub const ALL: [Collection; 7] = [
+    pub const ALL: [Collection; 8] = [
         Self::PayerActivity,
         Self::PayeeActivity,
         Self::PaymentLists,
+        Self::AllowanceProposals,
         Self::Allowances,
         Self::AllowanceLedgers,
         Self::BlockFloor,
@@ -51,6 +54,7 @@ impl Collection {
             Self::PayerActivity => "payer_activity",
             Self::PayeeActivity => "payee_activity",
             Self::PaymentLists => "payment_lists",
+            Self::AllowanceProposals => "allowance_proposals",
             Self::Allowances => "allowances",
             Self::AllowanceLedgers => "allowance_ledgers",
             Self::BlockFloor => "block_floor",
@@ -71,6 +75,7 @@ impl Collection {
             }
             Self::PayeeActivity => Policy::new("paykit_request", &["paykit_request"]),
             Self::Allowances => Policy::new("paykit_allowance", &["paykit_allowance"]),
+            Self::AllowanceProposals => Policy::new("paykit_allowance", &["paykit_allowance"]),
             Self::AllowanceLedgers => {
                 Policy::new("paykit_allowance", &["paykit_allowance_execute"])
             }
