@@ -8,7 +8,7 @@ use paykit_sdk::{PayOutcome, Paykit, UnrequestedPayment};
 use pubky_switch_client::app::{Collection, KeptReason, RecordRead, RecordTarget};
 use pubky_switch_core::ident::Policy;
 
-fn target(shop: &Paykit, recipient: &[u8; 32], generation: u64) -> RecordTarget {
+pub(super) fn target(shop: &Paykit, recipient: &[u8; 32], generation: u64) -> RecordTarget {
     let policy = Policy::new("paykit_request", &["paykit_request"]).permanent(Some(generation));
     RecordTarget::new(
         Collection::new("private_list_publications", policy),
@@ -16,7 +16,7 @@ fn target(shop: &Paykit, recipient: &[u8; 32], generation: u64) -> RecordTarget 
     )
 }
 
-fn offered(
+pub(super) fn offered(
     offer: &str,
 ) -> std::collections::BTreeMap<paykit_lib::PaymentEndpointIdentifier, PaymentEndpointPayload> {
     [(
@@ -1828,6 +1828,20 @@ async fn test_publication_answers_only_its_chosen_contact_and_resends_the_same_l
     shop.withdraw_list_from(wallet.identity()).await.unwrap();
     let withdrawal = published(&shop, &wallet).await;
     assert!(withdrawal.last().unwrap().withdrawn);
+    wallet.receive(None).await.unwrap();
+    let refused = wallet
+        .pay_without_request(UnrequestedPayment::new(w.bob_id(), btc("0.003")))
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::NoDestination(_))
+        ),
+        "{refused}"
+    );
+    assert_eq!(w.rail.all_executions().len(), 2);
     request_list(&mut wallet, &mut shop, publisher, Some(first[0].version)).await;
     assert_eq!(published(&shop, &wallet).await, withdrawal);
 }
@@ -1878,6 +1892,154 @@ async fn test_publication_request_for_an_unchanged_offer_uses_the_active_generat
             assert!(!sent[1].withdrawn);
             shop.receive(None).await.unwrap();
             assert_eq!(published(&shop, &wallet).await, sent);
+        }
+    }
+}
+
+/// Two installations of the same publisher separately choose the payer. The second can
+/// advance the shared counter without giving its signed list to the first installation.
+async fn contemporaneous_publishers(
+    w: &World,
+) -> (
+    Paykit,
+    Paykit,
+    Paykit,
+    std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+) {
+    use crate::common::store;
+    use paykit_sdk::{AppScopes, PaykitConfig};
+
+    let wallet = w.wallet("wallet").await;
+    let storage = store();
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default(),
+            storage.clone(),
+        )
+        .await;
+    shop.app_mut().invite(&wallet.identity()).await.unwrap();
+    let backup = shop.backup().await.unwrap();
+    let mut second = Paykit::restore(
+        w.env(&w.bob, store()),
+        PaykitConfig::default(),
+        &backup,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    second.receive(None).await.unwrap();
+    for (publisher, offer) in [(&mut shop, "lno1first"), (&mut second, "lno1second")] {
+        publisher.set_list_endpoints(offered(offer)).await.unwrap();
+        publisher.publish_list_to(wallet.identity()).await.unwrap();
+    }
+    assert_eq!(shop.app_id(), second.app_id());
+    assert_eq!(published(&shop, &wallet).await[0].version.counter(), 1);
+    assert_eq!(published(&second, &wallet).await[0].version.counter(), 2);
+    (wallet, shop, second, storage)
+}
+
+#[tokio::test]
+async fn test_publication_retains_a_named_request_after_another_installation_publishes() {
+    use paykit_lib::bodies::PRIVATE_LIST_MAX_AGE_MS;
+    use paykit_sdk::PaykitConfig;
+    let w = World::new();
+    let (mut wallet, mut shop, second, storage) = contemporaneous_publishers(&w).await;
+    let publisher = shop.app_id();
+    let first = published(&shop, &wallet).await;
+    let winner = published(&second, &wallet).await;
+    let key = shop
+        .app()
+        .record_key(&target(&shop, &wallet.identity(), 1))
+        .unwrap();
+    request_list(&mut wallet, &mut shop, publisher, Some(first[0].version)).await;
+    assert_eq!(published(&shop, &wallet).await, first);
+    assert_eq!(w.record_writes(&w.bob, &key), 2);
+    drop(shop);
+    let mut shop = Paykit::load(
+        w.env(&w.bob, storage),
+        PaykitConfig::default(),
+        publisher,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    w.clock.advance_ms(2 * PRIVATE_LIST_MAX_AGE_MS - 1);
+    shop.receive(None).await.unwrap();
+    assert_eq!(w.record_writes(&w.bob, &key), 2);
+    w.clock.advance_ms(1);
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        w.record_writes(&w.bob, &key),
+        3,
+        "the retained named request became eligible"
+    );
+    let newest = published(&shop, &wallet).await.pop().unwrap();
+    assert_eq!(newest.version, winner[0].version.next().unwrap());
+    assert!(!newest.withdrawn);
+    // The recipient's signed append time distinguishes a repeat from its first acceptance.
+    w.clock.advance_ms(1);
+    request_list(&mut wallet, &mut shop, publisher, Some(first[0].version)).await;
+    assert_eq!(w.record_writes(&w.bob, &key), 3);
+    let repeated = published(&shop, &wallet).await.pop().unwrap();
+    assert_eq!(
+        (repeated.id, repeated.hash, repeated.repeats),
+        (newest.id, newest.hash, 1)
+    );
+}
+
+#[tokio::test]
+async fn test_publication_missing_answers_age_once_across_reload_and_withdrawal() {
+    use paykit_sdk::PaykitConfig;
+    const DAY: u64 = 24 * 3_600_000;
+    for withdraw in [false, true] {
+        let w = World::new();
+        let (mut wallet, mut shop, mut second, storage) = contemporaneous_publishers(&w).await;
+        let publisher = shop.app_id();
+        let recipient = wallet.identity();
+        let key = shop
+            .app()
+            .record_key(&target(&shop, &recipient, 1))
+            .unwrap();
+        for offer in ["lno1third", "lno1fourth", "lno1fifth"] {
+            second.set_list_endpoints(offered(offer)).await.unwrap();
+        }
+        assert_eq!(w.record_writes(&w.bob, &key), 5);
+        request_list(&mut wallet, &mut shop, publisher, None).await;
+        assert_eq!(w.record_writes(&w.bob, &key), 5);
+        drop(shop);
+        let mut shop = Paykit::load(
+            w.env(&w.bob, storage),
+            PaykitConfig::default(),
+            publisher,
+            w.rail.clone(),
+            w.timer(),
+        )
+        .await
+        .unwrap();
+        w.clock.advance_ms(DAY - 1);
+        shop.receive(None).await.unwrap();
+        assert_eq!(w.record_writes(&w.bob, &key), 5);
+        if withdraw {
+            shop.withdraw_list_from(recipient).await.unwrap();
+        }
+        w.clock.advance_ms(1);
+        shop.receive(None).await.unwrap();
+        assert_eq!(
+            w.record_writes(&w.bob, &key),
+            6,
+            "the original daily window elapsed"
+        );
+        let newest = published(&shop, &wallet).await.pop().unwrap();
+        assert_eq!(newest.version.counter(), 6);
+        assert_eq!(newest.withdrawn, withdraw);
+        if withdraw {
+            request_list(&mut wallet, &mut shop, publisher, None).await;
+            assert_eq!(w.record_writes(&w.bob, &key), 6);
         }
     }
 }
