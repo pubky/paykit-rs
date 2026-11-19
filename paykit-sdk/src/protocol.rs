@@ -680,7 +680,8 @@ pub(crate) fn restore_paykit_layer(
                 msg_id,
                 ..
             } => {
-                state::restored::<[u8; 16]>(&key, &value, &binder).map_err(|_| unread())?;
+                state::restored::<crate::receipt_delivery::ReceiptBatch>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
                 // The original batch may have finished after this snapshot.
                 let imported = key::receipt_batch(&record, &hash, &msg_id, true).into_bytes();
                 if let Some(previous) = receipt_batches.insert(imported.clone(), value.clone()) {

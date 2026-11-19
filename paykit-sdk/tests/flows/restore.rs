@@ -2698,7 +2698,13 @@ async fn test_restore_fresh_store_keeps_an_issued_receipt_without_assuming_deliv
     assert_eq!(original.to, w.alice_id());
     let kept_receipts = shop.app().protocol_scan("paykit", b"ri/").await.unwrap();
     assert_eq!(kept_receipts.len(), 1);
-    assert_eq!(kept_receipts[0].1, kept);
+    assert!(std::str::from_utf8(&kept_receipts[0].0)
+        .unwrap()
+        .ends_with(&original.msg_id));
+    assert!(matches!(
+        shop.app().kept_batch(kept).await.unwrap(),
+        Some(pubky_switch_client::app::KeptBatchStatus::Kept { .. })
+    ));
     wallet.receive(None).await.unwrap();
     assert!(wallet.request(&request).await.unwrap().receipt.is_none());
     let backup = shop.backup().await.unwrap();

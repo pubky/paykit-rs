@@ -433,11 +433,36 @@ impl Stored for [u8; 16] {
 
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
-            StateKey::OfflineBatch(_) | StateKey::EndBatch(_) | StateKey::ReceiptBatch { .. } => {
-                Ok(())
-            }
+            StateKey::OfflineBatch(_) | StateKey::EndBatch(_) => Ok(()),
             _ => corrupt(),
         }
+    }
+}
+
+impl sealed::Sealed for crate::receipt_delivery::ReceiptBatch {}
+
+impl Stored for crate::receipt_delivery::ReceiptBatch {
+    fn read_bytes(bytes: &[u8]) -> Result<Self> {
+        match bytes.try_into() {
+            Ok(id) => Ok(Self::Awaiting(id)),
+            Err(_) => Ok(Self::Applied(decode(bytes)?)),
+        }
+    }
+
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let StateKey::ReceiptBatch { record, .. } = family else {
+            return corrupt();
+        };
+        if let Self::Applied(applied) = self {
+            let cert = binder.cert.ok_or_else(PaykitError::corrupt)?;
+            if applied
+                .original(binder.identity(), &cert.app_id(), record)
+                .is_none()
+            {
+                return corrupt();
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1665,7 +1690,7 @@ pub(crate) enum StateKey {
     Journal(AttemptId),
     /// The original Switch batch ID of a paid offline attempt.
     OfflineBatch(AttemptId),
-    /// The first local keep of a requested receipt delivery, awaiting its batch outcome.
+    /// A requested receipt delivery, awaiting its answer or holding its verified application.
     ReceiptBatch {
         record: [u8; 32],
         hash: [u8; 32],

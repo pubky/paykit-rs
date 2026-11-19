@@ -1240,3 +1240,199 @@ async fn test_absent_settlement_bucket_without_a_loss_keeps_the_wallet_stopped()
     world.close().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn test_restored_receipt_delivery_after_a_recovered_request_was_cancelled() -> TestResult {
+    receipt_after_recovery(true).await
+}
+
+#[tokio::test]
+async fn test_restored_receipt_waits_when_its_original_application_was_unavailable() -> TestResult {
+    receipt_after_recovery(false).await
+}
+
+async fn receipt_after_recovery(original_readable: bool) -> TestResult {
+    for backend in [Backend::Scripted, Backend::Service] {
+        let Some(world) = World::start(backend)? else {
+            continue;
+        };
+        let result = Box::pin(restored_receipt_delivery_after_cancellation(
+            &world,
+            original_readable,
+        ))
+        .await;
+        world.close().await?;
+        result?;
+    }
+    Ok(())
+}
+
+async fn restored_receipt_delivery_after_cancellation(
+    world: &World,
+    original_readable: bool,
+) -> TestResult {
+    use paykit_lib::records::{ActivityRecord, ActivitySide};
+    use paykit_sdk::NoticeKind;
+
+    let mut tills = Box::pin(enrolled_tills(world)).await?;
+    let (mut peer, signer) = Box::pin(join(
+        world,
+        *tills.signer,
+        "shop",
+        "other-shop",
+        AppScopes::new().request().manage_contacts().build()?,
+        Arc::new(MemoryStore::new()),
+        &tills.rail,
+    ))
+    .await?;
+    let (mut buyer, request, key) = Box::pin(paid_request(
+        &mut tills.till,
+        tills.buyer,
+        "btc-lightning-bolt11",
+        "ln-receipt-before-shop-recovery",
+    ))
+    .await?;
+    let shop_id = tills.till.app_id();
+    world.lose_answer("POST", "/ops");
+    if !original_readable {
+        world.unreachable(
+            "GET",
+            &format!("/records/{}", pubky_switch_core::enc::b64(&key)),
+        );
+    }
+    let kept = tills
+        .till
+        .confirm_payment_with(&key, ReceiptDetails::new())
+        .await
+        .unwrap_err()
+        .kept_batch()
+        .ok_or("missing unanswered receipt batch")?;
+    assert_eq!(world.faults_left(), 0);
+    let original = tills
+        .till
+        .app()
+        .queued_messages("paykit")
+        .await?
+        .into_iter()
+        .find(|message| message.kept_batch == Some(kept))
+        .ok_or("missing original receipt intent")?;
+    assert_eq!(original.to, buyer.identity());
+    assert_eq!(original.kind, paykit_lib::Kind::PaymentReceipt.as_str());
+    let backup = tills.till.backup().await?;
+    drop(tills.till);
+    peer.receive(None).await?;
+    let first = peer
+        .app()
+        .shared_record(&key)
+        .await?
+        .ok_or("missing credit")?;
+    assert!(first.authenticated);
+    let receipt = |value: &[u8]| -> TestResult<_> {
+        ActivityRecord::read(value, &peer.identity(), ActivitySide::Payee)?
+            .receipt
+            .ok_or_else(|| "missing receipt".into())
+    };
+    let issued = receipt(first.content.value().ok_or("unreadable credit")?)?;
+    assert_eq!(issued.hash(), original.hash);
+    assert_eq!(issued.message().msg_id, original.msg_id);
+    assert_eq!(issued.cert().app_id(), shop_id);
+    Box::pin(declare_shop_loss(world, Box::new(signer))).await?;
+    Box::pin(follow_recovered_shop(&mut peer)).await?;
+    peer.cancel_sent_request(&key, None).await?;
+    let successor = peer
+        .app()
+        .shared_record(&key)
+        .await?
+        .ok_or("missing cancellation")?;
+    assert!(successor.authenticated && successor.version.generation > first.version.generation);
+    assert_eq!(successor.writer, peer.app_id());
+    let current = ActivityRecord::read(
+        successor.content.value().ok_or("unreadable cancellation")?,
+        &peer.identity(),
+        ActivitySide::Payee,
+    )?;
+    assert!(current.cancellation.is_some());
+    assert_eq!(
+        current
+            .receipt
+            .ok_or("cancellation lost the receipt")?
+            .hash(),
+        original.hash
+    );
+    let store = Arc::new(MemoryStore::new());
+    let mut restored = Box::pin(Paykit::restore(
+        world.app_env(store.clone()),
+        Default::default(),
+        &backup,
+        tills.rail.clone(),
+        Arc::new(TestTimer),
+    ))
+    .await?;
+    Box::pin(follow_recovered_shop(&mut restored)).await?;
+    let unresolved: Vec<_> = restored
+        .notices()
+        .await?
+        .into_iter()
+        .filter(|n| n.kind == NoticeKind::PossiblyDelivered)
+        .collect();
+    let markers = restored.app().protocol_scan("paykit", b"ir/").await?;
+    let notice_id = if original_readable {
+        let [notice] = unresolved.as_slice() else {
+            return Err("expected one uncertain receipt delivery".into());
+        };
+        assert_eq!(notice.counterparty, Some(buyer.identity()));
+        assert_eq!(notice.msg_id.as_deref(), Some(original.msg_id.as_str()));
+        assert_eq!(notice.message_hash, Some(original.hash));
+        assert!(markers.is_empty());
+        Some(notice.id.clone())
+    } else {
+        assert!(unresolved.is_empty());
+        let [(_, id)] = markers.as_slice() else {
+            return Err("expected the unanswered original marker".into());
+        };
+        assert_eq!(id.as_slice(), kept);
+        None
+    };
+    drop(restored);
+    let mut reopened = Box::pin(Paykit::load(
+        world.app_env(store),
+        Default::default(),
+        shop_id,
+        tills.rail.clone(),
+        Arc::new(TestTimer),
+    ))
+    .await?;
+    reopened.receive(None).await?;
+    if let Some(notice_id) = notice_id {
+        assert_eq!(
+            reopened
+                .notices()
+                .await?
+                .iter()
+                .filter(|n| n.id == notice_id)
+                .count(),
+            1
+        );
+        reopened.acknowledge_notice(&notice_id).await?;
+        reopened.receive(None).await?;
+        assert!(reopened.notices().await?.iter().all(|n| n.id != notice_id));
+    } else {
+        assert!(reopened
+            .notices()
+            .await?
+            .iter()
+            .all(|n| n.kind != NoticeKind::PossiblyDelivered));
+        assert_eq!(
+            reopened.app().protocol_scan("paykit", b"ir/").await?,
+            markers
+        );
+    }
+    assert!(reopened.app().delivery(&original.msg_id).await?.is_none());
+    buyer.receive(None).await?;
+    assert!(buyer
+        .receipts(ReceiptsOf::Request(request))
+        .await?
+        .is_empty());
+    assert_eq!(tills.rail.all_executions().values().sum::<u64>(), 1);
+    Ok(())
+}

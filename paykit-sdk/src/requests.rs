@@ -1464,9 +1464,12 @@ impl Paykit {
                 }
                 None => self.submit(batch).await.map_err(PaykitError::from),
             };
-            if submitted.is_err() {
+            if let Err(error) = &submitted {
                 self.retire_refused_receipt_batch(delivery_marker.as_deref())
                     .await?;
+                if let (Some(marker), Some(batch)) = (&delivery_marker, error.kept_batch()) {
+                    Box::pin(self.remember_receipt_application(&target, marker, batch)).await?;
+                }
             }
             match submitted {
                 Ok(_) => break msg_id,
