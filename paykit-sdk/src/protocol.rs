@@ -28,7 +28,8 @@ use std::sync::{Arc, PoisonError, RwLock};
 use paykit_lib::bodies::check_body;
 use paykit_lib::collections::Collection;
 use paykit_lib::kinds::{
-    check_sender_scopes, holds_role, targets_app, Kind, MessageKind, Side, OPAQUE_MEMBERS,
+    check_sender_scopes, holds_role, targets_app, ExtensionKind, Kind, MessageKind, Side,
+    OPAQUE_MEMBERS,
 };
 use paykit_lib::records::{
     ActivitySide, AllowanceRecord, BlockFloorRecord, PaymentListRecord, PendingAllowanceRecord,
@@ -137,6 +138,8 @@ pub struct PaykitProtocol {
     /// The app's rail, which names a proof's settlement (Paykit wire 1.5); without one, the
     /// methods `paykit-lib` knows.
     rail: Option<Arc<dyn Rail>>,
+    /// The extension kinds the host's extension handles (Paykit spec 3.3).
+    extensions: Vec<ExtensionKind>,
 }
 
 /// [`PaykitProtocol`]'s publishing setting: not told yet.
@@ -165,6 +168,7 @@ impl PaykitProtocol {
             own: RwLock::new(None),
             publishes_record: std::sync::atomic::AtomicU8::new(PUBLISHES_UNKNOWN),
             rail: None,
+            extensions: Vec::new(),
         }
     }
 
@@ -190,6 +194,26 @@ impl PaykitProtocol {
             PUBLISHES_NO => Some(false),
             _ => None,
         }
+    }
+
+    /// The protocol, handling the extension kinds `kinds` besides Paykit's (Paykit spec 3.3):
+    /// they pass check 10 as they arrived and the receive step keeps them for the host
+    /// (`crate::extensions`).
+    #[must_use]
+    pub fn with_extension_kinds(mut self, kinds: Vec<ExtensionKind>) -> Self {
+        self.extensions = kinds;
+        self
+    }
+
+    pub(crate) fn has_extension_kinds(&self, kinds: &[ExtensionKind]) -> bool {
+        use std::collections::HashSet;
+
+        self.extensions.iter().collect::<HashSet<_>>() == kinds.iter().collect::<HashSet<_>>()
+    }
+
+    /// Whether `kind` is an extension kind the host registered.
+    fn handles_extension(&self, kind: &str) -> bool {
+        self.extensions.iter().any(|ext| ext.as_string() == kind)
     }
 
     /// The protocol of one app paying and paid through `rail`, which names the settlement of
@@ -381,6 +405,8 @@ pub(crate) fn may_deliver_to_contact(
 /// ([`restore_paykit_layer`]).
 #[derive(Default)]
 struct BoundedFamilies {
+    extensions: usize,
+    extensions_of: std::collections::BTreeMap<[u8; 32], usize>,
     lost_owed: usize,
     dropped_replies: usize,
     dropped_unverified: usize,
@@ -417,6 +443,21 @@ impl BoundedFamilies {
                 crate::marks::MAX_DROPPED_MARKS,
                 "marks of blocked messages",
             ),
+            StateKey::Extension { sender, .. } => {
+                // Bounded per sender as well as in all (`crate::extensions`).
+                let of_sender = self.extensions_of.entry(*sender).or_default();
+                *of_sender += 1;
+                if *of_sender > crate::extensions::MAX_EXTENSION_MESSAGES_PER_SENDER {
+                    return Err("Paykit's local state in the backup holds more extension \
+                                messages of one sender than the SDK keeps"
+                        .into());
+                }
+                (
+                    &mut self.extensions,
+                    crate::extensions::MAX_EXTENSION_MESSAGES,
+                    "extension messages",
+                )
+            }
             _ => return Ok(()),
         };
         *count += 1;
@@ -966,6 +1007,14 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
+            StateKey::Extension { .. } => {
+                state::restored::<crate::extensions::ExtensionMessage>(&key, &value, &binder)
+                    .map_err(|_| {
+                        "Paykit wire 4.3: a kept extension message in the backup doesn't verify"
+                    })?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
             // A notice of lost messages owed is carried as the marks and the notices are: the
             // mark it stands for is gone, so a backup without it would lose the notice. The
             // restore writes back the outbox's records the backup carries, under the same
@@ -1318,11 +1367,20 @@ impl Protocol for PaykitProtocol {
         if check_certificate(cert).is_err() {
             return Vec::new();
         }
-        HANDLED_KINDS
+        let mut kinds: Vec<String> = HANDLED_KINDS
             .iter()
             .filter(|kind| holds_role(cert.scopes(), kind.recipients()))
             .map(|kind| kind.as_str().to_owned())
-            .collect()
+            .collect();
+        // The registered extension kinds whose `ext:<prefix>` the certificate holds (Paykit
+        // wire 4.3): never wider than what its scopes receive (Switch spec 3.4).
+        for ext in &self.extensions {
+            let kind = ext.as_string();
+            if cert.scopes().contains(&ext.prefix().scope()) && !kinds.contains(&kind) {
+                kinds.push(kind);
+            }
+        }
+        kinds
     }
 
     /// Whether another app's scopes receive `kind` by Paykit's table (Paykit spec 3.3), which
@@ -1331,8 +1389,15 @@ impl Protocol for PaykitProtocol {
     /// verifiers refuse (Paykit wire 3.1) receives none: the Switch takes such a
     /// certificate, Paykit doesn't.
     fn receives(&self, kind: &str, cert: &AppCert) -> bool {
-        check_certificate(cert).is_ok()
-            && Kind::from_kind(kind).is_some_and(|k| holds_role(cert.scopes(), k.recipients()))
+        if check_certificate(cert).is_err() {
+            return false;
+        }
+        // An extension kind goes to an app whose certificate holds its `ext:<prefix>`; the
+        // client also asks that its record accept the kind (Paykit wire 4.3).
+        if let Ok(ext) = ExtensionKind::parse(kind) {
+            return cert.scopes().contains(&ext.prefix().scope());
+        }
+        Kind::from_kind(kind).is_some_and(|k| holds_role(cert.scopes(), k.recipients()))
     }
 
     /// The label narrowing of Paykit spec 3.4: a payer's acceptance, rejection,
@@ -1363,6 +1428,11 @@ impl Protocol for PaykitProtocol {
     /// Check 10 (Paykit wire 4.1), with no effect: a kind this SDK handles ([`HANDLED_KINDS`])
     /// and a body that parses for it, within the size of a recorded kind.
     fn check_body(&self, message: &ReceivedMessage) -> Result<(), String> {
+        // An extension kind the host registered passes as it arrived: its body is the
+        // extension's (Paykit wire 4.3).
+        if self.handles_extension(&message.message.kind) {
+            return Ok(());
+        }
         check_message(message)
     }
 
@@ -1402,14 +1472,19 @@ impl Protocol for PaykitProtocol {
             Err(Fail::Store(failure)) => return Outcome::Retry(failure),
             Err(_) => return Outcome::Retry(StoreFailure::of_entry(StoreError::Corrupt)),
         }
-        let stored = match stored_copy(message) {
-            Ok(stored) => stored,
-            Err(reason) => return Outcome::Drop { reason },
-        };
-        match receive::effect(cx, &stored, message.seq, &|proof| self.settlement_id(proof)) {
+        let effect = receive::check_before_effect(cx, &message.sender).and_then(|()| {
+            if self.handles_extension(&message.message.kind) {
+                return crate::extensions::extension_effect(cx, message);
+            }
+            let stored = stored_copy(message).map_err(Fail::Drop)?;
+            receive::effect(cx, &stored, message.seq, &|proof| self.settlement_id(proof))
+                .map(|()| Outcome::Apply(Effect::default()))
+        });
+        match effect {
+            Ok(outcome) => outcome,
             // A write the context couldn't build for want of a key: the context holds the
             // entry itself, whatever is returned (Switch spec 3.5).
-            Ok(()) | Err(Fail::NotNow) => Outcome::Apply(Effect::default()),
+            Err(Fail::NotNow) => Outcome::Apply(Effect::default()),
             Err(Fail::Need(needs)) => Outcome::Need(needs),
             Err(Fail::AwaitAdmission) => Outcome::AwaitAdmission,
             Err(Fail::Drop(reason)) => Outcome::Drop { reason },

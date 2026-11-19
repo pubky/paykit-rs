@@ -74,8 +74,9 @@ for future variants in non-exhaustive enums.
 
 ## Use a Switch App built by the host
 
-When the host opens the Switch App, register a fresh
-`PaykitProtocol::with_rail` in its protocol set. Hand the App and that exact
+When the host opens the Switch App, use `PaykitConfig::protocol` to build the
+protocol with the wallet's configured extension kinds. Register it in the App's
+protocol set. Hand the App and that exact
 protocol instance to `Paykit::attach` immediately after `App::join` or
 `App::load`, before driving its feed or outbox. The wallet uses the same rail
 as the protocol and the clock, Homeserver reader and publication setting of
@@ -84,7 +85,7 @@ the App. Other registered protocols stay with the App.
 ```rust
 use std::sync::Arc;
 
-use paykit_sdk::{App, AppEnv, Paykit, PaykitConfig, PaykitProtocol, Rail, Result, Timer};
+use paykit_sdk::{App, AppEnv, Paykit, PaykitConfig, Rail, Result, Timer};
 
 async fn attach_wallet(
     env: AppEnv,
@@ -93,7 +94,7 @@ async fn attach_wallet(
     rail: Arc<dyn Rail>,
     timer: Arc<dyn Timer>,
 ) -> Result<Paykit> {
-    let protocol = Arc::new(PaykitProtocol::with_rail(rail));
+    let protocol = config.protocol(rail);
     let app = App::load(env, Arc::clone(&protocol), config.app.clone(), app_id).await?;
     Paykit::attach(app, config, protocol, timer).await
 }
@@ -104,6 +105,12 @@ rail's capabilities before the App is saved. Open backups with
 `Paykit::restore` or `Paykit::restore_with_protocols` so Paykit validates the
 journal before any restore write. If an SDK-restored store is still in
 reconciliation on startup, reopen it with the SDK load constructors.
+
+Register the extension kinds your app handles with `PaykitConfig::with_extension_kinds`.
+After a receive, read `Paykit::extension_messages` and acknowledge each message by
+sender and message ID once your extension has durably handled it. Reads leave the
+messages available to the host across restarts. The wallet can evict untaken
+messages when the per-sender or total bound is reached (Paykit spec 3.3).
 
 ## Outgoing payment history and payer access
 

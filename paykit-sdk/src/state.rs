@@ -61,6 +61,7 @@
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
 //! | `nt/outgoing/<recipient>/<msg_id>/<hash>` | the disposition of an exact original delivery is unknown after restore. Acknowledgment is retained for repeated imports | |
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
+//! | `xm/<sender>/<msg_id>` | an extension message from `sender` of a kind the host registered, kept from its receive step until the host takes it (`extensions.rs`, Paykit spec 3.3); at most 64 per sender and 128 in all | yes |
 //! | `dl` | the deny list as the app last read it, with this app's blocks kept unanswered (`bk/`), for the views and a payment the user starts (Paykit spec 8.1) | |
 //! | `fg` | the flagged senders as the app last read them, at most `MAX_FLAGGED_COPY`; absent while not known, which holds the asks of block marks (`marks.rs`); never restored | |
 //! | `bf` | the raise of the identity's block floor this app owes: the latest of the latest times of the block marks gone for the bound or their own expiry, and of a restore's first read of the lists; written to the shared `block_floor` record before the block marks ask and with any ask, and deleted in that batch; applied as a floor meanwhile (`crate::floor`) | yes |
@@ -375,7 +376,7 @@ mod sealed {
 /// Paykit's state is read anywhere without its binding.
 pub(crate) trait Stored: sealed::Sealed + DeserializeOwned {
     /// Decode the bytes written by the owner of this state family.
-    fn read_bytes(bytes: &[u8]) -> Result<Self> {
+    fn read_bytes(bytes: &[u8], _: &Binder<'_>) -> Result<Self> {
         decode(bytes)
     }
 
@@ -388,7 +389,7 @@ pub(crate) trait Stored: sealed::Sealed + DeserializeOwned {
 fn bound<T: Stored>(key: &[u8], bytes: &[u8], binder: &Binder<'_>) -> Result<T> {
     let text = std::str::from_utf8(key).map_err(|_| PaykitError::corrupt())?;
     let family = StateKey::parse(key).ok_or_else(PaykitError::corrupt)?;
-    let value = T::read_bytes(bytes)?;
+    let value = T::read_bytes(bytes, binder)?;
     value.bind(text, &family, binder)?;
     Ok(value)
 }
@@ -476,7 +477,7 @@ impl sealed::Sealed for [u8; 16] {}
 
 /// The original batch ID is written by the Switch client as exactly sixteen bytes.
 impl Stored for [u8; 16] {
-    fn read_bytes(bytes: &[u8]) -> Result<Self> {
+    fn read_bytes(bytes: &[u8], _: &Binder<'_>) -> Result<Self> {
         bytes.try_into().map_err(|_| PaykitError::corrupt())
     }
 
@@ -506,7 +507,7 @@ impl Stored for crate::floor::PendingUnblocks {
 impl sealed::Sealed for crate::receipt_delivery::ReceiptBatch {}
 
 impl Stored for crate::receipt_delivery::ReceiptBatch {
-    fn read_bytes(bytes: &[u8]) -> Result<Self> {
+    fn read_bytes(bytes: &[u8], _: &Binder<'_>) -> Result<Self> {
         match bytes.try_into() {
             Ok(id) => Ok(Self::Awaiting(id)),
             Err(_) => Ok(Self::Applied(decode(bytes)?)),
@@ -594,6 +595,27 @@ impl OwnBlockMark {
             return Some(true);
         }
         (self.unblock_batch().is_some() && batch_kept).then_some(false)
+    }
+}
+
+impl sealed::Sealed for crate::extensions::ExtensionMessage {}
+
+/// An extension message kept for the host (`xm/<sender>/<msg_id>`): from the sender and of
+/// the `msg_id` its key names, of an extension kind (Paykit wire 4.3).
+impl Stored for crate::extensions::ExtensionMessage {
+    fn read_bytes(bytes: &[u8], binder: &Binder<'_>) -> Result<Self> {
+        decode::<crate::extensions::KeptExtension>(bytes)?.open(binder.identity())
+    }
+
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::Extension { sender, msg_id }
+                if *sender == self.sender && msg_id == &self.msg_id =>
+            {
+                Ok(())
+            }
+            _ => corrupt(),
+        }
     }
 }
 
@@ -1567,6 +1589,7 @@ pub(crate) mod key {
     pub(crate) const LISTED_CERT: &str = "lc";
     pub(crate) const NOTICES: &str = "nt/";
     pub(crate) const RESTORED_DELIVERIES: &str = "nt/outgoing/";
+    pub(crate) const EXTENSIONS: &str = "xm/";
     pub(crate) const STORED_NOTES: &str = "se/";
     pub(crate) const KEPT_REPLIES: &str = "pr/";
     pub(crate) const REPLY_ASKS: &str = "ra/";
@@ -1760,6 +1783,11 @@ pub(crate) mod key {
     /// A restored outgoing message, bound to its recipient, ID and signed JSON hash.
     pub(crate) fn restored_delivery(to: &[u8; 32], id: &str, hash: &[u8; 32]) -> String {
         format!("{RESTORED_DELIVERIES}{}/{id}/{}", b64(to), b64(hash))
+    }
+
+    /// The extension message `msg_id` from `sender`, kept until the host takes it.
+    pub(crate) fn extension(sender: &[u8; 32], msg_id: &str) -> String {
+        format!("{EXTENSIONS}{}/{msg_id}", b64(sender))
     }
 
     /// The notice of `kind` about `attempt`.
@@ -2098,6 +2126,11 @@ pub(crate) enum StateKey {
         sender: [u8; 32],
         msg_id: String,
     },
+    /// `xm/<sender>/<msg_id>`: an extension message kept until the host takes it.
+    Extension {
+        sender: [u8; 32],
+        msg_id: String,
+    },
     /// `dv/<record key>`: the pause mark of a divergent record.
     Divergent([u8; 32]),
     /// `dw/<record key>/<role>/<sender>/<msg_id>`: a message kept to write over a divergent
@@ -2372,6 +2405,13 @@ impl StateKey {
                         Self::DivergentWrite {
                             record: b64_32(record)?,
                             role: crate::divergent::WriteRole::from_tag(role)?,
+                            sender: b64_32(sender)?,
+                            msg_id: msg_id(id)?,
+                        }
+                    }
+                    "xm" => {
+                        let (sender, id) = rest.split_once('/')?;
+                        Self::Extension {
                             sender: b64_32(sender)?,
                             msg_id: msg_id(id)?,
                         }
@@ -3347,6 +3387,13 @@ mod tests {
                 StateKey::DivergentWrite {
                     record: pubky,
                     role: crate::divergent::WriteRole::List,
+                    sender: pubky,
+                    msg_id: id.into(),
+                },
+            ),
+            (
+                key::extension(&pubky, id),
+                StateKey::Extension {
                     sender: pubky,
                     msg_id: id.into(),
                 },
