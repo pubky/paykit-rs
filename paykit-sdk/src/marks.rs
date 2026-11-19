@@ -189,6 +189,12 @@ pub(crate) struct QueuedRequest {
     pub(crate) kept_batch: Option<[u8; 16]>,
 }
 
+impl QueuedRequest {
+    fn matches_signed_request(&self, kind: &str, hash: [u8; 32]) -> bool {
+        kind == paykit_lib::kinds::Kind::ResendRequest.as_str() && self.hash == hash
+    }
+}
+
 /// The most notices of lost messages the app keeps owed (`bl/`, [`LostOwed`]): past it, the
 /// receive step holds the next entry whose count would drop a mark that owes one, until the
 /// pass after the read settles those kept. None is dropped for this bound.
@@ -999,8 +1005,21 @@ impl Paykit {
                 self.app.delivery(msg_id).await?,
                 Some(Delivery::Queued { .. })
             ) {
-                // Queued, it is tried again now; one that fails stays queued for the next
-                // receive.
+                // A corrupt mark must not flush another signed message.
+                let pending = self
+                    .app
+                    .queued_messages(crate::protocol::BACKUP_NAME)
+                    .await?;
+                if !pending
+                    .iter()
+                    .find(|message| &message.msg_id == msg_id)
+                    .is_some_and(|message| {
+                        message.to == sender
+                            && queued.matches_signed_request(&message.kind, message.hash)
+                    })
+                {
+                    return Err(PaykitError::corrupt());
+                }
                 let _ = self.send_message(msg_id).await;
             }
             match self.app.delivery(msg_id).await? {
@@ -1009,11 +1028,11 @@ impl Paykit {
                 // request: a `msg_id` naming another message is a corrupt store, never a
                 // request delivered.
                 Some(Delivery::Accepted { .. }) => {
+                    self.delivered_request(&sender, &queued).await?;
                     if family == MarkFamily::Replies {
                         self.reconcile_reply_asks().await?;
                         return Ok(0);
                     }
-                    self.delivered_request(&sender, &queued).await?;
                     held.drop_mark().asked_at_ms = Some(self.now());
                 }
                 // A reply ask waits for its exact first-delivery duty. A later refusal,
@@ -1216,11 +1235,13 @@ impl Paykit {
         queued: &QueuedRequest,
     ) -> Result<()> {
         let sent = self.app.sent_to(sender, 0, u64::MAX).await?;
-        if sent.iter().any(|message| {
-            message.msg_id == queued.msg_id
-                && message.kind == paykit_lib::kinds::Kind::ResendRequest.as_str()
-                && message.plaintext.hash() == queued.hash
-        }) {
+        if sent
+            .iter()
+            .find(|message| message.msg_id == queued.msg_id)
+            .is_some_and(|message| {
+                queued.matches_signed_request(&message.kind, message.plaintext.hash())
+            })
+        {
             Ok(())
         } else {
             Err(PaykitError::corrupt())
