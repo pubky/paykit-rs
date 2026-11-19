@@ -4378,6 +4378,10 @@ impl Paykit {
     /// `read_record_fresh`, a read that shows anything but the switch's current write holding
     /// the dispatch.
     ///
+    /// For a period started under the host's policy, each pass instead reads the deny list,
+    /// subscription and occurrence. Compare the exact applications of both permitted records,
+    /// keeping every independent restriction found during either pass.
+    ///
     /// Another own app can block the payee, record a cancellation or a rejection, mark the
     /// record `manual_only` or raise the floor while this app awaits anything, between these
     /// reads included. A record's version only grows, whoever writes, a delete included, so an
@@ -4424,9 +4428,30 @@ impl Paykit {
                 deny,
                 record: None,
                 floor: None,
+                policy_period: None,
             }));
         };
         let target = ActivityTarget::payer(natural);
+        if let Some(period) = entry.period()?.filter(|_| !entry.user_started) {
+            let occurrence = ActivityTarget::payer(entry.natural_key.clone());
+            let Some(parent) = Box::pin(self.policy_period_condition(&target, None)).await? else {
+                return Ok(None);
+            };
+            let Some(current) =
+                Box::pin(self.policy_period_condition(&occurrence, Some(period))).await?
+            else {
+                return Ok(None);
+            };
+            if Box::pin(self.divergent_withholds(entry)).await? {
+                return Ok(None);
+            }
+            return Ok(Some(SharedState {
+                deny,
+                record: None,
+                floor: None,
+                policy_period: Some(Box::new([parent, current])),
+            }));
+        }
         let (record, stamp) = match self.fresh_request_stamped(&target).await {
             Ok((Fresh::Held(record), Some(stamp))) => (*record, stamp),
             Ok(_) | Err(_) => return Ok(None),
@@ -4442,6 +4467,7 @@ impl Paykit {
                 deny,
                 record: Some(stamp),
                 floor: None,
+                policy_period: None,
             }));
         }
         let stored = stored.clone();
@@ -4455,6 +4481,7 @@ impl Paykit {
             deny,
             record: Some(stamp),
             floor: Some(floor.as_ref().map(WriteStamp::of)),
+            policy_period: None,
         }))
     }
 
@@ -4629,6 +4656,19 @@ impl Paykit {
             Dispatch::First { answered, .. } => {
                 if let Err(refusal) = self.within_budget(&answered, now) {
                     return Ok(FinalCheck::Refused(refusal));
+                }
+                if automatic_first
+                    && entry.period()?.is_some_and(|period| {
+                        crate::periods::automatic_window_ended(
+                            &period,
+                            entry.deadline,
+                            self.service_time(),
+                        )
+                    })
+                {
+                    return Ok(FinalCheck::Refused(Refusal::NotAutomatic(
+                        "the Billing Period's automatic window ended before dispatch".into(),
+                    )));
                 }
             }
         }
@@ -4902,6 +4942,7 @@ struct SharedState {
     deny: Vec<[u8; 32]>,
     record: Option<WriteStamp>,
     floor: Option<Option<WriteStamp>>,
+    policy_period: Option<Box<[Condition; 2]>>,
 }
 
 #[cfg(test)]

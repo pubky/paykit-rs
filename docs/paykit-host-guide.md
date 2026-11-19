@@ -208,10 +208,21 @@ qualified roles and supplies no new proposal to act on.
 | `PayeeStatus::ProofReceived` | Use the payee's verification and credit path. Show the proof as awaiting credit. |
 | `PayeeStatus::Receipted` | Show the payment as credited and retain the receipt. |
 | `AllowanceStatus::Proposed` | The proposal awaits an answer. |
-| `AllowanceStatus::Accepted` | A stored acceptance is visible. Automatic payments remain unavailable in this SDK revision. |
+| `AllowanceStatus::Accepted` | A stored acceptance is visible. Payments funded by this Allowance require its executor. |
 | `AllowanceStatus::Rejected` | The recipient rejected the proposal. |
 | `AllowanceStatus::Ended` | Show that the Allowance stopped or was withdrawn. |
 | `AllowanceStatus::Conflicted` | Show that the competing proposals or replies prevent further use. |
+
+## Scheduling a Billing Period
+
+The host schedules payments and records the user’s recurring-payment policy. After accepting
+a subscription, use its signed recurrence to identify the current Billing Period. If that
+policy authorizes this subscription and it has no Allowance, call
+`pay_period_automatically(&request, &period)` and handle the returned `PayResult`. The SDK
+checks the current payment window, the request and period records, and the usual payment
+restrictions again before dispatch. A period that needs the user’s choice stays available
+through `pay_period` when its other payment conditions hold. A missed period is never
+automatically caught up.
 
 ## Notices and errors
 
@@ -291,6 +302,8 @@ service. Acknowledging the deletion notice leaves the credit restriction in forc
 | `Refusal::SettlementBucketFull` | Wait for the payee to decide whether to issue an unmarked receipt. Pass the explicit choice through `ReceiptDetails::with_unmarked_credit_confirmed`. |
 | `Refusal::Subscribed` | Show that the recurring request is already accepted. |
 | `Refusal::NotSubscribed` | Wait until the payer accepts the recurring request. |
+| `Refusal::ManualOnly` | Leave this period for the payer or the executor named by its Allowance. |
+| `Refusal::NotAutomatic` | Show why the current automatic window or dated subscription does not permit this payment. |
 | `Refusal::PeriodNotStarted` | Show when this Billing Period starts. If the payer chooses to pay early, call `pay_period` for that period with `PayOptions::with_early_payment_confirmed`. After a payer-provider loss, an older subscription may already have paid this period early. Keep it pending while that history is incomplete. |
 | `Refusal::AttemptedPeriodsFull` | Wait for an existing period attempt to finish or reconcile its outcome before starting another. |
 | `Refusal::Destination` | Show the failed destination check and refresh when the payee has a usable endpoint. |
