@@ -27,6 +27,7 @@
   - Private Payment Lists, and labelled selling scopes;
   - receiving and re-sends;
   - the Paykit side of approval: the scopes an app asks for, and the permissions `paykit-lib` derives from them, which the signer signs.
+- **`paykit-browser`** holds the `wasm32-unknown-unknown` build support (the browser random number backends) and the tests that run Paykit in browser engines. It is `publish = false` and has no public API. It depends on `paykit-lib` and `paykit-sdk`, never the reverse. The `Browser` workflow checks it, including the wasm32 dependency graph of both crates, so a native-only dependency there fails it.
 - **The Dispatch crates** live in `pubky/pubky-dispatch`:
   - `pubky-dispatch-core`: the stateless Dispatch formats and checks;
   - `pubky-dispatch-client`: the app side of the Dispatch, with its `StateStore`;
