@@ -1177,6 +1177,8 @@ Allowance acceptance is unavailable in this revision, and no new authority to pa
 
 ### 5.10 Recovery reports (`recovery_uploads`)
 
+The published `v0.2` vector set still needs the recovery report signature case.
+
 The identity-signed opening of the recovered generation supplies the account, its original App IDs, the lost generation (`recovery_from`), the recovered generation and its opening service key. Use the opening document’s authenticated hash for the record address in Section 1 and the ordinary fixed policy in 5.1. Count an explicit identity-signed removal only for the loss it covers.
 
 The sealed JSON value has five required members.
