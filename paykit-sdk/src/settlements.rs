@@ -29,7 +29,7 @@ pub(crate) struct SettlementWrite {
 pub(crate) enum SettlementCredit {
     SameOccurrence,
     AlreadyCredited,
-    Write(SettlementWrite),
+    Write(Box<SettlementWrite>),
 }
 
 /// A record accepted as the current value of a settlement bucket.
@@ -136,13 +136,13 @@ impl Paykit {
         };
         let current = self.app.record_condition(&key).await?;
         let conditions = bucket_conditions(key, version.unwrap_or(RecordVersion::NONE), current)?;
-        Ok(SettlementCredit::Write(SettlementWrite {
+        Ok(SettlementCredit::Write(Box::new(SettlementWrite {
             number,
             payer,
             conditions,
             target,
             bucket,
-        }))
+        })))
     }
 
     /// Apply the receipt and the requested delivery in one batch. After a definite

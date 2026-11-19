@@ -1185,7 +1185,7 @@ impl Paykit {
                         return Ok(None);
                     }
                     SettlementCredit::AlreadyCredited => return Ok(None),
-                    SettlementCredit::Write(write) => Some(write),
+                    SettlementCredit::Write(write) => Some(*write),
                 }
             } else {
                 None
