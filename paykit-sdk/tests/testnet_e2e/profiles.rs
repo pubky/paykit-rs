@@ -876,3 +876,218 @@ async fn test_new_identity_creates_its_profile_on_social_v1_without_the_flag() {
         .await
         .unwrap());
 }
+
+#[tokio::test]
+async fn test_pubky_profile_delete_removes_its_own_avatar() {
+    let testnet = crate::harness::build_testnet().await;
+    let capabilities = format!(
+        "{},{}",
+        paykit_sdk::PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
+        paykit_sdk::PUBKY_APP_PROFILE_SESSION_CAPABILITIES
+    );
+    let sign_up = || {
+        crate::harness::TestUser::sign_up_with_capabilities(
+            &testnet,
+            crate::harness::app_id("bitkit"),
+            &capabilities,
+        )
+    };
+    let named = |name: &str| paykit_sdk::PubkyProfileUpdate {
+        name: Some(name.into()),
+        ..Default::default()
+    };
+    let with_image = |image: &str| paykit_sdk::PubkyProfileUpdate {
+        image: Some(image.into()),
+        ..Default::default()
+    };
+    let path_of = |uri: &str| paykit_sdk::parse_pubky_resource(uri).unwrap().path;
+    let bytes = vec![0xff, 0xd8, 0xff, 0xe0, 1, 2, 3];
+
+    // Social v1: the avatar is one file.
+    let alice = sign_up().await;
+    let storage = alice.access.session.storage();
+    let created = alice
+        .sdk
+        .publish_pubky_profile(named("Alice"), None)
+        .await
+        .unwrap();
+    let uri = alice
+        .sdk
+        .upload_pubky_app_avatar(bytes.clone(), "image/jpeg")
+        .await
+        .unwrap();
+    let saved = alice
+        .sdk
+        .publish_pubky_profile(with_image(&uri), Some(created.revision.clone()))
+        .await
+        .unwrap();
+    // A stale revision deletes nothing.
+    let error = alice
+        .sdk
+        .delete_pubky_profile(created.revision)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, paykit_sdk::PaykitSdkError::ConcurrentUpdate { .. }),
+        "{error:?}"
+    );
+    assert!(storage.exists(path_of(&uri).as_str()).await.unwrap());
+    alice
+        .sdk
+        .delete_pubky_profile(saved.revision)
+        .await
+        .unwrap();
+    assert!(!storage
+        .exists(paykit_sdk::SOCIAL_V1_PROFILE_PATH)
+        .await
+        .unwrap());
+    assert!(!storage.exists(path_of(&uri).as_str()).await.unwrap());
+
+    // pubky.app (v0): the avatar is a file and the blob it points at.
+    let bob = sign_up().await;
+    let storage = bob.access.session.storage();
+    storage
+        .put(paykit_sdk::PUBKY_PROFILE_PATH, r#"{"name":"Bob"}"#)
+        .await
+        .unwrap();
+    let uri = bob
+        .sdk
+        .upload_pubky_app_avatar(bytes.clone(), "image/jpeg")
+        .await
+        .unwrap();
+    let file: serde_json::Value =
+        serde_json::from_str(&bob.sdk.fetch_pubky_text(&uri, 4096).await.unwrap().unwrap())
+            .unwrap();
+    let blob_path = path_of(file["src"].as_str().unwrap());
+    let current = bob
+        .sdk
+        .fetch_pubky_profile_with_revision(bob.public_key.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let saved = bob
+        .sdk
+        .publish_pubky_profile(with_image(&uri), Some(current.revision))
+        .await
+        .unwrap();
+    bob.sdk.delete_pubky_profile(saved.revision).await.unwrap();
+    assert!(!storage
+        .exists(paykit_sdk::PUBKY_PROFILE_PATH)
+        .await
+        .unwrap());
+    assert!(!storage.exists(path_of(&uri).as_str()).await.unwrap());
+    assert!(!storage.exists(blob_path.as_str()).await.unwrap());
+
+    // An image outside this identity's avatar paths, a nested one included, stays.
+    let carol = sign_up().await;
+    let storage = carol.access.session.storage();
+    let other = "/pub/social/v1/files/keep/avatar.jpg";
+    storage.put(other, bytes.clone()).await.unwrap();
+    let created = carol
+        .sdk
+        .publish_pubky_profile(named("Carol"), None)
+        .await
+        .unwrap();
+    let saved = carol
+        .sdk
+        .publish_pubky_profile(
+            with_image(&format!("pubky://{}{other}", carol.public_key)),
+            Some(created.revision),
+        )
+        .await
+        .unwrap();
+    carol
+        .sdk
+        .delete_pubky_profile(saved.revision)
+        .await
+        .unwrap();
+    assert!(storage.exists(other).await.unwrap());
+
+    // Another identity's avatar stays.
+    let dave = sign_up().await;
+    let alices = alice
+        .sdk
+        .publish_pubky_profile(named("Alice"), None)
+        .await
+        .unwrap();
+    let alices_avatar = alice
+        .sdk
+        .upload_pubky_app_avatar(bytes.clone(), "image/jpeg")
+        .await
+        .unwrap();
+    alice
+        .sdk
+        .publish_pubky_profile(with_image(&alices_avatar), Some(alices.revision))
+        .await
+        .unwrap();
+    let created = dave
+        .sdk
+        .publish_pubky_profile(named("Dave"), None)
+        .await
+        .unwrap();
+    let saved = dave
+        .sdk
+        .publish_pubky_profile(with_image(&alices_avatar), Some(created.revision))
+        .await
+        .unwrap();
+    dave.sdk.delete_pubky_profile(saved.revision).await.unwrap();
+    assert!(alice
+        .access
+        .session
+        .storage()
+        .exists(path_of(&alices_avatar).as_str())
+        .await
+        .unwrap());
+
+    // A social v1 identity's pubky.app (v0) copy takes its avatar with it.
+    let erin = sign_up().await;
+    let storage = erin.access.session.storage();
+    storage
+        .put(paykit_sdk::PUBKY_PROFILE_PATH, r#"{"name":"Erin"}"#)
+        .await
+        .unwrap();
+    let v0_avatar = erin
+        .sdk
+        .upload_pubky_app_avatar(bytes.clone(), "image/jpeg")
+        .await
+        .unwrap();
+    storage
+        .put(
+            paykit_sdk::PUBKY_PROFILE_PATH,
+            format!(r#"{{"name":"Erin","image":"{v0_avatar}"}}"#),
+        )
+        .await
+        .unwrap();
+    let file: serde_json::Value = serde_json::from_str(
+        &erin
+            .sdk
+            .fetch_pubky_text(&v0_avatar, 4096)
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    let blob_path = path_of(file["src"].as_str().unwrap());
+    storage
+        .put(paykit_sdk::SOCIAL_V1_PROFILE_PATH, r#"{"name":"Erin"}"#)
+        .await
+        .unwrap();
+    let current = erin
+        .sdk
+        .fetch_pubky_profile_with_revision(erin.public_key.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    erin.sdk
+        .delete_pubky_profile(current.revision)
+        .await
+        .unwrap();
+    for path in [
+        paykit_sdk::PUBKY_PROFILE_PATH.to_string(),
+        paykit_sdk::SOCIAL_V1_PROFILE_PATH.to_string(),
+        path_of(&v0_avatar),
+        blob_path,
+    ] {
+        assert!(!storage.exists(path.as_str()).await.unwrap(), "{path}");
+    }
+}

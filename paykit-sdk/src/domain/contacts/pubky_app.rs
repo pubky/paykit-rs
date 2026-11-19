@@ -78,7 +78,7 @@ const LINKS_MAX_COUNT: usize = 5;
 const LINK_TITLE_MAX_CHARS: usize = 100;
 const LINK_URL_MAX_CHARS: usize = 300;
 const STATUS_MAX_CHARS: usize = 50;
-const AVATAR_FILE_NAME: &str = "avatar";
+pub(crate) const AVATAR_FILE_NAME: &str = "avatar";
 
 /// Changes to apply to the identity's Pubky app profile.
 ///

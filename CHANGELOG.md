@@ -102,6 +102,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Fixed
 
+- `delete_pubky_profile` also deletes, best effort, the avatar each deleted profile named in the identity's own storage, and a stale revision now fails before anything is deleted.
 - FFI-created Pubky clients use their configured HTTP PKARR relays without
   direct DHT waits, reducing mobile profile signup latency. Initial identity
   refresh runs in the existing app-publication storage operation. Signup,
