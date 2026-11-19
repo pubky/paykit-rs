@@ -8124,7 +8124,7 @@ async fn queued_allowance_after_renewal(
     }
 }
 
-async fn recorded_end(app: &Paykit, record: &[u8; 32]) -> StoredMessage {
+async fn signed_recorded_end(app: &Paykit, record: &[u8; 32]) -> StoredMessage {
     let raw = serde_json::to_vec(&Box::pin(value(app, record)).await).unwrap();
     let end = AllowanceRecord::read(&raw, &app.identity())
         .unwrap()
@@ -8174,7 +8174,7 @@ async fn test_allowances_crossing_end_waits_for_contacts_after_renewal_and_reloa
     payer.receive(None).await.unwrap();
 
     assert!(Box::pin(ends_naming_both(&payer, &mine)).await);
-    let ended = Box::pin(recorded_end(&payer, &mine)).await;
+    let ended = Box::pin(signed_recorded_end(&payer, &mine)).await;
     assert_eq!(
         payer
             .app()
@@ -8240,7 +8240,7 @@ async fn test_allowances_crossing_end_rechecks_renewal_and_the_deny_copy_at_flus
     payer.app_mut().hold_queued(&w.bob_id()).await.unwrap();
     shop.end_allowance(&theirs).await.unwrap();
     payer.receive(None).await.unwrap();
-    let ended = Box::pin(recorded_end(&payer, &mine)).await;
+    let ended = Box::pin(signed_recorded_end(&payer, &mine)).await;
     let msg_id = &ended.message().msg_id;
     let queued = payer.app().queued_messages("paykit").await.unwrap();
     let exact = queued.iter().find(|q| q.msg_id == *msg_id).unwrap();

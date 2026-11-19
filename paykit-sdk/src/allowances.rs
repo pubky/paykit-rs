@@ -1529,7 +1529,8 @@ impl Paykit {
     /// [`OwedEnd`]) once they aren't, from the signed plaintext its record stores, with the
     /// client's `queue_stored`, and drop the mark after it (Paykit spec 8.1, "Blocked
     /// counterparties"; 8.3, "Ending"). A mark stays while sends to the counterparty are held,
-    /// or while its record isn't held as a value that reads and binds. One whose record is
+    /// or while its record isn't held as a value that reads and binds. After the end's replay
+    /// deadline a readable record no longer owes a delivery, and the recorded end stands. One whose record is
     /// held as deleted goes with nothing sent: no record holds the end to send; so does one
     /// whose Allowance is conflicted by then, in the record or as a kept stop, for which
     /// nothing is sent. A mark over a record that reads and binds without that end of this
