@@ -366,7 +366,52 @@ fn period_record_unread() -> PaykitError {
     Refusal::NotNow("Paykit wire 5.3: the period record held doesn't read".into()).into()
 }
 
+pub(crate) fn period_history_lost() -> Refusal {
+    Refusal::RecordHeld(
+        "Paykit spec 6: a deleted activity record may have held the payment's proof".into(),
+    )
+}
+
 impl Paykit {
+    /// The current payer activity used to open or dispatch a Billing Period. A retained
+    /// delete can hide the only proof after the claim expires (Paykit spec 6).
+    pub(crate) async fn period_payment_base(
+        &mut self,
+        target: &ActivityTarget,
+    ) -> Result<Option<ActivityRecord>> {
+        let held = match self.app.read_record_fresh(&target.record_target()).await? {
+            RecordRead::Fresh(held) => held,
+            RecordRead::Kept {
+                reason: KeptReason::NotFound,
+                record: None,
+            } => return Ok(None),
+            RecordRead::Kept {
+                reason: KeptReason::Unreachable(why),
+                ..
+            } => return Err(Refusal::SwitchUnavailable(why).into()),
+            RecordRead::Kept {
+                record: Some(held), ..
+            } if held.content == RecordContent::Deleted => return Err(period_history_lost().into()),
+            _ => return Err(period_record_unread()),
+        };
+        if held.content == RecordContent::Deleted {
+            return Err(period_history_lost().into());
+        }
+        if crate::hold::awaits_key(&held.content) {
+            return Err(crate::hold::value_awaits_key());
+        }
+        if held.flagged || held.not_taken || held.different_write_at_held_version {
+            return Err(period_record_unread());
+        }
+        let record = self
+            .read_activity(target, Some(&held))
+            .ok_or_else(period_record_unread)?;
+        if record.lost_to_delete.is_some() {
+            return Err(period_history_lost().into());
+        }
+        Ok(Some(record))
+    }
+
     /// The period records of `collection` this app holds that bind, with their keys, by the
     /// request they belong to; [`period_views`] shows them.
     pub(crate) async fn periods_of(
@@ -567,7 +612,8 @@ impl Paykit {
                 return Err(period_record_unread());
             }
             let held = match held.map(|held| held.content) {
-                None | Some(RecordContent::Deleted) => None,
+                None => None,
+                Some(RecordContent::Deleted) => return Err(period_history_lost().into()),
                 Some(content) if crate::hold::awaits_key(&content) => {
                     return Err(crate::hold::value_awaits_key());
                 }
@@ -774,6 +820,11 @@ impl Paykit {
         self.require_pay()?;
         self.app.may_attempt(false).map_err(crate::pay::not_now)?;
         self.refuse_while_payer_pass_owed().await?;
+        let parent = ActivityTarget::payer(natural_key::request_record(
+            &request.payee,
+            &request.request_hash,
+        ));
+        self.period_payment_base(&parent).await?;
         let (target, record) = self.payer_request(request).await?;
         let (stored, body) = request_of(&record).ok_or(Refusal::NotFound)?;
         let (stored, body) = (stored.clone(), body.clone());
@@ -803,12 +854,7 @@ impl Paykit {
             ActivityTarget::payer(period_key(&request.payee, &request.request_hash, &period));
         let record_key = self.activity_key(&target)?;
         let period_record_key = self.activity_key(&period_target)?;
-        if let Some(held) = self.app.shared_record(&period_record_key).await? {
-            if crate::hold::awaits_key(&held.content) {
-                return Err(crate::hold::value_awaits_key());
-            }
-        }
-        let held_period = self.held_activity(&period_target).await?;
+        let held_period = self.period_payment_base(&period_target).await?;
         // The period record shows it paid (Paykit spec 7.2).
         if held_period.as_ref().is_some_and(ActivityRecord::shows_paid) {
             return Err(Refusal::AlreadyPaid.into());
@@ -1037,7 +1083,7 @@ impl Paykit {
                     .shared_record(&self.activity_key(target)?)
                     .await?
                     .map(|held| held.content);
-                if !matches!(content, None | Some(RecordContent::Deleted)) {
+                if content.is_some() {
                     return Err(period_record_unread());
                 }
                 bare_period_record(request, period)

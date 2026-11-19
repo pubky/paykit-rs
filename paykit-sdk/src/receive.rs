@@ -1270,6 +1270,13 @@ fn period_details_effect(
     // value waits for its key holds the entry; one held that doesn't open, read or bind
     // decides nothing and is never written over here: the details are kept until placed.
     wait_for_key(cx, &target)?;
+    if cx
+        .record(&target.record_target())?
+        .is_some_and(|held| held.content == RecordContent::Deleted)
+    {
+        // New details cannot replace the evidence a deleted period may have held.
+        return Ok(());
+    }
     let period = match held_value(cx, &target)? {
         None if held_request(cx, &target)? => {
             return keep_until_placed(cx, stored, seq, scopes, &request_target);

@@ -3476,7 +3476,12 @@ impl Paykit {
     ) -> Result<OutcomeRecord> {
         let key = self.activity_key(target)?;
         let held = self.app.shared_record(&key).await?;
-        if crate::records::activity_base_changed(held.as_ref()) {
+        if crate::records::activity_base_changed(held.as_ref())
+            || (entry.billing_period.is_some()
+                && held
+                    .as_ref()
+                    .is_some_and(|r| r.content == RecordContent::Deleted))
+        {
             return Ok(if paid {
                 OutcomeRecord::Held
             } else {
@@ -4293,6 +4298,19 @@ impl Paykit {
     ) -> Result<bool> {
         if self.payment_base_changed(entry).await? {
             return Ok(true);
+        }
+        if entry.billing_period.is_some() {
+            let parent =
+                ActivityTarget::payer(entry.request_record()?.ok_or_else(PaykitError::corrupt)?);
+            let period = ActivityTarget::payer(entry.natural_key.clone());
+            for target in [&parent, &period] {
+                match Box::pin(self.period_payment_base(target)).await {
+                    Ok(Some(record))
+                        if !record.shows_paid() && !cancelled(&record) && !rejected(&record) => {}
+                    Ok(_) | Err(PaykitError::Refused(_)) => return Ok(true),
+                    Err(error) => return Err(error),
+                }
+            }
         }
         if by == Initiator::Automatic {
             return self.automatic_dispatch_held(entry).await;

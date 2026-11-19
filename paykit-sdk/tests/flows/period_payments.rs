@@ -1154,6 +1154,71 @@ async fn restore_before_original_completion(answered: bool) {
 }
 
 #[tokio::test]
+async fn test_period_payments_retained_delete_holds_the_period_after_claim_retention() {
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut first = w.wallet("payer").await;
+    let (request, _) = subscribed(&w, &mut shop, &mut first).await;
+    let period = january();
+    let attempt = by_user(&mut first, &request, period, PayOptions::default())
+        .await
+        .unwrap()
+        .attempt_id();
+    let obligation = period_obligation(&first, period).await;
+    let issued = period_record(&w, &first, &request, period).await.unwrap();
+    assert_eq!(proof_of(&issued).1.attempt_id, attempt);
+    w.clock.advance_ms(401 * DAY_MS);
+    let base = store();
+    let mut wallet = w.wallet_on("later-payer", Arc::clone(&base)).await;
+    let id = wallet.app_id();
+    let mut other = w.wallet("other-payer").await;
+    let natural = period_natural(&request, period);
+    other
+        .app_mut()
+        .delete_record(&natural_target(&natural), Vec::new())
+        .await
+        .unwrap();
+    assert!(wallet
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .is_none());
+    let key = period_key(&wallet, &request, period);
+    let mut backup = None;
+    for visit in 0..3 {
+        wallet.receive(None).await.unwrap();
+        let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
+        assert_eq!(
+            held.content,
+            pubky_switch_client::app::RecordContent::Deleted
+        );
+        let before = puts(&w, &wallet, &natural).len();
+        let attempts_before = attempt_conditions(&w, &obligation).len();
+        let error = by_user(&mut wallet, &request, period, PayOptions::default())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error.refusal(), Some(Refusal::RecordHeld(_))),
+            "{error:?}"
+        );
+        assert_eq!(puts(&w, &wallet, &natural).len(), before);
+        assert_eq!(attempt_conditions(&w, &obligation).len(), attempts_before);
+        assert_eq!(w.rail.all_executions().values().sum::<u64>(), 1);
+        if visit == 0 {
+            backup = Some(wallet.backup().await.unwrap());
+            drop(wallet);
+            wallet = w
+                .load_on_clock(&w.alice, Arc::clone(&base), id, Arc::clone(&w.clock))
+                .await;
+        } else if visit == 1 {
+            drop(wallet);
+            wallet = restored(&w, backup.as_ref().unwrap()).await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_period_payments_restore_the_original_paid_proof_with_its_receipt() {
     Box::pin(restore_before_original_completion(true)).await;
 }
