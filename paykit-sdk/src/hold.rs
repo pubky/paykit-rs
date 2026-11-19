@@ -601,6 +601,17 @@ impl Paykit {
         record_key: &[u8; 32],
         record: &ActivityRecord,
     ) -> Result<bool> {
+        self.held_across_payee_stop(record_key, record, None).await
+    }
+
+    /// A seller stop crossing an accepted first dispatch leaves any restore or missed-item
+    /// hold in force (Paykit spec 7.2, 8.1).
+    pub(crate) async fn held_across_payee_stop(
+        &self,
+        record_key: &[u8; 32],
+        record: &ActivityRecord,
+        crossing_payee: Option<[u8; 32]>,
+    ) -> Result<bool> {
         let hold = self.local_get::<RestoreHold>(key::RESTORE_HOLD).await?;
         let own = hold.as_ref().is_some_and(RestoreHold::in_force);
         let unbounded = hold.as_ref().is_some_and(RestoreHold::holds_all)
@@ -619,7 +630,7 @@ impl Paykit {
                 return Ok(false);
             }
         }
-        if payment_ended(record, None) {
+        if payment_ended(record, crossing_payee) {
             return Ok(false);
         }
         if self

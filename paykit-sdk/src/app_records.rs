@@ -187,18 +187,23 @@ impl Room {
     /// Take `member`'s public endpoints whole when they fit in what is left; `false`, taking
     /// nothing, when they don't.
     fn take(&mut self, member: &PaykitMember) -> bool {
-        let endpoints = member.public_endpoints.len();
+        let Some(left) = self.remaining_after(member) else {
+            return false;
+        };
+        *self = left;
+        true
+    }
+
+    fn remaining_after(&self, member: &PaykitMember) -> Option<Self> {
         let payload_bytes = member
             .public_endpoints
             .values()
             .map(|payload| payload.as_str().len())
             .sum::<usize>();
-        if endpoints > self.endpoints || payload_bytes > self.payload_bytes {
-            return false;
-        }
-        self.endpoints -= endpoints;
-        self.payload_bytes -= payload_bytes;
-        true
+        Some(Self {
+            endpoints: self.endpoints.checked_sub(member.public_endpoints.len())?,
+            payload_bytes: self.payload_bytes.checked_sub(payload_bytes)?,
+        })
     }
 }
 
@@ -247,6 +252,19 @@ pub(crate) fn usable(
             "Paykit wire 3.2: the record's Paykit member doesn't read: {error}"
         ))
     })?;
+    check_record_lifetime_and_certificate(app_id, record, doc, now)?;
+    Ok(UsableRecord {
+        record: record.clone(),
+        member,
+    })
+}
+
+fn check_record_lifetime_and_certificate(
+    app_id: &[u8; 16],
+    record: &AppRecord,
+    doc: &IdentityDoc,
+    now: u64,
+) -> std::result::Result<(), PublicAppFailureReason> {
     let expired = |limit: &str| PublicAppFailureReason::Expired(format!("Paykit spec 4: {limit}"));
     if record.is_ahead(now) {
         return Err(expired("the record was made ahead of the payer's clock"));
@@ -267,11 +285,7 @@ pub(crate) fn usable(
     }
     let carrier = Carrier::Record(Box::new(record.clone()));
     // The app's standing, with the record's certificate (the record age limit passed above).
-    current(doc, app_id, &carrier, now).map_err(PublicAppFailureReason::Refused)?;
-    Ok(UsableRecord {
-        record: record.clone(),
-        member,
-    })
+    current(doc, app_id, &carrier, now).map_err(PublicAppFailureReason::Refused)
 }
 
 type AppRecordResult = std::result::Result<Option<Vec<u8>>, TransportError>;
@@ -605,10 +619,22 @@ impl Paykit {
                     // is an earlier one in its place, which it may withdraw: the app's
                     // failure, and the other apps' reads go on (Paykit spec 4, below).
                     let Some(kept) = seen.keep(&record, held, now) else {
-                        failures.push(fail(PublicAppFailureReason::Refused(format!(
-                            "Paykit spec 4: the served record exceeds the history a reader keeps \
-                             for this app ({SEEN_RECORDS} records, {SEEN_RECORDS_BYTES} bytes)"
-                        ))));
+                        // Report the read's bound for otherwise usable endpoints. Compare
+                        // the record without retaining it or taking room from later apps.
+                        let over_bound = PaykitMember::read(&record)
+                            .is_ok_and(|member| room.remaining_after(&member).is_none())
+                            && check_record_lifetime_and_certificate(&app_id, &record, doc, now)
+                                .is_ok()
+                            && !view.see(&record, now);
+                        let reason = if over_bound {
+                            PublicAppFailureReason::OverBound
+                        } else {
+                            PublicAppFailureReason::Refused(format!(
+                                "Paykit spec 4: the served record exceeds the history a reader keeps \
+                                 for this app ({SEEN_RECORDS} records, {SEEN_RECORDS_BYTES} bytes)"
+                            ))
+                        };
+                        failures.push(fail(reason));
                         continue;
                     };
                     view = kept;
