@@ -94,7 +94,7 @@ async fn test_two_payee_wallets_reopen_the_same_manual_period_receipt() -> TestR
         let Some(world) = World::start(backend)? else {
             continue;
         };
-        let result = Box::pin(manual_period(&world, false)).await;
+        let result = Box::pin(settle_period(&world, PeriodPayment::Manual)).await;
         world.close().await?;
         result?;
     }
@@ -107,11 +107,31 @@ async fn test_two_wallets_settle_a_period_at_its_signed_rate() -> TestResult {
         let Some(world) = World::start(backend)? else {
             continue;
         };
-        let result = Box::pin(manual_period(&world, true)).await;
+        let result = Box::pin(settle_period(&world, PeriodPayment::ConfirmedRate)).await;
         world.close().await?;
         result?;
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn test_two_wallets_settle_a_period_with_an_authorized_rate() -> TestResult {
+    for backend in [Backend::Scripted, Backend::Service] {
+        let Some(world) = World::start(backend)? else {
+            continue;
+        };
+        let result = Box::pin(settle_period(&world, PeriodPayment::PolicyRate)).await;
+        world.close().await?;
+        result?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PeriodPayment {
+    Manual,
+    ConfirmedRate,
+    PolicyRate,
 }
 
 async fn period_wallets(
@@ -152,7 +172,8 @@ async fn period_wallets(
     Ok((buyer, shop, shop_signer))
 }
 
-async fn manual_period(world: &World, priced: bool) -> TestResult {
+async fn settle_period(world: &World, how: PeriodPayment) -> TestResult {
+    let priced = how != PeriodPayment::Manual;
     use paykit_lib::periods::{AnchoredRule, Recurrence, Unit};
 
     let rail = Arc::new(FakeRail::with_clock(world.clock().clone()));
@@ -182,10 +203,11 @@ async fn manual_period(world: &World, priced: bool) -> TestResult {
         None
     };
     let payer_rail = Arc::clone(&rail);
+    let shop_app = shop.app_id();
     let (mut buyer, payment, rate_source) = tokio::spawn(Box::pin(async move {
         let mut options = PayOptions::default();
         if let Some((id, expected)) = &rate_source {
-            let automatic = Box::pin(buyer.pay_period_automatically(&request, &period)).await;
+            let automatic = Box::pin(buyer.pay_period_automatically(&request, &period, None)).await;
             assert!(automatic.public_failures.is_empty());
             let automatic_refusal = automatic.outcome.unwrap_err();
             let quote = buyer
@@ -204,7 +226,40 @@ async fn manual_period(world: &World, priced: bool) -> TestResult {
             );
             assert_eq!(&payment.amount, expected);
             assert!(payer_rail.all_executions().is_empty());
-            options = options.with_rate_confirmed((**payment).clone());
+            assert_eq!(payment.billing_period, Some(period));
+            if how == PeriodPayment::PolicyRate {
+                let within_limit = |quote: &paykit_sdk::PricedPayment, ceiling: &Decimal| {
+                    quote.request == request
+                        && quote.billing_period == Some(period)
+                        && quote.app_id == shop_app
+                        && quote.endpoint_id.as_str() == "btc-lightning-bolt11"
+                        && quote.requested.asset.as_str() == "usd"
+                        && quote.amount.asset.as_str() == "btc"
+                        && &quote.amount.value <= ceiling
+                };
+                // The host withholds an over-limit quote. Calling without authorization
+                // leaves the attempt unopened. A higher user-selected limit permits it.
+                assert!(!within_limit(payment, &Decimal::new("0.0001").unwrap()));
+                let waiting =
+                    Box::pin(buyer.pay_period_automatically(&request, &period, None)).await;
+                assert_eq!(
+                    waiting.outcome.unwrap_err().refusal(),
+                    Some(&paykit_sdk::Refusal::PricedByRate {
+                        payment: payment.clone()
+                    })
+                );
+                assert!(buyer.payments().await.unwrap().is_empty());
+                assert!(payer_rail.all_executions().is_empty());
+                assert!(within_limit(payment, &Decimal::new("0.0002").unwrap()));
+                let result = Box::pin(buyer.pay_period_automatically(
+                    &request,
+                    &period,
+                    Some((**payment).clone()),
+                ))
+                .await;
+                return (buyer, result, rate_source);
+            }
+            options = options.with_rate_authorized((**payment).clone());
         }
         let payment = buyer.pay_period(&request, &period, options).await;
         (buyer, payment, rate_source)
@@ -270,6 +325,20 @@ async fn manual_period(world: &World, priced: bool) -> TestResult {
         .find(|item| item.billing_period == period)
         .ok_or("payer's settled period missing")?;
     assert!(payer_period.paid && payer_period.credited);
+    let payer_record = buyer
+        .app()
+        .shared_record(&payer_period.record)
+        .await?
+        .ok_or("missing payer record")?;
+    let activity = ActivityRecord::read(
+        payer_record
+            .content
+            .value()
+            .ok_or("missing payer record value")?,
+        &buyer.identity(),
+        ActivitySide::Payer,
+    )?;
+    assert_eq!(activity.manual_only, how != PeriodPayment::PolicyRate);
     assert_eq!(
         payer_period.receipt.as_ref().map(|r| &r.msg_id),
         Some(&receipt)
@@ -448,7 +517,7 @@ async fn second_app_rate(world: &World, issuer: QuoteIssuer) -> TestResult {
             paykit_sdk::RateSource::PeriodDetails { msg_id: id }
         );
         assert_eq!(payment.app_id, shop.app_id());
-        let options = PayOptions::default().with_rate_confirmed((**payment).clone());
+        let options = PayOptions::default().with_rate_authorized((**payment).clone());
         assert!(buyer.payments().await?.is_empty());
         assert!(rail.all_executions().is_empty());
         if issuer == QuoteIssuer::RemovedBeforeResume {

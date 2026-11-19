@@ -103,7 +103,7 @@ async fn test_conversion_priced_payment_pays_the_confirmed_amount() {
             .unwrap_err(),
     );
     let outcome = wallet
-        .pay_request(&request, PayOptions::default().with_rate_confirmed(shown))
+        .pay_request(&request, PayOptions::default().with_rate_authorized(shown))
         .await
         .outcome
         .unwrap();
@@ -137,7 +137,7 @@ async fn test_conversion_invoice_of_the_computed_amount_passes_both_transfer_che
             .unwrap_err(),
     );
     let outcome = wallet
-        .pay_request(&request, PayOptions::default().with_rate_confirmed(shown))
+        .pay_request(&request, PayOptions::default().with_rate_authorized(shown))
         .await
         .outcome
         .unwrap();
@@ -162,7 +162,7 @@ async fn test_conversion_changed_price_refused_again() {
     let mut other = shown.clone();
     other.amount = btc("0.0002");
     let refused = wallet
-        .pay_request(&request, PayOptions::default().with_rate_confirmed(other))
+        .pay_request(&request, PayOptions::default().with_rate_authorized(other))
         .await
         .outcome
         .unwrap_err();
@@ -171,7 +171,7 @@ async fn test_conversion_changed_price_refused_again() {
     // the shown confirmed before is refused again with the new one.
     w.rail.set_fraction_digits(endpoint(BOLT11), Some(6));
     let refused = wallet
-        .pay_request(&request, PayOptions::default().with_rate_confirmed(shown))
+        .pay_request(&request, PayOptions::default().with_rate_authorized(shown))
         .await
         .outcome
         .unwrap_err();
@@ -179,7 +179,7 @@ async fn test_conversion_changed_price_refused_again() {
     assert_eq!(new.amount, btc("0.000124"));
     nothing_paid(&w, &wallet).await;
     let PayOutcome::Paid { attempt_id, .. } = wallet
-        .pay_request(&request, PayOptions::default().with_rate_confirmed(new))
+        .pay_request(&request, PayOptions::default().with_rate_authorized(new))
         .await
         .outcome
         .unwrap()
@@ -272,7 +272,7 @@ async fn test_conversion_automatic_payment_of_a_priced_request_refused() {
     let refused = wallet
         .pay_request_automatically(
             &request,
-            PayOptions::default().with_rate_confirmed(shown.clone()),
+            PayOptions::default().with_rate_authorized(shown.clone()),
         )
         .await
         .outcome
@@ -318,7 +318,7 @@ async fn test_conversion_payee_credits_a_priced_payment_at_the_confirmed_amount(
             .unwrap_err(),
     );
     wallet
-        .pay_request(&request, PayOptions::default().with_rate_confirmed(shown))
+        .pay_request(&request, PayOptions::default().with_rate_authorized(shown))
         .await
         .outcome
         .unwrap();
@@ -422,7 +422,7 @@ async fn priced_in_flight(
     );
     w.rail.next(Behaviour::Hang);
     let PayOutcome::Pending { attempt_id, .. } = wallet
-        .pay_request(&request, PayOptions::default().with_rate_confirmed(shown))
+        .pay_request(&request, PayOptions::default().with_rate_authorized(shown))
         .await
         .outcome
         .unwrap()
@@ -784,7 +784,7 @@ async fn test_conversion_transfer_confirmation_cannot_change_a_priced_amount() {
             .outcome
             .unwrap_err(),
     );
-    let options = PayOptions::default().with_rate_confirmed(shown);
+    let options = PayOptions::default().with_rate_authorized(shown);
     let refused = wallet
         .pay_request(&request, options.clone())
         .await

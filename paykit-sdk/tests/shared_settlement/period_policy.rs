@@ -282,7 +282,9 @@ async fn dispatch_period(
     period: PeriodRef,
 ) -> TestResult<(Paykit, paykit_sdk::PayResult)> {
     Ok(tokio::spawn(Box::pin(async move {
-        let payment = buyer.pay_period_automatically(&request, &period).await;
+        let payment = buyer
+            .pay_period_automatically(&request, &period, None)
+            .await;
         (buyer, payment)
     }))
     .await?)

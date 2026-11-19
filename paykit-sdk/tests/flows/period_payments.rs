@@ -154,7 +154,7 @@ async fn by_policy(
     request: &RequestRef,
     period: PeriodRef,
 ) -> paykit_sdk::Result<PayOutcome> {
-    Box::pin(app.pay_period_automatically(request, &period))
+    Box::pin(app.pay_period_automatically(request, &period, None))
         .await
         .outcome
 }
@@ -472,7 +472,7 @@ async fn confirm_period_settlement(terms: SettlementTerms, after_start_ms: u64, 
                 shown.source,
                 paykit_sdk::RateSource::PeriodDetails { msg_id }
             );
-            let options = PayOptions::default().with_rate_confirmed(shown);
+            let options = PayOptions::default().with_rate_authorized(shown);
             (w, shop, payer, request, options)
         }
     };
@@ -1218,7 +1218,7 @@ async fn restore_before_original_completion(answered: bool, priced: bool) {
         let shown = by_user(&mut wallet, &request, period, PayOptions::default())
             .await
             .unwrap_err();
-        options = options.with_rate_confirmed(crate::conversion::priced_of(&shown));
+        options = options.with_rate_authorized(crate::conversion::priced_of(&shown));
     }
     w.rail.next(Behaviour::Hang);
     let attempt = by_user(&mut wallet, &request, period, options)
@@ -1527,6 +1527,152 @@ async fn priced_period_on(
 }
 
 #[tokio::test]
+async fn test_period_payments_standing_rate_policy_checks_each_occurrence_and_keeps_a_started_attempt(
+) {
+    let w = World::new();
+    w.rail.set_declaration(
+        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true),
+    );
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", base.clone()).await;
+    let mut shop = w.shop().await;
+    let recurrence = Recurrence::new(
+        AnchoredRule::new(START_MS, 1, Unit::Hour).unwrap(),
+        START_MS,
+        None,
+    )
+    .unwrap();
+    let periods = recurrence
+        .periods(4)
+        .unwrap()
+        .into_iter()
+        .map(PeriodRef::from)
+        .collect::<Vec<_>>();
+    let draft = crate::conversion::priced(
+        START_MS,
+        &[("btc-lightning-bolt11", "lnbc1invoice")],
+        &[("btc", "0.0000123456")],
+    )
+    .with_recurrence(recurrence);
+    let (request, _) = subscribed_to(&w, &mut shop, &mut wallet, draft).await;
+    let ceiling = crate::common::btc("0.0002");
+    let shop_app = shop.app_id();
+    let authorize = |quote: &paykit_sdk::PricedPayment, period| {
+        (quote.request == request
+            && quote.billing_period == Some(period)
+            && quote.app_id == shop_app
+            && quote.endpoint_id.as_str() == "btc-lightning-bolt11"
+            && quote.amount.asset == ceiling.asset
+            && quote.amount.value <= ceiling.value)
+            .then(|| quote.clone())
+    };
+    let first = crate::conversion::priced_of(
+        &by_policy(&mut wallet, &request, periods[0])
+            .await
+            .unwrap_err(),
+    );
+    assert_eq!(first.rate_source_hash, request.request_hash);
+    let first_payment = wallet
+        .pay_period_automatically(&request, &periods[0], authorize(&first, periods[0]))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(first_payment, PayOutcome::Paid { .. }));
+    w.clock.set_ms(periods[1].starts_at);
+    let prior = wallet
+        .pay_period_automatically(&request, &periods[1], Some(first))
+        .await
+        .outcome
+        .unwrap_err();
+    let second = crate::conversion::priced_of(&prior);
+    assert_eq!(second.billing_period, Some(periods[1]));
+    let mut changed = second.clone();
+    changed.rate_source_hash[0] ^= 1;
+    let refused = wallet
+        .pay_period_automatically(&request, &periods[1], Some(changed))
+        .await
+        .outcome
+        .unwrap_err();
+    assert_eq!(crate::conversion::priced_of(&refused), second);
+    assert_eq!(wallet.payments().await.unwrap().len(), 1);
+    w.rail.next(Behaviour::Hang);
+    let pending = wallet
+        .pay_period_automatically(&request, &periods[1], authorize(&second, periods[1]))
+        .await
+        .outcome
+        .unwrap();
+    let PayOutcome::Pending { attempt_id, .. } = pending else {
+        panic!("{pending:?}")
+    };
+    let wallet_id = wallet.app_id();
+    drop(wallet);
+    let mut wallet = w
+        .load_on_clock(&w.alice, base, wallet_id, Arc::clone(&w.clock))
+        .await;
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(w.rail.paid_amount(&attempt_id), Some(second.amount));
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+    w.clock.set_ms(periods[2].starts_at);
+    let missed = crate::conversion::priced_of(
+        &by_policy(&mut wallet, &request, periods[2])
+            .await
+            .unwrap_err(),
+    );
+    w.clock.set_ms(periods[3].starts_at);
+    let refused = wallet
+        .pay_period_automatically(&request, &periods[2], authorize(&missed, periods[2]))
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(refusal(&refused), Refusal::NotAutomatic(_)),
+        "{refused:?}"
+    );
+    assert_eq!(wallet.payments().await.unwrap().len(), 2);
+    assert_eq!(w.rail.all_executions().len(), 2);
+}
+
+#[tokio::test]
+async fn test_period_payments_a_rate_quote_cannot_override_automatic_holds() {
+    for under_allowance in [true, false] {
+        let (w, _shop, mut wallet, request, _) =
+            Box::pin(priced_period_on(false, store(), None)).await;
+        let shown = crate::conversion::priced_of(
+            &by_policy(&mut wallet, &request, january())
+                .await
+                .unwrap_err(),
+        );
+        if under_allowance {
+            let mut record = request_record(&w, &wallet, &request).await;
+            record.allowance_id = Some(
+                paykit_lib::AllowanceId::parse("0b4f9c1e-8d2a-4e6b-9f3c-5a7d1e2b8c40").unwrap(),
+            );
+            write_payer_record(
+                &mut wallet,
+                &natural_key::request_record(&request.payee, &request.request_hash),
+                &record,
+            )
+            .await;
+        } else {
+            let mut record = period_record(&w, &wallet, &request, january())
+                .await
+                .unwrap();
+            record.manual_only = true;
+            write_payer_record(&mut wallet, &period_natural(&request, january()), &record).await;
+        }
+        let refused = wallet
+            .pay_period_automatically(&request, &january(), Some(shown))
+            .await
+            .outcome
+            .unwrap_err();
+        assert_eq!(refusal(&refused), Refusal::ManualOnly);
+        assert!(wallet.payments().await.unwrap().is_empty());
+        assert!(w.rail.all_executions().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn test_period_payments_priced_repeat_requires_unexpired_selected_rates() {
     let (w, _shop, mut wallet, request, _) = Box::pin(priced_period_on(false, store(), None)).await;
     w.rail.set_declaration(
@@ -1543,7 +1689,7 @@ async fn test_period_payments_priced_repeat_requires_unexpired_selected_rates() 
         &mut wallet,
         &request,
         january(),
-        PayOptions::default().with_rate_confirmed(shown),
+        PayOptions::default().with_rate_authorized(shown),
     )
     .await
     .unwrap();
@@ -1582,7 +1728,7 @@ async fn test_period_payments_priced_first_dispatch_rechecks_selected_rate_expir
             &mut wallet,
             &request,
             january(),
-            PayOptions::default().with_rate_confirmed(shown),
+            PayOptions::default().with_rate_authorized(shown),
         )
         .await
         .unwrap_err();
@@ -1664,7 +1810,7 @@ async fn test_period_payments_recorded_attempt_rechecks_the_period_rate_issuer()
         &mut wallet,
         &request,
         january(),
-        PayOptions::default().with_rate_confirmed(shown),
+        PayOptions::default().with_rate_authorized(shown),
     )
     .await
     .unwrap_err();
@@ -1693,7 +1839,7 @@ async fn test_period_payments_priced_repeat_preserves_selected_rate_and_amount()
         &mut wallet,
         &request,
         january(),
-        PayOptions::default().with_rate_confirmed(shown),
+        PayOptions::default().with_rate_authorized(shown),
     )
     .await
     .unwrap();
@@ -1790,7 +1936,7 @@ async fn test_period_payments_priced_default_uses_latest_details_carrying_rates(
         &mut wallet,
         &request,
         january(),
-        PayOptions::default().with_rate_confirmed(confirmed),
+        PayOptions::default().with_rate_authorized(confirmed),
     )
     .await
     .unwrap();
@@ -1853,7 +1999,7 @@ async fn test_period_payments_held_rate_lasts_beyond_the_details_intake_window()
         &mut wallet,
         &request,
         first,
-        PayOptions::default().with_rate_confirmed(shown),
+        PayOptions::default().with_rate_authorized(shown),
     )
     .await
     .unwrap();
@@ -2445,7 +2591,7 @@ async fn test_period_payments_reconcile_holds_without_selected_period_rate() {
         &mut wallet,
         &request,
         january(),
-        PayOptions::default().with_rate_confirmed(shown),
+        PayOptions::default().with_rate_authorized(shown),
     )
     .await
     .unwrap()

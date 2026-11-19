@@ -912,7 +912,9 @@ impl Paykit {
 
     /// Pay one Billing Period selected by the host's own recurring-payment policy (Paykit
     /// spec 8.2, "Paying periods"). The host supplies the accepted subscription and the
-    /// period its policy authorizes. Accepting a subscription schedules no payment.
+    /// period its policy authorizes. For a rate-priced period, return the exact quote
+    /// from [`Refusal::PricedByRate`] once the user or their bounded policy approves it.
+    /// Accepting a subscription schedules no payment.
     ///
     /// The request and period must be open, eligible for automatic payment, and free of
     /// Allowance funding. The SDK checks the automatic window before opening the attempt
@@ -929,8 +931,13 @@ impl Paykit {
         &mut self,
         request: &RequestRef,
         period: &PeriodRef,
+        rate_authorized: Option<crate::PricedPayment>,
     ) -> PayResult {
-        self.pay_selected_period(request, period, Initiator::Automatic, PayOptions::default())
+        let options = PayOptions {
+            rate_authorized,
+            ..PayOptions::default()
+        };
+        self.pay_selected_period(request, period, Initiator::Automatic, options)
             .await
     }
 
@@ -1122,7 +1129,8 @@ impl Paykit {
         }
         // The claim was read just before: the service time it verified is current.
         let mut conditions = vec![self.not_before(&period, &options)?];
-        let pricing = self.period_pricing(request, &body, held_period.as_ref(), by, &options)?;
+        let pricing =
+            self.period_pricing(request, period, &body, held_period.as_ref(), by, &options)?;
         let Chosen {
             destination,
             carrier,
@@ -1234,12 +1242,19 @@ impl Paykit {
     fn period_pricing<'a>(
         &self,
         request: &RequestRef,
+        period: PeriodRef,
         body: &'a PaymentRequest,
         held: Option<&'a ActivityRecord>,
         by: Initiator,
         options: &PayOptions,
     ) -> Result<Pricing<'a>> {
-        let pricing = Pricing::of_request(&body.amount, *request, body.conversion.as_ref(), by);
+        let pricing = Pricing::of_request(
+            &body.amount,
+            *request,
+            Some(period),
+            body.conversion.as_ref(),
+            by,
+        );
         let named = options.selected_period_rate();
         if !matches!(
             body.conversion,

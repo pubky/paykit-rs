@@ -1067,6 +1067,7 @@ impl Paykit {
                 let mut pricing = crate::pay::Pricing::of_request(
                     &request.amount,
                     request_ref,
+                    proof.billing_period,
                     request.conversion.as_ref(),
                     pubky_switch_client::app::Initiator::User,
                 );

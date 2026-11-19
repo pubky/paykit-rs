@@ -302,6 +302,8 @@ mod tests {
                             payee: [1; 32],
                             request_hash: [4; 32],
                         },
+                        billing_period: None,
+                        rate_source_hash: [4; 32],
                         app_id: [2; 16],
                         endpoint_id: id(),
                         payload_hash: pubky_switch_core::enc::hash(payload().as_str().as_bytes()),
