@@ -57,7 +57,7 @@ impl Protocol for PaykitProtocol {
         PAYKIT_PREFIX
     }
 
-    /// The seven names of Paykit's scopes (Paykit spec 3.1, 3.2), each a root of Paykit's.
+    /// Paykit's scope names (Paykit spec 3.1, 3.2), each a root of Paykit's.
     /// Every one but `paykit_ext` has keys, and so do its sub-scopes, the labels of
     /// `paykit_request` (Paykit spec 3.5). The signer then owns every sub-scope of a root for
     /// Paykit, also one Paykit gives no meaning, such as `paykit_pay:x`, which
@@ -192,6 +192,7 @@ mod tests {
             "paykit_request",
             "paykit_request:shop1",
             "paykit_settlements",
+            "paykit_recovery",
             "paykit_allowance",
             "paykit_allowance_execute",
             "paykit_contacts",
@@ -211,6 +212,7 @@ mod tests {
             "paykit_request",
             "paykit_request:shop1",
             "paykit_settlements",
+            "paykit_recovery",
             "paykit_allowance",
             "paykit_allowance_execute",
             "paykit_contacts",

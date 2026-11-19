@@ -37,6 +37,7 @@ pub mod kinds;
 mod list_version;
 pub mod periods;
 pub mod records;
+pub mod recovery;
 pub mod scopes;
 #[cfg(feature = "signer")]
 pub mod signer;
