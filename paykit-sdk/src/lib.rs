@@ -32,8 +32,10 @@
 //! - Divergent records after a provider loss: paused until the user confirms
 //!   ([`Paykit::divergent_records`], [`Paykit::confirm_divergent`], [`DivergentRecord`]).
 //!
-//! A wallet pays each Billing Period on its own claim. Once the attempt opens,
-//! it finishes across a seller cancellation and sends its proof for that period.
+//! The host manages scheduling and timers. It can use [`paykit_lib::periods::Recurrence::periods`]
+//! to calculate the Billing Periods of a recurring request. When the user chooses a period,
+//! [`Paykit::pay_period`] pays it on its own claim. An attempt already open finishes
+//! across the payee's cancellation and sends its proof for that period.
 //! The Allowance executor with its grant and ledger, and publishing Private Payment Lists,
 //! build on the same parts in their own modules.
 
