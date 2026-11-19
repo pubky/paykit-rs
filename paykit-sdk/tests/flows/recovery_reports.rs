@@ -49,10 +49,8 @@ enum Role {
 
 #[derive(Clone, Copy, Debug)]
 enum Change {
-    RemovedAtWrite,
-    RemovedBeforeWrite,
-    RenewalEndsAfterWrite,
-    RenewalEndsAtWrite,
+    Removal { millis_before_write: u64 },
+    ClosedRenewal { millis_after_write: u64 },
 }
 
 /// Publish signed successors on the recovered service after the report's write.
@@ -67,12 +65,10 @@ fn change_standing(
     let id = app.app_id();
     w.clock.advance_ms(2_000);
     let doc = match change {
-        Change::RemovedAtWrite | Change::RemovedBeforeWrite => {
-            let distrust_from = if matches!(change, Change::RemovedAtWrite) {
-                written
-            } else {
-                written - 1
-            };
+        Change::Removal {
+            millis_before_write,
+        } => {
+            let distrust_from = written - millis_before_write;
             w.alice
                 .sign_next(|body| {
                     body.apps.retain(|member| member.app_id != id);
@@ -83,12 +79,8 @@ fn change_standing(
                 })
                 .unwrap()
         }
-        Change::RenewalEndsAfterWrite | Change::RenewalEndsAtWrite => {
-            let until = if matches!(change, Change::RenewalEndsAfterWrite) {
-                written + 1
-            } else {
-                written
-            };
+        Change::ClosedRenewal { millis_after_write } => {
+            let until = written + millis_after_write;
             let scopes: Vec<_> = app.cert().scopes().iter().map(String::as_str).collect();
             let renewed = issue_cert(
                 w.alice.identity().key(),
@@ -216,7 +208,7 @@ async fn reads_report(
             Role::Original => (&original, "original"),
         };
         change_standing(&w, &service, app, name, change, written);
-        if matches!(change, Change::RemovedAtWrite | Change::RemovedBeforeWrite) {
+        if matches!(change, Change::Removal { .. }) {
             removed = Some(app.app_id());
         }
     }
@@ -260,7 +252,12 @@ async fn test_recovery_reports_removal_includes_the_cutoff_for_each_signer() {
             Box::pin(reads_report(
                 true,
                 true,
-                Some((role, Change::RemovedAtWrite))
+                Some((
+                    role,
+                    Change::Removal {
+                        millis_before_write: 0
+                    }
+                ))
             ))
             .await,
             "{role:?}"
@@ -269,7 +266,12 @@ async fn test_recovery_reports_removal_includes_the_cutoff_for_each_signer() {
             !Box::pin(reads_report(
                 true,
                 true,
-                Some((role, Change::RemovedBeforeWrite))
+                Some((
+                    role,
+                    Change::Removal {
+                        millis_before_write: 1
+                    }
+                ))
             ))
             .await,
             "{role:?}"
@@ -284,7 +286,12 @@ async fn test_recovery_reports_closed_renewal_excludes_its_end_for_each_signer()
             Box::pin(reads_report(
                 true,
                 true,
-                Some((role, Change::RenewalEndsAfterWrite))
+                Some((
+                    role,
+                    Change::ClosedRenewal {
+                        millis_after_write: 1
+                    }
+                ))
             ))
             .await,
             "{role:?}"
@@ -293,7 +300,12 @@ async fn test_recovery_reports_closed_renewal_excludes_its_end_for_each_signer()
             !Box::pin(reads_report(
                 true,
                 true,
-                Some((role, Change::RenewalEndsAtWrite))
+                Some((
+                    role,
+                    Change::ClosedRenewal {
+                        millis_after_write: 0
+                    }
+                ))
             ))
             .await,
             "{role:?}"
