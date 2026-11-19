@@ -1083,7 +1083,19 @@ impl Paykit {
                     }
                     crate::conversion::Priced::Unusable(_) => return Ok(None),
                 };
-                (amount, payload, destination_expires, rate_window)
+                let period_deadline = match binding {
+                    RecordBinding::Period { billing_period, .. } => {
+                        request.period_payment_deadline(&billing_period)?
+                    }
+                    _ => None,
+                };
+                (
+                    amount,
+                    payload,
+                    destination_expires,
+                    rate_window,
+                    period_deadline,
+                )
             }
             // A period record whose request record the app holds but can't open or bind yet,
             // sealed under a scope key it doesn't hold or a value that doesn't read: not now,
@@ -1100,10 +1112,11 @@ impl Paykit {
                 None,
                 None,
                 None,
+                None,
             ),
             None => return Err(Refusal::NotFound.into()),
         };
-        let (amount, payload, destination_expires, rate_window) = payment;
+        let (amount, payload, destination_expires, rate_window, period_deadline) = payment;
         if let Some(settlement) = self.rail.settlement_id(&proof.proof) {
             if self
                 .retained_credit(bound.receipt.as_ref().map(|r| r.hash()), &settlement)
@@ -1137,7 +1150,8 @@ impl Paykit {
             .verify(check)
             .await?
             .filter(|paid_at| {
-                destination_expires.is_none_or(|expires| *paid_at < expires)
+                period_deadline.is_none_or(|deadline| *paid_at <= deadline)
+                    && destination_expires.is_none_or(|expires| *paid_at < expires)
                     && rate_window.is_none_or(|(start, expires)| {
                         paykit_lib::periods::rates_apply(start, expires, *paid_at)
                     })
