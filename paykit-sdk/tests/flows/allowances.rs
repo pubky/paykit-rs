@@ -8631,6 +8631,15 @@ async fn test_pending_proposal_conflict_discard_checks_the_selected_record_and_s
 
 #[tokio::test]
 async fn test_pending_proposal_conflict_discard_reads_the_current_proposal_after_restore() {
+    Box::pin(discard_after_restore(true)).await;
+}
+
+#[tokio::test]
+async fn test_pending_proposal_conflict_discard_waits_while_the_restore_feed_is_unavailable() {
+    Box::pin(discard_after_restore(false)).await;
+}
+
+async fn discard_after_restore(feed_available: bool) {
     use paykit_lib::records::PendingAllowanceRecord;
     use pubky_switch_client::app::{Collection, RecordContent, RecordTarget};
 
@@ -8670,6 +8679,26 @@ async fn test_pending_proposal_conflict_discard_reads_the_current_proposal_after
     .await;
 
     let mut restored = Box::pin(restored_unreceived(&w, &backup)).await;
+    if !feed_available {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "/feed".into(),
+                code: pubky_switch_core::http::ErrorCode::Unavailable,
+                current: Value::Null,
+            });
+        assert!(restored
+            .discard_pending_allowance(&canonical)
+            .await
+            .is_err());
+        assert!(restored.app().restore_held_cursor().is_none());
+        let current = phone.app_mut().read_record_fresh(&target).await.unwrap();
+        assert!(
+            matches!(current, pubky_switch_client::app::RecordRead::Fresh(ref held)
+            if held.authenticated && held.content.value()==Some(pending.to_json().unwrap().as_slice()))
+        );
+        return;
+    }
     restored
         .discard_pending_allowance(&canonical)
         .await
