@@ -1287,6 +1287,46 @@ async fn test_public_read_unretained_record_reports_its_remaining_endpoint_bound
     }
 }
 
+#[tokio::test]
+async fn test_public_read_unretained_conflicting_or_expired_record_is_refused() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let apps = bob_apps(&w, &["shop", "till"]).await;
+    publish_now(
+        &w,
+        apps[0].0,
+        one_endpoint("btc-lightning-bolt11", "lnbc1shop"),
+    );
+    publish_now(
+        &w,
+        apps[1].0,
+        one_endpoint("btc-lightning-bolt12", "lno1till"),
+    );
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(offering(&read), [apps[0].1, apps[1].1]);
+
+    let original_time = w.clock.now_ms();
+    w.clock.advance_ms(1000);
+    // The first body conflicts with the shop's retained record. The second is newer but
+    // has expired. Neither can supply usable public endpoints, whatever their size.
+    for (updated, expires) in [
+        (original_time, original_time + DAY_MS),
+        (original_time + 1, original_time + 2),
+    ] {
+        publish_app_at(&w, apps[0].0, many(3, 3 * MIB), updated, Some(expires));
+        let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+        assert_eq!(offering(&read), [apps[1].1]);
+        assert_eq!(read.failures.len(), 1, "{:?}", read.failures);
+        assert_eq!(read.failures[0].app_id, apps[0].1);
+        assert!(
+            matches!(&read.failures[0].reason, PublicAppFailureReason::Refused(rule)
+            if rule.contains("a reader keeps")),
+            "{:?}",
+            read.failures
+        );
+    }
+}
+
 /// A store that moves the world's clock on at the first read, once armed, of the records a
 /// reader keeps of a payee app (`ar/`).
 struct ClockOnSeenRead {
