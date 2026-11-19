@@ -79,7 +79,11 @@ async fn join(
         Arc::new(TestTimer),
     )
     .await?;
-    wallet.receive(None).await?;
+    let wallet = tokio::spawn(Box::pin(async move {
+        wallet.receive(None).await?;
+        Ok::<_, paykit_sdk::PaykitError>(wallet)
+    }))
+    .await??;
     Ok((wallet, signer))
 }
 
