@@ -1861,12 +1861,23 @@ async fn test_publication_restored_answers_use_the_retained_request_and_current_
 
 #[tokio::test]
 async fn test_publication_replaces_an_undelivered_withdrawal_only_when_due() {
-    use crate::common::HOUR_MS;
+    use crate::common::{store, HOUR_MS};
+    use paykit_sdk::{AppScopes, PaykitConfig};
     use pubky_switch_client::app::{AppEvent, Delivery};
 
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
-    let mut shop = w.shop().await;
+    let storage = store();
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default(),
+            storage.clone(),
+        )
+        .await;
+    let publisher = shop.app_id();
     let payer = w.alice_id();
     shop.app_mut().invite(&payer).await.unwrap();
     wallet.app_mut().invite(&w.bob_id()).await.unwrap();
@@ -1900,6 +1911,16 @@ async fn test_publication_replaces_an_undelivered_withdrawal_only_when_due() {
     let report = shop.receive(None).await.unwrap();
     assert!(report.report.events.iter().any(|event| matches!(event,
         AppEvent::MessageUndelivered { msg_id, resend: false, .. } if msg_id == &empty.msg_id)));
+    drop(shop);
+    let mut shop = Paykit::load(
+        w.env(&w.bob, storage),
+        PaykitConfig::default(),
+        publisher,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
     w.clock.advance_ms(HOUR_MS - 1);
     shop.receive(None).await.unwrap();
     assert_eq!(w.record_writes(&w.bob, &key), 2);
@@ -1927,4 +1948,7 @@ async fn test_publication_replaces_an_undelivered_withdrawal_only_when_due() {
             .and_then(|e| e.refusal()),
         Some(paykit_sdk::Refusal::NoDestination(_))
     ));
+    w.clock.advance_ms(24 * HOUR_MS);
+    shop.receive(None).await.unwrap();
+    assert_eq!(w.record_writes(&w.bob, &key), 3);
 }
