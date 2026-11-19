@@ -22,7 +22,8 @@ use paykit_lib::records::{ListPublicationRecord, UnknownMembers};
 use paykit_lib::{Kind, ListVersion, PaymentEndpointIdentifier, PaymentEndpointPayload};
 use pubky_switch_client::app::{
     Collection, DeliveryView, KeptBatchDrop, KeptBatchStatus, KeptReason, LocalWrite, OpBatch,
-    OutgoingMessage, RecordContent, RecordRead, RecordTarget, SharedRecord, StoreFailure,
+    OutgoingMessage, ReceiveReport, RecordContent, RecordRead, RecordTarget, SharedRecord,
+    StoreFailure,
 };
 use pubky_switch_core::ident::Policy;
 use pubky_switch_core::ops::Condition;
@@ -520,6 +521,89 @@ impl Paykit {
         Ok(current)
     }
 
+    fn later_recipient_key(&self, held: &SharedRecord, issue: &ListReservation) -> Result<bool> {
+        let Some(generation) = held
+            .policy
+            .permanent
+            .as_ref()
+            .and_then(|p| p.generation)
+            .filter(|generation| *generation > issue.generation)
+        else {
+            return Ok(false);
+        };
+        Ok(self
+            .app
+            .record_key(&target(&self.app_id(), &issue.recipient, generation))?
+            == held.key)
+    }
+
+    /// The active generation has a different key for this recipient. For a jump
+    /// across intervening generations, only a current inventory covers all of them.
+    async fn newer_list_reserved(
+        &mut self,
+        issue: &ListReservation,
+        generation: u64,
+        report: Option<&ReceiveReport>,
+    ) -> Result<bool> {
+        let publisher = self.app_id();
+        let active = target(&publisher, &issue.recipient, generation);
+        let key = self.app.record_key(&active)?;
+        match self.app.read_record_fresh(&active).await? {
+            RecordRead::Fresh(record) => {
+                self.publication_at(&record).await?;
+                return Ok(true);
+            }
+            RecordRead::Kept {
+                record: None,
+                reason: KeptReason::NotFound,
+            } if self
+                .local_get::<PublicationHistory>(&key::publication_history(&key))
+                .await?
+                .is_none()
+                && self.app.record_seen(&key).await?.is_none() => {}
+            _ => return Err(counter_unavailable().into()),
+        }
+        if generation - issue.generation == 1 {
+            return Ok(false);
+        }
+        if self
+            .local_scan::<PublicationHistory>(key::PUBLICATION_HISTORY)
+            .await?
+            .into_iter()
+            .any(|(_, history)| {
+                history.floor.publisher == publisher
+                    && history.floor.recipient == issue.recipient
+                    && history.floor.generation > issue.generation
+            })
+        {
+            return Ok(true);
+        }
+        let report = report.ok_or_else(counter_unavailable)?;
+        let inventory = self
+            .app
+            .current_collection(&collection(), report)
+            .await?
+            .ok_or_else(counter_unavailable)?;
+        for record in inventory.live {
+            if self.later_recipient_key(&record, issue)? {
+                self.publication_at(&record).await?;
+                return Ok(true);
+            }
+        }
+        for key in inventory.uncertain_keys {
+            // The signed floors above already exclude a later issue at a known key.
+            // An unknown opaque key could still belong to this recipient.
+            if self
+                .local_get::<PublicationHistory>(&key::publication_history(&key))
+                .await?
+                .is_none()
+            {
+                return Err(counter_unavailable().into());
+            }
+        }
+        Ok(false)
+    }
+
     /// Set the reusable Private Payment List. Each chosen contact is owed the changed
     /// list until its conditional publication applies (Paykit spec 8.4).
     pub async fn set_list_endpoints(
@@ -550,7 +634,7 @@ impl Paykit {
             },
         )
         .await?;
-        Box::pin(self.tend_private_lists()).await
+        Box::pin(self.tend_private_lists(None)).await
     }
 
     /// Share the current reusable list with the counterparty the host chose.
@@ -581,7 +665,7 @@ impl Paykit {
             state = Some(chosen);
         }
         if let Some(chosen) = state {
-            Box::pin(self.publish_recipient(chosen)).await?;
+            Box::pin(self.publish_recipient(chosen, None)).await?;
         }
         Ok(())
     }
@@ -599,14 +683,17 @@ impl Paykit {
         if prior.chosen {
             let left = ListRecipient::choose(Some(prior), recipient, false)?;
             self.local_put(&at, &left).await?;
-            Box::pin(self.publish_recipient(left)).await?;
+            Box::pin(self.publish_recipient(left, None)).await?;
         } else {
-            Box::pin(self.publish_recipient(prior)).await?;
+            Box::pin(self.publish_recipient(prior, None)).await?;
         }
         Ok(())
     }
 
-    pub(crate) async fn tend_private_lists(&mut self) -> Result<()> {
+    pub(crate) async fn tend_private_lists(
+        &mut self,
+        report: Option<&ReceiveReport>,
+    ) -> Result<()> {
         if !self.holds(SCOPE) {
             return Ok(());
         }
@@ -640,7 +727,7 @@ impl Paykit {
             .local_scan::<ListRecipient>(key::LIST_RECIPIENTS)
             .await?
         {
-            if let Err(error) = Box::pin(self.publish_recipient(recipient)).await {
+            if let Err(error) = Box::pin(self.publish_recipient(recipient, report)).await {
                 if crate::hold::local_failure(&error) {
                     return Err(error);
                 }
@@ -649,7 +736,11 @@ impl Paykit {
         Ok(())
     }
 
-    async fn publish_recipient(&mut self, mut recipient: ListRecipient) -> Result<()> {
+    async fn publish_recipient(
+        &mut self,
+        mut recipient: ListRecipient,
+        report: Option<&ReceiveReport>,
+    ) -> Result<()> {
         let settings = self.local_get::<ListSettings>(key::LIST_SETTINGS).await?;
         if recipient.chosen && settings.is_none() {
             return Ok(());
@@ -700,7 +791,7 @@ impl Paykit {
                         answers::Reply::Wait => return Ok(()),
                         answers::Reply::Newer => reason = IssueFor::Answer,
                         answers::Reply::Repeat => {
-                            return self.repeat_list(&mut recipient, prior, now).await
+                            return self.repeat_list(&mut recipient, prior, now, report).await
                         }
                     }
                 }
@@ -721,6 +812,7 @@ impl Paykit {
             &endpoints,
             reason,
             prior.as_ref(),
+            report,
         ))
         .await?;
         if recipient.withdraw {
@@ -778,39 +870,6 @@ impl Paykit {
         Ok(())
     }
 
-    /// A second installation can reserve a newer version at a different permanent
-    /// key. Check the later generations without assuming every generation has a key.
-    async fn newer_list_reserved(&mut self, issue: &ListReservation) -> Result<bool> {
-        if self.app.list_collection(&collection()).await?.more {
-            return Err(counter_unavailable().into());
-        }
-        let publisher = self.app_id();
-        for record in self.app.records_of(COLLECTION).await? {
-            let Some(generation) = record.policy.permanent.as_ref().and_then(|p| p.generation)
-            else {
-                continue;
-            };
-            if generation > issue.generation
-                && self
-                    .app
-                    .record_key(&target(&publisher, &issue.recipient, generation))?
-                    == record.key
-            {
-                self.publication_at(&record).await?;
-                return Ok(true);
-            }
-        }
-        Ok(self
-            .local_scan::<PublicationHistory>(key::PUBLICATION_HISTORY)
-            .await?
-            .into_iter()
-            .any(|(_, history)| {
-                history.floor.publisher == publisher
-                    && history.floor.recipient == issue.recipient
-                    && history.floor.generation > issue.generation
-            }))
-    }
-
     /// Current version and unknown members for a new list. A withdrawal timer
     /// additionally names the exact application whose undelivered message is being replaced.
     async fn publication_base(
@@ -820,6 +879,7 @@ impl Paykit {
         generation: u64,
         previous: Option<&ListReservation>,
         reason: IssueFor,
+        report: Option<&ReceiveReport>,
     ) -> Result<(u64, UnknownMembers, Vec<Condition>)> {
         let mut conditions = Vec::new();
         if reason == IssueFor::RetryWithdrawal {
@@ -832,19 +892,15 @@ impl Paykit {
             if prior.generation == generation {
                 return Ok((current.counter, current.unknown, conditions));
             }
-            if self.newer_list_reserved(prior).await? {
+            if self.newer_list_reserved(prior, generation, report).await? {
                 self.retire_obsolete_withdrawal(prior).await?;
                 return Err(counter_unavailable().into());
             }
+            return Ok((0, UnknownMembers::default(), conditions));
         }
         match self.app.read_record_fresh(target).await? {
             RecordRead::Fresh(held) => {
                 let current = self.publication_at(&held).await?;
-                if reason == IssueFor::RetryWithdrawal {
-                    self.retire_obsolete_withdrawal(previous.ok_or_else(counter_unavailable)?)
-                        .await?;
-                    return Err(counter_unavailable().into());
-                }
                 if reason == IssueFor::Answer && !previous.is_some_and(|r| r.matches(&current)) {
                     return Err(counter_unavailable().into());
                 }
@@ -875,6 +931,7 @@ impl Paykit {
         endpoints: &BTreeMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
         reason: IssueFor,
         previous: Option<&ListReservation>,
+        report: Option<&ReceiveReport>,
     ) -> Result<ListPublicationRecord> {
         let recipient = choice.recipient;
         self.first_read_before_writing().await?;
@@ -892,7 +949,7 @@ impl Paykit {
         let key = self.app.record_key(&target)?;
 
         let (counter, unknown, conditions) = self
-            .publication_base(&target, key, generation, previous, reason)
+            .publication_base(&target, key, generation, previous, reason, report)
             .await?;
         let now = self.service_time().ok_or_else(counter_unavailable)?;
         let accepted = previous.and_then(|r| choice.answers.first(r));
@@ -903,7 +960,7 @@ impl Paykit {
             Some(prior)
                 if reason == IssueFor::RetryWithdrawal
                     && counter == 0
-                    && prior.generation.checked_add(1) == Some(generation) =>
+                    && prior.generation < generation =>
             {
                 prior.payable_after(accepted)
             }

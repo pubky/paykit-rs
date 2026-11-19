@@ -12,7 +12,7 @@ use paykit_lib::bodies::{PrivatePaymentListRequest, PRIVATE_LIST_MAX_AGE_MS};
 use paykit_lib::records::StoredMessage;
 use paykit_lib::{Kind, ListVersion};
 use pubky_switch_client::app::{
-    AppError, Delivery, ReceiveContext, RecordRead, Refusal, WontDeliver,
+    AppError, Delivery, ReceiveContext, ReceiveReport, RecordRead, Refusal, WontDeliver,
 };
 use serde::{Deserialize, Serialize};
 
@@ -653,6 +653,7 @@ impl Paykit {
         recipient: &mut ListRecipient,
         issue: &ListReservation,
         now: u64,
+        report: Option<&ReceiveReport>,
     ) -> Result<()> {
         self.refuse_while_sends_held(&recipient.recipient).await?;
         if !matches!(
@@ -664,7 +665,8 @@ impl Paykit {
         self.own_identity_confirmed(false).await?;
         let generation = self.app.own_identity().generation();
         if issue.generation > generation
-            || (issue.generation < generation && self.newer_list_reserved(issue).await?)
+            || (issue.generation < generation
+                && self.newer_list_reserved(issue, generation, report).await?)
         {
             return Err(counter_unavailable().into());
         }
