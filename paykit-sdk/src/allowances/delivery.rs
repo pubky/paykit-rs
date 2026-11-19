@@ -28,19 +28,31 @@ pub(crate) struct AppliedReply {
     pub(crate) reply: [u8; 32],
     #[serde(with = "serde_b64")]
     pub(crate) proposal: [u8; 32],
+    generation: u64,
     #[serde(deserialize_with = "Option::deserialize")]
-    retirement: Option<SeenVersion>,
+    retirement_seq: Option<u64>,
 }
 
 impl AppliedReply {
-    pub(super) fn new(reply: &StoredMessage, retirement: Option<RecordVersion>) -> Self {
+    pub(super) fn new(reply: &StoredMessage, generation: u64, retirement_seq: Option<u64>) -> Self {
         Self {
             created_at_ms: reply.message().created_at_ms,
             reply: reply.hash(),
             proposal: reply.message().refs[0],
-            retirement: retirement.map(Into::into),
+            generation,
+            retirement_seq,
         }
     }
+
+    fn retirement(&self) -> Option<SeenVersion> {
+        Some(RecordVersion::new(self.generation, self.retirement_seq?).into())
+    }
+}
+
+/// The latest generation the followed, signed identity says was lost.
+/// An orderly provider move preserves continuity.
+pub(super) fn deletion_continues(generation: u64, recovery_from: Option<u64>) -> bool {
+    recovery_from.is_none_or(|lost| generation > lost)
 }
 
 /// A two-reference end belongs to an accepted Allowance and uses its own delivery rule.
@@ -176,17 +188,21 @@ pub(crate) fn judge_append(
         },
         None => None,
     };
-    if Kind::from_kind(&msg.kind) == Some(Kind::AllowanceEnd) {
+    let kind = Kind::from_kind(&msg.kind);
+    let applied = || {
+        state::delivery_get::<AppliedReply>(d, &key::applied_reply(&d.hash())).map_err(view_failure)
+    };
+    if kind == Some(Kind::AllowanceEnd) {
         if pending.is_some() || permanent.is_some() {
             return Ok(Withdraw);
         }
-        let applied = state::delivery_get::<AppliedReply>(d, &key::applied_reply(&d.hash()))
-            .map_err(view_failure)?;
         let retired =
             state::delivery_get::<super::PendingRetirement>(d, &key::pending_retirement(&p_key))
                 .map_err(view_failure)?;
-        return Ok(match (applied.and_then(|r| r.retirement), retired) {
-            (Some(original), Some(current)) => current.withdrawal_after(original),
+        return Ok(match (applied()?.and_then(|r| r.retirement()), retired) {
+            (Some(original), Some(current)) => {
+                current.withdrawal_after(original, d.recovery_from())
+            }
             _ => Hold,
         });
     }
@@ -212,7 +228,7 @@ pub(crate) fn judge_append(
             return Ok(Hold);
         }
     }
-    let supported = match Kind::from_kind(&msg.kind) {
+    let supported = match kind {
         Some(Kind::AllowanceProposal) => pending.is_some_and(|r| r.proposal().hash() == d.hash()),
         Some(Kind::AllowanceRejection) => {
             let [proposal] = msg.refs.as_slice() else {
@@ -223,5 +239,13 @@ pub(crate) fn judge_append(
         }
         _ => return Ok(Hold),
     };
-    Ok(if supported { Send } else { Withdraw })
+    if !supported {
+        return Ok(Withdraw);
+    }
+    if kind == Some(Kind::AllowanceRejection)
+        && !applied()?.is_some_and(|reply| deletion_continues(reply.generation, d.recovery_from()))
+    {
+        return Ok(Hold);
+    }
+    Ok(Send)
 }

@@ -10576,6 +10576,63 @@ async fn test_queued_withdrawal_after_reload_keeps_identical_recreated_proposals
 }
 
 #[tokio::test]
+async fn test_queued_withdrawal_after_provider_loss_preserves_the_peers_proposal() {
+    use pubky_switch_client::app::Delivery;
+
+    let w = World::new();
+    let mut payer = Box::pin(wallet(&w)).await;
+    let mut shop = Box::pin(shop(&w)).await;
+    let first = payer
+        .propose_allowance(w.bob_id(), AllowanceRole::Allower, terms())
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    let local = pending_target(&w.bob_id(), &first.allowance_id);
+    let peer = pending_target(&w.alice_id(), &first.allowance_id);
+    let peer_key = shop.app().record_key(&peer).unwrap();
+    let held = shop.app().shared_record(&peer_key).await.unwrap().unwrap();
+    assert!(held.authenticated && held.content.value().is_some());
+    payer.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    let old = payer.end_allowance(&first.record).await.unwrap();
+    let local_key = payer.app().record_key(&local).unwrap();
+    let deleted = payer
+        .app()
+        .shared_record(&local_key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(deleted.authenticated);
+    assert_eq!(
+        deleted.content,
+        pubky_switch_client::app::RecordContent::Deleted
+    );
+    crate::provider_loss::declare_loss(&w);
+    Box::pin(crate::provider_loss::follow_loss(&mut payer)).await;
+    assert_eq!(
+        payer.app().own_identity().body().recovery_from,
+        Some(deleted.version.generation)
+    );
+    payer.app_mut().release_queued(&w.bob_id()).await.unwrap();
+    payer.flush().await.unwrap();
+    assert!(matches!(
+        payer.app_mut().flush_message(&old).await.unwrap(),
+        Some(Delivery::Queued { .. })
+    ));
+    let received = shop.receive(None).await.unwrap();
+    assert!(!received
+        .report
+        .events
+        .iter()
+        .any(|event| matches!(event, AppEvent::MessageReceived {msg_id, ..} if msg_id == &old)));
+    let current = shop.app().shared_record(&peer_key).await.unwrap().unwrap();
+    assert_eq!(
+        (current.version, current.content),
+        (held.version, held.content)
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
 async fn test_queued_withdrawal_after_reload_cannot_use_the_next_deletion() {
     Box::pin(queued_withdrawal_after_reload(LaterProposal::Withdrawn)).await;
 }

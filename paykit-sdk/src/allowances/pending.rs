@@ -383,11 +383,11 @@ impl Paykit {
             let mut writes = vec![LocalWrite::Delete {
                 key: format!("{}{at}", key::PENDING_REPLIES).into_bytes(),
             }];
-            let msg_id = if applied.is_some() {
+            let queued = if let Some(applied) = applied {
                 // Queue first. A stop before the local release still leaves the identical
                 // signed original recoverable from the applied delete.
                 match self.app.queue_stored(msg.plaintext()).await {
-                    Ok(id) => Some(id),
+                    Ok(id) => Some((id, applied.version)),
                     Err(pubky_switch_client::app::AppError::Refused(
                         pubky_switch_client::app::Refusal::WontDeliver(_),
                     )) => None,
@@ -411,7 +411,7 @@ impl Paykit {
                     _ => None,
                 }
             };
-            let Some(msg_id) = msg_id else {
+            let Some((msg_id, version)) = queued else {
                 let msg_id = &msg.message().msg_id;
                 let notice_key = key::message_notice(&intent.peer, msg_id);
                 if self.kept_notice(&notice_key).await?.is_none() {
@@ -433,7 +433,7 @@ impl Paykit {
             };
             writes.push(state::local_put(
                 &key::applied_reply(&msg.hash()),
-                &AppliedReply::new(&msg, applied.map(|write| write.version)),
+                &AppliedReply::new(&msg, version.generation, Some(version.version)),
             )?);
             self.app
                 .protocol_commit(crate::protocol::BACKUP_NAME, &writes)
@@ -659,13 +659,8 @@ impl Paykit {
         let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME);
         // Guard the very version the user answered. A recovery upload also gets the
         // client's exact application condition; a concurrent change refuses the batch.
-        let delete_hash = prepared_write(
-            own,
-            self.app_id(),
-            self.app.own_identity().generation(),
-            &delete.0,
-            &delete.1,
-        )?;
+        let generation = self.app.own_identity().generation();
+        let delete_hash = prepared_write(own, self.app_id(), generation, &delete.0, &delete.1)?;
         let OpKind::RecordPut(put) = &delete.1 else {
             return Err(PaykitError::corrupt());
         };
@@ -673,7 +668,7 @@ impl Paykit {
         batch = batch.entry(delete);
         batch = batch.local(state::local_put(
             &key::applied_reply(&q.hash()),
-            &AppliedReply::new(&q, None),
+            &AppliedReply::new(&q, generation, None),
         )?);
         let msg_id = reply.msg_id().to_owned();
         let mut prepare = state::Tx::default();
@@ -713,7 +708,7 @@ impl Paykit {
                     let mut writes = state::Tx::default();
                     writes.put(
                         &key::applied_reply(&q.hash()),
-                        &AppliedReply::new(&q, Some(RecordVersion::new(at.generation, at.seq))),
+                        &AppliedReply::new(&q, at.generation, Some(at.seq)),
                     )?;
                     writes.delete(&intent_key);
                     self.local_commit(writes).await?;
