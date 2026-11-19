@@ -1,0 +1,44 @@
+[package]
+name = "paykit-browser"
+description = "Browser (wasm32) build support and tests for the Paykit SDK"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+# The tests live under `tests/`, so the same tests run natively and in a browser. A library test
+# binary would have no browser tests, and a browser run of it fails.
+[lib]
+test = false
+doctest = false
+
+[dependencies]
+paykit-lib.workspace = true
+paykit-sdk = { path = "../paykit-sdk" }
+pubky-switch-core.workspace = true
+pubky-switch-client.workspace = true
+
+# Browser random number backends. A browser has no OS entropy source, so on wasm32-unknown-unknown
+# each getrandom major version in the graph refuses to build until its JavaScript backend is
+# chosen. These entries only select that backend: Cargo feature unification turns it on for every
+# crate in the wasm32 graph that uses the same major version, so paykit-lib and paykit-sdk need
+# no wasm32 settings of their own.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# getrandom 0.2 comes in through pubky-switch-core (chacha20poly1305 -> aead -> crypto-common
+# -> rand_core 0.6).
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+# getrandom 0.3 is a direct dependency of pubky-switch-client. From 0.3.4 the `wasm_js` feature
+# alone selects the backend; earlier 0.3 releases also need a `getrandom_backend` cfg flag, so
+# 0.3.4 is the minimum.
+getrandom03 = { package = "getrandom", version = "0.3.4", features = ["wasm_js"] }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+# Each wasm-bindgen-test release requires one exact wasm-bindgen version, so Cargo.lock keeps the
+# two in step, and `rig/test.sh` checks that the installed CLI matches the lock.
+wasm-bindgen-test = "0.3.80"

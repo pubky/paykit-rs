@@ -25,6 +25,11 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
+# The workspace dependency turns the client's default features off, so the browser build drops
+# its native HTTP transport; every other target takes the defaults back here.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pubky-switch-client = { workspace = true, features = ["default"] }
+
 [dev-dependencies]
 paykit-sdk = { path = ".", features = ["test-support"] }
 pubky-switch-client = { workspace = true, features = ["test-support"] }
