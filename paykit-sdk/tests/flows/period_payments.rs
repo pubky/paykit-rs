@@ -1167,17 +1167,21 @@ async fn test_period_payments_retained_delete_holds_the_period_after_claim_reten
     let obligation = period_obligation(&first, period).await;
     let issued = period_record(&w, &first, &request, period).await.unwrap();
     assert_eq!(proof_of(&issued).1.attempt_id, attempt);
-    w.clock.advance_ms(401 * DAY_MS);
-    let base = store();
-    let mut wallet = w.wallet_on("later-payer", Arc::clone(&base)).await;
-    let id = wallet.app_id();
     let mut other = w.wallet("other-payer").await;
     let natural = period_natural(&request, period);
-    other
+    let deleted = other
         .app_mut()
         .delete_record(&natural_target(&natural), Vec::new())
         .await
         .unwrap();
+    assert_eq!(
+        deleted.content,
+        pubky_switch_client::app::RecordContent::Deleted
+    );
+    w.clock.advance_ms(401 * DAY_MS);
+    let base = store();
+    let mut wallet = w.wallet_on("later-payer", Arc::clone(&base)).await;
+    let id = wallet.app_id();
     assert!(wallet
         .app_mut()
         .read_claim(&obligation)
@@ -1188,11 +1192,6 @@ async fn test_period_payments_retained_delete_holds_the_period_after_claim_reten
     let mut backup = None;
     for visit in 0..3 {
         wallet.receive(None).await.unwrap();
-        let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
-        assert_eq!(
-            held.content,
-            pubky_switch_client::app::RecordContent::Deleted
-        );
         let before = puts(&w, &wallet, &natural).len();
         let attempts_before = attempt_conditions(&w, &obligation).len();
         let error = by_user(&mut wallet, &request, period, PayOptions::default())
@@ -1202,6 +1201,14 @@ async fn test_period_payments_retained_delete_holds_the_period_after_claim_reten
             matches!(error.refusal(), Some(Refusal::RecordHeld(_))),
             "{error:?}"
         );
+        let held = wallet
+            .app()
+            .shared_record(&key)
+            .await
+            .unwrap()
+            .expect("pay_period checked the retained deletion");
+        assert_eq!(held.version, deleted.version, "visit {visit}");
+        assert_eq!(held.content, deleted.content);
         assert_eq!(puts(&w, &wallet, &natural).len(), before);
         assert_eq!(attempt_conditions(&w, &obligation).len(), attempts_before);
         assert_eq!(w.rail.all_executions().values().sum::<u64>(), 1);
