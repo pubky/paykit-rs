@@ -1230,6 +1230,14 @@ async fn test_private_intake_seeds_cursor_without_replaying_history() {
         counted <= 2,
         "history must not be replayed one acquisition per event: {counted} cursor advances"
     );
+    // Outlast the first in-stream audit, which fires after at most five
+    // seconds of jitter.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    assert_eq!(
+        supervisor.health().await.peers.get(bob),
+        Some(&PrivateIntakeTransportState::CaughtUp),
+        "private intake stream must still be connected before the live packet is published"
+    );
 
     publish_private_lists(&pair.bob, &pair.alice, 1).await;
 
