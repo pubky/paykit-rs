@@ -31,8 +31,9 @@
 //!   check, and makes it once more after that commit, with no await between the second
 //!   reads and the payment method's call (`Paykit::dispatch`). A raise after the second
 //!   read of the floor is too late for that payment.
-//! - **Unknown holds:** while the floor can't be read (the payer's records not listed yet, its
-//!   value sealed under a key not held, or a value that doesn't read with none seen before),
+//! - **Unknown holds:** while the floor can't be read (the payer's records not listed yet, a deletion
+//!   without a verified protective publication, a value sealed under a key not held, or a
+//!   value that doesn't read with none seen before),
 //!   every one-time request counts as dated before it.
 
 use paykit_lib::derive::natural_key;
@@ -77,39 +78,38 @@ pub(crate) enum SharedFloor {
 }
 
 /// The floor of the record `held`, with `seen`, the mark of the newest value the app took that
-/// reads (`Protocol::record_seen`): the higher of the two. A delete, or a value that doesn't
-/// read, keeps the floor seen; with none seen, the floor is unknown. A value sealed under a
-/// key the app doesn't hold may be higher than any seen: unknown.
-pub(crate) fn shared_floor_of(held: Option<&SharedRecord>, seen: Option<&[u8]>) -> SharedFloor {
+/// reads (`Protocol::record_seen`): the higher of the two. A malformed value keeps the floor
+/// seen. A seen value establishes neither the exact predecessor of a delete nor an upper bound
+/// for it (Paykit wire 5.6). A deleted or unopened record holds every automatic attempt.
+pub(crate) fn shared_floor_of(
+    held: Option<&RecordContent>,
+    seen: Option<&[u8]>,
+    deleted: bool,
+) -> SharedFloor {
+    if deleted {
+        return SharedFloor::Unknown;
+    }
     let seen = seen
         .and_then(|value| BlockFloorRecord::read(value).ok())
         .map(|record| record.floor_ms);
     let Some(held) = held else {
         return SharedFloor::Known(seen);
     };
-    match &held.content {
+    match held {
         RecordContent::Value(value) => match BlockFloorRecord::read(value) {
             Ok(record) => SharedFloor::Known(Some(
                 seen.map_or(record.floor_ms, |s| s.max(record.floor_ms)),
             )),
             Err(_) => seen.map_or(SharedFloor::Unknown, |s| SharedFloor::Known(Some(s))),
         },
-        RecordContent::Deleted => {
-            seen.map_or(SharedFloor::Unknown, |s| SharedFloor::Known(Some(s)))
-        }
-        RecordContent::Unreadable(_) => SharedFloor::Unknown,
+        RecordContent::Deleted | RecordContent::Unreadable(_) => SharedFloor::Unknown,
     }
 }
 
 /// The record a raise is built on, so every member the writer doesn't know is written back
-/// as read (Paykit wire 5): the value held when it reads; when it doesn't read or the record
-/// is deleted, the last value seen that reads (`seen`, the mark `shared_floor_of` takes the
-/// floor from), with its unknown members; with neither, a record of `floor` alone.
-pub(crate) fn write_base(
-    held: Option<&[u8]>,
-    seen: Option<&[u8]>,
-    floor: Option<u64>,
-) -> BlockFloorRecord {
+/// as read (Paykit wire 5). For a readable floor use its current value, falling back to the
+/// mark for malformed content. The caller has already excluded an unresolved deletion.
+fn write_base(held: Option<&[u8]>, seen: Option<&[u8]>, floor: Option<u64>) -> BlockFloorRecord {
     let read = |value: &[u8]| BlockFloorRecord::read(value).ok();
     held.and_then(read)
         .or_else(|| seen.and_then(read))
@@ -146,8 +146,22 @@ impl Paykit {
         }
         let key = self.app.record_key(&floor_target(&self.identity()))?;
         let held = self.app.shared_record(&key).await?;
-        let seen = self.app.record_seen(&key).await?;
-        Ok(shared_floor_of(held.as_ref(), seen.as_deref()))
+        self.floor_of_read(&key, held.as_ref()).await
+    }
+
+    /// Apply the retained deletion hold even when a later, unproved write is readable.
+    async fn floor_of_read(
+        &self,
+        key: &[u8; 32],
+        held: Option<&SharedRecord>,
+    ) -> Result<SharedFloor> {
+        let deleted = self.local_get::<bool>(key::FLOOR_DELETED).await?.is_some();
+        let seen = self.app.record_seen(key).await?;
+        Ok(shared_floor_of(
+            held.map(|record| &record.content),
+            seen.as_deref(),
+            deleted,
+        ))
     }
 
     /// Whether `stored` is a one-time request dated before the floor, shared or owed, as this
@@ -205,10 +219,9 @@ impl Paykit {
             .await?
             .map(|pending| pending.to_ms);
         let key = self.app.record_key(&floor_target(&self.identity()))?;
-        let seen = self.app.record_seen(&key).await?;
         Ok(dated_before(
             stored,
-            shared_floor_of(read, seen.as_deref()),
+            self.floor_of_read(&key, read).await?,
             owed,
         ))
     }
@@ -216,23 +229,24 @@ impl Paykit {
     /// The shared floor for a write: the copy's, or, while the payer's records aren't listed
     /// or the copy can't open it, the record as the switch holds it now, read alone. A read
     /// that fails leaves it unknown, as does a scope key the app waits for.
-    async fn floor_for_write(&mut self) -> Result<SharedFloor> {
+    async fn floor_for_write(&mut self, to_ms: u64) -> Result<SharedFloor> {
         // Sealed under `paykit_pay` at the current data epoch: without that key nothing is written,
         // and nothing read while the copy waits for a wider certificate's keys.
         if !self.holds_scope_keys() {
             return Ok(SharedFloor::Unknown);
         }
         let held = self.shared_floor().await?;
-        if held != SharedFloor::Unknown {
+        if matches!(held, SharedFloor::Known(floor) if floor.is_none_or(|value| value < to_ms)) {
+            // The conditional raise will check this version at the service.
             return Ok(held);
         }
-        let target = floor_target(&self.identity());
-        let Ok(read) = self.app.read_record(&target).await else {
+        // Skipping a raise makes no conditional write. Verify the sufficient floor is
+        // still current before letting the unblock or widening proceed.
+        let Some(read) = self.floor_read_now().await else {
             return Ok(SharedFloor::Unknown);
         };
-        let key = self.app.record_key(&target)?;
-        let seen = self.app.record_seen(&key).await?;
-        Ok(shared_floor_of(read.as_ref(), seen.as_deref()))
+        let key = self.app.record_key(&floor_target(&self.identity()))?;
+        self.floor_of_read(&key, read.as_ref()).await
     }
 
     /// Prepare a conditional raise to `to_ms`. An applied floor at least as high
@@ -242,7 +256,7 @@ impl Paykit {
     ///
     /// [`Refusal::NotNow`] while the floor can't be read; the client's errors.
     async fn floor_batch(&mut self, to_ms: u64) -> Result<Option<OpBatch>> {
-        let SharedFloor::Known(floor) = self.floor_for_write().await? else {
+        let SharedFloor::Known(floor) = self.floor_for_write(to_ms).await? else {
             return Err(unreadable_floor());
         };
         let target = floor_target(&self.identity());
@@ -470,12 +484,32 @@ mod tests {
 
     #[test]
     fn test_floor_unknown_without_a_value_or_a_seen_floor() {
-        assert_eq!(shared_floor_of(None, None), SharedFloor::Known(None));
+        assert_eq!(shared_floor_of(None, None, false), SharedFloor::Known(None));
         let seen = BlockFloorRecord::new(70).to_json().unwrap();
         assert_eq!(
-            shared_floor_of(None, Some(&seen)),
+            shared_floor_of(None, Some(&seen), false),
             SharedFloor::Known(Some(70))
         );
+    }
+
+    #[test]
+    fn test_floor_deletion_requires_a_verified_replacement() {
+        let value = BlockFloorRecord::new(70).to_json().unwrap();
+        let current = RecordContent::Value(value.clone());
+        for seen in [None, Some(value.as_slice())] {
+            assert_eq!(
+                shared_floor_of(Some(&RecordContent::Deleted), seen, false),
+                SharedFloor::Unknown
+            );
+            // Neither absence nor a later numeric value discharges an observed deletion.
+            for held in [None, Some(&current)] {
+                assert_eq!(shared_floor_of(held, seen, true), SharedFloor::Unknown);
+            }
+            assert_eq!(
+                shared_floor_of(Some(&current), seen, false),
+                SharedFloor::Known(Some(70))
+            );
+        }
     }
 
     /// A floor value of `floor_ms` with a member no writer here knows.
@@ -491,7 +525,7 @@ mod tests {
         let seen = with_unknown_member(70);
         let expected = BlockFloorRecord::read(&seen).unwrap();
         assert!(!expected.unknown.is_empty());
-        // The value held doesn't read, or the record is deleted: the value seen is the base.
+        // The value held doesn't read: the value seen is the base.
         let malformed = br#"{"v":1}"#;
         assert_eq!(write_base(Some(malformed), Some(&seen), Some(70)), expected);
         assert_eq!(write_base(None, Some(&seen), Some(70)), expected);

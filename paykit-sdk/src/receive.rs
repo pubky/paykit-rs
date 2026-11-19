@@ -506,7 +506,12 @@ fn came_back_from_block(
     let target = crate::floor::floor_target(&cx.identity());
     let held = cx.record(&target)?;
     let seen = cx.record_seen(&cx.record_key(&target)?)?;
-    let shared = crate::floor::shared_floor_of(held.as_ref(), seen.as_deref());
+    let deleted = state::cx_get::<bool>(cx, key::FLOOR_DELETED)?.is_some();
+    let shared = crate::floor::shared_floor_of(
+        held.as_ref().map(|record| &record.content),
+        seen.as_deref(),
+        deleted,
+    );
     Ok(came_back_by(
         stored,
         mark.map(|mark| mark.latest_ms),

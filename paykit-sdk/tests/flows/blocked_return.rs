@@ -2238,10 +2238,8 @@ async fn floor_value(app: &Paykit) -> serde_json::Value {
     serde_json::from_slice(value).unwrap()
 }
 
-/// The wallet takes a floor with a member it doesn't know, written by another payer app;
-/// `spoil` then leaves the record without a value that reads, which the wallet takes too.
-/// Its next raise is built on the value it saw: the unknown member is written back as read.
-async fn raise_after_the_floor_stopped_reading(spoil: Spoil) {
+#[tokio::test]
+async fn test_blocked_return_floor_raised_over_a_value_that_does_not_read_keeps_unknown_members() {
     let w = World::new();
     let mut wallet = contacts_wallet(&w, store()).await;
     let mut phone = payer_app(&w, "phone").await;
@@ -2262,26 +2260,13 @@ async fn raise_after_the_floor_stopped_reading(spoil: Spoil) {
         .unwrap();
     wallet.receive(None).await.unwrap();
     assert_eq!(shared_floor(&wallet).await, Some(1));
-    match &spoil {
-        Spoil::Malformed => phone
-            .app_mut()
-            .put_record(&target, br#"{"v":1}"#, Vec::new())
-            .await
-            .unwrap(),
-        Spoil::Deleted => phone
-            .app_mut()
-            .delete_record(&target, Vec::new())
-            .await
-            .unwrap(),
-    };
+    phone
+        .app_mut()
+        .put_record(&target, br#"{"v":1}"#, Vec::new())
+        .await
+        .unwrap();
     wallet.receive(None).await.unwrap();
-    // A later write that doesn't read is ignored while the value seen reads, so the copy
-    // keeps the value seen; a delete is taken, and leaves only the mark of the value seen.
-    let held = match spoil {
-        Spoil::Malformed => Some(1),
-        Spoil::Deleted => None,
-    };
-    assert_eq!(shared_floor(&wallet).await, held);
+    assert_eq!(shared_floor(&wallet).await, Some(1));
     wallet_raises_the_floor(&w, &mut wallet, &mut shop).await;
     let raised = floor_value(&wallet).await;
     assert_eq!(raised["later_member"], unknown, "{raised}");
@@ -2292,20 +2277,98 @@ async fn raise_after_the_floor_stopped_reading(spoil: Spoil) {
     assert_eq!(raised, expected);
 }
 
-/// How the floor record stops holding a value that reads.
-enum Spoil {
-    Malformed,
-    Deleted,
-}
-
 #[tokio::test]
-async fn test_blocked_return_floor_raised_over_a_value_that_does_not_read_keeps_unknown_members() {
-    raise_after_the_floor_stopped_reading(Spoil::Malformed).await;
-}
+async fn test_blocked_return_deleted_floor_holds_the_unblock_and_one_time_requests() {
+    let w = World::new();
+    let storage = store();
+    let mut wallet = contacts_wallet(&w, Arc::clone(&storage)).await;
+    let mut phone = payer_app(&w, "phone").await;
+    let mut shop = w.shop().await;
+    let target = floor_record(&w);
+    let value = paykit_lib::records::BlockFloorRecord::new(1)
+        .to_json()
+        .unwrap();
+    phone
+        .app_mut()
+        .put_record(&target, &value, Vec::new())
+        .await
+        .unwrap();
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(shared_floor(&wallet).await, Some(1));
+    assert!(!wallet.request(&request).await.unwrap().manual_only);
+    wallet.block(&w.carol_id()).await.unwrap();
+    let before = wallet.backup().await.unwrap();
 
-#[tokio::test]
-async fn test_blocked_return_floor_raised_over_a_deleted_record_keeps_unknown_members() {
-    raise_after_the_floor_stopped_reading(Spoil::Deleted).await;
+    phone
+        .app_mut()
+        .delete_record(&target, Vec::new())
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let deletion = wallet
+        .app()
+        .records_of("block_floor")
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(
+        deletion.content,
+        pubky_switch_client::app::RecordContent::Deleted
+    );
+    let cursor = wallet.app().service_cursor();
+    assert!(cursor < wallet.app().cursor());
+    for _ in 0..2 {
+        assert!(matches!(
+            wallet.unblock(&w.carol_id()).await.unwrap_err().refusal(),
+            Some(paykit_sdk::Refusal::NotNow(_))
+        ));
+        assert!(wallet
+            .app_mut()
+            .allow_list()
+            .await
+            .unwrap()
+            .deny
+            .contains(&w.carol_id()));
+        assert!(wallet.request(&request).await.unwrap().manual_only);
+        assert_eq!(
+            wallet.app().records_of("block_floor").await.unwrap(),
+            vec![deletion.clone()]
+        );
+        wallet.receive(None).await.unwrap();
+        assert_eq!(wallet.app().service_cursor(), cursor);
+    }
+
+    // A backup from before the deletion cannot clear the installation's hold.
+    drop(wallet);
+    let mut restored = Box::pin(Paykit::restore(
+        w.env(&w.alice, storage),
+        PaykitConfig::default(),
+        &before,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    assert!(restored
+        .app()
+        .protocol_get("paykit", b"fd")
+        .await
+        .unwrap()
+        .is_some());
+    restored.receive(None).await.unwrap();
+    assert!(matches!(
+        restored.unblock(&w.carol_id()).await.unwrap_err().refusal(),
+        Some(paykit_sdk::Refusal::NotNow(_))
+    ));
+    assert!(restored
+        .app_mut()
+        .allow_list()
+        .await
+        .unwrap()
+        .deny
+        .contains(&w.carol_id()));
 }
 
 #[tokio::test]
@@ -3225,6 +3288,36 @@ async fn paid_in_flight(
         panic!("in flight");
     };
     attempt_id
+}
+
+#[tokio::test]
+async fn test_blocked_return_deleted_floor_holds_an_automatic_repeat() {
+    let w = World::new();
+    let (mut wallet, mut phone, _shop, request) = phone_paying_carol(&w).await;
+    let target = floor_record(&w);
+    let value = paykit_lib::records::BlockFloorRecord::new(1)
+        .to_json()
+        .unwrap();
+    wallet
+        .app_mut()
+        .put_record(&target, &value, Vec::new())
+        .await
+        .unwrap();
+    phone.receive(None).await.unwrap();
+    let attempt_id = paid_in_flight(&w, &mut phone, &request).await;
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+
+    wallet
+        .app_mut()
+        .delete_record(&target, Vec::new())
+        .await
+        .unwrap();
+    w.clock.advance_ms(MINUTE_MS);
+    phone.resume_payments().await.unwrap();
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    phone.receive(None).await.unwrap();
+    phone.resume_payments().await.unwrap();
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
 
 #[tokio::test]

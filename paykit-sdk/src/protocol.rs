@@ -574,6 +574,17 @@ pub(crate) fn restore_paykit_layer(
     let mut journaled = std::collections::BTreeSet::new();
     let mut acknowledged = Vec::new();
     let mut writes = crate::reply_asks::restore(restoring, &binder, &state)?;
+    // A backup taken before the floor was deleted cannot discharge the installation's hold.
+    let mut floor_deleted = false;
+    for (k, value) in restoring
+        .previous_local_scan(key::FLOOR_DELETED.as_bytes())
+        .map_err(|_| "the installation's block floor hold cannot be read")?
+    {
+        if k == key::FLOOR_DELETED.as_bytes() {
+            floor_deleted = state::restored::<bool>(&k, &value, &binder)
+                .map_err(|_| "invalid retained block floor hold")?;
+        }
+    }
     let mut cursor_time_ms = 0;
     let mut bounded = BoundedFamilies::default();
     for (key, value) in state {
@@ -716,6 +727,11 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::ResentDay { .. } => {
                 state::restored::<u64>(&key, &value, &binder).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::FloorDeleted => {
+                floor_deleted =
+                    state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
                 continue;
             }
             StateKey::BlockFloor => {
@@ -1027,6 +1043,12 @@ pub(crate) fn restore_paykit_layer(
         entry.restored = true;
         let value = state::encode(&entry).map_err(|_| bad())?;
         writes.push(LocalWrite::Put { key, value });
+    }
+    if floor_deleted {
+        writes.push(
+            state::local_put(key::FLOOR_DELETED, &true)
+                .map_err(|_| "the block floor hold cannot be written")?,
+        );
     }
     for (key, notice) in delivery_notices {
         let value = state::encode(&notice).map_err(|_| "a delivery notice cannot be written")?;
@@ -1593,6 +1615,17 @@ impl Protocol for PaykitProtocol {
         deletion: &RecordDeletion<'_>,
         cx: &ReceiveContext<'_>,
     ) -> Result<Option<PutBack>, StoreFailure> {
+        if deletion.collection == Collection::BlockFloor.name() {
+            let target = crate::floor::floor_target(&cx.identity());
+            if cx.record_key(&target).map_err(store_failure)? != *deletion.key {
+                return Ok(None);
+            }
+            // Paykit wire 5 and 5.6: this revision cannot verify a protective floor
+            // publication. Keep the service cursor and the payment hold together.
+            return Ok(Some(PutBack::Prepare {
+                observed: vec![local_write(key::FLOOR_DELETED, &true)?],
+            }));
+        }
         crate::deletions::observe_payee_deletion(deletion, cx, &|proof| self.settlement_id(proof))
     }
 
