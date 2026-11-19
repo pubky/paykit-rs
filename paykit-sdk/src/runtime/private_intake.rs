@@ -646,12 +646,13 @@ fn buffered_generation_moved() -> LinkAttemptError {
 /// state and its generation once, at its start, and keeps that snapshot, so a
 /// change committed after that leaves the attempt's snapshot and receive
 /// counter stale although nothing is wrong with the peer. The attempt's
-/// storage steps, the counter read, the buffer insert, and the absent check
-/// before the cursor advance, therefore first compare the stored Encrypted
-/// Link generation with the attempt's in the same transaction (see
-/// [`stored_link_generation_moved`]). When it moved, the step does not run and
-/// the attempt reports [`LinkAttemptError::GenerationMoved`]. Only that outcome
-/// is retried, and the next attempt reads the link state afresh.
+/// storage steps, the counter read, the buffer insert, and the absent-slot
+/// check, before any cursor advance or `Absent` report, therefore first
+/// compare the stored Encrypted Link generation with the attempt's in the
+/// same transaction (see [`stored_link_generation_moved`]). When it moved,
+/// the step does not run and the attempt reports
+/// [`LinkAttemptError::GenerationMoved`]. Only that outcome is retried, and
+/// the next attempt reads the link state afresh.
 ///
 /// Every other failure is returned after one attempt: an observation,
 /// recovery, network, or handshake step that fails, contention for the peer
@@ -945,6 +946,18 @@ async fn run_connected_private_intake_stream(
                                 acquire(peer, cursor)
                             })
                             .await;
+                            // The loop sees no stop while the probe runs. A
+                            // stop now ends this stream epoch, and a topology
+                            // change may have marked the peer `Stale` before
+                            // sending it, so drop the probe's outcome rather
+                            // than overwrite that state. Still announce the
+                            // packets it buffered: they are durable work.
+                            if stop.has_changed().is_err() || *stop.borrow() {
+                                if probe.inserted {
+                                    work.notify_waiters();
+                                }
+                                return PrivateIntakeEventLoopExit::Stopped;
+                            }
                             // A failed probe keeps the `Replaying` set above,
                             // not `Stale`: the event's packet is durably
                             // buffered, and the next event or audit probes
@@ -1931,8 +1944,9 @@ enum PeerAuditKind {
     /// `last_successful_audit_at`, and a failure marks the peer `Stale`.
     ScheduledAudit { audited_at: DateTime<Utc> },
     /// The probe after a live insert. It leaves `last_successful_audit_at`
-    /// alone, and a failure keeps the `Replaying` the probe set before it
-    /// started.
+    /// alone, and a failure leaves the state unchanged: the caller, the
+    /// stream loop's live insert arm, sets `Replaying` before it runs the
+    /// probe.
     LiveInsertProbe,
 }
 
@@ -4402,6 +4416,108 @@ mod tests {
         assert!(
             run.woken_after_probe,
             "a probe that finds a pending handshake must wake the consumer, as the audit does"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_live_insert_event_probe_outcome_dropped_once_stopped() {
+        use futures_util::FutureExt as _;
+
+        let peer = users(1).remove(0);
+        let owner = peer.to_public_key().unwrap();
+        let group = SubscriptionGroup {
+            homeserver: pubky::Keypair::random().public_key(),
+            homeserver_name: "homeserver-a".into(),
+            peers: vec![peer.clone()],
+        };
+        // The stream stays open after the event, so only the stop ends the loop.
+        let events = stream::iter([Ok(pubky::Event {
+            event_type: pubky::EventType::Put {
+                content_hash: blake3::Hash::from_bytes([7; 32]),
+            },
+            resource: format!(
+                "pubky://{}{}/slot",
+                owner.z32(),
+                paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX
+            )
+            .parse()
+            .unwrap(),
+            cursor: pubky::EventCursor::new(42),
+        })])
+        .chain(stream::pending());
+        let health = Arc::new(AsyncRwLock::new(PrivateIntakeHealth::default()));
+        health
+            .write()
+            .await
+            .peers
+            .insert(peer.clone(), PrivateIntakeTransportState::CaughtUp);
+        let work = Arc::new(Notify::new());
+        let (stop, stop_rx) = watch::channel(false);
+        let stop = Arc::new(stop);
+        let acquisitions = Arc::new(AtomicUsize::new(0));
+        let wakeup_after_stop = Arc::new(StdMutex::new(None));
+        let acquire: PrivateIntakeAcquire = Arc::new({
+            let health = Arc::clone(&health);
+            let work = Arc::clone(&work);
+            let stop = Arc::clone(&stop);
+            let acquisitions = Arc::clone(&acquisitions);
+            let wakeup_after_stop = Arc::clone(&wakeup_after_stop);
+            move |requested, _| {
+                let health = Arc::clone(&health);
+                let work = Arc::clone(&work);
+                let stop = Arc::clone(&stop);
+                let wakeup_after_stop = Arc::clone(&wakeup_after_stop);
+                let index = acquisitions.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    match index {
+                        // The event, then the probe's first slot.
+                        0 | 1 => Ok(PrivatePacketAcquisition::Inserted),
+                        // A topology refresh during the probe: it marks the
+                        // peer `Stale` and stops the stream epoch.
+                        _ => {
+                            health
+                                .write()
+                                .await
+                                .peers
+                                .insert(requested, PrivateIntakeTransportState::Stale);
+                            let mut wakeup = Box::pin(Arc::clone(&work).notified_owned());
+                            wakeup.as_mut().enable();
+                            *wakeup_after_stop.lock().unwrap() = Some(wakeup);
+                            stop.send(true).unwrap();
+                            Ok(PrivatePacketAcquisition::Absent)
+                        }
+                    }
+                })
+            }
+        });
+        let audit: PrivateIntakeAudit =
+            Arc::new(|| Box::pin(async { PrivateIntakeAuditOutcome::default() }));
+
+        let exit = run_connected_private_intake_stream(
+            &group,
+            Box::pin(events),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+            stop_rx,
+            &health,
+            &work,
+            acquire,
+            audit,
+            false,
+        )
+        .await;
+
+        assert!(matches!(exit, PrivateIntakeEventLoopExit::Stopped));
+        assert_eq!(acquisitions.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            health.read().await.peers[&peer],
+            PrivateIntakeTransportState::Stale,
+            "a probe that ends after its stream epoch stopped must not overwrite the peer's state"
+        );
+        let mut wakeup = wakeup_after_stop.lock().unwrap().take().unwrap();
+        assert!(
+            wakeup.as_mut().now_or_never().is_some(),
+            "the packet the probe buffered must still wake the consumer"
         );
     }
 

@@ -1430,15 +1430,16 @@ work remains drainable during transport failure.
 
 An expected-slot acquisition reads the Encrypted Link state once, at its start.
 Its generation-checked storage steps (the counter read, the buffer insert, and
-the absent-slot check before a cursor advance) first compare the stored
-Encrypted Link generation with that one in the same transaction. When any
-committed change moved it, whoever committed it (a consumer drain, an outbound
-private send, a handshake or observation transition, or the acquisition's own
-observation step that committed a replacement), the step neither buffers a
-packet, advances a cursor, nor reports the slot absent, and the acquisition is
-retried from fresh link state, up to 8 attempts. After the last attempt it
-fails like any other fetch failure. Other failures, including a failed
-observation, recovery, network, or handshake step, are not retried.
+the absent-slot check, before any cursor advance or Absent report) first
+compare the stored Encrypted Link generation with that one in the same
+transaction. When any committed change moved it, whoever committed it (a
+consumer drain, an outbound private send, a handshake or observation
+transition, or the acquisition's own observation step that committed a
+replacement), the step neither buffers a packet, advances a cursor, nor
+reports the slot absent, and the acquisition is retried from fresh link state,
+up to 8 attempts. After the last attempt it fails like any other fetch
+failure. Other failures, including a failed observation, recovery, network,
+or handshake step, are not retried.
 
 `PrivateIntakeSupervisor::health` reports per-peer transport state and last
 successful absent-slot audit. `subscribe_work` is a coalesced local hint, not a
