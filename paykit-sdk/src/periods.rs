@@ -1024,6 +1024,7 @@ impl Paykit {
             None => conditions.push(self.app.record_condition(&period_record_key).await?),
         }
         let entry = JournalEntry {
+            user_started: true,
             attempt_id: AttemptId::generate()?.to_text(),
             obligation,
             payee: request.payee,

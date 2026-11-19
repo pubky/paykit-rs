@@ -575,6 +575,8 @@ impl Paykit {
             return Ok(None);
         }
         let mut entry = JournalEntry {
+            // The claim alone cannot establish that the user started this payment.
+            user_started: false,
             attempt_id: attempt.to_text(),
             obligation: obligation.claim_key,
             payee: obligation.payee,

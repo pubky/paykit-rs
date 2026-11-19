@@ -1185,6 +1185,7 @@ impl Paykit {
             refuse_blocked(true, shown, options.blocked_confirmed.as_ref())?;
         }
         let entry = JournalEntry {
+            user_started: by == Initiator::User,
             attempt_id: AttemptId::generate()?.to_text(),
             obligation,
             payee: request.payee,
@@ -1426,6 +1427,7 @@ impl Paykit {
         )?);
         record.status = Some("paying".into());
         let entry = JournalEntry {
+            user_started: true,
             attempt_id: attempt_id.to_text(),
             obligation: payment_obligation(&attempt_id),
             payee: payment.payee,
@@ -4194,8 +4196,9 @@ impl Paykit {
     /// included, whatever copy this app keeps) or doesn't read as the request, a newer write
     /// this app refused included, so nothing shows it still open; or the request is held
     /// after a restore or a `missed` item until the user confirms it (Paykit spec 7.2,
-    /// [`Paykit::confirm_possibly_cancelled`]); or the record holds `manual_only`, or the
-    /// request is a one-time one dated before the block floor, or the floor can't be read
+    /// [`Paykit::confirm_possibly_cancelled`]); or the record holds `manual_only` for an
+    /// attempt the user did not start, or the request is a one-time one dated before the
+    /// block floor, or the floor can't be read
     /// (`crate::floor`, whatever the record holds: another app may have opened it before it
     /// held the floor): the request is paid only by hand, and a repeat is an automatic
     /// payment (Paykit spec 8.1, 8.3), so the attempt stays open and the user's payment
@@ -4237,8 +4240,9 @@ impl Paykit {
     /// ([`Paykit::fresh_request`]), withholds an automatic payment of it, at a repeat's
     /// withheld check and at the last check before any automatic call
     /// ([`Paykit::automatic_dispatch_held`]): the record shows the request cancelled or
-    /// rejected, or holds `manual_only`; the request is held after a restore or a `missed`
-    /// item until the user confirms it (Paykit spec 7.2); or the record, or the list's
+    /// rejected, or holds `manual_only` for an attempt the user did not start; the request
+    /// is held after a restore or a `missed` item until the user confirms it (Paykit
+    /// spec 7.2); or the record, or the list's
     /// record, is divergent or paused since it was seen so, the view read after the record
     /// (Paykit spec 6, 8.1, 8.3).
     async fn fresh_record_withholds(
@@ -4249,7 +4253,7 @@ impl Paykit {
     ) -> Result<bool> {
         Ok(cancelled(fresh)
             || rejected(fresh)
-            || fresh.manual_only
+            || (fresh.manual_only && !entry.user_started)
             || self.held(&self.activity_key(target)?, fresh).await?
             || Box::pin(self.divergent_withholds(entry)).await?)
     }

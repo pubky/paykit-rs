@@ -128,6 +128,11 @@ existing `PaymentView::attempt_id` and use its `stage` to track progress. A dura
 pending. Use `resume_payments` to progress outstanding work, then read
 `payments()` again to refresh the journal view.
 
+When another wallet marks a subscription manual-only, the wallet that started
+a payment by hand can still resume that attempt after a restart. The SDK
+reuses the same attempt ID if the method still guarantees idempotency. A
+cancellation can withhold that repeat and leave the original payment uncertain.
+
 After restoring, process `receive` and `reconcile`, show unresolved attempts
 using the report, and complete `end_reconcile` after user confirmation.
 A missing receipt or an unavailable provider can leave the outcome unresolved.

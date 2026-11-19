@@ -2113,6 +2113,108 @@ async fn test_period_payments_resume_repeats_a_periods_dispatch_unless_cancelled
     assert_eq!(calls, 1);
 }
 
+async fn resume_marked_subscription(
+    w: &World,
+    idempotent: bool,
+    after_mark: impl AsyncFnOnce(&mut Paykit, [u8; 32]),
+) -> (paykit_lib::AttemptId, Vec<PayOutcome>, ActivityRecord) {
+    w.rail.set_declaration(
+        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(idempotent),
+    );
+    let storage = store();
+    let mut wallet = w
+        .wallet_with("wallet", storage.clone(), crate::common::day_window())
+        .await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let (request, sale) = subscribed(w, &mut shop, &mut wallet).await;
+    w.rail.next(Behaviour::Hang);
+    let pending = by_user(&mut wallet, &request, january(), PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(pending, PayOutcome::Pending { .. }), "{pending:?}");
+    let attempt = pending.attempt_id();
+    let app_id = wallet.app_id();
+    drop(wallet);
+
+    phone.receive(None).await.unwrap();
+    let mut parent = request_record(w, &phone, &request).await;
+    parent.manual_only = true;
+    write_payer_record(
+        &mut phone,
+        &natural_key::request_record(&request.payee, &request.request_hash),
+        &parent,
+    )
+    .await;
+    after_mark(&mut shop, sale).await;
+    // The method settles the first dispatch and has no history lookup.
+    w.rail.settle(&attempt, true);
+    w.clock.advance_ms(60_000);
+    let mut wallet = w
+        .load_with(
+            &w.alice,
+            storage,
+            app_id,
+            w.clock.clone(),
+            crate::common::day_window(),
+        )
+        .await;
+    wallet.receive(None).await.unwrap();
+    assert!(request_record(w, &wallet, &request).await.manual_only);
+    let outcomes = wallet.resume_payments().await.unwrap();
+    let period = period_record(w, &wallet, &request, january())
+        .await
+        .unwrap();
+    (attempt, outcomes, period)
+}
+
+#[tokio::test]
+async fn test_period_payments_resume_the_users_attempt_on_a_manual_only_subscription() {
+    let w = World::new();
+    let (attempt, outcomes, paid) = resume_marked_subscription(&w, true, async |_, _| {}).await;
+    assert!(
+        matches!(outcomes.as_slice(), [PayOutcome::Paid { attempt_id, .. }] if *attempt_id == attempt),
+        "{outcomes:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt), 2);
+    assert_eq!(w.rail.all_executions().values().sum::<u64>(), 1);
+    assert!(paid.manual_only);
+    let (_, proof) = proof_of(&paid);
+    assert_eq!(proof.attempt_id, attempt);
+    assert_eq!(proof.billing_period, Some(january()));
+}
+
+fn assert_period_stays_uncertain(
+    w: &World,
+    (attempt, outcomes, period): (paykit_lib::AttemptId, Vec<PayOutcome>, ActivityRecord),
+) {
+    assert!(
+        matches!(outcomes.as_slice(), [PayOutcome::Uncertain { attempt_id, .. }] if *attempt_id == attempt),
+        "{outcomes:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt), 1);
+    assert_eq!(w.rail.all_executions().values().sum::<u64>(), 1);
+    assert!(period.proof.is_none());
+}
+
+#[tokio::test]
+async fn test_period_payments_hold_a_cancelled_attempt_on_a_manual_only_subscription() {
+    let w = World::new();
+    let resumed = resume_marked_subscription(&w, true, async |shop, sale| {
+        shop.cancel_sent_request(&sale, None).await.unwrap();
+    })
+    .await;
+    assert_period_stays_uncertain(&w, resumed);
+}
+
+#[tokio::test]
+async fn test_period_payments_hold_a_dispatch_without_idempotency_or_history() {
+    let w = World::new();
+    let resumed = resume_marked_subscription(&w, false, async |_, _| {}).await;
+    assert_period_stays_uncertain(&w, resumed);
+}
+
 #[tokio::test]
 async fn test_period_payments_reconcile_holds_without_selected_period_rate() {
     let (w, _shop, mut wallet, request, _) = Box::pin(priced_period_on(false, store(), None)).await;
@@ -2341,7 +2443,18 @@ async fn test_period_payments_restore_refuses_a_period_entry_no_run_writes() {
     // entry as written restores (Paykit spec 7.1, 8.2).
     let w = World::new();
     let backup = backup_paying_january(&w).await;
-    assert!(restore_takes(&w, &backup, |_| {}).await);
+    assert!(
+        restore_takes(&w, &backup, |entry| {
+            assert_eq!(entry["user_started"], true);
+        })
+        .await
+    );
+    assert!(
+        !restore_takes(&w, &backup, |entry| {
+            entry.as_object_mut().unwrap().remove("user_started");
+        })
+        .await
+    );
     let request_key = |e: &serde_json::Value| {
         let payee =
             pubky_switch_core::enc::unb64_array::<32>(e["payee"].as_str().unwrap()).unwrap();
