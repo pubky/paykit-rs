@@ -2108,7 +2108,7 @@ async fn backup_with_a_priced_payment(w: &World) -> (serde_json::Value, [u8; 16]
     let shown = crate::conversion::priced_of(&refused);
     w.rail.next(Behaviour::Hang);
     wallet
-        .pay_request(&request, PayOptions::default().with_rate_confirmed(shown))
+        .pay_request(&request, PayOptions::default().with_rate_authorized(shown))
         .await
         .outcome
         .unwrap();
@@ -3585,7 +3585,7 @@ async fn test_restore_rebuilds_a_priced_outcome_without_authorizing_another_disp
         &w,
         &mut wallet,
         &request,
-        PayOptions::default().with_rate_confirmed(price),
+        PayOptions::default().with_rate_authorized(price),
     )
     .await;
     drop(wallet);

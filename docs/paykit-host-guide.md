@@ -222,14 +222,30 @@ qualified roles and supplies no new proposal to act on.
 
 ## Scheduling a Billing Period
 
-The host schedules payments and records the user's recurring-payment policy. After accepting
-a subscription, use its signed recurrence to identify the current Billing Period. If that
-policy authorizes this subscription and it has no Allowance, call
-`pay_period_automatically(&request, &period)` and handle the returned `PayResult`. The SDK
-checks the current payment window, the request and period records, and the usual payment
-restrictions again before dispatch. A period that needs the user's choice stays available
-through `pay_period` when its other payment conditions hold. A missed period is never
-automatically caught up.
+The host schedules payments and records the user's recurring-payment policy. Accepting a
+subscription schedules no payment. For a current period outside an Allowance, choose how
+the host may use the endpoint before calling `pay_period_automatically`.
+
+- Use `PeriodPrice::RequestedAmount` when the host authorizes an eligible endpoint that
+  transfers the requested asset and amount. This call can pay immediately.
+- Use `PeriodPrice::QuoteFor(endpoint)` to inspect a signed rate for that endpoint.
+  The call returns `PricedByRate` or another refusal and opens no attempt. It still opens
+  no attempt when another endpoint can transfer the requested amount.
+- Use `PeriodPrice::AtRate(quote)` only after the host authorizes that exact quote. If
+  the user or policy declines it, leave the period unpaid and make no payment call.
+
+For example, a user can authorize one subscription's current monthly period at a named
+shop, payable to its chosen BTC endpoint for at most 0.0002 BTC at a rate of at most
+0.00002 BTC per requested USD. Check the request, period, destination and both assets
+before comparing the decimal amounts. If either ceiling is exceeded, keep the payment
+waiting or show this quote to the user. The same standing policy can evaluate the next
+month's quote. The SDK checks the signed source, amount and payment method again. A fee
+above the configured cap still stops automatic payment. For a payment by hand, pass the
+authorized quote through `PayOptions::with_rate_authorized`.
+
+The SDK checks the automatic payment window, the request and period records, and the
+usual payment restrictions again before dispatch. A missed period remains available for
+`pay_period` when its other payment conditions hold.
 
 ## Notices and errors
 
@@ -319,7 +335,7 @@ service. Acknowledging the deletion notice leaves the credit restriction in forc
 | `Refusal::UnsupportedEndpoint` | Ask the user to choose a compatible endpoint or payment method. |
 | `Refusal::WaitingForList` | Show that a newer Private Payment List was requested. A public destination is a separate user choice. |
 | `Refusal::Transfer` | Show the actual transfer or fee quote and return that exact quote only on confirmation. |
-| `Refusal::PricedByRate` | Show the rate and computed amount for confirmation in a manual payment. |
+| `Refusal::PricedByRate` | Obtain authorization for this exact quote from the user or their bounded policy (Scheduling a Billing Period). |
 | `Refusal::IdentityUnavailable` | Refresh the required identity before retrying. |
 | `Refusal::IdentityUnconfirmed` | Ask for explicit confirmation before using a public destination without Switch confirmation. |
 | `Refusal::PaymentInProgress` | Wait for the existing attempt before rejecting or cancelling. |

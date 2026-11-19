@@ -47,7 +47,14 @@ async fn labelled_sale(world: &World) -> TestResult {
     let start = world.now_ms() / 1000 * 1000;
     let recurrence = Recurrence::new(AnchoredRule::new(start, 1, Unit::Month)?, start, None)?;
     let period = PeriodRef::from(recurrence.first()?);
-    let request = Box::pin(subscribe(world, &mut buyer, &mut till, recurrence, true)).await?;
+    let request = Box::pin(subscribe(
+        world,
+        &mut buyer,
+        &mut till,
+        recurrence,
+        PeriodPayment::ConfirmedRate,
+    ))
+    .await?;
     counter.receive(None).await?;
     let quote = Box::pin(issue_period_rate(
         &mut counter,
@@ -80,7 +87,7 @@ async fn labelled_sale(world: &World) -> TestResult {
             payment.source,
             paykit_sdk::RateSource::PeriodDetails { msg_id: quote }
         );
-        let approved = PayOptions::default().with_rate_confirmed((**payment).clone());
+        let approved = PayOptions::default().with_rate_authorized((**payment).clone());
         let result = buyer.pay_period(&request, &period, approved).await;
         (buyer, result)
     }))

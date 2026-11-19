@@ -1090,6 +1090,7 @@ impl Paykit {
                 let mut pricing = crate::pay::Pricing::of_request(
                     &request.amount,
                     request_ref,
+                    proof.billing_period,
                     request.conversion.as_ref(),
                     pubky_switch_client::app::Initiator::User,
                 );
@@ -1657,7 +1658,7 @@ impl Paykit {
         })
     }
 
-    pub(crate) async fn payer_request(
+    pub(crate) async fn read_payer_request(
         &mut self,
         request: &RequestRef,
     ) -> Result<(ActivityTarget, ActivityRecord)> {
@@ -1671,6 +1672,14 @@ impl Paykit {
         if request_of(&record).is_none() {
             return Err(Refusal::NotFound.into());
         }
+        Ok((target, record))
+    }
+
+    pub(crate) async fn payer_request(
+        &mut self,
+        request: &RequestRef,
+    ) -> Result<(ActivityTarget, ActivityRecord)> {
+        let (target, record) = self.read_payer_request(request).await?;
         // The kept stop refuses whatever this placement does; it is tried again later.
         if self.place_kept_cancellation(&target).await.unwrap_or(false) {
             let record = self.activity(&target).await?.ok_or(Refusal::NotFound)?;

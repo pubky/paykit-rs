@@ -205,7 +205,7 @@ impl TransferBound {
     }
 }
 
-/// The price of a payment priced by a rate, as its user confirmed it (Paykit spec 7.2 step 1,
+/// The price of a payment priced by a rate, as its host authorized it (Paykit spec 7.2 step 1,
 /// 8.2): the rate the call amount ([`JournalEntry::payment_amount`]) was computed by, with where the
 /// rate comes from.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -489,9 +489,11 @@ impl JournalEntry {
         Ok(Some(signed))
     }
 
-    /// What a payment priced by a rate showed its user ([`PricedPayment`]), as kept; `None` for
-    /// a payment no rate prices.
-    pub(crate) fn priced_payment(&self) -> Result<Option<PricedPayment>> {
+    /// The originally authorized quote from the kept attempt and verified rate details.
+    pub(crate) fn priced_payment(
+        &self,
+        selected: Option<&StoredMessage>,
+    ) -> Result<Option<PricedPayment>> {
         let Some(price) = &self.price else {
             return Ok(None);
         };
@@ -504,6 +506,8 @@ impl JournalEntry {
                 payee: self.payee,
                 request_hash,
             },
+            billing_period: self.period()?,
+            rate_source_hash: selected.map_or(request_hash, StoredMessage::hash),
             app_id: self.destination.app_id,
             endpoint_id: self.destination.endpoint_id()?,
             payload_hash: pubky_switch_core::enc::hash(payload.as_str().as_bytes()),

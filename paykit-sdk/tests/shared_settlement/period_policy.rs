@@ -73,7 +73,14 @@ async fn subscription_through_cancellation(world: &World, restore: bool) -> Test
         .into_iter()
         .map(PeriodRef::from)
         .collect();
-    let request = Box::pin(subscribe(world, &mut buyer, &mut shop, recurrence, false)).await?;
+    let request = Box::pin(subscribe(
+        world,
+        &mut buyer,
+        &mut shop,
+        recurrence,
+        super::PeriodPayment::Manual,
+    ))
+    .await?;
     let sale = shop
         .payee_activity()
         .await?
@@ -282,7 +289,9 @@ async fn dispatch_period(
     period: PeriodRef,
 ) -> TestResult<(Paykit, paykit_sdk::PayResult)> {
     Ok(tokio::spawn(Box::pin(async move {
-        let payment = buyer.pay_period_automatically(&request, &period).await;
+        let payment = buyer
+            .pay_period_automatically(&request, &period, paykit_sdk::PeriodPrice::RequestedAmount)
+            .await;
         (buyer, payment)
     }))
     .await?)
