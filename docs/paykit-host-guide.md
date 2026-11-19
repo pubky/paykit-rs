@@ -210,6 +210,7 @@ shared record.
 | `NoticeKind::HeldWithoutPay` | Show that the open attempt needs a wallet with `paykit_pay`. |
 | `NoticeKind::MessageGivenUp` | Show the message or request whose effect or delivery was given up. Acknowledgment can also retire the stored entry. |
 | `NoticeKind::BlockedMessagesLost` | Show the affected counterparty and acceptance-time range. Consult the payment method for payments that may have been among the lost messages. |
+| `NoticeKind::DroppedMessagesLost` | Show the counterparty and the acceptance-time range for which the wallet stopped requesting dropped replies. Check the payment method for any payment whose outcome is still unknown. |
 | `PaykitError::Client` | Handle the enclosed Switch outcome. Preserve any kept batch and its ID. |
 | `PaykitError::Lib` | Use the rule error to distinguish invalid input from invalid network or shared data. |
 | `PaykitError::Rail` | Preserve any unresolved attempt unless the method established definitive refusal. |
