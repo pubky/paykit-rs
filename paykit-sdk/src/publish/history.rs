@@ -395,7 +395,7 @@ mod tests {
 
     #[test]
     fn test_history_restore_compares_applied_and_observed_issues_before_installation() {
-        use super::super::{ListReservation, RestoredPublications};
+        use super::super::{ListReservation, Payable, RestoredPublications, Withdrawal};
 
         let publisher = crate::testkit::Party::new(
             "merchant",
@@ -410,6 +410,13 @@ mod tests {
             answer: Default::default(),
             missing: None,
             expires: 1000,
+            publisher: actual.publisher,
+            predecessors: Payable::Unknown,
+            undelivered: false,
+            withdrawal: Some(Withdrawal {
+                first: 0,
+                issued: 0,
+            }),
             recipient: actual.recipient,
             choice: [7; 16],
             revision: None,

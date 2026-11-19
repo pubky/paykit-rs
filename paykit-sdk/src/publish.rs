@@ -10,9 +10,11 @@
 
 pub(crate) mod answers;
 pub(crate) mod history;
+mod withdrawal;
 
 use history::PublicationHistory;
 use std::collections::{BTreeMap, BTreeSet};
+use withdrawal::{Payable, Withdrawal};
 
 use paykit_lib::bodies::{ListEndpoint, PrivatePaymentList, PRIVATE_LIST_MAX_AGE_MS};
 use paykit_lib::derive::natural_key;
@@ -24,6 +26,8 @@ use pubky_switch_client::app::{
     StoreFailure,
 };
 use pubky_switch_core::ident::Policy;
+use pubky_switch_core::ops::Condition;
+use pubky_switch_core::records::DAY_MS as DAY;
 
 use crate::error::{Refusal, Result};
 use crate::state::{self, key, PublicationIds, PublicationKey, Tx};
@@ -33,6 +37,14 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) const COLLECTION: &str = "private_list_publications";
 const SCOPE: &str = "paykit_request";
+const HOUR: u64 = DAY / 24;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IssueFor {
+    Change,
+    Answer(ListVersion),
+    RetryWithdrawal,
+}
 
 pub(crate) fn collection() -> Collection {
     Collection::with_permanent_generations(COLLECTION, SCOPE, &[SCOPE])
@@ -163,6 +175,11 @@ impl ListRecipient {
 pub(crate) struct ListReservation {
     answer: answers::RequestsAnswered,
     expires: u64,
+    pub(crate) publisher: [u8; 16],
+    predecessors: Payable,
+    undelivered: bool,
+    #[serde(deserialize_with = "Option::deserialize")]
+    withdrawal: Option<Withdrawal>,
     #[serde(deserialize_with = "Option::deserialize")]
     missing: Option<answers::MissingAnswers>,
     pub(crate) recipient: [u8; 32],
@@ -178,6 +195,11 @@ pub(crate) struct ListReservation {
 impl ListReservation {
     pub(crate) fn check(&self) -> Result<()> {
         let version = ListVersion::new(self.generation, self.counter)?;
+        if self.revision.is_some() && self.withdrawal.is_some()
+            || self.withdrawal.is_some_and(|w| w.first > w.issued)
+        {
+            return Err(crate::PaykitError::corrupt());
+        }
         if let Some(missing) = self.missing {
             missing.check(version)?;
         }
@@ -194,7 +216,9 @@ impl ListReservation {
     }
 
     fn matches(&self, record: &ListPublicationRecord) -> bool {
-        self.id == record.msg_id
+        self.publisher == record.publisher
+            && self.recipient == record.recipient
+            && self.id == record.msg_id
             && self.hash == record.message_hash
             && self.generation == record.generation
             && self.counter == record.counter
@@ -260,7 +284,7 @@ impl RestoredPublications {
         value: &[u8],
         binder: &state::Binder<'_>,
     ) -> Result<()> {
-        let issue = state::restored::<ListReservation>(key, value, binder)?;
+        let mut issue = state::restored::<ListReservation>(key, value, binder)?;
         self.remember_issue(
             issue.recipient,
             issue.generation,
@@ -270,11 +294,25 @@ impl RestoredPublications {
         )?;
         self.recipients.insert(issue.recipient);
         self.applied.insert(issue.original());
-        if let Some(held) = self.floors.get(&issue.recipient) {
+        if let Some(held) = self.floors.get_mut(&issue.recipient) {
             let prior = (held.generation, held.counter);
             let next = (issue.generation, issue.counter);
-            if next <= prior {
-                return Ok(());
+            match next.cmp(&prior) {
+                std::cmp::Ordering::Less => {
+                    held.predecessors = held.predecessors.union(issue.payable_after(None));
+                    return Ok(());
+                }
+                std::cmp::Ordering::Equal => {
+                    held.predecessors = held.predecessors.union(issue.predecessors);
+                    held.undelivered |= issue.undelivered;
+                    if issue.withdrawal.is_none() {
+                        held.withdrawal = None;
+                    }
+                    return Ok(());
+                }
+                std::cmp::Ordering::Greater => {
+                    issue.predecessors = issue.predecessors.union(held.payable_after(None));
+                }
             }
         }
         self.floors.insert(issue.recipient, issue);
@@ -634,6 +672,9 @@ impl Paykit {
     }
 
     /// Stop sharing with this counterparty. A fresh, empty list supersedes what it may hold.
+    /// If the client confirms first non-delivery, later receives can reserve a replacement
+    /// after an hour, then hourly for the first day and daily while an earlier offer may be paid.
+    /// Choosing the counterparty again ends this withdrawal.
     pub async fn withdraw_list_from(&mut self, recipient: [u8; 32]) -> Result<()> {
         self.first_read_before_writing().await?;
         let at = key::list_recipient(&recipient);
@@ -712,8 +753,8 @@ impl Paykit {
         // Only the original batch's outcome or its atomic applied write settles it.
         // An equal readable counter can outlive an undecided batch.
         self.resolve_publications(&recipient.recipient).await?;
-        let prior = self.local_get::<ListReservation>(&at).await?;
-        let mut requested_after = None;
+        let mut prior = self.local_get::<ListReservation>(&at).await?;
+        let mut reason = IssueFor::Change;
         if let Some(prior) = prior.as_ref() {
             let same_choice = prior.choice == recipient.choice;
             let same_list = same_choice && prior.revision == revision;
@@ -728,49 +769,64 @@ impl Paykit {
                     self.local_put(&key::list_recipient(&recipient.recipient), &recipient)
                         .await?;
                 }
-                if !recipient.chosen || revision.is_none() {
-                    return Ok(());
-                }
-                let local = ListVersion::new(prior.generation, prior.counter)?;
-                let requests = recipient.answers.has_requests();
-                let (version, missing) = if requests {
-                    self.current_list_for_request(prior, accepted.is_some())
-                        .await?
-                } else {
-                    (local, prior.missing)
-                };
-                if version == local && accepted.is_none() {
-                    return Ok(());
-                }
-                let Some(now) = self.service_time() else {
-                    return Ok(());
-                };
-                let missing = if requests {
-                    self.earlier_list_answers(&recipient, missing, now).await?
-                } else {
-                    missing
-                };
-                match recipient.answers.decision(now, version, missing) {
-                    answers::Reply::Wait => return Ok(()),
-                    answers::Reply::Newer => requested_after = Some(version),
-                    answers::Reply::Repeat if version == local => {
-                        return self.repeat_list(&mut recipient, prior, now, report).await
+                if revision.is_none() {
+                    if accepted.is_some()
+                        || !self
+                            .service_time()
+                            .is_some_and(|now| prior.withdrawal_due(now))
+                    {
+                        return Ok(());
                     }
-                    // The other installation queued that list in its own outbox.
-                    // Its authenticated counter cannot reproduce the signed plaintext.
-                    answers::Reply::Repeat => return Ok(()),
+                    reason = IssueFor::RetryWithdrawal;
+                } else {
+                    let local = ListVersion::new(prior.generation, prior.counter)?;
+                    let requests = recipient.answers.has_requests();
+                    let (version, missing) = if requests {
+                        self.current_list_for_request(prior, accepted.is_some())
+                            .await?
+                    } else {
+                        (local, prior.missing)
+                    };
+                    if version == local && accepted.is_none() {
+                        return Ok(());
+                    }
+                    let Some(now) = self.service_time() else {
+                        return Ok(());
+                    };
+                    let missing = if requests {
+                        self.earlier_list_answers(&recipient, missing, now).await?
+                    } else {
+                        missing
+                    };
+                    match recipient.answers.decision(now, version, missing) {
+                        answers::Reply::Wait => return Ok(()),
+                        answers::Reply::Newer => reason = IssueFor::Answer(version),
+                        answers::Reply::Repeat if version == local => {
+                            return self.repeat_list(&mut recipient, prior, now, report).await
+                        }
+                        // The other installation queued that list in its own outbox.
+                        // Its authenticated counter cannot reproduce the signed plaintext.
+                        answers::Reply::Repeat => return Ok(()),
+                    }
                 }
             }
         }
-        if !recipient.chosen && !recipient.withdraw {
+        if !recipient.chosen && !recipient.withdraw && reason != IssueFor::RetryWithdrawal {
             return Ok(());
         }
         let endpoints = settings.map_or_else(|| Ok(BTreeMap::new()), |s| s.endpoints())?;
+        if let Some(issue) = prior.as_mut() {
+            if !issue.undelivered && recipient.answers.first(issue).is_none() {
+                issue.undelivered = self.take_prior_list_nondelivery(&issue.id).await?;
+            }
+        }
         let issue = Box::pin(self.reserve_private_list(
             &mut recipient,
             revision,
             &endpoints,
-            requested_after,
+            reason,
+            prior.as_ref(),
+            report,
         ))
         .await?;
         if recipient.withdraw {
@@ -828,6 +884,60 @@ impl Paykit {
         Ok(())
     }
 
+    /// Current version and unknown members for a new list. A withdrawal timer
+    /// additionally names the exact application whose undelivered message is being replaced.
+    async fn publication_base(
+        &mut self,
+        target: &RecordTarget,
+        key: [u8; 32],
+        generation: u64,
+        previous: Option<&ListReservation>,
+        reason: IssueFor,
+        report: Option<&ReceiveReport>,
+    ) -> Result<(u64, UnknownMembers, Vec<Condition>)> {
+        let mut conditions = Vec::new();
+        if reason == IssueFor::RetryWithdrawal {
+            let prior = previous.ok_or_else(counter_unavailable)?;
+            if generation < prior.generation {
+                return Err(counter_unavailable().into());
+            }
+            let (current, condition) = self.withdrawal_base(prior).await?;
+            conditions.push(condition);
+            if prior.generation == generation {
+                return Ok((current.counter, current.unknown, conditions));
+            }
+            if self.newer_list_reserved(prior, generation, report).await? {
+                self.retire_obsolete_withdrawal(prior).await?;
+                return Err(counter_unavailable().into());
+            }
+            return Ok((0, UnknownMembers::default(), conditions));
+        }
+        match self.app.read_record_fresh(target).await? {
+            RecordRead::Fresh(held) => {
+                let current = self.publication_at(&held).await?;
+                if let IssueFor::Answer(expected) = reason {
+                    if ListVersion::new(current.generation, current.counter)? != expected {
+                        return Err(counter_unavailable().into());
+                    }
+                }
+                Ok((current.counter, current.unknown, conditions))
+            }
+            RecordRead::Kept {
+                record: None,
+                reason: KeptReason::NotFound,
+            } if self
+                .local_get::<PublicationHistory>(&key::publication_history(&key))
+                .await?
+                .is_none()
+                && previous.is_none_or(|issue| issue.generation < generation)
+                && self.app.record_seen(&key).await?.is_none() =>
+            {
+                Ok((0, UnknownMembers::default(), conditions))
+            }
+            _ => Err(counter_unavailable().into()),
+        }
+    }
+
     /// Reserve a new version of a Private Payment List for its chosen recipient. The signed
     /// message enters the outbox in the same client commit as the applied counter.
     async fn reserve_private_list(
@@ -835,7 +945,9 @@ impl Paykit {
         choice: &mut ListRecipient,
         revision: Option<[u8; 16]>,
         endpoints: &BTreeMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
-        requested_after: Option<ListVersion>,
+        reason: IssueFor,
+        previous: Option<&ListReservation>,
+        report: Option<&ReceiveReport>,
     ) -> Result<ListPublicationRecord> {
         let recipient = choice.recipient;
         self.first_read_before_writing().await?;
@@ -852,42 +964,27 @@ impl Paykit {
         let target = target(&publisher, &recipient, generation);
         let key = self.app.record_key(&target)?;
 
-        let previous = self
-            .local_get::<ListReservation>(&key::list_reservation(&recipient))
+        let (counter, unknown, conditions) = self
+            .publication_base(&target, key, generation, previous, reason, report)
             .await?;
-        let (counter, unknown, observed) = match self.app.read_record_fresh(&target).await? {
-            RecordRead::Fresh(held) => {
-                let current = self.publication_at(&held).await?;
-                let version = ListVersion::new(current.generation, current.counter)?;
-                if requested_after.is_some_and(|expected| expected != version) {
-                    return Err(counter_unavailable().into());
-                }
-                let observed = if requested_after.is_some() {
-                    self.local_get::<PublicationHistory>(&key::publication_history(&key))
-                        .await?
-                        .and_then(|history| history.missing_since)
-                } else {
-                    None
-                };
-                (current.counter, current.unknown, observed)
-            }
-            RecordRead::Kept {
-                record: None,
-                reason: KeptReason::NotFound,
-            } if self
-                .local_get::<PublicationHistory>(&key::publication_history(&key))
-                .await?
-                .is_none()
-                && previous
-                    .as_ref()
-                    .is_none_or(|issue| issue.generation < generation)
-                && self.app.record_seen(&key).await?.is_none() =>
-            {
-                (0, UnknownMembers::default(), None)
-            }
-            _ => return Err(counter_unavailable().into()),
-        };
         let now = self.service_time().ok_or_else(counter_unavailable)?;
+        let accepted = previous.and_then(|r| choice.answers.first(r));
+        let predecessors = match previous {
+            Some(prior) if prior.generation == generation && prior.counter == counter => {
+                prior.payable_after(accepted)
+            }
+            Some(prior)
+                if reason == IssueFor::RetryWithdrawal
+                    && counter == 0
+                    && prior.generation < generation =>
+            {
+                prior.payable_after(accepted)
+            }
+            None if counter == 0 && generation == 1 && !choice.await_repeat_time => {
+                Payable::Until(0)
+            }
+            _ => Payable::Unknown,
+        };
         if choice.await_repeat_time {
             // A repeat after the backup advances no permanent counter. This covering read
             // supplies the upper bound on the missing hour independently of fresh issues.
@@ -897,15 +994,19 @@ impl Paykit {
             self.local_put(&key::list_recipient(&recipient), choice)
                 .await?;
         }
-        let accepted = previous
-            .as_ref()
-            .is_some_and(|r| choice.answers.first(r).is_some());
+        let observed = if matches!(reason, IssueFor::Answer(_)) && counter != 0 {
+            self.local_get::<PublicationHistory>(&key::publication_history(&key))
+                .await?
+                .and_then(|history| history.missing_since)
+        } else {
+            None
+        };
         let missing = answers::MissingAnswers::after(
-            previous.as_ref(),
+            previous,
             generation,
             counter,
             observed.unwrap_or(now),
-            accepted,
+            accepted.is_some(),
         )?;
         let version = ListVersion::new(generation, counter + 1)?;
         let list = PrivatePaymentList {
@@ -944,13 +1045,23 @@ impl Paykit {
         };
         let put = self
             .app
-            .record_op(&target, Some(&publication.to_json()?), vec![])
+            .record_op(&target, Some(&publication.to_json()?), conditions)
             .await?;
         let at = key::list_reservation(&recipient);
         let reservation = ListReservation {
-            answer: choice.answers.answer(requested_after.is_some()),
+            answer: choice.answers.answer(matches!(reason, IssueFor::Answer(_))),
             missing,
             expires: list.expires_at,
+            publisher,
+            predecessors,
+            undelivered: false,
+            withdrawal: endpoints.is_empty().then(|| Withdrawal {
+                first: previous
+                    .and_then(|p| p.withdrawal)
+                    .filter(|_| reason == IssueFor::RetryWithdrawal)
+                    .map_or(now, |w| w.first),
+                issued: now,
+            }),
             recipient,
             choice: choice.choice,
             revision,
@@ -970,6 +1081,20 @@ impl Paykit {
         self.own_identity_confirmed(false).await?;
         if self.app.own_identity().generation() != generation || !self.holds(SCOPE) {
             return Err(counter_unavailable().into());
+        }
+        if reason == IssueFor::RetryWithdrawal {
+            let current = self
+                .local_get::<ListRecipient>(&key::list_recipient(&recipient))
+                .await?;
+            if current.is_none_or(|r| r.choice != choice.choice)
+                || (choice.chosen
+                    && self
+                        .local_get::<ListSettings>(key::LIST_SETTINGS)
+                        .await?
+                        .is_some_and(|s| !s.endpoints.is_empty()))
+            {
+                return Err(unresolved().into());
+            }
         }
         if let Err(error) = self.submit(batch).await {
             // The client can settle the imported original from a signed conflict answer.
@@ -1163,6 +1288,10 @@ mod tests {
             answer: Default::default(),
             missing: None,
             expires: 1000,
+            publisher: issued.publisher,
+            predecessors: Payable::Until(0),
+            undelivered: false,
+            withdrawal: None,
             recipient: issued.recipient,
             choice: [7; 16],
             revision: Some([6; 16]),

@@ -389,6 +389,24 @@ impl Paykit {
         self.local_commit(gone).await
     }
 
+    /// A host can change its list after native delivery finished and before its next
+    /// receive. Record the previous issue's first non-delivery while its ID still
+    /// identifies that recipient's reservation. Its duty keeps its ordinary ack order.
+    pub(crate) async fn take_prior_list_nondelivery(&mut self, msg_id: &str) -> Result<bool> {
+        for duty in self.app.pending_duty_events().await? {
+            if duty
+                .owners
+                .iter()
+                .any(|owner| owner == crate::protocol::BACKUP_NAME)
+                && matches!(&duty.event, AppEvent::MessageUndelivered { msg_id: id, resend: false, .. } if id == msg_id)
+            {
+                let id = duty.event.id().ok_or_else(PaykitError::corrupt)?;
+                return self.take_stored_event(&duty.event, &key::taken(&id)).await;
+            }
+        }
+        Ok(false)
+    }
+
     /// Keep what a duty event about a stored entry says, with its mark `mark`, in one
     /// commit (module docs). Whether it was taken: `false` for an event of another kind, or
     /// one whose message can't be kept, which stays for the host.
@@ -454,6 +472,11 @@ impl Paykit {
                 tx.put(key::RECORD_EXPIRY_OWED, &true)?;
                 true
             }
+            AppEvent::MessageUndelivered {
+                msg_id,
+                resend: false,
+                ..
+            } if self.take_undelivered_list(&mut tx, msg_id).await? => true,
             _ => self.take_reply_ask_duty(&mut tx, event).await?,
         };
         if taken {
