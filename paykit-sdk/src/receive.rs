@@ -561,7 +561,7 @@ fn put_flagged(
 
 /// Whether an app with `scopes` reads the lists: `paykit_contacts` gives `lists.read`.
 pub(crate) fn reads_lists(scopes: &[String]) -> bool {
-    scopes.iter().any(|s| s == "paykit_contacts")
+    scopes.iter().any(|s| s == paykit_lib::scopes::CONTACTS)
 }
 
 /// Note a counterparty with Paykit activity, for re-sends after a `missed` item or a
@@ -2247,6 +2247,11 @@ pub const KEPT_MESSAGE_MS: u64 = 30 * pubky_switch_core::records::DAY_MS;
 /// senders among them (Paykit wire 4.1: at most every 10 minutes).
 pub const LISTS_REFRESH_MS: u64 = 10 * 60_000;
 
+pub(crate) fn lists_read_is_fresh(read: u64, now: u64) -> bool {
+    now.checked_sub(read)
+        .is_some_and(|age| age < LISTS_REFRESH_MS)
+}
+
 /// A Private Payment List held because its `payment_lists` record doesn't read, or is
 /// deleted ([`Paykit::held_lists`]): never written over it, which could drop the single-use
 /// marks it holds or held, until the record reads again or the host places it without them
@@ -2649,7 +2654,7 @@ impl Paykit {
         }
         let now = self.now();
         let last = self.local_get::<u64>(key::LISTS_READ).await?;
-        if last.is_some_and(|last| last <= now && now - last < LISTS_REFRESH_MS) {
+        if last.is_some_and(|read| lists_read_is_fresh(read, now)) {
             return Ok(());
         }
         match self.app.allow_list().await {
@@ -2826,7 +2831,7 @@ impl Paykit {
         let copy = self.local_get::<Vec<[u8; 32]>>(key::DENIED).await?;
         let now = self.now();
         match (read, copy) {
-            (Some(read), Some(denied)) if read <= now && now - read < LISTS_REFRESH_MS => {
+            (Some(read), Some(denied)) if lists_read_is_fresh(read, now) => {
                 Ok(denied.contains(pubky))
             }
             _ => self.denied(pubky).await,

@@ -355,19 +355,14 @@ fn may_deliver_to_contact(
 
     let cert = delivery.cert();
     if paykit_lib::scopes::check_certificate(cert).is_err()
-        || !cert
-            .scopes()
-            .iter()
-            .any(|s| s == paykit_lib::scopes::CONTACTS)
+        || !receive::reads_lists(cert.scopes())
         || extension.is_some_and(|kind| !cert.scopes().contains(&kind.prefix().scope()))
     {
         return Ok(false);
     }
     let view = delivery.local();
-    if state::view_get::<u64>(view, key::LISTS_READ)
-        .map_err(view_failure)?
-        .is_none()
-    {
+    let read = state::view_get::<u64>(view, key::LISTS_READ).map_err(view_failure)?;
+    if !read.is_some_and(|at| receive::lists_read_is_fresh(at, delivery.now_ms())) {
         return Ok(false);
     }
     let to = &delivery.message().to;
