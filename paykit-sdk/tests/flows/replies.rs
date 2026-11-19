@@ -2673,6 +2673,19 @@ async fn test_reply_loss_restore_counts_overlapping_windows_and_preserves_the_lo
         )
     };
     assert!(restore(store(), &too_many).await.is_err());
+
+    let mut wider = layer_of(&backup);
+    wider.push(retired_windows(&peer, 33..=33));
+    wider.extend((1..=64).map(|n| loss_notice(&peer, n, n)));
+    let wider = encoded(wider);
+    let mut pending = restore(store(), &wider).await.unwrap();
+    pending.receive(None).await.unwrap();
+    let shown = pending.notices().await.unwrap();
+    assert_eq!(shown.len(), 64);
+    assert!(shown
+        .iter()
+        .any(|n| n.lost_from_ms == Some(33) && n.lost_until_ms == Some(34)));
+
     let storage = store();
     let restored = restore(storage.clone(), &good).await.unwrap();
     assert_eq!(restored.notices().await.unwrap().len(), 32);
