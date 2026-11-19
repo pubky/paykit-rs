@@ -1429,15 +1429,20 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
             "asked_at_ms": null, "queued": null, "epochs": epochs,
         })
     };
+    let stop_key = format!(
+        "{}/{}",
+        key_of("kc/"),
+        pubky_switch_core::enc::b64(&shop1.app_id_bytes())
+    );
     let cases: [(&str, String, serde_json::Value); 22] = [
         (
             "kept cancellation of another kind",
-            key_of("kc/"),
+            stop_key.clone(),
             kept(request.clone()),
         ),
         (
             "kept cancellation under another key",
-            key_of("kc/"),
+            stop_key,
             kept(cancellation),
         ),
         (
