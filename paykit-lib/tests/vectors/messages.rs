@@ -1343,7 +1343,8 @@ attempt_id), may carry the payee's payment_reference for it. accepted are receip
 takes at check 10: the request's receipt with metadata, and the receipt of the payment \
 without a request with metadata and a payment_reference. refused are receipts it drops \
 there: the request's receipt carrying a payment_reference, whose request's reference \
-applies, and one whose metadata isn't an object. reason is paykit-lib's wording.";
+applies, one whose metadata isn't an object, and a receipt naming a Billing Period without a \
+request. reason is paykit-lib's wording.";
 
 /// A case of `receipt_members`: name, whether it confirms the payment without a request, and
 /// the members added.
@@ -1352,21 +1353,28 @@ type ReceiptCase = (&'static str, bool, Vec<(&'static str, Value)>);
 /// The cases of `receipt_members`, accepted then refused.
 fn receipt_cases() -> (Vec<ReceiptCase>, Vec<ReceiptCase>) {
     let metadata = json!({ "note": "thank you", "order": "1042" });
+    let mut without_request = vec![
+        ("metadata", metadata.clone()),
+        ("payment_reference", json!("invoice-77")),
+    ];
     let accepted = vec![
         (
             "a request's receipt with metadata",
             false,
-            vec![("metadata", metadata.clone())],
+            vec![("metadata", metadata)],
         ),
         (
             "a receipt of a payment without a request with metadata and payment_reference",
             true,
-            vec![
-                ("metadata", metadata),
-                ("payment_reference", json!("invoice-77")),
-            ],
+            without_request.clone(),
         ),
     ];
+    let period_proof =
+        Message::parse(&message_json("payment_proof_period"), OPAQUE_MEMBERS).unwrap();
+    without_request.push((
+        "billing_period",
+        period_proof.body["billing_period"].clone(),
+    ));
     let refused = vec![
         (
             "a request's receipt carrying payment_reference",
@@ -1377,6 +1385,11 @@ fn receipt_cases() -> (Vec<ReceiptCase>, Vec<ReceiptCase>) {
             "a receipt whose metadata isn't an object",
             false,
             vec![("metadata", json!("thank you"))],
+        ),
+        (
+            "a receipt of a payment without a request naming a Billing Period",
+            true,
+            without_request,
         ),
     ];
     (accepted, refused)
