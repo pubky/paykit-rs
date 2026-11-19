@@ -28,8 +28,8 @@ const LATER_SECRET: [u8; 32] = [0x4f; 32];
 /// service recovering the account at the next generation, routed at [`SWITCH_ORIGIN`], the
 /// next `identity.json` naming it with `recovery_from`, delivered there and published; then
 /// the old service is unreachable.
-pub(super) fn declare_loss(w: &World) {
-    declare_loss_of(w, ALICE_ORIGIN, NEXT_SECRET);
+pub(super) fn declare_loss(w: &World) -> Arc<ScriptedSwitch> {
+    declare_loss_of(w, ALICE_ORIGIN, NEXT_SECRET)
 }
 
 /// [`declare_loss`] of the service at `lost_origin`, the new one under `secret`.
