@@ -15,7 +15,8 @@
 //! - `timer`: `JsTimer`, the SDK's `Timer` on JavaScript's `setTimeout`;
 //! - `send`: `run_local`, which runs a future that waits on the browser, and so is not `Send`,
 //!   behind a `Send` future, as the host traits require;
-//! - `panic`: `install_panic_hook`, which reports a Rust panic to the browser console.
+//! - `panic`: `install_panic_hook`, which reports a Rust panic to the browser console;
+//! - `fetch`: `FetchTransport`, the Switch client's `Transport` on the browser's `fetch`.
 //!
 //! The tests under `tests/` run a subset of Paykit's vectors, the random generator, signing,
 //! and sealing natively and in browser engines; and, in browser engines only, the host pieces
@@ -44,6 +45,8 @@ compile_error!(
 // them: other wasm32 targets, such as WASI, have no JavaScript host to call.
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub mod clock;
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub mod fetch;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub mod panic;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
