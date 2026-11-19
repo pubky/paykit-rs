@@ -1606,16 +1606,16 @@ fn receipt_effect(
         conditions.push(cx.record_condition(&parent_key)?);
         let held = intake_activity(cx, &parent_target, RecordSide::Payer)?;
         let Some(held) = held.filter(|h| !crate::records::activity_base_changed(Some(h))) else {
-            return keep_reply(cx, &target, stored, seq);
+            return keep_reply(cx, &target, stored, position);
         };
         if crate::divergent::step_write_waits(cx, &held, stored, seq, settlement)? {
-            return keep_reply(cx, &target, stored, seq);
+            return keep_reply(cx, &target, stored, position);
         }
         let Some(parent) = held_bound(cx, &parent_target, settlement)? else {
-            return keep_reply(cx, &target, stored, seq);
+            return keep_reply(cx, &target, stored, position);
         };
         match period_receipt(stored, &record, &parent) {
-            PeriodReceipt::Missing => return keep_reply(cx, &target, stored, seq),
+            PeriodReceipt::Missing => return keep_reply(cx, &target, stored, position),
             PeriodReceipt::Different => return Ok(()),
             PeriodReceipt::Matched => {}
         }
