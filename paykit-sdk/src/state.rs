@@ -1457,7 +1457,10 @@ impl Stored for crate::allowances::PreparedPendingReply {
         let id =
             crate::allowances::named_allowance(reply.body()).ok_or_else(PaykitError::corrupt)?;
         let target = crate::allowances::allowance_target(&self.peer, id);
-        if reply.sender() != binder.own
+        if self.source.record_version().is_none()
+            || !self.sealed_delete.looks_like_delete()
+            || self.sealed_delete.check_shape("paykit_allowance").is_err()
+            || reply.sender() != binder.own
             || binder
                 .cert
                 .is_none_or(|cert| reply.message().from.app_id != cert.app_id())

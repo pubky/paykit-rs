@@ -892,6 +892,7 @@ pub(crate) fn restore_conflicts(
     restoring: &pubky_switch_client::app::RestoreContext<'_>,
     binder: &Binder<'_>,
     mut imported: BTreeMap<[u8; 32], PendingConflict>,
+    mut prepared: BTreeMap<[u8; 32], super::PreparedPendingReply>,
     mut retirements: BTreeMap<[u8; 32], PendingRetirement>,
     mut replies: BTreeMap<String, KeptMessage>,
     writes: &mut Vec<LocalWrite>,
@@ -911,6 +912,52 @@ pub(crate) fn restore_conflicts(
     let retired = |key: &[u8; 32], source: SeenVersion| {
         retirements.get(key).is_some_and(|r| source < r.version)
     };
+    for (at, value) in restoring.previous_local_scan(key::PENDING_REPLIES.as_bytes())? {
+        let kept = state::restored::<super::PreparedPendingReply>(&at, &value, binder)?;
+        let Some(StateKey::PendingReply(record)) = StateKey::parse(&at) else {
+            return Err(PaykitError::corrupt());
+        };
+        let signed = kept.message.stored(&kept.peer)?;
+        let id = named_allowance(signed.body()).ok_or_else(PaykitError::corrupt)?;
+        let target = allowance_record_target(Collection::AllowanceProposals, &kept.peer, id);
+        let pending = binder.record_key(&target)?;
+        if let Some(backup) = prepared.get(&record) {
+            let same = backup.delete == kept.delete
+                && backup.message.stored(&backup.peer)?.hash() == signed.hash();
+            if !same {
+                match (
+                    retired(&pending, backup.source),
+                    retired(&pending, kept.source),
+                ) {
+                    (true, false) => (),
+                    (false, true) => continue,
+                    // Neither the arrival order of backups nor the signed message dates
+                    // determine which unresolved decision applies to this proposal.
+                    _ => return Err(PaykitError::corrupt()),
+                }
+            }
+        }
+        if matches!(signed.body(), Body::AllowanceEnd(_)) {
+            let origin = key::end_origin(&signed.message().msg_id);
+            let previous = restoring.previous_local_scan(origin.as_bytes())?;
+            let (_, value) = previous
+                .into_iter()
+                .find(|(at, _)| at == origin.as_bytes())
+                .ok_or_else(PaykitError::corrupt)?;
+            let end = state::restored::<super::EndOrigin>(origin.as_bytes(), &value, binder)?;
+            if !end.matches(signed.message(), signed.hash()) || end.cause != super::EndCause::User {
+                return Err(PaykitError::corrupt());
+            }
+            writes.push(LocalWrite::Put {
+                key: origin.into_bytes(),
+                value,
+            });
+        }
+        prepared.insert(record, kept);
+    }
+    for (record, reply) in prepared {
+        writes.push(state::local_put(&key::pending_reply(&record), &reply)?);
+    }
     // A matched Q may still be owed before the first opposing reply arrives.
     for (at, bytes) in restoring.previous_local_scan(key::KEPT_REPLIES.as_bytes())? {
         let held = state::restored::<KeptMessage>(&at, &bytes, binder)?;

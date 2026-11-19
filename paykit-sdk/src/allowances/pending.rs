@@ -34,6 +34,8 @@ pub(crate) struct PreparedPendingReply {
     /// Commitment to this reply's exact sealed delete and original application conditions.
     #[serde(with = "serde_b64")]
     pub(crate) delete: [u8; 32],
+    pub(crate) source: crate::divergent::SeenVersion,
+    pub(crate) sealed_delete: pubky_switch_core::sealed::SealedValue,
 }
 
 /// The Switch chooses the batch ID during submission. All other signed members, including
@@ -450,6 +452,10 @@ impl Paykit {
                 | pubky_switch_client::app::Delivery::Queued { .. }
                 | pubky_switch_client::app::Delivery::Accepted { .. },
             ) => Ok(Some(msg_id.clone())),
+            None => {
+                Box::pin(self.retry_prepared_answer(key, &intent)).await?;
+                Ok(Some(msg_id.clone()))
+            }
             _ => Err(Refusal::NotNow(
                 "the original Allowance answer has no verified outcome".into(),
             )
@@ -457,17 +463,92 @@ impl Paykit {
         }
     }
 
-    /// Open only the current pending value at the user's selected key, followed by its
-    /// permanent record. The cached value supplies the natural key for the first read.
-    pub(super) async fn answer_pending(
+    /// Resume a signed original that has no outbox item. A successful delete is reconciled
+    /// first. Otherwise only the exact sealed write against the same application may run.
+    async fn retry_prepared_answer(
+        &mut self,
+        key: &[u8; 32],
+        intent: &PreparedPendingReply,
+    ) -> Result<()> {
+        Box::pin(self.recover_pending_deletes()).await?;
+        let original = intent.message.stored(&intent.peer)?;
+        if self
+            .app
+            .delivery(&original.message().msg_id)
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+        // Reconciliation can finish an undeliverable original and record its give-up.
+        // Such an answer cannot be submitted again, even if the proposal reappears.
+        if self
+            .local_get::<PreparedPendingReply>(&key::pending_reply(key))
+            .await?
+            .is_none()
+        {
+            return Err(not_current());
+        }
+        let Some((selected, _)) = self.pending_by_allowance_key(key).await? else {
+            return Err(not_current());
+        };
+        let (pending, target, condition, permanent) =
+            Box::pin(self.checked_pending_answer(&selected, original.body().kind())).await?;
+        let own = self.identity();
+        if permanent != *key
+            || selected.version != intent.source.record_version()
+            || original.message().refs != [pending.proposal().hash()]
+            || original.cert().hash() != self.app.cert().hash()
+        {
+            return Err(not_current());
+        }
+        let (conditions, mut op) = self
+            .app
+            .record_op(&target, None, vec![condition, absent(permanent)])
+            .await?;
+        let OpKind::RecordPut(put) = &mut op else {
+            return Err(PaykitError::corrupt());
+        };
+        let sealed = &intent.sealed_delete;
+        if sealed.data_epoch != put.value_sealed.data_epoch || sealed.scope != put.policy.read_scope
+        {
+            return Err(not_current());
+        }
+        let scope = self
+            .app
+            .scope_key(sealed.data_epoch, &sealed.scope)
+            .ok_or_else(not_current)?;
+        if !matches!(
+            sealed.open(&scope, &own, &put.key),
+            Ok(pubky_switch_core::sealed::RecordValue::Delete)
+        ) {
+            return Err(PaykitError::corrupt());
+        }
+        put.value_sealed = sealed.clone();
+        if prepared_write(
+            own,
+            self.app_id(),
+            self.app.own_identity().generation(),
+            &conditions,
+            &op,
+        )? != intent.delete
+        {
+            return Err(not_current());
+        }
+        let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME).entry((conditions, op));
+        match self.submit(batch).await {
+            Ok(_) => Box::pin(self.recover_pending_deletes()).await,
+            Err(error) if error.kept_batch().is_some() => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Select the original pending write and recheck every condition that authorizes this answer.
+    async fn checked_pending_answer(
         &mut self,
         selected: &SharedRecord,
         kind: Kind,
-    ) -> Result<String> {
-        let own = self.identity();
-        if kind == Kind::AllowanceAcceptance {
-            return Err(Refusal::AllowanceAcceptanceUnavailable.into());
-        }
+    ) -> Result<(PendingAllowanceRecord, RecordTarget, Condition, [u8; 32])> {
         let (chosen, target) = self.selected_pending(selected)?;
         let id = chosen.allowance_id();
         let peer = chosen.counterparty();
@@ -502,7 +583,7 @@ impl Paykit {
             return Err(Refusal::AllowanceEnded.into());
         }
         let p = pending.proposal();
-        if (kind == Kind::AllowanceEnd) != (p.sender() == own) {
+        if (kind == Kind::AllowanceEnd) != (p.sender() == self.identity()) {
             return Err(Refusal::Usage(
                 "only the proposer withdraws a pending Allowance and only its recipient answers it"
                     .into(),
@@ -512,6 +593,25 @@ impl Paykit {
         if kind != Kind::AllowanceEnd {
             self.refuse_while_sends_held(peer).await?;
         }
+        Ok((pending, target, condition, permanent_key))
+    }
+
+    /// Open only the current pending value at the user's selected key, followed by its
+    /// permanent record. The cached value supplies the natural key for the first read.
+    pub(super) async fn answer_pending(
+        &mut self,
+        selected: &SharedRecord,
+        kind: Kind,
+    ) -> Result<String> {
+        let own = self.identity();
+        if kind == Kind::AllowanceAcceptance {
+            return Err(Refusal::AllowanceAcceptanceUnavailable.into());
+        }
+        let (pending, target, condition, permanent_key) =
+            Box::pin(self.checked_pending_answer(selected, kind)).await?;
+        let p = pending.proposal();
+        let peer = pending.counterparty();
+        let id = pending.allowance_id();
         let intent_key = key::pending_reply(&permanent_key);
         let body = AllowanceReply {
             allowance_id: id.clone(),
@@ -534,6 +634,10 @@ impl Paykit {
             &delete.0,
             &delete.1,
         )?;
+        let OpKind::RecordPut(put) = &delete.1 else {
+            return Err(PaykitError::corrupt());
+        };
+        let sealed_delete = put.value_sealed.clone();
         batch = batch.entry(delete);
         batch = batch.local(state::local_put(
             &key::applied_reply(&q.hash()),
@@ -551,6 +655,8 @@ impl Paykit {
                 peer: *peer,
                 message: KeptMessage::of(&q),
                 delete: delete_hash,
+                source: selected.version.into(),
+                sealed_delete,
             },
         )?;
         if kind == Kind::AllowanceEnd {

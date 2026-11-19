@@ -530,6 +530,7 @@ pub(crate) fn restore_paykit_layer(
     // and unresolved ones first observed since the backup (Paykit spec 7.2).
     let mut delivery_notices = std::collections::BTreeMap::new();
     let mut pending_conflicts = std::collections::BTreeMap::new();
+    let mut prepared_replies = std::collections::BTreeMap::new();
     let mut retirements = std::collections::BTreeMap::new();
     let mut sourced_replies = std::collections::BTreeMap::new();
     for (key, value) in restoring
@@ -850,10 +851,12 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::PendingReply(_) => {
-                state::restored::<crate::allowances::PreparedPendingReply>(&key, &value, &binder)
-                    .map_err(|_| unread())?;
-                writes.push(LocalWrite::Put { key, value });
+            StateKey::PendingReply(record) => {
+                let reply = state::restored::<crate::allowances::PreparedPendingReply>(
+                    &key, &value, &binder,
+                )
+                .map_err(|_| unread())?;
+                prepared_replies.insert(record, reply);
                 continue;
             }
             StateKey::AppliedReply(_) => {
@@ -1089,6 +1092,7 @@ pub(crate) fn restore_paykit_layer(
         restoring,
         &binder,
         pending_conflicts,
+        prepared_replies,
         retirements,
         sourced_replies,
         &mut writes,
