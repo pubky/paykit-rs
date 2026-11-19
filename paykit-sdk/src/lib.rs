@@ -57,6 +57,7 @@ mod deletions;
 mod destination;
 mod divergent;
 mod error;
+mod executor;
 mod extensions;
 mod floor;
 mod hold;

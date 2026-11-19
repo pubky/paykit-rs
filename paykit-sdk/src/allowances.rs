@@ -70,7 +70,7 @@ use crate::stored::{Placed, StoredNote};
 pub(crate) use delivery::{
     append_records, judge_append, pending_delivery, reply_is_applied, AppliedReply,
 };
-pub(crate) use original::{restore_originals, OriginalApproval};
+pub(crate) use original::{restore_originals, OriginalAllowanceApplication, OriginalApproval};
 pub(crate) use pending::PreparedPendingReply;
 pub(crate) use replies::holds_delivery as pending_conflict_holds_delivery;
 pub(crate) use replies::{
@@ -1489,6 +1489,60 @@ impl Paykit {
             }
         }
         Ok(false)
+    }
+
+    /// Condition a first grant on the exact original deletion, or a fresh observation
+    /// that the service has forgotten it. The caller separately holds its complete proof.
+    pub(crate) async fn pending_condition_for_executor(
+        &mut self,
+        peer: &[u8; 32],
+        id: &AllowanceId,
+        deletion: pubky_switch_core::shared::ApplicationRef,
+    ) -> Result<Option<pubky_switch_core::ops::Condition>> {
+        use pubky_switch_client::app::{KeptReason, RecordRead};
+        use pubky_switch_core::ops::{Condition, RecordVersion};
+        let target = allowance_record_target(Collection::AllowanceProposals, peer, id);
+        let key = self.app.record_key(&target)?;
+        if self
+            .local_get::<PendingConflict>(&key::pending_conflict(&key))
+            .await?
+            .is_some()
+        {
+            return Ok(None);
+        }
+        let read = self.app.read_record_fresh(&target).await?;
+        if !matches!(delivery::current(&target, &key, &read, true), Some(None)) {
+            return Ok(None);
+        }
+        match read {
+            RecordRead::Kept {
+                reason: KeptReason::NotFound,
+                record,
+            } => {
+                let original = RecordVersion::new(deletion.generation, deletion.seq);
+                Ok(record.is_none_or(|r| r.version == original).then_some(
+                    Condition::RecordVersion {
+                        key,
+                        version: RecordVersion::NONE,
+                    },
+                ))
+            }
+            RecordRead::Fresh(_) => {
+                let applied = self.app.read_record_application(&target).await?;
+                Ok(applied
+                    .is_some_and(|(r, revision, _)| {
+                        revision == deletion
+                            && replies::qualified_at(&r, &target, &key)
+                            && r.content == pubky_switch_client::app::RecordContent::Deleted
+                    })
+                    .then_some(Condition::RecordCurrent {
+                        key,
+                        revision: deletion,
+                        deleted: true,
+                    }))
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Whether this app keeps the counterparty's end of the Allowance at `record` as its

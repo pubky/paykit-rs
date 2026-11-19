@@ -245,6 +245,15 @@ to create the ledger. Every later ledger write needs the same execution scope.
 An unanswered write retains the original signed reply for retry. Automatic
 payment also requires the payer's explicit choice to use this wallet as executor.
 
+After the original exchange applies, the approving payer calls
+`Paykit::resume_allowance_executor` with the permanent Allowance handle to
+complete its first executor grant. Repeating that call or reopening the same
+wallet preserves the original grant. A sibling wallet, missing original
+application or changed initial ledger leaves the grant held. After a restore
+that requires consent again, show the counterparty, terms and this executor
+before calling `Paykit::confirm_allowance_executor`. These calls establish the
+first grant; automatic spending remains unavailable.
+
 | Case | What to show or do |
 |---|---|
 | `RequestStatus::Open` | Show the request and the current conditions for acting on it. |

@@ -19,6 +19,22 @@ use pubky_switch_core::shared::ApplicationRef;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// The same app's complete protected original, read again by its executor against the
+/// actual P, Q, selected proposal and all three signed service applications.
+pub(crate) struct OriginalAllowanceApplication {
+    pub(crate) counterparty: [u8; 32],
+    pub(crate) allowance_id: String,
+    pub(crate) confirmed_for_execution: bool,
+    pub(crate) decision_hash: [u8; 32],
+    pub(crate) generation: u64,
+    pub(crate) reply_hash: [u8; 32],
+    pub(crate) selected: KeptOp,
+    pub(crate) selected_condition: Condition,
+    pub(crate) permanent: KeptOp,
+    pub(crate) ledger: KeptOp,
+    pub(crate) deletion: KeptOp,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct OriginalApproval {
@@ -358,5 +374,44 @@ impl Paykit {
             self.local_put(&at, &approval).await?;
         }
         Ok(Some(approval))
+    }
+    pub(crate) async fn original_allowance_application(
+        &mut self,
+        record: &[u8; 32],
+    ) -> Result<Option<OriginalAllowanceApplication>> {
+        let Some(approval) = self.applied_original_approval(record).await? else {
+            return Ok(None);
+        };
+        let decision = approval.decision.stored(&approval.peer)?;
+        let id = named_allowance(decision.body()).ok_or_else(PaykitError::corrupt)?;
+        let opening = approval.opening.ok_or_else(PaykitError::corrupt)?;
+        let [permanent, ledger, deletion] = opening.applied.ok_or_else(PaykitError::corrupt)?;
+        let key = self.app.record_key(&allowance_record_target(
+            Collection::AllowanceProposals,
+            &approval.peer,
+            id,
+        ))?;
+        let version = opening.version.record_version();
+        let selected_condition = match opening.current_revision {
+            Some(encoded) => Condition::RecordCurrent {
+                key,
+                revision: ApplicationRef::parse(&encoded).map_err(|_| PaykitError::corrupt())?,
+                deleted: false,
+            },
+            None => Condition::RecordVersion { key, version },
+        };
+        Ok(Some(OriginalAllowanceApplication {
+            counterparty: approval.peer,
+            allowance_id: id.as_str().to_owned(),
+            confirmed_for_execution: approval.confirmed_for_execution,
+            decision_hash: decision.hash(),
+            generation: approval.generation,
+            reply_hash: opening.reply,
+            selected: opening.selected,
+            selected_condition,
+            permanent,
+            ledger,
+            deletion,
+        }))
     }
 }
