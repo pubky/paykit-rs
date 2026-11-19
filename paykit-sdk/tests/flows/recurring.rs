@@ -61,12 +61,6 @@ async fn test_recurring_request_rejected_before_acceptance() {
         matches!(refused.refusal(), Some(Refusal::Recurring)),
         "{refused:?}"
     );
-    // Its payer cancellation belongs to the flows that pay its periods.
-    let refused = wallet.cancel_request(&request, None).await.unwrap_err();
-    assert!(
-        matches!(refused.refusal(), Some(Refusal::Recurring)),
-        "{refused:?}"
-    );
     wallet.reject_request(&request, None).await.unwrap();
     let again = wallet.reject_request(&request, None).await.unwrap_err();
     assert!(

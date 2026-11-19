@@ -1240,19 +1240,7 @@ fn check_reassociations(
 /// 4.4). A period starting at `...00.500Z` is named by its second, `...00Z`, so the period
 /// starting within that second is looked up.
 fn is_period_start(recurrence: &Recurrence, start: u64) -> bool {
-    let Some(first) = start.checked_mul(1000) else {
-        return false;
-    };
-    [Some(first), first.checked_add(999)]
-        .into_iter()
-        .flatten()
-        .any(|ms| {
-            recurrence
-                .lookup(ms)
-                .ok()
-                .flatten()
-                .is_some_and(|p| p.start_secs() == start)
-        })
+    recurrence.by_start_secs(start).ok().flatten().is_some()
 }
 
 fn unrequested_json(u: &UnrequestedDestination) -> Value {
@@ -1683,8 +1671,9 @@ impl ActivityRecord {
     /// What the record is, from its messages' signed fields (Paykit wire 5.3 "Binding"): a
     /// request record when it stores the request, whose messages all name it and no period;
     /// a period record when any message names a request or a period, or `request_hash` or
-    /// `billing_period` is set, every message then naming the same request and period; else
-    /// a payment without a request.
+    /// `billing_period` is set, every message then naming the same request and period, or,
+    /// for a payer's period record that holds no message, both set and nothing else but
+    /// `manual_only`; else a payment without a request.
     ///
     /// # Errors
     ///
@@ -1722,6 +1711,21 @@ impl ActivityRecord {
         let names_any = named.iter().any(|(_, h, p)| h.is_some() || p.is_some());
         if !names_any && self.request_hash.is_none() && self.billing_period.is_none() {
             return Ok(RecordBinding::Unrequested);
+        }
+        // A payer's period record that holds no message names its request and period by its
+        // own members alone, as the record a `manual_only` mark creates (Paykit wire 5.3): it
+        // binds nothing a reader acts on but what those members say.
+        if let (true, Some(request_hash), Some(billing_period)) =
+            (named.is_empty(), self.request_hash, self.billing_period)
+        {
+            ensure(
+                self.side == ActivitySide::Payer && self.msg_ids.is_empty() && self.status.is_none(),
+                "Paykit wire 5.3: a period record without a message is a payer's, holding only request_hash, billing_period and manual_only",
+            )?;
+            return Ok(RecordBinding::Period {
+                request_hash,
+                billing_period,
+            });
         }
         let Some((_, Some(h), Some(p))) = named.first().copied() else {
             return invalid(
@@ -5335,6 +5339,40 @@ mod tests {
             ..publication(7, 1)
         };
         assert!(held.check_later_write(&other_hash).is_err());
+    }
+
+    #[test]
+    fn test_period_record_without_a_message_binds_only_as_a_payers_bare_record() {
+        let own = [1u8; 32];
+        let mut bare = ActivityRecord::new(ActivitySide::Payer, [2u8; 32]);
+        bare.request_hash = Some([3u8; 32]);
+        bare.billing_period = Some(PeriodRef {
+            starts_at: 1_767_225_600_000,
+            ends_at: 1_769_904_000_000,
+        });
+        for manual_only in [false, true] {
+            bare.manual_only = manual_only;
+            let read =
+                ActivityRecord::read(&bare.to_json().unwrap(), &own, ActivitySide::Payer).unwrap();
+            assert_eq!(
+                read.binding().unwrap(),
+                RecordBinding::Period {
+                    request_hash: [3u8; 32],
+                    billing_period: bare.billing_period.unwrap(),
+                }
+            );
+        }
+        // A payee's, one with another member, or one naming only its request, is invalid.
+        let mut payee = bare.clone();
+        payee.side = ActivitySide::Payee;
+        payee.manual_only = false;
+        assert!(payee.binding().is_err());
+        let mut status = bare.clone();
+        status.status = Some("paying".into());
+        assert!(status.binding().is_err());
+        let mut no_period = bare.clone();
+        no_period.billing_period = None;
+        assert!(no_period.binding().is_err());
     }
 
     #[test]

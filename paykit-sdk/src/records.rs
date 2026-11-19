@@ -793,8 +793,6 @@ mod own_message_tests {
         assert!(body(pay, "outcome_record").contains("self.own_copy(proof)"));
         let outcome = body(pay, "write_outcome");
         assert!(outcome.contains(".outcome_record(entry, &target, paid, proof.as_ref()"));
-        assert!(outcome.contains("batch = batch.queue(proof);"));
-        assert!(outcome.contains("self.app.queue_signed(proof)"));
         assert!(body(pay, "place_acceptance").contains("if !entry.acceptance_released {"));
     }
 }

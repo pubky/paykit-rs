@@ -128,6 +128,11 @@ existing `PaymentView::attempt_id` and use its `stage` to track progress. A dura
 pending. Use `resume_payments` to progress outstanding work, then read
 `payments()` again to refresh the journal view.
 
+When another wallet marks a subscription manual-only, the wallet that started
+a payment by hand can still resume that attempt after a restart. The SDK
+reuses the same attempt ID if the method still guarantees idempotency. A
+cancellation can withhold that repeat and leave the original payment uncertain.
+
 After restoring, process `receive` and `reconcile`, show unresolved attempts
 using the report, and complete `end_reconcile` after user confirmation.
 A missing receipt or an unavailable provider can leave the outcome unresolved.
@@ -297,6 +302,8 @@ service. Acknowledging the deletion notice leaves the credit restriction in forc
 | `Refusal::SettlementBucketFull` | Wait for the payee to decide whether to issue an unmarked receipt. Pass the explicit choice through `ReceiptDetails::with_unmarked_credit_confirmed`. |
 | `Refusal::Subscribed` | Show that the recurring request is already accepted. |
 | `Refusal::NotSubscribed` | Wait until the payer accepts the recurring request. |
+| `Refusal::PeriodNotStarted` | Show when this Billing Period starts. If the payer chooses to pay early, call `pay_period` for that period with `PayOptions::with_early_payment_confirmed`. After a payer-provider loss, an older subscription may already have paid this period early. Keep it pending while that history is incomplete. |
+| `Refusal::AttemptedPeriodsFull` | Wait for an existing period attempt to finish or reconcile its outcome before starting another. |
 | `Refusal::Destination` | Show the failed destination check and refresh when the payee has a usable endpoint. |
 | `Refusal::AttemptFailed` | The attempt was recorded failed before dispatch. Show its enclosed refusal. |
 | `Refusal::NoDestination` | Show why no endpoint could be used, including failed public app reads if available. |
