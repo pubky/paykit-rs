@@ -14,7 +14,7 @@ use pubky_switch_core::{
 use serde::Deserialize;
 
 use crate::error::{ensure, Error, Result};
-use crate::scopes::verify_certificate;
+use crate::scopes::{certificate_in_force_at_write, verify_certificate};
 
 /// The signature domain for an original app's recovery report.
 pub const RECOVERY_UPLOAD_LABEL: &str = "paykit/v1/recovery-upload";
@@ -90,9 +90,7 @@ impl RecoveryCommitments {
         ensure(
             identity.identity() == opening.identity()
                 && cert.app_id() == *original
-                && identity.counts_at(original, &cert.hash(), written)
-                && cert.issued_at() <= written
-                && !cert.expired_at(written),
+                && certificate_in_force_at_write(identity, &cert, written),
             "Paykit wire 5.10: invalid original app certificate",
         )?;
         let commitments = Self {

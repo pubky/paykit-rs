@@ -6,8 +6,12 @@ use paykit_lib::collections::Collection;
 use paykit_lib::recovery::{RecoveryCommitments, RECOVERY_UPLOAD_LABEL};
 use paykit_sdk::{AppScopes, PaykitConfig};
 use pubky_switch_client::app::{App, Collection as SwitchCollection, RecordTarget};
-use pubky_switch_client::testing::{ProtocolSpec, TestProtocol};
+use pubky_switch_client::testing::{
+    issue_cert, AppSpec, ProtocolSpec, ScriptedSwitch, TestProtocol,
+};
 use pubky_switch_core::enc::{b64, lp};
+use pubky_switch_core::ops::OpKind;
+use pubky_switch_core::records::{RemovedApp, RenewedCert};
 
 use crate::common::{spec, store, World};
 use crate::provider_loss::{declare_loss, follow_loss};
@@ -37,9 +41,105 @@ async fn party(w: &World, name: &str, scopes: AppScopes, lists_read: bool) -> Ap
     app
 }
 
-async fn reads_report(original_lists_read: bool, publisher_lists_read: bool) -> bool {
+#[derive(Clone, Copy, Debug)]
+enum Role {
+    Original,
+    Publisher,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Change {
+    RemovedAtWrite,
+    RemovedBeforeWrite,
+    RenewalEndsAfterWrite,
+    RenewalEndsAtWrite,
+}
+
+/// Publish signed successors on the recovered service after the report's write.
+fn change_standing(
+    w: &World,
+    service: &ScriptedSwitch,
+    app: &App,
+    name: &str,
+    change: Change,
+    written: u64,
+) {
+    let id = app.app_id();
+    w.clock.advance_ms(2_000);
+    let doc = match change {
+        Change::RemovedAtWrite | Change::RemovedBeforeWrite => {
+            let distrust_from = if matches!(change, Change::RemovedAtWrite) {
+                written
+            } else {
+                written - 1
+            };
+            w.alice
+                .sign_next(|body| {
+                    body.apps.retain(|member| member.app_id != id);
+                    body.removed.push(RemovedApp {
+                        app_id: id,
+                        distrust_from,
+                    });
+                })
+                .unwrap()
+        }
+        Change::RenewalEndsAfterWrite | Change::RenewalEndsAtWrite => {
+            let until = if matches!(change, Change::RenewalEndsAfterWrite) {
+                written + 1
+            } else {
+                written
+            };
+            let scopes: Vec<_> = app.cert().scopes().iter().map(String::as_str).collect();
+            let renewed = issue_cert(
+                w.alice.identity().key(),
+                &w.alice.identity().app_keys(name),
+                &AppSpec::new(&scopes).with_permissions(app.cert().permissions()),
+                written,
+            )
+            .unwrap();
+            service
+                .signer_op(OpKind::CertPut {
+                    target_app_id: id,
+                    cert: renewed.signed().clone(),
+                })
+                .unwrap();
+            let open = w
+                .alice
+                .sign_next(|body| {
+                    body.apps
+                        .iter_mut()
+                        .find(|member| member.app_id == id)
+                        .unwrap()
+                        .cert = renewed.hash();
+                    body.renewed.push(RenewedCert {
+                        app_id: id,
+                        cert: app.cert().hash(),
+                        until: None,
+                    });
+                })
+                .unwrap();
+            service.deliver_identity(&open).unwrap();
+            w.alice
+                .sign_next(|body| {
+                    body.renewed
+                        .iter_mut()
+                        .find(|entry| entry.cert == app.cert().hash())
+                        .unwrap()
+                        .until = Some(until);
+                })
+                .unwrap()
+        }
+    };
+    service.deliver_identity(&doc).unwrap();
+}
+
+async fn reads_report(
+    original_lists_read: bool,
+    publisher_lists_read: bool,
+    change: Option<(Role, Change)>,
+) -> bool {
     let w = World::new();
-    let original = party(&w, "original", AppScopes::new(), original_lists_read).await;
+    let mut original = party(&w, "original", AppScopes::new(), original_lists_read).await;
     let mut publisher = party(
         &w,
         "publisher",
@@ -54,7 +154,7 @@ async fn reads_report(original_lists_read: bool, publisher_lists_read: bool) -> 
             AppScopes::new().recovery().build().unwrap(),
         )
         .await;
-    declare_loss(&w);
+    let service = declare_loss(&w);
     follow_loss(&mut reader).await;
     publisher.refresh_identity().await.unwrap();
     publisher.follow_provider().await.unwrap();
@@ -87,6 +187,7 @@ async fn reads_report(original_lists_read: bool, publisher_lists_read: bool) -> 
         SwitchCollection::new(family.name(), family.fixed_policy()),
         &lp(&[&id, &opening.hash()]),
     );
+    w.clock.advance_ms(3_000);
     publisher
         .put_record(&target, &payload, vec![])
         .await
@@ -106,8 +207,24 @@ async fn reads_report(original_lists_read: bool, publisher_lists_read: bool) -> 
             .own_identity()
             .counts_at(&cert.app_id(), &cert.hash(), written));
     }
+    let mut removed = None;
+    if let Some((role, change)) = change {
+        original.refresh_identity().await.unwrap();
+        original.follow_provider().await.unwrap();
+        let (app, name) = match role {
+            Role::Publisher => (&publisher, "publisher"),
+            Role::Original => (&original, "original"),
+        };
+        change_standing(&w, &service, app, name, change, written);
+        if matches!(change, Change::RemovedAtWrite | Change::RemovedBeforeWrite) {
+            removed = Some(app.app_id());
+        }
+    }
     let members = reader.recovery_members().await.unwrap().unwrap();
-    assert!(members.originals.contains(&id));
+    for member in [id, publisher.app_id()] {
+        assert_eq!(members.removed.contains(&member), removed == Some(member));
+        assert_eq!(members.originals.contains(&member), removed != Some(member));
+    }
     match members.reports.as_slice() {
         [] => false,
         [report] => {
@@ -123,15 +240,63 @@ async fn reads_report(original_lists_read: bool, publisher_lists_read: bool) -> 
 
 #[tokio::test]
 async fn test_recovery_reports_accepts_a_relay_for_a_contacts_only_original() {
-    assert!(Box::pin(reads_report(true, true)).await);
+    assert!(Box::pin(reads_report(true, true, None)).await);
 }
 
 #[tokio::test]
 async fn test_recovery_reports_omits_an_original_missing_a_required_permission() {
-    assert!(!Box::pin(reads_report(false, true)).await);
+    assert!(!Box::pin(reads_report(false, true, None)).await);
 }
 
 #[tokio::test]
 async fn test_recovery_reports_omits_a_publisher_missing_a_required_permission() {
-    assert!(!Box::pin(reads_report(true, false)).await);
+    assert!(!Box::pin(reads_report(true, false, None)).await);
+}
+
+#[tokio::test]
+async fn test_recovery_reports_removal_includes_the_cutoff_for_each_signer() {
+    for role in [Role::Original, Role::Publisher] {
+        assert!(
+            Box::pin(reads_report(
+                true,
+                true,
+                Some((role, Change::RemovedAtWrite))
+            ))
+            .await,
+            "{role:?}"
+        );
+        assert!(
+            !Box::pin(reads_report(
+                true,
+                true,
+                Some((role, Change::RemovedBeforeWrite))
+            ))
+            .await,
+            "{role:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_recovery_reports_closed_renewal_excludes_its_end_for_each_signer() {
+    for role in [Role::Original, Role::Publisher] {
+        assert!(
+            Box::pin(reads_report(
+                true,
+                true,
+                Some((role, Change::RenewalEndsAfterWrite))
+            ))
+            .await,
+            "{role:?}"
+        );
+        assert!(
+            !Box::pin(reads_report(
+                true,
+                true,
+                Some((role, Change::RenewalEndsAtWrite))
+            ))
+            .await,
+            "{role:?}"
+        );
+    }
 }

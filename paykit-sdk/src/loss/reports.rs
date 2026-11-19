@@ -2,7 +2,7 @@
 
 use paykit_lib::{
     recovery::RecoveryCommitments,
-    scopes::{verify_certificate, RECOVERY},
+    scopes::{certificate_in_force_at_write, verify_certificate, RECOVERY},
 };
 use pubky_switch_client::app::RecordTarget;
 use pubky_switch_core::{enc::lp, records::IdentityDoc, shared::ApplicationRef};
@@ -21,7 +21,8 @@ pub struct RecoveryMembers {
     /// Original apps for which the opening has no verified removal.
     pub originals: Vec<[u8; 16]>,
     /// Current reports whose original signature and publishing app were verified.
-    /// The application identifies the exact write. Its commitments can still
+    /// A removed original can have a verified earlier report. The application
+    /// identifies the exact write. Its commitments can still
     /// describe unresolved work.
     pub reports: Vec<RecoveryReport>,
     /// Original apps explicitly removed by a verified successor of this opening.
@@ -99,12 +100,7 @@ impl Paykit {
         };
         if writer.app_id() != record.writer
             || !writer.holds_scope(RECOVERY)
-            || !self
-                .app
-                .own_identity()
-                .counts_at(&writer.app_id(), &writer.hash(), written)
-            || written < writer.issued_at()
-            || writer.expired_at(written)
+            || !certificate_in_force_at_write(self.app.own_identity(), &writer, written)
         {
             return Ok(None);
         }
@@ -203,11 +199,9 @@ impl Paykit {
                 members.removed.push(member.app_id);
             } else {
                 members.originals.push(member.app_id);
-                if let Some(report) =
-                    Box::pin(self.original_report(&opening, &member.app_id)).await?
-                {
-                    members.reports.push(report);
-                }
+            }
+            if let Some(report) = Box::pin(self.original_report(&opening, &member.app_id)).await? {
+                members.reports.push(report);
             }
         }
         self.refresh_recovery_reader().await?;
