@@ -19,7 +19,9 @@ use paykit_sdk::{
     AppScopes, PayOptions, PayOutcome, PayeeStatus, Paykit, ReceiptsOf, Refusal, RequestDraft,
     RequestRef, RequestedScopes, Timer,
 };
-use pubky_switch_client::app::{Collection as SwitchCollection, RecordTarget};
+use pubky_switch_client::app::{
+    Collection as SwitchCollection, RecordTarget, DEFAULT_CURSOR_DEFER_MS,
+};
 use pubky_switch_client::client::answers::FeedQuery;
 use pubky_switch_client::store::MemoryStore;
 use pubky_switch_client::transport::BoxFuture;
@@ -231,6 +233,11 @@ async fn service_cursor(client: &SwitchClient) -> TestResult<u64> {
         .cursor)
 }
 
+async fn shared_position(client: &SwitchClient, key: &[u8; 32]) -> TestResult<(u64, u64)> {
+    let record = client.record(key).await?.view;
+    Ok((record.version, service_cursor(client).await?))
+}
+
 async fn publish_after_restart(world: &World, shared: Shared, restart: Restart) -> TestResult {
     const SHOP: &str = "https://shop.payment.test";
     let payer = setup_identity(world, "buyer", "https://buyer.payment.test").await?;
@@ -434,9 +441,11 @@ async fn publish_after_restart(world: &World, shared: Shared, restart: Restart) 
             .await?
         }
     };
+    let reopened = shared_position(&observer, &key).await?;
     shop.app_mut().read_record_fresh(&target).await?;
+    let fresh = shared_position(&observer, &key).await?;
     shop.receive(None).await?;
-    shop.app_mut().flush_cursor().await?;
+    let received = shared_position(&observer, &key).await?;
     till.app_mut().read_record_fresh(&target).await?;
     till.receive(None).await?;
     let final_record = till
@@ -481,11 +490,30 @@ async fn publish_after_restart(world: &World, shared: Shared, restart: Restart) 
                 deleted: shared == Shared::Deleted,
             }));
     }
+    let at_application = [reopened, fresh, received]
+        .into_iter()
+        .find(|(version, _)| *version == final_record.version.version)
+        .ok_or("no applied publication at the service")?;
+    for (version, cursor) in [reopened, fresh, received] {
+        if version < final_record.version.version {
+            assert!(
+                cursor < delete.version.version,
+                "cursor {cursor} before publication"
+            );
+        }
+    }
+    // Publication may release the deletion before the shop has read its own replacement.
+    shop.receive(None).await?;
+    let next_local = shop.app().cursor().seq;
+    let next_service = service_cursor(&observer).await?;
+    assert!(next_local >= final_record.version.version);
+    // The service can learn the committed local position on a later ordinary poll.
+    world.advance_ms(DEFAULT_CURSOR_DEFER_MS + 1);
+    shop.receive(None).await?;
     let after = service_cursor(&observer).await?;
     assert!(
         after >= final_record.version.version,
-        "cursor {after}, final {:?}",
-        final_record.version
+        "cursor {after} after reading the shared replacement"
     );
     assert!(shop.payee_deletion_notices().await?.is_empty());
     let retained = shop.retained_payee_receipts().await?;
@@ -514,7 +542,9 @@ async fn publish_after_restart(world: &World, shared: Shared, restart: Restart) 
         serde_json::json!({
             "backend": format!("{:?}", world.backend()), "current": format!("{shared:?}"), "restart": format!("{restart:?}"),
             "delete": delete.version.version, "compared": current.version, "published": final_record.version.version,
-            "cursor_before": before, "cursor_after": after, "receipt_hash": pubky_switch_core::enc::b64(&receipt.hash()),
+            "cursor_before": before, "cursor_at_publication": at_application.1,
+            "cursor_after_receive": received.1, "next_local": next_local, "next_service": next_service,
+            "cursor_after": after, "receipt_hash": pubky_switch_core::enc::b64(&receipt.hash()),
             "writer": pubky_switch_core::enc::b64(&final_record.writer), "rail_executions": 1,
         })
     );
