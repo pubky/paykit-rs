@@ -52,6 +52,19 @@ struct ReopenedProposal {
 }
 
 impl PendingRetirement {
+    /// Only the closed lifetime of this withdrawal's applied delete permits its append.
+    pub(super) fn withdrawal_after(
+        &self,
+        original: SeenVersion,
+    ) -> pubky_switch_client::app::AppendDecision {
+        use pubky_switch_client::app::AppendDecision::{Hold, Send, Withdraw};
+        match self.version.cmp(&original) {
+            Ordering::Less => Hold,
+            Ordering::Equal if self.reopened.is_none() => Send,
+            _ => Withdraw,
+        }
+    }
+
     pub(super) fn retires(&self, source: SeenVersion) -> bool {
         source < self.version
     }

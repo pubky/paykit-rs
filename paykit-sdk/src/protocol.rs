@@ -1337,12 +1337,7 @@ impl Protocol for PaykitProtocol {
         delivery: &pubky_switch_client::app::DeliveryView<'_>,
     ) -> Result<bool, StoreFailure> {
         let kind = MessageKind::parse(&delivery.message().kind);
-        let pending = match &kind {
-            Ok(MessageKind::Paykit(Kind::AllowanceProposal | Kind::AllowanceRejection)) => true,
-            Ok(MessageKind::Paykit(Kind::AllowanceEnd)) => delivery.message().refs.len() == 1,
-            _ => false,
-        };
-        if pending
+        if crate::allowances::pending_delivery(delivery.message())
             && (crate::allowances::pending_conflict_holds_delivery(delivery)
                 .map_err(view_failure)?
                 || !crate::allowances::reply_is_applied(delivery)?)

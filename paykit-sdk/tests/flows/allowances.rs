@@ -10571,6 +10571,187 @@ async fn test_pending_withdrawal_cannot_close_a_later_identical_recreation() {
 }
 
 #[tokio::test]
+async fn test_queued_withdrawal_after_reload_keeps_identical_recreated_proposals() {
+    Box::pin(queued_withdrawal_after_reload(LaterProposal::Pending)).await;
+}
+
+#[tokio::test]
+async fn test_queued_withdrawal_after_reload_cannot_use_the_next_deletion() {
+    Box::pin(queued_withdrawal_after_reload(LaterProposal::Withdrawn)).await;
+}
+
+#[tokio::test]
+async fn test_queued_withdrawal_after_reload_keeps_the_permanent_acceptance() {
+    Box::pin(queued_withdrawal_after_reload(LaterProposal::Accepted)).await;
+}
+
+enum LaterProposal {
+    Pending,
+    Withdrawn,
+    Accepted,
+}
+
+async fn queued_withdrawal_after_reload(later: LaterProposal) {
+    use pubky_switch_client::app::Delivery;
+    use pubky_switch_client::store::MemoryStore;
+    use std::sync::Arc;
+
+    let w = World::new();
+    let store = Arc::new(MemoryStore::new());
+    let scopes = AppScopes::new()
+        .pay()
+        .allowance()
+        .manage_contacts()
+        .build()
+        .unwrap();
+    let mut wallet = Box::pin(w.join_with(
+        &w.alice,
+        "wallet",
+        scopes.clone(),
+        Default::default(),
+        store.clone(),
+    ))
+    .await;
+    let mut sibling = Box::pin(alice_app(&w, "phone", scopes)).await;
+    let mut shop = Box::pin(shop(&w)).await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let proposal = wallet
+        .propose_allowance(w.bob_id(), AllowanceRole::Allower, terms())
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    let local = pending_target(&w.bob_id(), &proposal.allowance_id);
+    let remote = pending_target(&w.alice_id(), &proposal.allowance_id);
+    let local_key = wallet.app().record_key(&local).unwrap();
+    let remote_key = shop.app().record_key(&remote).unwrap();
+    let original = Box::pin(pending_at(&wallet, &proposal.record)).await;
+    let remote_public = shop
+        .app()
+        .record_key(&allowances_target(&w.alice_id(), &proposal.allowance_id))
+        .unwrap();
+    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    let withdrawal = wallet.end_allowance(&proposal.record).await.unwrap();
+    assert!(matches!(
+        wallet.app().delivery(&withdrawal).await.unwrap(),
+        Some(Delivery::Queued { .. })
+    ));
+    let old_delete = wallet
+        .app()
+        .shared_record(&local_key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        old_delete.content,
+        pubky_switch_client::app::RecordContent::Deleted
+    );
+    let app_id = wallet.app_id();
+    drop(wallet);
+
+    // Both accounts again place the very same signed P under the same Allowance ID.
+    sibling.app_mut().read_record_fresh(&local).await.unwrap();
+    Box::pin(records_proposal(
+        &mut sibling,
+        original.proposal(),
+        &proposal.allowance_id,
+    ))
+    .await;
+    shop.app_mut().hold_queued(&w.alice_id()).await.unwrap();
+    shop.reject_allowance(&remote_public).await.unwrap();
+    Box::pin(records_proposal(
+        &mut shop,
+        original.proposal(),
+        &proposal.allowance_id,
+    ))
+    .await;
+    match later {
+        LaterProposal::Pending => (),
+        LaterProposal::Withdrawn => {
+            sibling.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+            sibling.end_allowance(&proposal.record).await.unwrap();
+        }
+        LaterProposal::Accepted => {
+            let q = Box::pin(own_acceptance_recorded(&mut shop, &remote_public)).await;
+            Box::pin(install_accepted_record(
+                &mut sibling,
+                &proposal.record,
+                original,
+                q,
+            ))
+            .await;
+        }
+    }
+    let remote_live = shop
+        .app()
+        .shared_record(&remote_key)
+        .await
+        .unwrap()
+        .unwrap();
+    let local_current = sibling
+        .app()
+        .shared_record(&local_key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(local_current.version > old_delete.version);
+    let mut wallet = Box::pin(Paykit::load(
+        w.env(&w.alice, store),
+        Default::default(),
+        app_id,
+        w.rail.clone(),
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: format!("records/{}", pubky_switch_core::enc::b64(&proposal.record)),
+            after: 0,
+        });
+    wallet.app_mut().flush_message(&withdrawal).await.unwrap();
+    assert!(matches!(
+        wallet.app().delivery(&withdrawal).await.unwrap(),
+        Some(Delivery::Queued { .. })
+    ));
+    w.clock.advance_ms(60_000);
+    wallet.flush().await.unwrap();
+    wallet.app_mut().flush_message(&withdrawal).await.unwrap();
+    let current = wallet
+        .app()
+        .shared_record(&local_key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.version, local_current.version);
+    assert_eq!(current.content, local_current.content);
+    assert!(!matches!(
+        wallet.app().delivery(&withdrawal).await.unwrap(),
+        Some(Delivery::Accepted { .. } | Delivery::Queued { .. })
+    ));
+    assert!(Box::pin(received_originals(&mut shop, &[&withdrawal]))
+        .await
+        .is_empty());
+    let current = shop
+        .app()
+        .shared_record(&remote_key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.version, remote_live.version);
+    assert_eq!(current.content, remote_live.content);
+    if matches!(later, LaterProposal::Accepted) {
+        for (app, key) in [(&wallet, &proposal.record), (&shop, &remote_public)] {
+            let value = Box::pin(raw(app, key)).await;
+            let accepted = AllowanceRecord::read(&value, &app.identity()).unwrap();
+            assert!(accepted.response.is_some() && accepted.end.is_none());
+        }
+    }
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
 async fn test_pending_withdrawal_retries_the_exact_placed_proposal_on_cold_load() {
     Box::pin(withdraw_before_receiving(WithdrawalCase::Cold)).await;
 }

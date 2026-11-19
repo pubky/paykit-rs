@@ -68,7 +68,9 @@ use crate::requests::MessageDelivery;
 use crate::state::{self, key, Tx};
 use crate::stored::{Placed, StoredNote};
 
-pub(crate) use delivery::{append_records, judge_append, reply_is_applied, AppliedReply};
+pub(crate) use delivery::{
+    append_records, judge_append, pending_delivery, reply_is_applied, AppliedReply,
+};
 pub(crate) use pending::PreparedPendingReply;
 pub(crate) use replies::holds_delivery as pending_conflict_holds_delivery;
 pub(crate) use replies::{

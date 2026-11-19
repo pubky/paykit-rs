@@ -379,11 +379,11 @@ impl Paykit {
             let pending_key = self.app.record_key(&target)?;
             let applied = deletes
                 .get(&(pending_key, intent.delete))
-                .is_some_and(|write| write.signing_key == msg.cert().signing_key());
+                .filter(|write| write.signing_key == msg.cert().signing_key());
             let mut writes = vec![LocalWrite::Delete {
                 key: format!("{}{at}", key::PENDING_REPLIES).into_bytes(),
             }];
-            let msg_id = if applied {
+            let msg_id = if applied.is_some() {
                 // Queue first. A stop before the local release still leaves the identical
                 // signed original recoverable from the applied delete.
                 match self.app.queue_stored(msg.plaintext()).await {
@@ -433,11 +433,7 @@ impl Paykit {
             };
             writes.push(state::local_put(
                 &key::applied_reply(&msg.hash()),
-                &AppliedReply {
-                    created_at_ms: msg.message().created_at_ms,
-                    reply: msg.hash(),
-                    proposal: msg.message().refs[0],
-                },
+                &AppliedReply::new(&msg, applied.map(|write| write.version)),
             )?);
             self.app
                 .protocol_commit(crate::protocol::BACKUP_NAME, &writes)
@@ -677,11 +673,7 @@ impl Paykit {
         batch = batch.entry(delete);
         batch = batch.local(state::local_put(
             &key::applied_reply(&q.hash()),
-            &AppliedReply {
-                created_at_ms: q.message().created_at_ms,
-                reply: q.hash(),
-                proposal: p.hash(),
-            },
+            &AppliedReply::new(&q, None),
         )?);
         let msg_id = reply.msg_id().to_owned();
         let mut prepare = state::Tx::default();
@@ -702,11 +694,30 @@ impl Paykit {
             )?;
         }
         self.local_commit(prepare).await?;
-        batch = batch.local(LocalWrite::Delete {
-            key: intent_key.as_bytes().to_vec(),
-        });
+        if kind != Kind::AllowanceEnd {
+            batch = batch.local(LocalWrite::Delete {
+                key: intent_key.as_bytes().to_vec(),
+            });
+        }
         match self.submit(batch.queue(reply)).await {
-            Ok(_) => {
+            Ok(submitted) => {
+                if kind == Kind::AllowanceEnd {
+                    // The client checked this one deletion's proof before settling the batch.
+                    // Keep the prepared input until its authenticated version is durable.
+                    let [proof] = submitted.proofs.as_slice() else {
+                        return Err(PaykitError::corrupt());
+                    };
+                    let at = proof
+                        .record_revision()
+                        .map_err(|_| PaykitError::corrupt())?;
+                    let mut writes = state::Tx::default();
+                    writes.put(
+                        &key::applied_reply(&q.hash()),
+                        &AppliedReply::new(&q, Some(RecordVersion::new(at.generation, at.seq))),
+                    )?;
+                    writes.delete(&intent_key);
+                    self.local_commit(writes).await?;
+                }
                 self.delivered(&msg_id).await?;
             }
             Err(error) if error.kept_batch().is_some() => (),
