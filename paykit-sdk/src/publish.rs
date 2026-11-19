@@ -778,6 +778,39 @@ impl Paykit {
         Ok(())
     }
 
+    /// A second installation can reserve a newer version at a different permanent
+    /// key. Check the later generations without assuming every generation has a key.
+    async fn newer_list_reserved(&mut self, issue: &ListReservation) -> Result<bool> {
+        if self.app.list_collection(&collection()).await?.more {
+            return Err(counter_unavailable().into());
+        }
+        let publisher = self.app_id();
+        for record in self.app.records_of(COLLECTION).await? {
+            let Some(generation) = record.policy.permanent.as_ref().and_then(|p| p.generation)
+            else {
+                continue;
+            };
+            if generation > issue.generation
+                && self
+                    .app
+                    .record_key(&target(&publisher, &issue.recipient, generation))?
+                    == record.key
+            {
+                self.publication_at(&record).await?;
+                return Ok(true);
+            }
+        }
+        Ok(self
+            .local_scan::<PublicationHistory>(key::PUBLICATION_HISTORY)
+            .await?
+            .into_iter()
+            .any(|(_, history)| {
+                history.floor.publisher == publisher
+                    && history.floor.recipient == issue.recipient
+                    && history.floor.generation > issue.generation
+            }))
+    }
+
     /// Current version and unknown members for a new list. A withdrawal timer
     /// additionally names the exact application whose undelivered message is being replaced.
     async fn publication_base(
@@ -798,6 +831,10 @@ impl Paykit {
             conditions.push(condition);
             if prior.generation == generation {
                 return Ok((current.counter, current.unknown, conditions));
+            }
+            if self.newer_list_reserved(prior).await? {
+                self.retire_obsolete_withdrawal(prior).await?;
+                return Err(counter_unavailable().into());
             }
         }
         match self.app.read_record_fresh(target).await? {

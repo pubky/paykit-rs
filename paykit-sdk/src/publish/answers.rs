@@ -1,8 +1,8 @@
 //! A publisher's bounded replies to one chosen recipient (Paykit spec 8.4).
 
 use super::{
-    collection, counter_unavailable, target, ListRecipient, ListReservation, ListSettings,
-    PublicationHistory, COLLECTION, DAY, HOUR, SCOPE,
+    counter_unavailable, target, ListRecipient, ListReservation, ListSettings, COLLECTION, DAY,
+    HOUR, SCOPE,
 };
 use crate::error::{PaykitError, Result};
 use crate::receive::{keep_local, local, Fail};
@@ -644,37 +644,6 @@ impl Paykit {
             }
         }
         Ok(accepted)
-    }
-
-    /// A second installation can reserve a newer version at a different permanent
-    /// key. Check the later generations without assuming every generation has a key.
-    async fn newer_list_reserved(&mut self, issue: &ListReservation) -> Result<bool> {
-        if self.app.list_collection(&collection()).await?.more {
-            return Err(counter_unavailable().into());
-        }
-        let publisher = self.app_id();
-        for record in self.app.records_of(COLLECTION).await? {
-            let Some(generation) = record.policy.permanent.and_then(|p| p.generation) else {
-                continue;
-            };
-            if generation > issue.generation
-                && self
-                    .app
-                    .record_key(&target(&publisher, &issue.recipient, generation))?
-                    == record.key
-            {
-                return Ok(true);
-            }
-        }
-        Ok(self
-            .local_scan::<PublicationHistory>(key::PUBLICATION_HISTORY)
-            .await?
-            .into_iter()
-            .any(|(_, history)| {
-                history.floor.publisher == publisher
-                    && history.floor.recipient == issue.recipient
-                    && history.floor.generation > issue.generation
-            }))
     }
 
     /// A repeat can expose only the newest signed version of this recipient's

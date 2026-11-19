@@ -2323,6 +2323,68 @@ async fn test_publication_retry_after_a_move_requires_the_original_application()
 }
 
 #[tokio::test]
+async fn test_publication_withdrawal_retry_respects_a_newer_issue_in_an_intervening_generation() {
+    use crate::common::{store, BOB_ORIGIN, HOUR_MS};
+    use paykit_sdk::PaykitConfig;
+    use pubky_switch_core::records::Inbox;
+
+    let w = World::new();
+    let buyer = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let payer = buyer.identity();
+    shop.app_mut().invite(&payer).await.unwrap();
+    shop.set_list_endpoints(offered("lno1first")).await.unwrap();
+    shop.publish_list_to(payer).await.unwrap();
+    assert_eq!(give_up_withdrawal(&mut shop, payer).await.counter, 2);
+    shop.receive(None).await.unwrap();
+    let saved = shop.backup().await.unwrap();
+
+    let mut service = w.bob.switch().clone();
+    for generation in 2..=3 {
+        let next = service.change_key_into([70 + generation as u8; 32]);
+        w.router.add_switch(BOB_ORIGIN, &next);
+        let moved = w
+            .bob
+            .sign_next(|body| {
+                body.generation = generation;
+                body.inbox = Inbox::new(BOB_ORIGIN, next.service_key());
+            })
+            .unwrap();
+        next.deliver_identity(&moved).unwrap();
+        shop.app_mut().refresh_identity().await.unwrap();
+        shop.app_mut().follow_provider().await.unwrap();
+        if generation == 2 {
+            let mut restored = Paykit::restore(
+                w.env(&w.bob, store()),
+                PaykitConfig::default(),
+                &saved,
+                w.rail.clone(),
+                w.timer(),
+            )
+            .await
+            .unwrap();
+            restored.receive(None).await.unwrap();
+            let issues = published(&restored, &buyer).await;
+            let newer = issues.last().unwrap();
+            assert_eq!(newer.version, paykit_lib::ListVersion::new(2, 1).unwrap());
+            assert!(newer.withdrawn);
+        }
+        service = next;
+    }
+    w.clock.advance_ms(HOUR_MS);
+    shop.receive(None).await.unwrap();
+    let current = target(&shop, &payer, 3);
+    assert!(matches!(
+        shop.app_mut().read_record_fresh(&current).await.unwrap(),
+        RecordRead::Kept {
+            record: None,
+            reason: KeptReason::NotFound
+        }
+    ));
+    assert_eq!(published(&shop, &buyer).await.len(), 1);
+}
+
+#[tokio::test]
 async fn test_publication_stops_retrying_when_its_only_older_offer_never_reached_the_payer() {
     for receive_before_withdrawal in [true, false] {
         let w = World::new();
