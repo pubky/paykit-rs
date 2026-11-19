@@ -20,11 +20,11 @@ The design may still change before it is frozen. The spec's Section 17 lists the
 
 The spec's Status paragraph is the full statement of implementation status; this section summarizes its settlement part.
 
-`paykit-lib` derives settlement bucket keys under the permanent policy. Its vectors cover the policy hash, blinded bucket key, sealed bucket and marks. It checks that plain and labelled selling certificates hold `paykit_settlements` and `paykit_contacts`.
+`paykit-lib` derives settlement bucket keys under the permanent policy. The `policies` and `record_keys` cases in `identifiers.json` give the policy hash and bucket key derivation. The `settlement_marks` cases in `sealed.json` show how buckets are encoded, sealed, checked and merged. It checks that plain and labelled selling certificates hold `paykit_settlements` and `paykit_contacts`.
 
 Wire Section 5 describes how a payee can retain a receipt it already issued when it observes a deletion. Section 18 lists the SDK cases for receipt verification, attribution, credit restrictions and restore. The SDK on `v0.2` implements these receipt checks and preserves the installation’s verified receipt and credit restriction across an in-place restore. For a one-time request, a payee wallet that verifies the original deletion and its predecessor in the current service generation can publish the receipt it already issued. It holds its service cursor until the conditional write applies or it verifies that another app has published the complete record (wire Section 5).
 
-The SDK writes a settlement mark and the signed receipt in the same conditional batch and queues delivery only when requested. Two payee apps that confirm the same settlement concurrently can apply one marked credit, including when they name different occurrences. The wallet tests exercise both the first write and an existing bucket, with the scripted and PostgreSQL services. Section 18 also requires repair after provider loss. Wire Section 5 governs protective publication for other record families.
+The SDK writes a settlement mark and the signed receipt in the same conditional batch and queues delivery only when requested. Two payee apps that confirm the same settlement concurrently can apply one marked credit, including when they name different occurrences. The wallet tests exercise both the first write and an existing bucket, with the scripted and PostgreSQL services. After provider loss, wallet tests cover repairing an uploaded bucket from retained marks without another payment and preserving known marks when the bucket is absent. Wire Section 5 governs protective publication for other record families.
 
 ## Bounded message recovery
 
