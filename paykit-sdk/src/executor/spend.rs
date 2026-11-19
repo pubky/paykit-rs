@@ -96,14 +96,20 @@ pub(super) fn accounts_for_attempt(
 }
 
 impl AllowanceReservation {
-    pub(crate) fn request(&self, record: &ActivityRecord, claim: Option<&ClaimView>) -> Result<()> {
+    pub(crate) fn request(
+        &self,
+        record: &ActivityRecord,
+        claim: Option<&ClaimView>,
+        period_start: Option<u64>,
+    ) -> Result<()> {
         let (_, request) = crate::requests::request_of(record).ok_or(Refusal::NotFound)?;
-        if request.conversion.is_some()
+        if (request.conversion.is_some() && !request.is_recurring())
             || request.amount.asset != self.checked.terms.asset
             || record.manual_only
-            || record
-                .allowance_id
-                .as_ref()
+            || period_start
+                .map_or(record.allowance_id.as_ref(), |start| {
+                    record.allowance_for(start)
+                })
                 .is_some_and(|id| id != &self.id)
         {
             return Err(held("the request does not qualify under this Allowance"));
@@ -121,6 +127,60 @@ impl AllowanceReservation {
             }
         }
         Ok(())
+    }
+
+    pub(crate) async fn subscription(
+        &self,
+        app: &mut Paykit,
+        request: &crate::RequestRef,
+        record: &ActivityRecord,
+    ) -> Result<()> {
+        self.request(record, None, None)?;
+        let (stored, body) = crate::requests::request_of(record).ok_or(Refusal::NotFound)?;
+        let terms = &self.checked.terms;
+        if terms
+            .active_from
+            .as_ref()
+            .is_some_and(|t| self.checked.at < t.ms())
+            || terms
+                .expires_at
+                .as_ref()
+                .is_some_and(|t| self.checked.at >= t.ms())
+            || terms
+                .per_payment_amount
+                .as_ref()
+                .is_some_and(|r| body.amount.value < r.minimum || body.amount.value > r.maximum)
+        {
+            return Err(held("the subscription is outside the Allowance's terms"));
+        }
+        if let Some(ids) = self.endpoints() {
+            let pricing = crate::pay::Pricing::of_request(
+                &body.amount,
+                *request,
+                None,
+                body.conversion.as_ref(),
+                pubky_switch_client::app::Initiator::Automatic,
+            )
+            .under_allowance();
+            Box::pin(app.request_destination(
+                &request.payee,
+                stored,
+                body,
+                &crate::PayOptions::default(),
+                Some(ids),
+                &pricing,
+                &mut Vec::new(),
+            ))
+            .await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn active_window(&self) -> Option<Condition> {
+        let terms = &self.checked.terms;
+        let start = terms.active_from.as_ref().map(|t| t.ms());
+        let end = terms.expires_at.as_ref().map(|t| t.ms());
+        (start.is_some() || end.is_some()).then_some(Condition::ServerTimeIn { start, end })
     }
 
     pub(crate) fn endpoints(&self) -> Option<&[PaymentEndpointIdentifier]> {

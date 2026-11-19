@@ -515,11 +515,23 @@ impl Paykit {
         conditions: Vec<Condition>,
         local: Vec<LocalWrite>,
     ) -> Result<String> {
-        let msg_id = signed.msg_id().to_owned();
         let stored = self.own_copy(&signed)?;
         let write = self
             .placed_write(target, signed.to(), role, stored, conditions)
             .await?;
+        self.queue_activity_write(signed, target, write, local)
+            .await
+    }
+
+    /// Queue the original message and the record write that makes it deliverable together.
+    pub(crate) async fn queue_activity_write(
+        &mut self,
+        signed: SignedMessage,
+        target: &ActivityTarget,
+        write: Option<(Vec<Condition>, OpKind)>,
+        local: Vec<LocalWrite>,
+    ) -> Result<String> {
+        let msg_id = signed.msg_id().to_owned();
         let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
             .queue(signed.clone())
             .locals(local.clone());
@@ -824,7 +836,7 @@ mod own_message_tests {
                 ("allowances/pending.rs", 1),
                 ("pay.rs", 1),
                 ("records.rs", 2),
-                ("requests.rs", 2),
+                ("requests.rs", 3),
             ]),
             "an own message's stored copy is made somewhere new: queue it in the same batch"
         );
@@ -851,8 +863,10 @@ mod own_message_tests {
         // Each requested delivery is queued with the write of the signed message.
         let send = body(text("records.rs"), "send_with_record");
         assert!(send.contains("self.own_copy(&signed)"));
-        assert!(send.contains(".queue(signed.clone())"));
-        assert!(send.contains("self.app.queue_signed(signed)"));
+        assert!(send.contains("self.queue_activity_write(signed, target, write, local)"));
+        let queue = body(text("records.rs"), "queue_activity_write");
+        assert!(queue.contains(".queue(signed.clone())"));
+        assert!(queue.contains("self.app.queue_signed(signed)"));
         // The held path queues nothing and owes the message in the same batch.
         let held = body(text("records.rs"), "record_held");
         assert!(held.contains("self.own_copy(&signed)"));
@@ -865,6 +879,9 @@ mod own_message_tests {
         let request = body(text("requests.rs"), "send_request_inner");
         assert!(request.contains("self.own_copy(&signed)"));
         assert!(request.contains(".queue(signed)"));
+        let answer = body(text("requests.rs"), "answer_request");
+        assert!(answer.contains("self.own_copy(&signed)"));
+        assert!(answer.contains("self.queue_activity_write(signed, &target, Some(write),"));
         let receipt = body(text("requests.rs"), "confirm_payment_with_inner");
         assert!(receipt.contains("self.own_copy(&signed)"));
         let receipt = receipt.split_whitespace().collect::<String>();

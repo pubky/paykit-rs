@@ -2227,6 +2227,7 @@ impl Paykit {
             Answer::Reject,
             reason,
             AcceptOptions::default(),
+            None,
         ))
         .await?;
         Ok(msg_id)
@@ -2261,6 +2262,7 @@ impl Paykit {
             Answer::Cancel,
             reason,
             AcceptOptions::default(),
+            None,
         ))
         .await?;
         Ok(msg_id)
@@ -2310,13 +2312,40 @@ impl Paykit {
         request: &RequestRef,
         options: AcceptOptions,
     ) -> Result<SentMessage> {
+        self.accept_subscription_as(request, options, None).await
+    }
+
+    /// Accept a recurring request under this wallet's approved Allowance (Paykit spec
+    /// 8.2, 8.3). The signed acceptance and the selected Allowance are recorded together.
+    /// Each Billing Period still requires its own eligible payment and available budget.
+    ///
+    /// # Errors
+    ///
+    /// As [`Paykit::accept_subscription`]. A missing grant, a held request or terms that
+    /// do not cover the request refuse automatic acceptance.
+    pub async fn accept_subscription_under_allowance(
+        &mut self,
+        request: &RequestRef,
+        allowance: &[u8; 32],
+    ) -> Result<SentMessage> {
+        self.accept_subscription_as(request, AcceptOptions::default(), Some(allowance))
+            .await
+    }
+
+    async fn accept_subscription_as(
+        &mut self,
+        request: &RequestRef,
+        options: AcceptOptions,
+        allowance: Option<&[u8; 32]>,
+    ) -> Result<SentMessage> {
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
         self.records_known().await?;
         // The answer's future goes on the heap, as `receive`'s does: it nests deep.
         let (msg_id, delivery) =
-            Box::pin(self.answer_request(request, Answer::Accept, None, options)).await?;
+            Box::pin(self.answer_request(request, Answer::Accept, None, options, allowance))
+                .await?;
         // An acceptance is never held: it is recorded and queued, or refused.
         let delivery = delivery.ok_or_else(PaykitError::corrupt)?;
         Ok(SentMessage { msg_id, delivery })
@@ -2328,6 +2357,7 @@ impl Paykit {
         answer: Answer,
         reason: Option<String>,
         options: AcceptOptions,
+        allowance: Option<&[u8; 32]>,
     ) -> Result<(String, Option<MessageDelivery>)> {
         self.require_pay()?;
         // An answer goes to no counterparty whose sends are held (Paykit spec 8.1, "Blocked
@@ -2338,7 +2368,11 @@ impl Paykit {
         // starts, read first when the copy is older than 10 minutes or not known, a read that
         // fails being the call's error, so it never goes on a copy not known; to a blocked
         // payee it goes only on the user's confirmation, below. It is never held.
-        let (blocked, held) = if answer == Answer::Accept {
+        let (blocked, held) = if allowance.is_some() {
+            self.refuse_while_payer_pass_owed().await?;
+            self.app.may_attempt(true).map_err(crate::pay::not_now)?;
+            (self.denied(&request.payee).await?, false)
+        } else if answer == Answer::Accept {
             (self.denied_for_user(&request.payee).await?, false)
         } else {
             if !self.deny_copy_known().await? {
@@ -2346,7 +2380,7 @@ impl Paykit {
             }
             (false, self.sends_held(&request.payee).await?)
         };
-        let (target, record) = self.payer_request(request).await?;
+        let (target, mut record) = self.payer_request(request).await?;
         let (_, body) = request_of(&record).ok_or(Refusal::NotFound)?;
         let recurring = body.is_recurring();
         let label = body.label.clone();
@@ -2386,6 +2420,26 @@ impl Paykit {
         if timed && self.reached(expiry) {
             return Err(self.expired_answer(&target, answer, None).await?);
         }
+        let funding = if let Some(key) = allowance {
+            let fresh = self.current_period_activity(&target, None).await?;
+            let request_key = self.activity_key(&target)?;
+            let held = self.app.shared_record(&request_key).await?;
+            if !matches!(fresh, Some(ref current) if current.to_json()? == record.to_json()?)
+                || !held.is_some_and(|r| r.authenticated && !r.doubtful)
+                || self.pause_at(&request_key).await?.blocks_automatic()
+            {
+                return Err(Refusal::NotNow(
+                    "the current subscription is not available for automatic acceptance".into(),
+                )
+                .into());
+            }
+            let conditions = self.app.record_condition(&request_key).await?;
+            let reservation = Box::pin(self.allowance_reservation(key, &request.payee)).await?;
+            Box::pin(reservation.subscription(self, request, &record)).await?;
+            Some((reservation, conditions))
+        } else {
+            None
+        };
         let obligation = self.obligation(&request.payee, &request.request_hash, 0);
         if !recurring {
             if let Some(read) = self.app.read_claim(&obligation).await? {
@@ -2446,7 +2500,28 @@ impl Paykit {
         } else {
             vec![self.app.claim_condition(&obligation).await?]
         };
-        let written = if held {
+        let written = if let Some((funding, original)) = funding {
+            record.allowance_id = Some(funding.id.clone());
+            let stored = self.own_copy(&signed)?;
+            if !activity::place(&mut record, role, stored) {
+                return Err(Refusal::Subscribed.into());
+            }
+            let mut conditions = conditions;
+            conditions.extend([original, funding.grant()]);
+            if let Some(active) = funding.active_window() {
+                conditions.push(active);
+            }
+            let write = self
+                .app
+                .record_op(
+                    &target.record_target(),
+                    Some(&record.to_json()?),
+                    conditions,
+                )
+                .await?;
+            self.queue_activity_write(signed, &target, Some(write), tx.into_writes())
+                .await
+        } else if held {
             self.record_held(
                 signed,
                 &target,
