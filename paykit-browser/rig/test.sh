@@ -33,9 +33,12 @@
 #                                       Default: the dispatch-enroll example, built here.
 #
 # The network tests read the origin, https://localhost:<rig port>, from
-# PAYKIT_BROWSER_RIG_ORIGIN, and the closed port from PAYKIT_BROWSER_RIG_CLOSED_PORT, at compile
-# time; this script sets them with --dispatch only. Every port must be free on both 127.0.0.1 and
-# ::1, the addresses a browser may resolve localhost to.
+# PAYKIT_BROWSER_RIG_ORIGIN, the closed port from PAYKIT_BROWSER_RIG_CLOSED_PORT, and the token
+# the rig requires for POST /rig/world from PAYKIT_BROWSER_RIG_TOKEN, at compile time; this
+# script sets them with --dispatch only. It makes a fresh random token for each run, and gives it
+# to the rig in its environment, so a page or program that does not know it cannot make the rig
+# enrol. Every port must be free on both 127.0.0.1 and ::1, the addresses a browser may resolve
+# localhost to.
 
 set -euo pipefail
 
@@ -344,8 +347,12 @@ start_dispatch_rig() {
   NO_COLOR=1 PUBKY_DISPATCH_DATABASE_URL=$database_url "$dispatch_bin" --config "$work/dispatch.toml" \
     >"$logs/dispatch.log" 2>&1 &
   dispatch_pid=$!
-  node "$rig/dispatch-rig.mjs" --listen "$rig_port" --upstream "$dispatch_port" \
-    --enroll-bin "$enroll_bin" >"$logs/rig.log" 2>&1 &
+  # A fresh token per run, in the rig's environment only: the process list shows arguments.
+  rig_token=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n') ||
+    die "could not make a random token for the rig"
+  [[ "$rig_token" =~ ^[0-9a-f]{32}$ ]] || die "could not make a random token for the rig"
+  PAYKIT_BROWSER_RIG_TOKEN=$rig_token node "$rig/dispatch-rig.mjs" --listen "$rig_port" \
+    --upstream "$dispatch_port" --enroll-bin "$enroll_bin" >"$logs/rig.log" 2>&1 &
   rig_pid=$!
 
   origin="https://localhost:$rig_port"
@@ -367,8 +374,9 @@ if [[ $dispatch -eq 1 ]]; then
   start_dispatch_rig
   export PAYKIT_BROWSER_RIG_ORIGIN=$origin
   export PAYKIT_BROWSER_RIG_CLOSED_PORT=$closed_port
+  export PAYKIT_BROWSER_RIG_TOKEN=$rig_token
 else
-  unset PAYKIT_BROWSER_RIG_ORIGIN PAYKIT_BROWSER_RIG_CLOSED_PORT
+  unset PAYKIT_BROWSER_RIG_ORIGIN PAYKIT_BROWSER_RIG_CLOSED_PORT PAYKIT_BROWSER_RIG_TOKEN
 fi
 
 failed=()
