@@ -2076,16 +2076,20 @@ enum Between {
     Restore,
 }
 
-/// Keep the lists unavailable to both the receive and the flush while their copy is unknown.
+/// Hold every due list read during a flush that exercises the unavailable-list case.
+async fn flush_held(w: &World, wallet: &mut Paykit, held: Held) {
+    if let Held::Unknown = held {
+        fail_list_read(w);
+    }
+    wallet.flush().await.unwrap();
+}
+
 async fn receive_held(w: &World, wallet: &mut Paykit, held: Held) {
     if let Held::Unknown = held {
         fail_list_read(w);
     }
     wallet.receive(None).await.unwrap();
-    if let Held::Unknown = held {
-        fail_list_read(w);
-    }
-    wallet.flush().await.unwrap();
+    flush_held(w, wallet, held).await;
 }
 
 /// Bob's request is held by alice's wallet, and its sends to bob are then `held`. The
@@ -2146,7 +2150,7 @@ async fn answer_held(held: Held, answer: Answer, between: Between) {
     let entries = w.bob.switch().entries_from(&w.alice_id());
 
     let msg_id = answer.give(&mut wallet, &request).await.unwrap();
-    wallet.flush().await.unwrap();
+    flush_held(&w, &mut wallet, held).await;
     assert_eq!(
         counts.outbox.load(std::sync::atomic::Ordering::SeqCst),
         queued,
