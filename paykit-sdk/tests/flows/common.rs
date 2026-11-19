@@ -44,6 +44,7 @@ pub fn spec() -> ProtocolSpec {
             "paykit_pay",
             "paykit_request",
             "paykit_settlements",
+            "paykit_recovery",
             "paykit_allowance",
             "paykit_allowance_execute",
             "paykit_contacts",
