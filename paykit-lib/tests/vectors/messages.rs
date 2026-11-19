@@ -419,8 +419,8 @@ multi_protocol_senders holds messages from apps whose certificates hold another 
 scopes; cancellation_roles holds a cancellation between certificates of each pair of roles; \
 conversion_terms holds the shop's period details and requests with their conversion terms \
 changed, which a payer takes or drops; conversion_amounts holds the amount a payer pays to \
-an endpoint under a request's or period details' rates; proof_members holds alice's proofs with a member \
-outside the payment it proves, which a payee drops; receipt_members holds bob's receipts \
+an endpoint under a request's or period details' rates; proof_members holds alice's proofs \
+with an extra or missing member, which a payee drops; receipt_members holds bob's receipts \
 with the payee's metadata and reference, which a payer takes or drops; list_versions holds \
 the shop's Private Payment Lists with a malformed version, which a payer drops.";
 
@@ -1227,45 +1227,54 @@ fn check_conversion_amounts(file: &Value) {
     }
 }
 
-const PROOF_MEMBERS_DESCRIPTION: &str = "Wire 4.10: alice's proofs, payment_proof of the \
-one-time request and payment_proof_unrequested of a payment without one, with one member \
-added and signed again by her wallet. amount is only in a proof of a payment without a \
+const PROOF_MEMBERS_DESCRIPTION: &str = "Wire 4.10: alice's proofs with one member added or \
+removed and signed again by her wallet. amount is only in a proof of a payment without a \
 request, whose refs are empty; billing_period, label, payment_reference and allowance_id are \
-only in a proof of a request. A payee drops each at check 10. reason is paykit-lib's \
-wording.";
+only in a proof of a request. A proof that refers to period details must name their Billing \
+Period. A payee drops each at check 10. reason is paykit-lib's wording.";
 
-/// The cases of `proof_members`: name, base and the member added.
-fn proof_cases() -> Vec<(&'static str, &'static str, &'static str, Value)> {
+/// Name, base proof, body member and value to add, or `None` to remove the member.
+type ProofCase = (&'static str, &'static str, &'static str, Option<Value>);
+
+fn proof_cases() -> Vec<ProofCase> {
     vec![
         (
             "a request's proof carrying amount",
             "payment_proof",
             "amount",
-            json!({ "asset": "btc", "value": "0.00025" }),
+            Some(json!({ "asset": "btc", "value": "0.00025" })),
         ),
         (
             "a proof without a request carrying billing_period",
             "payment_proof_unrequested",
             "billing_period",
-            json!({ "ends_at": "2026-03-31T00:00:00.000Z", "starts_at": "2026-02-28T00:00:00.000Z" }),
+            Some(
+                json!({ "ends_at": "2026-03-31T00:00:00.000Z", "starts_at": "2026-02-28T00:00:00.000Z" }),
+            ),
         ),
         (
             "a proof without a request carrying label",
             "payment_proof_unrequested",
             "label",
-            json!("shop1"),
+            Some(json!("shop1")),
         ),
         (
             "a proof without a request carrying payment_reference",
             "payment_proof_unrequested",
             "payment_reference",
-            json!("order-1042"),
+            Some(json!("order-1042")),
         ),
         (
             "a proof without a request carrying allowance_id",
             "payment_proof_unrequested",
             "allowance_id",
-            json!(crate::common::ALLOWANCE_ID),
+            Some(json!(crate::common::ALLOWANCE_ID)),
+        ),
+        (
+            "a proof referring to period details without billing_period",
+            "payment_proof_period",
+            "billing_period",
+            None,
         ),
     ]
 }
@@ -1276,8 +1285,13 @@ fn proof_members(keys: &Keys) -> Value {
     let refused: Vec<Value> = proof_cases()
         .into_iter()
         .map(|(name, base, member, value)| {
-            let mut m = Message::parse(&message_json(base), OPAQUE_MEMBERS).unwrap();
-            m.body.insert(member.into(), value);
+            let original = message_json(base);
+            let mut m = Message::parse(&original, OPAQUE_MEMBERS).unwrap();
+            check_body(&m, &original).expect(base);
+            match value {
+                Some(value) => assert!(m.body.insert(member.into(), value).is_none(), "{name}"),
+                None => assert!(m.body.remove(member).is_some(), "{name}"),
+            }
             let json = m.to_json().unwrap();
             assert_eq!(m.from.app_id, wallet.keys.app_id_bytes(), "{name}");
             let plaintext =
