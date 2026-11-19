@@ -9391,7 +9391,7 @@ async fn pending_replies_across_loss(another_loss: bool, journey: ReplyJourney) 
             .filter(|n| {
                 n.kind == paykit_sdk::NoticeKind::MessageGivenUp
                     && n.msg_id.as_deref() == Some(q.as_str())
-                    && n.counterparty == w.bob_id()
+                    && n.counterparty == Some(w.bob_id())
             })
             .collect();
         assert_eq!(matches.len(), 1);
@@ -9779,7 +9779,7 @@ async fn held_pending_replies(by: PendingReplyCase) {
             .find(|n| {
                 n.kind == paykit_sdk::NoticeKind::MessageGivenUp
                     && n.msg_id.as_deref() == Some(SENT_FIRST)
-                    && n.counterparty == w.bob_id()
+                    && n.counterparty == Some(w.bob_id())
             })
             .unwrap();
         wallet.acknowledge_notice(&notice.id).await.unwrap();
