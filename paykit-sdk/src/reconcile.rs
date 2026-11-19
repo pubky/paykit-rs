@@ -827,6 +827,11 @@ impl Paykit {
         let key = self.activity_key(target)?;
         let current = self.activity_write_base(&key).await?;
         let read = match current.as_ref().map(|r| &r.content) {
+            Some(RecordContent::Deleted)
+                if entry.is_some_and(|entry| entry.billing_period.is_some()) =>
+            {
+                return Err(crate::periods::period_history_lost().into())
+            }
             None | Some(RecordContent::Deleted) => None,
             Some(_) => match self.read_activity(target, current.as_ref()) {
                 Some(record) => Some(record),

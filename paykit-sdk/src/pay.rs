@@ -70,7 +70,9 @@ use crate::rail::{
     CandidateId, PaymentEndpointCandidate, RailError, RailOutcome, RailPaid, RailPayment, Transfer,
 };
 use crate::records::{list_target, KeptMessage};
-use crate::requests::{cancelled, rejected, request_of, unreadable_request, Fresh, RequestRef};
+use crate::requests::{
+    cancelled, payment_ended, rejected, request_of, unreadable_request, Fresh, RequestRef,
+};
 use crate::state::{self, key};
 
 /// How long after the latest time it has seen a payment without a request's attempt pins its
@@ -3539,7 +3541,12 @@ impl Paykit {
     ) -> Result<OutcomeRecord> {
         let key = self.activity_key(target)?;
         let held = self.app.shared_record(&key).await?;
-        if crate::records::activity_base_changed(held.as_ref()) {
+        if crate::records::activity_base_changed(held.as_ref())
+            || (entry.billing_period.is_some()
+                && held
+                    .as_ref()
+                    .is_some_and(|r| r.content == RecordContent::Deleted))
+        {
             return Ok(if paid {
                 OutcomeRecord::Held
             } else {
@@ -4371,6 +4378,18 @@ impl Paykit {
     ) -> Result<bool> {
         if self.payment_base_changed(entry).await? {
             return Ok(true);
+        }
+        if entry.billing_period.is_some() {
+            let parent =
+                ActivityTarget::payer(entry.request_record()?.ok_or_else(PaykitError::corrupt)?);
+            let period = ActivityTarget::payer(entry.natural_key.clone());
+            for target in [&parent, &period] {
+                match Box::pin(self.current_period_activity(target)).await {
+                    Ok(Some(record)) if !payment_ended(&record) => {}
+                    Ok(_) | Err(PaykitError::Refused(_)) => return Ok(true),
+                    Err(error) => return Err(error),
+                }
+            }
         }
         if by == Initiator::Automatic {
             return self.automatic_dispatch_held(entry).await;
