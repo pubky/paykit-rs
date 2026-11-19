@@ -3298,7 +3298,14 @@ mod tests {
 
     #[test]
     fn test_allowances_bind_at_refuses_another_allowance() {
-        let (alice, bob, record) = proposed();
+        let (alice, bob, mut record) = proposed();
+        let acceptance = answer(
+            &alice,
+            &bob,
+            "paykit.allowance_acceptance",
+            vec![record.proposal.hash()],
+        );
+        assert!(place(&mut record, as_read(&alice, &bob, &acceptance)));
         let value = record.to_json().unwrap();
         let id = AllowanceId::parse(ID).unwrap();
         assert!(bind_at(&value, &alice.id(), &bob.id(), &id).is_some());

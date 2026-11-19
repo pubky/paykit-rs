@@ -2566,17 +2566,30 @@ mod receive_tests {
 
     #[test]
     fn test_protocol_record_regression_on_a_dropped_allowance_end() {
-        let (alice, bob, proposal, end) = allowance_end();
+        let (alice, bob, proposal, _) = allowance_end();
         let p = protocol_of(&alice);
+        let Body::AllowanceProposal(body) = proposal.body() else {
+            panic!("a proposal");
+        };
+        let reply = object(json!({ "allowance_id": body.allowance_id.as_str() }));
+        let acceptance = alice.message(
+            &bob,
+            "paykit.allowance_acceptance",
+            vec![proposal.hash()],
+            reply.clone(),
+        );
+        let end = bob.message(
+            &alice,
+            "paykit.allowance_end",
+            vec![proposal.hash(), acceptance.hash()],
+            reply,
+        );
         let open = |end: Option<StoredMessage>| {
-            let Body::AllowanceProposal(body) = proposal.body() else {
-                panic!("a proposal");
-            };
             AllowanceRecord {
                 counterparty: bob.id(),
                 allowance_id: body.allowance_id.clone(),
                 proposal: proposal.clone(),
-                response: None,
+                response: Some(acceptance.clone()),
                 end,
                 conflicted: None,
                 grant: None,

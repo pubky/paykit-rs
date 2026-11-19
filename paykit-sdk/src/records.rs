@@ -701,6 +701,7 @@ mod own_message_tests {
             count("self.own_copy("),
             named(&[
                 ("allowances.rs", 3),
+                ("allowances/pending.rs", 1),
                 ("pay.rs", 1),
                 ("records.rs", 2),
                 ("requests.rs", 2),
@@ -759,6 +760,11 @@ mod own_message_tests {
         let propose = body(allowances, "propose_allowance_inner");
         assert!(propose.contains("self.own_copy(&signed)"));
         assert!(propose.contains(".queue(signed)"));
+        let pending = body(text("allowances/pending.rs"), "answer_pending");
+        assert!(pending.contains("self.own_copy(&reply)"));
+        assert!(pending.contains("message: KeptMessage::of(&q)"));
+        assert!(pending.contains("batch = batch.entry(delete)"));
+        assert!(pending.contains("self.submit(batch.queue(reply))"));
         let answer = body(allowances, "answer_allowance");
         assert!(answer.contains("self.own_copy(&signed)"));
         assert!(answer.contains("let mut queue = vec![signed];"));
