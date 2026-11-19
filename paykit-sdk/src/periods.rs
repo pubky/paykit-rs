@@ -42,7 +42,9 @@ use crate::pay::{BlockedPayment, Chosen, PayOptions, PayOutcome, PayResult, Plan
 use crate::paykit::Paykit;
 use crate::receipts::{period_request_target, received_receipt, ReceivedReceipt};
 use crate::records::{conflict, KeptMessage};
-use crate::requests::{cancelled, rejected, request_of, MessageDelivery, RequestRef, SentMessage};
+use crate::requests::{
+    cancelled, payment_ended, rejected, request_of, MessageDelivery, RequestRef, SentMessage,
+};
 
 /// How many times a payee's write of period details is built again after its record changed
 /// meanwhile.
@@ -381,7 +383,7 @@ impl Paykit {
         if let Some(held) = self.app.shared_record(&self.activity_key(target)?).await? {
             return self.checked_period_activity(target, &held).map(Some);
         }
-        self.current_period_activity(target).await
+        Box::pin(self.current_period_activity(target)).await
     }
 
     /// Recheck the parent's and period's payment restrictions before calling the method.
@@ -393,11 +395,11 @@ impl Paykit {
         if let Some(held) = self.app.shared_record(&self.activity_key(target)?).await? {
             let record = self.checked_period_activity(target, &held)?;
             self.pause_of(&held).await?;
-            if record.shows_paid() || cancelled(&record) || rejected(&record) {
+            if payment_ended(&record) {
                 return Ok(Some(record));
             }
         }
-        let held = match self.app.read_record_fresh(&target.record_target()).await? {
+        let held = match Box::pin(self.app.read_record_fresh(&target.record_target())).await? {
             RecordRead::Fresh(held) => held,
             RecordRead::Kept {
                 reason: KeptReason::NotFound,

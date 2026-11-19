@@ -71,7 +71,9 @@ use crate::rail::{
     CandidateId, PaymentEndpointCandidate, RailError, RailOutcome, RailPaid, RailPayment, Transfer,
 };
 use crate::records::{list_target, KeptMessage};
-use crate::requests::{cancelled, rejected, request_of, unreadable_request, Fresh, RequestRef};
+use crate::requests::{
+    cancelled, payment_ended, rejected, request_of, unreadable_request, Fresh, RequestRef,
+};
 use crate::state::{self, key};
 
 /// How long after the latest time it has seen a payment without a request's attempt pins its
@@ -4305,8 +4307,7 @@ impl Paykit {
             let period = ActivityTarget::payer(entry.natural_key.clone());
             for target in [&parent, &period] {
                 match Box::pin(self.current_period_activity(target)).await {
-                    Ok(Some(record))
-                        if !record.shows_paid() && !cancelled(&record) && !rejected(&record) => {}
+                    Ok(Some(record)) if !payment_ended(&record) => {}
                     Ok(_) | Err(PaykitError::Refused(_)) => return Ok(true),
                     Err(error) => return Err(error),
                 }

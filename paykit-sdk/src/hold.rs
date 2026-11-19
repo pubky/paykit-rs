@@ -58,7 +58,7 @@ use crate::allowances::{Consent, ConsentEntry};
 use crate::error::{PaykitError, Refusal, Result};
 use crate::marks::WideningRead;
 use crate::paykit::Paykit;
-use crate::requests::{cancelled, rejected, RequestStatus};
+use crate::requests::{cancelled, payment_ended, rejected, RequestStatus};
 use crate::state::{key, Tx};
 
 /// A request held after a restore or a `missed` item, as the user is shown it
@@ -604,7 +604,7 @@ impl Paykit {
                 return Ok(false);
             }
         }
-        if record.shows_paid() || cancelled(record) || rejected(record) {
+        if payment_ended(record) {
             return Ok(false);
         }
         if self

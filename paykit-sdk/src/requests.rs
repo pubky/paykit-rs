@@ -583,6 +583,11 @@ pub(crate) fn cancelled(record: &ActivityRecord) -> bool {
     record.cancellation.is_some()
 }
 
+/// The activity already shows a paid, cancelled or rejected payment (Paykit spec 7.2).
+pub(crate) fn payment_ended(record: &ActivityRecord) -> bool {
+    record.shows_paid() || cancelled(record) || rejected(record)
+}
+
 impl Paykit {
     // ---------------------------------------------------------------------------------
     // The payee
