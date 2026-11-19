@@ -2836,6 +2836,10 @@ struct MarkMerge {
 pub enum CurrentBucket<'a> {
     /// No current value at the bucket's key.
     Absent,
+    /// A current hosted absence after a declared provider loss. The caller established that
+    /// the missing bucket predates the loss and this payment is eligible under Section 8.1
+    /// step 4. Its retained marks still count and must be included in the new bucket.
+    AbsentAfterLoss,
     /// A current write that doesn't open, a read that failed, or a view that shows the
     /// bucket divergent (Paykit spec 6, Divergent records).
     Unopened,
@@ -3033,7 +3037,8 @@ impl SettlementBucket {
     ///
     /// In order: a mark of the settlement the bucket or
     /// the seen marks hold makes it [`CreditDecision::Marked`]. An absent bucket the app has
-    /// seen marks in is [`CreditDecision::Lost`]. A current write that doesn't open, read or
+    /// seen marks in is [`CreditDecision::Lost`] until the caller qualifies
+    /// [`CurrentBucket::AbsentAfterLoss`]. A current write that doesn't open, read or
     /// bind is [`CreditDecision::NeedsUser`], and a bucket that can't take the mark once
     /// every seen mark is merged is [`CreditDecision::Full`]. Otherwise the credit writes the
     /// current write (empty when absent) with every seen mark and the mark.
@@ -3062,7 +3067,7 @@ impl SettlementBucket {
         seen.same_bucket(bucket)?;
         let mark = SettlementMark::new(settlement_tag, kind, occurrence);
         let read = match current {
-            CurrentBucket::Absent => Some(Self::new(bucket)),
+            CurrentBucket::Absent | CurrentBucket::AbsentAfterLoss => Some(Self::new(bucket)),
             CurrentBucket::Unopened => None,
             CurrentBucket::Opened { json, key } => Self::bind(json, bucket, naming_key, key).ok(),
         };
@@ -4744,6 +4749,21 @@ mod tests {
             };
             assert_eq!(at.decide(current, &seen), decision, "{name}");
         }
+        assert_eq!(
+            at.decide(CurrentBucket::AbsentAfterLoss, &[elsewhere]),
+            CreditDecision::Marked(elsewhere)
+        );
+        let CreditDecision::Credit { bucket, .. } =
+            at.decide(CurrentBucket::AbsentAfterLoss, &[one, three])
+        else {
+            panic!("the qualified payment rebuilds the bucket")
+        };
+        assert_eq!(bucket.marks(), &[one, three, credited]);
+        let filled: Vec<_> = (0..MAX_SETTLEMENT_MARKS as u64).map(numbered).collect();
+        assert_eq!(
+            at.decide(CurrentBucket::AbsentAfterLoss, &filled),
+            CreditDecision::Full
+        );
         // The mark is the settlement's and the bucket is its own: the tag's first bytes
         // name the bucket, so a settlement of another bucket can't be credited here.
         let other_tag = full_tag(BUCKET + 1, CREDITED);

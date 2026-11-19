@@ -488,6 +488,16 @@ pub(crate) fn restore_paykit_layer(
     let own_cert = restoring.cert();
     let blind = |input: &[u8]| restoring.blind(input);
     let binder = state::Binder::new(own, own_cert, &blind);
+    let mut settlement_buckets = std::collections::BTreeMap::new();
+    for (key, value) in restoring
+        .previous_local_scan(key::SETTLEMENT_BUCKETS.as_bytes())
+        .map_err(|_| "the settlement bucket history cannot be read")?
+    {
+        let history =
+            state::restored::<crate::settlement_marks::BucketHistory>(&key, &value, &binder)
+                .map_err(|_| "invalid retained settlement bucket history")?;
+        settlement_buckets.insert(key, history);
+    }
     let mut settlement_marks = std::collections::BTreeMap::new();
     for (key, value) in restoring
         .previous_local_scan(key::SETTLEMENT_MARKS.as_bytes())
@@ -835,6 +845,17 @@ pub(crate) fn restore_paykit_layer(
                     .or_insert(restored);
                 continue;
             }
+            StateKey::SettlementBucket(_) => {
+                let history = state::restored::<crate::settlement_marks::BucketHistory>(
+                    &key, &value, &binder,
+                )
+                .map_err(|_| "invalid restored settlement bucket history")?;
+                settlement_buckets
+                    .entry(key)
+                    .and_modify(|previous| previous.include(history))
+                    .or_insert(history);
+                continue;
+            }
             StateKey::SettlementMark { .. } => {
                 state::restored::<crate::settlement_marks::ObservedMark>(&key, &value, &binder)
                     .map_err(|_| "invalid restored settlement mark")?;
@@ -1005,6 +1026,15 @@ pub(crate) fn restore_paykit_layer(
     let resend = state::local_put(key::OWN_RESEND_OWED, &crate::hold::OwnResendOwed::default())
         .map_err(|_| String::from("the restored-record scan mark can't be written"))?;
     writes.push(resend);
+    for (key, mut history) in settlement_buckets {
+        // The selected native layer may hold an older value or none. Only a fresh,
+        // authenticated current bucket can authorize a rewrite.
+        history.repair = true;
+        writes.push(LocalWrite::Put {
+            key,
+            value: state::encode(&history).map_err(|_| "invalid settlement bucket history")?,
+        });
+    }
     for (key, notice) in settlement_notices {
         let value = state::encode(&notice).map_err(|_| "invalid saved settlement notice")?;
         writes.push(LocalWrite::Put { key, value });

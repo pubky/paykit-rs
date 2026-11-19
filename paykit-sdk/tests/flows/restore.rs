@@ -2443,7 +2443,7 @@ async fn test_restore_unanswered_request_from_a_shared_record_is_possibly_delive
     assert_eq!(notices.len(), 1);
     let notice = &notices[0];
     assert_eq!(notice.kind, paykit_sdk::NoticeKind::PossiblyDelivered);
-    assert_eq!(notice.counterparty, w.alice_id());
+    assert_eq!(notice.counterparty, Some(w.alice_id()));
     assert!(notice.msg_id.is_some() && notice.message_hash.is_some());
     assert!(shop
         .app()
@@ -2512,7 +2512,7 @@ async fn test_restore_late_first_read_keeps_an_original_delivery_with_its_wallet
     assert_eq!(notices.len(), 1);
     let notice = &notices[0];
     assert_eq!(notice.kind, paykit_sdk::NoticeKind::PossiblyDelivered);
-    assert_eq!(notice.counterparty, w.alice_id());
+    assert_eq!(notice.counterparty, Some(w.alice_id()));
     assert_eq!(notice.msg_id.as_deref(), Some(sent.msg_id.as_str()));
     assert_eq!(notice.message_hash, Some(hash));
     assert!(restored
@@ -2716,7 +2716,7 @@ async fn test_restore_fresh_store_keeps_an_issued_receipt_without_assuming_deliv
     let [notice] = uncertain.as_slice() else {
         panic!("expected one notice about the original receipt: {notices:?}");
     };
-    assert_eq!(notice.counterparty, w.alice_id());
+    assert_eq!(notice.counterparty, Some(w.alice_id()));
     assert_eq!(notice.message_hash, Some(original.hash));
     shop.acknowledge_notice(&notice.id).await.unwrap();
     assert!(shop

@@ -1164,6 +1164,7 @@ impl Paykit {
                 _ => None,
             })
             .collect();
+        Box::pin(self.repair_settlement_buckets()).await?;
         let answered = Box::pin(self.answer_kept_resends()).await?;
         // Open records resolve re-send requests and locally held answers. After a restore,
         // signed records also identify outgoing messages whose outcome the host must check.

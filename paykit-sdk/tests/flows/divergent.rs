@@ -2897,7 +2897,7 @@ async fn held_answer_lacking_in_its_record(divergent: bool) {
     let notices = wallet.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, NoticeKind::MessageGivenUp);
-    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert_eq!(notices[0].counterparty, Some(w.bob_id()));
     assert_eq!(notices[0].msg_id.as_deref(), Some(rejection.as_str()));
     assert_eq!(sent(&w), 0);
     // The user rejects the request again: it goes.

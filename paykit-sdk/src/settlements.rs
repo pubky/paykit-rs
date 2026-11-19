@@ -2,7 +2,7 @@
 //! (Paykit spec 6 and 8.1 step 4, Paykit wire 5.7).
 
 use paykit_lib::collections::Collection;
-use paykit_lib::derive::{natural_key, occurrence_tag, settlement_bucket, settlement_tag};
+use paykit_lib::derive::{occurrence_tag, settlement_bucket, settlement_tag};
 use paykit_lib::records::{
     CreditDecision, CurrentBucket, OccurrenceKind, RecordBinding, SettlementBucket,
 };
@@ -11,7 +11,7 @@ use pubky_switch_client::client::Submitted;
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::ops::{Condition, RecordVersion};
 
-use crate::activity::{family, ActivityTarget};
+use crate::activity::ActivityTarget;
 use crate::error::{Refusal, Result};
 use crate::notices::SettlementSubject;
 use crate::paykit::Paykit;
@@ -26,6 +26,24 @@ pub(crate) struct SettlementWrite {
     bucket: Option<SettlementBucket>,
 }
 
+pub(crate) struct CreditConsent {
+    pub(crate) loss: Option<crate::LossBoundary>,
+    pub(crate) uncertain: bool,
+    pub(crate) maybe_credited: bool,
+    pub(crate) unmarked: bool,
+}
+
+impl CreditConsent {
+    /// A loss can account for the disappearance only when this bucket's latest verified
+    /// physical application precedes it. A cooperative move preserves that application.
+    fn permits_lost_bucket(&self, latest_application: Option<u64>) -> bool {
+        self.loss
+            .zip(latest_application)
+            .is_some_and(|(loss, generation)| generation < loss.generation())
+            && (!self.uncertain || self.maybe_credited)
+    }
+}
+
 pub(crate) enum SettlementCredit {
     SameOccurrence,
     AlreadyCredited,
@@ -33,7 +51,7 @@ pub(crate) enum SettlementCredit {
 }
 
 /// A record accepted as the current value of a settlement bucket.
-fn readable(record: &SharedRecord) -> bool {
+pub(crate) fn readable(record: &SharedRecord) -> bool {
     !record.flagged
         && !record.not_taken
         && !record.different_write_at_held_version
@@ -48,15 +66,11 @@ impl Paykit {
         activity: &ActivityTarget,
         payer: [u8; 32],
         binding: RecordBinding,
-        confirmed: bool,
-        unmarked_confirmed: bool,
+        consent: CreditConsent,
     ) -> Result<SettlementCredit> {
         let tag = settlement_tag(self.app.naming_key(), id);
         let number = settlement_bucket(&tag);
-        let target = RecordTarget::new(
-            family(Collection::Settlements),
-            &natural_key::settlement_bucket(number),
-        );
+        let target = crate::settlement_marks::target(number);
         let key = self.app.record_key(&target)?;
         let mut seen = self.seen_settlement_marks(number, &key).await?;
         if let Some(record) = self
@@ -72,7 +86,7 @@ impl Paykit {
             }
         }
 
-        let read = self.app.read_record_fresh(&target).await?;
+        let read = self.read_settlement_bucket(number, &target, &key).await?;
         let version = match &read {
             RecordRead::Fresh(record) => Some(record.version),
             _ => None,
@@ -91,8 +105,8 @@ impl Paykit {
             }
             RecordRead::Fresh(_) => CurrentBucket::Unopened,
             RecordRead::Kept {
-                record: None,
                 reason: KeptReason::NotFound,
+                ..
             } => CurrentBucket::Absent,
             // Retained marks still apply when the service cannot supply the current write.
             _ => CurrentBucket::Unopened,
@@ -103,14 +117,23 @@ impl Paykit {
             RecordBinding::Unrequested => OccurrenceKind::PaymentWithoutRequest,
         };
         let occurrence = occurrence_tag(self.app.naming_key(), &activity.natural_key);
-        let decision = SettlementBucket::decide_credit(
-            &tag,
-            kind,
-            occurrence,
-            self.app.naming_key(),
-            current,
-            &seen,
-        )?;
+        let decide = |current| {
+            SettlementBucket::decide_credit(
+                &tag,
+                kind,
+                occurrence,
+                self.app.naming_key(),
+                current,
+                &seen,
+            )
+        };
+        let mut decision = decide(current)?;
+        if decision == CreditDecision::Lost {
+            let latest_application = self.latest_settlement_application(number).await?;
+            if consent.permits_lost_bucket(latest_application) {
+                decision = decide(CurrentBucket::AbsentAfterLoss)?;
+            }
+        }
         let bucket = match decision {
             CreditDecision::Marked(mark) if mark.kind == kind && mark.occurrence == occurrence => {
                 return Ok(SettlementCredit::SameOccurrence)
@@ -120,7 +143,7 @@ impl Paykit {
             CreditDecision::Full => {
                 self.raise_settlement_notice(SettlementSubject::Bucket(number), payer)
                     .await?;
-                if !unmarked_confirmed {
+                if !consent.unmarked {
                     return Err(Refusal::SettlementBucketFull { bucket: number }.into());
                 }
                 None
@@ -128,14 +151,26 @@ impl Paykit {
             CreditDecision::NeedsUser | CreditDecision::Lost => {
                 self.raise_settlement_notice(SettlementSubject::Tag(tag), payer)
                     .await?;
-                if !confirmed || version.is_none() || decision == CreditDecision::Lost {
+                if !consent.maybe_credited || version.is_none() || decision == CreditDecision::Lost
+                {
                     return Err(Refusal::MaybeCredited.into());
                 }
                 None
             }
         };
-        let current = self.app.record_condition(&key).await?;
-        let conditions = bucket_conditions(key, version.unwrap_or(RecordVersion::NONE), current)?;
+        let conditions = match current {
+            // NotFound is a hosted, covering answer. The client can still hold the old
+            // generation's live value, which cannot be the base of a create here.
+            CurrentBucket::Absent => vec![Condition::RecordVersion {
+                key,
+                version: RecordVersion::NONE,
+            }],
+            _ => bucket_conditions(
+                key,
+                version.ok_or(Refusal::MaybeCredited)?,
+                self.app.record_condition(&key).await?,
+            )?,
+        };
         Ok(SettlementCredit::Write(Box::new(SettlementWrite {
             number,
             payer,
@@ -159,7 +194,7 @@ impl Paykit {
         let Some(bucket) = write.bucket else {
             return Ok(self.submit(receipt_only(batch)).await?);
         };
-        let entry = self
+        let (mut conditions, mut operation) = self
             .app
             .record_op(
                 &write.target,
@@ -167,7 +202,25 @@ impl Paykit {
                 write.conditions.clone(),
             )
             .await?;
-        let submitted = self.submit(batch.clone().entry(entry)).await;
+        if let [Condition::RecordVersion {
+            version: RecordVersion::NONE,
+            ..
+        }] = write.conditions.as_slice()
+        {
+            if let pubky_switch_core::ops::OpKind::RecordPut(put) = &mut operation {
+                // A covering hosted absence can coexist with a retained pre-loss
+                // value. Create at strict zero with its actual blinded name inputs.
+                put.expected_version = RecordVersion::NONE;
+                put.id_inputs = Some(pubky_switch_core::ops::IdInputs {
+                    collection: write.target.collection.name.clone(),
+                    blinded_key: self.app.naming_key().blind(&write.target.natural_key),
+                });
+                conditions.clone_from(&write.conditions);
+            }
+        }
+        let submitted = self
+            .submit(batch.clone().entry((conditions, operation)))
+            .await;
         if submitted.as_ref().err().is_some_and(|err| {
             err.kept_batch().is_none()
                 && matches!(
@@ -215,7 +268,7 @@ impl Paykit {
 
 /// The put and a receipt-only write both compare the version that supplied the
 /// decision. A recovered write also compares its physical application.
-fn bucket_conditions(
+pub(crate) fn bucket_conditions(
     key: [u8; 32],
     version: RecordVersion,
     current: Condition,
@@ -233,9 +286,37 @@ fn bucket_conditions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use paykit_lib::derive::natural_key;
     use paykit_lib::records::{SeenMarks, SettlementMark};
     use pubky_switch_core::ident::NamingKey;
     use pubky_switch_core::shared::ApplicationRef;
+
+    #[test]
+    fn test_only_an_intervening_loss_can_release_an_absent_bucket() {
+        let loss = crate::LossBoundary {
+            generation: 4,
+            declared_at_ms: 50,
+            uncertain_until_ms: 100,
+        };
+        for (boundary, latest, paid_at, confirmed, expected) in [
+            (None, Some(2), 101, true, false),
+            (Some(loss), None, 101, true, false),
+            (Some(loss), Some(4), 101, true, false),
+            (Some(loss), Some(5), 101, true, false),
+            (Some(loss), Some(2), 99, false, false),
+            (Some(loss), Some(2), 100, false, false),
+            (Some(loss), Some(2), 100, true, true),
+            (Some(loss), Some(2), 101, false, true),
+        ] {
+            let choice = CreditConsent {
+                loss: boundary,
+                uncertain: boundary.is_some_and(|loss| loss.settlement_uncertain(paid_at)),
+                maybe_credited: confirmed,
+                unmarked: false,
+            };
+            assert_eq!(choice.permits_lost_bucket(latest), expected);
+        }
+    }
 
     #[test]
     fn test_distinct_occurrences_compare_one_settlement_bucket() {

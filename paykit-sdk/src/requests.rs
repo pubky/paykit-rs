@@ -1156,14 +1156,20 @@ impl Paykit {
             if settlement_id.is_none() && binding == RecordBinding::Unrequested {
                 return Ok(None);
             }
+            let loss = self.settlement_loss().await?;
+            let uncertain = loss.is_some_and(|loss| loss.settlement_uncertain(paid_at));
             let decision = if let Some(id) = &settlement_id {
                 match Box::pin(self.settlement_credit(
                     id,
                     &target,
                     bound.counterparty,
                     binding,
-                    maybe_credited_confirmed,
-                    unmarked_credit_confirmed,
+                    crate::settlements::CreditConsent {
+                        loss,
+                        uncertain,
+                        maybe_credited: maybe_credited_confirmed,
+                        unmarked: unmarked_credit_confirmed,
+                    },
                 ))
                 .await?
                 {
@@ -1190,10 +1196,7 @@ impl Paykit {
             } else {
                 None
             };
-            if other_uncertain
-                || self.settlement_uncertain_after_loss(paid_at).await?
-                || settlement_id.is_none()
-            {
+            if other_uncertain || uncertain || settlement_id.is_none() {
                 let subject = match &settlement_id {
                     Some(id) => crate::SettlementSubject::Tag(paykit_lib::derive::settlement_tag(
                         self.app.naming_key(),
