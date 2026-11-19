@@ -938,7 +938,7 @@ async fn test_replies_kept_from_another_identity_never_placed_nor_stop_the_recei
     let notices = shop.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
-    assert_eq!(notices[0].counterparty, w.carol_id());
+    assert_eq!(notices[0].counterparty, Some(w.carol_id()));
     assert_eq!(
         shop.payee_activity().await.unwrap()[0].status,
         PayeeStatus::ProofReceived

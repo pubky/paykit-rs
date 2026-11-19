@@ -1094,6 +1094,23 @@ impl Stored for KeyWaitMark {
     }
 }
 
+impl sealed::Sealed for crate::settlement_marks::BucketHistory {}
+
+impl Stored for crate::settlement_marks::BucketHistory {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let StateKey::SettlementBucket(record) = family else {
+            return corrupt();
+        };
+        if self.number >= paykit_lib::derive::SETTLEMENT_BUCKETS
+            || self.generation == 0
+            || binder.record_key(&crate::settlement_marks::target(self.number))? != *record
+        {
+            return corrupt();
+        }
+        Ok(())
+    }
+}
+
 impl sealed::Sealed for crate::settlement_marks::ObservedMark {}
 
 impl Stored for crate::settlement_marks::ObservedMark {
@@ -1277,6 +1294,10 @@ pub(crate) mod key {
     pub(crate) const CREDIT_HOLDS: &str = "ch/";
     pub(crate) const SETTLEMENT_NOTICES: &str = "nt/settlement/";
     pub(crate) const SETTLEMENT_MARKS: &str = "sm/";
+    pub(crate) const SETTLEMENT_BUCKETS: &str = "sb/";
+    pub(crate) fn settlement_bucket(key: &[u8; 32]) -> String {
+        format!("{SETTLEMENT_BUCKETS}{}", b64(key))
+    }
     pub(crate) fn receipt_batch(
         record: &[u8; 32],
         hash: &[u8; 32],
@@ -1622,6 +1643,8 @@ pub(crate) mod key {
 pub(crate) enum StateKey {
     /// A warning once per bucket or settlement.
     SettlementNotice(SettlementSubject),
+    /// The last verified physical application and its outstanding repair.
+    SettlementBucket([u8; 32]),
     /// A complete mark observed at the permanently bound settlement bucket key.
     SettlementMark {
         record: [u8; 32],
@@ -1843,6 +1866,7 @@ impl StateKey {
             _ => {
                 let (family, rest) = text.split_once('/')?;
                 match family {
+                    "sb" => Self::SettlementBucket(b64_32(rest)?),
                     "sm" => {
                         let (record, mark) = rest.split_once('/')?;
                         let bytes = pubky_switch_core::enc::unb64_array(mark).ok()?;

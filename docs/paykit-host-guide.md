@@ -168,6 +168,13 @@ current store.
 
 ## Request and Allowance status
 
+A wallet with `paykit_allowance` receives pending proposal records from other
+apps on its account. A host inspecting an `allowance_proposals` record can use
+`PendingAllowanceRecord::read` and `bind` to check its signed proposal against
+the account and record key (Paykit wire 5.4). A verified current deletion ends
+that proposal’s lifetime. An unreadable or flagged value keeps the last
+qualified roles and supplies no new proposal to act on.
+
 | Case | What to show or do |
 |---|---|
 | `RequestStatus::Open` | Show the request and the current conditions for acting on it. |
@@ -220,7 +227,9 @@ shared record.
 | `NoticeKind::MessageGivenUp` | Show the message or request whose effect or delivery was given up. Acknowledgment can also retire the stored entry. |
 | `NoticeKind::PossiblyDelivered` | Reconcile the original message with its recipient using its ID and signed hash. Acknowledging the notice records that the host has seen it. It authorizes no send or replacement. |
 | `NoticeKind::BlockedMessagesLost` | Show the affected counterparty and acceptance-time range. Consult the payment method for payments that may have been among the lost messages. |
-| `NoticeKind::SettlementBucketFull` | Show that the payee cannot add a mark to this bucket. Explain that issuing a receipt without a mark can let another till credit the same settlement again. |
+| `NoticeKind::SettlementBucketFull` | Show that the payee cannot add a mark to this bucket. A warning from a bucket read has no payer. Explain that issuing a receipt without a mark can let another till credit the same settlement again. |
+| `NoticeKind::SettlementMarksChanged` | Show the bucket and the own app that signed its current value. The wallet checks the current write again and restores the retained marks that fit. |
+| `NoticeKind::SettlementCreditedTwice` | Show the conflicting occurrence marks. Acknowledging the notice records that the user saw it. Every retained mark continues to prevent another credit. |
 | `NoticeKind::CreditNeedsUser` | Show the user which settlement or requested proof needs a credit decision. Acknowledging the warning leaves the credit decision open. |
 | `PaykitError::Client` | Handle the enclosed Switch outcome. Preserve any kept batch and its ID. |
 | `PaykitError::Lib` | Use the rule error to distinguish invalid input from invalid network or shared data. |

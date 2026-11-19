@@ -337,8 +337,8 @@ pub(crate) enum RecordSide {
     Payer,
     /// `payee_activity`, every label's.
     Payee,
-    /// `allowances`: the Allowance records, on their own side (Paykit spec 8.1, "Records
-    /// not listed yet"; Paykit spec 8.3).
+    /// Pending proposals and Allowance records (Paykit spec 8.1, "Records not listed yet";
+    /// Paykit spec 8.3).
     Allowances,
     /// Every collection of Paykit's.
     All,
@@ -352,12 +352,21 @@ impl RecordSide {
         let settlements = crate::activity::family(Collection::Settlements);
         let lists = crate::activity::family(Collection::PaymentLists);
         let floor = crate::activity::family(Collection::BlockFloor);
+        let proposals = crate::activity::family(Collection::AllowanceProposals);
         let allowances = crate::activity::family(Collection::Allowances);
         match self {
             Self::Payer => vec![payer, lists, floor],
             Self::Payee => vec![payee, settlements],
-            Self::Allowances => vec![allowances],
-            Self::All => vec![payer, payee, lists, floor, allowances, settlements],
+            Self::Allowances => vec![proposals, allowances],
+            Self::All => vec![
+                payer,
+                payee,
+                lists,
+                floor,
+                proposals,
+                allowances,
+                settlements,
+            ],
         }
     }
 }

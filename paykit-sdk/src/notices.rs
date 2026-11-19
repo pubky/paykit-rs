@@ -78,6 +78,10 @@ pub enum NoticeKind {
     SettlementBucketFull,
     /// This settlement can only be credited with the user's confirmation.
     CreditNeedsUser,
+    /// An authenticated bucket omitted or raised a lower mark the wallet retained.
+    SettlementMarksChanged,
+    /// One settlement was credited to different occurrences.
+    SettlementCreditedTwice,
 }
 
 impl NoticeKind {
@@ -91,6 +95,8 @@ impl NoticeKind {
             Self::BlockedMessagesLost => "blocked_lost",
             Self::SettlementBucketFull => "settlement_bucket_full",
             Self::CreditNeedsUser => "credit_needs_user",
+            Self::SettlementMarksChanged => "settlement_marks_changed",
+            Self::SettlementCreditedTwice => "settlement_credited_twice",
         }
     }
 
@@ -112,6 +118,22 @@ impl NoticeKind {
 pub enum SettlementSubject {
     /// The ten-bit bucket number.
     Bucket(u16),
+    /// The current bucket write that lacked a retained mark.
+    Changed {
+        /// The bound ten-bit bucket number.
+        bucket: u16,
+        /// The own app that signed the current value.
+        writer: [u8; 16],
+        /// The physical application of the signed write.
+        application: pubky_switch_core::shared::ApplicationRef,
+    },
+    /// Distinct retained occurrence marks for this opaque tag in this bucket.
+    Conflicting {
+        /// The bound ten-bit bucket number.
+        bucket: u16,
+        /// The tag carried by the bucket's marks.
+        settlement: [u8; paykit_lib::derive::SETTLEMENT_TAG_LEN],
+    },
     /// The complete blinded settlement tag for the payee identity.
     Tag([u8; 32]),
     /// The bound requested occurrence and signed proof when the method supplies no ID.
@@ -124,9 +146,23 @@ pub enum SettlementSubject {
 }
 
 impl SettlementSubject {
-    fn path(self) -> String {
+    pub(crate) fn path(self) -> String {
         match self {
             Self::Bucket(number) => format!("bucket/{number}"),
+            Self::Changed {
+                bucket,
+                writer,
+                application,
+            } => format!(
+                "changed/{bucket}/{}/{}/{}/{}",
+                b64(&writer),
+                application.generation,
+                application.seq,
+                b64(&application.item_hash)
+            ),
+            Self::Conflicting { bucket, settlement } => {
+                format!("twice/{bucket}/{}", b64(&settlement))
+            }
             Self::Tag(tag) => format!("tag/{}", b64(&tag)),
             Self::RequestedProof { record, proof } => {
                 format!("proof/{}/{}", b64(&record), b64(&proof))
@@ -144,6 +180,37 @@ impl SettlementSubject {
                 }
                 Self::Bucket(number)
             }
+            "changed" | "twice" => {
+                let (number, data) = data.split_once('/')?;
+                let bucket = number.parse().ok()?;
+                if bucket >= paykit_lib::derive::SETTLEMENT_BUCKETS {
+                    return None;
+                }
+                if family == "twice" {
+                    Self::Conflicting {
+                        bucket,
+                        settlement: unb64_array(data).ok()?,
+                    }
+                } else {
+                    let mut parts = data.split('/');
+                    let writer = unb64_array(parts.next()?).ok()?;
+                    let generation = parts.next()?.parse().ok()?;
+                    let seq = parts.next()?.parse().ok()?;
+                    let item_hash = unb64_array(parts.next()?).ok()?;
+                    if generation == 0 || seq == 0 || parts.next().is_some() {
+                        return None;
+                    }
+                    Self::Changed {
+                        bucket,
+                        writer,
+                        application: pubky_switch_core::shared::ApplicationRef {
+                            generation,
+                            seq,
+                            item_hash,
+                        },
+                    }
+                }
+            }
             "tag" => Self::Tag(unb64_array(data).ok()?),
             "proof" => {
                 let (record, proof) = data.split_once('/')?;
@@ -160,6 +227,8 @@ impl SettlementSubject {
     fn kind(self) -> NoticeKind {
         match self {
             Self::Bucket(_) => NoticeKind::SettlementBucketFull,
+            Self::Changed { .. } => NoticeKind::SettlementMarksChanged,
+            Self::Conflicting { .. } => NoticeKind::SettlementCreditedTwice,
             Self::Tag(_) | Self::RequestedProof { .. } => NoticeKind::CreditNeedsUser,
         }
     }
@@ -182,7 +251,10 @@ pub struct Notice {
     /// The counterparty: the payee of an attempt, the message's sender, or, for an own
     /// answer given up, its payee. A possibly delivered message names its recipient. A settlement
     /// warning names the payer whose proof first raised it.
-    pub counterparty: [u8; 32],
+    /// A shared bucket observation identifies no payer.
+    pub counterparty: Option<[u8; 32]>,
+    /// The conflicting marks when one settlement names more than one occurrence.
+    pub settlement_marks: Vec<paykit_lib::records::SettlementMark>,
     /// The request paid or named, `None` for none.
     pub request_hash: Option<[u8; 32]>,
     /// The signed JSON hash of a possibly delivered outgoing message.
@@ -208,8 +280,7 @@ pub(crate) struct KeptNotice {
     settlement: Option<String>,
     pub(crate) attempt_id: Option<String>,
     pub(crate) msg_id: Option<String>,
-    #[serde(with = "serde_b64")]
-    pub(crate) counterparty: [u8; 32],
+    pub(crate) counterparty: Option<String>,
     pub(crate) request_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) message_hash: Option<String>,
@@ -274,6 +345,23 @@ pub(crate) struct StoredHandle {
 }
 
 impl KeptNotice {
+    pub(crate) fn settlement(subject: SettlementSubject, payer: Option<[u8; 32]>, at: u64) -> Self {
+        Self {
+            kind: subject.kind(),
+            settlement: Some(subject.path()),
+            counterparty: payer.map(|peer| b64(&peer)),
+            raised_at_ms: at,
+            acknowledged: false,
+            attempt_id: None,
+            msg_id: None,
+            message_hash: None,
+            request_hash: None,
+            stored: None,
+            origin: None,
+            lost: None,
+        }
+    }
+
     /// A notice of `kind` about the payment `entry` journals, raised at `at`.
     pub(crate) fn of(kind: NoticeKind, entry: &JournalEntry, at: u64) -> Self {
         Self {
@@ -281,7 +369,7 @@ impl KeptNotice {
             settlement: None,
             attempt_id: Some(entry.attempt_id.clone()),
             msg_id: None,
-            counterparty: entry.payee,
+            counterparty: Some(b64(&entry.payee)),
             request_hash: entry.request_hash.clone(),
             message_hash: None,
             raised_at_ms: at,
@@ -305,7 +393,7 @@ impl KeptNotice {
             settlement: None,
             attempt_id: Some(attempt.to_text()),
             msg_id: None,
-            counterparty: payee,
+            counterparty: Some(b64(&payee)),
             request_hash: request_hash.map(|hash| pubky_switch_core::enc::b64(hash)),
             message_hash: None,
             raised_at_ms: at,
@@ -334,7 +422,7 @@ impl KeptNotice {
             settlement: None,
             attempt_id: None,
             msg_id: Some(msg_id.to_owned()),
-            counterparty: sender,
+            counterparty: Some(b64(&sender)),
             request_hash: request_hash.map(|hash| pubky_switch_core::enc::b64(&hash)),
             message_hash: None,
             raised_at_ms: at,
@@ -351,7 +439,7 @@ impl KeptNotice {
             settlement: None,
             attempt_id: None,
             msg_id: Some(stored.message().msg_id.clone()),
-            counterparty: stored.message().to,
+            counterparty: Some(b64(&stored.message().to)),
             request_hash: None,
             message_hash: Some(pubky_switch_core::enc::b64(&stored.hash())),
             raised_at_ms: at,
@@ -396,7 +484,7 @@ impl KeptNotice {
             settlement: None,
             attempt_id: None,
             msg_id: None,
-            counterparty,
+            counterparty: Some(b64(&counterparty)),
             request_hash: None,
             message_hash: None,
             raised_at_ms: at,
@@ -417,7 +505,7 @@ impl KeptNotice {
             || self.attempt_id.is_some()
             || self.msg_id.is_some()
             || self.request_hash.is_some()
-            || self.counterparty != *counterparty
+            || self.counterparty.as_deref() != Some(&b64(counterparty))
             || self.stored.is_some()
             || self.origin.is_some()
             || !window_read
@@ -438,7 +526,7 @@ impl KeptNotice {
         if self.kind != NoticeKind::MessageGivenUp
             || self.attempt_id.is_some()
             || self.msg_id.as_deref() != Some(msg_id)
-            || self.counterparty != *sender
+            || self.counterparty.as_deref() != Some(&b64(sender))
             || self.stored.is_some() == self.origin.is_some()
             || self.lost.is_some()
             || self.acknowledged
@@ -478,7 +566,13 @@ impl KeptNotice {
                 .transpose()
                 .map_err(|_| PaykitError::corrupt())?,
             msg_id: self.msg_id.clone(),
-            counterparty: self.counterparty,
+            counterparty: self
+                .counterparty
+                .as_deref()
+                .map(unb64_array)
+                .transpose()
+                .map_err(|_| PaykitError::corrupt())?,
+            settlement_marks: Vec::new(),
             request_hash,
             message_hash: self
                 .message_hash
@@ -496,7 +590,24 @@ impl KeptNotice {
 /// Bind `notice`, read at `key` (`nt/...`), to what the key names, as a restore checks it:
 /// a value at another notice's key, or under a key that names no notice, is a corrupt store.
 pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
-    match StateKey::parse(key.as_bytes()) {
+    let family = StateKey::parse(key.as_bytes());
+    let peer = notice
+        .counterparty
+        .as_deref()
+        .map(unb64_array::<32>)
+        .transpose()
+        .map_err(|_| PaykitError::corrupt())?;
+    let peer_allowed = match family {
+        Some(StateKey::SettlementNotice(
+            SettlementSubject::Changed { .. } | SettlementSubject::Conflicting { .. },
+        )) => peer.is_none(),
+        Some(StateKey::SettlementNotice(SettlementSubject::Bucket(_))) => true,
+        _ => peer.is_some(),
+    };
+    if !peer_allowed {
+        return Err(PaykitError::corrupt());
+    }
+    match family {
         Some(StateKey::SettlementNotice(subject)) => {
             if notice.kind == subject.kind()
                 && notice.settlement.as_deref() == Some(&subject.path())
@@ -516,7 +627,7 @@ pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
         _ if notice.settlement.is_some() => Err(PaykitError::corrupt()),
         Some(StateKey::RestoredDelivery { to, msg_id, hash }) => {
             if notice.kind != NoticeKind::PossiblyDelivered
-                || notice.counterparty != to
+                || notice.counterparty.as_deref() != Some(&b64(&to))
                 || notice.msg_id.as_ref() != Some(&msg_id)
                 || notice.message_hash.as_deref() != Some(&pubky_switch_core::enc::b64(&hash))
                 || notice.attempt_id.is_some()
@@ -554,20 +665,8 @@ impl Paykit {
         let path = subject.path();
         let key = format!("{}{path}", key::SETTLEMENT_NOTICES);
         if self.kept_notice(&key).await?.is_none() {
-            let notice = KeptNotice {
-                kind: subject.kind(),
-                settlement: Some(path),
-                message_hash: None,
-                attempt_id: None,
-                msg_id: None,
-                counterparty: payer,
-                request_hash: None,
-                raised_at_ms: self.service_time().unwrap_or(0),
-                acknowledged: false,
-                stored: None,
-                origin: None,
-                lost: None,
-            };
+            let notice =
+                KeptNotice::settlement(subject, Some(payer), self.service_time().unwrap_or(0));
             self.local_put(&key, &notice).await?;
         }
         Ok(())
@@ -608,7 +707,23 @@ impl Paykit {
         // Each read whole and bound to its key ([`bind_notice`]).
         for (id, kept) in self.local_scan::<KeptNotice>(key::NOTICES).await? {
             if !kept.acknowledged {
-                out.push(kept.view(id)?);
+                let mut notice = kept.view(id)?;
+                if let Some(SettlementSubject::Conflicting { bucket, settlement }) =
+                    notice.settlement
+                {
+                    let key = self
+                        .app
+                        .record_key(&crate::settlement_marks::target(bucket))?;
+                    notice.settlement_marks = self
+                        .seen_settlement_marks(bucket, &key)
+                        .await?
+                        .marks()
+                        .iter()
+                        .copied()
+                        .filter(|m| m.settlement == settlement)
+                        .collect();
+                }
+                out.push(notice);
             }
         }
         out.sort_by_key(|notice| notice.raised_at_ms);
@@ -691,7 +806,7 @@ impl Paykit {
         };
         let message = self.app.parked_entry(entry.stored_id).await?;
         let names = message.as_ref().is_some_and(|parked| {
-            parked.sender == notice.counterparty
+            notice.counterparty.as_deref() == Some(&b64(&parked.sender))
                 && parked.message.as_ref().map(|m| m.msg_id.as_str()) == notice.msg_id.as_deref()
         });
         if !names {
@@ -741,7 +856,7 @@ mod tests {
             settlement: None,
             attempt_id: Some(attempt.to_text()),
             msg_id: None,
-            counterparty: [1; 32],
+            counterparty: Some(b64(&[1; 32])),
             request_hash: Some(pubky_switch_core::enc::b64(&[2; 32])),
             message_hash: None,
             raised_at_ms: 3,
@@ -772,7 +887,7 @@ mod tests {
                 message_hash: None,
                 attempt_id: None,
                 msg_id: None,
-                counterparty: [9; 32],
+                counterparty: Some(b64(&[9; 32])),
                 request_hash: None,
                 raised_at_ms: 84,
                 acknowledged: false,
@@ -785,6 +900,49 @@ mod tests {
                 assert!(bind_notice(&key, &notice).is_ok());
                 assert_eq!(notice.view(key.clone()).unwrap().settlement, Some(subject));
                 assert!(bind_notice("nt/settlement/bucket/2", &notice).is_err());
+            }
+        }
+        for (subject, with_peer, without_peer) in [
+            (SettlementSubject::Bucket(3), true, true),
+            (
+                SettlementSubject::Changed {
+                    bucket: 3,
+                    writer: [2; 16],
+                    application: pubky_switch_core::shared::ApplicationRef {
+                        generation: 2,
+                        seq: 3,
+                        item_hash: [7; 32],
+                    },
+                },
+                false,
+                true,
+            ),
+            (
+                SettlementSubject::Conflicting {
+                    bucket: 3,
+                    settlement: [4; paykit_lib::derive::SETTLEMENT_TAG_LEN],
+                },
+                false,
+                true,
+            ),
+            (SettlementSubject::Tag([4; 32]), true, false),
+            (
+                SettlementSubject::RequestedProof {
+                    record: [3; 32],
+                    proof: [7; 32],
+                },
+                true,
+                false,
+            ),
+        ] {
+            let key = format!("{}{}", key::SETTLEMENT_NOTICES, subject.path());
+            for (peer, valid) in [(Some([9; 32]), with_peer), (None, without_peer)] {
+                let notice = KeptNotice::settlement(subject, peer, 84);
+                assert_eq!(
+                    bind_notice(&key, &notice).is_ok(),
+                    valid,
+                    "{subject:?} {peer:?}"
+                );
             }
         }
         for bad in ["bucket/1024", "bucket/00", "tag/2", "proof/1", "proof/2/3"] {
@@ -802,7 +960,7 @@ mod tests {
             settlement: None,
             attempt_id: None,
             msg_id: Some(id.into()),
-            counterparty: to,
+            counterparty: Some(b64(&to)),
             request_hash: None,
             message_hash: Some(pubky_switch_core::enc::b64(&hash)),
             raised_at_ms: 3,

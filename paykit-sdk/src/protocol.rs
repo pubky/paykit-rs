@@ -31,7 +31,8 @@ use paykit_lib::kinds::{
     check_sender_scopes, targets_app, Kind, MessageKind, Role as KindRole, Side, OPAQUE_MEMBERS,
 };
 use paykit_lib::records::{
-    ActivitySide, AllowanceRecord, BlockFloorRecord, PaymentListRecord, StoredMessage,
+    ActivitySide, AllowanceRecord, BlockFloorRecord, PaymentListRecord, PendingAllowanceRecord,
+    StoredMessage,
 };
 use paykit_lib::scopes::{acts_as_payee, check_certificate, PaykitScope, ScopeName};
 use paykit_lib::{Label, PaykitKindRules};
@@ -39,7 +40,7 @@ use pubky_switch_client::app::{
     decode_local_state, AppBackup, AppError, Collection as SwitchCollection, Effect, LocalView,
     LocalWrite, LossActions, MissedEntries, OpaqueRule, Outcome, Protocol, ProtocolLayer,
     ProviderLoss, PutBack, ReceiveContext, ReceivedMessage, RecordDeletion, RecordExpiry,
-    ResendNeeded, RestoreContext, StoreFailure, WriteBase,
+    RecordMarkContext, RecordTarget, ResendNeeded, RestoreContext, StoreFailure, WriteBase,
 };
 use pubky_switch_client::error::StoreError;
 use pubky_switch_core::enc::{serde_b64, unb64_array};
@@ -487,6 +488,16 @@ pub(crate) fn restore_paykit_layer(
     let own_cert = restoring.cert();
     let blind = |input: &[u8]| restoring.blind(input);
     let binder = state::Binder::new(own, own_cert, &blind);
+    let mut settlement_buckets = std::collections::BTreeMap::new();
+    for (key, value) in restoring
+        .previous_local_scan(key::SETTLEMENT_BUCKETS.as_bytes())
+        .map_err(|_| "the settlement bucket history cannot be read")?
+    {
+        let history =
+            state::restored::<crate::settlement_marks::BucketHistory>(&key, &value, &binder)
+                .map_err(|_| "invalid retained settlement bucket history")?;
+        settlement_buckets.insert(key, history);
+    }
     let mut settlement_marks = std::collections::BTreeMap::new();
     for (key, value) in restoring
         .previous_local_scan(key::SETTLEMENT_MARKS.as_bytes())
@@ -834,6 +845,17 @@ pub(crate) fn restore_paykit_layer(
                     .or_insert(restored);
                 continue;
             }
+            StateKey::SettlementBucket(_) => {
+                let history = state::restored::<crate::settlement_marks::BucketHistory>(
+                    &key, &value, &binder,
+                )
+                .map_err(|_| "invalid restored settlement bucket history")?;
+                settlement_buckets
+                    .entry(key)
+                    .and_modify(|previous| previous.include(history))
+                    .or_insert(history);
+                continue;
+            }
             StateKey::SettlementMark { .. } => {
                 state::restored::<crate::settlement_marks::ObservedMark>(&key, &value, &binder)
                     .map_err(|_| "invalid restored settlement mark")?;
@@ -1004,6 +1026,15 @@ pub(crate) fn restore_paykit_layer(
     let resend = state::local_put(key::OWN_RESEND_OWED, &crate::hold::OwnResendOwed::default())
         .map_err(|_| String::from("the restored-record scan mark can't be written"))?;
     writes.push(resend);
+    for (key, mut history) in settlement_buckets {
+        // The selected native layer may hold an older value or none. Only a fresh,
+        // authenticated current bucket can authorize a rewrite.
+        history.repair = true;
+        writes.push(LocalWrite::Put {
+            key,
+            value: state::encode(&history).map_err(|_| "invalid settlement bucket history")?,
+        });
+    }
     for (key, notice) in settlement_notices {
         let value = state::encode(&notice).map_err(|_| "invalid saved settlement notice")?;
         writes.push(LocalWrite::Put { key, value });
@@ -1426,9 +1457,21 @@ impl Protocol for PaykitProtocol {
         crate::settlement_marks::observe(observation, context)
     }
 
-    /// The mark of what the app has seen in a record: the newest value it took that reads
-    /// (Paykit wire 5.3 "Seen roles", 5.4). A delete or a value that doesn't read keeps the
-    /// mark held.
+    fn mark_ends_at_delete(&self, collection: &str) -> bool {
+        collection == Collection::AllowanceProposals.name()
+    }
+
+    fn qualify_record_mark(
+        &self,
+        input: &RecordMarkContext<'_>,
+        seen: Option<&[u8]>,
+        value: &[u8],
+    ) -> Option<Result<Vec<u8>, String>> {
+        (input.collection.name == Collection::AllowanceProposals.name())
+            .then(|| self.pending_mark(input, seen, value))
+    }
+
+    /// The roles the app has seen in a record (Paykit wire 5.3 "Seen roles", 5.4).
     fn record_seen(
         &self,
         collection: &str,
@@ -1471,8 +1514,8 @@ impl Protocol for PaykitProtocol {
     /// refused too. A delete isn't such a write. A write built on the
     /// version this app holds is judged as by a reader holding it, which also refuses a
     /// reassociation at or before a period it attempted (Paykit wire 5.3 "Seen Allowance").
-    /// The version is judged by the mark of what the app saw, the value it took last that
-    /// reads. The client counts a create over a record it holds deleted as built on what it
+    /// The version is judged by the mark of what the app saw. For activity records the
+    /// client counts a create over a record it holds deleted as built on what it
     /// holds, so such a write is judged against the mark from before the delete: stricter
     /// than the wire format's reader holding the version built on, which a delete leaves with
     /// no attempted period.
@@ -1489,6 +1532,52 @@ impl Protocol for PaykitProtocol {
 }
 
 impl PaykitProtocol {
+    /// Bind both signed roles to the service key where this wallet qualified them.
+    fn pending_mark(
+        &self,
+        input: &RecordMarkContext<'_>,
+        seen: Option<&[u8]>,
+        value: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let own = self
+            .own()
+            .ok_or("Paykit spec 3.2: the app identity is unavailable")?;
+        let record =
+            PendingAllowanceRecord::read(value, &own.identity).map_err(|e| e.to_string())?;
+        let target = RecordTarget::new(
+            crate::activity::family(Collection::AllowanceProposals),
+            &paykit_lib::derive::natural_key::allowance(
+                record.counterparty(),
+                record.allowance_id(),
+            ),
+        );
+        if input.collection.policy != target.collection.policy
+            || input.record_key(&target).map_err(|e| e.to_string())? != input.key
+        {
+            return Err("Paykit wire 5.4: the signed proposal belongs to another record".into());
+        }
+
+        // A version, the actual key and the original hash precede the optional
+        // first conflict. Neither signed role can be replaced (Paykit wire 5.4).
+        let mut mark = vec![1];
+        mark.extend_from_slice(&input.key);
+        mark.extend_from_slice(&record.proposal().hash());
+        let original_size = mark.len();
+        if let Some(conflict) = record.conflicted() {
+            mark.extend_from_slice(&conflict.hash());
+        }
+        if let Some(previous) = seen {
+            if (previous.len() != original_size && previous.len() != original_size + 32)
+                || !mark.starts_with(previous)
+            {
+                return Err(
+                    "Paykit wire 5.4: the proposal does not preserve the roles at this key".into(),
+                );
+            }
+        }
+        Ok(mark)
+    }
+
     /// [`Protocol::record_regression`]'s rules; `built_on` when the write builds on the
     /// version this app holds.
     fn regression(
