@@ -26,7 +26,7 @@ extern "C" {
 /// The longest delay `setTimeout` takes: `2^31 - 1` milliseconds, about 24.8 days.
 ///
 /// Public, but hidden from the docs, only so the tests in `tests/host/` can check the steps of
-/// a sleep: this crate's library has no test binary of its own.
+/// a sleep.
 ///
 /// Browsers store the delay as a signed 32-bit integer, and a longer one overflows: the timer
 /// then fires at once instead of late.
