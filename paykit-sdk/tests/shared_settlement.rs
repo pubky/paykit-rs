@@ -7,14 +7,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use paykit_lib::bodies::RequestDestination;
+use paykit_lib::derive::{
+    natural_key, occurrence_tag, settlement_bucket, settlement_id, settlement_tag,
+};
 use paykit_lib::identifiers::{
     PaymentEndpointIdentifier, PaymentEndpointPayload, PaymentReference,
 };
-use paykit_lib::{Asset, Decimal, PaymentAmount};
+use paykit_lib::periods::PeriodRef;
+use paykit_lib::records::{
+    ActivityRecord, ActivitySide, OccurrenceKind, SettlementBucket, SettlementMark,
+};
+use paykit_lib::{Asset, Body, Decimal, PaymentAmount};
 use paykit_sdk::rail::FakeRail;
 use paykit_sdk::{
     AppScopes, PayOptions, PayOutcome, Paykit, ReceiptsOf, RequestDraft, RequestedScopes, Timer,
 };
+use pubky_switch_client::app::SharedRecord;
 use pubky_switch_client::store::MemoryStore;
 use pubky_switch_client::transport::BoxFuture;
 use pubky_switch_harness::{parties::Asking, Backend, World};
@@ -85,7 +93,7 @@ async fn test_two_payee_wallets_reopen_the_same_manual_period_receipt() -> TestR
 }
 
 async fn manual_period(world: &World) -> TestResult {
-    use paykit_lib::periods::{AnchoredRule, PeriodRef, Recurrence, Unit};
+    use paykit_lib::periods::{AnchoredRule, Recurrence, Unit};
 
     let mut buyer_signer = Box::pin(setup_identity(
         world,
@@ -238,6 +246,13 @@ async fn manual_period(world: &World) -> TestResult {
         .ok_or("reopened period credit missing")?;
     assert_eq!(current.version, issued.version);
     assert_eq!(current.writer, issued.writer);
+    Box::pin(check_period_mark(
+        &reopened,
+        &current,
+        &request.request_hash,
+        period,
+    ))
+    .await?;
     let credited = reopened
         .payee_activity()
         .await?
@@ -252,5 +267,52 @@ async fn manual_period(world: &World) -> TestResult {
     assert_eq!(received[0].msg_id, receipt);
     assert_eq!(rail.all_executions().values().copied().sum::<u64>(), 1);
     assert_eq!(rail.pay_calls(&attempt_id), 1);
+    Ok(())
+}
+
+async fn check_period_mark(
+    shop: &Paykit,
+    record: &SharedRecord,
+    request_hash: &[u8; 32],
+    period: PeriodRef,
+) -> TestResult {
+    let naming = shop.app().naming_key();
+    let activity = ActivityRecord::bind(
+        record.content.value().ok_or("missing paid period")?,
+        &shop.identity(),
+        ActivitySide::Payee,
+        naming,
+        &record.key,
+        None,
+    )?;
+    let signed = activity.proof.as_ref().ok_or("missing period proof")?;
+    let Body::PaymentProof(proof) = signed.body() else {
+        return Err("expected a payment proof".into());
+    };
+    let id = settlement_id(&proof.proof).ok_or("missing method settlement ID")?;
+    let tag = settlement_tag(naming, &id);
+    let number = settlement_bucket(&tag);
+    let key = SettlementBucket::record_key(number, naming)?;
+    let shared = shop
+        .app()
+        .shared_record(&key)
+        .await?
+        .ok_or("missing shared settlement bucket")?;
+    let bucket = SettlementBucket::bind(
+        shared
+            .content
+            .value()
+            .ok_or("unreadable settlement bucket")?,
+        number,
+        naming,
+        &key,
+    )?;
+    let natural = natural_key::period_record(&shop.identity(), request_hash, period.start_secs());
+    let expected = SettlementMark::new(
+        &tag,
+        OccurrenceKind::BillingPeriod,
+        occurrence_tag(naming, &natural),
+    );
+    assert_eq!(bucket.marks(), &[expected]);
     Ok(())
 }
