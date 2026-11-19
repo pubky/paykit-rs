@@ -334,6 +334,14 @@ pub(crate) fn store_failure(error: pubky_switch_client::app::AppError) -> StoreF
     }
 }
 
+/// A receive effect exposes its storage failure to the record owner.
+pub(crate) fn step_failure(failure: Fail) -> StoreFailure {
+    match failure {
+        Fail::Store(error) => error,
+        _ => StoreFailure::unavailable(StoreError::Unavailable),
+    }
+}
+
 /// A local read failure keeps its real store error; malformed protocol state is corrupt.
 pub(crate) fn view_failure(error: crate::PaykitError) -> StoreFailure {
     match error {

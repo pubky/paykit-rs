@@ -10,13 +10,13 @@ use paykit_lib::collections::Collection;
 use paykit_lib::records::{ActivityRecord, ActivitySide, RecordBinding};
 use paykit_lib::{derive::natural_key, Label};
 use pubky_switch_client::app::{PutBack, ReceiveContext, RecordDeletion, StoreFailure};
-use pubky_switch_client::error::StoreError;
 use pubky_switch_core::enc::{b64, serde_b64, serde_b64_vec};
 use serde::{Deserialize, Serialize};
 
 use crate::activity::ActivityTarget;
 use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
+use crate::protocol::step_failure;
 use crate::protocol::view_failure;
 use crate::receipts::{receipt_binding, ReceiptBinding};
 use crate::receive::{Fail, Settlement};
@@ -379,13 +379,6 @@ pub struct PayeeReceiptDeletion {
     pub writer: Option<[u8; 16]>,
     /// The original verified feed-page time.
     pub page_time_ms: Option<u64>,
-}
-
-fn step_failure(failure: Fail) -> StoreFailure {
-    match failure {
-        Fail::Store(error) => error,
-        _ => StoreFailure::unavailable(StoreError::Unavailable),
-    }
 }
 
 fn period_parent(

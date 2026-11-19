@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::activity::family;
 use crate::error::Result;
 use crate::paykit::Paykit;
-use crate::protocol::{store_failure, view_failure};
-use crate::state::{self, key, Binder};
+use crate::protocol::{step_failure, store_failure, view_failure};
+use crate::state::{self, key};
 
 /// One positive observation. The physical bucket and the complete mark are bound to its key.
 #[derive(Serialize, Deserialize)]
@@ -62,16 +62,14 @@ pub(crate) fn observe(
             return Ok(Vec::new());
         };
         let prefix = prefix(&record.key);
-        let blind = |input: &[u8]| cx.blind(input);
-        let binder = Binder::new(cx.identity(), cx.cert(), &blind);
         let mut writes = Vec::new();
         for mark in bucket.marks() {
             let bytes = mark.to_bytes();
             let name = format!("{prefix}{}", b64(&bytes));
-            if let Some(held) = cx.local_get(name.as_bytes()).map_err(store_failure)? {
-                state::restored::<ObservedMark>(name.as_bytes(), &held, &binder)
-                    .map_err(view_failure)?;
-            } else {
+            if state::cx_get::<ObservedMark>(cx, &name)
+                .map_err(step_failure)?
+                .is_none()
+            {
                 let observed = ObservedMark {
                     bucket: number,
                     mark: bytes,
