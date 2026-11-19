@@ -2345,10 +2345,15 @@ mod tests {
 
     #[test]
     fn test_private_intake_event_path_filter_selects_private_directory() {
+        let filter = private_intake_event_path_filter();
         assert_eq!(
-            private_intake_event_path_filter().strip_suffix('/'),
+            filter.strip_suffix('/'),
             Some(paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX),
             "the filter must be the private routing prefix in directory form"
+        );
+        assert!(
+            !filter.ends_with("//"),
+            "the filter must end in exactly one slash, got {filter:?}"
         );
     }
 
