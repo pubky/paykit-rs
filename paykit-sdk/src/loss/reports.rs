@@ -1,12 +1,11 @@
 //! What the wallet can verify about the original participants in a provider loss.
 
-use paykit_lib::{recovery::RecoveryCommitments, scopes::RECOVERY};
-use pubky_switch_client::app::RecordTarget;
-use pubky_switch_core::{
-    enc::lp,
-    records::{AppCert, IdentityDoc},
-    shared::ApplicationRef,
+use paykit_lib::{
+    recovery::RecoveryCommitments,
+    scopes::{verify_certificate, RECOVERY},
 };
+use pubky_switch_client::app::RecordTarget;
+use pubky_switch_core::{enc::lp, records::IdentityDoc, shared::ApplicationRef};
 
 use super::{LossBoundary, Paykit, Refusal, Result};
 
@@ -95,7 +94,7 @@ impl Paykit {
         {
             return Ok(None);
         }
-        let Ok(writer) = AppCert::verify(&operation.cert, &opening.identity()) else {
+        let Ok(writer) = verify_certificate(&operation.cert, &opening.identity()) else {
             return Ok(None);
         };
         if writer.app_id() != record.writer

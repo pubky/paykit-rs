@@ -8,12 +8,13 @@ pub use evidence::{
 use pubky_switch_core::{
     enc::{lp, unb64_array},
     json::{parse_json_as, Doc},
-    records::{AppCert, IdentityDoc},
+    records::IdentityDoc,
     sig::{self, SignedDoc},
 };
 use serde::Deserialize;
 
 use crate::error::{ensure, Error, Result};
+use crate::scopes::verify_certificate;
 
 /// The signature domain for an original app's recovery report.
 pub const RECOVERY_UPLOAD_LABEL: &str = "paykit/v1/recovery-upload";
@@ -85,7 +86,7 @@ impl RecoveryCommitments {
             report.v == 1,
             "Paykit wire 5.10: unsupported recovery report version",
         )?;
-        let cert = AppCert::verify(&report.author_certificate, &opening.identity())?;
+        let cert = verify_certificate(&report.author_certificate, &opening.identity())?;
         ensure(
             identity.identity() == opening.identity()
                 && cert.app_id() == *original
