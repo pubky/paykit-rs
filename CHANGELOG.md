@@ -156,11 +156,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   Health reports `Replaying` while that check runs and then returns to
   `CaughtUp`, and packets written back to back are buffered together.
   Previously health reported the Linked Peer as `Replaying` until the next
-  healthy audit. When intake fails to read or store buffered packets and the
-  stored Encrypted Link generation changed meanwhile, normally because the
-  app's drain committed a new one, intake now retries instead of marking the
-  Linked Peer `Stale`. Other failures, such as network errors, are not
-  retried.
+  healthy audit. A drain woken by the packet can still report the `Replaying`
+  freshness it started with, and no further wakeup follows when the check
+  settles the Linked Peer, so read `PrivateIntakeSupervisor::health()` for the
+  current state. When the app's drain commits a new Encrypted Link generation
+  while intake reads or stores a buffered packet, intake now retries with the
+  new generation instead of marking the Linked Peer `Stale`. Other failures,
+  such as network errors or a packet that fails the buffer's integrity checks,
+  are not retried.
 
 ### Integration
 
