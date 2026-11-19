@@ -507,7 +507,7 @@ async fn reconcile_fractional_periods(world: &World) -> TestResult {
     );
     let mut occurrences = Vec::new();
     for (listed, recorded) in [(first, next), (next, first)] {
-        let request = Box::pin(subscribe(world, &mut buyer, &mut shop, recurrence)).await?;
+        let request = Box::pin(subscribe(world, &mut buyer, &mut shop, recurrence, false)).await?;
         let target = |natural: Vec<u8>| {
             RecordTarget::new(
                 SwitchCollection::new(
