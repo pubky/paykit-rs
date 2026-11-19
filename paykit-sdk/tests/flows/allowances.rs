@@ -8207,11 +8207,29 @@ async fn test_allowances_crossing_end_waits_for_contacts_after_renewal_and_reloa
     let renewed = renew(&w, app_id, &full, 2000);
     list(&w, app_id, &narrow, &renewed);
     w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
-    fail_list_read(&w);
     payer.receive(None).await.unwrap();
     assert_eq!(payer.app().cert().hash(), renewed.hash());
+    // The renewal arrives during that read. Only the new certificate can read contacts.
+    fail_list_read(&w);
+    payer.receive(None).await.unwrap();
+    assert!(payer
+        .app()
+        .protocol_get("paykit", b"lr")
+        .await
+        .unwrap()
+        .is_none());
     assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
     payer.receive(None).await.unwrap();
+    assert!(payer
+        .app()
+        .protocol_get("paykit", b"lr")
+        .await
+        .unwrap()
+        .is_some());
+    assert!(matches!(
+        payer.app().delivery(&ended.message().msg_id).await.unwrap(),
+        Some(pubky_switch_client::app::Delivery::Accepted { .. })
+    ));
     let received = shop.receive(None).await.unwrap();
     assert!(received.report.events.iter().any(|event| matches!(event,
         AppEvent::MessageReceived { msg_id, kind, .. } if *msg_id == ended.message().msg_id && kind == "paykit.allowance_end"
