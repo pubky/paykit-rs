@@ -9,6 +9,11 @@ use tokio::sync::{watch, Mutex as AsyncMutex, Notify, RwLock as AsyncRwLock};
 
 const MAX_EVENT_STREAM_USERS: usize = crate::storage::PRIVATE_INTAKE_MAX_EVENT_STREAM_USERS;
 const DEFAULT_MAX_EVENT_BYTES: usize = 4096;
+// The limit applies to an event's joined `data` lines. The largest homeserver
+// event is a PUT: `pubky://` + 52-char z32 key + 972-byte max storage path,
+// then `cursor: <u64>` and `content_hash: <44-char base64>`, about 1.1 KB.
+// 2048 leaves headroom above that.
+const MIN_EVENT_BYTES: usize = 2048;
 const MAX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_STREAM_CAPACITY: usize = 1024;
 const DEFAULT_HEALTHY_AUDIT_INTERVAL: Duration = Duration::from_secs(60);
@@ -27,7 +32,10 @@ const MAX_AUDIT_ACQUISITIONS_PER_PEER: usize =
 pub struct PrivateIntakeConfig {
     /// Maximum homeserver stream connections reserved for this supervisor (1..=1024).
     pub stream_capacity: usize,
-    /// Maximum SSE frame size accepted from a homeserver (1..=65536 bytes).
+    /// Maximum SSE frame size accepted from a homeserver (2048..=65536 bytes).
+    ///
+    /// A limit below the largest homeserver event would end the stream on
+    /// that event, so values below 2048 are rejected.
     pub max_event_bytes: usize,
     /// Expected-slot reconciliation cadence while SSE is healthy (1 second..=1 hour).
     pub healthy_audit_interval: Duration,
@@ -48,7 +56,7 @@ impl PrivateIntakeConfig {
     fn validate(&self) -> Result<()> {
         if self.stream_capacity == 0
             || self.stream_capacity > MAX_STREAM_CAPACITY
-            || self.max_event_bytes == 0
+            || self.max_event_bytes < MIN_EVENT_BYTES
             || self.max_event_bytes > MAX_EVENT_BYTES
             || self.healthy_audit_interval < MIN_HEALTHY_AUDIT_INTERVAL
             || self.healthy_audit_interval > MAX_HEALTHY_AUDIT_INTERVAL
@@ -2435,6 +2443,19 @@ mod tests {
         }
         .validate()
         .is_err());
+    }
+
+    #[test]
+    fn test_private_intake_config_rejects_event_limit_below_largest_event() {
+        let config = |max_event_bytes| PrivateIntakeConfig {
+            stream_capacity: 1,
+            max_event_bytes,
+            healthy_audit_interval: std::time::Duration::from_secs(60),
+        };
+        assert!(config(0).validate().is_err());
+        assert!(config(MIN_EVENT_BYTES - 1).validate().is_err());
+        assert!(config(MIN_EVENT_BYTES).validate().is_ok());
+        assert!(config(MAX_EVENT_BYTES).validate().is_ok());
     }
 
     #[tokio::test]
