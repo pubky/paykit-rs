@@ -101,6 +101,12 @@ impl AppScopes {
         self.with("paykit_contacts")
     }
 
+    /// Read and publish recovery reports with their own scope key.
+    #[must_use]
+    pub fn recovery(self) -> Self {
+        self.with(paykit_lib::scopes::RECOVERY)
+    }
+
     /// `paykit_manage_contacts`, with the `paykit_contacts` it requires.
     #[must_use]
     pub fn manage_contacts(self) -> Self {
