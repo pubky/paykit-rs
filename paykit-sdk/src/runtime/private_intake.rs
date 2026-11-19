@@ -1478,13 +1478,14 @@ where
         work: Arc<Notify>,
         topology_changed: Arc<Notify>,
     ) {
-        // The newest event from this group's last successful seed query.
-        // Reconnects reuse it for peers that are still seedless instead of
-        // querying again. That stays safe: the skip-safety argument in
-        // [`audit_seeded_private_intake_peer`] holds for any earlier seed
-        // read, because every connection runs its startup audit after
-        // subscribing, and an event at or below it that commits later is
-        // fetched by a later audit.
+        // The newest event from this task's last successful seed query.
+        // Reconnects within this topology epoch reuse it for peers that are
+        // still seedless instead of querying again; a topology restart spawns
+        // a new task that queries again. That stays safe: the skip-safety
+        // argument in [`audit_seeded_private_intake_peer`] holds for any
+        // earlier seed read, because every connection runs its startup audit
+        // after subscribing, and an event at or below it that commits later
+        // is fetched by a later audit.
         let mut known_newest = None;
         loop {
             if *stop.borrow() {

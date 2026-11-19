@@ -1434,11 +1434,13 @@ request. The stream skips it, and the next audit fetches its slot: the
 jittered in-stream audit, then each healthy audit. Every audit on that
 connection runs after the request, so the first one that finds a peer's
 expected slot absent stores that peer's cursor, and no later audit on the
-connection writes it again. If no audit does, later connects of the same
-subscription group reuse the event from its last successful request instead of
-repeating it. This stays safe because each connection runs its startup audit
-after subscribing. If the request fails or returns no event, those peers
-subscribe from the beginning as before, and the next connect requests again.
+connection writes it again. If no audit does, reconnects of the same
+subscription group within one topology epoch, which lasts until the
+subscription topology restarts, reuse the event from its last successful
+request instead of repeating it. A new epoch makes the request again. This
+stays safe because each connection runs its startup audit after subscribing.
+If the request fails or returns no event, those peers subscribe from the
+beginning as before, and the next connect requests again.
 Stopping the supervisor or restarting the subscription topology abandons a
 pending request. Audits, not events, guarantee delivery: a packet whose event
 the stream skips is fetched by the next audit.
