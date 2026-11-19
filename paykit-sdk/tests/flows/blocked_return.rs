@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use paykit_sdk::{AppScopes, NoticeKind, Paykit, PaykitConfig};
+use pubky_switch_client::app::Initiator;
 use pubky_switch_client::clock::Clock;
 use pubky_switch_client::store::StateStore;
 use pubky_switch_client::transport::Transport;
@@ -2461,7 +2462,7 @@ async fn carol_cancels(w: &World) {
     till.cancel_sent_request(&record, None).await.unwrap();
 }
 
-/// The phone pays carol's request by hand, left in flight. At the resume, the repeat reads
+/// The phone leaves an automatic payment of carol's request in flight. At the resume, the repeat reads
 /// her record; then, while the phone reads the deny list, the wallet makes `write` (carol's
 /// cancellation is sent before the resume). The
 /// method isn't called again, and the attempt stays open for the method's history or a
@@ -2474,7 +2475,7 @@ async fn repeat_while_the_wallet_writes(w: &World, write: OwnWrite) {
         Arc::clone(&phone_store) as Arc<dyn StateStore>,
     ))
     .await;
-    let attempt_id = paid_in_flight(w, &mut phone, &carols).await;
+    let attempt_id = paid_in_flight(w, &mut phone, &carols, Initiator::Automatic).await;
     w.clock.advance_ms(MINUTE_MS);
     if matches!(write, OwnWrite::Cancellation) {
         Box::pin(carol_cancels(w)).await;
@@ -2640,7 +2641,7 @@ async fn first_dispatch_with_a_write_after_its_read(w: &Arc<World>, write: Lands
     assert_eq!(payment.stage, paykit_sdk::Stage::Attempted);
 }
 
-/// The phone pays carol's request by hand, left in flight. At the resume, once the repeat's
+/// The phone leaves an automatic payment of carol's request in flight. At the resume, once the repeat's
 /// check has read the deny list, the wallet makes `write`: at once for the deny list, which
 /// that read has answered, or right after the phone's next read of the record or the floor.
 /// The method isn't called again, and the attempt stays open, at this resume and the next.
@@ -2654,7 +2655,7 @@ async fn repeat_with_a_write_after_its_read(w: &Arc<World>, write: LandsAfter) {
         Arc::clone(&reads) as Arc<dyn Transport>,
     ))
     .await;
-    let attempt_id = paid_in_flight(w, &mut phone, &carols).await;
+    let attempt_id = paid_in_flight(w, &mut phone, &carols, Initiator::Automatic).await;
     if matches!(write, LandsAfter::Floor) {
         Box::pin(wallet_about_to_raise_the_floor(w, &mut wallet, &mut shop)).await;
     }
@@ -2835,19 +2836,21 @@ async fn wallet_raises_the_floor(w: &World, wallet: &mut Paykit, shop: &mut Payk
     assert!(shared_floor(wallet).await.is_some());
 }
 
-/// The phone pays carol's request by hand, left in flight.
+/// Start the named kind of attempt and leave its dispatch in flight.
 async fn paid_in_flight(
     w: &World,
     phone: &mut Paykit,
     carols: &paykit_sdk::RequestRef,
+    by: Initiator,
 ) -> paykit_lib::AttemptId {
     w.rail.next(paykit_sdk::rail::Behaviour::Hang);
-    let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = phone
-        .pay_request(carols, paykit_sdk::PayOptions::default())
-        .await
-        .outcome
-        .unwrap()
-    else {
+    let options = paykit_sdk::PayOptions::default();
+    let paid = if by == Initiator::User {
+        phone.pay_request(carols, options).await
+    } else {
+        phone.pay_request_automatically(carols, options).await
+    };
+    let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = paid.outcome.unwrap() else {
         panic!("in flight");
     };
     attempt_id
@@ -2862,7 +2865,7 @@ async fn test_blocked_return_floor_raised_before_the_attempt_read_again_at_the_r
     let (mut wallet, mut phone, mut shop, carols) = phone_paying_carol(&w).await;
     wallet_raises_the_floor(&w, &mut wallet, &mut shop).await;
     assert_eq!(shared_floor(&phone).await, None);
-    let attempt_id = paid_in_flight(&w, &mut phone, &carols).await;
+    let attempt_id = paid_in_flight(&w, &mut phone, &carols, Initiator::User).await;
     w.clock.advance_ms(MINUTE_MS);
     phone.resume_payments().await.unwrap();
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
@@ -2875,7 +2878,7 @@ async fn test_blocked_return_floor_raised_after_the_attempt_read_again_at_the_re
     // resume, the floor read again immediately before the repeat holds it: no repeat.
     let w = World::new();
     let (mut wallet, mut phone, mut shop, carols) = phone_paying_carol(&w).await;
-    let attempt_id = paid_in_flight(&w, &mut phone, &carols).await;
+    let attempt_id = paid_in_flight(&w, &mut phone, &carols, Initiator::User).await;
     wallet_raises_the_floor(&w, &mut wallet, &mut shop).await;
     assert_eq!(shared_floor(&phone).await, None);
     w.clock.advance_ms(MINUTE_MS);
@@ -2890,7 +2893,7 @@ async fn test_blocked_return_floor_read_that_fails_at_the_repeat_holds_it() {
     // lets the next resume repeat.
     let w = World::new();
     let (_wallet, mut phone, _shop, carols) = phone_paying_carol(&w).await;
-    let attempt_id = paid_in_flight(&w, &mut phone, &carols).await;
+    let attempt_id = paid_in_flight(&w, &mut phone, &carols, Initiator::User).await;
     w.clock.advance_ms(MINUTE_MS);
     // The resume reads the request record again, twice, then the floor, which fails.
     w.alice

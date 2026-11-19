@@ -1594,7 +1594,7 @@ async fn test_provider_loss_the_final_activity_read_precedes_the_payment_method_
 }
 
 /// The doubt a payment was refused with, as [`Refusal::MayBePaid`] shows it.
-fn doubt_of(paid: &paykit_sdk::Result<PayOutcome>) -> PaymentDoubt {
+pub(crate) fn doubt_of(paid: &paykit_sdk::Result<PayOutcome>) -> PaymentDoubt {
     match paid.as_ref().err().and_then(PaykitError::refusal) {
         Some(Refusal::MayBePaid {
             doubt: Some(doubt), ..

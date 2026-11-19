@@ -30,6 +30,7 @@ mod one_time;
 mod outcome_record;
 mod own_record;
 mod period_credit;
+mod period_payments;
 mod periods;
 mod protocols;
 mod provider_loss;

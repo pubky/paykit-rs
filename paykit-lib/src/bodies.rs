@@ -533,6 +533,24 @@ impl PaymentRequest {
         })
     }
 
+    /// The last settlement time allowed for this request's Billing Period, in milliseconds
+    /// (Paykit spec 7.1, 8.2). A recurring request can leave the payment deadline open.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] if the period does not belong to the request or the sum overflows.
+    pub fn period_payment_deadline(&self, named: &PeriodRef) -> Result<Option<u64>> {
+        let period = self.named_period(named)?;
+        let Some(PaymentDeadline::PeriodStart { seconds }) = self.payment_deadline else {
+            return Ok(None);
+        };
+        let deadline = seconds
+            .checked_mul(1000)
+            .and_then(|duration| period.starts_at.checked_add(duration))
+            .ok_or_else(|| Error::Invalid("Paykit wire 4.5: a deadline past 64 bits".into()))?;
+        Ok(Some(deadline))
+    }
+
     /// The `deadline` an `attempt` carries (Paykit spec 7.1, Paykit wire 4.5): `d + 1 ms`,
     /// where for a one-time request `d` is the earlier of `proposal_expires_at` and the
     /// payment deadline's `timestamp`, and for a Billing Period of a recurring request the
@@ -560,22 +578,7 @@ impl PaymentRequest {
                     (a, b) => a.or(b),
                 }
             }
-            (true, Some(period)) => {
-                // Paykit wire 4.4: the period is one of this request's, as its recurrence
-                // computes it; a period of another request gives no deadline here.
-                let period = self.named_period(&PeriodRef::from(*period))?;
-                match self.payment_deadline {
-                    Some(PaymentDeadline::PeriodStart { seconds }) => Some(
-                        seconds
-                            .checked_mul(1000)
-                            .and_then(|s| period.starts_at.checked_add(s))
-                            .ok_or_else(|| {
-                                Error::Invalid("Paykit wire 4.5: a deadline past 64 bits".into())
-                            })?,
-                    ),
-                    _ => None,
-                }
-            }
+            (true, Some(period)) => self.period_payment_deadline(&PeriodRef::from(*period))?,
             (true, None) => {
                 return invalid(
                     "Paykit wire 4.5: an attempt on a recurring request names a Billing Period",
@@ -2161,10 +2164,13 @@ mod tests {
                 "{seconds}"
             );
         }
-        // Past 64 bits, only from a caller's own value: refused.
-        assert!(with(u64::MAX / 1000 + 1)
-            .attempt_deadline(Some(&period))
-            .is_err());
+        // Both adding the period's start and converting the duration must fit in 64 bits.
+        for seconds in [u64::MAX / 1000, u64::MAX / 1000 + 1] {
+            assert!(with(seconds)
+                .period_payment_deadline(&period.into())
+                .is_err());
+            assert!(with(seconds).attempt_deadline(Some(&period)).is_err());
+        }
     }
 
     #[test]

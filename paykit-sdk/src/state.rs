@@ -992,7 +992,7 @@ impl sealed::Sealed for JournalEntry {}
 
 /// A journal entry (Paykit spec 7.2), checked as a restore checks it
 /// ([`JournalEntry::check_restored`]): of the attempt its key names; its claim key the one
-/// its payee and request blind to; the request it keeps that payee's request of that hash,
+/// its payee, request and Billing Period blind to; the request it keeps that payee's request of that hash,
 /// amount, reference and label; its carrier verified for the payee; its acceptance this
 /// app's, of that request, at the `msg_id` it keeps; and its record the payer's record of
 /// that request, or, for a payment without a request, of this app's attempt the key names.
@@ -1008,8 +1008,8 @@ impl Stored for JournalEntry {
         }
         let blind = binder.blind()?;
         let cert = binder.cert.ok_or_else(PaykitError::corrupt)?;
-        self.check_restored(&binder.own, cert, |payee, request_hash| {
-            request_obligation_blinded(&blind(payee), &blind(request_hash), 0)
+        self.check_restored(&binder.own, cert, |payee, request_hash, start| {
+            request_obligation_blinded(&blind(payee), &blind(request_hash), start)
         })?;
         if self.request_hash()?.is_none()
             && self.natural_key != natural_key::payer_payment_record(&binder.own, attempt)
