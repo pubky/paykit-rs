@@ -11222,6 +11222,165 @@ async fn test_queued_withdrawal_after_reload_keeps_identical_recreated_proposals
 }
 
 #[tokio::test]
+async fn test_kept_rejection_delivers_after_a_service_key_change_preserves_its_selected_proposal() {
+    Box::pin(kept_rejection_across_generations(false)).await;
+}
+
+#[tokio::test]
+async fn test_kept_rejection_refuses_the_pre_loss_condition_on_an_uploaded_proposal() {
+    Box::pin(kept_rejection_across_generations(true)).await;
+}
+
+async fn kept_rejection_across_generations(lost: bool) {
+    use pubky_switch_client::app::{Delivery, KeptBatchStatus, RecordContent, RecordRead};
+    use pubky_switch_client::store::MemoryStore;
+    use std::sync::Arc;
+
+    let w = World::new();
+    let store = Arc::new(MemoryStore::new());
+    let scopes = AppScopes::new()
+        .pay()
+        .allowance()
+        .manage_contacts()
+        .build()
+        .unwrap();
+    let mut payer = Box::pin(w.join_with(
+        &w.alice,
+        "wallet",
+        scopes.clone(),
+        Default::default(),
+        store.clone(),
+    ))
+    .await;
+    let mut sibling = Box::pin(alice_app(&w, "phone", scopes)).await;
+    let mut seller = Box::pin(shop(&w)).await;
+    payer.app_mut().invite(&w.bob_id()).await.unwrap();
+    let offer = seller
+        .propose_allowance(w.alice_id(), AllowanceRole::Allowee, terms())
+        .await
+        .unwrap();
+    payer.receive(None).await.unwrap();
+    let target = pending_target(&w.bob_id(), &offer.allowance_id);
+    let canonical = payer
+        .app()
+        .record_key(&allowances_target(&w.bob_id(), &offer.allowance_id))
+        .unwrap();
+    let RecordRead::Fresh(proposal) = sibling.app_mut().read_record_fresh(&target).await.unwrap()
+    else {
+        panic!("the sibling must hold the authenticated proposal before recovery");
+    };
+    assert!(proposal.authenticated && proposal.content.value().is_some());
+
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "ops".into(),
+            after: 0,
+        });
+    let id = payer.reject_allowance(&canonical).await.unwrap();
+    let Some(Delivery::Kept { batch_id }) = payer.app().delivery(&id).await.unwrap() else {
+        panic!("the original rejection must still be in its unanswered batch");
+    };
+    let app_id = payer.app_id();
+    drop(payer);
+    if lost {
+        crate::provider_loss::declare_loss(&w);
+        Box::pin(crate::provider_loss::follow_generation(&mut sibling)).await;
+        // An upload preserves P's original version but acquires a new service revision.
+        let RecordRead::Fresh(uploaded) =
+            sibling.app_mut().read_record_fresh(&target).await.unwrap()
+        else {
+            panic!("the replacement must have the proposal the payer actually selected");
+        };
+        assert!(uploaded.authenticated);
+        assert_eq!(
+            (uploaded.version, &uploaded.content),
+            (proposal.version, &proposal.content)
+        );
+    } else {
+        use crate::common::ALICE_ORIGIN;
+        use pubky_switch_core::records::Inbox;
+        // Switch 12.5 retains the current signed write across a service key change.
+        let service = w.alice.switch().change_key_into([74; 32]);
+        w.router.add_switch(ALICE_ORIGIN, &service);
+        let doc = w
+            .alice
+            .sign_next(|body| {
+                body.generation += 1;
+                body.inbox = Inbox::new(ALICE_ORIGIN, service.service_key());
+            })
+            .unwrap();
+        service.deliver_identity(&doc).unwrap();
+    }
+
+    let mut payer = Box::pin(Paykit::load(
+        w.env(&w.alice, store),
+        Default::default(),
+        app_id,
+        w.rail.clone(),
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    payer.app_mut().refresh_identity().await.unwrap();
+    for _ in 0..6 {
+        payer.receive(None).await.unwrap();
+    }
+    let current_generation = payer.app().own_identity().generation();
+    assert!(current_generation > proposal.version.generation);
+    let outcome = payer.app().kept_batch(batch_id).await.unwrap();
+    if lost {
+        assert!(
+            matches!(outcome, Some(KeptBatchStatus::Dropped {
+            reason: pubky_switch_client::app::KeptBatchDrop::Refused { ref code }, ..
+        }) if code == "conflict"),
+            "{outcome:?}"
+        );
+        payer.flush().await.unwrap();
+        assert!(Box::pin(received_originals(&mut seller, &[&id]))
+            .await
+            .is_empty());
+        let RecordRead::Fresh(live) = payer.app_mut().read_record_fresh(&target).await.unwrap()
+        else {
+            panic!("the refused deletion must leave the re-uploaded P intact");
+        };
+        assert!(live.authenticated);
+        assert_eq!(
+            (live.version, live.content),
+            (proposal.version, proposal.content)
+        );
+        return;
+    }
+    assert!(
+        matches!(outcome, Some(KeptBatchStatus::Applied { .. })),
+        "the original guarded deletion must have applied after recovery: {outcome:?}"
+    );
+    let closed = payer
+        .app()
+        .shared_record(&proposal.key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(closed.authenticated && closed.version.generation == current_generation);
+    assert_eq!(closed.content, RecordContent::Deleted);
+    payer.flush().await.unwrap();
+    assert!(matches!(
+        payer.app().delivery(&id).await.unwrap(),
+        Some(Delivery::Accepted { .. })
+    ));
+    assert_eq!(
+        Box::pin(received_originals(&mut seller, &[&id]))
+            .await
+            .as_slice(),
+        std::slice::from_ref(&id)
+    );
+    assert!(Box::pin(received_originals(&mut seller, &[&id]))
+        .await
+        .is_empty());
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
 async fn test_queued_withdrawal_after_provider_loss_preserves_the_peers_proposal() {
     use pubky_switch_client::app::Delivery;
 

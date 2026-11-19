@@ -883,7 +883,9 @@ mod own_message_tests {
         let pending = body(text("allowances/pending.rs"), "answer_pending");
         assert!(pending.contains("self.own_copy(&reply)"));
         assert!(pending.contains("message: KeptMessage::of(&q)"));
-        assert!(pending.contains("batch = batch.entry(delete)"));
+        assert!(
+            pending.contains("OpBatch::for_protocol(crate::protocol::BACKUP_NAME).entry(delete)")
+        );
         assert!(pending.contains("self.submit(batch.queue(reply))"));
         let answer = body(allowances, "answer_allowance");
         assert!(answer.contains("self.own_copy(&signed)"));
