@@ -1204,6 +1204,11 @@ impl Paykit {
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
+        // When the host took the restored App's first page itself, Paykit has not had
+        // its usual opportunity to read the lists before trying contact deliveries.
+        if self.app.reconcile_mode() && !self.first_read_done && !self.deny_copy_known().await? {
+            Box::pin(self.refresh_lists_when_due()).await?;
+        }
         self.send_outbox().await?;
         Ok(())
     }
