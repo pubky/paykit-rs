@@ -907,7 +907,9 @@ async fn test_buffered_receive_retention_refusal_keeps_packet_and_checkpoint() {
 /// Guards #435: a packet published while intake is connected must arrive
 /// through the live event stream. The healthy audit interval is maxed so the
 /// only audits in the test window are the startup audit and the first jittered
-/// in-stream audit, both of which finish before the packet is published.
+/// in-stream audit, both of which finish before the packet is published. Only
+/// stream delivery records an event cursor on the buffered packet, so its
+/// `source_cursor` proves the delivery path.
 #[tokio::test]
 async fn test_private_intake_buffers_new_packet_from_live_event_stream() {
     let pair = linked_two_party().await;
@@ -933,5 +935,13 @@ async fn test_private_intake_buffers_new_packet_from_live_event_stream() {
     publish_private_lists(&pair.bob, &pair.alice, 1).await;
 
     wait_for_buffered(&pair.alice.storage, &pair.bob.public_key, 1).await;
+    let state = pair.alice.storage.snapshot().unwrap();
+    let buffered = &state.private_intake_peers[&pair.bob.public_key].buffered_packets;
+    assert_eq!(buffered.len(), 1);
+    let source_cursor = buffered[0]
+        .source_cursor
+        .as_ref()
+        .expect("packet must arrive through the live event stream, not an audit");
+    assert_eq!(source_cursor.subscribed_user, pair.bob.public_key);
     supervisor.stop().await;
 }

@@ -2346,8 +2346,9 @@ mod tests {
     #[test]
     fn test_private_intake_event_path_filter_selects_private_directory() {
         assert_eq!(
-            private_intake_event_path_filter(),
-            "/pub/paykit/v0/private/"
+            private_intake_event_path_filter().strip_suffix('/'),
+            Some(paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX),
+            "the filter must be the private routing prefix in directory form"
         );
     }
 
