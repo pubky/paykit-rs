@@ -1191,3 +1191,59 @@ impl StorageTransaction for StorageStateTransaction {
             .cloned()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_storage_private_intake_cursor_rejected_advance_leaves_state_unchanged() {
+        let subscribed_user =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let new_user = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let storage = InMemoryStorage::new();
+        storage
+            .transaction({
+                let subscribed_user = subscribed_user.clone();
+                move |tx| {
+                    tx.advance_private_intake_cursor(PrivateIntakeCursorRecord {
+                        subscribed_user,
+                        homeserver: "homeserver-a".into(),
+                        event_id: 10,
+                    })
+                }
+            })
+            .await
+            .unwrap();
+        let before = storage.snapshot().unwrap();
+
+        let rejected = [
+            ("regression", subscribed_user.clone(), "homeserver-a", 9),
+            (
+                "homeserver mismatch",
+                subscribed_user.clone(),
+                "homeserver-b",
+                11,
+            ),
+            ("empty homeserver", subscribed_user.clone(), "", 11),
+            ("empty homeserver for a new user", new_user, "", 1),
+        ];
+        for (case, subscribed_user, homeserver, event_id) in rejected {
+            let cursor = PrivateIntakeCursorRecord {
+                subscribed_user,
+                homeserver: homeserver.into(),
+                event_id,
+            };
+            let was_rejected = storage
+                .transaction(move |tx| Ok(tx.advance_private_intake_cursor(cursor).is_err()))
+                .await
+                .unwrap();
+            assert!(was_rejected, "{case}: advance was not rejected");
+            assert_eq!(
+                storage.snapshot().unwrap(),
+                before,
+                "{case}: rejected advance changed state"
+            );
+        }
+    }
+}

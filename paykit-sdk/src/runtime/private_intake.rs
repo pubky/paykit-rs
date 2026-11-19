@@ -4,7 +4,13 @@ use crate::storage::{
     PrivateIntakeSupervisorLease,
 };
 use futures_util::StreamExt;
-use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    time::Duration,
+};
 use tokio::sync::{watch, Mutex as AsyncMutex, Notify, RwLock as AsyncRwLock};
 
 const MAX_EVENT_STREAM_USERS: usize = crate::storage::PRIVATE_INTAKE_MAX_EVENT_STREAM_USERS;
@@ -505,19 +511,227 @@ fn private_intake_event_path_filter() -> String {
     format!("{}/", paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX)
 }
 
+/// Per-peer Encrypted Link read folders used to drop irrelevant event hints.
+///
+/// A read folder ties a pseudorandom storage path to one counterparty, so it
+/// must never be logged or exposed through health or errors. That is why this
+/// type does not derive `Debug`. A peer without an entry is unfiltered: every
+/// event under its private tree is a hint. Every acquisition that derives
+/// the expected slot replaces its peer's entry with the read folder of the
+/// snapshot it used. An acquisition that finds the peer pending an Encrypted
+/// Link Handshake removes the entry, and one that fails before deriving the
+/// folder keeps it (see `scoped_private_intake_acquire`).
+#[derive(Default)]
+struct PrivateIntakeEventScopes {
+    read_folders: HashMap<PubkyPublicKey, String>,
+}
+
+/// Return the Encrypted Link folder that holds the derived slot `resource`,
+/// or `None` (unfiltered) when the path does not have the derived shape.
+fn private_intake_slot_folder(resource: &str) -> Option<String> {
+    let resource: pubky::PubkyResource = resource.parse().ok()?;
+    let (folder, _) = resource.path.as_str().rsplit_once('/')?;
+    is_private_intake_link_folder(folder).then(|| folder.to_owned())
+}
+
+/// Whether `folder` has the shape of a derived Encrypted Link folder:
+/// the private prefix followed by 64 lowercase hex characters.
+///
+/// paykit-lib owns this format: `encrypted_link/paths.rs` derives the folders
+/// and `encrypted_link/snapshot.rs` (`validate_pending_packet`) checks the
+/// same folder and slot shape. Keep this copy in step with them.
+fn is_private_intake_link_folder(folder: &str) -> bool {
+    folder
+        .strip_prefix(paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .is_some_and(|hex| {
+            hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        })
+}
+
+/// Number of messages in a full Encrypted Link Handshake.
+///
+/// pubky-noise 0.1.0 writes handshake message `n` to slot `n` of the writer's
+/// derived folder and starts both transport counters at this count when it
+/// enters transport (`DataLinkContext::transition_to_transport`), so slots
+/// below it are handshake messages and slots at or above it are transport
+/// messages. A unit test pins it to pubky-noise's XX action list.
+const ENCRYPTED_LINK_HANDSHAKE_MESSAGE_COUNT: usize = 3;
+// `is_encrypted_link_handshake_slot` matches one decimal digit.
+const _: () = assert!(ENCRYPTED_LINK_HANDSHAKE_MESSAGE_COUNT <= 10);
+
+/// Whether `path` is an Encrypted Link Handshake slot in any derived folder.
+///
+/// A relink or recovery derives a new folder, so its handshake reply lands
+/// outside the current read folder and must still be a hint. Slot names are
+/// canonical decimal counters (see `validate_pending_packet` in paykit-lib
+/// `encrypted_link/snapshot.rs`), so `01` or `0/1` is not a handshake slot.
+fn is_encrypted_link_handshake_slot(path: &str) -> bool {
+    path.rsplit_once('/').is_some_and(|(folder, slot)| {
+        is_private_intake_link_folder(folder)
+            && matches!(
+                slot.as_bytes(),
+                [digit @ b'0'..=b'9']
+                    if usize::from(digit - b'0') < ENCRYPTED_LINK_HANDSHAKE_MESSAGE_COUNT
+            )
+    })
+}
+
+/// Whether `event` may announce a packet the expected-slot fetch would find.
+///
+/// `read_folder` is `None` for an unfiltered peer: every event is a hint.
+/// Otherwise only a PUT below the read folder, or a PUT at an Encrypted Link
+/// Handshake slot, is a hint. Deletes, Receipts, and other links' slots are
+/// not.
+fn private_intake_event_may_announce_packet(
+    read_folder: Option<&str>,
+    event: &pubky::Event,
+) -> bool {
+    let Some(read_folder) = read_folder else {
+        return true;
+    };
+    if !matches!(event.event_type, pubky::EventType::Put { .. }) {
+        return false;
+    }
+    let path = event.resource.path.as_str();
+    path.strip_prefix(read_folder)
+        .is_some_and(|rest| rest.starts_with('/'))
+        || is_encrypted_link_handshake_slot(path)
+}
+
+/// Where a subscribed peer's event goes.
+enum PrivateIntakeEventRoute {
+    /// The event may announce a packet: acquire the expected slot.
+    Hint(PrivateIntakeCursorRecord),
+    /// The event cannot announce a packet. Its cursor is only committed after
+    /// a later successful audit of the same peer.
+    Ignored { peer: PubkyPublicKey, event_id: u64 },
+}
+
+/// Route an event to its subscribed peer's replay cursor, or `None` when the
+/// owner is not subscribed.
+///
+/// Trust and durability assumptions: the event path is an untrusted hint and
+/// never selects what is fetched; acquisition always derives the next expected
+/// slot from the stored Encrypted Link. Healthy audits remain the delivery
+/// guarantee, so a stale scope can only drop a hint. An ignored event writes
+/// no cursor by itself, so a reconnect before the next successful audit
+/// replays it and filters it again. A poisoned scope lock leaves every peer
+/// unfiltered.
 fn route_private_intake_event(
     group: &SubscriptionGroup,
+    scopes: &std::sync::Mutex<PrivateIntakeEventScopes>,
     event: pubky::Event,
-) -> Option<(PubkyPublicKey, PrivateIntakeCursorRecord)> {
+) -> Option<PrivateIntakeEventRoute> {
     let peer = PubkyPublicKey::from_public_key(&event.resource.owner);
-    group.peers.contains(&peer).then(|| {
-        let cursor = PrivateIntakeCursorRecord {
-            subscribed_user: peer.clone(),
+    if !group.peers.contains(&peer) {
+        return None;
+    }
+    let is_hint = scopes.lock().ok().is_none_or(|scopes| {
+        private_intake_event_may_announce_packet(
+            scopes.read_folders.get(&peer).map(String::as_str),
+            &event,
+        )
+    });
+    let event_id = event.cursor.id();
+    Some(if is_hint {
+        PrivateIntakeEventRoute::Hint(PrivateIntakeCursorRecord {
+            subscribed_user: peer,
             homeserver: group.homeserver_name.clone(),
-            event_id: event.cursor.id(),
-        };
-        (peer, cursor)
+            event_id,
+        })
+    } else {
+        PrivateIntakeEventRoute::Ignored { peer, event_id }
     })
+}
+
+/// Highest ignored event ID per peer since that peer's last successful
+/// in-stream audit. Held only in memory by one connected stream, whose
+/// subscription group names the homeserver these IDs belong to.
+type PrivateIntakeIgnoredCursors = HashMap<PubkyPublicKey, u64>;
+
+fn record_ignored_private_intake_event(
+    ignored: &mut PrivateIntakeIgnoredCursors,
+    peer: PubkyPublicKey,
+    event_id: u64,
+) {
+    ignored
+        .entry(peer)
+        .and_modify(|highest| *highest = (*highest).max(event_id))
+        .or_insert(event_id);
+}
+
+/// Run one in-stream audit, then commit, in one batch, the ignored cursors
+/// of every peer whose audit found its next expected slot absent.
+///
+/// The caller holds `ignored` for the whole audit, so no event is recorded
+/// while it runs and every entry was seen before the audit started.
+///
+/// Safety argument: the stream delivers a homeserver's events in cursor
+/// order, and for each such peer the audit fetched the expected slot after
+/// every event in `ignored` and found it absent. An ignored event either
+/// cannot announce a packet the expected-slot fetch would find, or, when the
+/// read folder was stale, announced one that this audit fetched. Moving the
+/// stored cursor, on `homeserver_name`, past those events only skips
+/// replaying them on reconnect.
+///
+/// `ignored` lives only as long as the connected stream. Any audit outcome
+/// other than an absent expected slot (a pending handshake, an already
+/// buffered packet, capacity, the acquisition cap or a failure) keeps the
+/// peer's ignored cursor for the next in-stream audit while the stream stays
+/// connected. An audit that stops at capacity makes the caller exit with
+/// backpressure, which drops `ignored` like any other disconnect; the
+/// homeserver then replays those events after reconnect and they are filtered
+/// again.
+async fn audit_private_intake_stream(
+    audit_group: &PrivateIntakeAudit,
+    homeserver_name: &str,
+    ignored: &mut PrivateIntakeIgnoredCursors,
+    commit_cursors: &PrivateIntakeCommitCursors,
+) -> PrivateIntakeAuditOutcome {
+    let outcome = audit_group().await;
+    let mut audited = Vec::new();
+    ignored.retain(|peer, event_id| {
+        if !outcome.absent_slot_peers.contains(peer) {
+            return true;
+        }
+        audited.push(PrivateIntakeCursorRecord {
+            subscribed_user: peer.clone(),
+            homeserver: homeserver_name.to_owned(),
+            event_id: *event_id,
+        });
+        false
+    });
+    if !audited.is_empty() {
+        commit_cursors(audited).await;
+    }
+    outcome
+}
+
+/// Commit ignored events' replay cursors in one storage transaction, best
+/// effort.
+///
+/// `StorageTransaction::advance_private_intake_cursor` rejects a cursor that
+/// would regress (a later event already moved it) or that names another or an
+/// empty homeserver, and its contract is that an error never changes state.
+/// Skipping any error, a rejection or a fault, therefore cannot commit half a
+/// write, and the other cursors still commit. A failed transaction only leaves
+/// irrelevant events to replay.
+async fn commit_ignored_private_intake_cursors<S: StorageAdapter>(
+    storage: &S,
+    cursors: Vec<PrivateIntakeCursorRecord>,
+) {
+    let _ = storage
+        .transaction(move |tx| {
+            for cursor in cursors {
+                let _ = tx.advance_private_intake_cursor(cursor);
+            }
+            Ok(())
+        })
+        .await;
 }
 
 async fn audit_private_intake_peer<F, Fut>(
@@ -558,6 +772,78 @@ where
         outcome: Ok(PrivatePacketAcquisition::Inserted),
         inserted,
     }
+}
+
+/// Audit every active peer in `group` through `acquire`, which also refreshes
+/// each peer's event scope.
+async fn audit_private_intake_group<S: StorageAdapter, C: Clock>(
+    storage: &S,
+    clock: &C,
+    group: &SubscriptionGroup,
+    health: &Arc<AsyncRwLock<PrivateIntakeHealth>>,
+    work: &Arc<Notify>,
+    acquire: &PrivateIntakeAcquire,
+) -> PrivateIntakeAuditOutcome {
+    let active_peers = match storage
+        .transaction({
+            let peers = group.peers.clone();
+            move |tx| {
+                Ok(subscribable_private_intake_peers(
+                    &tx.export_storage_state(),
+                    &peers,
+                ))
+            }
+        })
+        .await
+    {
+        Ok(peers) => peers,
+        Err(_) => {
+            set_group_state(health, group, PrivateIntakeTransportState::Stale).await;
+            return PrivateIntakeAuditOutcome::default();
+        }
+    };
+    let mut audit = PrivateIntakeAuditOutcome::default();
+    for peer in &group.peers {
+        if !active_peers.contains(peer) {
+            audit.backpressured = true;
+            set_peer_state(
+                health,
+                peer.clone(),
+                PrivateIntakeTransportState::Backpressured,
+            )
+            .await;
+            continue;
+        }
+        let peer_audit =
+            audit_private_intake_peer(peer.clone(), |peer, cursor| acquire(peer, cursor)).await;
+        if peer_audit.inserted {
+            work.notify_waiters();
+        }
+        match peer_audit.outcome {
+            Ok(outcome) => {
+                audit.handshake_pending |=
+                    matches!(&outcome, PrivatePacketAcquisition::PendingHandshake);
+                audit.backpressured |= matches!(
+                    &outcome,
+                    PrivatePacketAcquisition::InsertedAtCapacity
+                        | PrivatePacketAcquisition::CapacityReached
+                );
+                if matches!(&outcome, PrivatePacketAcquisition::PendingHandshake) {
+                    work.notify_waiters();
+                }
+                // Only an absent expected slot proves the audit read past
+                // every earlier event; other outcomes stopped short of it.
+                if matches!(&outcome, PrivatePacketAcquisition::Absent) {
+                    audit.absent_slot_peers.insert(peer.clone());
+                }
+                set_peer_audit_outcome(health, peer.clone(), outcome, clock.now()).await;
+            }
+            Err(_) => {
+                set_peer_state(health, peer.clone(), PrivateIntakeTransportState::Stale).await
+            }
+        }
+    }
+    audit
 }
 
 #[derive(Debug)]
@@ -603,10 +889,79 @@ type PrivateIntakeAcquire = Arc<
         + Send
         + Sync,
 >;
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// An acquisition's outcome together with the read folder of the snapshot it
+/// used, or `None` when it derived none.
+type PrivateIntakeScopedAcquisitionFuture =
+    Pin<Box<dyn Future<Output = (Option<String>, Result<PrivatePacketAcquisition>)> + Send>>;
+type PrivateIntakeCommitCursorsFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+/// Best-effort monotonic write of ignored events' replay cursors in one
+/// storage transaction.
+type PrivateIntakeCommitCursors =
+    Arc<dyn Fn(Vec<PrivateIntakeCursorRecord>) -> PrivateIntakeCommitCursorsFuture + Send + Sync>;
+
+/// Wrap a scoped acquisition so its outcome refreshes its peer's event
+/// scope. A derived read folder replaces the entry. Without a folder, a
+/// successful outcome (a pending Encrypted Link Handshake) removes the entry,
+/// which leaves the peer unfiltered, and an error keeps it unchanged. Stream
+/// events and audits share the returned closure, so the scope follows the
+/// latest snapshot from which a slot was derived.
+fn scoped_private_intake_acquire<F>(
+    scopes: Arc<std::sync::Mutex<PrivateIntakeEventScopes>>,
+    acquire: F,
+) -> PrivateIntakeAcquire
+where
+    F: Fn(
+            PubkyPublicKey,
+            Option<PrivateIntakeCursorRecord>,
+        ) -> PrivateIntakeScopedAcquisitionFuture
+        + Send
+        + Sync
+        + 'static,
+{
+    Arc::new(move |peer, cursor| {
+        let scopes = Arc::clone(&scopes);
+        let acquisition = acquire(peer.clone(), cursor);
+        Box::pin(async move {
+            let (read_folder, outcome) = acquisition.await;
+            if let Ok(mut scopes) = scopes.lock() {
+                match (read_folder, &outcome) {
+                    (Some(read_folder), _) => {
+                        scopes.read_folders.insert(peer, read_folder);
+                    }
+                    // A pending Encrypted Link Handshake has no read folder
+                    // yet. A slot whose path lacks the derived folder shape
+                    // also lands here.
+                    (None, Ok(_)) => {
+                        scopes.read_folders.remove(&peer);
+                    }
+                    // The acquisition failed before deriving the slot: a
+                    // storage, handshake, authorization, marker or
+                    // observation error, or the peer has no private intake
+                    // checkpoint or no Encrypted Link snapshot (both are
+                    // `RecoveryRequired` errors). Keep the previous entry,
+                    // or none, so a flaky homeserver does not turn the
+                    // filter off and re-enable a fetch per unrelated event.
+                    // A stale folder only delays a packet: handshake slots
+                    // in any folder still pass, audits still fetch the
+                    // expected slot, and every audit or acquisition that
+                    // derives the slot replaces the entry.
+                    (None, Err(_)) => {}
+                }
+            }
+            outcome
+        })
+    })
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct PrivateIntakeAuditOutcome {
     handshake_pending: bool,
     backpressured: bool,
+    /// Peers whose audit ended in `PrivatePacketAcquisition::Absent`. Only an
+    /// absent expected slot proves the audit read past every earlier event of
+    /// the peer, which is what lets the caller commit the peer's ignored
+    /// cursor; any other outcome stopped short of that slot.
+    absent_slot_peers: HashSet<PubkyPublicKey>,
 }
 
 type PrivateIntakeAuditFuture = Pin<Box<dyn Future<Output = PrivateIntakeAuditOutcome> + Send>>;
@@ -614,6 +969,8 @@ type PrivateIntakeAudit = Arc<dyn Fn() -> PrivateIntakeAuditFuture + Send + Sync
 
 async fn process_private_intake_event<F, Fut>(
     group: &SubscriptionGroup,
+    scopes: &std::sync::Mutex<PrivateIntakeEventScopes>,
+    ignored: &mut PrivateIntakeIgnoredCursors,
     event: pubky::Event,
     acquire: &mut F,
 ) -> Option<(PubkyPublicKey, Result<PrivatePacketAcquisition>)>
@@ -621,11 +978,44 @@ where
     F: FnMut(PubkyPublicKey, Option<PrivateIntakeCursorRecord>) -> Fut,
     Fut: Future<Output = Result<PrivatePacketAcquisition>>,
 {
-    let (peer, cursor) = route_private_intake_event(group, event)?;
-    let outcome = acquire(peer.clone(), Some(cursor)).await;
-    Some((peer, outcome))
+    match route_private_intake_event(group, scopes, event)? {
+        PrivateIntakeEventRoute::Hint(cursor) => {
+            let peer = cursor.subscribed_user.clone();
+            let event_id = cursor.event_id;
+            let outcome = acquire(peer.clone(), Some(cursor)).await;
+            // A successful acquisition for this event supersedes the peer's
+            // ignored events, so a later audit does not write a cursor behind
+            // the one this acquisition may have stored, which storage rejects
+            // as a regression after a wasted transaction. Dropping an ignored
+            // ID can only mean committing less: the worst case is replaying
+            // irrelevant events after a reconnect, never a skipped packet. A
+            // failed acquisition keeps the entry. The `<=` check is defensive
+            // only: the stream delivers events in cursor order, so an ignored
+            // ID is never newer than this event.
+            if outcome.is_ok()
+                && ignored
+                    .get(&peer)
+                    .is_some_and(|&ignored_id| ignored_id <= event_id)
+            {
+                ignored.remove(&peer);
+            }
+            Some((peer, outcome))
+        }
+        PrivateIntakeEventRoute::Ignored { peer, event_id } => {
+            record_ignored_private_intake_event(ignored, peer, event_id);
+            None
+        }
+    }
 }
 
+/// Acquire the next expected slot of `snapshot`'s link and return the read
+/// folder (the parent of the snapshot's next expected slot) with the outcome.
+/// The folder is `None` when that slot cannot be derived, or when the derived
+/// slot's path does not have the derived Encrypted Link folder shape
+/// (`private_intake_slot_folder` returns `None`). In the second case the
+/// acquisition still runs, and a successful outcome leaves the peer
+/// unfiltered (see `scoped_private_intake_acquire`). A failure after
+/// derivation keeps the folder.
 #[allow(
     clippy::too_many_arguments,
     reason = "expected-slot acquisition keeps routing, generation, cursor, and injected transport explicit"
@@ -640,69 +1030,76 @@ async fn acquire_expected_private_packet_with_fetch<S, F, Fut>(
     cursor: Option<PrivateIntakeCursorRecord>,
     buffered_at: DateTime<Utc>,
     fetch: F,
-) -> Result<PrivatePacketAcquisition>
+) -> (Option<String>, Result<PrivatePacketAcquisition>)
 where
     S: StorageAdapter,
     F: FnOnce(String) -> Fut,
     Fut: Future<Output = Result<Option<Vec<u8>>>>,
 {
-    let snapshot_counter = snapshot
-        .next_private_application_message_resource(local, secret)?
-        .1;
-    let counterparty_for_tail = counterparty.clone();
-    let receive_counter = storage
-        .transaction(move |tx| {
-            let state = tx.export_storage_state();
-            next_private_intake_counter(
-                &state,
-                &counterparty_for_tail,
-                generation,
-                snapshot_counter,
-            )
-        })
-        .await?;
-    let (resource, receive_counter) =
-        snapshot.private_application_message_resource_at_counter(local, secret, receive_counter)?;
-    let Some(ciphertext) = fetch(resource).await? else {
-        if let Some(cursor) = cursor {
-            storage
-                .transaction(move |tx| tx.advance_private_intake_cursor(cursor))
-                .await?;
-        }
-        return Ok(PrivatePacketAcquisition::Absent);
-    };
-    let packet = BufferedPrivatePacketRecord {
-        counterparty,
-        link_generation: generation,
-        receive_counter,
-        ciphertext,
-        source_cursor: cursor,
-        buffered_at,
-    };
-    storage
-        .transaction(move |tx| {
-            let counterparty = packet.counterparty.clone();
-            let outcome = tx.buffer_private_intake_packet(packet)?;
-            let at_capacity = matches!(outcome, PrivateIntakeBufferOutcome::Inserted)
-                && subscribable_private_intake_peers(
-                    &tx.export_storage_state(),
-                    std::slice::from_ref(&counterparty),
+    let (next_resource, snapshot_counter) =
+        match snapshot.next_private_application_message_resource(local, secret) {
+            Ok(next) => next,
+            Err(error) => return (None, Err(error.into())),
+        };
+    let read_folder = private_intake_slot_folder(&next_resource);
+    let outcome = async move {
+        let counterparty_for_tail = counterparty.clone();
+        let receive_counter = storage
+            .transaction(move |tx| {
+                let state = tx.export_storage_state();
+                next_private_intake_counter(
+                    &state,
+                    &counterparty_for_tail,
+                    generation,
+                    snapshot_counter,
                 )
-                .is_empty();
-            Ok(match outcome {
-                PrivateIntakeBufferOutcome::Inserted if at_capacity => {
-                    PrivatePacketAcquisition::InsertedAtCapacity
-                }
-                PrivateIntakeBufferOutcome::Inserted => PrivatePacketAcquisition::Inserted,
-                PrivateIntakeBufferOutcome::AlreadyBuffered => {
-                    PrivatePacketAcquisition::AlreadyBuffered
-                }
-                PrivateIntakeBufferOutcome::CapacityReached => {
-                    PrivatePacketAcquisition::CapacityReached
-                }
             })
-        })
-        .await
+            .await?;
+        let (resource, receive_counter) = snapshot
+            .private_application_message_resource_at_counter(local, secret, receive_counter)?;
+        let Some(ciphertext) = fetch(resource).await? else {
+            if let Some(cursor) = cursor {
+                storage
+                    .transaction(move |tx| tx.advance_private_intake_cursor(cursor))
+                    .await?;
+            }
+            return Ok(PrivatePacketAcquisition::Absent);
+        };
+        let packet = BufferedPrivatePacketRecord {
+            counterparty,
+            link_generation: generation,
+            receive_counter,
+            ciphertext,
+            source_cursor: cursor,
+            buffered_at,
+        };
+        storage
+            .transaction(move |tx| {
+                let counterparty = packet.counterparty.clone();
+                let outcome = tx.buffer_private_intake_packet(packet)?;
+                let at_capacity = matches!(outcome, PrivateIntakeBufferOutcome::Inserted)
+                    && subscribable_private_intake_peers(
+                        &tx.export_storage_state(),
+                        std::slice::from_ref(&counterparty),
+                    )
+                    .is_empty();
+                Ok(match outcome {
+                    PrivateIntakeBufferOutcome::Inserted if at_capacity => {
+                        PrivatePacketAcquisition::InsertedAtCapacity
+                    }
+                    PrivateIntakeBufferOutcome::Inserted => PrivatePacketAcquisition::Inserted,
+                    PrivateIntakeBufferOutcome::AlreadyBuffered => {
+                        PrivatePacketAcquisition::AlreadyBuffered
+                    }
+                    PrivateIntakeBufferOutcome::CapacityReached => {
+                        PrivatePacketAcquisition::CapacityReached
+                    }
+                })
+            })
+            .await
+    }
+    .await;
+    (read_folder, outcome)
 }
 
 #[allow(
@@ -723,8 +1120,11 @@ async fn run_connected_private_intake_stream(
     work: &Arc<Notify>,
     acquire: PrivateIntakeAcquire,
     audit_group: PrivateIntakeAudit,
+    event_scopes: &std::sync::Mutex<PrivateIntakeEventScopes>,
+    commit_cursors: PrivateIntakeCommitCursors,
     mut handshake_pending: bool,
 ) -> PrivateIntakeEventLoopExit {
+    let mut ignored = PrivateIntakeIgnoredCursors::new();
     let mut audit =
         tokio::time::interval_at(tokio::time::Instant::now() + audit_delay, audit_interval);
     audit.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -741,14 +1141,28 @@ async fn run_connected_private_intake_stream(
                 }
             }
             _ = audit.tick() => {
-                let outcome = audit_group().await;
+                let outcome =
+                    audit_private_intake_stream(
+                        &audit_group,
+                        &group.homeserver_name,
+                        &mut ignored,
+                        &commit_cursors,
+                    )
+                    .await;
                 if outcome.backpressured {
                     return PrivateIntakeEventLoopExit::Backpressured;
                 }
                 handshake_pending = outcome.handshake_pending;
             }
             _ = handshake_retry.tick(), if handshake_pending => {
-                let outcome = audit_group().await;
+                let outcome =
+                    audit_private_intake_stream(
+                        &audit_group,
+                        &group.homeserver_name,
+                        &mut ignored,
+                        &commit_cursors,
+                    )
+                    .await;
                 if outcome.backpressured {
                     return PrivateIntakeEventLoopExit::Backpressured;
                 }
@@ -757,7 +1171,15 @@ async fn run_connected_private_intake_stream(
             event = stream.next() => match event {
                 Some(Ok(event)) => {
                     let mut acquire_one = |peer, cursor| acquire(peer, cursor);
-                    match process_private_intake_event(group, event, &mut acquire_one).await {
+                    match process_private_intake_event(
+                        group,
+                        event_scopes,
+                        &mut ignored,
+                        event,
+                        &mut acquire_one,
+                    )
+                    .await
+                    {
                         Some((peer, Ok(PrivatePacketAcquisition::Inserted))) => {
                             work.notify_waiters();
                             set_peer_state(health, peer, PrivateIntakeTransportState::Replaying).await;
@@ -1292,6 +1714,39 @@ where
         work: Arc<Notify>,
         topology_changed: Arc<Notify>,
     ) {
+        // Event scopes live for this group task, not for one connection, so
+        // read folders recorded on one connection still filter after an SSE
+        // reconnect even when the next startup audit fails before deriving a
+        // slot. The task starts unfiltered; every acquisition, from the first
+        // startup audit on, records the read folder of the snapshot it used.
+        // A topology change, including a homeserver move, or a capacity
+        // release stops this task through its epoch, and the replacement task
+        // starts with an empty map. `group.peers` is fixed for the task; only
+        // its subscribable subset changes between connections. A peer that
+        // drops out keeps an unused entry, because routing only consults the
+        // connection's subscribed peers, and a peer without an entry stays
+        // unfiltered. A stale folder only delays a packet: handshake slots in
+        // any folder still pass, audits still fetch the expected slot, and
+        // every acquisition that derives the slot replaces the entry. The
+        // acquisition and cursor-commit callbacks hold no per-connection
+        // state, so they are also built once per task.
+        let event_scopes = Arc::new(std::sync::Mutex::new(PrivateIntakeEventScopes::default()));
+        let acquire = scoped_private_intake_acquire(Arc::clone(&event_scopes), {
+            let sdk = Arc::clone(&self);
+            move |peer, cursor| {
+                let sdk = Arc::clone(&sdk);
+                Box::pin(async move { sdk.acquire_expected_private_packet(peer, cursor).await })
+            }
+        });
+        let commit_cursors: PrivateIntakeCommitCursors = {
+            let sdk = Arc::clone(&self);
+            Arc::new(move |cursors| {
+                let sdk = Arc::clone(&sdk);
+                Box::pin(async move {
+                    commit_ignored_private_intake_cursors(&sdk.storage, cursors).await;
+                })
+            })
+        };
         loop {
             if *stop.borrow() {
                 break;
@@ -1416,7 +1871,16 @@ where
                         audit_disconnected_private_intake_stream(
                             &error,
                             config.healthy_audit_interval,
-                            || self.audit_private_intake_group(&active_group, &health, &work),
+                            || {
+                                audit_private_intake_group(
+                                    &self.storage,
+                                    &self.clock,
+                                    &active_group,
+                                    &health,
+                                    &work,
+                                    &acquire,
+                                )
+                            },
                         )
                         .await;
                     if audit_outcome.backpressured {
@@ -1436,9 +1900,15 @@ where
             // Establish live delivery before startup audit. Pending handshakes can
             // publish their next packet during audit; subscribing first prevents
             // that packet from falling into the live-stream setup gap.
-            let audit_outcome = self
-                .audit_private_intake_group(&active_group, &health, &work)
-                .await;
+            let audit_outcome = audit_private_intake_group(
+                &self.storage,
+                &self.clock,
+                &active_group,
+                &health,
+                &work,
+                &acquire,
+            )
+            .await;
             if audit_outcome.backpressured {
                 topology_changed.notify_one();
                 if wait_reconnect_or_stop(&mut stop).await {
@@ -1446,26 +1916,29 @@ where
                 }
                 continue;
             }
-            let acquire: PrivateIntakeAcquire = {
-                let sdk = Arc::clone(&self);
-                Arc::new(move |peer, cursor| {
-                    let sdk = Arc::clone(&sdk);
-                    Box::pin(async move { sdk.acquire_expected_private_packet(peer, cursor).await })
-                })
-            };
             let audit_group: PrivateIntakeAudit = {
                 let sdk = Arc::clone(&self);
                 let group = active_group.clone();
                 let health = Arc::clone(&health);
                 let work = Arc::clone(&work);
+                let acquire = Arc::clone(&acquire);
                 Arc::new(move || {
                     let sdk = Arc::clone(&sdk);
                     let group = group.clone();
                     let health = Arc::clone(&health);
                     let work = Arc::clone(&work);
-                    Box::pin(
-                        async move { sdk.audit_private_intake_group(&group, &health, &work).await },
-                    )
+                    let acquire = Arc::clone(&acquire);
+                    Box::pin(async move {
+                        audit_private_intake_group(
+                            &sdk.storage,
+                            &sdk.clock,
+                            &group,
+                            &health,
+                            &work,
+                            &acquire,
+                        )
+                        .await
+                    })
                 })
             };
             let exit = run_connected_private_intake_stream(
@@ -1476,8 +1949,10 @@ where
                 stop.clone(),
                 &health,
                 &work,
-                acquire,
+                Arc::clone(&acquire),
                 audit_group,
+                &event_scopes,
+                Arc::clone(&commit_cursors),
                 audit_outcome.handshake_pending,
             )
             .await;
@@ -1497,189 +1972,135 @@ where
         }
     }
 
-    async fn audit_private_intake_group(
-        &self,
-        group: &SubscriptionGroup,
-        health: &Arc<AsyncRwLock<PrivateIntakeHealth>>,
-        work: &Arc<Notify>,
-    ) -> PrivateIntakeAuditOutcome {
-        let active_peers = match self
-            .storage
-            .transaction({
-                let peers = group.peers.clone();
-                move |tx| {
-                    Ok(subscribable_private_intake_peers(
-                        &tx.export_storage_state(),
-                        &peers,
-                    ))
-                }
-            })
-            .await
-        {
-            Ok(peers) => peers,
-            Err(_) => {
-                set_group_state(health, group, PrivateIntakeTransportState::Stale).await;
-                return PrivateIntakeAuditOutcome::default();
-            }
-        };
-        let mut audit = PrivateIntakeAuditOutcome::default();
-        for peer in &group.peers {
-            if !active_peers.contains(peer) {
-                audit.backpressured = true;
-                set_peer_state(
-                    health,
-                    peer.clone(),
-                    PrivateIntakeTransportState::Backpressured,
-                )
-                .await;
-                continue;
-            }
-            let peer_audit = audit_private_intake_peer(peer.clone(), |peer, cursor| {
-                self.acquire_expected_private_packet(peer, cursor)
-            })
-            .await;
-            if peer_audit.inserted {
-                work.notify_waiters();
-            }
-            match peer_audit.outcome {
-                Ok(outcome) => {
-                    audit.handshake_pending |=
-                        matches!(&outcome, PrivatePacketAcquisition::PendingHandshake);
-                    audit.backpressured |= matches!(
-                        &outcome,
-                        PrivatePacketAcquisition::InsertedAtCapacity
-                            | PrivatePacketAcquisition::CapacityReached
-                    );
-                    if matches!(&outcome, PrivatePacketAcquisition::PendingHandshake) {
-                        work.notify_waiters();
-                    }
-                    set_peer_audit_outcome(health, peer.clone(), outcome, self.clock.now()).await;
-                }
-                Err(_) => {
-                    set_peer_state(health, peer.clone(), PrivateIntakeTransportState::Stale).await
-                }
-            }
-        }
-        audit
-    }
-
+    /// Acquire `counterparty`'s next expected slot and return the read folder
+    /// of the snapshot it used. The folder is `None` when the peer is pending
+    /// an Encrypted Link Handshake, has no snapshot, the acquisition failed
+    /// before deriving the slot, or the derived slot's path does not have the
+    /// derived Encrypted Link folder shape (a successful acquisition then
+    /// leaves the peer unfiltered).
     async fn acquire_expected_private_packet(
         &self,
         counterparty: PubkyPublicKey,
         cursor: Option<PrivateIntakeCursorRecord>,
-    ) -> Result<PrivatePacketAcquisition> {
-        let counterparty_for_phase = counterparty.clone();
-        let phase = self
-            .storage
-            .transaction(move |tx| {
-                Ok(private_intake_peer_phase(
-                    &tx.export_storage_state(),
-                    &counterparty_for_phase,
-                ))
-            })
-            .await?;
-        if matches!(phase, Some(PrivateIntakePeerPhase::PendingHandshake { .. })) {
-            let report = self.advance_link_handshake(counterparty.clone()).await?;
-            if report.state == LinkedPeerState::Linking {
-                if let Some(cursor) = cursor {
-                    self.storage
-                        .transaction(move |tx| tx.advance_private_intake_cursor(cursor))
-                        .await?;
-                }
-                return Ok(PrivatePacketAcquisition::PendingHandshake);
-            }
-        } else if phase.is_none() {
-            return Err(PaykitSdkError::RecoveryRequired {
-                context: "Linked Peer has no current private intake checkpoint".into(),
-                source: None,
-            });
-        }
-        let (access, snapshots) = self.private_receive_context(Some(&counterparty)).await?;
-        let snapshot = snapshots
-            .into_iter()
-            .next()
-            .and_then(|(_, snapshot, _)| snapshot)
-            .ok_or_else(|| PaykitSdkError::RecoveryRequired {
-                context: "Linked Peer has no current Encrypted Link snapshot".into(),
-                source: None,
-            })?;
-        let secret = access.paykit_noise_secret_key()?;
-        let session_info = access.session.info();
-        let local = session_info.public_key();
-        let remote = counterparty.to_public_key()?;
-        let public_storage = access.outbox_client.public_storage();
-        let (authorization, marker) = tokio::join!(
-            noise_key_authorization::require_authorization(&public_storage, &remote),
-            paykit_lib::fetch_encrypted_link_recovery_marker(
-                &public_storage,
-                &secret,
-                local,
-                &remote,
-                snapshot.link.remote_noise_public_key(),
-            ),
-        );
-        let authorization = authorization.map_err(super::recovery::link_observation_error)?;
-        let marker = self
-            .preserve_authorization_advance_on_marker_failure(
-                &counterparty,
-                &access,
-                snapshot.state.generation,
-                &snapshot.authorization,
-                &authorization,
-                marker.map_err(|error| super::recovery::link_observation_error(error.into())),
-            )
-            .await?;
-        if !super::private_stream::private_receive_observation_is_current(
-            &snapshot,
-            &authorization,
-            marker.as_ref(),
-        ) {
-            let lease = self.claim_peer_link_operation(&counterparty).await?;
-            let result = self
-                .require_current_private_receive_observation(
-                    &counterparty,
-                    &lease,
-                    &access,
-                    super::private_stream::PrivateReceiveObservation::new(
-                        snapshot.state.generation,
-                        &snapshot.authorization,
-                        &authorization,
-                        marker.as_ref(),
-                    ),
-                )
-                .await;
-            self.finish_peer_link_operation(lease, result).await?;
-        }
-        let generation = snapshot.state.generation;
-        acquire_expected_private_packet_with_fetch(
-            &self.storage,
-            counterparty,
-            &snapshot.link,
-            local,
-            &secret,
-            generation,
-            cursor,
-            self.clock.now(),
-            move |resource| async move {
-                let response = match public_storage.get(resource).await {
-                    Ok(response) => response,
-                    Err(error) if is_pubky_not_found(&error) => return Ok(None),
-                    Err(error) => {
-                        return Err(map_pubky_transport_error(
-                            "fetch expected private intake slot",
-                            error,
-                        ))
+    ) -> (Option<String>, Result<PrivatePacketAcquisition>) {
+        // An error before the expected slot is derived leaves no read folder;
+        // `acquire_expected_private_packet_with_fetch` reports it from there.
+        let acquisition = async move {
+            let counterparty_for_phase = counterparty.clone();
+            let phase = self
+                .storage
+                .transaction(move |tx| {
+                    Ok(private_intake_peer_phase(
+                        &tx.export_storage_state(),
+                        &counterparty_for_phase,
+                    ))
+                })
+                .await?;
+            if matches!(phase, Some(PrivateIntakePeerPhase::PendingHandshake { .. })) {
+                let report = self.advance_link_handshake(counterparty.clone()).await?;
+                if report.state == LinkedPeerState::Linking {
+                    if let Some(cursor) = cursor {
+                        self.storage
+                            .transaction(move |tx| tx.advance_private_intake_cursor(cursor))
+                            .await?;
                     }
-                };
-                read_public_response(
-                    response,
-                    crate::storage::PRIVATE_INTAKE_PACKET_BYTES,
-                    "read expected private intake slot",
+                    return Ok((None, Ok(PrivatePacketAcquisition::PendingHandshake)));
+                }
+            } else if phase.is_none() {
+                return Err(PaykitSdkError::RecoveryRequired {
+                    context: "Linked Peer has no current private intake checkpoint".into(),
+                    source: None,
+                });
+            }
+            let (access, snapshots) = self.private_receive_context(Some(&counterparty)).await?;
+            let snapshot = snapshots
+                .into_iter()
+                .next()
+                .and_then(|(_, snapshot, _)| snapshot)
+                .ok_or_else(|| PaykitSdkError::RecoveryRequired {
+                    context: "Linked Peer has no current Encrypted Link snapshot".into(),
+                    source: None,
+                })?;
+            let secret = access.paykit_noise_secret_key()?;
+            let session_info = access.session.info();
+            let local = session_info.public_key();
+            let remote = counterparty.to_public_key()?;
+            let public_storage = access.outbox_client.public_storage();
+            let (authorization, marker) = tokio::join!(
+                noise_key_authorization::require_authorization(&public_storage, &remote),
+                paykit_lib::fetch_encrypted_link_recovery_marker(
+                    &public_storage,
+                    &secret,
+                    local,
+                    &remote,
+                    snapshot.link.remote_noise_public_key(),
+                ),
+            );
+            let authorization = authorization.map_err(super::recovery::link_observation_error)?;
+            let marker = self
+                .preserve_authorization_advance_on_marker_failure(
+                    &counterparty,
+                    &access,
+                    snapshot.state.generation,
+                    &snapshot.authorization,
+                    &authorization,
+                    marker.map_err(|error| super::recovery::link_observation_error(error.into())),
                 )
-                .await
-            },
-        )
-        .await
+                .await?;
+            if !super::private_stream::private_receive_observation_is_current(
+                &snapshot,
+                &authorization,
+                marker.as_ref(),
+            ) {
+                let lease = self.claim_peer_link_operation(&counterparty).await?;
+                let result = self
+                    .require_current_private_receive_observation(
+                        &counterparty,
+                        &lease,
+                        &access,
+                        super::private_stream::PrivateReceiveObservation::new(
+                            snapshot.state.generation,
+                            &snapshot.authorization,
+                            &authorization,
+                            marker.as_ref(),
+                        ),
+                    )
+                    .await;
+                self.finish_peer_link_operation(lease, result).await?;
+            }
+            let generation = snapshot.state.generation;
+            let acquisition = acquire_expected_private_packet_with_fetch(
+                &self.storage,
+                counterparty,
+                &snapshot.link,
+                local,
+                &secret,
+                generation,
+                cursor,
+                self.clock.now(),
+                move |resource| async move {
+                    let response = match public_storage.get(resource).await {
+                        Ok(response) => response,
+                        Err(error) if is_pubky_not_found(&error) => return Ok(None),
+                        Err(error) => {
+                            return Err(map_pubky_transport_error(
+                                "fetch expected private intake slot",
+                                error,
+                            ))
+                        }
+                    };
+                    read_public_response(
+                        response,
+                        crate::storage::PRIVATE_INTAKE_PACKET_BYTES,
+                        "read expected private intake slot",
+                    )
+                    .await
+                },
+            )
+            .await;
+            Ok(acquisition)
+        };
+        acquisition.await.unwrap_or_else(|error| (None, Err(error)))
     }
 }
 
@@ -1966,6 +2387,10 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+
+    fn no_cursor_commit() -> PrivateIntakeCommitCursors {
+        Arc::new(|_| Box::pin(async {}))
     }
 
     fn users(count: usize) -> Vec<PubkyPublicKey> {
@@ -3379,12 +3804,13 @@ mod tests {
                 Box::pin(async move {
                     audited.notify_one();
                     PrivateIntakeAuditOutcome {
-                        handshake_pending: false,
                         backpressured,
+                        ..PrivateIntakeAuditOutcome::default()
                     }
                 })
             }
         });
+        let scopes = StdMutex::default();
         let mut running = Box::pin(run_connected_private_intake_stream(
             &active_group,
             Box::pin(stream::pending()),
@@ -3395,6 +3821,8 @@ mod tests {
             &work,
             Arc::new(|_, _| Box::pin(async { Ok(PrivatePacketAcquisition::Absent) })),
             audit,
+            &scopes,
+            no_cursor_commit(),
             false,
         ));
 
@@ -3471,11 +3899,14 @@ mod tests {
             cursor: pubky::EventCursor::new(42),
         };
 
-        let routed = route_private_intake_event(&group, event).unwrap();
-        assert_eq!(routed.0, peer);
-        assert_eq!(routed.1.subscribed_user, routed.0);
-        assert_eq!(routed.1.homeserver, "homeserver-a");
-        assert_eq!(routed.1.event_id, 42);
+        let Some(PrivateIntakeEventRoute::Hint(cursor)) =
+            route_private_intake_event(&group, &StdMutex::default(), event)
+        else {
+            panic!("an unscoped subscribed peer's event must be a hint");
+        };
+        assert_eq!(cursor.subscribed_user, peer);
+        assert_eq!(cursor.homeserver, "homeserver-a");
+        assert_eq!(cursor.event_id, 42);
     }
 
     #[test]
@@ -3494,7 +3925,1005 @@ mod tests {
             cursor: pubky::EventCursor::new(99),
         };
 
-        assert!(route_private_intake_event(&group, event).is_none());
+        assert!(route_private_intake_event(&group, &StdMutex::default(), event).is_none());
+    }
+
+    fn intake_event(
+        event_type: pubky::EventType,
+        resource: pubky::PubkyResource,
+        event_id: u64,
+    ) -> pubky::Event {
+        pubky::Event {
+            event_type,
+            resource,
+            cursor: pubky::EventCursor::new(event_id),
+        }
+    }
+
+    fn put_event(resource: pubky::PubkyResource, event_id: u64) -> pubky::Event {
+        intake_event(
+            pubky::EventType::Put {
+                content_hash: blake3::Hash::from_bytes([7; 32]),
+            },
+            resource,
+            event_id,
+        )
+    }
+
+    fn peer_resource(owner: &pubky::PublicKey, path: &str) -> pubky::PubkyResource {
+        pubky::PubkyResource::new(owner.clone(), path).unwrap()
+    }
+
+    /// An established link's peer, its read folder, and its expected slot.
+    struct ScopedIntakeFixture {
+        remote: pubky::PublicKey,
+        read_folder: String,
+        expected_slot: pubky::PubkyResource,
+    }
+
+    fn scoped_intake_fixture() -> ScopedIntakeFixture {
+        let local = pubky::Keypair::random().public_key();
+        let remote = pubky::Keypair::random().public_key();
+        let (snapshot, secret) = intake_snapshot(&local, &remote, 3);
+        let (expected_slot, _) = snapshot
+            .next_private_application_message_resource(&local, &secret)
+            .unwrap();
+        let read_folder = private_intake_slot_folder(&expected_slot).unwrap();
+        let expected_slot: pubky::PubkyResource = expected_slot.parse().unwrap();
+        // The read folder is the parent of the next expected slot.
+        assert!(is_private_intake_link_folder(&read_folder));
+        assert_eq!(expected_slot.owner, remote);
+        assert_eq!(expected_slot.path.as_str(), format!("{read_folder}/3"));
+        ScopedIntakeFixture {
+            remote,
+            read_folder,
+            expected_slot,
+        }
+    }
+
+    fn other_link_folder(read_folder: &str) -> String {
+        let other = format!(
+            "{}/{}",
+            paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX,
+            "ab".repeat(32)
+        );
+        assert_ne!(other, read_folder);
+        other
+    }
+
+    /// Events under a scoped peer's private tree that cannot announce its
+    /// next expected slot.
+    fn irrelevant_intake_events(fixture: &ScopedIntakeFixture) -> Vec<pubky::Event> {
+        let owner = &fixture.remote;
+        let folder = &fixture.read_folder;
+        let other_folder = other_link_folder(folder);
+        let receipt = paykit_lib::ReceiptAccess::location_for(&paykit_lib::ReceiptId::new_v4());
+        vec![
+            put_event(peer_resource(owner, &format!("{other_folder}/3")), 10),
+            put_event(peer_resource(owner, &receipt), 11),
+            intake_event(pubky::EventType::Delete, fixture.expected_slot.clone(), 12),
+            put_event(peer_resource(owner, &format!("{folder}0")), 13),
+            put_event(peer_resource(owner, &format!("{folder}0/3")), 14),
+        ]
+    }
+
+    #[test]
+    fn test_private_intake_event_filter_accepts_put_in_read_folder() {
+        let fixture = scoped_intake_fixture();
+        let scope = Some(fixture.read_folder.as_str());
+
+        assert!(private_intake_event_may_announce_packet(
+            scope,
+            &put_event(fixture.expected_slot.clone(), 1),
+        ));
+        let later_slot = peer_resource(&fixture.remote, &format!("{}/4", fixture.read_folder));
+        assert!(private_intake_event_may_announce_packet(
+            scope,
+            &put_event(later_slot, 2),
+        ));
+    }
+
+    #[test]
+    fn test_private_intake_event_filter_ignores_irrelevant_events() {
+        let fixture = scoped_intake_fixture();
+
+        for event in irrelevant_intake_events(&fixture) {
+            assert!(
+                !private_intake_event_may_announce_packet(Some(&fixture.read_folder), &event),
+                "event {} must not be a hint",
+                event.cursor.id()
+            );
+        }
+    }
+
+    #[test]
+    fn test_private_intake_event_filter_accepts_handshake_slot_in_any_folder() {
+        // pubky-noise 0.1.0 XX handshakes use slots 0, 1, and 2; transport
+        // counters start at 3, which the `intake_snapshot` fixture mirrors.
+        assert_eq!(
+            ENCRYPTED_LINK_HANDSHAKE_MESSAGE_COUNT,
+            pubky_noise::snow_crypto::full_handshake_actions(
+                pubky_noise::snow_crypto::HandshakePattern::PatternXX,
+                true,
+            )
+            .unwrap()
+            .len()
+        );
+        let fixture = scoped_intake_fixture();
+        let owner = &fixture.remote;
+        let scope = Some(fixture.read_folder.as_str());
+        let other_folder = other_link_folder(&fixture.read_folder);
+
+        for folder in [&fixture.read_folder, &other_folder] {
+            for slot in 0..3 {
+                let resource = peer_resource(owner, &format!("{folder}/{slot}"));
+                assert!(private_intake_event_may_announce_packet(
+                    scope,
+                    &put_event(resource, 1),
+                ));
+            }
+        }
+        let not_handshake_slots = [
+            format!("{other_folder}/3"),
+            format!("{other_folder}/01"),
+            format!("{other_folder}/0/1"),
+            format!("{}/0", other_folder.to_uppercase()),
+            format!("{}/0", &other_folder[..other_folder.len() - 1]),
+        ];
+        for path in not_handshake_slots {
+            assert!(
+                !private_intake_event_may_announce_packet(
+                    scope,
+                    &put_event(peer_resource(owner, &path), 1),
+                ),
+                "{path} must not be a handshake slot"
+            );
+        }
+    }
+
+    #[test]
+    fn test_private_intake_event_route_leaves_unscoped_peer_unfiltered() {
+        let fixture = scoped_intake_fixture();
+        let scoped_peer = PubkyPublicKey::from_public_key(&fixture.remote);
+        let unscoped_owner = pubky::Keypair::random().public_key();
+        let unscoped_peer = PubkyPublicKey::from_public_key(&unscoped_owner);
+        let group = SubscriptionGroup {
+            homeserver: pubky::Keypair::random().public_key(),
+            homeserver_name: "homeserver-a".into(),
+            peers: vec![scoped_peer.clone(), unscoped_peer.clone()],
+        };
+        let scopes = StdMutex::new(PrivateIntakeEventScopes {
+            read_folders: HashMap::from([(scoped_peer.clone(), fixture.read_folder.clone())]),
+        });
+
+        for event in irrelevant_intake_events(&fixture) {
+            let event_id = event.cursor.id();
+            assert!(matches!(
+                route_private_intake_event(&group, &scopes, event),
+                Some(PrivateIntakeEventRoute::Ignored { peer, event_id: ignored_id })
+                    if peer == scoped_peer && ignored_id == event_id
+            ));
+        }
+        for event in irrelevant_intake_events(&fixture) {
+            let event = intake_event(
+                event.event_type,
+                peer_resource(&unscoped_owner, event.resource.path.as_str()),
+                event.cursor.id(),
+            );
+            let event_id = event.cursor.id();
+            assert!(matches!(
+                route_private_intake_event(&group, &scopes, event),
+                Some(PrivateIntakeEventRoute::Hint(cursor))
+                    if cursor.subscribed_user == unscoped_peer && cursor.event_id == event_id
+            ));
+        }
+
+        // A poisoned scope lock leaves even the scoped peer unfiltered.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = scopes.lock().unwrap();
+            panic!("poison private intake event scopes");
+        }));
+        assert!(scopes.is_poisoned());
+        for event in irrelevant_intake_events(&fixture) {
+            assert!(matches!(
+                route_private_intake_event(&group, &scopes, event),
+                Some(PrivateIntakeEventRoute::Hint(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_expected_slot_fetch_without_derivation_reports_no_read_folder() {
+        let storage = crate::storage::InMemoryStorage::new();
+        let local = pubky::Keypair::random().public_key();
+        let remote = pubky::Keypair::random().public_key();
+        let peer = PubkyPublicKey::from_public_key(&remote);
+        let (snapshot, _) = intake_snapshot(&local, &remote, 3);
+        seed_intake_link(&storage, peer.clone(), &snapshot, 7).await;
+        let fetched = Arc::new(StdMutex::new(false));
+
+        let (read_folder, outcome) = acquire_expected_private_packet_with_fetch(
+            &storage,
+            peer,
+            &snapshot,
+            &local,
+            &[9; 32],
+            7,
+            None,
+            Utc::now(),
+            {
+                let fetched = Arc::clone(&fetched);
+                move |_| {
+                    *fetched.lock().unwrap() = true;
+                    async { Ok(None) }
+                }
+            },
+        )
+        .await;
+
+        assert!(outcome.is_err());
+        assert_eq!(read_folder, None);
+        assert!(!*fetched.lock().unwrap());
+    }
+
+    #[test]
+    fn test_private_intake_slot_folder_requires_derived_folder_shape() {
+        let owner = pubky::Keypair::random().public_key().z32();
+        let folder = format!(
+            "{}/{}",
+            paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX,
+            "ab".repeat(32)
+        );
+
+        assert_eq!(
+            private_intake_slot_folder(&format!("pubky://{owner}{folder}/3")),
+            Some(folder.clone())
+        );
+        for path in [
+            paykit_lib::ReceiptAccess::location_for(&paykit_lib::ReceiptId::new_v4()),
+            format!("{}/3", folder.to_uppercase()),
+            format!("{folder}/0/3"),
+        ] {
+            assert_eq!(
+                private_intake_slot_folder(&format!("pubky://{owner}{path}")),
+                None,
+                "{path} must not have a derived folder"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_production_stream_loop_ignores_irrelevant_events_without_acquisition() {
+        let fixture = scoped_intake_fixture();
+        let peer = PubkyPublicKey::from_public_key(&fixture.remote);
+        let group = SubscriptionGroup {
+            homeserver: pubky::Keypair::random().public_key(),
+            homeserver_name: "homeserver-a".into(),
+            peers: vec![peer.clone()],
+        };
+        let scopes = StdMutex::new(PrivateIntakeEventScopes {
+            read_folders: HashMap::from([(peer.clone(), fixture.read_folder.clone())]),
+        });
+        let observed = Arc::new(StdMutex::new(Vec::new()));
+        let acquire: PrivateIntakeAcquire = Arc::new({
+            let observed = Arc::clone(&observed);
+            move |requested, cursor| {
+                observed.lock().unwrap().push((requested, cursor));
+                Box::pin(async { Ok(PrivatePacketAcquisition::Absent) })
+            }
+        });
+        let audit: PrivateIntakeAudit =
+            Arc::new(|| Box::pin(async { PrivateIntakeAuditOutcome::default() }));
+        let health = Arc::new(AsyncRwLock::new(PrivateIntakeHealth::default()));
+        let work = Arc::new(Notify::new());
+        let (_stop, stop_rx) = watch::channel(false);
+        let run = |events: Vec<pubky::Event>| {
+            run_connected_private_intake_stream(
+                &group,
+                Box::pin(stream::iter(events.into_iter().map(Ok))),
+                Duration::from_secs(60),
+                Duration::from_secs(60),
+                stop_rx.clone(),
+                &health,
+                &work,
+                Arc::clone(&acquire),
+                Arc::clone(&audit),
+                &scopes,
+                no_cursor_commit(),
+                false,
+            )
+        };
+
+        let ignored_exit = run(irrelevant_intake_events(&fixture)).await;
+        assert!(matches!(ignored_exit, PrivateIntakeEventLoopExit::Ended));
+        assert!(observed.lock().unwrap().is_empty());
+        assert!(health.read().await.peers.is_empty());
+
+        let mut events = irrelevant_intake_events(&fixture);
+        events.push(put_event(fixture.expected_slot.clone(), 99));
+        let exit = run(events).await;
+
+        assert!(matches!(exit, PrivateIntakeEventLoopExit::Ended));
+        let observed = std::mem::take(&mut *observed.lock().unwrap());
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].0, peer);
+        assert_eq!(observed[0].1.as_ref().unwrap().event_id, 99);
+        assert_eq!(
+            health.read().await.peers[&peer],
+            PrivateIntakeTransportState::CaughtUp
+        );
+    }
+
+    fn recovery_required() -> PaykitSdkError {
+        PaykitSdkError::RecoveryRequired {
+            context: "test acquisition failure".into(),
+            source: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_acquisition_refreshes_read_folder_before_next_event() {
+        let fixture = scoped_intake_fixture();
+        let peer = PubkyPublicKey::from_public_key(&fixture.remote);
+        let new_folder = other_link_folder(&fixture.read_folder);
+        let group = SubscriptionGroup {
+            homeserver: pubky::Keypair::random().public_key(),
+            homeserver_name: "homeserver-a".into(),
+            peers: vec![peer.clone()],
+        };
+        let scopes = Arc::new(StdMutex::new(PrivateIntakeEventScopes {
+            read_folders: HashMap::from([(peer.clone(), fixture.read_folder.clone())]),
+        }));
+        let observed = Arc::new(StdMutex::new(Vec::new()));
+        // A recovery moved the link to `new_folder`: the peer's handshake
+        // reply completes it and the acquisition reports the new folder.
+        let acquire = scoped_private_intake_acquire(Arc::clone(&scopes), {
+            let observed = Arc::clone(&observed);
+            let new_folder = new_folder.clone();
+            move |_, cursor: Option<PrivateIntakeCursorRecord>| {
+                observed.lock().unwrap().push(cursor.unwrap().event_id);
+                let new_folder = new_folder.clone();
+                Box::pin(async move { (Some(new_folder), Ok(PrivatePacketAcquisition::Absent)) })
+            }
+        });
+        let events = vec![
+            put_event(
+                peer_resource(&fixture.remote, &format!("{new_folder}/1")),
+                20,
+            ),
+            put_event(
+                peer_resource(&fixture.remote, &format!("{new_folder}/3")),
+                21,
+            ),
+            put_event(fixture.expected_slot.clone(), 22),
+        ];
+        let health = Arc::new(AsyncRwLock::new(PrivateIntakeHealth::default()));
+        let work = Arc::new(Notify::new());
+        let (_stop, stop_rx) = watch::channel(false);
+
+        let exit = run_connected_private_intake_stream(
+            &group,
+            Box::pin(stream::iter(events.into_iter().map(Ok))),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+            stop_rx,
+            &health,
+            &work,
+            acquire,
+            Arc::new(|| Box::pin(async { PrivateIntakeAuditOutcome::default() })),
+            &scopes,
+            no_cursor_commit(),
+            false,
+        )
+        .await;
+
+        assert!(matches!(exit, PrivateIntakeEventLoopExit::Ended));
+        // The transport slot in the new folder is a hint without an audit in
+        // between, and the old folder's slot no longer is.
+        assert_eq!(*observed.lock().unwrap(), vec![20, 21]);
+        assert_eq!(
+            scopes.lock().unwrap().read_folders.get(&peer),
+            Some(&new_folder)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_pending_acquisition_leaves_peer_unfiltered() {
+        let fixture = scoped_intake_fixture();
+        let peer = PubkyPublicKey::from_public_key(&fixture.remote);
+        let scopes = Arc::new(StdMutex::new(PrivateIntakeEventScopes {
+            read_folders: HashMap::from([(peer.clone(), fixture.read_folder.clone())]),
+        }));
+        let acquire = scoped_private_intake_acquire(Arc::clone(&scopes), |_, _| {
+            Box::pin(async { (None, Ok(PrivatePacketAcquisition::PendingHandshake)) })
+        });
+
+        let outcome = acquire(peer.clone(), None).await;
+
+        assert!(matches!(
+            outcome,
+            Ok(PrivatePacketAcquisition::PendingHandshake)
+        ));
+        assert!(!scopes.lock().unwrap().read_folders.contains_key(&peer));
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_failed_acquisition_keeps_read_folder() {
+        let fixture = scoped_intake_fixture();
+        let peer = PubkyPublicKey::from_public_key(&fixture.remote);
+        let scopes = Arc::new(StdMutex::new(PrivateIntakeEventScopes::default()));
+        let acquire = scoped_private_intake_acquire(Arc::clone(&scopes), |_, _| {
+            Box::pin(async { (None, Err(recovery_required())) })
+        });
+
+        // Without a previous folder the peer stays unfiltered.
+        assert!(acquire(peer.clone(), None).await.is_err());
+        assert!(!scopes.lock().unwrap().read_folders.contains_key(&peer));
+
+        // A previous folder survives the error.
+        scopes
+            .lock()
+            .unwrap()
+            .read_folders
+            .insert(peer.clone(), fixture.read_folder.clone());
+        assert!(acquire(peer.clone(), None).await.is_err());
+        assert_eq!(
+            scopes.lock().unwrap().read_folders.get(&peer),
+            Some(&fixture.read_folder)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_audit_refreshes_read_folders() {
+        let fixture = scoped_intake_fixture();
+        let established = PubkyPublicKey::from_public_key(&fixture.remote);
+        let failing = users(1).remove(0);
+        let group = SubscriptionGroup {
+            homeserver: pubky::Keypair::random().public_key(),
+            homeserver_name: "homeserver-a".into(),
+            peers: vec![established.clone(), failing.clone()],
+        };
+        let scopes = Arc::new(StdMutex::new(PrivateIntakeEventScopes {
+            read_folders: HashMap::from([(
+                failing.clone(),
+                other_link_folder(&fixture.read_folder),
+            )]),
+        }));
+        let acquire = scoped_private_intake_acquire(Arc::clone(&scopes), {
+            let established = established.clone();
+            let read_folder = fixture.read_folder.clone();
+            move |requested, _| {
+                let outcome = if requested == established {
+                    (
+                        Some(read_folder.clone()),
+                        Ok(PrivatePacketAcquisition::Absent),
+                    )
+                } else {
+                    (None, Err(recovery_required()))
+                };
+                Box::pin(async move { outcome })
+            }
+        });
+        let health = Arc::new(AsyncRwLock::new(PrivateIntakeHealth::default()));
+
+        let outcome = audit_private_intake_group(
+            &crate::storage::InMemoryStorage::new(),
+            &MutableClock::new(Utc::now()),
+            &group,
+            &health,
+            &Arc::new(Notify::new()),
+            &acquire,
+        )
+        .await;
+
+        assert_eq!(
+            outcome.absent_slot_peers,
+            HashSet::from([established.clone()])
+        );
+        let scopes = scopes.lock().unwrap();
+        assert_eq!(
+            scopes.read_folders.get(&established),
+            Some(&fixture.read_folder)
+        );
+        // A failure before slot derivation keeps the previous folder.
+        assert_eq!(
+            scopes.read_folders.get(&failing),
+            Some(&other_link_folder(&fixture.read_folder))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_audit_commits_ignored_cursors_only_after_absent_slot() {
+        let peers = users(4);
+        let (absent, pending, capacity, inserting) = (
+            peers[0].clone(),
+            peers[1].clone(),
+            peers[2].clone(),
+            peers[3].clone(),
+        );
+        let group = SubscriptionGroup {
+            homeserver: pubky::Keypair::random().public_key(),
+            homeserver_name: "homeserver-a".into(),
+            peers: peers.clone(),
+        };
+        let acquire: PrivateIntakeAcquire = Arc::new({
+            let (absent, pending, capacity) = (absent.clone(), pending.clone(), capacity.clone());
+            move |requested, _| {
+                let outcome = if requested == absent {
+                    PrivatePacketAcquisition::Absent
+                } else if requested == pending {
+                    PrivatePacketAcquisition::PendingHandshake
+                } else if requested == capacity {
+                    PrivatePacketAcquisition::CapacityReached
+                } else {
+                    // Every fetch finds another packet, so the audit stops at
+                    // the per-peer acquisition cap.
+                    PrivatePacketAcquisition::Inserted
+                };
+                Box::pin(async move { Ok(outcome) })
+            }
+        });
+        let audit: PrivateIntakeAudit = Arc::new(move || {
+            let group = group.clone();
+            let acquire = Arc::clone(&acquire);
+            Box::pin(async move {
+                audit_private_intake_group(
+                    &crate::storage::InMemoryStorage::new(),
+                    &MutableClock::new(Utc::now()),
+                    &group,
+                    &Arc::new(AsyncRwLock::new(PrivateIntakeHealth::default())),
+                    &Arc::new(Notify::new()),
+                    &acquire,
+                )
+                .await
+            })
+        });
+        let cursor = |peer: &PubkyPublicKey, event_id| PrivateIntakeCursorRecord {
+            subscribed_user: peer.clone(),
+            homeserver: "homeserver-a".into(),
+            event_id,
+        };
+        let mut ignored = PrivateIntakeIgnoredCursors::new();
+        for (peer, event_id) in peers.iter().zip([10, 20, 30, 40]) {
+            record_ignored_private_intake_event(&mut ignored, peer.clone(), event_id);
+        }
+        let batches = Arc::new(StdMutex::new(Vec::new()));
+        let commit_cursors: PrivateIntakeCommitCursors = Arc::new({
+            let batches = Arc::clone(&batches);
+            move |cursors| {
+                batches.lock().unwrap().push(cursors);
+                Box::pin(async {})
+            }
+        });
+
+        let outcome =
+            audit_private_intake_stream(&audit, "homeserver-a", &mut ignored, &commit_cursors)
+                .await;
+
+        // Only the peer whose expected slot was absent counts as audited;
+        // a pending handshake, full capacity or the acquisition cap leave
+        // the ignored cursor in the stream's map (a capacity stop then ends
+        // the stream, which drops it).
+        assert_eq!(outcome.absent_slot_peers, HashSet::from([absent.clone()]));
+        assert_eq!(
+            std::mem::take(&mut *batches.lock().unwrap()),
+            vec![vec![cursor(&absent, 10)]]
+        );
+        assert_eq!(
+            ignored,
+            HashMap::from([
+                (pending.clone(), 20),
+                (capacity.clone(), 30),
+                (inserting, 40)
+            ])
+        );
+    }
+
+    /// Drives a stream loop whose audits block until released.
+    struct IgnoredCursorScript {
+        events_tx: tokio::sync::mpsc::UnboundedSender<pubky::Event>,
+        acquired_rx: tokio::sync::mpsc::UnboundedReceiver<Option<u64>>,
+        started_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+        release_tx: tokio::sync::mpsc::UnboundedSender<PrivateIntakeAuditOutcome>,
+    }
+
+    impl IgnoredCursorScript {
+        /// Wait for the next audit and release it with `outcome`.
+        async fn audit(&mut self, outcome: PrivateIntakeAuditOutcome) {
+            self.started_rx.recv().await.unwrap();
+            self.release_tx.send(outcome).unwrap();
+        }
+
+        /// Send `events`, then `hint`, and wait until the hint is acquired,
+        /// so the loop has handled every earlier event and committed what
+        /// earlier audits allowed. Audits that start meanwhile fail, which
+        /// keeps every ignored cursor.
+        async fn send(&mut self, events: Vec<pubky::Event>, hint: pubky::Event) {
+            for event in events {
+                self.events_tx.send(event).unwrap();
+            }
+            let event_id = hint.cursor.id();
+            self.events_tx.send(hint).unwrap();
+            loop {
+                tokio::select! {
+                    acquired = self.acquired_rx.recv() => {
+                        assert_eq!(acquired.unwrap(), Some(event_id));
+                        return;
+                    }
+                    _ = self.started_rx.recv() => {
+                        self.release_tx.send(PrivateIntakeAuditOutcome::default()).unwrap();
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_audit_commits_highest_ignored_cursor_seen_before_it() {
+        let fixture = scoped_intake_fixture();
+        let peer = PubkyPublicKey::from_public_key(&fixture.remote);
+        let other_folder = other_link_folder(&fixture.read_folder);
+        let ignored = |event_id| {
+            put_event(
+                peer_resource(&fixture.remote, &format!("{other_folder}/{event_id}")),
+                event_id,
+            )
+        };
+        // Sync points come from a second, unfiltered peer, so their
+        // successful acquisitions never supersede `peer`'s ignored cursors.
+        let sync_owner = pubky::Keypair::random().public_key();
+        let hint = |event_id| {
+            put_event(
+                peer_resource(&sync_owner, &format!("{}/{event_id}", fixture.read_folder)),
+                event_id,
+            )
+        };
+        let group = SubscriptionGroup {
+            homeserver: pubky::Keypair::random().public_key(),
+            homeserver_name: "homeserver-a".into(),
+            peers: vec![peer.clone(), PubkyPublicKey::from_public_key(&sync_owner)],
+        };
+        let scopes = StdMutex::new(PrivateIntakeEventScopes {
+            read_folders: HashMap::from([(peer.clone(), fixture.read_folder.clone())]),
+        });
+        let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let events = stream::unfold(events_rx, |mut events_rx| async move {
+            events_rx.recv().await.map(|event| (Ok(event), events_rx))
+        });
+        let (acquired_tx, acquired_rx) = tokio::sync::mpsc::unbounded_channel();
+        let acquire: PrivateIntakeAcquire = Arc::new(move |_, cursor| {
+            acquired_tx
+                .send(cursor.map(|cursor: PrivateIntakeCursorRecord| cursor.event_id))
+                .unwrap();
+            Box::pin(async { Ok(PrivatePacketAcquisition::Absent) })
+        });
+        // Each audit reports its start and blocks until the test releases it
+        // with an outcome.
+        let (started_tx, started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) =
+            tokio::sync::mpsc::unbounded_channel::<PrivateIntakeAuditOutcome>();
+        let release_rx = Arc::new(AsyncMutex::new(release_rx));
+        let audit: PrivateIntakeAudit = Arc::new(move || {
+            let started_tx = started_tx.clone();
+            let release_rx = Arc::clone(&release_rx);
+            Box::pin(async move {
+                started_tx.send(()).unwrap();
+                release_rx.lock().await.recv().await.unwrap_or_default()
+            })
+        });
+        let commits = Arc::new(StdMutex::new(Vec::new()));
+        let commit_cursors: PrivateIntakeCommitCursors = Arc::new({
+            let commits = Arc::clone(&commits);
+            move |cursors| {
+                commits.lock().unwrap().push(cursors);
+                Box::pin(async {})
+            }
+        });
+        let audited = PrivateIntakeAuditOutcome {
+            absent_slot_peers: HashSet::from([peer.clone()]),
+            ..PrivateIntakeAuditOutcome::default()
+        };
+        let health = Arc::new(AsyncRwLock::new(PrivateIntakeHealth::default()));
+        let work = Arc::new(Notify::new());
+        let (stop, stop_rx) = watch::channel(false);
+        let running = run_connected_private_intake_stream(
+            &group,
+            Box::pin(events),
+            Duration::from_millis(20),
+            Duration::ZERO,
+            stop_rx,
+            &health,
+            &work,
+            acquire,
+            audit,
+            &scopes,
+            commit_cursors,
+            false,
+        );
+        // Event ids per commit batch, one batch per storage transaction.
+        let committed_ids = || {
+            commits
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|batch| batch.iter().map(|cursor| cursor.event_id).collect())
+                .collect::<Vec<Vec<_>>>()
+        };
+
+        let mut script = IgnoredCursorScript {
+            events_tx,
+            acquired_rx,
+            started_rx,
+            release_tx,
+        };
+        let script_run = async {
+            // An audit with no ignored events commits nothing.
+            script.audit(audited.clone()).await;
+            script.send(Vec::new(), hint(9)).await;
+            assert!(committed_ids().is_empty());
+
+            // A completed audit commits the highest ignored cursor seen
+            // before it, once.
+            script.send(vec![ignored(10), ignored(11)], hint(12)).await;
+            assert!(committed_ids().is_empty());
+            script.audit(audited.clone()).await;
+            script.send(vec![ignored(13)], hint(14)).await;
+            assert_eq!(committed_ids(), vec![vec![11]]);
+
+            // Ignored events after an audit wait for the next one, and a
+            // failed audit keeps them.
+            script.audit(PrivateIntakeAuditOutcome::default()).await;
+            script.send(Vec::new(), hint(15)).await;
+            assert_eq!(committed_ids(), vec![vec![11]]);
+            script.audit(audited.clone()).await;
+            script.send(Vec::new(), hint(16)).await;
+            assert_eq!(committed_ids(), vec![vec![11], vec![13]]);
+
+            script.audit(audited.clone()).await;
+            script.send(Vec::new(), hint(17)).await;
+            assert_eq!(committed_ids(), vec![vec![11], vec![13]]);
+        };
+
+        tokio::pin!(running);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::select! {
+                exit = &mut running => panic!("stream loop exited early: {exit:?}"),
+                () = script_run => {}
+            }
+        })
+        .await
+        .expect("ignored cursor script should finish");
+        let commits = std::mem::take(&mut *commits.lock().unwrap());
+        assert!(commits
+            .iter()
+            .flatten()
+            .all(|cursor| cursor.subscribed_user == peer && cursor.homeserver == "homeserver-a"));
+        stop.send(true).unwrap();
+        // An audit may be waiting for release; dropping its sender ends it.
+        // The event sender stays alive so the stream does not end first.
+        drop(script.release_tx);
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), running)
+                .await
+                .unwrap(),
+            PrivateIntakeEventLoopExit::Stopped
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_successful_hint_supersedes_earlier_ignored_cursor() {
+        let fixture = scoped_intake_fixture();
+        let peer = PubkyPublicKey::from_public_key(&fixture.remote);
+        let other_folder = other_link_folder(&fixture.read_folder);
+        let ignored_event = |event_id| {
+            put_event(
+                peer_resource(&fixture.remote, &format!("{other_folder}/{event_id}")),
+                event_id,
+            )
+        };
+        let hint_event = |event_id| {
+            put_event(
+                peer_resource(
+                    &fixture.remote,
+                    &format!("{}/{event_id}", fixture.read_folder),
+                ),
+                event_id,
+            )
+        };
+        let group = SubscriptionGroup {
+            homeserver: pubky::Keypair::random().public_key(),
+            homeserver_name: "homeserver-a".into(),
+            peers: vec![peer.clone()],
+        };
+        let scopes = StdMutex::new(PrivateIntakeEventScopes {
+            read_folders: HashMap::from([(peer.clone(), fixture.read_folder.clone())]),
+        });
+        let audit: PrivateIntakeAudit = Arc::new({
+            let peer = peer.clone();
+            move || {
+                let audited = PrivateIntakeAuditOutcome {
+                    absent_slot_peers: HashSet::from([peer.clone()]),
+                    ..PrivateIntakeAuditOutcome::default()
+                };
+                Box::pin(async move { audited })
+            }
+        });
+        let commits = Arc::new(StdMutex::new(Vec::<Vec<u64>>::new()));
+        let commit_cursors: PrivateIntakeCommitCursors = Arc::new({
+            let commits = Arc::clone(&commits);
+            move |cursors: Vec<PrivateIntakeCursorRecord>| {
+                commits
+                    .lock()
+                    .unwrap()
+                    .push(cursors.iter().map(|cursor| cursor.event_id).collect());
+                Box::pin(async {})
+            }
+        });
+        let mut succeed = |_: PubkyPublicKey, _: Option<PrivateIntakeCursorRecord>| async {
+            Ok(PrivatePacketAcquisition::Absent)
+        };
+        let mut fail = |_: PubkyPublicKey, _: Option<PrivateIntakeCursorRecord>| async {
+            Err(PaykitSdkError::Transport {
+                context: "fetch expected private intake slot".into(),
+                source: None,
+            })
+        };
+        let mut ignored = PrivateIntakeIgnoredCursors::new();
+        let committed_ids = || std::mem::take(&mut *commits.lock().unwrap());
+
+        // A successful hint supersedes the ignored event before it, so the
+        // next audit commits nothing for the peer.
+        process_private_intake_event(
+            &group,
+            &scopes,
+            &mut ignored,
+            ignored_event(10),
+            &mut succeed,
+        )
+        .await;
+        assert_eq!(ignored, HashMap::from([(peer.clone(), 10)]));
+        process_private_intake_event(&group, &scopes, &mut ignored, hint_event(11), &mut succeed)
+            .await;
+        assert!(ignored.is_empty());
+        audit_private_intake_stream(&audit, "homeserver-a", &mut ignored, &commit_cursors).await;
+        assert!(committed_ids().is_empty());
+
+        // An ignored event after the hint still commits, and so does one
+        // with a higher ID than a successful hint.
+        process_private_intake_event(
+            &group,
+            &scopes,
+            &mut ignored,
+            ignored_event(12),
+            &mut succeed,
+        )
+        .await;
+        audit_private_intake_stream(&audit, "homeserver-a", &mut ignored, &commit_cursors).await;
+        assert_eq!(committed_ids(), vec![vec![12]]);
+        process_private_intake_event(
+            &group,
+            &scopes,
+            &mut ignored,
+            ignored_event(14),
+            &mut succeed,
+        )
+        .await;
+        process_private_intake_event(&group, &scopes, &mut ignored, hint_event(13), &mut succeed)
+            .await;
+        assert_eq!(ignored, HashMap::from([(peer.clone(), 14)]));
+        audit_private_intake_stream(&audit, "homeserver-a", &mut ignored, &commit_cursors).await;
+        assert_eq!(committed_ids(), vec![vec![14]]);
+
+        // A hint whose acquisition fails keeps the ignored event.
+        process_private_intake_event(
+            &group,
+            &scopes,
+            &mut ignored,
+            ignored_event(20),
+            &mut succeed,
+        )
+        .await;
+        let failed =
+            process_private_intake_event(&group, &scopes, &mut ignored, hint_event(21), &mut fail)
+                .await;
+        assert!(matches!(failed, Some((_, Err(_)))));
+        assert_eq!(ignored, HashMap::from([(peer.clone(), 20)]));
+        audit_private_intake_stream(&audit, "homeserver-a", &mut ignored, &commit_cursors).await;
+        assert_eq!(committed_ids(), vec![vec![20]]);
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_audit_commits_ignored_cursors_in_one_batch() {
+        let peers = users(3);
+        let cursor = |peer: &PubkyPublicKey, event_id| PrivateIntakeCursorRecord {
+            subscribed_user: peer.clone(),
+            homeserver: "homeserver-a".into(),
+            event_id,
+        };
+        let mut ignored = PrivateIntakeIgnoredCursors::new();
+        for (peer, event_id) in peers.iter().zip([10, 20, 30]) {
+            record_ignored_private_intake_event(&mut ignored, peer.clone(), event_id);
+        }
+        let audit: PrivateIntakeAudit = Arc::new({
+            let absent_slot_peers = HashSet::from([peers[0].clone(), peers[1].clone()]);
+            move || {
+                let absent_slot_peers = absent_slot_peers.clone();
+                Box::pin(async move {
+                    PrivateIntakeAuditOutcome {
+                        absent_slot_peers,
+                        ..PrivateIntakeAuditOutcome::default()
+                    }
+                })
+            }
+        });
+        let batches = Arc::new(StdMutex::new(Vec::new()));
+        let commit_cursors: PrivateIntakeCommitCursors = Arc::new({
+            let batches = Arc::clone(&batches);
+            move |cursors| {
+                batches.lock().unwrap().push(cursors);
+                Box::pin(async {})
+            }
+        });
+
+        audit_private_intake_stream(&audit, "homeserver-a", &mut ignored, &commit_cursors).await;
+
+        // Both audited peers' cursors go to storage in one batch; the peer
+        // the audit did not complete keeps its ignored cursor.
+        let mut batches = std::mem::take(&mut *batches.lock().unwrap());
+        assert_eq!(batches.len(), 1);
+        batches[0].sort_by_key(|cursor| cursor.event_id);
+        assert_eq!(
+            batches[0],
+            vec![cursor(&peers[0], 10), cursor(&peers[1], 20)]
+        );
+        assert_eq!(ignored, HashMap::from([(peers[2].clone(), 30)]));
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_ignored_cursor_commit_skips_rejected_cursors() {
+        let storage = crate::storage::InMemoryStorage::new();
+        let peers = users(4);
+        let cursor =
+            |peer: &PubkyPublicKey, homeserver: &str, event_id| PrivateIntakeCursorRecord {
+                subscribed_user: peer.clone(),
+                homeserver: homeserver.into(),
+                event_id,
+            };
+        let stored = [
+            cursor(&peers[0], "homeserver-a", 50),
+            cursor(&peers[1], "homeserver-b", 5),
+        ];
+        storage
+            .transaction({
+                let stored = stored.clone();
+                move |tx| {
+                    for cursor in stored {
+                        tx.advance_private_intake_cursor(cursor)?;
+                    }
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+
+        commit_ignored_private_intake_cursors(
+            &storage,
+            vec![
+                // Regresses below the stored cursor.
+                cursor(&peers[0], "homeserver-a", 40),
+                // Names another homeserver than the stored cursor.
+                cursor(&peers[1], "homeserver-a", 60),
+                cursor(&peers[2], "homeserver-a", 10),
+                cursor(&peers[3], "homeserver-a", 20),
+            ],
+        )
+        .await;
+
+        let cursors = storage.snapshot().unwrap().private_intake_cursors;
+        assert_eq!(cursors[&peers[0]], stored[0]);
+        assert_eq!(cursors[&peers[1]], stored[1]);
+        assert_eq!(cursors[&peers[2]], cursor(&peers[2], "homeserver-a", 10));
+        assert_eq!(cursors[&peers[3]], cursor(&peers[3], "homeserver-a", 20));
     }
 
     #[test]
@@ -3632,6 +5061,8 @@ mod tests {
             &work,
             acquire,
             audit,
+            &StdMutex::default(),
+            no_cursor_commit(),
             false,
         )
         .await;
@@ -3685,6 +5116,7 @@ mod tests {
                 })
             }
         });
+        let scopes = StdMutex::default();
         let mut running = Box::pin(run_connected_private_intake_stream(
             &group,
             Box::pin(events),
@@ -3695,6 +5127,8 @@ mod tests {
             &work,
             acquire,
             audit,
+            &scopes,
+            no_cursor_commit(),
             false,
         ));
 
@@ -3727,7 +5161,7 @@ mod tests {
             event_id: 42,
         };
 
-        let outcome = acquire_expected_private_packet_with_fetch(
+        let (read_folder, outcome) = acquire_expected_private_packet_with_fetch(
             &storage,
             peer.clone(),
             &snapshot,
@@ -3744,10 +5178,12 @@ mod tests {
                 }
             },
         )
-        .await
-        .unwrap();
+        .await;
 
-        assert!(matches!(outcome, PrivatePacketAcquisition::Inserted));
+        assert!(matches!(outcome, Ok(PrivatePacketAcquisition::Inserted)));
+        // The read folder is the parent of the snapshot's next expected slot.
+        assert_eq!(read_folder, private_intake_slot_folder(&expected));
+        assert!(read_folder.is_some());
         assert_eq!(*observed.lock().unwrap(), vec![expected]);
         let state = storage.snapshot().unwrap();
         assert_eq!(state.private_intake_cursors[&peer], cursor);
@@ -3809,6 +5245,7 @@ mod tests {
             |_| async { Ok(Some(vec![9; crate::storage::PRIVATE_INTAKE_PACKET_BYTES])) },
         )
         .await
+        .1
         .unwrap();
 
         assert!(matches!(
@@ -3863,6 +5300,7 @@ mod tests {
                 },
             )
             .await
+            .1
             .unwrap();
         }
 
@@ -3905,7 +5343,7 @@ mod tests {
             event_id: 42,
         };
 
-        let result = acquire_expected_private_packet_with_fetch(
+        let (read_folder, result) = acquire_expected_private_packet_with_fetch(
             &storage,
             peer.clone(),
             &snapshot,
@@ -3923,6 +5361,8 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
+        // A failure after the slot is derived keeps the peer's read folder.
+        assert!(read_folder.is_some());
         let state = storage.snapshot().unwrap();
         assert!(!state.private_intake_cursors.contains_key(&peer));
         assert!(!state.private_intake_peers.contains_key(&peer));
@@ -3964,7 +5404,8 @@ mod tests {
                 .await
             },
         )
-        .await;
+        .await
+        .1;
 
         assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
         let state = storage.snapshot().unwrap();
@@ -4009,7 +5450,8 @@ mod tests {
             Utc::now(),
             |_| async { Ok(Some(vec![9; crate::storage::PRIVATE_INTAKE_PACKET_BYTES])) },
         )
-        .await;
+        .await
+        .1;
 
         assert!(matches!(result, Err(PaykitSdkError::Storage { .. })));
         let state = storage.snapshot().unwrap();
@@ -4043,6 +5485,7 @@ mod tests {
             |_| async { Ok(None) },
         )
         .await
+        .1
         .unwrap();
 
         assert!(matches!(outcome, PrivatePacketAcquisition::Absent));
@@ -4109,6 +5552,7 @@ mod tests {
                         },
                     )
                     .await
+                    .1
                 })
             }
         });
@@ -4126,6 +5570,8 @@ mod tests {
             &work,
             acquire,
             Arc::new(|| Box::pin(async { PrivateIntakeAuditOutcome::default() })),
+            &StdMutex::default(),
+            no_cursor_commit(),
             false,
         )
         .await;
@@ -4186,6 +5632,7 @@ mod tests {
                         },
                     )
                     .await
+                    .1
                 }
             }
         })
@@ -4287,6 +5734,7 @@ mod tests {
                         },
                     )
                     .await
+                    .1
                 })
             }
         });
@@ -4319,6 +5767,8 @@ mod tests {
             &work,
             Arc::clone(&acquire),
             Arc::new(|| Box::pin(async { PrivateIntakeAuditOutcome::default() })),
+            &StdMutex::default(),
+            no_cursor_commit(),
             false,
         )
         .await;
@@ -4351,6 +5801,8 @@ mod tests {
             &work,
             Arc::clone(&acquire),
             Arc::new(|| Box::pin(async { PrivateIntakeAuditOutcome::default() })),
+            &StdMutex::default(),
+            no_cursor_commit(),
             false,
         )
         .await;
@@ -4395,6 +5847,8 @@ mod tests {
             &work,
             acquire,
             Arc::new(|| Box::pin(async { PrivateIntakeAuditOutcome::default() })),
+            &StdMutex::default(),
+            no_cursor_commit(),
             false,
         )
         .await;

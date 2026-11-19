@@ -1375,13 +1375,60 @@ The Rust SDK has two explicit receive modes per Linked Peer:
   explicit `receive_buffered_private_messages` calls.
 
 SSE-assisted intake treats each event as an untrusted hint. It validates the
-subscribed owner, derives the expected immutable Noise resource independently
-of the event path, fetches only that resource, and atomically stores ciphertext
-with the relevant per-user cursor. It does not decrypt application data or
-advance the Noise receive checkpoint in the background. Explicit buffered
-drain commits plaintext stream records, Event Message dedupe, the advanced
-Noise snapshot, queue removal, and retained packet generations together.
-Failure leaves the packet and checkpoint unchanged.
+subscribed owner. Each acquisition of a peer's expected slot, from a stream
+event or an audit, records the read folder of the Encrypted Link snapshot it
+used, which is the folder that holds that expected slot. While a peer has a
+recorded read folder, intake ignores DELETEs and every PUT that is neither
+under that folder nor at an Encrypted Link Handshake slot. An ignored event
+triggers no fetch and does not change health, so a `Stale` state set by a
+failed fetch for a relevant event clears only on the next relevant event or
+audit. A peer is unfiltered until an acquisition records its folder, and
+becomes unfiltered again once an acquisition sees a pending Encrypted Link
+Handshake. An acquisition that fails before it derives the expected slot, for
+example on a storage, authorization or marker error, or because the peer has
+no private intake checkpoint or no Encrypted Link snapshot, keeps the
+previously recorded folder, or none, so a flaky homeserver does not turn the
+filter off. A stale folder only delays a packet: Encrypted Link Handshake slots
+in any folder still pass, and audits still fetch the expected slot. Each
+acquisition that derives the expected slot refreshes the folder from the
+snapshot it used. A link that moves to a new folder, for example through a
+recovery or a relink finished outside intake, is followed from the next
+acquisition that starts after the move and derives the expected slot, at the
+latest the next successful audit. A link that moves while an acquisition runs
+is therefore followed from the acquisition after that one, because the running
+one records the folder of the snapshot it read before the move. Recorded
+folders live for the stream group's task: they survive reconnects of that
+group's stream, and a topology change, such as a homeserver move, or a restart
+after buffer capacity is released starts a new task with no recorded folders.
+
+The connected stream remembers the highest ignored event per peer in memory. A
+later relevant event from that peer whose acquisition succeeds drops it, which
+only means committing less. After an audit that finds the peer's next expected
+slot absent, it advances the stored per-user cursor to that event unless the
+cursor is already past it, so a reconnect does not replay it. Any audit outcome
+other than an absent expected slot, such as a pending Encrypted Link Handshake,
+an already buffered packet, capacity, the per-peer acquisition limit or a
+failure, keeps the ignored event for the next in-stream audit while the stream
+stays connected. Ignored events live only as long as the connected stream: an
+audit that stops at capacity ends the stream with backpressure, and that or any
+other disconnect drops them. After reconnect the homeserver replays those
+events from the stored cursor and intake filters them again. The stream handles
+no event while an audit runs, so every remembered event precedes the audit.
+This is safe because the stream delivers a homeserver's events in cursor order
+and the audit fetched the peer's expected slot after every remembered event and
+found it absent: an ignored event either cannot announce a packet the
+expected-slot fetch would find or, when the recorded folder was stale,
+announced one that the audit fetched. Audits remain the delivery guarantee, so
+a hint dropped through a stale read folder only adds latency, up to the audit
+interval.
+
+For a relevant event, the SDK still derives the expected immutable Noise
+resource independently of the event path, fetches only that resource, and
+atomically stores ciphertext with the relevant per-user cursor. Intake does not
+decrypt application data or advance the Noise receive checkpoint in the
+background. Explicit buffered drain commits plaintext stream records, Event
+Message dedupe, the advanced Noise snapshot, queue removal, and retained packet
+generations together. Failure leaves the packet and checkpoint unchanged.
 
 The supervisor groups public subscriptions by current homeserver and partitions
 each homeserver into at most 50 users per SSE request. Every partition consumes

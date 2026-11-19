@@ -150,6 +150,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   Intake subscribed with a path filter that the homeserver treats as one exact
   file, so the stream matched no private message, and new messages waited for
   the healthy audit (60 seconds by default).
+- In the Rust-only SSE-assisted private intake API (`start_private_intake` and
+  `PrivateIntakeSupervisor`), files a Linked Peer writes under its private
+  directory for other Encrypted Links (except Encrypted Link Handshake slots),
+  its Receipts, and deletes no longer each trigger an expected-slot fetch
+  inline in the stream loop. Before, a burst of such events could delay other
+  peers' packets and `stop()`, and an unrelated fetch error could mark the peer
+  `Stale`. Each acquisition refreshes the peer's read folder, so a recovered
+  link's new folder is followed from its next acquisition. Ignored events
+  advance the replay cursor after an audit that finds the peer's next expected
+  slot absent.
 
 ### Integration
 

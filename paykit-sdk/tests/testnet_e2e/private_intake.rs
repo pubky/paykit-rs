@@ -83,6 +83,51 @@ impl StorageAdapter for RejectSecondBufferedDrainCommit {
     }
 }
 
+/// Counts transactions that move `peer`'s private intake cursor without
+/// changing its buffered packet count. That is the durable trace of a stream
+/// event that routed to `peer` and found the expected slot absent, and of an
+/// in-stream audit committing `peer`'s ignored events' cursors.
+#[derive(Clone)]
+struct CountCursorOnlyAdvances {
+    inner: InMemoryStorage,
+    peer: PubkyPublicKey,
+    advances: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl StorageAdapter for CountCursorOnlyAdvances {
+    async fn transaction_erased<'a>(
+        &self,
+        callback: StorageTransactionCallback<'a>,
+    ) -> Result<Box<dyn Any + Send>> {
+        let peer = self.peer.clone();
+        let advances = Arc::clone(&self.advances);
+        self.inner
+            .transaction_erased(Box::new(move |tx| {
+                let progress = |state: paykit_sdk::storage::StorageState| {
+                    (
+                        state
+                            .private_intake_cursors
+                            .get(&peer)
+                            .map(|cursor| cursor.event_id),
+                        state
+                            .private_intake_peers
+                            .get(&peer)
+                            .map_or(0, |intake| intake.buffered_packets.len()),
+                    )
+                };
+                let (cursor_before, buffered_before) = progress(tx.export_storage_state());
+                let result = callback(tx)?;
+                let (cursor_after, buffered_after) = progress(tx.export_storage_state());
+                if cursor_after != cursor_before && buffered_after == buffered_before {
+                    advances.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(result)
+            }))
+            .await
+    }
+}
+
 async fn publish_private_lists(sender: &TestUser, receiver: &TestUser, count: usize) {
     for _ in 0..count {
         sender
@@ -207,11 +252,7 @@ async fn advance_handshake_from_intake_after_restart(
     supervisor.stop().await;
 }
 
-async fn pending_handshake_write_path(user: &TestUser, counterparty: &PubkyPublicKey) -> String {
-    let state = load_encrypted_link_state(&user.storage, counterparty)
-        .await
-        .unwrap()
-        .unwrap();
+fn paykit_noise_secret_key(user: &TestUser) -> [u8; 32] {
     let paykit_key = user
         .access
         .local_secret_key
@@ -219,21 +260,51 @@ async fn pending_handshake_write_path(user: &TestUser, counterparty: &PubkyPubli
         .unwrap()
         .derive_paykit_identity_secret_key(paykit_sdk::INITIAL_PAYKIT_KEY_GENERATION)
         .unwrap();
-    paykit_lib::restore_encrypted_link_handshake(
-        user.access.session.clone(),
-        paykit_lib::derive_paykit_noise_secret_key(paykit_key.as_bytes()),
-        &counterparty.to_public_key().unwrap(),
-        user.access.outbox_client.clone(),
-        paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(
-            state.handshake_snapshot.as_ref().unwrap(),
+    paykit_lib::derive_paykit_noise_secret_key(paykit_key.as_bytes())
+}
+
+/// Return `user`'s write folder for its Encrypted Link with `counterparty`:
+/// the established link's folder, or the pending Encrypted Link Handshake's
+/// folder while no link is established. An established write folder is also
+/// the counterparty's private intake read folder for `user`.
+async fn encrypted_link_write_path(user: &TestUser, counterparty: &PubkyPublicKey) -> String {
+    let state = load_encrypted_link_state(&user.storage, counterparty)
+        .await
+        .unwrap()
+        .unwrap();
+    let session = user.access.session.clone();
+    let secret = paykit_noise_secret_key(user);
+    let remote = counterparty.to_public_key().unwrap();
+    let outbox = user.access.outbox_client.clone();
+    match state.link_snapshot.as_ref() {
+        Some(link) => paykit_lib::restore_encrypted_link(
+            session,
+            secret,
+            &remote,
+            outbox,
+            paykit_lib::EncryptedLinkSnapshot::deserialize(link).unwrap(),
         )
-        .unwrap(),
-    )
-    .await
-    .unwrap()
-    .config()
-    .write_path
-    .clone()
+        .await
+        .unwrap()
+        .config()
+        .write_path
+        .clone(),
+        None => paykit_lib::restore_encrypted_link_handshake(
+            session,
+            secret,
+            &remote,
+            outbox,
+            paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(
+                state.handshake_snapshot.as_ref().unwrap(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+        .config()
+        .write_path
+        .clone(),
+    }
 }
 
 async fn publish_pending_handshake_packet_from_restarted_intake(
@@ -242,10 +313,7 @@ async fn publish_pending_handshake_packet_from_restarted_intake(
 ) -> String {
     for _ in 0..3 {
         advance_handshake_from_intake_after_restart(user, counterparty).await;
-        let packet_path = format!(
-            "{}/0",
-            pending_handshake_write_path(user, counterparty).await
-        );
+        let packet_path = format!("{}/0", encrypted_link_write_path(user, counterparty).await);
         if user
             .access
             .outbox_client
@@ -971,16 +1039,106 @@ async fn test_private_intake_buffers_new_packet_from_live_event_stream() {
     supervisor.stop().await;
 }
 
-/// Build a path under the private directory with the homeserver's maximum
-/// storage path length (pubky-common `MAX_STORAGE_PATH_TOTAL_LENGTH`), split
-/// into segments of at most `MAX_STORAGE_PATH_SEGMENT_LENGTH` bytes. Its PUT
-/// event is the largest event a homeserver can send for this directory.
-fn max_length_private_path() -> String {
+/// Guards the private intake event relevance filter. Once Alice's Encrypted
+/// Link with Bob is established, Bob's private events that cannot hold her next
+/// expected slot (paths outside any link folder, a transport slot in another
+/// link folder, and deletes) must not start an acquisition. Each acquisition
+/// would find the slot absent and only move the cursor, so the count of
+/// cursor-only advances may grow by at most the one batch commit of ignored
+/// cursors after an in-stream audit. Bob's real packet then arrives
+/// through the same ordered stream, so once it is buffered every earlier
+/// unrelated event has been handled.
+#[tokio::test]
+async fn test_private_intake_stream_ignores_unrelated_private_events() {
+    let pair = linked_two_party().await;
+    let cursor_only_advances = Arc::new(AtomicUsize::new(0));
+    let sdk = Arc::new(PaykitSdk::new(
+        CountCursorOnlyAdvances {
+            inner: pair.alice.storage.clone(),
+            peer: pair.bob.public_key.clone(),
+            advances: Arc::clone(&cursor_only_advances),
+        },
+        TestnetSessionProvider::new(pair.alice.access.clone()),
+        pair.alice.adapter.clone(),
+        PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+    ));
+    let mut config = PrivateIntakeConfig::new(1).unwrap();
+    config.healthy_audit_interval = Duration::from_secs(60 * 60);
+    let supervisor = sdk.start_private_intake(config).await.unwrap();
+    wait_for_caught_up(
+        &supervisor,
+        &pair.bob.public_key,
+        "startup audit should catch up before the unrelated events are published",
+    )
+    .await;
+    // Outlast the first in-stream audit, which fires after at most five
+    // seconds of jitter.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    let advances_before = cursor_only_advances.load(Ordering::SeqCst);
+
+    let bob_write_folder = encrypted_link_write_path(&pair.bob, &pair.alice.public_key).await;
+    let other_link_folder = format!(
+        "{}/{}",
+        paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX,
+        hex::encode(pubky::Keypair::random().public_key().to_bytes())
+    );
+    assert_ne!(other_link_folder, bob_write_folder);
+    // pubky-noise uses slots 0 to 2 for the Encrypted Link Handshake, which
+    // the filter accepts in any link folder, so the other folder's slots
+    // start at the first transport slot.
+    let unrelated_paths: Vec<String> = (3..8)
+        .flat_map(|slot| {
+            [
+                paykit_lib::ReceiptAccess::location_for(&paykit_lib::ReceiptId::new_v4()),
+                format!("{other_link_folder}/{slot}"),
+            ]
+        })
+        .collect();
+    let bob_storage = pair.bob.access.session.storage();
+    for path in &unrelated_paths {
+        bob_storage.put(path, b"x".to_vec()).await.unwrap();
+    }
+    bob_storage.delete(&unrelated_paths[0]).await.unwrap();
+
+    publish_private_lists(&pair.bob, &pair.alice, 1).await;
+
+    wait_for_buffered(&pair.alice.storage, &pair.bob.public_key, 1).await;
+    let state = pair.alice.storage.snapshot().unwrap();
+    let buffered = &state.private_intake_peers[&pair.bob.public_key].buffered_packets;
+    assert_eq!(buffered.len(), 1);
+    assert!(
+        buffered[0].source_cursor.is_some(),
+        "packet must arrive through the live event stream, not an audit"
+    );
+    // The one legitimate cursor-only advance is the batch commit of Bob's
+    // highest ignored cursor after an in-stream audit, which can land in this
+    // window when an SSE reconnect restarts the audit timer. A per-event
+    // acquisition would add one advance per unrelated event (11 here).
+    let advances = cursor_only_advances.load(Ordering::SeqCst) - advances_before;
+    assert!(
+        advances <= 1,
+        "unrelated private events must not start an acquisition, got {advances} cursor-only advances"
+    );
+    // The stream has handled every unrelated event by now. The live insert
+    // sets `Replaying`, so only `Stale` is ruled out.
+    assert_ne!(
+        supervisor.health().await.peers.get(&pair.bob.public_key),
+        Some(&PrivateIntakeTransportState::Stale),
+        "private intake stream must stay connected through the unrelated events and not fall back to audits"
+    );
+    supervisor.stop().await;
+}
+
+/// Build a descendant of `base_folder` with the homeserver's maximum storage
+/// path length (pubky-common `MAX_STORAGE_PATH_TOTAL_LENGTH`), split into
+/// segments of at most `MAX_STORAGE_PATH_SEGMENT_LENGTH` bytes. Its PUT event
+/// is the largest event a homeserver can send for that folder.
+fn max_length_private_path(base_folder: &str) -> String {
     use pubky_common::storage_path::{
         MAX_STORAGE_PATH_SEGMENT_LENGTH as MAX_SEGMENT_BYTES,
         MAX_STORAGE_PATH_TOTAL_LENGTH as MAX_STORAGE_PATH_BYTES,
     };
-    let mut path = format!("{}/", paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX);
+    let mut path = format!("{base_folder}/");
     loop {
         let remaining = MAX_STORAGE_PATH_BYTES - path.len();
         if remaining <= MAX_SEGMENT_BYTES {
@@ -998,7 +1156,10 @@ fn max_length_private_path() -> String {
 /// stream must deliver the largest event a homeserver can send under the
 /// private directory and stay connected. A limit below that event's size ends
 /// the stream on it, the stored cursor never moves past it, and every
-/// reconnect fails the same way, so new packets wait for audits.
+/// reconnect fails the same way, so new packets wait for audits. The event's
+/// path lies inside Bob's write folder for Alice, which is Alice's read folder
+/// for Bob, so the event relevance filter hands it to acquisition instead of
+/// dropping it.
 #[tokio::test]
 async fn test_private_intake_stream_survives_largest_private_event() {
     let pair = linked_two_party().await;
@@ -1036,17 +1197,19 @@ async fn test_private_intake_stream_survives_largest_private_event() {
     };
     let baseline_cursor = intake_cursor(&pair.alice.storage)
         .expect("startup replay should have advanced the private intake cursor");
+    let bob_write_folder = encrypted_link_write_path(&pair.bob, &pair.alice.public_key).await;
 
     pair.bob
         .access
         .session
         .storage()
-        .put(max_length_private_path(), b"x".to_vec())
+        .put(max_length_private_path(&bob_write_folder), b"x".to_vec())
         .await
         .unwrap();
 
-    // The long-path event routes to Bob, finds his next expected slot absent,
-    // and advances the cursor. A stream that ended on the event never does.
+    // The long-path event lies in Alice's read folder for Bob, so it passes
+    // the event relevance filter, finds Bob's next expected slot absent, and
+    // advances the cursor. A stream that ended on the event never does.
     let largest_event_cursor = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let Some(cursor) = intake_cursor(&pair.alice.storage) {

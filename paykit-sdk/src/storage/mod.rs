@@ -522,6 +522,9 @@ pub trait StorageTransaction {
     ) -> Result<PrivateIntakeBufferOutcome>;
 
     /// Advance one subscribed user's durable homeserver cursor monotonically.
+    ///
+    /// Rejects a cursor whose homeserver is empty or differs from the stored cursor's,
+    /// or whose event ID is lower than the stored one. An error never changes state.
     fn advance_private_intake_cursor(&mut self, cursor: PrivateIntakeCursorRecord) -> Result<()>;
 
     /// Drop one user's replay cursor when authoritative homeserver resolution moves it.
