@@ -13,6 +13,8 @@ revoked independently. Installations sharing an App ID have the same grants.
 Synchronize receive keys, cursor, the public endpoint member and its deadline,
 payment journal and backend payment history across those installations and restores. The wallet owns payment-method
 idempotency and must prevent duplicate execution of an attempt.
+For example, two wallets enrolled independently under the same payer identity
+use distinct App IDs and can both retrieve the seller's receipt for the same payment.
 
 ## Open a wallet and pay a one-time request
 
