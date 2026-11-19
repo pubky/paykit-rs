@@ -13,6 +13,9 @@
 //! app can file a counterparty's message under another obligation, label or Allowance.
 //! Writers may write every member, with `null` for absent; readers read `null` as absent.
 
+mod pending;
+pub use pending::PendingAllowanceRecord;
+
 use std::collections::HashSet;
 
 use pubky_switch_core::enc::{b64, pubky_id, unb64, zbase32_encode};

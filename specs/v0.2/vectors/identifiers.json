@@ -62,6 +62,15 @@
       },
       {
         "hashed_bytes_hex": "000000167075626b792d7377697463682f76312f706f6c696379000000107061796b69745f616c6c6f77616e6365000000080000000000000001000000107061796b69745f616c6c6f77616e6365",
+        "name": "allowance_proposals",
+        "policy_hash": "UoT8AyaYBgZCAy6dFx7wfZUAvLL6zjhNakF3I_-iVek",
+        "read_scope": "paykit_allowance",
+        "write_scopes": [
+          "paykit_allowance"
+        ]
+      },
+      {
+        "hashed_bytes_hex": "000000167075626b792d7377697463682f76312f706f6c696379000000107061796b69745f616c6c6f77616e6365000000080000000000000001000000107061796b69745f616c6c6f77616e6365",
         "name": "allowances",
         "policy_hash": "UoT8AyaYBgZCAy6dFx7wfZUAvLL6zjhNakF3I_-iVek",
         "read_scope": "paykit_allowance",
@@ -178,6 +187,17 @@
         "natural_key_hex": "00000020eb74516b4e85b8ca18a21df66247a5002f24018e00e6f1b90786cf02c820bc070000001009097cafc6d9195f55c2ba91ad3b434b",
         "policy_hash": "T2nnvFGNVnBeOE5yZLMxNFEekVzGbPsON87MmBPWrqQ",
         "record_key": "ep-ePAih7SigcQbJSFTn7Dknoy-fcFxDSkLI1DrLKpM"
+      },
+      {
+        "blinded_natural_key": "Tg9e6p9NJU_RWUm715jvEDIOl5U-60c9VcQh2dj3dRQ",
+        "collection": "allowance_proposals",
+        "identity": "6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy",
+        "key_material_hex": "00000013616c6c6f77616e63655f70726f706f73616c73000000204e0f5eea9f4d254fd15949bbd798ef10320e97953eeb473d55c421d9d8f77514000000205284fc032698060642032e9d171ef07d9500bcb2face384d6a417723ffa255e9",
+        "name": "pending Allowance proposal",
+        "natural_key": "AAAAIOt0UWtOhbjKGKId9mJHpQAvJAGOAObxuQeGzwLIILwHAAAAJGQwZWZmZmI3LTE5MWItNDcwOS1iNmM3LWUzNDNhZjU1MDBiNA",
+        "natural_key_hex": "00000020eb74516b4e85b8ca18a21df66247a5002f24018e00e6f1b90786cf02c820bc070000002464306566666662372d313931622d343730392d623663372d653334336166353530306234",
+        "policy_hash": "UoT8AyaYBgZCAy6dFx7wfZUAvLL6zjhNakF3I_-iVek",
+        "record_key": "7LAElrewZOFf10aJPu4GxA7SMdVRTtnL96xiKmUUVbE"
       },
       {
         "blinded_natural_key": "Tg9e6p9NJU_RWUm715jvEDIOl5U-60c9VcQh2dj3dRQ",
