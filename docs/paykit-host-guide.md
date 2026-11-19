@@ -7,17 +7,6 @@ for store guarantees, approval and client outcomes. Keep app keys and backups in
 host-protected storage and serialize operations on the handle. A memory store
 cannot preserve unanswered writes or payments across a restart.
 
-## Outgoing payment history and payer access
-
-An app granted `paykit_pay` can make payments and read the identity's past and
-future outgoing Paykit history. This includes earlier payments made by other
-wallets under the same identity and payments made without a request.
-
-We recommend that the signer or host explain this access in its own words
-before the user approves the grant. This applies to direct payer grants,
-Allowance executor grants with payer access, and grants that bundle payer
-access with another protocol.
-
 ## Open a wallet and pay a one-time request
 
 Use `Paykit::join` with a signer-approved `JoinRequest` at enrollment. On an
@@ -115,6 +104,17 @@ rail's capabilities before the App is saved. Open backups with
 `Paykit::restore` or `Paykit::restore_with_protocols` so Paykit validates the
 journal before any restore write. If an SDK-restored store is still in
 reconciliation on startup, reopen it with the SDK load constructors.
+
+## Outgoing payment history and payer access
+
+An app granted `paykit_pay` can make payments and read the identity's past and
+future outgoing Paykit history. This includes earlier payments made by other
+wallets under the same identity and payments made without a request.
+
+We recommend that the signer or host explain this access in its own words
+before the user approves the grant. This applies to direct payer grants,
+Allowance executor grants with payer access, and grants that bundle payer
+access with another protocol.
 
 ## Payment and delivery progress
 
