@@ -11339,7 +11339,7 @@ async fn applied_answer_before_key_change(withdraw: bool, retain_key: bool) {
     Box::pin(payer.flush()).await.unwrap();
     let received = Box::pin(received_originals(&mut seller, &[&message])).await;
     if retain_key {
-        assert_eq!(received, [message.clone()]);
+        assert_eq!(received, std::slice::from_ref(&message));
         assert!(matches!(
             payer.app().delivery(&message).await.unwrap(),
             Some(Delivery::Accepted { .. })
