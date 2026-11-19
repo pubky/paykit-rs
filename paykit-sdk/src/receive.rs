@@ -1035,11 +1035,9 @@ fn place_manual_only(
 /// [`crate::Paykit::resume_payments`] and before any payment), once it holds the record, a
 /// request first unopenable and re-sent later (Paykit spec 9) included; and every new
 /// attempt reads the kept copies itself, so a stop that can't be placed still refuses the
-/// payment. One copy is kept per sending app of the payee, and a later cancellation from the
-/// same app replaces that app's copy: a copy from an app the request's label doesn't let
-/// cancel it (Paykit spec 3.4) is judged only once the request reads, so it never takes the
-/// place of another app's cancellation, which may be the valid one. The copies of one request
-/// are at most as many as the payee identity's apps.
+/// payment. Keep original certificates separately across renewals. An earlier original from
+/// the same installation suffices for every parent its selling scopes already cover. Other
+/// originals stay distinct until the parent determines which ones can cancel it (Paykit spec 3.4).
 ///
 /// Security: the cancellation passed every recipient check and check 10 before it was kept,
 /// and is verified again when it is placed. It is keyed by the payer's record of the request
@@ -1062,23 +1060,51 @@ fn keep_cancellation(
     held: bool,
 ) -> Result<(), Fail> {
     let record = cx.record_key(&target.record_target())?;
-    let kept = key::kept_cancellation(&record, &stored.message().from.app_id);
-    let earlier = match state::cx_get::<KeptMessage>(cx, &kept)? {
-        Some(earlier) => Some(kept_with_time(cx, &earlier)?.0),
-        None => None,
-    };
-    if earlier
-        .as_ref()
-        .is_some_and(|earlier| earlier.message().msg_id == stored.message().msg_id)
-    {
-        return Ok(());
+    let name = key::kept_cancellation(&record, &stored.cert().hash());
+    let order = (stored.accepted_at().ok_or_else(Fail::corrupt)?, seq);
+    let mut superseded = Vec::new();
+    for (key, kept) in state::cx_scan::<KeptMessage>(cx, &key::kept_cancellations(&record))? {
+        let (old, _) = kept_with_time(cx, &kept)?;
+        if old.message().from.app_id != stored.message().from.app_id {
+            continue;
+        }
+        let earlier = ordered(&kept)?;
+        if earlier <= order && covers_selling_scopes(&old, stored) {
+            return Ok(());
+        }
+        if order <= earlier && covers_selling_scopes(stored, &old) {
+            superseded.push(key);
+        }
     }
-    if !held && earlier.is_none() {
-        let order = (stored.accepted_at().ok_or_else(Fail::corrupt)?, seq);
-        make_room_for_stop(cx, &stored.sender(), order)?;
+    if !held && superseded.is_empty() {
+        let request = stored.message().refs.first().ok_or_else(Fail::corrupt)?;
+        if !keeps_stored_of(cx, &stored.sender(), request)? {
+            make_room_for_stop(cx, &stored.sender(), order)?;
+        }
     }
-    keep_local(cx, local(&kept, &KeptMessage::taken(stored, seq))?);
+    for old in superseded {
+        if old != name {
+            keep_local(
+                cx,
+                LocalWrite::Delete {
+                    key: old.into_bytes(),
+                },
+            );
+        }
+    }
+    keep_local(cx, local(&name, &KeptMessage::taken(stored, seq))?);
     Ok(())
+}
+
+/// Whether every parent label the second original can cancel is also covered by the first.
+/// Other certificate permissions do not participate in the payee's selling authority.
+fn covers_selling_scopes(first: &StoredMessage, second: &StoredMessage) -> bool {
+    use paykit_lib::scopes::{holds, paykit_scopes, PaykitScope};
+
+    paykit_scopes(second.cert().scopes())
+        .iter()
+        .filter(|s| matches!(s, PaykitScope::Request | PaykitScope::RequestLabel(_)))
+        .all(|s| holds(first.cert().scopes(), s))
 }
 
 /// Keep `stored`, a message whose record this app holds no record of yet, as a message
@@ -1136,9 +1162,8 @@ fn ordered(kept: &KeptMessage) -> Result<crate::records::KeptOrder, Fail> {
 /// neither counted nor dropped, are:
 /// - a request's stop for a request the copy holds ([`holds_record`]), and one for a request
 ///   the app keeps a stored message of to write ([`crate::stored::writes_request`]), the
-///   request's own entry among them. These last are bounded by the entries the client stores
-///   (Switch spec 8.2), one stop per request record; counted here, they would make the stops
-///   of other requests go first;
+///   request's own entry among them. Potentially applicable originals for those requests
+///   stay protected until the authenticated parent can be judged (Paykit spec 3.4, 8.1);
 /// - an Allowance's stop over a record held that doesn't read, or that reads and holds what
 ///   the end names ([`crate::allowances::end_bounded`]), and one whose Allowance has a stored
 ///   message kept to write ([`crate::allowances::keeps_stored_message`]): the message could

@@ -1458,7 +1458,7 @@ async fn test_one_time_cancellation_while_its_record_awaits_its_key_stops_it_pas
 }
 
 /// Whether `wallet` keeps a stop for bob's request `hash`, from any of bob's apps: one copy is
-/// kept per sending app (Paykit spec 8.1).
+/// kept per original signing certificate (Paykit spec 8.1).
 async fn keeps_stop(w: &World, wallet: &paykit_sdk::Paykit, hash: [u8; 32]) -> bool {
     let request = paykit_sdk::RequestRef {
         payee: w.bob_id(),
@@ -2070,7 +2070,7 @@ pub(crate) fn stop_key(w: &World, wallet: &paykit_sdk::Paykit, hash: [u8; 32]) -
     format!(
         "kc/{}/{}",
         pubky_switch_core::enc::b64(&key),
-        pubky_switch_core::enc::b64(&shop)
+        pubky_switch_core::enc::b64(&w.bob.switch().app(&shop).cert.unwrap().hash())
     )
     .into_bytes()
 }

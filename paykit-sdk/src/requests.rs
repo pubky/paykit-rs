@@ -1698,11 +1698,14 @@ impl Paykit {
         if copies.is_empty() {
             return Ok(false);
         }
+        let record = self.held_activity(target).await?;
+        if record.as_ref().and_then(request_of).is_none() {
+            return Ok(false);
+        }
         let mut tx = Tx::default();
         for key in copies.keys() {
             tx.delete(key);
         }
-        let record = self.held_activity(target).await?;
         let Some(cancellation) = first_kept_stop(copies.into_values(), record.as_ref()) else {
             self.local_commit(tx).await?;
             return Ok(false);
@@ -1742,7 +1745,7 @@ impl Paykit {
     }
 
     /// A payee's cancellation kept as a stop of the request record at `target` that stops it,
-    /// the earliest accepted: of the kept copies, one per sending app, those
+    /// the earliest accepted: of the kept copies, one per original certificate, those
     /// [`stop_applies`] takes against the record as the app holds it now. The one place a
     /// kept stop is judged outside the receive step.
     pub(crate) async fn kept_stop_message(
@@ -1785,6 +1788,7 @@ impl Paykit {
     /// may be one, waiting for a write that failed or for a listing, and written without
     /// the stop the request would be payable.
     pub(crate) async fn place_kept_cancellations(&mut self) -> Result<()> {
+        let mut placed = std::collections::BTreeSet::new();
         let own = self.identity();
         for (rest, kept) in self
             .local_scan::<KeptMessage>(key::KEPT_CANCELLATIONS)
@@ -1797,6 +1801,9 @@ impl Paykit {
             let Some(request) = cancellation.message().refs.first().copied() else {
                 return Err(PaykitError::corrupt());
             };
+            if placed.contains(&(cancellation.sender(), request)) {
+                continue;
+            }
             let target = ActivityTarget::payer(natural_key::request_record(
                 &cancellation.sender(),
                 &request,
@@ -1808,6 +1815,7 @@ impl Paykit {
             if held {
                 // A placement that fails now is tried again at the next run; the kept stop
                 // stands meanwhile, so it can't let a payment through.
+                placed.insert((cancellation.sender(), request));
                 let _ = self.place_kept_cancellation(&target).await;
                 continue;
             }
@@ -2986,7 +2994,7 @@ mod stop_tests {
             .unwrap();
             let mut tx = Tx::default();
             tx.put(
-                &key::kept_cancellation(&view.record, &canceller.app_id()),
+                &key::kept_cancellation(&view.record, &stop.cert().hash()),
                 &KeptMessage::taken(&stop, 1),
             )
             .unwrap();
@@ -3094,11 +3102,11 @@ mod stop_order_tests {
         let at = w.clock.now_ms();
         let stops = [
             (
-                shop1.app_id(),
+                shop1.app.cert().hash(),
                 stop_from(&shop1, alice, bob, request.request_hash, at),
             ),
             (
-                shop.app_id(),
+                shop.app.cert().hash(),
                 stop_from(&shop, alice, bob, request.request_hash, at),
             ),
         ];
@@ -3106,7 +3114,7 @@ mod stop_order_tests {
         // pick the other one.
         let keys: Vec<String> = stops
             .iter()
-            .map(|(app, _)| key::kept_cancellation(&record, app))
+            .map(|(cert, _)| key::kept_cancellation(&record, cert))
             .collect();
         let first = usize::from(keys[0] < keys[1]);
         let mut tx = Tx::default();

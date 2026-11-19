@@ -651,7 +651,7 @@ async fn test_provider_loss_disputed_delete_protects_its_cancellation_from_expir
     let stop = format!(
         "kc/{}/{}",
         pubky_switch_core::enc::b64(&record),
-        pubky_switch_core::enc::b64(&shop.app_id()),
+        pubky_switch_core::enc::b64(&shop.app().cert().hash()),
     )
     .into_bytes();
     assert!(
@@ -1521,7 +1521,7 @@ async fn test_provider_loss_missing_record_epoch_holds_the_original_request_proo
     let stop_key = format!(
         "kc/{}/{}",
         pubky_switch_core::enc::b64(&observer.app().record_key(&purchase_target).unwrap()),
-        pubky_switch_core::enc::b64(&seller.app_id()),
+        pubky_switch_core::enc::b64(&seller.app().cert().hash()),
     );
     assert!(observer
         .app()

@@ -3108,7 +3108,7 @@ mod receive_tests {
             object(json!({})),
         );
         let target = ActivityTarget::payer(natural_key::request_record(&shop.id(), &[4; 32]));
-        let key = key::kept_cancellation(&fake_key(&target.record_target()), &shop.app_id());
+        let key = key::kept_cancellation(&fake_key(&target.record_target()), &shop.cert.hash());
         let unordered = state::encode(&KeptMessage::of(&cancellation)).unwrap();
         assert!(!restores::<KeptMessage>(
             &wallet,
@@ -3344,7 +3344,7 @@ mod receive_tests {
         let target = ActivityTarget::payer(natural_key::request_record(&bob.id(), &[4; 32]));
         let record = fake_key(&target.record_target());
         (
-            key::kept_cancellation(&record, &bob.app_id()).into_bytes(),
+            key::kept_cancellation(&record, &bob.cert.hash()).into_bytes(),
             value,
         )
     }
@@ -3370,13 +3370,13 @@ mod receive_tests {
             &["paykit_request", "paykit_settlements", "paykit_contacts"],
         );
         let (key, value) = kept_cancellation(&alice, &bob);
-        let other = key::kept_cancellation(&[9; 32], &bob.app_id()).into_bytes();
+        let other = key::kept_cancellation(&[9; 32], &bob.cert.hash()).into_bytes();
         assert!(!restores::<KeptMessage>(&alice, &other, &value));
-        // Under another sending app's key it would stand for a stop that app never sent.
+        // A renewal of the same app can grant different selling scopes.
         let target = ActivityTarget::payer(natural_key::request_record(&bob.id(), &[4; 32]));
         let record = fake_key(&target.record_target());
-        let other_app = key::kept_cancellation(&record, &[6; 16]).into_bytes();
-        assert!(!restores::<KeptMessage>(&alice, &other_app, &value));
+        let other_cert = key::kept_cancellation(&record, &[6; 32]).into_bytes();
+        assert!(!restores::<KeptMessage>(&alice, &other_cert, &value));
         assert!(!restores::<KeptMessage>(
             &alice,
             &key,
