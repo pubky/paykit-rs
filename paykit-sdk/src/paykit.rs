@@ -96,6 +96,10 @@ pub struct PaykitConfig {
     pub selling_label: Option<Label>,
     /// How many messages the app re-sends to one requester identity a day (Paykit spec 9).
     pub resend_budget: u64,
+    /// The extension kinds the host's extension handles (Paykit spec 3.3): the record
+    /// accepts each one whose prefix the certificate holds, and the receive step keeps them
+    /// for the host ([`Paykit::extension_messages`]).
+    pub extension_kinds: Vec<paykit_lib::kinds::ExtensionKind>,
 }
 
 impl PaykitConfig {
@@ -145,6 +149,21 @@ impl PaykitConfig {
         self
     }
 
+    /// The extension kinds the host's extension handles (Paykit spec 3.3, Paykit wire 4.3),
+    /// replacing any set before. A kind whose `ext:<prefix>` the certificate doesn't hold is
+    /// neither accepted nor kept.
+    #[must_use]
+    pub fn with_extension_kinds(mut self, kinds: Vec<paykit_lib::kinds::ExtensionKind>) -> Self {
+        self.extension_kinds = kinds;
+        self
+    }
+
+    /// Build the Paykit protocol to register when the host opens its own Switch app
+    /// for [`Paykit::attach`]. It handles this wallet's registered extension kinds.
+    pub fn protocol(&self, rail: Arc<dyn Rail>) -> Arc<PaykitProtocol> {
+        Arc::new(PaykitProtocol::with_rail(rail).with_extension_kinds(self.extension_kinds.clone()))
+    }
+
     /// The `orphan_after` the app's attempts carry for a rail that declares `declaration`:
     /// the value set, or else the rail's floor ([`orphan_floor_s`]).
     pub fn orphan_after_s_for(&self, declaration: &RailDeclaration) -> u64 {
@@ -161,6 +180,7 @@ impl Default for PaykitConfig {
             fee_caps: BTreeMap::new(),
             selling_label: None,
             resend_budget: DEFAULT_RESEND_BUDGET,
+            extension_kinds: Vec::new(),
         }
     }
 }
@@ -384,7 +404,7 @@ impl Paykit {
     where
         F: FnOnce(Arc<PaykitProtocol>) -> std::result::Result<ProtocolSet, AppError>,
     {
-        let protocol = Arc::new(PaykitProtocol::with_rail(Arc::clone(rail)));
+        let protocol = config.protocol(Arc::clone(rail));
         protocol.set_publishes_record(config.app.publishes_record);
         let protocols = register(Arc::clone(&protocol))?;
         Self::check_protocol(&protocol, &protocols)?;
@@ -610,7 +630,7 @@ impl Paykit {
     }
 
     /// Take ownership of a host-built Switch app immediately after [`App::join`] or
-    /// [`App::load`]. Register a fresh [`PaykitProtocol::with_rail`] for that app and pass
+    /// [`App::load`]. Register a fresh [`PaykitConfig::protocol`] for that app and pass
     /// the same instance here. The app supplies its clock, Homeserver reader and record
     /// publishing setting. The host supplies Paykit's other settings and its timer.
     ///
@@ -621,9 +641,9 @@ impl Paykit {
     /// # Errors
     ///
     /// The client's `Usage` refusal if the protocol differs from the registered one,
-    /// has no rail, already has an owner, or the app is in reconciliation or has an
-    /// unfinished restore. As with [`Paykit::load`], returns an error for an invalid
-    /// orphan window or a store failure.
+    /// has different extension kinds, has no rail, already has an owner, or the app is in
+    /// reconciliation or has an unfinished restore. As with [`Paykit::load`], returns an
+    /// error for an invalid orphan window or a store failure.
     pub async fn attach(
         app: App,
         config: PaykitConfig,
@@ -632,6 +652,13 @@ impl Paykit {
     ) -> Result<Self> {
         Box::pin(async move {
             Self::check_protocol(&protocol, app.protocols())?;
+            if !protocol.has_extension_kinds(&config.extension_kinds) {
+                return Err(AppError::Refused(pubky_switch_client::app::Refusal::Usage(
+                    "the registered Paykit protocol and wallet must handle the same extension kinds"
+                        .into(),
+                ))
+                .into());
+            }
             let rail = Arc::clone(protocol.rail().ok_or_else(|| {
                 AppError::Refused(pubky_switch_client::app::Refusal::Usage(
                     "the registered Paykit protocol must have a rail".into(),
@@ -970,6 +997,11 @@ impl Paykit {
         // used. The steps never count an unblock: the client's copy decides there.
         if self.certificate_refused().is_none() {
             Box::pin(self.drop_unblocks_not_kept()).await?;
+        }
+        // The record accepts the kinds this app handles now, extension kinds included
+        // (`crate::extensions`), before the feed is read.
+        if self.certificate_refused().is_none() {
+            Box::pin(self.align_accepts()).await?;
         }
         // An app holding `paykit_contacts` reads the flagged senders again first, at most every 10
         // minutes, for the spam rule (Paykit wire 4.1).

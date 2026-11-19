@@ -336,6 +336,11 @@ fn note_cursor_time(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Resu
     let Some(at) = stored.accepted_at() else {
         return Ok(());
     };
+    note_cursor_time_at(cx, at)
+}
+
+/// [`note_cursor_time`] of an entry accepted at `at`.
+pub(crate) fn note_cursor_time_at(cx: &mut ReceiveContext<'_>, at: u64) -> Result<(), Fail> {
     let held = state::cx_get::<u64>(cx, key::CURSOR_TIME)?.unwrap_or(0);
     if at > held {
         keep_local(cx, local(key::CURSOR_TIME, &at)?);
@@ -369,6 +374,22 @@ pub(crate) fn admits_new_state(
     scopes: &[String],
     stored: &StoredMessage,
 ) -> Result<bool, Fail> {
+    admits_new_state_of(
+        cx,
+        sender,
+        scopes,
+        &stored.message().msg_id,
+        stored.accepted_at().unwrap_or(0),
+    )
+}
+
+pub(crate) fn admits_new_state_of(
+    cx: &mut ReceiveContext<'_>,
+    sender: &[u8; 32],
+    scopes: &[String],
+    msg_id: &str,
+    accepted_at_ms: u64,
+) -> Result<bool, Fail> {
     if !reads_lists(scopes) {
         return Ok(true);
     }
@@ -390,7 +411,7 @@ pub(crate) fn admits_new_state(
     // for again once it is unblocked (`marks.rs`, Paykit spec 8.1). One counted only because
     // the service flagged its sender is counted, its pair kept.
     if blocked {
-        mark_blocked(cx, sender, stored)?;
+        mark_blocked(cx, sender, msg_id, accepted_at_ms)?;
     }
     let kept = key::spam(sender);
     let count = state::cx_get::<u64>(cx, &kept)?.unwrap_or(0);
@@ -414,11 +435,11 @@ pub(crate) fn admits_new_state(
 fn mark_blocked(
     cx: &mut ReceiveContext<'_>,
     sender: &[u8; 32],
-    stored: &StoredMessage,
+    msg_id: &str,
+    at: u64,
 ) -> Result<(), Fail> {
     let held_entry = || Fail::Store(StoreFailure::unavailable(StoreError::Unavailable));
-    let at = stored.accepted_at().unwrap_or(0);
-    let msg_id = stored.message().msg_id.clone();
+    let msg_id = msg_id.to_owned();
     let family = MarkFamily::Blocked;
     let mark_key = family.key(sender);
     let held = state::cx_get::<crate::marks::DropMark>(cx, &mark_key)?;
@@ -2309,7 +2330,7 @@ pub(crate) fn make_room_for_reply(
 /// Count the drops from one receive effect together. Each victim is selected against the
 /// marks left by earlier drops in this effect. The receive context itself exposes only
 /// preceding effects until this one commits.
-fn mark_dropped(
+pub(crate) fn mark_dropped(
     cx: &mut ReceiveContext<'_>,
     dropped: impl IntoIterator<Item = ([u8; 32], (u64, u64))>,
 ) -> Result<(), Fail> {
