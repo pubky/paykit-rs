@@ -11273,7 +11273,37 @@ async fn test_queued_withdrawal_after_provider_loss_preserves_the_peers_proposal
     let current = shop.app().shared_record(&peer_key).await.unwrap().unwrap();
     assert_eq!(
         (current.version, current.content),
-        (held.version, held.content)
+        (held.version, held.content.clone())
+    );
+    // The peer can already hold a new lifetime of the same signed proposal.
+    let remote = shop
+        .app()
+        .record_key(&allowances_target(&w.alice_id(), &first.allowance_id))
+        .unwrap();
+    let original = Box::pin(pending_at(&shop, &remote)).await;
+    shop.app_mut().hold_queued(&w.alice_id()).await.unwrap();
+    shop.reject_allowance(&remote).await.unwrap();
+    Box::pin(records_proposal(
+        &mut shop,
+        original.proposal(),
+        &first.allowance_id,
+    ))
+    .await;
+    let newer = shop.app().shared_record(&peer_key).await.unwrap().unwrap();
+    assert!(newer.authenticated && newer.version > held.version);
+    assert_eq!(newer.content, held.content);
+    w.clock.advance_ms(60_000);
+    assert!(matches!(
+        payer.app_mut().flush_message(&old).await.unwrap(),
+        Some(Delivery::Queued { .. })
+    ));
+    assert!(Box::pin(received_originals(&mut shop, &[&old]))
+        .await
+        .is_empty());
+    let current = shop.app().shared_record(&peer_key).await.unwrap().unwrap();
+    assert_eq!(
+        (current.version, current.content),
+        (newer.version, newer.content)
     );
     assert!(w.rail.all_executions().is_empty());
 }
