@@ -26,7 +26,7 @@ use paykit_sdk::{
 use pubky_switch_client::app::SharedRecord;
 use pubky_switch_client::store::MemoryStore;
 use pubky_switch_client::transport::BoxFuture;
-use pubky_switch_harness::{Backend, World, parties::Asking};
+use pubky_switch_harness::{parties::Asking, Backend, World};
 use pubky_switch_signer::{Protocols, Signer};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -518,14 +518,12 @@ async fn early_paid_period_after_loss(world: &World) -> TestResult {
         .receive(None)
         .await
         .map_err(|e| format!("tablet learns subscription: {e}"))?;
-    assert!(
-        tablet
-            .request(&request)
-            .await
-            .map_err(|e| format!("tablet subscription: {e}"))?
-            .held
-            .is_none()
-    );
+    assert!(tablet
+        .request(&request)
+        .await
+        .map_err(|e| format!("tablet subscription: {e}"))?
+        .held
+        .is_none());
     let tablet_id = tablet.app_id();
     drop(tablet);
     let early = || PayOptions::default().with_early_payment_confirmed(UserConfirmed::new());
@@ -598,12 +596,10 @@ async fn early_paid_period_after_loss(world: &World) -> TestResult {
         .ok_or("subscriber did not follow loss")?
         .loss;
     assert!(loss.uncertain_until_ms < period.starts_at);
-    assert!(
-        restored
-            .receipts(ReceiptsOf::Period(request, period))
-            .await?
-            .is_empty()
-    );
+    assert!(restored
+        .receipts(ReceiptsOf::Period(request, period))
+        .await?
+        .is_empty());
     let mut options = early();
     if let Some(hold) = restored
         .request(&request)
