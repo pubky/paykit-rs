@@ -1501,3 +1501,310 @@ async fn test_publication_restored_while_labelled_discovers_a_former_recipient_w
     assert_eq!(body["msg_id"], withdrawal.msg_id);
     assert_eq!(body["body"]["payment_endpoints"], serde_json::json!({}));
 }
+
+async fn request_list(
+    wallet: &mut Paykit,
+    shop: &mut Paykit,
+    app_id: impl Into<Option<[u8; 16]>>,
+    held_version: Option<paykit_lib::ListVersion>,
+) {
+    let body = paykit_lib::bodies::PrivatePaymentListRequest {
+        app_id: app_id.into(),
+        held_version,
+    }
+    .to_body()
+    .unwrap();
+    let (id, delivery) = wallet
+        .app_mut()
+        .send(pubky_switch_client::app::OutgoingMessage::new(
+            shop.identity(),
+            paykit_lib::Kind::PrivatePaymentListRequest.as_str(),
+            body,
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        delivery,
+        pubky_switch_client::app::Delivery::Accepted { .. }
+    ));
+    assert!(shop.receive(None).await.unwrap().applied.contains(&id));
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Published {
+    version: paykit_lib::ListVersion,
+    id: String,
+    hash: [u8; 32],
+    repeats: usize,
+    withdrawn: bool,
+}
+
+async fn published(shop: &Paykit, wallet: &Paykit) -> Vec<Published> {
+    let mut issues = Vec::new();
+    for sent in shop
+        .app()
+        .sent_to(&wallet.identity(), 0, u64::MAX)
+        .await
+        .unwrap()
+    {
+        if sent.kind != paykit_lib::Kind::PrivatePaymentList.as_str() {
+            continue;
+        }
+        let signed = pubky_switch_core::message::Message::parse(
+            sent.plaintext.json(),
+            paykit_lib::kinds::OPAQUE_MEMBERS,
+        )
+        .unwrap();
+        let list = paykit_lib::bodies::PrivatePaymentList::from_body(&signed.body).unwrap();
+        issues.push(Published {
+            version: list.version,
+            id: sent.msg_id,
+            hash: sent.plaintext.hash(),
+            repeats: sent.resent_at_ms.len(),
+            withdrawn: list.payment_endpoints.is_empty(),
+        });
+    }
+    issues.sort_by_key(|issue| issue.version);
+    issues
+}
+
+#[tokio::test]
+async fn test_publication_answers_only_its_chosen_contact_and_resends_the_same_list_after_reload() {
+    use crate::common::store;
+    use paykit_sdk::{AppScopes, PaykitConfig};
+
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let storage = store();
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default(),
+            storage.clone(),
+        )
+        .await;
+    shop.app_mut().invite(&wallet.identity()).await.unwrap();
+    let publisher = shop.app_id();
+    let other = wallet.app_id();
+    shop.set_list_endpoints(offered("lno1current"))
+        .await
+        .unwrap();
+    request_list(&mut wallet, &mut shop, publisher, None).await;
+    assert!(published(&shop, &wallet).await.is_empty());
+    assert!(shop
+        .app()
+        .records_of("private_list_publications")
+        .await
+        .unwrap()
+        .is_empty());
+    shop.publish_list_to(wallet.identity()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let result = wallet
+        .pay_without_request(UnrequestedPayment::new(w.bob_id(), btc("0.001")))
+        .await;
+    assert!(matches!(result.outcome.unwrap(), PayOutcome::Paid { .. }));
+    let first = published(&shop, &wallet).await;
+    assert_eq!(first.len(), 1);
+    request_list(&mut wallet, &mut shop, other, Some(first[0].version)).await;
+    assert_eq!(published(&shop, &wallet).await, first);
+    let day = 86_400_000;
+    let now = shop.app().clock().now_ms();
+    let evening = (now / day + 1) * day - 2 * 3_600_000;
+    w.clock.advance_ms(if evening >= now {
+        evening - now
+    } else {
+        evening + day - now
+    });
+    request_list(&mut wallet, &mut shop, publisher, Some(first[0].version)).await;
+    let first_answer_at = shop.app().clock().now_ms();
+    let initial = published(&shop, &wallet).await;
+    assert_eq!(initial.len(), 2);
+    assert_eq!(initial[1].version, first[0].version.next().unwrap());
+
+    drop(shop);
+    let mut shop = Paykit::load(
+        w.env(&w.bob, storage),
+        PaykitConfig::default(),
+        publisher,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    w.clock.advance_ms(1_000);
+    for (elapsed, count) in [(0, 1), (0, 1), (3_600_000, 2)] {
+        w.clock.advance_ms(elapsed);
+        request_list(&mut wallet, &mut shop, publisher, Some(first[0].version)).await;
+        let mut expected = initial.clone();
+        expected[1].repeats = count;
+        assert_eq!(published(&shop, &wallet).await, expected);
+    }
+    wallet.receive(None).await.unwrap();
+    let result = wallet
+        .pay_without_request(UnrequestedPayment::new(w.bob_id(), btc("0.002")))
+        .await;
+    assert!(matches!(result.outcome.unwrap(), PayOutcome::Paid { .. }));
+
+    let proofs = wallet
+        .app()
+        .sent_to(&w.bob_id(), 0, u64::MAX)
+        .await
+        .unwrap();
+    let mut paid = Vec::new();
+    for signed in proofs
+        .iter()
+        .filter(|sent| sent.kind == paykit_lib::Kind::PaymentProof.as_str())
+    {
+        let message = pubky_switch_core::message::Message::parse(
+            signed.plaintext.json(),
+            paykit_lib::kinds::OPAQUE_MEMBERS,
+        )
+        .unwrap();
+        let paykit_lib::Body::PaymentProof(proof) = paykit_lib::Body::parse(&message).unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(proof.payment_app_id, publisher);
+        paid.push(proof.list_version.unwrap());
+    }
+    paid.sort();
+    assert_eq!(paid, [first[0].version, initial[1].version]);
+
+    for count in 3..=5 {
+        let held = published(&shop, &wallet).await.last().unwrap().version;
+        if count == 3 {
+            request_list(&mut wallet, &mut shop, None, None).await;
+        } else {
+            request_list(&mut wallet, &mut shop, publisher, Some(held)).await;
+        }
+        assert_eq!(published(&shop, &wallet).await.len(), count);
+    }
+    let held = published(&shop, &wallet).await;
+    request_list(
+        &mut wallet,
+        &mut shop,
+        publisher,
+        Some(held.last().unwrap().version),
+    )
+    .await;
+    assert_eq!(published(&shop, &wallet).await, held);
+    let midnight = (first_answer_at / day + 1) * day;
+    w.clock.advance_ms(midnight - shop.app().clock().now_ms());
+    shop.receive(None).await.unwrap();
+    assert_eq!(published(&shop, &wallet).await, held);
+    w.clock
+        .advance_ms(first_answer_at + day - shop.app().clock().now_ms());
+    shop.receive(None).await.unwrap();
+    assert_eq!(published(&shop, &wallet).await.len(), 6);
+    request_list(&mut wallet, &mut shop, publisher, None).await;
+    assert_eq!(published(&shop, &wallet).await.len(), 6);
+    shop.set_list_endpoints(offered("lno1replacement"))
+        .await
+        .unwrap();
+    let changed = published(&shop, &wallet).await;
+    assert_eq!(changed.len(), 7);
+    w.clock.advance_ms(2 * 3_600_000);
+    shop.receive(None).await.unwrap();
+    assert_eq!(published(&shop, &wallet).await, changed);
+    shop.withdraw_list_from(wallet.identity()).await.unwrap();
+    let withdrawal = published(&shop, &wallet).await;
+    assert!(withdrawal.last().unwrap().withdrawn);
+    request_list(&mut wallet, &mut shop, publisher, Some(first[0].version)).await;
+    assert_eq!(published(&shop, &wallet).await, withdrawal);
+}
+
+#[tokio::test]
+async fn test_publication_restored_answers_use_the_retained_request_and_current_sharing_choice() {
+    use crate::common::{store, BOB_ORIGIN};
+    use paykit_sdk::{AppScopes, PaykitConfig};
+    use pubky_switch_core::records::Inbox;
+
+    for (in_place, moved) in [(false, false), (true, false), (false, true), (true, true)] {
+        let w = World::new();
+        let mut wallet = w.wallet("wallet").await;
+        let storage = store();
+        let mut shop = w
+            .join_with(
+                &w.bob,
+                "publisher",
+                AppScopes::new().request().build().unwrap(),
+                PaykitConfig::default(),
+                storage.clone(),
+            )
+            .await;
+        let app = shop.app_id();
+        shop.app_mut().invite(&wallet.identity()).await.unwrap();
+        shop.set_list_endpoints(offered("lno1old")).await.unwrap();
+        shop.publish_list_to(wallet.identity()).await.unwrap();
+        let old = published(&shop, &wallet).await[0].version;
+        w.clock.advance_ms(31 * 86_400_000);
+        shop.set_list_endpoints(offered("lno1current"))
+            .await
+            .unwrap();
+        let before = shop.backup().await.unwrap();
+        request_list(&mut wallet, &mut shop, app, Some(old)).await;
+        let answered = published(&shop, &wallet).await.last().unwrap().version;
+        assert_eq!(answered.counter(), 3);
+        if moved {
+            let changed = w.bob.switch().change_key_into([74; 32]);
+            w.router.add_switch(BOB_ORIGIN, &changed);
+            let current = w
+                .bob
+                .sign_next(|body| {
+                    body.generation = 2;
+                    body.inbox = Inbox::new(BOB_ORIGIN, changed.service_key());
+                })
+                .unwrap();
+            changed.deliver_identity(&current).unwrap();
+        }
+        drop(shop);
+
+        let destination = if in_place { storage } else { store() };
+        let mut shop = Paykit::restore(
+            w.env(&w.bob, destination),
+            PaykitConfig::default(),
+            &before,
+            w.rail.clone(),
+            w.timer(),
+        )
+        .await
+        .unwrap();
+        if moved {
+            shop.app_mut().refresh_identity().await.unwrap();
+            shop.app_mut().follow_provider().await.unwrap();
+        }
+        shop.receive(None).await.unwrap();
+        let withdrawals = published(&shop, &wallet).await;
+        assert!(withdrawals.last().unwrap().withdrawn);
+        request_list(&mut wallet, &mut shop, app, Some(old)).await;
+        assert_eq!(published(&shop, &wallet).await, withdrawals);
+        shop.set_list_endpoints(offered("lno1chosen"))
+            .await
+            .unwrap();
+        shop.publish_list_to(wallet.identity()).await.unwrap();
+        let fresh = published(&shop, &wallet).await;
+        assert_eq!(
+            fresh.last().unwrap().version,
+            if moved {
+                paykit_lib::ListVersion::new(2, 2).unwrap()
+            } else {
+                paykit_lib::ListVersion::new(1, 5).unwrap()
+            }
+        );
+        request_list(&mut wallet, &mut shop, app, Some(old)).await;
+        assert_eq!(published(&shop, &wallet).await, fresh);
+        w.clock.advance_ms(3_600_000);
+        request_list(&mut wallet, &mut shop, app, Some(old)).await;
+        let mut expected = fresh;
+        if in_place {
+            expected.last_mut().unwrap().repeats += 1;
+        }
+        assert_eq!(
+            published(&shop, &wallet).await,
+            expected,
+            "in-place={in_place}, moved={moved}"
+        );
+    }
+}

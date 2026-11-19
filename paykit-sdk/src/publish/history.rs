@@ -390,6 +390,9 @@ mod tests {
         let mut actual = issue(9, false);
         actual.publisher = publisher.cert.app_id();
         let reservation = ListReservation {
+            answer: Default::default(),
+            missing: None,
+            expires: 1000,
             recipient: actual.recipient,
             choice: [7; 16],
             revision: None,

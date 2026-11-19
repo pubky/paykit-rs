@@ -433,6 +433,7 @@ pub(crate) fn restore_paykit_layer(
         key::PUBLICATIONS,
         key::LIST_RESERVATIONS,
         key::PUBLICATION_HISTORY,
+        key::LIST_RECIPIENTS,
     ] {
         for (key, value) in restoring
             .previous_local_scan(prefix.as_bytes())
@@ -441,6 +442,10 @@ pub(crate) fn restore_paykit_layer(
             match prefix {
                 key::PUBLICATIONS => publications.pending(&key, &value, &binder),
                 key::LIST_RESERVATIONS => publications.applied(&key, &value, &binder),
+                key::LIST_RECIPIENTS => {
+                    state::restored::<crate::publish::ListRecipient>(&key, &value, &binder)
+                        .and_then(|recipient| publications.recipient(recipient))
+                }
                 _ => publications.observed(&key, &value, &binder),
             }
             .map_err(|err| format!("invalid retained private list publication: {err}"))?;
@@ -721,7 +726,9 @@ pub(crate) fn restore_paykit_layer(
                 let recipient =
                     state::restored::<crate::publish::ListRecipient>(&key, &value, &binder)
                         .map_err(|_| unread())?;
-                publications.recipient(recipient);
+                publications
+                    .recipient(recipient)
+                    .map_err(|err| err.to_string())?;
                 continue;
             }
             StateKey::Publication(_) => {
