@@ -1263,6 +1263,7 @@ impl Protocol for PaykitProtocol {
             // entry itself, whatever is returned (Switch spec 3.5).
             Ok(()) | Err(Fail::NotNow) => Outcome::Apply(Effect::default()),
             Err(Fail::Need(needs)) => Outcome::Need(needs),
+            Err(Fail::Consume) => Outcome::Consume,
             Err(Fail::AwaitAdmission) => Outcome::AwaitAdmission,
             Err(Fail::Drop(reason)) => Outcome::Drop { reason },
             Err(Fail::Store(failure)) => Outcome::Retry(failure),
@@ -2934,8 +2935,8 @@ mod receive_tests {
     #[test]
     fn test_protocol_restore_refuses_a_kept_unrequested_proof_it_cannot_order() {
         // A proof of a payment without a request is a kept reply (`pr/`) like any other, and
-        // is placed among them in the order its inbox accepted it: one kept without its feed
-        // `seq`, or with a null one, can't be ordered, so a restore refuses it, though its
+        // is placed among them in the order its inbox accepted it: one kept without its full
+        // feed position can't be ordered, so a restore refuses it, though its
         // record, which only the rail names, isn't bound until it is placed.
         let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
         let bob = Party::new(
@@ -2956,7 +2957,14 @@ mod receive_tests {
             })),
         );
         let at = key::kept_reply(&alice.id(), &[9; 32], &proof.message().msg_id);
-        let value = state::encode(&KeptMessage::taken(&proof, 3)).unwrap();
+        let value = state::encode(&KeptMessage::taken_at(
+            &proof,
+            pubky_switch_client::app::FeedPosition {
+                generation: 1,
+                seq: 3,
+            },
+        ))
+        .unwrap();
         assert!(restores::<KeptMessage>(&bob, at.as_bytes(), &value));
         assert!(restores::<KeptMessage>(
             &bob,

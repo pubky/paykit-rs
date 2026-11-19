@@ -948,6 +948,238 @@ async fn replies_held(shop: &Paykit, record: &[u8; 32]) -> usize {
 }
 
 #[tokio::test]
+async fn test_replies_wait_for_a_prior_answer_with_an_uncertain_effect_at_the_sender_bound() {
+    Box::pin(uncertain_answer_at_the_reply_bound(false)).await;
+}
+
+#[tokio::test]
+async fn test_replies_wait_for_a_prior_answer_with_an_uncertain_effect_at_the_total_bound() {
+    Box::pin(uncertain_answer_at_the_reply_bound(true)).await;
+}
+
+async fn uncertain_answer_at_the_reply_bound(total: bool) {
+    use pubky_switch_client::app::{AppEvent, ParkReason};
+    let w = World::new();
+    let mut wallet = Box::pin(w.wallet("wallet")).await;
+    let mut shop = Box::pin(w.shop()).await;
+    let request = Box::pin(paid_before_recorded(&w, &mut wallet, &mut shop)).await;
+    let acceptance = Box::pin(sent_reply(&w, &wallet, "paykit.payment_request_acceptance")).await;
+    let accept_id = &acceptance.message().msg_id;
+    let copies = shop.app().protocol_scan("paykit", b"pr/").await.unwrap();
+    assert_eq!(copies.len(), 2);
+    assert!(copies
+        .iter()
+        .any(|(key, _)| key.ends_with(accept_id.as_bytes())));
+    let at = w.clock.now_ms();
+    // The payer sends its original again while it is retained. The shop returns
+    // after the original processed pair has reached the end of its retention.
+    w.clock.advance_ms(29 * DAY_MS);
+    wallet.app_mut().resend(accept_id).await.unwrap();
+    wallet.flush().await.unwrap();
+    Box::pin(record_request(&w, &mut shop, &request)).await;
+    w.clock.advance_ms(2 * DAY_MS);
+    w.bob.switch().fail_next(Fault::LoseAnswer {
+        path: "/ops".into(),
+    });
+    let failed = shop.app_mut().receive(None).await;
+    assert!(failed.is_err(), "{failed:?}");
+    // The service kept the applied batch. The next read comes after the period
+    // in which an answer can settle whether that original write was applied.
+    w.clock.advance_ms(31 * DAY_MS);
+    shop.app_mut().receive(None).await.unwrap();
+    let parked = shop.app_mut().parked_entries().await.unwrap();
+    let old = parked
+        .iter()
+        .find(|entry| entry.reason == ParkReason::Uncertain)
+        .expect("original answer has an uncertain effect");
+    let held = shop
+        .app_mut()
+        .parked_entry(old.stored_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(held.message.unwrap().msg_id, *accept_id);
+    let copies = shop.app().protocol_scan("paykit", b"pr/").await.unwrap();
+    assert!(
+        copies
+            .iter()
+            .any(|(key, _)| key.ends_with(accept_id.as_bytes())),
+        "the initial kept reply survives the unanswered write"
+    );
+    let bound = if total {
+        paykit_sdk::MAX_KEPT_REPLIES
+    } else {
+        paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER
+    };
+    let sender_bound = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
+    let last = if total {
+        let scopes = paykit_sdk::AppScopes::new().pay().build().unwrap();
+        let mut carol = Box::pin(w.join(&w.carol, "wallet", scopes.clone())).await;
+        let (dave, mut other) = Box::pin(crate::allowances::dave_app(&w, "wallet", scopes)).await;
+        for app in [&mut carol, &mut other] {
+            shop.app_mut().invite(&app.identity()).await.unwrap();
+            app.app_mut().invite(&w.bob_id()).await.unwrap();
+        }
+        Box::pin(rejected_requests(
+            &w,
+            &shop,
+            &w.alice,
+            &mut wallet,
+            sender_bound - copies.len(),
+        ))
+        .await;
+        Box::pin(rejected_requests(
+            &w,
+            &shop,
+            &w.carol,
+            &mut carol,
+            sender_bound - 1,
+        ))
+        .await;
+        Box::pin(rejected_requests(&w, &shop, &dave, &mut other, 1)).await;
+        // Alice alone holds 64. Carol's own limit has room but the total is full.
+        Box::pin(rejected_requests(&w, &shop, &w.carol, &mut carol, 1)).await
+    } else {
+        Box::pin(rejected_requests(
+            &w,
+            &shop,
+            &w.alice,
+            &mut wallet,
+            bound + 1 - copies.len(),
+        ))
+        .await
+    };
+    let mut events = Vec::new();
+    for _ in 0..3 {
+        events.extend(shop.app_mut().receive(None).await.unwrap().events);
+    }
+    let held = shop.app().protocol_scan("paykit", b"pr/").await.unwrap();
+    assert_eq!(held.len(), bound, "{events:?}");
+    assert!(held
+        .iter()
+        .any(|(key, _)| key.ends_with(accept_id.as_bytes())));
+    assert!(!held.iter().any(|(key, _)| key.ends_with(last.as_bytes())));
+    let parked = shop.app_mut().parked_entries().await.unwrap();
+    let waiting = parked
+        .iter()
+        .find(|p| p.reason == ParkReason::AwaitingAdmission)
+        .unwrap();
+    assert_eq!(
+        shop.app_mut()
+            .parked_entry(waiting.stored_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .message
+            .unwrap()
+            .msg_id,
+        last
+    );
+    assert!(parked
+        .iter()
+        .any(|p| p.stored_id == old.stored_id && p.reason == ParkReason::Uncertain));
+    assert!(Box::pin(marks(&shop)).await.is_empty());
+    // The host has checked the service record containing the earlier acceptance.
+    let activity = shop.payee_activity().await.unwrap();
+    let record = shop
+        .app()
+        .shared_record(&activity[0].record)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(record.authenticated);
+    let current = ActivityRecord::read(
+        record.content.value().unwrap(),
+        &w.bob_id(),
+        ActivitySide::Payee,
+    )
+    .unwrap();
+    assert_eq!(current.request.unwrap().hash(), request.hash());
+    let applied = current.response.unwrap();
+    assert_eq!(applied.sender(), w.alice_id());
+    assert_eq!(applied.message().msg_id, *accept_id);
+    assert_eq!(applied.hash(), acceptance.hash());
+    shop.app_mut()
+        .release_parked(old.stored_id, &old.hash)
+        .await
+        .unwrap();
+    let mut completed = Vec::new();
+    for _ in 0..3 {
+        completed.extend(shop.app_mut().receive(None).await.unwrap().events);
+    }
+    assert_eq!(
+        completed
+            .iter()
+            .filter(|event| matches!(
+                event, AppEvent::MessageReceived { msg_id, .. } if msg_id == &last
+            ))
+            .count(),
+        1,
+        "{completed:?}"
+    );
+    let held = shop.app().protocol_scan("paykit", b"pr/").await.unwrap();
+    assert_eq!(held.len(), bound);
+    assert!(held.iter().any(|(key, _)| key.ends_with(last.as_bytes())));
+    assert!(!held
+        .iter()
+        .any(|(key, _)| key.ends_with(accept_id.as_bytes())));
+    assert!(shop.app_mut().parked_entries().await.unwrap().is_empty());
+    assert_eq!(Box::pin(marks(&shop)).await, vec![(at, at)]);
+}
+
+async fn rejected_requests(
+    w: &World,
+    shop: &Paykit,
+    signer: &pubky_switch_client::testing::TestSigner,
+    payer: &mut Paykit,
+    count: usize,
+) -> String {
+    let mut last = String::new();
+    for _ in 0..count {
+        w.clock.advance_ms(1);
+        let body = json!({"amount":{"asset":"btc","value":"1"},"payment_reference":"ordered",
+            "proposal_expires_at":null,"payment_endpoints":{"btc-lightning-bolt11":"lnbc1invoice"}});
+        let sent = shop
+            .app()
+            .sign_message(OutgoingMessage::new(
+                payer.identity(),
+                "paykit.payment_request",
+                body.as_object().unwrap().clone(),
+            ))
+            .unwrap();
+        signer
+            .switch()
+            .send_plaintext(
+                w.bob_id(),
+                shop.app().cert(),
+                sent.plaintext(),
+                &[payer.app_id()],
+            )
+            .unwrap();
+        payer.receive(None).await.unwrap();
+        last = payer
+            .reject_request(
+                &RequestRef {
+                    payee: w.bob_id(),
+                    request_hash: sent.hash(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    payer.flush().await.unwrap();
+    assert!(payer
+        .app()
+        .sent_to(&w.bob_id(), 0, u64::MAX)
+        .await
+        .unwrap()
+        .iter()
+        .any(|m| m.msg_id == last));
+    last
+}
+
+#[tokio::test]
 async fn test_replies_kept_up_to_the_bound_per_sender() {
     let (shop, record, _) =
         recorded_after_unmatched(&World::new(), paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER - 2).await;

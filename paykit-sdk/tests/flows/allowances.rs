@@ -6216,7 +6216,7 @@ async fn test_allowances_answers_of_one_millisecond_placed_in_acceptance_order()
 }
 
 /// A fourth identity, dave, with its own switch, and an app of his, `name`, with `scopes`.
-async fn dave_app(
+pub(super) async fn dave_app(
     w: &World,
     name: &str,
     scopes: RequestedScopes,
@@ -8968,6 +8968,142 @@ async fn test_pending_reply_stop_holds_equal_millisecond_replies_when_another_lo
     Box::pin(pending_replies_across_loss(true, ReplyJourney::Placement)).await;
 }
 
+async fn accept_signed_proposal(
+    world: &World,
+    wallet: &Paykit,
+    shop: &mut Paykit,
+) -> (
+    paykit_lib::AllowanceId,
+    StoredMessage,
+    pubky_switch_client::app::SignedMessage,
+) {
+    let id = paykit_lib::AllowanceId::generate().unwrap();
+    let offer = signed_pending_proposal(wallet, world.bob_id(), &id, "allower");
+    world
+        .bob
+        .switch()
+        .send_plaintext(
+            world.alice_id(),
+            wallet.app().cert(),
+            offer.plaintext(),
+            &[shop.app_id()],
+        )
+        .unwrap();
+    let delivered = shop.app_mut().receive(None).await.unwrap();
+    assert!(delivered.events.iter().any(|e| matches!(e, AppEvent::MessageReceived { msg_id, .. } if msg_id == &offer.message().msg_id)));
+    let mut reply = OutgoingMessage::new(
+        world.alice_id(),
+        "paykit.allowance_acceptance",
+        json!({"allowance_id":id.as_str()})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    reply.refs = vec![offer.hash()];
+    (id, offer, shop.app().sign_message(reply).unwrap())
+}
+
+#[tokio::test]
+async fn test_pending_reply_stop_consumes_an_older_stored_answer_at_the_bound() {
+    use pubky_switch_client::app::{Collection, ParkReason, RecordTarget};
+    let w = World::new();
+    let store = std::sync::Arc::new(crate::common::FailingRecordReads::default());
+    let mut wallet = Box::pin(w.join_with(
+        &w.alice,
+        "wallet",
+        AppScopes::new().pay().allowance().build().unwrap(),
+        Default::default(),
+        store.clone(),
+    ))
+    .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut shop = Box::pin(shop(&w)).await;
+    Box::pin(proposed(&w, &mut shop, &mut wallet)).await;
+    Box::pin(read_listed_records(&mut wallet)).await;
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"ct")
+        .await
+        .unwrap()
+        .is_some());
+    let bound = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
+    let deliver =
+        |wallet: &Paykit, shop: &Paykit, reply: &pubky_switch_client::app::SignedMessage| {
+            w.alice
+                .switch()
+                .send_plaintext(
+                    w.bob_id(),
+                    shop.app().cert(),
+                    reply.plaintext(),
+                    &[wallet.app_id()],
+                )
+                .unwrap();
+        };
+    let (id, proposal, first) = Box::pin(accept_signed_proposal(&w, &wallet, &mut shop)).await;
+    let at = w.clock.now_ms();
+    deliver(&wallet, &shop, &first);
+    store.limit_next_cursor_time();
+    let first_read = wallet.app_mut().receive(None).await.unwrap();
+    assert!(
+        first_read.events.iter().any(|event| matches!(
+            event,
+            AppEvent::Parked {
+                reason: ParkReason::StoreRejected,
+                ..
+            }
+        )),
+        "{:?}",
+        first_read.events
+    );
+    assert!(!Box::pin(keeps(&wallet, b"pr/", first.msg_id())).await);
+    let mut others = Vec::new();
+    for _ in 0..bound {
+        w.clock.advance_ms(1);
+        let (_, _, reply) = Box::pin(accept_signed_proposal(&w, &wallet, &mut shop)).await;
+        deliver(&wallet, &shop, &reply);
+        others.push(reply.msg_id().to_owned());
+    }
+    // A stored entry is retried before the feed. Keep the earlier input stored
+    // while the sixty-four later answers are first admitted.
+    store.limit_next_cursor_time();
+    wallet.app_mut().receive(None).await.unwrap();
+    for id in &others {
+        assert!(Box::pin(keeps(&wallet, b"pr/", id)).await, "{id}");
+    }
+    assert!(!Box::pin(keeps(&wallet, b"pr/", first.msg_id())).await);
+    wallet.app_mut().receive(None).await.unwrap();
+    assert_eq!(Box::pin(kept_under(&wallet, b"pr/")).await, bound);
+    assert!(!Box::pin(keeps(&wallet, b"pr/", first.msg_id())).await);
+    assert!(wallet.app_mut().parked_entries().await.unwrap().is_empty());
+    let marks = wallet.app().protocol_scan("paykit", b"pd/").await.unwrap();
+    assert_eq!(marks.len(), 1);
+    let mark: Value = serde_json::from_slice(&marks[0].1).unwrap();
+    assert_eq!(mark["d"]["earliest_ms"], at);
+    assert_eq!(mark["d"]["latest_ms"], at);
+    // The same signed reply is eligible again after the original proposal is held.
+    let family = paykit_lib::Collection::AllowanceProposals;
+    let target = RecordTarget::new(
+        Collection::new(family.name(), family.fixed_policy()),
+        &paykit_lib::derive::natural_key::allowance(&w.bob_id(), &id),
+    );
+    let pending = paykit_lib::records::PendingAllowanceRecord::new(&w.alice_id(), proposal)
+        .unwrap()
+        .to_json()
+        .unwrap();
+    Box::pin(write_record(&mut wallet, &target, Some(&pending))).await;
+    deliver(&wallet, &shop, &first);
+    let read = wallet.app_mut().receive(None).await.unwrap();
+    assert!(
+        read.events.iter().any(
+            |e| matches!(e, AppEvent::MessageReceived {msg_id,..} if msg_id == first.msg_id())
+        ),
+        "{:?}",
+        read.events
+    );
+    assert!(Box::pin(keeps(&wallet, b"pr/", first.msg_id())).await);
+    assert_eq!(Box::pin(kept_under(&wallet, b"pr/")).await, bound + 1);
+}
+
 #[tokio::test]
 async fn test_pending_reply_stop_counts_replies_in_proven_feed_order_at_the_sender_bound() {
     Box::pin(pending_replies_across_loss(
@@ -9145,32 +9281,11 @@ async fn pending_replies_across_loss(another_loss: bool, journey: ReplyJourney) 
         let mut first_offer = None;
         for _ in 0..(bound - 1 + usize::from(protected)) {
             w.clock.advance_ms(1);
-            let offer_id = paykit_lib::AllowanceId::generate().unwrap();
-            let offer = signed_pending_proposal(&restored, w.bob_id(), &offer_id, "allower");
-            w.bob
-                .switch()
-                .send_plaintext(
-                    w.alice_id(),
-                    restored.app().cert(),
-                    offer.plaintext(),
-                    &[shop.app_id()],
-                )
-                .unwrap();
-            let seen = shop.app_mut().receive(None).await.unwrap();
-            assert!(seen.events.iter().any(|event| matches!(event, AppEvent::MessageReceived {msg_id,..} if msg_id == &offer.message().msg_id)));
-            let mut reply = OutgoingMessage::new(
-                w.alice_id(),
-                "paykit.allowance_acceptance",
-                json!({"allowance_id":offer_id.as_str()})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            );
-            reply.refs = vec![offer.hash()];
+            let (offer_id, offer, signed) =
+                Box::pin(accept_signed_proposal(&w, &restored, &mut shop)).await;
             if first_offer.is_none() {
                 first_offer = Some((offer_id, offer));
             }
-            let signed = shop.app().sign_message(reply).unwrap();
             replacement
                 .send_plaintext(
                     w.bob_id(),

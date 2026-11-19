@@ -79,6 +79,8 @@ pub(crate) enum Fail {
     /// The effect needs these claims read from the switch first (Switch spec 10.2): the
     /// client reads them and calls the step again.
     Need(Vec<Need>),
+    /// The incoming reply is the selected drop. Commit its recovery window without a processed pair.
+    Consume,
     /// Admission waits until the app can select any required eviction and retain its recovery state.
     AwaitAdmission,
     /// The store failed, or holds data of the SDK's own that doesn't read: the entry is
@@ -2231,21 +2233,18 @@ pub(crate) fn make_room_for_reply(
     if uncertain.contains(&index) {
         return Err(Fail::AwaitAdmission);
     }
-    // The client's accepted outcome records the arriving pair. As for other
-    // bounded replies, it cannot be forgotten in the same step if it is earliest.
-    if index == arriving {
-        return Ok(());
-    }
     let dropped = &members[index];
     let from = dropped.sender;
     let at = dropped.at.0;
+    if index == arriving {
+        mark_dropped(cx, [(from, (at, at))])?;
+        return Err(Fail::Consume);
+    }
     match cx.forget_processed(from, &dropped.msg_id) {
         Ok(_) => {}
-        // The client won't forget the pair now: an entry it stores locally, or an effect it
-        // keeps to send, holds the message. Dropped without forgetting it, the reply could
-        // never be taken again, so it stays kept, and the bounds are over by one for this
-        // step.
-        Err(AppError::Refused(ClientRefusal::NotNow(_))) => return Ok(()),
+        // Its earlier effect is still owed. Keep both the pair and the reply
+        // while the incoming entry waits for admission.
+        Err(AppError::Refused(ClientRefusal::NotNow(_))) => return Err(Fail::AwaitAdmission),
         // Past the step's bound on local writes: the context marks the step, and the
         // client stores the entry as too large, applying none of it (`keep_local`).
         Err(AppError::Refused(ClientRefusal::Usage(_))) => {}
