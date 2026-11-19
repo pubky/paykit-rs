@@ -1,7 +1,8 @@
 //! Delivery evidence for requests to recover a sender's dropped replies (Paykit spec 7.2).
 //! The drop mark can expire or be evicted independently of an uncertain delivery.
 
-use std::collections::BTreeMap;
+use pubky_switch_core::enc::b64;
+use std::collections::{BTreeMap, BTreeSet};
 
 use paykit_lib::bodies::{Body, ResendRequest};
 use pubky_switch_client::app::{
@@ -12,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{PaykitError, Result};
 use crate::marks::{DropMark, QueuedRequest, MAX_DROPPED_MARKS};
+use crate::notices::{KeptNotice, NoticeKind};
 use crate::records::KeptMessage;
 use crate::state::{self, key, Binder, Tx};
 use crate::Paykit;
@@ -98,6 +100,10 @@ pub(crate) struct ReplyAsks {
 }
 
 impl ReplyAsks {
+    fn is_empty(&self) -> bool {
+        self.unidentified_from.is_none() && self.originals.is_empty() && self.retired.is_empty()
+    }
+
     pub(crate) fn check(&self, sender: &[u8; 32], binder: &Binder<'_>) -> Result<()> {
         let mut ids = std::collections::BTreeSet::new();
         if self.originals.len() > MAX_DROPPED_MARKS {
@@ -222,28 +228,108 @@ impl ReplyAsks {
     }
 }
 
+/// Pending checks and unacknowledged loss notices share one budget. Converting a
+/// pending check to its notice in one commit uses the slot it already occupies.
+fn loss_windows_fit<'a>(
+    retired: impl Iterator<Item = (String, &'a ReplyAsks)>,
+    notices: impl Iterator<Item = &'a KeptNotice>,
+    new: Option<(&[u8; 32], u64)>,
+) -> bool {
+    let pending = retired.flat_map(|(sender, asks)| {
+        asks.retired
+            .iter()
+            .map(move |w| (sender.clone(), w.from_ms))
+    });
+    let shown = notices
+        .filter(|n| n.kind == NoticeKind::DroppedMessagesLost)
+        .filter_map(|n| n.lost.map(|(from, _)| (b64(&n.counterparty), from)));
+    let new = new.map(|(sender, from)| (b64(sender), from));
+    let mut windows = BTreeSet::new();
+    pending.chain(shown).chain(new).all(|window| {
+        windows.insert(window);
+        windows.len() <= crate::marks::MAX_LOST_OWED
+    })
+}
+
+/// Independent observations at the same notice key can enlarge the lost window.
+fn joined_loss(mut notice: KeptNotice, previous: Option<&KeptNotice>) -> KeptNotice {
+    if let Some(previous) = previous {
+        notice.raised_at_ms = notice.raised_at_ms.min(previous.raised_at_ms);
+        notice.lost = notice.lost.max(previous.lost);
+    }
+    notice
+}
+
 /// Retire the recovery obligation in the intake commit. If the native outbox could have
 /// accepted an identified request, the next SDK pass checks it before telling the host.
 pub(crate) fn retire_in_receive(
     cx: &mut pubky_switch_client::app::ReceiveContext<'_>,
-    sender: &[u8; 32],
-    from_ms: u64,
-    until_ms: u64,
+    retired: &[([u8; 32], u64, u64)],
 ) -> std::result::Result<(), crate::receive::Fail> {
-    let key = key::reply_asks(sender);
-    let mut held = state::cx_get::<ReplyAsks>(cx, &key)?.unwrap_or_default();
-    let raised_ms = cx.highest_service_time().unwrap_or(0);
-    if held.originals.iter().any(|o| !o.outcome.settled()) {
-        held.retire(RetiredWindow {
-            from_ms,
-            until_ms,
-            raised_ms,
-        });
-        crate::receive::keep_local(cx, crate::receive::local(&key, &held)?);
-    } else if let Some((key, notice)) = held.lost_notice(sender, from_ms, until_ms, raised_ms) {
-        crate::receive::keep_local(cx, crate::receive::local(&key, &notice)?);
+    if retired.is_empty() {
+        return Ok(());
+    }
+    let writes = retired_writes(
+        state::cx_scan::<ReplyAsks>(cx, key::REPLY_ASKS)?
+            .into_iter()
+            .collect(),
+        state::cx_scan::<KeptNotice>(cx, key::NOTICES)?
+            .into_iter()
+            .collect(),
+        retired,
+        cx.highest_service_time().unwrap_or(0),
+    )?;
+    for write in writes {
+        crate::receive::keep_local(cx, write);
     }
     Ok(())
+}
+
+/// Plan all losses of this input before staging any of their writes. A stop can
+/// displace more than one sender when previously protected entries become countable.
+fn retired_writes(
+    mut asks: BTreeMap<String, ReplyAsks>,
+    mut notices: BTreeMap<String, KeptNotice>,
+    retired: &[([u8; 32], u64, u64)],
+    raised_ms: u64,
+) -> std::result::Result<Vec<LocalWrite>, crate::receive::Fail> {
+    let mut staged = BTreeMap::new();
+    for &(sender, from_ms, until_ms) in retired {
+        let ask_key = key::reply_asks(&sender);
+        let held = asks.entry(ask_key.clone()).or_default();
+        let Some((notice_key, notice)) = held.lost_notice(&sender, from_ms, until_ms, raised_ms)
+        else {
+            continue;
+        };
+        let previous = notices.get(&notice_key);
+        if previous.is_some_and(|n| n.lost >= notice.lost) {
+            continue;
+        }
+        if held.originals.iter().any(|o| !o.outcome.settled()) {
+            held.retire(RetiredWindow {
+                from_ms,
+                until_ms,
+                raised_ms,
+            });
+            let write = crate::receive::local(&ask_key, held)?;
+            staged.insert(ask_key, write);
+        } else {
+            let loss = joined_loss(notice, previous);
+            staged.insert(
+                notice_key.clone(),
+                crate::receive::local(&notice_key, &loss)?,
+            );
+            notices.insert(notice_key, loss);
+        }
+    }
+    let pending = asks.iter().filter_map(|(key, ask)| {
+        key.strip_prefix(key::REPLY_ASKS)
+            .map(|sender| (sender.to_owned(), ask))
+    });
+    if !loss_windows_fit(pending, notices.values(), None) {
+        return Err(crate::receive::Fail::AwaitAdmission);
+    }
+    Ok(staged.into_values().collect())
 }
 
 /// Combine the selected history with evidence from this installation before replacing it.
@@ -316,7 +402,43 @@ pub(crate) fn restore(
             })
             .or_insert(Some(id));
     }
+    let retained = restoring
+        .previous_local_scan(key::NOTICES.as_bytes())
+        .map_err(|_| "the installation's loss notices cannot be read")?;
+    let mut losses = BTreeMap::new();
+    for (k, v) in retained.iter().chain(state) {
+        if matches!(
+            state::StateKey::parse(k),
+            Some(state::StateKey::DroppedLost { .. })
+        ) {
+            let notice = state::restored::<KeptNotice>(k, v, binder)
+                .map_err(|_| "invalid dropped-message loss notice")?;
+            let key = std::str::from_utf8(k).map_err(|_| "invalid loss notice key")?;
+            let joined = joined_loss(notice, losses.get(key));
+            losses.insert(key, joined);
+        }
+    }
+    // An existing notice settles just the part already visible to the host. Its
+    // acknowledgment must not recreate it from an older pending check.
+    for (sender, asks) in &mut requests {
+        asks.retired.retain(|w| {
+            let key = key::dropped_lost(sender, "pd", w.from_ms);
+            !losses
+                .get(key.as_str())
+                .is_some_and(|n| n.lost >= Some((w.from_ms, w.until_ms)))
+        });
+    }
+    if !loss_windows_fit(
+        requests.iter().map(|(sender, a)| (b64(sender), a)),
+        losses.values(),
+        None,
+    ) {
+        return Err("too many retired message windows and loss notices".into());
+    }
     let mut writes = Vec::new();
+    for (key, notice) in losses {
+        writes.push(state::local_put(key, &notice).map_err(|_| "invalid loss notice")?);
+    }
     for (hash, outcome) in floor_requests {
         if let Some(id) = markers
             .remove(&hash)
@@ -332,6 +454,9 @@ pub(crate) fn restore(
     for (sender, held) in requests {
         held.check(&sender, binder)
             .map_err(|_| "invalid merged recovery request evidence")?;
+        if held.is_empty() {
+            continue;
+        }
         writes.push(
             state::local_put(&key::reply_asks(&sender), &held)
                 .map_err(|_| "recovery request evidence cannot be written")?,
@@ -452,6 +577,39 @@ impl Paykit {
         Ok(1)
     }
 
+    /// A live mark remains owed when its expiry would create a loss beyond the bound.
+    pub(crate) async fn record_expired_reply_loss(
+        &self,
+        tx: &mut Tx,
+        sender: &[u8; 32],
+        from: u64,
+        until: u64,
+    ) -> Result<bool> {
+        let evidence = self
+            .local_get::<ReplyAsks>(&key::reply_asks(sender))
+            .await?
+            .unwrap_or_default();
+        let Some((key, loss)) =
+            evidence.lost_notice(sender, from, until, self.service_time().unwrap_or(0))
+        else {
+            return Ok(true);
+        };
+        let previous = self.kept_notice(&key).await?;
+        if previous.is_none() {
+            let asks = self.local_scan::<ReplyAsks>(key::REPLY_ASKS).await?;
+            let notices = self.local_scan::<KeptNotice>(key::NOTICES).await?;
+            if !loss_windows_fit(
+                asks.iter().map(|(sender, a)| (sender.clone(), a)),
+                notices.iter().map(|(_, n)| n),
+                Some((sender, from)),
+            ) {
+                return Ok(false);
+            }
+        }
+        tx.put(&key, &joined_loss(loss, previous.as_ref()))?;
+        Ok(true)
+    }
+
     /// Bring the mark and its delivery evidence up to date together. An absent sent row
     /// or a final failure of a later try proves nothing about a previous try.
     pub(crate) async fn reconcile_reply_asks(&mut self) -> Result<()> {
@@ -534,7 +692,8 @@ impl Paykit {
                 if let Some((key, notice)) =
                     held.lost_notice(&sender, window.from_ms, window.until_ms, window.raised_ms)
                 {
-                    tx.put(&key, &notice)?;
+                    let previous = self.kept_notice(&key).await?;
+                    tx.put(&key, &joined_loss(notice, previous.as_ref()))?;
                 }
                 changed = true;
             }
@@ -548,7 +707,7 @@ impl Paykit {
                 changed |= held.originals.len() != before;
             }
             if changed {
-                if held.originals.is_empty() && held.unidentified_from.is_none() {
+                if held.is_empty() {
                     tx.delete(&k);
                 } else {
                     tx.put(&k, &held)?;
@@ -590,7 +749,33 @@ impl Paykit {
 
 #[cfg(test)]
 mod tests {
-    use super::Outcome;
+    use super::{retired_writes, KeptNotice, Outcome};
+    use crate::receive::Fail;
+    use crate::state::key;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn test_retiring_two_senders_admits_the_whole_effect_or_neither_loss() {
+        let peer = [9; 32];
+        let mut shown: BTreeMap<_, _> = (1..crate::marks::MAX_LOST_OWED as u64)
+            .map(|from| {
+                (
+                    key::dropped_lost(&peer, "pd", from),
+                    KeptNotice::dropped_lost(peer, from, from, from),
+                )
+            })
+            .collect();
+        let retired = [([1; 32], 50, 54), ([2; 32], 50, 50)];
+        assert!(matches!(
+            retired_writes(BTreeMap::new(), shown.clone(), &retired, 60),
+            Err(Fail::AwaitAdmission)
+        ));
+        shown.remove(&key::dropped_lost(&peer, "pd", 1));
+        let Ok(writes) = retired_writes(BTreeMap::new(), shown, &retired, 60) else {
+            panic!("both newly retired senders fit");
+        };
+        assert_eq!(writes.len(), 2);
+    }
 
     #[test]
     fn test_restore_composes_observations_of_the_same_signed_original() {

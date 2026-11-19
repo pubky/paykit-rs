@@ -2542,3 +2542,259 @@ async fn test_replies_dropped_restore_in_place_uses_the_identified_first_deliver
         assert_eq!(open(asked(&shop, &payer).await), vec![(Some(from), None)]);
     }
 }
+
+fn loss_notice(sender: &[u8; 32], from: u64, until: u64) -> (Vec<u8>, serde_json::Value) {
+    let sender = pubky_switch_core::enc::b64(sender);
+    (
+        format!("nt/{sender}/dropped-pd-{from:020}").into_bytes(),
+        json!({"v":1,"d":{
+            "kind":"dropped_messages_lost","counterparty":sender,"lost":[from,until],
+            "raised_at_ms":until,"acknowledged":false
+        }}),
+    )
+}
+
+fn retired_windows(
+    sender: &[u8; 32],
+    times: std::ops::RangeInclusive<u64>,
+) -> (Vec<u8>, serde_json::Value) {
+    let retired: Vec<_> = times
+        .map(|from| json!({"from_ms":from,"until_ms":from+1,"raised_ms":from+2}))
+        .collect();
+    (
+        format!("ra/{}", pubky_switch_core::enc::b64(sender)).into_bytes(),
+        json!({"v":1,"d":{"unidentified_from":null,"originals":[],"retired":retired}}),
+    )
+}
+
+async fn keep_loss_fixture(app: &mut Paykit, keys: Vec<(Vec<u8>, serde_json::Value)>) {
+    let writes = keys
+        .into_iter()
+        .map(|(key, value)| pubky_switch_client::app::LocalWrite::Put {
+            key,
+            value: serde_json::to_vec(&value).unwrap(),
+        })
+        .collect::<Vec<_>>();
+    app.app_mut()
+        .protocol_commit("paykit", &writes)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_reply_loss_capacity_keeps_the_rotated_input_until_acknowledgement() {
+    use pubky_switch_client::app::{AppEvent, ParkReason};
+    let w = World::new();
+    let _wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    unmatched_replies(&w, &shop, paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER);
+    shop.receive(None).await.unwrap();
+    let prior = shop.app().protocol_scan("paykit", b"pr/").await.unwrap();
+    assert_eq!(prior.len(), paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER);
+    let first = w.clock.now_ms() - 1000;
+    let marks = seed_marks(&mut shop, "pd/", paykit_sdk::MAX_DROPPED_MARKS, first).await;
+    let peer = w.carol_id();
+    let mut losses = (1..=63)
+        .map(|n| loss_notice(&peer, n, n))
+        .collect::<Vec<_>>();
+    losses.push(retired_windows(&peer, 64..=64));
+    keep_loss_fixture(&mut shop, losses).await;
+
+    let id = w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_request_acceptance",
+        vec![[255; 32]],
+        serde_json::Map::new(),
+    );
+    let read = shop.app_mut().receive(None).await.unwrap();
+    assert!(read.events.iter().any(|e| matches!(
+        e,
+        AppEvent::Parked {
+            reason: ParkReason::AwaitingAdmission,
+            ..
+        }
+    )));
+    assert_eq!(
+        shop.app().protocol_scan("paykit", b"pr/").await.unwrap(),
+        prior
+    );
+    assert!(mark_senders(&shop, "pd/").await.contains(&marks[0]));
+    assert!(!shop.receive(None).await.unwrap().applied.contains(&id));
+    let shown = shop.notices().await.unwrap();
+    assert_eq!(shown.len(), 64);
+    let ready = shown.iter().find(|n| n.lost_from_ms == Some(64)).unwrap();
+    assert_eq!(ready.lost_until_ms, Some(65));
+    shop.acknowledge_notice(&ready.id).await.unwrap();
+    assert!(shop.receive(None).await.unwrap().applied.contains(&id));
+    let held = shop.app().protocol_scan("paykit", b"pr/").await.unwrap();
+    assert_eq!(held.len(), prior.len());
+    assert_ne!(held, prior);
+    let senders = mark_senders(&shop, "pd/").await;
+    assert!(senders.contains(&w.alice_id()) && !senders.contains(&marks[0]));
+    let shown = shop.notices().await.unwrap();
+    assert_eq!(shown.len(), 64);
+    assert!(shown
+        .iter()
+        .any(|n| n.counterparty == marks[0] && n.lost_from_ms == Some(first)));
+}
+
+#[tokio::test]
+async fn test_reply_loss_restore_counts_overlapping_windows_and_preserves_the_longest_notice() {
+    use crate::restore::{layer_of, with_layer};
+    use paykit_sdk::PaykitBackup;
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let original = shop.backup().await.unwrap();
+    let backup: serde_json::Value = serde_json::from_slice(&original.to_bytes().unwrap()).unwrap();
+    let peer = w.alice_id();
+    let mut selected = layer_of(&backup);
+    selected.push(retired_windows(&peer, 1..=33));
+    selected.extend((33..=64).map(|n| loss_notice(&peer, n, n + 5)));
+    let encoded = |rows| {
+        PaykitBackup::from_bytes(&serde_json::to_vec(&with_layer(&backup, rows)).unwrap()).unwrap()
+    };
+    let good = encoded(selected.clone());
+    selected.push(loss_notice(&peer, 65, 65));
+    let too_many = encoded(selected);
+    let mut extra = layer_of(&backup);
+    extra.push(loss_notice(&peer, 65, 65));
+    let new_only = encoded(extra);
+    let restore = |storage, backup| {
+        Paykit::restore(
+            w.env(&w.bob, storage),
+            Default::default(),
+            backup,
+            w.rail.clone(),
+            w.timer(),
+        )
+    };
+    assert!(restore(store(), &too_many).await.is_err());
+    let storage = store();
+    let restored = restore(storage.clone(), &good).await.unwrap();
+    assert_eq!(restored.notices().await.unwrap().len(), 32);
+    let unchanged = restored.app().protocol_scan("paykit", b"").await.unwrap();
+    drop(restored);
+    assert!(restore(storage.clone(), &new_only).await.is_err());
+    let mut restored = w
+        .load_on_clock(&w.bob, storage, shop.app_id(), w.clock.clone())
+        .await;
+    assert_eq!(
+        restored.app().protocol_scan("paykit", b"").await.unwrap(),
+        unchanged
+    );
+    restored.receive(None).await.unwrap();
+    let shown = restored.notices().await.unwrap();
+    assert_eq!(shown.len(), 64);
+    let overlap = shown.iter().find(|n| n.lost_from_ms == Some(33)).unwrap();
+    assert_eq!(overlap.lost_until_ms, Some(38));
+    restored.acknowledge_notice(&overlap.id).await.unwrap();
+    restored.receive(None).await.unwrap();
+    assert_eq!(restored.notices().await.unwrap().len(), 63);
+}
+
+#[tokio::test]
+async fn test_reply_loss_acknowledgement_before_the_first_restored_receive_keeps_only_a_wider_check(
+) {
+    use crate::restore::{layer_of, with_layer};
+    use paykit_sdk::PaykitBackup;
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let backup: serde_json::Value =
+        serde_json::from_slice(&shop.backup().await.unwrap().to_bytes().unwrap()).unwrap();
+    let peer = w.alice_id();
+    let mut selected = layer_of(&backup);
+    let other = w.carol_id();
+    selected.push(retired_windows(&peer, 1..=1));
+    selected.push(retired_windows(&other, 2..=2));
+    let chosen =
+        PaykitBackup::from_bytes(&serde_json::to_vec(&with_layer(&backup, selected)).unwrap())
+            .unwrap();
+    let storage = store();
+    let mut restored = Paykit::restore(
+        w.env(&w.bob, storage.clone()),
+        Default::default(),
+        &chosen,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    keep_loss_fixture(
+        &mut restored,
+        vec![loss_notice(&peer, 1, 2), loss_notice(&other, 2, 2)],
+    )
+    .await;
+    drop(restored);
+    let mut restored = Paykit::restore(
+        w.env(&w.bob, storage),
+        Default::default(),
+        &chosen,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert!(restored
+        .app()
+        .protocol_get(
+            "paykit",
+            format!("ra/{}", pubky_switch_core::enc::b64(&peer)).as_bytes()
+        )
+        .await
+        .unwrap()
+        .is_none());
+    let visible = restored.notices().await.unwrap();
+    assert_eq!(visible.len(), 2);
+    for notice in visible {
+        restored.acknowledge_notice(&notice.id).await.unwrap();
+    }
+    restored.receive(None).await.unwrap();
+    let shown = restored.notices().await.unwrap();
+    assert_eq!(shown.len(), 1);
+    assert_eq!(
+        (shown[0].lost_from_ms, shown[0].lost_until_ms),
+        (Some(2), Some(3))
+    );
+}
+
+#[tokio::test]
+async fn test_reply_loss_expiry_keeps_an_unreported_mark_and_widens_an_existing_notice() {
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let from = w.clock.now_ms();
+    let senders = seed_marks(&mut shop, "pd/", 2, from).await;
+    let first = format!("pd/{}", pubky_switch_core::enc::b64(&senders[0]));
+    let bytes = shop
+        .app()
+        .protocol_get("paykit", first.as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut mark: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    mark["d"]["latest_ms"] = json!(from + 4);
+    let mut rows = (1..64)
+        .map(|n| loss_notice(&w.alice_id(), n, n))
+        .collect::<Vec<_>>();
+    rows.push((first.into_bytes(), mark));
+    rows.push(loss_notice(&senders[0], from, from));
+    keep_loss_fixture(&mut shop, rows).await;
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS + DAY_MS);
+    shop.receive(None).await.unwrap();
+    assert_eq!(mark_senders(&shop, "pd/").await, [senders[1]]);
+    let shown = shop.notices().await.unwrap();
+    assert_eq!(shown.len(), 64);
+    let widened = shown.iter().find(|n| n.counterparty == senders[0]).unwrap();
+    assert_eq!(widened.lost_until_ms, Some(from + 4));
+    shop.acknowledge_notice(&widened.id).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert!(mark_senders(&shop, "pd/").await.is_empty());
+    let shown = shop.notices().await.unwrap();
+    assert_eq!(shown.len(), 64);
+    assert!(shown
+        .iter()
+        .any(|n| n.counterparty == senders[1] && n.lost_from_ms == Some(from + 1)));
+}

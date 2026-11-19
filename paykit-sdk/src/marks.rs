@@ -945,17 +945,16 @@ impl Paykit {
             }
             if family == MarkFamily::Replies {
                 let gone = mark.drop_mark();
-                let evidence = self
-                    .local_get::<crate::reply_asks::ReplyAsks>(&key::reply_asks(&gone.sender))
+                if !self
+                    .record_expired_reply_loss(
+                        &mut tx,
+                        &gone.sender,
+                        gone.earliest_ms,
+                        gone.latest_ms,
+                    )
                     .await?
-                    .unwrap_or_default();
-                if let Some((key, lost)) = evidence.lost_notice(
-                    &gone.sender,
-                    gone.earliest_ms,
-                    gone.latest_ms,
-                    self.service_time().unwrap_or(0),
-                ) {
-                    tx.put(&key, &lost)?;
+                {
+                    return Ok(0);
                 }
             }
             self.local_commit(tx).await?;

@@ -467,8 +467,9 @@ pub const BACKUP_NAME: &str = "paykit";
 /// The families whose size the runtime bounds at every write are counted, and a layer
 /// past a bound is refused: the notices of lost messages owed (`bl/`, at most
 /// [`crate::marks::MAX_LOST_OWED`]) and each family of marks (`pd/`, `ud/`, `kw/`, `bd/`, at
-/// most [`crate::marks::MAX_DROPPED_MARKS`] each). No run leaves more, and the runtime
-/// checks the bound only as it adds one, so a restored layer over it would stay over it.
+/// most [`crate::marks::MAX_DROPPED_MARKS`] each). Retired reply windows and their
+/// unacknowledged loss notices together occupy at most [`crate::marks::MAX_LOST_OWED`]
+/// distinct sender and start-time pairs across both histories.
 pub(crate) fn restore_paykit_layer(
     layer: Option<&ProtocolLayer>,
     restoring: &RestoreContext<'_>,
@@ -545,7 +546,9 @@ pub(crate) fn restore_paykit_layer(
         let unread = || String::from("Paykit's local state in the backup doesn't read");
         bounded.count(&family)?;
         let attempt = match family {
-            StateKey::ReplyAsks { .. } | StateKey::ReplyFloorBatch { .. } => continue, // Merged above.
+            StateKey::ReplyAsks { .. }
+            | StateKey::ReplyFloorBatch { .. }
+            | StateKey::DroppedLost { .. } => continue, // Merged and bounded together above.
             StateKey::RestoreHold => continue, // Validated above before reading its confirmations.
             StateKey::MissedHold => {
                 state::restored::<crate::hold::MissedHold>(&key, &value, &binder)
@@ -855,8 +858,7 @@ pub(crate) fn restore_paykit_layer(
             }
             StateKey::MessageNotice { .. }
             | StateKey::Notice { .. }
-            | StateKey::BlockedLost { .. }
-            | StateKey::DroppedLost { .. } => {
+            | StateKey::BlockedLost { .. } => {
                 let notice =
                     state::restored::<KeptNotice>(&key, &value, &binder).map_err(|_| unread())?;
                 // An acknowledged notice of an attempt is kept only while the journal holds
@@ -1217,6 +1219,7 @@ impl Protocol for PaykitProtocol {
             // entry itself, whatever is returned (Switch spec 3.5).
             Ok(()) | Err(Fail::NotNow) => Outcome::Apply(Effect::default()),
             Err(Fail::Need(needs)) => Outcome::Need(needs),
+            Err(Fail::AwaitAdmission) => Outcome::AwaitAdmission,
             Err(Fail::Drop(reason)) => Outcome::Drop { reason },
             Err(Fail::Store(failure)) => Outcome::Retry(failure),
             // A record value waits for its scope key: the client stores the entry and passes
