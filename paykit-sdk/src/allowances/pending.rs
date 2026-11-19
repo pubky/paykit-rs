@@ -1,4 +1,4 @@
-//! Admission, views, replies and discard of current pending Allowance proposals.
+//! Admission, views and replies to current pending Allowance proposals.
 
 use super::{
     allowance_record_target, allowance_target, AllowanceStatus, AllowanceView, Paykit,
@@ -57,6 +57,39 @@ fn prepared_write(
         kind: kind.clone(),
     };
     Ok(hash(&body.to_json().map_err(|_| PaykitError::corrupt())?))
+}
+
+/// An unplaced signed proposal still belongs to the current pending lifetime
+/// unless a verified deletion retired it. Its receipt remains owed until the
+/// account record itself reflects it (Paykit spec 8.3.1).
+pub(super) fn awaits_competing_proposal(
+    own: &[u8; 32],
+    pending: &PendingAllowanceRecord,
+    end: Option<&super::PendingRetirement>,
+    kept: Vec<(String, KeptMessage)>,
+    notes: Vec<(String, StoredNote)>,
+) -> Result<bool> {
+    let messages = kept.into_iter().map(|(_, message)| message).chain(
+        notes
+            .into_iter()
+            .filter(|(_, note)| !note.placed)
+            .map(|(_, note)| note.message),
+    );
+    for held in messages {
+        let message = held.stored(own)?;
+        if message.sender() == *pending.counterparty()
+            && matches!(message.body(), paykit_lib::Body::AllowanceProposal(p) if &p.allowance_id == pending.allowance_id())
+            && (held.pending_source.is_some() || message.hash() != pending.proposal().hash())
+            && !end.is_some_and(|end| {
+                end.compare(held.pending_source, held.position(), |a, b| {
+                    (a.generation == b.generation).then(|| a.seq.cmp(&b.seq))
+                }) == Some(std::cmp::Ordering::Less)
+            })
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 struct ConfirmedWrite {
@@ -125,7 +158,7 @@ impl Paykit {
         }
     }
 
-    fn selected_pending(
+    pub(super) fn selected_pending(
         &self,
         held: &SharedRecord,
     ) -> Result<(PendingAllowanceRecord, RecordTarget)> {
@@ -142,6 +175,23 @@ impl Paykit {
             return Err(not_current());
         }
         Ok((pending, target))
+    }
+
+    pub(super) async fn competing_proposal_owed(
+        &self,
+        pending: &PendingAllowanceRecord,
+        pending_key: &[u8; 32],
+        permanent_key: &[u8; 32],
+    ) -> Result<bool> {
+        let peer = pending.counterparty();
+        let end = self
+            .local_get::<super::PendingRetirement>(&key::pending_retirement(pending_key))
+            .await?;
+        let kept = self
+            .local_scan(&key::kept_reply(peer, permanent_key, ""))
+            .await?;
+        let notes = self.local_scan(&key::stored_notes_of(peer)).await?;
+        awaits_competing_proposal(&self.identity(), pending, end.as_ref(), kept, notes)
     }
 
     /// Locate the pending key from the same canonical Allowance key every wallet method accepts.
@@ -215,7 +265,7 @@ impl Paykit {
             }
         }
         let mut out = Vec::new();
-        for (pending, conflicted) in by_key.into_values() {
+        for (pending_key, (pending, conflicted)) in by_key {
             let permanent = self.app.record_key(&allowance_target(
                 pending.counterparty(),
                 pending.allowance_id(),
@@ -225,7 +275,12 @@ impl Paykit {
             {
                 continue;
             }
-            let status = if conflicted || self.conflict_kept(&permanent).await? {
+            let status = if conflicted
+                || self.conflict_kept(&permanent).await?
+                || self
+                    .competing_proposal_owed(&pending, &pending_key, &permanent)
+                    .await?
+            {
                 AllowanceStatus::Conflicted
             } else if self.allowance_stopped(&permanent).await? {
                 AllowanceStatus::Ended
@@ -432,6 +487,9 @@ impl Paykit {
         self.refresh_own()?;
         self.require_allowance_send(kind)?;
         if pending.conflicted().is_some()
+            || self
+                .competing_proposal_owed(&pending, &selected.key, &permanent_key)
+                .await?
             || self.conflict_kept(&permanent_key).await?
             || self
                 .local_get::<super::PendingConflict>(&key::pending_conflict(&selected.key))
@@ -578,18 +636,20 @@ impl Paykit {
         if held.position() != Some(position) || held.stored(&own)?.hash() != message.hash() {
             return Ok(Some(Placed::Waits));
         }
-        if p.is_some() {
-            return self.place_received_second(message, &held, stored_id).await;
-        }
         if let Some(end) = self
             .local_get::<super::PendingRetirement>(&key::pending_retirement(&p_key))
             .await?
         {
-            match end.compare(None, Some(position), |a, b| self.app.received_order(a, b)) {
+            match end.compare(held.pending_source, Some(position), |a, b| {
+                self.app.received_order(a, b)
+            }) {
                 Some(std::cmp::Ordering::Greater) => (),
                 Some(std::cmp::Ordering::Less) => return Ok(Some(Placed::Done)),
                 _ => return Ok(Some(Placed::Waits)),
             }
+        }
+        if p.is_some() {
+            return self.place_received_second(message, &held, stored_id).await;
         }
         let retained_delete = match &p_read {
             RecordRead::Fresh(record)
@@ -609,6 +669,11 @@ impl Paykit {
                 Some(std::cmp::Ordering::Less) => return Ok(Some(Placed::Done)),
                 _ => return Ok(Some(Placed::Waits)),
             }
+        }
+        // A proposal first received over a live original is owed for that
+        // lifetime. Its absence from a new installation cannot admit it again.
+        if held.pending_source.is_some() {
+            return Ok(Some(Placed::Waits));
         }
         let Some(count) = self.pending_count(report, &peer, false).await? else {
             return Ok(Some(Placed::Waits));
@@ -725,6 +790,12 @@ impl Paykit {
             || proposal.conflicted().is_some()
         {
             return Ok(Some(Placed::Done));
+        }
+        if self
+            .competing_proposal_owed(&proposal, &key, &permanent_key)
+            .await?
+        {
+            return Ok(Some(Placed::Waits));
         }
         let current = self.app.record_condition(&key).await?;
         if let Some(end) = self

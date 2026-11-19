@@ -1239,19 +1239,102 @@ async fn test_public_read_large_records_kept_per_app_within_the_store_bound() {
         assert_eq!(offering(&read), [apps[0].1, apps[1].1]);
         assert!(read.failures.is_empty(), "{:?}", read.failures);
     }
-    // A record the reader can't keep at all is the shop's failure; the till is still read.
+    // The shop's newer nine MiB of payloads exceed both the history and read limits.
     w.clock.advance_ms(1000);
     publish_now(&w, apps[0].0, many(3, 3 * MIB));
     let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
     assert_eq!(offering(&read), [apps[1].1]);
     assert_eq!(read.failures.len(), 1, "{:?}", read.failures);
     assert_eq!(read.failures[0].app_id, apps[0].1);
-    assert!(
-        matches!(&read.failures[0].reason, PublicAppFailureReason::Refused(rule)
-            if rule.contains("a reader keeps")),
-        "{:?}",
-        read.failures
+    assert_eq!(read.failures[0].reason, PublicAppFailureReason::OverBound);
+    let paid = wallet.pay_without_request(public_to_bob(&w)).await;
+    assert_eq!(paid.public_failures, read.failures);
+    assert!(matches!(paid.outcome.unwrap(), PayOutcome::Paid { .. }));
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
+        "btc-lightning-bolt11"
     );
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_public_read_unretained_record_reports_its_remaining_endpoint_bound() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let apps = bob_apps(&w, &["shop", "till", "kiosk"]).await;
+    publish_now(&w, apps[0].0, many(MAX_PUBLIC_ENDPOINTS - 1, 8));
+    publish_now(
+        &w,
+        apps[2].0,
+        one_endpoint("btc-lightning-bolt12", "lno1kiosk"),
+    );
+
+    // The unknown signed member takes history space but contributes no endpoint payload.
+    // One endpoint would fit in the read. Two would exceed the slot the shop leaves.
+    for count in [1, 2] {
+        w.clock.advance_ms(1000);
+        let mut member = many(count, 8);
+        member["description"] = Value::String("a".repeat(9 * MIB));
+        publish_now(&w, apps[1].0, member);
+
+        let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+        assert_eq!(offering(&read), [apps[0].1, apps[2].1]);
+        assert_eq!(read.endpoints.len(), MAX_PUBLIC_ENDPOINTS);
+        assert_eq!(read.failures.len(), 1, "{:?}", read.failures);
+        assert_eq!(read.failures[0].app_id, apps[1].1);
+        let reason = &read.failures[0].reason;
+        if count == 1 {
+            assert!(
+                matches!(reason, PublicAppFailureReason::Refused(rule)
+                if rule.contains("a reader keeps")),
+                "{reason:?}"
+            );
+        } else {
+            assert_eq!(reason, &PublicAppFailureReason::OverBound);
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_public_read_unretained_conflicting_or_expired_record_is_refused() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let apps = bob_apps(&w, &["shop", "till"]).await;
+    let original_time = w.clock.now_ms();
+    publish_app_at(
+        &w,
+        apps[0].0,
+        one_endpoint("btc-lightning-bolt11", "lnbc1shop"),
+        original_time,
+        Some(original_time + DAY_MS),
+    );
+    publish_now(
+        &w,
+        apps[1].0,
+        one_endpoint("btc-lightning-bolt12", "lno1till"),
+    );
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(offering(&read), [apps[0].1, apps[1].1]);
+
+    w.clock.advance_ms(1000);
+    // The first body conflicts with the shop's retained record. The second is newer but
+    // has expired. Neither can supply usable public endpoints, whatever their size.
+    for (updated, expires) in [
+        (original_time, original_time + DAY_MS),
+        (original_time + 1, original_time + 2),
+    ] {
+        publish_app_at(&w, apps[0].0, many(3, 3 * MIB), updated, Some(expires));
+        let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+        assert_eq!(offering(&read), [apps[1].1]);
+        assert_eq!(read.failures.len(), 1, "{:?}", read.failures);
+        assert_eq!(read.failures[0].app_id, apps[0].1);
+        assert!(
+            matches!(&read.failures[0].reason, PublicAppFailureReason::Refused(rule)
+            if rule.contains("a reader keeps")),
+            "updated {updated}, expires {expires}, time {original_time}: {:?}",
+            read.failures
+        );
+    }
 }
 
 /// A store that moves the world's clock on at the first read, once armed, of the records a

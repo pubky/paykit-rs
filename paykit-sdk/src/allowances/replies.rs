@@ -465,7 +465,7 @@ pub(super) fn qualified_at(
         && !held.different_write_at_held_version
 }
 
-fn qualified(
+pub(super) fn qualified(
     held: &SharedRecord,
     target: &pubky_switch_client::app::RecordTarget,
     key: &[u8; 32],
@@ -851,6 +851,20 @@ impl Paykit {
                 Some(_) => {}
             }
         }
+        if let Some(source) = evidence.pending_source {
+            let Some(pending) = qualified(&held, &target, &key, &self.identity()) else {
+                return Ok(Some(Placed::Waits));
+            };
+            // A single original that happens to equal the competitor cannot prove
+            // the shared conflict. Only the original lifetime can take this duty.
+            if pending.proposal().hash() == message.hash()
+                || (held.version != source.record_version()
+                    && self.pending_predecessor(&target, &held).await?
+                        != Some(source.record_version()))
+            {
+                return Ok(Some(Placed::Waits));
+            }
+        }
         let at = key::pending_conflict(&key);
         let previous = self.local_get::<PendingConflict>(&at).await?;
         let step = second_proposal(
@@ -1114,6 +1128,13 @@ impl Paykit {
                     record: None
                 }
             )
+        {
+            return Ok(PendingReply::Undecided);
+        }
+        let pending = self.selected_pending(&current)?.0;
+        if self
+            .competing_proposal_owed(&pending, &selected.key, &self.app.record_key(&permanent)?)
+            .await?
         {
             return Ok(PendingReply::Undecided);
         }

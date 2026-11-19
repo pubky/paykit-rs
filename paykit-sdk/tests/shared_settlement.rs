@@ -1,5 +1,8 @@
-//! Manual Billing Period payments and receipts across independently enrolled wallets.
+//! Billing Period payments and receipts across independently enrolled wallets.
 #![recursion_limit = "256"]
+
+#[path = "shared_settlement/period_policy.rs"]
+mod period_policy;
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -41,6 +44,11 @@ impl Timer for TestTimer {
 async fn setup_identity(world: &World, name: &str, origin: &str) -> TestResult<Signer> {
     let identity = world.identity(name)?;
     world.add_switch(origin, &[&identity]).await?;
+    signer_on(world, name, origin).await
+}
+
+async fn signer_on(world: &World, name: &str, origin: &str) -> TestResult<Signer> {
+    let identity = world.identity(name)?;
     let mut env = world.signer_env(&identity, Arc::new(MemoryStore::new()))?;
     env.protocols = Protocols::new(vec![Arc::new(paykit_lib::signer::PaykitProtocol)])?;
     let mut signer = Signer::create(env, world.keyring(&identity)?, origin).await?;
