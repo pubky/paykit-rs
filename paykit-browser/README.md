@@ -39,9 +39,8 @@ target feature) is refused at compile time.
 - The `wasm32-unknown-unknown` dependency graph of `paykit-lib` and `paykit-sdk` builds.
 - The tests listed under [Tests](#tests) run in a page and in a dedicated worker, in Chromium,
   Firefox and WebKit.
-- The host pieces above are tested on their own. The Payment Request flow below gives its apps
-  `JsTimer` as their `Timer`, which it never sleeps on (the SDK waits on its timer only when it
-  pays), and starts its test clock at `JsClock`'s reading.
+- The host pieces above are tested on their own. The flows below give their apps `JsTimer` as
+  their `Timer`, and start their test clock at `JsClock`'s reading.
 - A Payment Request flow of the SDK runs in one WebAssembly instance, with no network: a payer
   and a payee each join a Paykit App through their signer, on the Switch client's in-memory
   scripted switches. The payer invites the payee, the payee sends a one-time Payment Request,
@@ -49,49 +48,61 @@ target feature) is refused at compile time.
   expiry that were sent, its activity record holding the payee's signed request with its
   Payment Endpoint. The flow also shows a request expire, a rejection refused a second
   time, and a request that waits until the payer admits the payee.
+- The pay and receipt flow runs the same way, with no network: the payer pays the open
+  one-time Payment Request through the SDK's `FakeRail`, the payee receives the Payment Proof
+  and confirms it with a Payment Receipt, and the payer stores the receipt with the request it
+  pays. It also shows a payment the rail refuses or fails, paid again afterwards, a request
+  refused once its expiry has passed, a payment that settles late resumed once, and a payment
+  left in flight asked again under the same idempotency key after its app is loaded again.
 
 Not run in a browser yet:
 
-- paying a Payment Request, and so Payment Proofs and Receipts (see the hazards below);
-- a real network: the flow's apps reach the scripted switches in memory, and this crate holds
+- a real network: the flows' apps reach the scripted switches in memory, and this crate holds
   no Switch transport;
+- payments other than a one-time Payment Request paid with `Paykit::pay_request`:
+  `Paykit::pay_request_automatically`, `Paykit::pay_without_request`, `Paykit::pay_period` and
+  `Paykit::pay_period_automatically` dispatch through the same code, but no test here runs
+  them, and `pay_without_request` to a public Payment Endpoint while the payer's switch is
+  unavailable meets the hazard below;
 - service workers and shared workers: only a page and a dedicated worker are tested.
 
-Two known run-time hazards remain on `wasm32-unknown-unknown`, where the standard library has
-no clock and `std::time::Instant::now()` panics:
+On `wasm32-unknown-unknown` the standard library has no clock: `std::time::Instant::now()` and
+`std::time::SystemTime::now()` panic. `paykit-sdk` takes the pay path's monotonic time from the
+`web-time` crate, which reads `performance.now()` there and is `std::time::Instant` on every
+other target, and the `wasm-check` job rejects the std clocks in the code of `paykit-lib`,
+`paykit-sdk` and this crate that the browser build compiles (see
+[Continuous integration](#continuous-integration)). One known run-time hazard remains, outside
+the workspace:
 
-- `paykit-sdk` calls `Instant::now()` in `execute` (`src/pay.rs`) before it submits a payment
-  attempt. `Paykit::pay_request`, `Paykit::pay_request_automatically`,
-  `Paykit::pay_without_request` (while the payer's switch is available), `Paykit::pay_period`
-  and `Paykit::pay_period_automatically` dispatch their payments through it. It also calls
-  `Instant::now()` in `resolve_dispatched` (`src/pay.rs`), before it reads the claim of a
-  payment that was left in progress.
 - The Switch client calls `Instant::now()` in `FirstSend::new`. It builds a `FirstSend` only
   when it submits a batch that sets a first-send deadline (`first_send_before`). In
   `paykit-sdk`, only `record_offline_attempt` (`src/pay/offline.rs`) sets one: it records a
   payment that `Paykit::pay_without_request` made to a public endpoint while the payer's switch
-  was unavailable. Other writes do not reach it.
+  was unavailable. Other writes do not reach it, and the flows here do not run it.
 
 ## Stack
 
 A `wasm32-unknown-unknown` build gets a 1 MiB stack by default, and a stack overflow there
-traps with an out-of-bounds memory access. The `tests/request_flow/` target passes on that
-default. Measured with `-zstack-size`, in steps of 64 KiB for the debug build and 32 KiB for the
-release build, in Chromium, Firefox and WebKit, in a page and in a dedicated worker, with the
-same result in each:
+traps with an out-of-bounds memory access. Measured with `-zstack-size`, in steps of 64 KiB for
+the debug build and 32 KiB for the release build, in Chromium, Firefox and WebKit, in a page and
+in a dedicated worker, with the same result in each:
 
-| Build | Smallest stack that passes | Largest stack that fails |
-| --- | --- | --- |
-| debug (`cargo test`) | 832 KiB | 768 KiB |
-| `--release` | 160 KiB | 128 KiB |
+| Target | Build | Smallest stack that passes | Largest stack that fails |
+| --- | --- | --- | --- |
+| `tests/request_flow/` | debug (`cargo test`) | 832 KiB | 768 KiB |
+| `tests/request_flow/` | `--release` | 160 KiB | 128 KiB |
+| `tests/pay_flow/` | debug (`cargo test`) | 1216 KiB | 1152 KiB |
+| `tests/pay_flow/` | `--release` | 192 KiB | 160 KiB |
 
-So the debug test build uses most of the default stack. This crate sets no stack size of its
-own. A web app that links Paykit into its own WebAssembly module sets that module's stack size
-when it links it, and should measure its own call paths.
+The debug build of the pay flow does not fit the default, so `build.rs` gives this crate's
+wasm32 test binaries a 2 MiB stack, about 68 percent above the largest need measured. It sets
+nothing for the library or for native builds. A web app that links Paykit into its own
+WebAssembly module sets that module's stack size when it links it, and should measure its own
+call paths.
 
 ## Tests
 
-There are four test targets.
+There are five test targets.
 
 The tests in `tests/conformance/` build for both the host and wasm32, with the same test
 bodies, so a browser result is compared with the native result by construction. They cover:
@@ -130,6 +141,24 @@ They check that:
   and the payee's shop sees the rejection;
 - a request to a payer who has not admitted the payee waits for admission, and is accepted
   once the payer invites the payee.
+
+The tests in `tests/pay_flow/` run the pay and receipt flow described above, in the same world
+as `tests/request_flow/` (`tests/world/`), so they also run only in a browser. They follow the
+SDK's native flow tests (`paykit-sdk/tests/flows/one_time.rs` and `recovery.rs`). They check
+that:
+
+- a paid request reads as paid, with one execution on the rail; the payee's shop receives the
+  Payment Proof, and confirming it sends a Payment Receipt; and the payer's wallet stores that
+  receipt, with its attempt, payee, request and Payment Reference, and lists it;
+- a payment the rail refuses, or fails, is reported failed and written `failed` (its journal
+  entry finished, its attempt failed on the claim), a resume repeats nothing, no money moves,
+  the request stays open, and a second payment then goes through;
+- paying a request whose expiry has passed is refused (`Refusal::DeadlinePassed`) and moves no
+  money;
+- a payment the rail leaves in flight reads as being paid here, and once the rail settles it, a
+  resume reports it paid, once;
+- a payment left in flight, with a rail that keeps no history, is asked again under the same
+  idempotency key when its app, loaded again from its store, resumes it, and money moves once.
 
 ### Run the tests natively
 
