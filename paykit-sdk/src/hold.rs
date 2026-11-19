@@ -1097,9 +1097,9 @@ impl Paykit {
                         .as_ref()
                         .is_none_or(|waiting| waiting.binary_search(&counterparty).is_ok())
                 });
-                // Period details go again only while no later stop covers them: one their
-                // request record can't show yet holds them, unless the client would refuse
-                // them by now anyway.
+                // Only open period details can raise a delivery notice. If the request
+                // record cannot establish whether they are open, check again while an
+                // original is still within its replay window.
                 let details = if restore_owes {
                     own_details(&record, &own, &app_id)
                 } else {
