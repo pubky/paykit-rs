@@ -374,33 +374,91 @@ async fn test_period_payments_refused_before_acceptance_and_for_what_isnt_a_peri
 
 #[tokio::test]
 async fn test_period_payments_credit_a_late_proof_settled_at_the_deadline() {
-    Box::pin(confirm_period_settlement(Some(60), 60_000, true)).await;
+    Box::pin(confirm_period_settlement(
+        SettlementTerms::Fixed(Some(60)),
+        60_000,
+        true,
+    ))
+    .await;
 }
 
 #[tokio::test]
 async fn test_period_payments_keep_a_payment_settled_after_the_deadline_uncredited() {
-    Box::pin(confirm_period_settlement(Some(60), 60_001, false)).await;
+    Box::pin(confirm_period_settlement(
+        SettlementTerms::Fixed(Some(60)),
+        60_001,
+        false,
+    ))
+    .await;
 }
 
 #[tokio::test]
 async fn test_period_payments_credit_a_later_settlement_without_a_deadline() {
-    Box::pin(confirm_period_settlement(None, 60_001, true)).await;
+    Box::pin(confirm_period_settlement(
+        SettlementTerms::Fixed(None),
+        60_001,
+        true,
+    ))
+    .await;
 }
 
-async fn confirm_period_settlement(deadline_s: Option<u64>, after_start_ms: u64, credited: bool) {
-    let w = World::new();
-    let mut shop = w.shop().await;
-    let mut payer = w.wallet("wallet").await;
-    let mut draft = monthly();
-    if let Some(seconds) = deadline_s {
-        draft = draft.with_period_deadline_s(seconds);
+#[tokio::test]
+async fn test_period_payments_priced_settlement_observes_the_rate_and_period_deadline() {
+    // The signed rate expires 120 seconds after the period starts.
+    for (deadline_s, settled_after_ms, credited) in [
+        (60, 60_000, true),
+        (60, 60_001, false),
+        (180, 120_000, true),
+        (180, 120_001, false),
+    ] {
+        Box::pin(confirm_period_settlement(
+            SettlementTerms::SignedRate(deadline_s),
+            settled_after_ms,
+            credited,
+        ))
+        .await;
     }
-    let request = requested(&w, &mut shop, &mut payer, draft).await;
-    payer.accept_subscription(&request).await.unwrap();
-    shop.receive(None).await.unwrap();
+}
+
+enum SettlementTerms {
+    Fixed(Option<u64>),
+    SignedRate(u64),
+}
+
+async fn confirm_period_settlement(terms: SettlementTerms, after_start_ms: u64, credited: bool) {
+    let (w, mut shop, mut payer, request, options) = match terms {
+        SettlementTerms::Fixed(deadline_s) => {
+            let w = World::new();
+            let mut shop = w.shop().await;
+            let mut payer = w.wallet("wallet").await;
+            let mut draft = monthly();
+            if let Some(seconds) = deadline_s {
+                draft = draft.with_period_deadline_s(seconds);
+            }
+            let request = requested(&w, &mut shop, &mut payer, draft).await;
+            payer.accept_subscription(&request).await.unwrap();
+            shop.receive(None).await.unwrap();
+            (w, shop, payer, request, PayOptions::default())
+        }
+        SettlementTerms::SignedRate(seconds) => {
+            let (w, shop, mut payer, request, msg_id) =
+                Box::pin(priced_period_on(false, store(), Some(seconds))).await;
+            let shown = crate::conversion::priced_of(
+                &by_user(&mut payer, &request, january(), PayOptions::default())
+                    .await
+                    .unwrap_err(),
+            );
+            assert_eq!(
+                shown.source,
+                paykit_sdk::RateSource::PeriodDetails { msg_id }
+            );
+            let options = PayOptions::default().with_rate_confirmed(shown);
+            (w, shop, payer, request, options)
+        }
+    };
 
     w.rail.next(Behaviour::Hang);
-    let pending = by_user(&mut payer, &request, january(), PayOptions::default())
+    let pending = by_user(&mut payer, &request, january(), options)
         .await
         .unwrap();
     assert!(matches!(pending, PayOutcome::Pending { .. }));
@@ -1123,7 +1181,8 @@ async fn restore_before_original_completion(answered: bool, priced: bool) {
     use pubky_switch_client::store::{Fault, FaultStore};
     let fault = Arc::new(FaultStore::new(store(), Fault::None));
     let (w, mut shop, mut wallet, request, rate) = if priced {
-        let (w, shop, wallet, request, id) = Box::pin(priced_period_on(false, fault.clone())).await;
+        let (w, shop, wallet, request, id) =
+            Box::pin(priced_period_on(false, fault.clone(), None)).await;
         (w, shop, wallet, request, Some(id))
     } else {
         let w = World::new();
@@ -1410,18 +1469,22 @@ async fn test_period_payments_divergent_records_pause_their_periods_until_confir
 async fn priced_period_on(
     with_endpoints: bool,
     base: Arc<dyn StateStore>,
+    period_deadline_s: Option<u64>,
 ) -> (World, Paykit, Paykit, RequestRef, String) {
     let w = World::new();
     let mut shop = w.shop().await;
     let mut wallet = w.wallet_on("wallet", base).await;
     let rule = AnchoredRule::new(START_MS, 1, Unit::Month).unwrap();
-    let draft = crate::conversion::priced(
+    let mut draft = crate::conversion::priced(
         START_MS,
         &[("btc-lightning-bolt11", "lnbc1invoice")],
         &[("btc", "0.0000123456")],
     )
     .with_conversion(paykit_lib::bodies::Conversion::PerPeriod)
     .with_recurrence(Recurrence::new(rule, START_MS, None).unwrap());
+    if let Some(seconds) = period_deadline_s {
+        draft = draft.with_period_deadline_s(seconds);
+    }
     let (request, sale) = subscribed_to(&w, &mut shop, &mut wallet, draft).await;
     let period = january();
     w.clock.set_ms(period.starts_at);
@@ -1445,7 +1508,7 @@ async fn priced_period_on(
 
 #[tokio::test]
 async fn test_period_payments_priced_repeat_requires_unexpired_selected_rates() {
-    let (w, _shop, mut wallet, request, _) = Box::pin(priced_period_on(false, store())).await;
+    let (w, _shop, mut wallet, request, _) = Box::pin(priced_period_on(false, store(), None)).await;
     w.rail.set_declaration(
         paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
             .with_idempotent(true),
@@ -1485,6 +1548,7 @@ async fn test_period_payments_priced_first_dispatch_rechecks_selected_rate_expir
         let (w, _shop, mut wallet, request, _) = Box::pin(priced_period_on(
             false,
             Arc::clone(&base) as Arc<dyn StateStore>,
+            None,
         ))
         .await;
         let shown = crate::conversion::priced_of(
@@ -1513,7 +1577,7 @@ async fn test_period_payments_priced_first_dispatch_rechecks_selected_rate_expir
 
 #[tokio::test]
 async fn test_period_payments_priced_repeat_preserves_selected_rate_and_amount() {
-    let (w, _shop, mut wallet, request, _) = Box::pin(priced_period_on(false, store())).await;
+    let (w, _shop, mut wallet, request, _) = Box::pin(priced_period_on(false, store(), None)).await;
     w.rail.set_declaration(
         paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
             .with_idempotent(true),
@@ -1551,7 +1615,8 @@ async fn test_period_payments_priced_repeat_preserves_selected_rate_and_amount()
 
 #[tokio::test]
 async fn test_period_payments_priced_default_uses_latest_details_carrying_rates() {
-    let (w, mut shop, mut wallet, request, first) = Box::pin(priced_period_on(true, store())).await;
+    let (w, mut shop, mut wallet, request, first) =
+        Box::pin(priced_period_on(true, store(), None)).await;
     let confirmed = crate::conversion::priced_of(
         &by_user(&mut wallet, &request, january(), PayOptions::default())
             .await
@@ -2040,7 +2105,7 @@ async fn test_period_payments_resume_repeats_a_periods_dispatch_unless_cancelled
 
 #[tokio::test]
 async fn test_period_payments_reconcile_holds_without_selected_period_rate() {
-    let (w, _shop, mut wallet, request, _) = Box::pin(priced_period_on(false, store())).await;
+    let (w, _shop, mut wallet, request, _) = Box::pin(priced_period_on(false, store(), None)).await;
     let backup = wallet.backup().await.unwrap();
     let shown = crate::conversion::priced_of(
         &by_user(&mut wallet, &request, january(), PayOptions::default())
