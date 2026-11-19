@@ -35,7 +35,8 @@ pub(crate) const SOCIAL_V1_MIGRATION_FLAG_CAPABILITY: &str = "/priv/social/v1/_m
 pub(crate) enum SocialVersion {
     /// `/pub/pubky.app/`, until pubky.app migrates the identity.
     V0,
-    /// `/pub/social/v1/`, once pubky.app migrated the identity.
+    /// `/pub/social/v1/`, once pubky.app migrated the identity or it has a
+    /// social v1 profile.
     V1,
 }
 
