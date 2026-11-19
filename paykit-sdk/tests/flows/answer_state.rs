@@ -468,40 +468,9 @@ async fn current_reload_restore_and_resend(family: Family) {
     let w = World::new();
     let mut value = Box::pin(held(&w, family)).await;
     let backup = value.app.backup().await.unwrap();
-    value.storage = store();
-    value.app = Paykit::restore(
-        w.env(
-            if value.alice { &w.alice } else { &w.bob },
-            Arc::clone(&value.storage),
-        ),
-        PaykitConfig::default(),
-        &backup,
-        Arc::clone(&w.rail) as Arc<dyn Rail>,
-        w.timer(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        value
-            .app
-            .app()
-            .protocol_get("paykit", &value.key)
-            .await
-            .unwrap(),
-        Some(value.bytes.clone())
-    );
     value.reload(&w).await;
-    let before = value.entries(&w);
     value.app.receive(None).await.unwrap();
-    assert!(value.entries(&w) > before);
     assert_eq!(value.signed_bytes().await, value.plaintext);
-    assert!(value
-        .app
-        .app()
-        .protocol_scan("paykit", b"ans/")
-        .await
-        .unwrap()
-        .is_empty());
     value.ask().await;
     value.app.receive(None).await.unwrap();
     let stamp = format!(
@@ -529,6 +498,47 @@ async fn current_reload_restore_and_resend(family: Family) {
     value.app.receive(None).await.unwrap();
     assert_eq!(value.entries(&w), delivered + 1);
     assert_eq!(value.signed_bytes().await, value.plaintext);
+    value.storage = store();
+    value.app = Paykit::restore(
+        w.env(
+            if value.alice { &w.alice } else { &w.bob },
+            Arc::clone(&value.storage),
+        ),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        value
+            .app
+            .app()
+            .protocol_get("paykit", &value.key)
+            .await
+            .unwrap(),
+        Some(value.bytes.clone())
+    );
+    value.reload(&w).await;
+    let before = value.entries(&w);
+    value.app.receive(None).await.unwrap();
+    value.ask().await;
+    value.app.receive(None).await.unwrap();
+    assert_eq!(value.entries(&w), before);
+    assert!(value
+        .app
+        .message_delivery(&value.sent_id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(value
+        .app
+        .app()
+        .protocol_scan("paykit", b"ans/")
+        .await
+        .unwrap()
+        .is_empty());
     assert!(w.rail.all_executions().is_empty());
 }
 
