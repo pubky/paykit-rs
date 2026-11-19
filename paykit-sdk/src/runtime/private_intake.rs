@@ -36,11 +36,15 @@ const SUPERVISOR_LEASE_TIMEOUT: chrono::Duration = chrono::Duration::minutes(2);
 const SUPERVISOR_LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_AUDIT_ACQUISITIONS_PER_PEER: usize =
     crate::storage::PRIVATE_INTAKE_MAX_PACKETS_PER_PEER + 1;
-/// Maximum attempts of one expected-slot acquisition while the Encrypted Link
-/// generation keeps moving under it, see [`retry_while_link_generation_moves`].
-/// Eight attempts cover a consumer draining a short burst during one
-/// acquisition.
+/// Maximum attempts of one expected-slot acquisition while the stored
+/// Encrypted Link generation keeps moving under it. See
+/// [`retry_while_link_generation_moves`] for why this bound suffices.
 const LINK_ADVANCE_RETRY_ATTEMPTS: usize = 8;
+
+/// Error context when the buffered private intake's link generation is not
+/// the stored Encrypted Link generation.
+const BUFFERED_PRIVATE_INTAKE_GENERATION_MISMATCH: &str =
+    "buffered private intake generation does not match Encrypted Link";
 
 /// Validated limits for SSE-assisted private intake.
 #[derive(Clone, Debug)]
@@ -312,7 +316,7 @@ fn next_private_intake_counter(
     };
     if buffered.link_generation != generation {
         return Err(PaykitSdkError::RecoveryRequired {
-            context: "buffered private intake generation does not match Encrypted Link".into(),
+            context: BUFFERED_PRIVATE_INTAKE_GENERATION_MISMATCH.into(),
             source: None,
         });
     }
@@ -606,29 +610,35 @@ impl From<paykit_lib::PaykitError> for LinkAttemptError {
 }
 
 /// Whether the stored Encrypted Link generation of `counterparty` is no longer
-/// `generation`, or no link state is stored. Each generation-checked storage
-/// step runs this first, inside its own transaction, see
+/// `generation`, or no link state is stored. The buffer insert runs this
+/// first, inside its own transaction, see
 /// [`retry_while_link_generation_moves`].
 fn link_generation_moved(
     tx: &dyn StorageTransaction,
     counterparty: &PubkyPublicKey,
     generation: u64,
 ) -> bool {
+    // Mirrors the Encrypted Link generation check of the storage adapter's
+    // `buffer_private_intake_packet`, so that a mismatch is reported as
+    // `GenerationMoved` before the adapter's untyped error. Keep the two in
+    // sync.
     tx.encrypted_link_state(counterparty)
         .is_none_or(|link| link.generation != generation)
 }
 
-/// Runs an expected-slot acquisition `attempt` again while the Encrypted Link
-/// generation moves under it.
+/// Runs an expected-slot acquisition `attempt` again while the stored
+/// Encrypted Link generation moves under it.
 ///
-/// A consumer drain commits one Encrypted Link generation per packet and, in
-/// the same transaction, rebases the buffered intake to it. An attempt reads
-/// the link state and its generation once, at its start, so a drain that
-/// commits after that leaves the attempt's snapshot and receive counter stale
-/// although nothing is wrong with the peer. The attempt's two storage steps
-/// that check the buffered intake against its generation, the counter read
-/// and the buffer insert, therefore first compare the stored Encrypted Link
-/// generation with the attempt's in the same transaction (see
+/// Any committed change of the stored Encrypted Link generation makes the
+/// attempt retry: a consumer drain (one generation per packet), an outbound
+/// private send, or a handshake or observation transition. Drains and sends
+/// rebase the buffered intake to the new generation in the same transaction.
+/// An attempt reads the link state and its generation once, at its start, so
+/// a change committed after that leaves the attempt's snapshot and receive
+/// counter stale although nothing is wrong with the peer. The attempt's two
+/// storage steps that check the buffered intake against its generation, the
+/// counter read and the buffer insert, therefore first compare the stored
+/// Encrypted Link generation with the attempt's in the same transaction (see
 /// [`link_generation_moved`]). When it moved, the step does not run and the
 /// attempt reports [`LinkAttemptError::GenerationMoved`]. Only that outcome is
 /// retried, and the next attempt reads the link state afresh.
@@ -640,10 +650,12 @@ fn link_generation_moved(
 /// still, such as a receive slot whose ciphertext changed. The next event or
 /// audit tries again.
 ///
-/// A retry needs the generation to have moved, so this does not spin while it
-/// stands still. The attempts are bounded by [`LINK_ADVANCE_RETRY_ATTEMPTS`]
-/// in case it keeps moving; the last attempt's error is returned then, the
-/// error that step's own generation mismatch check reports.
+/// Each retry needs a committed generation change, so this does not spin while
+/// the generation stands still. The attempts are bounded by
+/// [`LINK_ADVANCE_RETRY_ATTEMPTS`] in case it keeps moving; eight attempts
+/// cover a short burst of drains and sends committing during one acquisition.
+/// Past the bound, the last attempt's error is returned, the error that
+/// step's own generation mismatch check reports.
 async fn retry_while_link_generation_moves<A, Fut>(
     mut attempt: A,
 ) -> Result<PrivatePacketAcquisition>
@@ -767,10 +779,14 @@ where
     let counterparty_for_tail = counterparty.clone();
     let receive_counter = storage
         .transaction(move |tx| {
-            if link_generation_moved(tx, &counterparty_for_tail, generation) {
+            let state = tx.export_storage_state();
+            let stored_generation = state
+                .encrypted_link_states
+                .get(&counterparty_for_tail)
+                .map(|link| link.generation);
+            if stored_generation != Some(generation) {
                 return Ok(None);
             }
-            let state = tx.export_storage_state();
             next_private_intake_counter(
                 &state,
                 &counterparty_for_tail,
@@ -783,7 +799,7 @@ where
     let Some(receive_counter) = receive_counter else {
         return Err(LinkAttemptError::GenerationMoved(
             PaykitSdkError::RecoveryRequired {
-                context: "buffered private intake generation does not match Encrypted Link".into(),
+                context: BUFFERED_PRIVATE_INTAKE_GENERATION_MISMATCH.into(),
                 source: None,
             },
         ));
@@ -835,7 +851,7 @@ where
         .await?;
     acquisition.ok_or_else(|| {
         LinkAttemptError::GenerationMoved(PaykitSdkError::Storage {
-            context: "private intake packet generation does not match Encrypted Link".into(),
+            context: crate::storage::PRIVATE_INTAKE_PACKET_GENERATION_MISMATCH.into(),
             source: None,
         })
     })
@@ -914,8 +930,14 @@ async fn run_connected_private_intake_stream(
                             // buffered, and the next event or audit probes
                             // again.
                             if let Some(effect) =
-                                apply_private_intake_peer_audit(health, work, peer, probe, None, None)
-                                    .await
+                                apply_private_intake_peer_audit(
+                                    health,
+                                    work,
+                                    peer,
+                                    probe,
+                                    PeerAuditKind::LiveInsertProbe,
+                                )
+                                .await
                             {
                                 if effect.backpressured {
                                     return PrivateIntakeEventLoopExit::Backpressured;
@@ -1706,8 +1728,9 @@ where
                 work,
                 peer.clone(),
                 peer_audit,
-                Some(self.clock.now()),
-                Some(PrivateIntakeTransportState::Stale),
+                PeerAuditKind::ScheduledAudit {
+                    audited_at: self.clock.now(),
+                },
             )
             .await
             {
@@ -1721,8 +1744,8 @@ where
     /// Acquires the next expected private packet for `counterparty`.
     ///
     /// Live events, the probe after a live insert, and audits all acquire
-    /// through this method. An attempt is retried only while a consumer drain
-    /// moves the Encrypted Link generation under it, see
+    /// through this method. An attempt is retried only while the stored
+    /// Encrypted Link generation moves under it, see
     /// [`retry_while_link_generation_moves`].
     async fn acquire_expected_private_packet(
         &self,
@@ -1881,31 +1904,41 @@ fn transport_state_after_acquisition(
     }
 }
 
+/// Which expected-slot check [`apply_private_intake_peer_audit`] applies.
+#[derive(Clone, Copy, Debug)]
+enum PeerAuditKind {
+    /// The scheduled audit. An absent next slot also records
+    /// `last_successful_audit_at`, and a failure marks the peer `Stale`.
+    ScheduledAudit { audited_at: DateTime<Utc> },
+    /// The probe after a live insert. It leaves `last_successful_audit_at`
+    /// alone, and a failure keeps the `Replaying` the probe set before it
+    /// started.
+    LiveInsertProbe,
+}
+
 /// Applies one peer's expected-slot audit, or the probe after a live insert,
 /// to health and wakeups.
 ///
 /// Sets the peer's transport state for the outcome, and then wakes the
 /// consumer when the audit buffered a packet or found a pending handshake:
-/// the woken consumer reads that state once when its drain starts. Pass
-/// `audited_at` for an audit: an absent next slot then also records
-/// `last_successful_audit_at`, which a probe leaves alone. The returned flags
-/// tell the caller to back off or to retry the handshake.
+/// the woken consumer reads that state once when its drain starts. `kind`
+/// decides whether an absent next slot records `last_successful_audit_at`,
+/// see [`PeerAuditKind`]. The returned flags tell the caller to back off or
+/// to retry the handshake.
 ///
-/// A failed audit sets `failure_state`, when given, before it wakes the
-/// consumer for packets buffered before the failure, and returns `None`. The
-/// scheduled audit passes `Stale`; the probe passes none, because it set
-/// `Replaying` before it started.
+/// A failed scheduled audit sets `Stale` before it wakes the consumer for
+/// packets buffered before the failure; a failed probe leaves the state
+/// alone. Either returns `None`.
 async fn apply_private_intake_peer_audit(
     health: &Arc<AsyncRwLock<PrivateIntakeHealth>>,
     work: &Notify,
     peer: PubkyPublicKey,
     peer_audit: PrivateIntakePeerAudit,
-    audited_at: Option<DateTime<Utc>>,
-    failure_state: Option<PrivateIntakeTransportState>,
+    kind: PeerAuditKind,
 ) -> Option<PrivateIntakeAuditOutcome> {
     let Ok(outcome) = peer_audit.outcome else {
-        if let Some(state) = failure_state {
-            set_peer_state(health, peer, state).await;
+        if let PeerAuditKind::ScheduledAudit { .. } = kind {
+            set_peer_state(health, peer, PrivateIntakeTransportState::Stale).await;
         }
         if peer_audit.inserted {
             work.notify_waiters();
@@ -1920,14 +1953,15 @@ async fn apply_private_intake_peer_audit(
                 | PrivatePacketAcquisition::CapacityReached
         ),
     };
-    match audited_at {
-        Some(audited_at) => set_peer_audit_outcome(health, peer, outcome, audited_at).await,
-        None => set_peer_state(health, peer, transport_state_after_acquisition(&outcome)).await,
+    match kind {
+        PeerAuditKind::ScheduledAudit { audited_at } => {
+            set_peer_audit_outcome(health, peer, outcome, audited_at).await
+        }
+        PeerAuditKind::LiveInsertProbe => {
+            set_peer_state(health, peer, transport_state_after_acquisition(&outcome)).await
+        }
     }
-    if peer_audit.inserted {
-        work.notify_waiters();
-    }
-    if effect.handshake_pending {
+    if peer_audit.inserted || effect.handshake_pending {
         work.notify_waiters();
     }
     Some(effect)
@@ -4197,8 +4231,9 @@ mod tests {
                 outcome: probe_fetch_error(),
                 inserted: true,
             },
-            Some(Utc::now()),
-            Some(PrivateIntakeTransportState::Stale),
+            PeerAuditKind::ScheduledAudit {
+                audited_at: Utc::now(),
+            },
         )
         .await;
         ended.notify_one();
@@ -4377,7 +4412,7 @@ mod tests {
     /// The error the counter read reports when the generation moved.
     fn counter_generation_moved() -> LinkAttemptError {
         LinkAttemptError::GenerationMoved(PaykitSdkError::RecoveryRequired {
-            context: "buffered private intake generation does not match Encrypted Link".into(),
+            context: BUFFERED_PRIVATE_INTAKE_GENERATION_MISMATCH.into(),
             source: None,
         })
     }
@@ -4438,7 +4473,7 @@ mod tests {
             .collect();
         results.push(Err(LinkAttemptError::GenerationMoved(
             PaykitSdkError::Storage {
-                context: "private intake packet generation does not match Encrypted Link".into(),
+                context: crate::storage::PRIVATE_INTAKE_PACKET_GENERATION_MISMATCH.into(),
                 source: None,
             },
         )));
@@ -4449,7 +4484,7 @@ mod tests {
             matches!(
                 &result,
                 Err(PaykitSdkError::Storage { context, .. })
-                    if context == "private intake packet generation does not match Encrypted Link"
+                    if context == crate::storage::PRIVATE_INTAKE_PACKET_GENERATION_MISMATCH
             ),
             "the last attempt's mismatch error must be returned"
         );
@@ -5118,13 +5153,18 @@ mod tests {
         );
     }
 
-    /// The consumer is woken before the probe, so its drain can persist the
-    /// next link generation while the probe's first attempt still holds the
-    /// generation it read. That attempt's counter read then reports
-    /// [`LinkAttemptError::GenerationMoved`] from
-    /// [`acquire_expected_private_packet_with_fetch`], so the acquisition
-    /// retries: it reads the post-drain link state, finds the next slot
-    /// absent, and settles the peer `CaughtUp`.
+    /// After a real drain rebase commits the next link generation under the
+    /// probe's first attempt, the storage steps of
+    /// [`acquire_expected_private_packet_with_fetch`] report
+    /// [`LinkAttemptError::GenerationMoved`], and
+    /// [`retry_while_link_generation_moves`] recovers: the next attempt reads
+    /// the post-drain link state, finds the next slot absent, and settles the
+    /// peer `CaughtUp`.
+    ///
+    /// The test wires the acquisition and retry itself rather than calling
+    /// `PaykitSdk::acquire_expected_private_packet`; the testnet test
+    /// `test_private_intake_live_insert_settles_while_consumer_drains` covers
+    /// that production wiring.
     #[tokio::test]
     async fn test_live_insert_probe_recovers_from_a_concurrent_drain() {
         let storage = crate::storage::InMemoryStorage::new();

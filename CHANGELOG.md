@@ -159,11 +159,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   healthy audit. A drain woken by the packet can still report the `Replaying`
   freshness it started with, and no further wakeup follows when the check
   settles the Linked Peer, so read `PrivateIntakeSupervisor::health()` for the
-  current state. When the app's drain commits a new Encrypted Link generation
-  while intake reads or stores a buffered packet, intake now retries with the
-  new generation instead of marking the Linked Peer `Stale`. Other failures,
-  such as network errors or a packet that fails the buffer's integrity checks,
-  are not retried.
+  current state. When the stored Encrypted Link generation changes while
+  intake reads or stores a buffered packet, for example because the app drains
+  a packet, sends a private message, or advances a handshake, intake now
+  retries with the new generation instead of marking the Linked Peer `Stale`.
+  Other failures, such as network errors or a packet that fails the buffer's
+  integrity checks, are not retried.
 
 ### Integration
 
