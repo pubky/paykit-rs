@@ -116,7 +116,7 @@ pub use paykit_lib::{
     Asset, AttemptId, Decimal, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
     PaymentReference,
 };
-pub use periods::{PeriodDetailsView, PeriodView};
+pub use periods::{PeriodDetailsView, PeriodPrice, PeriodView};
 pub use protocol::{PaykitProtocol, HANDLED_KINDS};
 pub use pubky_switch_client::app::{
     App, AppConfig, AppEnv, JoinRequest, ProtocolSet, UserConfirmed,
@@ -302,6 +302,8 @@ mod tests {
                             payee: [1; 32],
                             request_hash: [4; 32],
                         },
+                        billing_period: None,
+                        rate_source_hash: [4; 32],
                         app_id: [2; 16],
                         endpoint_id: id(),
                         payload_hash: pubky_switch_core::enc::hash(payload().as_str().as_bytes()),

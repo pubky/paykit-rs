@@ -11,8 +11,8 @@
 //! promises no rate: an endpoint of another asset is paid only by hand, on its user's
 //! confirmation of what the method would transfer ([`Priced::ByHand`]).
 //!
-//! A payment priced by a rate is made only by hand: its user confirms the amount so
-//! computed ([`PricedPayment`]), and the payer pays exactly that. The payee expects the amount
+//! A rate-priced payment needs the host's authorization of the exact [`PricedPayment`],
+//! by user confirmation or a bounded policy the user authorized. The payer pays that amount. The payee expects the amount
 //! computed by the same rule for the endpoint its proof names.
 
 use paykit_lib::bodies::Conversion;
@@ -37,12 +37,12 @@ pub enum RateSource {
     },
 }
 
-/// What a payment priced by a rate shows its user before paying (Paykit spec 7.2 step 1):
+/// The quote the host authorizes before paying at a rate (Paykit spec 7.2 step 1):
 /// the request, the destination, named by its payee app, Payment Endpoint Identifier and a
 /// hash of its payload, never the payload itself, the amount requested, the rate used and
 /// where it comes from, and the amount so computed, in the endpoint's asset. A
-/// [`crate::Refusal::PricedByRate`] carries it, and a payment the user then makes carries it
-/// back ([`crate::PayOptions::with_rate_confirmed`]): the SDK computes the amount again and
+/// [`crate::Refusal::PricedByRate`] carries it, and an authorized payment carries it
+/// back ([`crate::PayOptions::with_rate_authorized`]): the SDK computes the amount again and
 /// pays only when what it would show now is this, field for field, and then pays exactly
 /// [`PricedPayment::amount`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,6 +50,10 @@ pub enum RateSource {
 pub struct PricedPayment {
     /// The request paid.
     pub request: RequestRef,
+    /// The exact occurrence, including when the request uses fixed rates.
+    pub billing_period: Option<paykit_lib::periods::PeriodRef>,
+    /// Hash of the signed request or signed period details that supply the rate.
+    pub rate_source_hash: [u8; 32],
     /// The payee app whose destination it is.
     pub app_id: [u8; 16],
     /// The Payment Endpoint Identifier.
@@ -65,6 +69,14 @@ pub struct PricedPayment {
     /// The amount paid: the amount requested times the rate, rounded up once to the
     /// endpoint's smallest unit, in the endpoint's asset.
     pub amount: PaymentAmount,
+}
+
+impl PricedPayment {
+    /// A user-started payment or an eligible own-policy period can carry a quote.
+    /// The period entry point independently excludes Allowance funding.
+    pub(crate) fn may_authorize_rate(&self, user_started: bool) -> bool {
+        user_started || self.billing_period.is_some()
+    }
 }
 
 /// The amount a payment pays to an endpoint ([`price`]).
