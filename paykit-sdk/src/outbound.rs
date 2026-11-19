@@ -7,6 +7,28 @@ use crate::error::Result;
 use crate::paykit::Paykit;
 
 impl Paykit {
+    /// The complete queued inventory, under uninterrupted host namespace ownership and
+    /// after prior operations have resolved. A partial owner set proves no source absent.
+    pub(crate) async fn queued_message_ids(&self) -> Result<std::collections::BTreeSet<String>> {
+        let protocols = self.app.protocols().names();
+        if !protocols
+            .iter()
+            .any(|name| name == crate::protocol::BACKUP_NAME)
+        {
+            return Err(crate::error::Refusal::NotNow(
+                "Switch spec 11: delivery ownership is not established".into(),
+            )
+            .into());
+        }
+        let mut queued = std::collections::BTreeSet::new();
+        for protocol in protocols {
+            for message in self.app.queued_messages(&protocol).await? {
+                queued.insert(message.msg_id);
+            }
+        }
+        Ok(queued)
+    }
+
     /// A restore in reconcile mode has no verdict until its identity-confirmed first page.
     /// A directory may settle the verdict while adopting an identity not yet confirmed
     /// on the Homeserver. A load repeats that unsettled read; the verdict alone is not enough.

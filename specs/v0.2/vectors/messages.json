@@ -434,7 +434,7 @@
       }
     ]
   },
-  "description": "Every message kind as sent in v0.2 (Switch wire 4.5, wire 4): the exact JSON bytes, their BLAKE3 hash (refs, request hash), the sender app's signature over lp(\"pubky-switch/v1/msg\", recipient identity, JSON), and the signed plaintext layout sender app ID (16) | signature (64) | u32_be(JSON length) | JSON, before zero padding. payment_request_labelled is sent by bob's hosted app under its label, and alice's acceptance of it copies the label; label_rejections holds requests a payer drops for their label; multi_protocol_senders holds messages from apps whose certificates hold another protocol's scopes; cancellation_roles holds a cancellation between certificates of each pair of roles; conversion_terms holds the shop's period details and requests with their conversion terms changed, which a payer takes or drops; conversion_amounts holds the amount a payer pays to an endpoint under a request's or period details' rates; proof_members holds alice's proofs with a member outside the payment it proves, which a payee drops; receipt_members holds bob's receipts with the payee's metadata and reference, which a payer takes or drops; list_versions holds the shop's Private Payment Lists with a malformed version, which a payer drops.",
+  "description": "Every message kind as sent in v0.2 (Switch wire 4.5, wire 4): the exact JSON bytes, their BLAKE3 hash (refs, request hash), the sender app's signature over lp(\"pubky-switch/v1/msg\", recipient identity, JSON), and the signed plaintext layout sender app ID (16) | signature (64) | u32_be(JSON length) | JSON, before zero padding. payment_request_labelled is sent by bob's hosted app under its label, and alice's acceptance of it copies the label; label_rejections holds requests a payer drops for their label; multi_protocol_senders holds messages from apps whose certificates hold another protocol's scopes; cancellation_roles holds a cancellation between certificates of each pair of roles; conversion_terms holds the shop's period details and requests with their conversion terms changed, which a payer takes or drops; conversion_amounts holds the amount a payer pays to an endpoint under a request's or period details' rates; proof_members holds alice's proofs with an extra or missing member, which a payee drops; receipt_members holds bob's receipts with the payee's metadata and reference, which a payer takes or drops; list_versions holds the shop's Private Payment Lists with a malformed version, which a payer drops.",
   "label_rejections": {
     "cases": [
       {
@@ -848,7 +848,7 @@
     ]
   },
   "proof_members": {
-    "description": "Wire 4.10: alice's proofs, payment_proof of the one-time request and payment_proof_unrequested of a payment without one, with one member added and signed again by her wallet. amount is only in a proof of a payment without a request, whose refs are empty; billing_period, label, payment_reference and allowance_id are only in a proof of a request. A payee drops each at check 10. reason is paykit-lib's wording.",
+    "description": "Wire 4.10: alice's proofs with one member added or removed and signed again by her wallet. amount is only in a proof of a payment without a request, whose refs are empty; billing_period, label, payment_reference and allowance_id are only in a proof of a request. A proof that refers to period details must name their Billing Period. A payee drops each at check 10. reason is paykit-lib's wording.",
     "refused": [
       {
         "base": "payment_proof",
@@ -889,6 +889,14 @@
         "reason": "invalid: payment_proof: allowance_id: only in a proof of a request, not of a payment without one",
         "sender_app": "wejf37ngr7qizej3eoijn3hq4c",
         "signature": "G4vJYxB6Wg5akvSBY4AcsGBujaXTBssOoKEqYCNB5MEG3xWp8Yuww8wkTPdkWpzEeug6aqaiPJgYIvCs_Q_IAQ"
+      },
+      {
+        "base": "payment_proof_period",
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"5aabefde-df1d-43dd-99d1-086bac038944\",\"created_at\":\"2026-02-28T00:00:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[\"c_ys4n4gUNKJa3D13sszDTpkj8rqdB206n-gIMVuzXY\",\"kM3kzLA74HW6gW84eMivgv3gCSowYHwWWlBefx5WXnU\"],\"body\":{\"attempt_id\":\"4TyjQUac-NiiIf-haaHWbA\",\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-lightning-bolt11\",\"proof\":{\"data\":\"0d1c2b3a\",\"type\":\"bitcoin-bolt11-preimage\"}}}",
+        "name": "a proof referring to period details without billing_period",
+        "reason": "invalid: payment_proof: billing_period: missing; a proof that used period details names their Billing Period",
+        "sender_app": "wejf37ngr7qizej3eoijn3hq4c",
+        "signature": "a6Qx9q2naRs1LdbuVKtCvtYwsp6JsjVbbZ88g9SlUitzSdauAaxvU7y3Rzpnw80J8ULpHLyJ_L1d7UUqg_6NCg"
       }
     ]
   },
