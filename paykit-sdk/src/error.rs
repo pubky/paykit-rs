@@ -78,7 +78,8 @@ pub enum Refusal {
     /// is shown and may pay over: paying anyway carries it back
     /// ([`crate::PayOptions::with_may_be_paid_confirmed`]), and only that same doubt is
     /// passed. `None` for a reason no confirmation passes, such as a pinned deadline other
-    /// than the app's own, or a claim that doesn't show this app's attempt open.
+    /// than the app's own, a claim that doesn't show this app's attempt open, or a
+    /// Billing Period with incomplete payment history after payer-provider loss.
     #[error("may already be paid: {reason}")]
     MayBePaid {
         /// The rule that makes it doubtful.

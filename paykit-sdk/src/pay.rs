@@ -1641,6 +1641,12 @@ impl Paykit {
         }
         // A SETTLED claim is refused above.
         let before_loss = self.loss_doubt(obligation, Some(request), period).await?;
+        if period.is_some() && before_loss.is_some() {
+            return Err(Refusal::MayBePaid {
+                reason: "Paykit spec 7.3, 8.2: the Billing Period may have been paid early before the provider loss".into(),
+                doubt: None,
+            }.into());
+        }
         let doubt = PaymentDoubt {
             obligation: *obligation,
             step: view.as_ref().map(|v| v.step),
@@ -1654,9 +1660,7 @@ impl Paykit {
             early_pin: kept.early_pin,
             before_loss,
         };
-        let held_after_loss =
-            before_loss.is_some() && (period.is_some() || by == Initiator::Automatic);
-        if held_after_loss
+        if before_loss.is_some() && by == Initiator::Automatic
             || doubt.doubtful() && options.may_be_paid_confirmed.as_ref() != Some(&doubt)
         {
             let reason = if !doubt.restored.is_empty() {
