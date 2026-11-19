@@ -983,6 +983,122 @@ async fn test_private_intake_buffers_new_packet_from_live_event_stream() {
     supervisor.stop().await;
 }
 
+/// A real app drains buffered private intake as soon as `subscribe_work`
+/// wakes it, so its drain runs while intake probes the peer's next slot after
+/// a live insert, and moves the buffered link generation under the probe. The
+/// packet must be consumed, not only buffered, and health must settle to
+/// `CaughtUp` without the hour-long healthy audit. The drain also releases
+/// capacity, which restarts the stream epoch with a startup audit, so this
+/// test guards the combined outcome; the unit test
+/// `test_live_insert_probe_recovers_from_a_concurrent_drain` covers the probe's
+/// retry alone.
+#[tokio::test]
+async fn test_private_intake_live_insert_settles_while_consumer_drains() {
+    let pair = linked_two_party().await;
+    let sdk = Arc::new(PaykitSdk::new(
+        pair.alice.storage.clone(),
+        TestnetSessionProvider::new(pair.alice.access.clone()),
+        pair.alice.adapter.clone(),
+        PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+    ));
+    let mut config = PrivateIntakeConfig::new(1).unwrap();
+    config.healthy_audit_interval = Duration::from_secs(60 * 60);
+    let supervisor = Arc::new(sdk.start_private_intake(config).await.unwrap());
+    wait_for_caught_up(
+        &supervisor,
+        &pair.bob.public_key,
+        "startup audit should catch up before the live packet is published",
+    )
+    .await;
+
+    let consumed = Arc::new(AtomicUsize::new(0));
+    let consumer = tokio::spawn({
+        let sdk = Arc::clone(&sdk);
+        let supervisor = Arc::clone(&supervisor);
+        let consumed = Arc::clone(&consumed);
+        let bob = pair.bob.public_key.clone();
+        async move {
+            let work = supervisor.subscribe_work();
+            loop {
+                // Register before draining so a wakeup during the drain is kept.
+                let notified = work.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                match sdk
+                    .receive_buffered_private_messages(bob.clone(), &supervisor)
+                    .await
+                {
+                    Ok(drained) => {
+                        consumed.fetch_add(drained.report.stream_item_ids.len(), Ordering::SeqCst);
+                    }
+                    // Another drain of this peer won the link lease; retry.
+                    Err(error) if error.is_concurrent_update() => {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        continue;
+                    }
+                    Err(error) => panic!("consumer drain failed: {error}"),
+                }
+                notified.await;
+            }
+        }
+    });
+
+    // Outlast the first in-stream audit, which fires after at most five
+    // seconds of jitter, so only the live insert's probe can settle health.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    assert_eq!(
+        supervisor.health().await.peers.get(&pair.bob.public_key),
+        Some(&PrivateIntakeTransportState::CaughtUp),
+        "private intake stream must still be connected before the live packet is published"
+    );
+    let baseline_cursor = pair
+        .alice
+        .storage
+        .snapshot()
+        .unwrap()
+        .private_intake_cursors
+        .get(&pair.bob.public_key)
+        .cloned()
+        .expect("startup replay should have advanced the private intake cursor before the publish");
+
+    publish_private_lists(&pair.bob, &pair.alice, 1).await;
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while consumed.load(Ordering::SeqCst) == 0 {
+            assert!(!consumer.is_finished(), "consumer stopped early");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the woken consumer should drain the live packet");
+    assert_eq!(consumed.load(Ordering::SeqCst), 1);
+    let state = pair.alice.storage.snapshot().unwrap();
+    assert!(state
+        .private_intake_peers
+        .get(&pair.bob.public_key)
+        .is_none_or(|peer| peer.buffered_packets.is_empty()));
+    assert!(
+        state.private_intake_cursors[&pair.bob.public_key].event_id > baseline_cursor.event_id,
+        "packet must come from a stream event newer than the pre-publish cursor"
+    );
+    // Let the stream finish handling the event so a peer left `Replaying`
+    // cannot pass on the pre-publish `CaughtUp`.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    wait_for_caught_up(
+        &supervisor,
+        &pair.bob.public_key,
+        "health should return to CaughtUp while the consumer drains, not wait for the audit",
+    )
+    .await;
+    consumer.abort();
+    if let Err(error) = consumer.await {
+        if error.is_panic() {
+            std::panic::resume_unwind(error.into_panic());
+        }
+    }
+    supervisor.stop().await;
+}
+
 /// Build a path under the private directory with the homeserver's maximum
 /// storage path length (pubky-common `MAX_STORAGE_PATH_TOTAL_LENGTH`), split
 /// into segments of at most `MAX_STORAGE_PATH_SEGMENT_LENGTH` bytes. Its PUT

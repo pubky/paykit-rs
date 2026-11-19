@@ -36,6 +36,11 @@ const SUPERVISOR_LEASE_TIMEOUT: chrono::Duration = chrono::Duration::minutes(2);
 const SUPERVISOR_LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_AUDIT_ACQUISITIONS_PER_PEER: usize =
     crate::storage::PRIVATE_INTAKE_MAX_PACKETS_PER_PEER + 1;
+/// Probe attempts after a live insert. The consumer is woken before the probe,
+/// and its drain moves the buffered link generation, which fails a probe
+/// acquisition still holding the old one. A retry reads the post-drain state.
+/// The small bound keeps a failing peer from holding up the event loop.
+const LIVE_INSERT_PROBE_ATTEMPTS: usize = 3;
 
 /// Validated limits for SSE-assisted private intake.
 #[derive(Clone, Debug)]
@@ -567,23 +572,31 @@ where
 /// healthy audit's rule, without a cursor, so the durable cursor never moves
 /// past a buffered packet that was not processed yet. It does not record
 /// `last_successful_audit_at`, which stays the time of the last scheduled
-/// audit; callers map the outcome only to a transport state.
+/// audit.
 ///
-/// The consumer is woken only after the probe, like the scheduled audit does.
-/// Its drain moves the buffered link generation, which would fail a probe
-/// acquisition still in flight.
+/// The consumer was already woken for the event's packet and may drain while
+/// the probe runs. A drain moves the buffered link generation and fails an
+/// acquisition still holding the old one, so a failed attempt is retried, up
+/// to [`LIVE_INSERT_PROBE_ATTEMPTS`]. Each attempt reads the link state again.
+/// `inserted` reports whether any attempt buffered another packet.
 async fn probe_private_intake_peer_after_live_insert(
     peer: PubkyPublicKey,
     acquire: &PrivateIntakeAcquire,
-    work: &Notify,
-) -> PrivatePacketAcquisition {
-    let probe = audit_private_intake_peer(peer, |peer, cursor| acquire(peer, cursor)).await;
-    // The event buffered a packet, so there is work whatever the probe found.
-    work.notify_waiters();
-    // The event's packet is durably buffered, so a failed probe (a drain that
-    // was already running, or a transient fetch error) keeps the event's own
-    // outcome: the peer stays `Replaying` and the next event or audit retries.
-    probe.outcome.unwrap_or(PrivatePacketAcquisition::Inserted)
+) -> PrivateIntakePeerAudit {
+    let mut inserted = false;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let probe =
+            audit_private_intake_peer(peer.clone(), |peer, cursor| acquire(peer, cursor)).await;
+        inserted |= probe.inserted;
+        if probe.outcome.is_ok() || attempt == LIVE_INSERT_PROBE_ATTEMPTS {
+            return PrivateIntakePeerAudit {
+                outcome: probe.outcome,
+                inserted,
+            };
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -783,23 +796,40 @@ async fn run_connected_private_intake_stream(
             event = stream.next() => match event {
                 Some(Ok(event)) => {
                     let mut acquire_one = |peer, cursor| acquire(peer, cursor);
-                    // A live insert reports the probe's outcome, so the peer
-                    // settles now instead of at the next audit.
-                    let routed = match process_private_intake_event(group, event, &mut acquire_one).await {
+                    match process_private_intake_event(group, event, &mut acquire_one).await {
                         Some((peer, Ok(PrivatePacketAcquisition::Inserted))) => {
-                            let outcome =
-                                probe_private_intake_peer_after_live_insert(peer.clone(), &acquire, work)
+                            work.notify_waiters();
+                            // Probe the next slots so the peer settles now
+                            // instead of at the next audit.
+                            let probe =
+                                probe_private_intake_peer_after_live_insert(peer.clone(), &acquire)
                                     .await;
-                            Some((peer, Ok(outcome)))
-                        }
-                        routed => routed,
-                    };
-                    match routed {
-                        // The probe after a live insert hit its bound or
-                        // failed, and it already woke the consumer; the next
-                        // audit or event picks up the remaining slots.
-                        Some((peer, Ok(PrivatePacketAcquisition::Inserted))) => {
-                            set_peer_state(health, peer, PrivateIntakeTransportState::Replaying).await;
+                            if probe.inserted {
+                                work.notify_waiters();
+                            }
+                            match probe.outcome {
+                                Ok(outcome) => {
+                                    set_peer_state(health, peer, transport_state_after_acquisition(&outcome)).await;
+                                    match outcome {
+                                        PrivatePacketAcquisition::InsertedAtCapacity
+                                        | PrivatePacketAcquisition::CapacityReached => {
+                                            return PrivateIntakeEventLoopExit::Backpressured;
+                                        }
+                                        PrivatePacketAcquisition::PendingHandshake => {
+                                            handshake_pending = true;
+                                        }
+                                        PrivatePacketAcquisition::Absent
+                                        | PrivatePacketAcquisition::Inserted
+                                        | PrivatePacketAcquisition::AlreadyBuffered => {}
+                                    }
+                                }
+                                // The event's packet is durably buffered, so
+                                // the peer stays `Replaying`, not `Stale`; the
+                                // next event or audit probes again.
+                                Err(_) => {
+                                    set_peer_state(health, peer, PrivateIntakeTransportState::Replaying).await;
+                                }
+                            }
                         }
                         Some((peer, Ok(PrivatePacketAcquisition::InsertedAtCapacity))) => {
                             work.notify_waiters();
@@ -1730,6 +1760,21 @@ async fn set_peer_state(
     health.write().await.peers.insert(peer, state);
 }
 
+/// Transport state an expected-slot audit or probe reports for its outcome.
+fn transport_state_after_acquisition(
+    outcome: &PrivatePacketAcquisition,
+) -> PrivateIntakeTransportState {
+    match outcome {
+        PrivatePacketAcquisition::Absent => PrivateIntakeTransportState::CaughtUp,
+        PrivatePacketAcquisition::Inserted => PrivateIntakeTransportState::Replaying,
+        PrivatePacketAcquisition::InsertedAtCapacity
+        | PrivatePacketAcquisition::CapacityReached => PrivateIntakeTransportState::Backpressured,
+        PrivatePacketAcquisition::AlreadyBuffered | PrivatePacketAcquisition::PendingHandshake => {
+            PrivateIntakeTransportState::Replaying
+        }
+    }
+}
+
 async fn set_peer_audit_outcome(
     health: &Arc<AsyncRwLock<PrivateIntakeHealth>>,
     peer: PubkyPublicKey,
@@ -1738,15 +1783,7 @@ async fn set_peer_audit_outcome(
 ) {
     let mut health = health.write().await;
     let proves_absence = matches!(&outcome, PrivatePacketAcquisition::Absent);
-    let state = match outcome {
-        PrivatePacketAcquisition::Absent => PrivateIntakeTransportState::CaughtUp,
-        PrivatePacketAcquisition::Inserted => PrivateIntakeTransportState::Replaying,
-        PrivatePacketAcquisition::InsertedAtCapacity
-        | PrivatePacketAcquisition::CapacityReached => PrivateIntakeTransportState::Backpressured,
-        PrivatePacketAcquisition::AlreadyBuffered | PrivatePacketAcquisition::PendingHandshake => {
-            PrivateIntakeTransportState::Replaying
-        }
-    };
+    let state = transport_state_after_acquisition(&outcome);
     health.peers.insert(peer.clone(), state);
     if proves_absence {
         health.last_successful_audit_at.insert(peer, audited_at);
@@ -3747,22 +3784,25 @@ mod tests {
         .expect("pending handshake should retry before healthy audit cadence");
     }
 
-    type ObservedAcquisitions = Vec<(PubkyPublicKey, Option<PrivateIntakeCursorRecord>)>;
+    struct LiveInsertRun {
+        exit: PrivateIntakeEventLoopExit,
+        observed: Vec<(PubkyPublicKey, Option<PrivateIntakeCursorRecord>)>,
+        health: PrivateIntakeHealth,
+        /// Whether `work` woke the consumer again after the probe started.
+        woken_after_probe: bool,
+    }
 
     /// Runs the connected stream loop over one live event from `peer` until the
     /// stream ends. `outcomes` answers acquisitions in order: the first answers
     /// the event, the rest answer the follow-up probe.
     ///
-    /// Every run also asserts that `work` wakes the consumer only after the
-    /// last acquisition, so a drain cannot race the probe.
+    /// Every run also asserts that `work` wakes the consumer for the event's
+    /// packet before the probe's first acquisition, so the probe never delays
+    /// delivery.
     async fn run_live_insert_event(
         peer: &PubkyPublicKey,
         outcomes: Vec<Result<PrivatePacketAcquisition>>,
-    ) -> (
-        PrivateIntakeEventLoopExit,
-        ObservedAcquisitions,
-        PrivateIntakeHealth,
-    ) {
+    ) -> LiveInsertRun {
         use futures_util::FutureExt as _;
 
         let owner = peer.to_public_key().unwrap();
@@ -3787,17 +3827,26 @@ mod tests {
         // Registered before the run, so it sees every wakeup of `work`.
         let wakeup = Arc::new(StdMutex::new(Box::pin(Arc::clone(&work).notified_owned())));
         wakeup.lock().unwrap().as_mut().enable();
-        let woken_before_acquisition = Arc::new(AtomicBool::new(false));
+        let woken_before_probe = Arc::new(AtomicBool::new(false));
         let (_stop, stop_rx) = watch::channel(false);
         let acquire: PrivateIntakeAcquire = Arc::new({
             let observed = Arc::clone(&observed);
+            let work = Arc::clone(&work);
             let wakeup = Arc::clone(&wakeup);
-            let woken_before_acquisition = Arc::clone(&woken_before_acquisition);
+            let woken_before_probe = Arc::clone(&woken_before_probe);
             move |requested, cursor| {
-                if wakeup.lock().unwrap().as_mut().now_or_never().is_some() {
-                    woken_before_acquisition.store(true, Ordering::SeqCst);
+                let mut observed = observed.lock().unwrap();
+                if observed.len() == 1 {
+                    // The probe's first acquisition: the event's wakeup must
+                    // have fired. Re-register to see any wakeup after it.
+                    let mut wakeup = wakeup.lock().unwrap();
+                    if wakeup.as_mut().now_or_never().is_some() {
+                        woken_before_probe.store(true, Ordering::SeqCst);
+                    }
+                    *wakeup = Box::pin(Arc::clone(&work).notified_owned());
+                    wakeup.as_mut().enable();
                 }
-                observed.lock().unwrap().push((requested, cursor));
+                observed.push((requested, cursor));
                 let outcome = outcomes
                     .lock()
                     .unwrap()
@@ -3824,23 +3873,25 @@ mod tests {
         .await;
 
         assert!(
-            !woken_before_acquisition.load(Ordering::SeqCst),
-            "work must not wake the consumer before the probe finishes"
+            woken_before_probe.load(Ordering::SeqCst),
+            "a live insert must wake the consumer before the probe's first acquisition"
         );
-        assert!(
-            wakeup.lock().unwrap().as_mut().now_or_never().is_some(),
-            "a live insert must wake the consumer"
-        );
+        let woken_after_probe = wakeup.lock().unwrap().as_mut().now_or_never().is_some();
         let observed = observed.lock().unwrap().clone();
         let health = health.read().await.clone();
-        (exit, observed, health)
+        LiveInsertRun {
+            exit,
+            observed,
+            health,
+            woken_after_probe,
+        }
     }
 
     #[tokio::test]
     async fn test_live_insert_event_probes_until_caught_up() {
         let peer = users(1).remove(0);
 
-        let (exit, observed, health) = run_live_insert_event(
+        let run = run_live_insert_event(
             &peer,
             vec![
                 Ok(PrivatePacketAcquisition::Inserted),
@@ -3850,22 +3901,26 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(exit, PrivateIntakeEventLoopExit::Ended));
-        assert_eq!(observed.len(), 3);
-        assert!(observed.iter().all(|(requested, _)| requested == &peer));
-        assert_eq!(observed[0].1.as_ref().unwrap().event_id, 42);
+        assert!(matches!(run.exit, PrivateIntakeEventLoopExit::Ended));
+        assert_eq!(run.observed.len(), 3);
+        assert!(run.observed.iter().all(|(requested, _)| requested == &peer));
+        assert_eq!(run.observed[0].1.as_ref().unwrap().event_id, 42);
         assert!(
-            observed[1..].iter().all(|(_, cursor)| cursor.is_none()),
+            run.observed[1..].iter().all(|(_, cursor)| cursor.is_none()),
             "the probe must not advance the durable cursor"
         );
         assert_eq!(
-            health.peers[&peer],
+            run.health.peers[&peer],
             PrivateIntakeTransportState::CaughtUp,
             "a probe that finds the next slot absent proves the peer is caught up"
         );
         assert!(
-            !health.last_successful_audit_at.contains_key(&peer),
+            !run.health.last_successful_audit_at.contains_key(&peer),
             "the probe must not stand in for the scheduled audit"
+        );
+        assert!(
+            run.woken_after_probe,
+            "a probe that buffered a packet must wake the consumer again"
         );
     }
 
@@ -3873,7 +3928,7 @@ mod tests {
     async fn test_live_insert_event_probe_at_capacity_backpressures() {
         let peer = users(1).remove(0);
 
-        let (exit, observed, health) = run_live_insert_event(
+        let run = run_live_insert_event(
             &peer,
             vec![
                 Ok(PrivatePacketAcquisition::Inserted),
@@ -3882,37 +3937,72 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(exit, PrivateIntakeEventLoopExit::Backpressured));
-        assert_eq!(observed.len(), 2);
+        assert!(matches!(
+            run.exit,
+            PrivateIntakeEventLoopExit::Backpressured
+        ));
+        assert_eq!(run.observed.len(), 2);
         assert_eq!(
-            health.peers[&peer],
+            run.health.peers[&peer],
             PrivateIntakeTransportState::Backpressured
         );
+        assert!(run.woken_after_probe);
+    }
+
+    fn probe_fetch_error() -> Result<PrivatePacketAcquisition> {
+        Err(PaykitSdkError::Transport {
+            context: "probe fetch failed".into(),
+            source: None,
+        })
     }
 
     #[tokio::test]
     async fn test_live_insert_event_probe_failure_keeps_peer_replaying() {
         let peer = users(1).remove(0);
+        let mut outcomes = vec![Ok(PrivatePacketAcquisition::Inserted)];
+        outcomes.extend((0..LIVE_INSERT_PROBE_ATTEMPTS).map(|_| probe_fetch_error()));
 
-        let (exit, observed, health) = run_live_insert_event(
+        let run = run_live_insert_event(&peer, outcomes).await;
+
+        assert!(matches!(run.exit, PrivateIntakeEventLoopExit::Ended));
+        assert_eq!(
+            run.observed.len(),
+            1 + LIVE_INSERT_PROBE_ATTEMPTS,
+            "every probe attempt must run once, and no more"
+        );
+        assert_eq!(
+            run.health.peers[&peer],
+            PrivateIntakeTransportState::Replaying,
+            "the event's packet is buffered, so a failed probe must not mark the peer stale"
+        );
+        assert!(
+            !run.woken_after_probe,
+            "a probe that buffered nothing must not wake the consumer again"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_live_insert_event_probe_retries_after_a_failed_attempt() {
+        let peer = users(1).remove(0);
+
+        let run = run_live_insert_event(
             &peer,
             vec![
                 Ok(PrivatePacketAcquisition::Inserted),
-                Err(PaykitSdkError::Transport {
-                    context: "probe fetch failed".into(),
-                    source: None,
-                }),
+                probe_fetch_error(),
+                Ok(PrivatePacketAcquisition::Absent),
             ],
         )
         .await;
 
-        assert!(matches!(exit, PrivateIntakeEventLoopExit::Ended));
-        assert_eq!(observed.len(), 2);
+        assert!(matches!(run.exit, PrivateIntakeEventLoopExit::Ended));
+        assert_eq!(run.observed.len(), 3);
         assert_eq!(
-            health.peers[&peer],
-            PrivateIntakeTransportState::Replaying,
-            "the event's packet is buffered, so a failed probe must not mark the peer stale"
+            run.health.peers[&peer],
+            PrivateIntakeTransportState::CaughtUp,
+            "a retry that finds the next slot absent proves the peer is caught up"
         );
+        assert!(!run.woken_after_probe);
     }
 
     #[tokio::test]
@@ -4364,21 +4454,31 @@ mod tests {
         );
     }
 
-    /// A drain that is already running can persist the next link generation
-    /// while the probe's acquisition still holds the generation it read. The
-    /// event's packet is buffered, so the peer stays `Replaying`, not `Stale`.
+    /// The consumer is woken before the probe, so its drain can persist the
+    /// next link generation while the probe's first attempt still holds the
+    /// generation it read. That attempt fails; the retry reads the post-drain
+    /// link state, finds the next slot absent, and settles the peer `CaughtUp`.
     #[tokio::test]
-    async fn test_live_insert_probe_racing_a_drain_keeps_peer_replaying() {
+    async fn test_live_insert_probe_recovers_from_a_concurrent_drain() {
         let storage = crate::storage::InMemoryStorage::new();
         let local = pubky::Keypair::random().public_key();
         let remote = pubky::Keypair::random().public_key();
         let peer = PubkyPublicKey::from_public_key(&remote);
         let (snapshot, secret) = intake_snapshot(&local, &remote, 3);
         seed_intake_link(&storage, peer.clone(), &snapshot, 7).await;
-        let snapshot_bytes = snapshot.serialize();
-        let drained_snapshot_bytes = intake_snapshot(&local, &remote, 4).0.serialize();
+        let expected_resource = snapshot
+            .private_application_message_resource_at_counter(&local, &secret, 3)
+            .unwrap()
+            .0;
+        let drained_snapshot = intake_snapshot(&local, &remote, 4).0;
+        let next_resource = drained_snapshot
+            .private_application_message_resource_at_counter(&local, &secret, 4)
+            .unwrap()
+            .0;
+        let drained_snapshot_bytes = drained_snapshot.serialize();
         let acquisitions = Arc::new(AtomicUsize::new(0));
         let generation_races = Arc::new(AtomicUsize::new(0));
+        let observed_resources = Arc::new(StdMutex::new(Vec::new()));
         let group = SubscriptionGroup {
             homeserver: pubky::Keypair::random().public_key(),
             homeserver_name: "homeserver-a".into(),
@@ -4398,17 +4498,24 @@ mod tests {
             let local = local.clone();
             let acquisitions = Arc::clone(&acquisitions);
             let generation_races = Arc::clone(&generation_races);
+            let observed_resources = Arc::clone(&observed_resources);
+            let expected_resource = expected_resource.clone();
             move |requested_peer, cursor| {
                 let storage = storage.clone();
                 let local = local.clone();
-                let snapshot_bytes = snapshot_bytes.clone();
                 let drained_snapshot_bytes = drained_snapshot_bytes.clone();
                 let generation_races = Arc::clone(&generation_races);
-                let probe = acquisitions.fetch_add(1, Ordering::SeqCst) > 0;
+                let observed_resources = Arc::clone(&observed_resources);
+                let expected_resource = expected_resource.clone();
+                let first_probe_attempt = acquisitions.fetch_add(1, Ordering::SeqCst) == 1;
                 Box::pin(async move {
-                    if probe {
-                        // The consumer drains the event's packet the way
-                        // `private_stream` does, after the probe read
+                    // Each acquisition reads the current link state, as
+                    // `acquire_expected_private_packet` does.
+                    let link =
+                        storage.snapshot().unwrap().encrypted_link_states[&requested_peer].clone();
+                    if first_probe_attempt {
+                        // The woken consumer drains the event's packet the
+                        // way `private_stream` does, after the probe read
                         // generation 7 and its snapshot.
                         let drained_peer = requested_peer.clone();
                         storage
@@ -4428,18 +4535,26 @@ mod tests {
                             })
                             .await?;
                     }
-                    let snapshot = paykit_lib::EncryptedLinkSnapshot::deserialize(&snapshot_bytes)?;
+                    let snapshot = paykit_lib::EncryptedLinkSnapshot::deserialize(
+                        link.link_snapshot.as_ref().unwrap(),
+                    )?;
                     let outcome = acquire_expected_private_packet_with_fetch(
                         &storage,
                         requested_peer,
                         &snapshot,
                         &local,
                         &secret,
-                        7,
+                        link.generation,
                         cursor,
                         Utc::now(),
-                        |_| async {
-                            Ok(Some(vec![9; crate::storage::PRIVATE_INTAKE_PACKET_BYTES]))
+                        move |resource| {
+                            // The peer published only the event's slot.
+                            let published = resource == expected_resource;
+                            observed_resources.lock().unwrap().push(resource);
+                            async move {
+                                Ok(published
+                                    .then(|| vec![9; crate::storage::PRIVATE_INTAKE_PACKET_BYTES]))
+                            }
                         },
                     )
                     .await;
@@ -4469,22 +4584,31 @@ mod tests {
         .await;
 
         assert!(matches!(exit, PrivateIntakeEventLoopExit::Ended));
-        assert_eq!(acquisitions.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            health.read().await.peers[&peer],
+            PrivateIntakeTransportState::CaughtUp,
+            "a retry after a drain must settle the peer"
+        );
+        assert_eq!(
+            acquisitions.load(Ordering::SeqCst),
+            3,
+            "the event, the probe attempt that lost the race, and its retry"
+        );
         assert_eq!(
             generation_races.load(Ordering::SeqCst),
             1,
-            "the probe must hit the generation race"
+            "the first probe attempt must hit the generation race"
+        );
+        assert_eq!(
+            *observed_resources.lock().unwrap(),
+            vec![expected_resource, next_resource],
+            "the retry must probe the slot after the drained packet"
         );
         let state = storage.snapshot().unwrap();
         assert_eq!(state.private_intake_cursors[&peer].event_id, 42);
         assert!(state.private_intake_peers[&peer]
             .buffered_packets
             .is_empty());
-        assert_eq!(
-            health.read().await.peers[&peer],
-            PrivateIntakeTransportState::Replaying,
-            "a probe that lost the race to a drain must not mark the peer stale"
-        );
     }
 
     #[tokio::test]
