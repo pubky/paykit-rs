@@ -1735,6 +1735,87 @@ impl StageStore {
 }
 
 #[tokio::test]
+async fn test_period_payments_payee_cancellation_crosses_an_accepted_attempt() {
+    let w = World::new();
+    let base = Arc::new(StageStore::default());
+    let mut payer = w.wallet_on("phone", base.clone()).await;
+    let mut tablet = w.wallet("tablet").await;
+    let mut shop = w.shop().await;
+    let (request, sale) = subscribed(&w, &mut shop, &mut payer).await;
+    tablet.receive(None).await.unwrap();
+    let obligation = paykit_lib::derive::request_obligation(
+        payer.app().naming_key(),
+        &request.payee,
+        &request.request_hash,
+        january().start_secs(),
+    );
+    let rail = Arc::clone(&w.rail);
+    let (finished, seller) = std::sync::mpsc::channel();
+    base.on_stage("paying", move || {
+        // Both apps use their ordinary APIs while the phone is between its commit and call.
+        let shop = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(async move {
+                    let claim = tablet
+                        .app_mut()
+                        .read_claim(&obligation)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(claim.view.status, ClaimStatus::Attempting);
+                    assert!(rail.all_executions().is_empty());
+                    shop.cancel_sent_request(&sale, None).await.unwrap();
+                    tablet.receive(None).await.unwrap();
+                    assert_eq!(
+                        tablet.request(&request).await.unwrap().status,
+                        RequestStatus::Cancelled
+                    );
+                    shop
+                })
+        })
+        .join()
+        .unwrap();
+        assert!(finished.send(shop).is_ok());
+    });
+    let paid = by_user(&mut payer, &request, january(), PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(w.rail.pay_calls(&paid.attempt_id()), 1);
+    let record = period_record(&w, &payer, &request, january())
+        .await
+        .unwrap();
+    let (proof, body) = proof_of(&record);
+    assert_eq!(body.billing_period, Some(january()));
+    assert_eq!(proof.message().refs, [request.request_hash]);
+    let mut shop = seller.try_recv().unwrap();
+    shop.receive(None).await.unwrap();
+    let period = &shop.payee_activity().await.unwrap()[0].periods[0];
+    assert_eq!(period.billing_period, january());
+    let received = shop
+        .app()
+        .shared_record(&period.record)
+        .await
+        .unwrap()
+        .unwrap();
+    let record = ActivityRecord::read(
+        received.content.value().unwrap(),
+        &w.bob_id(),
+        ActivitySide::Payee,
+    )
+    .unwrap();
+    assert_eq!(proof_of(&record).0.hash(), proof.hash());
+    payer.receive(None).await.unwrap();
+    let next = by_user(&mut payer, &request, february(), early())
+        .await
+        .unwrap_err();
+    assert_eq!(refusal(&next), Refusal::Cancelled);
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
 async fn test_period_payments_period_record_divergent_after_the_paying_commit_holds_it() {
     // Right after the wallet journals January's `Paying` by hand, a view shows January's
     // period record divergent: the dispatch is held, nothing paid, as the check before it
