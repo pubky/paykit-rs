@@ -211,8 +211,10 @@ impl Paykit {
     ///
     /// Returns where the record stands on the Homeserver after the call, as
     /// [`Paykit::set_public_endpoints`] does: [`Publication::Owed`] when the Homeserver write
-    /// failed, which the client retries at the next read or update, and
+    /// failed, which the client retries at the next read or update, or
     /// [`Publication::Unchecked`] when the read that checks the Homeserver copy failed.
+    /// [`Publication::AwaitingRecord`] means the client retains a newer record choice
+    /// and is waiting for it to settle before repairing the public copy.
     ///
     /// # Errors
     ///

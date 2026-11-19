@@ -96,6 +96,11 @@ delays signing, `PaykitError::PublicEndpointChangePending` means that the
 client retained the requested edit. Show the withdrawal as pending until the
 client signs the updated record and reports its publication.
 
+After restoring a backup, drive the wallet's first receive. When publication
+returns `Publication::AwaitingRecord`, the wallet still has a newer record
+choice to settle. Keep the change pending and continue normal receives.
+A restore carrying only the accepted offer can repair its missing public copy.
+
 ## Use a Switch App built by the host
 
 When the host opens the Switch App, use `PaykitConfig::protocol` to build the

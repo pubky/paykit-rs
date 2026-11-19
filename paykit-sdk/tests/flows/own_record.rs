@@ -2,6 +2,8 @@
 //! a payee app that publishes its record, with `expires_at` and renewal past half its
 //! lifetime, and the capabilities of a paying app.
 
+mod restored_publication;
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
