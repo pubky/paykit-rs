@@ -299,7 +299,7 @@ impl Paykit {
 
     /// Submit `batch`; after a `409 conflict` the floor is read again before the error
     /// returns, so the next try builds on what the switch holds.
-    async fn submit_floor(&mut self, batch: OpBatch) -> Result<()> {
+    pub(crate) async fn submit_floor(&mut self, batch: OpBatch) -> Result<()> {
         match self.submit(batch).await {
             Ok(_) => Ok(()),
             Err(error) => {
@@ -334,11 +334,7 @@ impl Paykit {
         to: &[u8; 32],
     ) -> Result<String> {
         let msg_id = signed.msg_id().to_owned();
-        let batch = match self.floor_owed_for(Some(to)).await? {
-            Some(to_ms) => self.floor_batch(to_ms).await?,
-            None => None,
-        };
-        match batch {
+        match self.resend_floor_batch(to).await? {
             Some(batch) => self
                 .submit_floor(batch.queue(signed))
                 .await
@@ -348,6 +344,14 @@ impl Paykit {
             }
         }
         Ok(msg_id)
+    }
+
+    /// The conditional floor raise which must apply before a recovery request can leave.
+    pub(crate) async fn resend_floor_batch(&mut self, to: &[u8; 32]) -> Result<Option<OpBatch>> {
+        match self.floor_owed_for(Some(to)).await? {
+            Some(to_ms) => self.floor_batch(to_ms).await,
+            None => Ok(None),
+        }
     }
 
     /// Write the raise owed, when one is kept and the floor can be read, before the block
@@ -461,7 +465,7 @@ fn unreadable_floor() -> crate::error::PaykitError {
 /// - a failure of the app itself (its store, the protocol's store, an alarm, an app stopped
 ///   or gone): as it is. A later try doesn't get past it by itself, and it is never reported
 ///   as a floor to wait for.
-fn floor_write_error(error: crate::error::PaykitError) -> crate::error::PaykitError {
+pub(crate) fn floor_write_error(error: crate::error::PaykitError) -> crate::error::PaykitError {
     use pubky_switch_client::app::{AppError, Refusal as ClientRefusal};
     use pubky_switch_core::http::Retry;
     if error.kept_batch().is_some() || error.code() == Some(ErrorCode::Conflict) {

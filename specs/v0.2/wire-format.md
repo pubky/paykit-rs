@@ -84,6 +84,7 @@ Paykit's identifiers, beside the Switch's (Switch wire 1.7):
 | `payee_activity` | payment without a request | `lp(Payment Endpoint Identifier text, settlement ID)`, below |
 | `payment_lists` | one per payee app | `lp(payee identity, publishing app ID (16 bytes))` |
 | `private_list_publications` | one per publishing app, recipient and generation | `lp(publishing app ID (16 bytes), recipient identity (32 bytes), u64(publishing identity generation))` |
+| `recovery_uploads` | one per original app and recovery opening | `lp(original App ID (16 bytes), opening identity document hash (32 bytes))` |
 | `allowance_proposals` | one per pending Allowance proposal | `lp(counterparty identity, allowance_id text)` |
 | `allowances`, `allowance_ledgers` | one per Allowance | `lp(counterparty identity, allowance_id text)` |
 | `block_floor` | the one record | `lp(own identity)` |
@@ -112,6 +113,7 @@ Paykit's own format signs under a `paykit/v1/` label, with the Switch's algorith
 |---|---|---|---|---|
 | Executor grant | `paykit/v1/executor-grant` | executor app signing key | identity, counterparty identity, `allowance_id`, terms hash, `u64(confirmed_generation)`, `u64(generation)` and `u64(seq)` of the Allowance record version its write builds on (0 and 0 for a new record) | `sig` of the grant (3.3) |
 | Ledger handoff | `paykit/v1/ledger-handoff` | previous executor app signing key | identity, counterparty identity, `allowance_id`, `u64(generation)` and `u64(version)` of the grant history entry that handed the Allowance on, `u64(generation)` and `u64(version)` of the previous executor's last ledger version, and that write's item hash | `sig` of `ledger_handoff` (5.4) |
+| Recovery report | `paykit/v1/recovery-upload` | original app signing key | the single length-prefixed field in 5.10 | `signature` in the report |
 
 - Vectors: `signatures.json`, the executor grant's and ledger handoff's cases, generated and checked by `paykit-lib` on `v0.2`, as the Switch set's [`signatures.json`](https://github.com/pubky/pubky-switch/blob/5f3209aae28d1b538a31c8ce43506b39df828b61/spec/vectors/signatures.json) gives those of the Switch's labels.
 
@@ -790,6 +792,7 @@ Until an adopted Switch revision and its Paykit mapping and implementation provi
 | `payee_activity`, a request sent under a label | `paykit_request:<label>` | `["paykit_request:<label>"]` | `identifiers.json` `policies` (`shop1`) |
 | `payment_lists` | `paykit_pay` | `["paykit_pay"]` | |
 | `private_list_publications` | `paykit_request` | `["paykit_request"]` | permanent, naming the key's generation (5.8); vectors come with the code that writes it |
+| `recovery_uploads` | `paykit_recovery` | `["paykit_recovery"]` | ordinary (5.10) |
 | `allowance_proposals` | `paykit_allowance` | `["paykit_allowance"]` | ordinary |
 | `allowances` | `paykit_allowance` | `["paykit_allowance"]` | permanent, `"permanent":{"generation":null}` |
 | `allowance_ledgers` | `paykit_allowance` | `["paykit_allowance_execute"]` | `identifiers.json` `policies` |
@@ -1171,6 +1174,49 @@ Vectors for this record come with the code that writes it.
 ### 5.9 Allowance origins and initial ledgers
 
 Allowance acceptance is unavailable in this revision, and no new authority to pay under an Allowance is established through acceptance (spec 8.3.1). The formats by which acceptance establishes the Allower's initial ledger, and the executor's initial anchor, are specified with their implementation.
+
+### 5.10 Recovery reports (`recovery_uploads`)
+
+The published `v0.2` vector set still needs the recovery report signature case.
+
+The identity-signed opening of the recovered generation supplies the account, its original App IDs, the lost generation (`recovery_from`), the recovered generation and its opening service key. Use the opening document’s authenticated hash for the record address in Section 1 and the ordinary fixed policy in 5.1. Count an explicit identity-signed removal only for the loss it covers.
+
+The sealed JSON object has six required members. Read `v` as an unsigned JSON integer and require the value `1` before interpreting the record.
+
+| Member | Value |
+|---|---|
+| `v` | `1`, the record schema version |
+| `cutoff` | Base64url of the 32-byte cutoff digest below |
+| `inventory` | Base64url of the 32-byte inventory digest below |
+| `dispositions` | Base64url of the 32-byte dispositions digest below |
+| `signature` | Base64url of the 64-byte Ed25519 signature made by the original app |
+| `author_certificate` | The original app’s identity-signed Switch App Certificate, in its signed-document form |
+
+**Disclosed evidence.** Use `lp` from Switch wire 1.4, with a four-byte unsigned big-endian length before each field, and `H` from Switch wire 1.5 (unkeyed BLAKE3, 32 output bytes). Quoted literals are their exact ASCII bytes. `u64` is eight unsigned big-endian bytes. An identifier or hash contributes its decoded bytes. `set(rows)` is `lp` of the complete encoded rows sorted in unsigned bytewise lexicographic order. The empty set is zero bytes. Reject duplicate rows. To check an encoded disclosure, require this ordering and consume every byte. To build one from typed inputs, sort before encoding. Use the exact disclosed bytes for signed bodies and local values. Re-serializing a parsed JSON value can change those bytes.
+
+A witness is one of these encoded rows. Select the tag from the underlying evidence type.
+
+| Evidence | Encoded row |
+|---|---|
+| Identity document, app certificate, signed operation, or service transition proof | `lp(tag, doc_bytes)` with tag `"identity"`, `"certificate"`, `"operation"`, or `"proof"` respectively. Switch wire 2.2 defines `doc_bytes = lp(exact signed body bytes, raw 64-byte signature)`. |
+| Signed service head | `lp("head", u64(chain_version), u64(generation), u64(seq), chain_hash, sig)` using the 32-byte hash and 64-byte signature from Switch wire 6.7. |
+| Local checkpoint or retained local evidence | `lp("local", scheme, key, value)`. `scheme` names the author’s format as `name/version`. The name is one or more lowercase ASCII letters, digits, dots or hyphens and the version is a positive decimal integer without leading zeroes (for example, `org.example.wallet/1`). `key` is the nonempty raw locator in that format and `value` is the exact retained byte string. A verifier can match these bytes across implementations. Interpreting their contents requires the named format. |
+
+The subject of an inventory entry is `lp(kind, key)` for `"record"` (32-byte Switch record key), `"claim"` (32-byte Paykit obligation ID) or `"settlement"` (full 32-byte settlement tag from Section 1.5). A duty with only a local locator uses `lp("local", scheme, key)` with the same rules as a local witness. Use the same subject bytes in its disposition.
+
+| Digest | Typed preimage for `H` |
+|---|---|
+| `cutoff` | `lp("paykit/v1/recovery-cutoff", set(anchors))`. Include the identity documents, verified old service heads or local checkpoints that delimit this original’s scan. Require at least one anchor. A local checkpoint used to claim an uninterrupted scan must have the same value before and after enumeration. |
+| `inventory` | `lp("paykit/v1/recovery-inventory", cutoff, set(items))`. Each item is `lp(subject, set(witnesses))` for the records, claims, settlements and local duties the scan found. Keep a subject with incomplete evidence in the inventory. |
+| `dispositions` | `lp("paykit/v1/recovery-dispositions", inventory, set(decisions))`. Each decision is `lp(subject, state, set(witnesses))`. `state` is `"held"` for unresolved work, `"represented"` for evidence the original found at the recovered service, `"transferred"` for protective custody accepted by another holder, or `"terminal"` for a final outcome supported by the witnesses. Require supporting witnesses for every state except `"held"`. |
+
+Require distinct subjects in each set of items or decisions and exactly one decision for every inventory subject. Recompute the digests in table order and compare all three to the report. An empty inventory has an empty set of decisions. A digest match establishes which evidence and decisions the original signed. Verifying an operation, its historical authority, the completeness of the scan or the claimed outcome requires the underlying evidence and the rules for that item. An omission, a declared terminal state or a later relay cannot by itself release a payment or credit.
+
+The app signs under `paykit/v1/recovery-upload` with **one field**. That field is `lp(u64(1), identity, original App ID, u64(lost generation), u64(recovered generation), opening service key, opening identity document hash, cutoff, inventory, dispositions)`. The first integer is the checked outer `v`. The identity, service key, document hash and commitments are raw 32-byte strings. The App ID is 16 bytes. Signature framing follows Section 1 and Switch wire 2.1. The original can give its report to a different app for publication. The inner signature covers this version, loss context and these three digests. The authenticated service write covers the sealed value, including the presented certificate and any other members. A reader holding only the report can check the origin and the committed digests. Disclosed inputs let it recompute those digests.
+
+The reader needs a current recovery grant, its scope key, and the verified opening for the loss it follows. It verifies the current applied write at the derived key, the fixed policy, and the publishing app’s signing certificate and `paykit_recovery` grant. Independently it verifies `author_certificate` under the opening’s identity, checks that its App ID is the addressed opening member, and verifies `signature` under that certificate’s signing key. Each certificate must count in the authenticated identity directory at the write’s accepted time and be valid at that time. These checks also apply when the publisher is the original. Readers ignore unknown members. Rewriting a value preserves unknown members as in Section 5.
+
+The exact service application identifies a publication of this report. A fresh application of the same signed report identifies its republication. Neither application establishes that the original’s historical commitments still cover every relevant action. An absent, deleted or unverified report supplies no commitments. An unreadable collection, an unconfirmed opening or a changed loss cannot supply an authoritative roster. Reading reports authorizes no payment or credit (spec 7.3).
 
 ## Appendix A. Choices this document made
 

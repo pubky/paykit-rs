@@ -84,6 +84,17 @@ impl std::fmt::Debug for KeptMessage {
 }
 
 impl KeptMessage {
+    /// Keep the original signed by this app before it hands it to the outbox.
+    pub(crate) fn signed(sender: [u8; 32], cert: &SignedDoc, message: &SignedMessage) -> Self {
+        Self {
+            sender,
+            cert: cert.clone(),
+            plaintext: message.plaintext().encode(),
+            accepted_at: None,
+            seq: None,
+        }
+    }
+
     /// Keep `stored`.
     pub(crate) fn of(stored: &StoredMessage) -> Self {
         Self {

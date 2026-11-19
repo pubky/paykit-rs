@@ -863,7 +863,7 @@ dependencies = [
 [[package]]
 name = "pubky-switch-client"
 version = "0.1.0"
-source = "git+https://github.com/pubky/pubky-switch?rev=07aac6af08356b250c4e3abd8250c2d965bc3fdc#07aac6af08356b250c4e3abd8250c2d965bc3fdc"
+source = "git+https://github.com/pubky/pubky-switch?rev=3e4fef5954080a524514547dcd7b7a60ac372e17#3e4fef5954080a524514547dcd7b7a60ac372e17"
 dependencies = [
  "blake3",
  "bytes",
@@ -886,7 +886,7 @@ dependencies = [
 [[package]]
 name = "pubky-switch-core"
 version = "0.1.0"
-source = "git+https://github.com/pubky/pubky-switch?rev=07aac6af08356b250c4e3abd8250c2d965bc3fdc#07aac6af08356b250c4e3abd8250c2d965bc3fdc"
+source = "git+https://github.com/pubky/pubky-switch?rev=3e4fef5954080a524514547dcd7b7a60ac372e17#3e4fef5954080a524514547dcd7b7a60ac372e17"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -905,7 +905,7 @@ dependencies = [
 [[package]]
 name = "pubky-switch-signer"
 version = "0.1.0"
-source = "git+https://github.com/pubky/pubky-switch?rev=07aac6af08356b250c4e3abd8250c2d965bc3fdc#07aac6af08356b250c4e3abd8250c2d965bc3fdc"
+source = "git+https://github.com/pubky/pubky-switch?rev=3e4fef5954080a524514547dcd7b7a60ac372e17#3e4fef5954080a524514547dcd7b7a60ac372e17"
 dependencies = [
  "pubky-switch-client",
  "pubky-switch-core",
