@@ -728,14 +728,12 @@ impl Paykit {
                     self.local_put(&key::list_recipient(&recipient.recipient), &recipient)
                         .await?;
                 }
-                let Some(now) = self.service_time() else {
-                    return Ok(());
-                };
                 if !recipient.chosen || revision.is_none() {
                     return Ok(());
                 }
                 let local = ListVersion::new(prior.generation, prior.counter)?;
-                let (version, missing) = if recipient.answers.has_requests() {
+                let requests = recipient.answers.has_requests();
+                let (version, missing) = if requests {
                     self.current_list_for_request(prior, accepted.is_some())
                         .await?
                 } else {
@@ -744,8 +742,14 @@ impl Paykit {
                 if version == local && accepted.is_none() {
                     return Ok(());
                 }
-                let now = self.service_time().unwrap_or(now);
-                let missing = self.earlier_list_answers(&recipient, missing, now).await?;
+                let Some(now) = self.service_time() else {
+                    return Ok(());
+                };
+                let missing = if requests {
+                    self.earlier_list_answers(&recipient, missing, now).await?
+                } else {
+                    missing
+                };
                 match recipient.answers.decision(now, version, missing) {
                     answers::Reply::Wait => return Ok(()),
                     answers::Reply::Newer => requested_after = Some(version),

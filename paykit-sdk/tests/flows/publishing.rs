@@ -1828,6 +1828,20 @@ async fn test_publication_answers_only_its_chosen_contact_and_resends_the_same_l
     shop.withdraw_list_from(wallet.identity()).await.unwrap();
     let withdrawal = published(&shop, &wallet).await;
     assert!(withdrawal.last().unwrap().withdrawn);
+    wallet.receive(None).await.unwrap();
+    let refused = wallet
+        .pay_without_request(UnrequestedPayment::new(w.bob_id(), btc("0.003")))
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::NoDestination(_))
+        ),
+        "{refused}"
+    );
+    assert_eq!(w.rail.all_executions().len(), 2);
     request_list(&mut wallet, &mut shop, publisher, Some(first[0].version)).await;
     assert_eq!(published(&shop, &wallet).await, withdrawal);
 }
@@ -1967,6 +1981,8 @@ async fn test_publication_retains_a_named_request_after_another_installation_pub
     let newest = published(&shop, &wallet).await.pop().unwrap();
     assert_eq!(newest.version, winner[0].version.next().unwrap());
     assert!(!newest.withdrawn);
+    // The recipient's signed append time distinguishes a repeat from its first acceptance.
+    w.clock.advance_ms(1);
     request_list(&mut wallet, &mut shop, publisher, Some(first[0].version)).await;
     assert_eq!(w.record_writes(&w.bob, &key), 3);
     let repeated = published(&shop, &wallet).await.pop().unwrap();
