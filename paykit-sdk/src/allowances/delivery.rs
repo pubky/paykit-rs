@@ -163,6 +163,21 @@ pub(crate) fn judge_append(
     {
         return Ok(Withdraw);
     }
+    if let Some(record) = &pending {
+        let retired =
+            state::delivery_get::<super::PendingRetirement>(d, &key::pending_retirement(&p_key))
+                .map_err(view_failure)?;
+        let kept =
+            state::bound_view_scan(d.local(), &key::kept_reply(&msg.to, &a_key, ""), &binder)
+                .map_err(view_failure)?;
+        let notes = state::bound_view_scan(d.local(), &key::stored_notes_of(&msg.to), &binder)
+            .map_err(view_failure)?;
+        if super::pending::awaits_competing_proposal(&own, record, retired.as_ref(), kept, notes)
+            .map_err(view_failure)?
+        {
+            return Ok(Hold);
+        }
+    }
     let supported = match Kind::from_kind(&msg.kind) {
         Some(Kind::AllowanceProposal) => pending.is_some_and(|r| r.proposal().hash() == d.hash()),
         Some(Kind::AllowanceRejection) => {

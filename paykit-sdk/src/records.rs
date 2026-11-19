@@ -243,7 +243,8 @@ impl KeptMessage {
                 || self.order().is_err()
                 || !matches!(
                     message.body(),
-                    paykit_lib::Body::AllowanceAcceptance(_)
+                    paykit_lib::Body::AllowanceProposal(_)
+                        | paykit_lib::Body::AllowanceAcceptance(_)
                         | paykit_lib::Body::AllowanceRejection(_)
                 )
             {

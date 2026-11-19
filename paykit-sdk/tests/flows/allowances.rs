@@ -2212,11 +2212,53 @@ fn propose_as(w: &World, to: &[[u8; 16]], allowance_id: &str, limit: &str) {
     );
 }
 
+/// Deliver one signed competing proposal so another enrolled wallet can place that same message.
+fn competing_proposal(
+    w: &World,
+    shop: &Paykit,
+    wallet: &Paykit,
+    id: &paykit_lib::AllowanceId,
+) -> StoredMessage {
+    let second = signed_pending_proposal(shop, w.alice_id(), id, "allowee");
+    w.alice
+        .switch()
+        .send_plaintext(
+            w.bob_id(),
+            second.cert(),
+            second.plaintext(),
+            &[wallet.app_id()],
+        )
+        .unwrap();
+    second
+}
+
+async fn share_competing_proposal(
+    w: &World,
+    phone: &mut Paykit,
+    id: &paykit_lib::AllowanceId,
+    second: &StoredMessage,
+) {
+    let target = pending_target(&w.bob_id(), id);
+    let pubky_switch_client::app::RecordRead::Fresh(held) =
+        phone.app_mut().read_record_fresh(&target).await.unwrap()
+    else {
+        panic!("the original must be current");
+    };
+    let mut record =
+        PendingAllowanceRecord::read(held.content.value().unwrap(), &w.alice_id()).unwrap();
+    assert!(record.note_proposal(second.clone()).unwrap());
+    Box::pin(write_record(
+        phone,
+        &target,
+        Some(&record.to_json().unwrap()),
+    ))
+    .await;
+}
+
 #[tokio::test]
 async fn test_allowances_second_proposal_conflicts_and_is_recorded() {
-    // Bob proposes again under the same Allowance ID with other terms: the second proposal
-    // is kept as the stop, then written into the record's `conflicted`. The Allowance shows
-    // conflicted, and nothing is answered under it (Paykit spec 8.3, "Conflicted").
+    // The first wallet keeps Bob's second proposal owed while the account shows only
+    // the first. The other enrolled wallet then writes both (Paykit spec 8.3.1).
     let w = World::new();
     let mut shop = Box::pin(shop(&w)).await;
     let mut wallet = Box::pin(wallet(&w)).await;
@@ -2224,10 +2266,42 @@ async fn test_allowances_second_proposal_conflicts_and_is_recorded() {
     let id = wallet.allowance(&mine).await.unwrap().allowance_id;
     let physical = pending_key(&wallet, &w.bob_id(), &id);
     let writes = w.record_writes(&w.alice, &physical);
-    propose_as(&w, &[wallet.app_id()], id.as_str(), "0.20");
+    let mut phone = Box::pin(alice_app(
+        &w,
+        "phone",
+        AppScopes::new().pay().allowance().build().unwrap(),
+    ))
+    .await;
+    let second = competing_proposal(&w, &shop, &wallet, &id);
     let got = wallet.receive(None).await.unwrap();
     assert!(received(&got, "paykit.allowance_proposal"), "{got:?}");
-    // The step wrote nothing at the switch; the later write placed the conflict.
+    let msg_id = &second.message().msg_id;
+    assert!(Box::pin(keeps(&wallet, b"pr/", msg_id)).await);
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"pc/")
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(w.record_writes(&w.alice, &physical), writes);
+    assert!(Box::pin(pending_at(&wallet, &mine))
+        .await
+        .conflicted()
+        .is_none());
+    wallet.receive(None).await.unwrap();
+    assert!(Box::pin(keeps(&wallet, b"pr/", msg_id)).await);
+    assert_eq!(
+        wallet.allowance(&mine).await.unwrap().status,
+        AllowanceStatus::Conflicted
+    );
+    assert!(matches!(
+        refusal(&wallet.reject_allowance(&mine).await.unwrap_err()),
+        Some(Refusal::AllowanceConflicted)
+    ));
+    Box::pin(share_competing_proposal(&w, &mut phone, &id, &second)).await;
+    wallet.receive(None).await.unwrap();
+    assert!(!Box::pin(keeps(&wallet, b"pr/", msg_id)).await);
+    // The peer app's verified shared placement discharges the original obligation.
     assert_eq!(w.record_writes(&w.alice, &physical), writes + 1);
     assert!(wallet.app().shared_record(&mine).await.unwrap().is_none());
     assert!(wallet
@@ -2838,29 +2912,27 @@ async fn test_allowances_consent_under_a_key_not_its_spelling_is_corrupt() {
 
 #[tokio::test]
 async fn test_allowances_conflict_kept_as_the_stop_though_its_record_write_fails() {
-    // The second proposal is kept as the stop before anything else: the later write of it
-    // into the record is refused, and the Allowance shows conflicted all the same.
+    // The wallet retains the signed input while the pending record still shows the
+    // first proposal. The local view holds further use until the conflict is placed.
     let w = World::new();
     let mut shop = Box::pin(shop(&w)).await;
     let mut wallet = Box::pin(wallet(&w)).await;
     let (_, mine) = Box::pin(proposed(&w, &mut shop, &mut wallet)).await;
     let id = wallet.allowance(&mine).await.unwrap().allowance_id;
-    propose_as(&w, &[wallet.app_id()], id.as_str(), "0.20");
+    let second = competing_proposal(&w, &shop, &wallet, &id);
     refuse_writes(&w, 2);
     let got = wallet.receive(None).await.unwrap();
     assert!(
         Box::pin(value(&wallet, &pending_key(&wallet, &w.bob_id(), &id))).await["conflicted"]
             .is_null()
     );
-    assert_eq!(
-        wallet
-            .app()
-            .protocol_scan("paykit", b"pc/")
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
+    assert!(Box::pin(keeps(&wallet, b"pr/", &second.message().msg_id)).await);
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"pc/")
+        .await
+        .unwrap()
+        .is_empty());
     // The step wrote nothing at the switch, so no effect of it was refused.
     assert!(
         !got.report
@@ -3207,29 +3279,30 @@ async fn test_allowances_rejected_never_revived_by_a_restore_and_resends() {
 
 #[tokio::test]
 async fn test_allowances_conflicted_kept_through_a_restore_and_resends() {
-    // A conflicted Allowance, the wallet restored from a backup and bob's messages sent to it
-    // again: it stays conflicted, the record keeps `conflicted`, and nothing is answered
-    // (Paykit spec 8.3, "Never cleared").
+    // A restore and a resend preserve the conflicting signed proposal still owed,
+    // and leave the first proposal in the account record (Paykit spec 8.3.1).
     let w = World::new();
     let mut shop = Box::pin(shop(&w)).await;
     let mut wallet = Box::pin(wallet(&w)).await;
     let (_, mine) = Box::pin(proposed(&w, &mut shop, &mut wallet)).await;
     let id = wallet.allowance(&mine).await.unwrap().allowance_id;
-    propose_as(&w, &[wallet.app_id()], id.as_str(), "0.20");
+    let second = competing_proposal(&w, &shop, &wallet, &id);
     wallet.receive(None).await.unwrap();
+    assert!(Box::pin(keeps(&wallet, b"pr/", &second.message().msg_id)).await);
     assert!(Box::pin(pending_at(&wallet, &mine))
         .await
         .conflicted()
-        .is_some());
+        .is_none());
     let mut restored = Box::pin(restored_and_resent(&w, &mut shop, wallet)).await;
     assert_eq!(
         restored.allowance(&mine).await.unwrap().status,
         AllowanceStatus::Conflicted
     );
+    assert!(Box::pin(keeps(&restored, b"pr/", &second.message().msg_id)).await);
     assert!(Box::pin(pending_at(&restored, &mine))
         .await
         .conflicted()
-        .is_some());
+        .is_none());
     let error = restored.reject_allowance(&mine).await.unwrap_err();
     assert!(
         matches!(refusal(&error), Some(Refusal::AllowanceConflicted)),
@@ -4673,7 +4746,6 @@ async fn restored_rejection_over_conflict(w: &World, shop: &mut Paykit, shared: 
     let id = wallet.allowance(&key).await.unwrap().allowance_id;
     let original = Box::pin(queued_rejection(w, &mut wallet, &key)).await;
     let backup = wallet.backup().await.unwrap();
-    let app_id = wallet.app_id();
     drop(wallet);
     let p = signed_pending_proposal(shop, w.alice_id(), &id, "allowee");
     phone.receive(None).await.unwrap();
@@ -4687,7 +4759,7 @@ async fn restored_rejection_over_conflict(w: &World, shop: &mut Paykit, shared: 
             .hash(),
         p.hash()
     );
-    propose_as(w, &[app_id], id.as_str(), "0.20");
+    let second = competing_proposal(w, shop, &restored, &id);
     if !shared {
         refuse_writes(w, 12);
     }
@@ -4696,10 +4768,18 @@ async fn restored_rejection_over_conflict(w: &World, shop: &mut Paykit, shared: 
     for _ in 0..2 {
         restored.receive(None).await.unwrap();
     }
+    assert!(Box::pin(keeps(&restored, b"pr/", &second.message().msg_id)).await);
+    if shared {
+        Box::pin(share_competing_proposal(w, &mut phone, &id, &second)).await;
+        restored.receive(None).await.unwrap();
+    }
     let physical = pending_key(&restored, &w.bob_id(), &id);
     let view = restored.allowance(&key).await.unwrap();
     assert_eq!(view.status, AllowanceStatus::Conflicted);
-    assert!(Box::pin(keeps(&restored, b"pc/", &b64_of(&physical))).await);
+    assert_eq!(
+        Box::pin(keeps(&restored, b"pr/", &second.message().msg_id)).await,
+        !shared
+    );
     let held = restored
         .app()
         .shared_record(&physical)

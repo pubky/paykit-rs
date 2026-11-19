@@ -24,17 +24,8 @@ use std::{cmp::Ordering, collections::BTreeMap};
 #[serde(deny_unknown_fields)]
 pub(crate) struct PendingConflict {
     source: SeenVersion,
-    /// The latest proven live application of this same original in its observed lifetime.
-    current: SeenVersion,
     #[serde(with = "pubky_switch_core::enc::serde_b64_vec")]
     pending: Vec<u8>,
-    second: Option<KeptMessage>,
-    replies: Option<OpposedReplies>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OpposedReplies {
     acceptance: KeptMessage,
     rejection: KeptMessage,
 }
@@ -257,13 +248,9 @@ impl PendingConflict {
         }
         Opposed::Found(Box::new(Self {
             source: held.version.into(),
-            current: held.version.into(),
             pending: value.to_vec(),
-            second: None,
-            replies: Some(OpposedReplies {
-                acceptance: KeptMessage::taken_at(&q.message, first),
-                rejection: KeptMessage::taken_at(&r.message, later),
-            }),
+            acceptance: KeptMessage::taken_at(&q.message, first),
+            rejection: KeptMessage::taken_at(&r.message, later),
         }))
     }
 
@@ -271,65 +258,19 @@ impl PendingConflict {
         PendingAllowanceRecord::read(&self.pending, own).map_err(|_| PaykitError::corrupt())
     }
 
-    fn matches(
-        &self,
-        own: &[u8; 32],
-        current: &PendingAllowanceRecord,
-        held: &SharedRecord,
-    ) -> Result<bool> {
-        Ok(self.current.record_version() == held.version && self.stops(own, current)?)
-    }
-
-    /// An explicit discard is conditioned on the selected current write. A later
-    /// copy of the very same proposal cannot itself retire this known stop.
-    pub(super) fn stops(&self, own: &[u8; 32], pending: &PendingAllowanceRecord) -> Result<bool> {
-        Ok(self.original(own)?.proposal().hash() == pending.proposal().hash())
-    }
-
     fn source(&self) -> RecordVersion {
         self.source.record_version()
     }
 
-    fn merge(&mut self, other: Self) -> Result<()> {
-        if self.source != other.source || self.pending != other.pending {
-            return Err(PaykitError::corrupt());
-        }
-        self.current = self.current.max(other.current);
-        if let Some(new) = other.replies {
-            if !self
-                .replies
-                .as_ref()
-                .map(|old| Self::earlier(&old.rejection, &new.rejection))
-                .transpose()?
-                .unwrap_or(false)
-            {
-                self.replies = Some(new);
-            }
-        }
-        if let Some(new) = other.second {
-            if !self
-                .second
-                .as_ref()
-                .map(|old| Self::earlier(old, &new))
-                .transpose()?
-                .unwrap_or(false)
-            {
-                self.second = Some(new);
-            }
-        }
-        Ok(())
-    }
-
-    /// An import only compares equal-time receipts within the same generation.
-    /// Keep the destination's established conflict if their order is unknown.
-    fn earlier(a: &KeptMessage, b: &KeptMessage) -> Result<bool> {
-        let a_pos = a.position().ok_or_else(PaykitError::corrupt)?;
-        let b_pos = b.position().ok_or_else(PaykitError::corrupt)?;
-        Ok(crate::records::compare_received(
-            (a.order()?.0, a_pos),
-            (b.order()?.0, b_pos),
-            |x, y| (x.generation == y.generation).then(|| x.seq.cmp(&y.seq)),
-        ) == Some(Ordering::Less))
+    fn earlier_than(&self, other: &Self) -> Result<bool> {
+        let a = self.rejection.order()?.0;
+        let b = other.rejection.order()?.0;
+        let first = self.rejection.position().ok_or_else(PaykitError::corrupt)?;
+        let second = other
+            .rejection
+            .position()
+            .ok_or_else(PaykitError::corrupt)?;
+        Ok(a < b || (a == b && first.generation == second.generation && first.seq < second.seq))
     }
 
     fn reply(&self, own: &[u8; 32], answer: &StoredMessage) -> Result<PendingReply> {
@@ -343,49 +284,15 @@ impl PendingConflict {
         })
     }
 
-    /// Preserve still-owed replies from the destination of an in-place restore.
-    /// Their original inbox receipt and pending source survive alongside the stop.
-    fn restore_acceptances(
-        &self,
-        restoring: &pubky_switch_client::app::RestoreContext<'_>,
-        binder: &Binder<'_>,
-        replies: &mut BTreeMap<String, KeptMessage>,
-    ) -> Result<()> {
+    pub(super) fn unplaced_acceptance_key(&self, binder: &Binder<'_>) -> Result<String> {
         let own = binder.identity();
         let p = self.original(own)?;
-        if p.proposal().sender() != *own {
-            return Ok(());
-        }
         let a = super::allowance_target(p.counterparty(), p.allowance_id());
-        let prefix = key::kept_reply(p.counterparty(), &binder.record_key(&a)?, "");
-        for (at, bytes) in restoring.previous_local_scan(prefix.as_bytes())? {
-            let mut held = state::restored::<KeptMessage>(&at, &bytes, binder)?;
-            let message = held.stored(own)?;
-            if !matches!(message.body(), Body::AllowanceAcceptance(_))
-                || !answers(p.proposal(), &message)
-            {
-                continue;
-            }
-            if let Some(pair) = &self.replies {
-                let q = pair.acceptance.stored(own)?;
-                if q.message().msg_id == message.message().msg_id {
-                    if message.hash() != q.hash()
-                        || held.order()? != pair.acceptance.order()?
-                        || held.position() != pair.acceptance.position()
-                    {
-                        return Err(PaykitError::corrupt());
-                    }
-                    held.pending_source.get_or_insert(self.source);
-                }
-            }
-            if held.pending_source == Some(self.source) {
-                replies.insert(
-                    String::from_utf8(at).map_err(|_| PaykitError::corrupt())?,
-                    held,
-                );
-            }
-        }
-        Ok(())
+        Ok(key::kept_reply(
+            p.counterparty(),
+            &binder.record_key(&a)?,
+            &self.acceptance.stored(own)?.message().msg_id,
+        ))
     }
 
     pub(crate) fn bind(&self, key: &[u8; 32], binder: &Binder<'_>) -> Result<()> {
@@ -398,57 +305,38 @@ impl PendingConflict {
         );
         if original.conflicted().is_some()
             || self.source.record_version().is_none()
-            || self.current.record_version().generation != self.source().generation
-            || self.current < self.source
             || binder.record_key(&target)? != *key
         {
             return Err(PaykitError::corrupt());
         }
         let p = original.proposal();
-        if self.replies.is_none() && self.second.is_none() {
+        let q = self.acceptance.stored(own)?;
+        let r = self.rejection.stored(own)?;
+        let first = self
+            .acceptance
+            .position()
+            .ok_or_else(PaykitError::corrupt)?;
+        let second = self.rejection.position().ok_or_else(PaykitError::corrupt)?;
+        let q_time = self.acceptance.order()?.0;
+        let r_time = self.rejection.order()?.0;
+        // The writer checked cross-generation order through the account's verified feed history.
+        // The restore context has no feed ordering service and preserves the established stop.
+        if !(p.sender() == *own
+            && matches!(q.body(), Body::AllowanceAcceptance(_))
+            && matches!(r.body(), Body::AllowanceRejection(_))
+            && answers(p, &q)
+            && answers(p, &r)
+            && first != second
+            && (q_time < r_time
+                || (q_time == r_time
+                    && (first.generation != second.generation || first.seq < second.seq))))
+        {
             return Err(PaykitError::corrupt());
-        }
-        if let Some(replies) = &self.replies {
-            let q = replies.acceptance.stored(own)?;
-            let r = replies.rejection.stored(own)?;
-            let first = replies
-                .acceptance
-                .position()
-                .ok_or_else(PaykitError::corrupt)?;
-            let second = replies
-                .rejection
-                .position()
-                .ok_or_else(PaykitError::corrupt)?;
-            let q_time = replies.acceptance.order()?.0;
-            let r_time = replies.rejection.order()?.0;
-            // The writer verified cross-generation order before creating this stop.
-            if !(p.sender() == *own
-                && matches!(q.body(), Body::AllowanceAcceptance(_))
-                && matches!(r.body(), Body::AllowanceRejection(_))
-                && answers(p, &q)
-                && answers(p, &r)
-                && first != second
-                && (q_time < r_time
-                    || (q_time == r_time
-                        && (first.generation != second.generation || first.seq < second.seq))))
-            {
-                return Err(PaykitError::corrupt());
-            }
-        }
-        if let Some(second) = &self.second {
-            second.order()?;
-            second.position().ok_or_else(PaykitError::corrupt)?;
-            let mut checked = original;
-            if !checked.note_proposal(second.stored(own)?)? {
-                return Err(PaykitError::corrupt());
-            }
         }
         Ok(())
     }
 }
 
-/// Only a qualified original can establish a new stop. A previously acquired stop
-/// survives an uncertain or unreadable current record.
 pub(super) fn qualified_at(
     held: &SharedRecord,
     target: &pubky_switch_client::app::RecordTarget,
@@ -465,7 +353,7 @@ pub(super) fn qualified_at(
         && !held.different_write_at_held_version
 }
 
-fn qualified(
+pub(super) fn qualified(
     held: &SharedRecord,
     target: &pubky_switch_client::app::RecordTarget,
     key: &[u8; 32],
@@ -506,83 +394,6 @@ pub(super) fn before_retirement(
         _ => Err(Fail::Store(StoreFailure::unavailable(
             pubky_switch_client::error::StoreError::Unavailable,
         ))),
-    }
-}
-
-enum SecondProposal {
-    Undecided,
-    Reflected,
-    Keep(Box<PendingConflict>),
-}
-
-/// A second proposal must belong to the same signed parties, ID and physical
-/// key as the selected original. A repeat never replaces either proposal.
-fn second_proposal(
-    own: &[u8; 32],
-    held: &SharedRecord,
-    target: &pubky_switch_client::app::RecordTarget,
-    record: &[u8; 32],
-    previous: Option<PendingConflict>,
-    message: &StoredMessage,
-    position: FeedPosition,
-) -> Result<SecondProposal> {
-    let Some(mut pending) = qualified(held, target, record, own) else {
-        return Ok(SecondProposal::Undecided);
-    };
-    if pending.counterparty() != &message.sender()
-        || Some(pending.allowance_id()) != named_allowance(message.body())
-    {
-        return Ok(SecondProposal::Undecided);
-    }
-    if !pending.note_proposal(message.clone())? {
-        return Ok(SecondProposal::Reflected);
-    }
-    let value = held.content.value().ok_or_else(PaykitError::corrupt)?;
-    let mut stop = previous.unwrap_or_else(|| PendingConflict {
-        source: held.version.into(),
-        current: held.version.into(),
-        pending: value.to_vec(),
-        second: None,
-        replies: None,
-    });
-    if !stop.matches(own, &pending, held)? {
-        return Ok(SecondProposal::Undecided);
-    }
-    if stop.second.is_some() {
-        return Ok(SecondProposal::Reflected);
-    }
-    stop.second = Some(KeptMessage::taken_at(message, position));
-    Ok(SecondProposal::Keep(Box::new(stop)))
-}
-
-/// Keep the competing envelope in the same commit as its inbox disposition.
-pub(super) fn observe_second(
-    cx: &mut ReceiveContext<'_>,
-    target: &pubky_switch_client::app::RecordTarget,
-    held: &SharedRecord,
-    message: &StoredMessage,
-    position: pubky_switch_client::app::FeedPosition,
-) -> std::result::Result<(), Fail> {
-    let record = cx.record_key(target)?;
-    let at = key::pending_conflict(&record);
-    let previous = state::cx_get::<PendingConflict>(cx, &at)?;
-    match second_proposal(
-        &cx.identity(),
-        held,
-        target,
-        &record,
-        previous,
-        message,
-        position,
-    )
-    .map_err(|_| Fail::corrupt())?
-    {
-        SecondProposal::Undecided => super::stored_entry(cx, message),
-        SecondProposal::Reflected => Ok(()),
-        SecondProposal::Keep(stop) => {
-            receive::keep_local(cx, receive::local(&at, &*stop)?);
-            Ok(())
-        }
     }
 }
 
@@ -790,87 +601,7 @@ pub(crate) fn lifetime_ended(
 }
 
 impl Paykit {
-    /// Bind a delayed proposal to the current lifetime before recording its local stop.
-    pub(super) async fn place_received_second(
-        &mut self,
-        message: &StoredMessage,
-        evidence: &KeptMessage,
-        stored_id: Option<u64>,
-    ) -> Result<Option<crate::stored::Placed>> {
-        use crate::stored::Placed;
-        use pubky_switch_client::app::RecordContent;
-        let position = evidence.position().ok_or_else(PaykitError::corrupt)?;
-        let Some(id) = named_allowance(message.body()) else {
-            return Err(PaykitError::corrupt());
-        };
-        let peer = message.sender();
-        let target = allowance_record_target(Collection::AllowanceProposals, &peer, id);
-        let key = self.app.record_key(&target)?;
-        let Some(held) = self.app.shared_record(&key).await? else {
-            return Ok(None);
-        };
-        if matches!(held.content, RecordContent::Deleted)
-            || self
-                .app
-                .shared_record(&self.app.record_key(&super::allowance_target(&peer, id))?)
-                .await?
-                .is_some()
-        {
-            return Ok(None);
-        }
-        if self
-            .side_unlisted(crate::hold::RecordSide::Allowances)
-            .await?
-        {
-            return Ok(Some(Placed::Waits));
-        }
-        if let Some(end) = self
-            .local_get::<PendingRetirement>(&key::pending_retirement(&key))
-            .await?
-        {
-            if let Some(stored_id) = stored_id {
-                let Some(entry) = self.app.parked_entry(stored_id).await? else {
-                    return Ok(Some(Placed::Waits));
-                };
-                if !entry.sender_verified
-                    || entry.sender != peer
-                    || &entry.plaintext != message.plaintext()
-                    || entry.generation != position.generation
-                    || entry.seq != position.seq
-                    || Some(entry.accepted_at_ms) != message.accepted_at()
-                {
-                    return Ok(Some(Placed::Waits));
-                }
-            }
-            match end.compare(evidence.pending_source, Some(position), |a, b| {
-                self.app.received_order(a, b)
-            }) {
-                None => return Ok(Some(Placed::Waits)),
-                Some(std::cmp::Ordering::Less) => return Ok(Some(Placed::Done)),
-                Some(_) => {}
-            }
-        }
-        let at = key::pending_conflict(&key);
-        let previous = self.local_get::<PendingConflict>(&at).await?;
-        let step = second_proposal(
-            &self.identity(),
-            &held,
-            &target,
-            &key,
-            previous,
-            message,
-            position,
-        )?;
-        match step {
-            SecondProposal::Undecided => Ok(Some(Placed::Not)),
-            SecondProposal::Reflected => Ok(Some(Placed::Done)),
-            SecondProposal::Keep(stop) => {
-                self.local_put(&at, &*stop).await?;
-                Ok(Some(Placed::Done))
-            }
-        }
-    }
-
+    /// Establish a direct live successor of an earlier matched proposal. A readable
     /// copy with the same signed proposal also occurs after deletion and recreation.
     pub(super) async fn pending_predecessor(
         &self,
@@ -1033,6 +764,13 @@ impl Paykit {
         {
             return Ok(PendingReply::Undecided);
         }
+        let pending = self.selected_pending(&current)?.0;
+        if self
+            .competing_proposal_owed(&pending, &selected.key, &self.app.record_key(&permanent)?)
+            .await?
+        {
+            return Ok(PendingReply::Undecided);
+        }
         let conditions = vec![
             Condition::RecordVersion {
                 key: selected.key,
@@ -1192,14 +930,31 @@ pub(crate) fn restore_conflicts(
         if retired(&key, old.source) {
             continue;
         }
-        old.restore_acceptances(restoring, binder, &mut replies)?;
-        match imported.get_mut(&key) {
-            Some(current) if current.source() == old.source() => current.merge(old)?,
-            Some(current) if current.source() > old.source() => (),
-            _ => {
-                imported.insert(key, old);
+        let q = old.unplaced_acceptance_key(binder)?;
+        if let Some((at, bytes)) = restoring
+            .previous_local_scan(q.as_bytes())?
+            .into_iter()
+            .find(|(at, _)| at == q.as_bytes())
+        {
+            let mut held = state::restored::<KeptMessage>(&at, &bytes, binder)?;
+            if held.stored(binder.identity())?.hash()
+                != old.acceptance.stored(binder.identity())?.hash()
+                || held.order()? != old.acceptance.order()?
+                || held.position() != old.acceptance.position()
+            {
+                return Err(PaykitError::corrupt());
+            }
+            held.pending_source.get_or_insert(old.source);
+            replies.insert(q, held);
+        }
+        if let Some(other) = imported.get(&key) {
+            if other.source() > old.source()
+                || (other.source() == old.source() && other.earlier_than(&old)?)
+            {
+                continue;
             }
         }
+        imported.insert(key, old);
     }
     for (key, stop) in imported {
         writes.push(state::local_put(&key::pending_conflict(&key), &stop)?);

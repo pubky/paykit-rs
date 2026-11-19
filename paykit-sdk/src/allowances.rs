@@ -718,7 +718,29 @@ pub(crate) fn receive_effect(
             {
                 receive::hold_while_unlisted(cx, RecordSide::Allowances)?;
                 if !replies::before_retirement(cx, &pending, position)? {
-                    replies::observe_second(cx, &pending, &held, stored, position)?;
+                    let key = cx.record_key(&pending)?;
+                    let Some(original) = replies::qualified(&held, &pending, &key, &own) else {
+                        return stored_entry(cx, stored);
+                    };
+                    if original.counterparty() != &sender
+                        || original.allowance_id() != &allowance_id
+                    {
+                        return stored_entry(cx, stored);
+                    }
+                    if original.conflicted().is_none()
+                        && original.proposal().hash() != stored.hash()
+                    {
+                        // The pending record still carries only P. Keep the second
+                        // signed envelope owed until the record reflects a conflict.
+                        keep_answer(
+                            cx,
+                            &target,
+                            stored,
+                            position,
+                            true,
+                            Some(held.version.into()),
+                        )?;
+                    }
                 }
                 return receive::note_peer(cx, &sender, stored);
             }
@@ -3217,7 +3239,7 @@ mod tests {
         assert_eq!(code.matches(".queue(signed)").count(), 1);
         let pending = include_str!("allowances/pending.rs");
         assert!(!pending.contains(".put_record("));
-        assert_eq!(pending.matches(".record_op(").count(), 4);
+        assert_eq!(pending.matches(".record_op(").count(), 3);
         assert_eq!(
             pending.matches("self.submit(batch.queue(reply))").count(),
             1
