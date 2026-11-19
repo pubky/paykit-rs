@@ -10575,6 +10575,172 @@ async fn test_queued_withdrawal_after_reload_keeps_identical_recreated_proposals
     Box::pin(queued_withdrawal_after_reload(LaterProposal::Pending)).await;
 }
 
+/// Stop after the confirmed deletion and before Paykit releases the original signed message.
+/// An orderly change keeps the service history; an identity without the old key cannot date it.
+async fn applied_answer_before_key_change(withdraw: bool, retain_key: bool) {
+    use crate::common::ALICE_ORIGIN;
+    use pubky_switch_client::app::{Delivery, RecordContent};
+    use pubky_switch_client::store::{Fault, FaultStore};
+    use pubky_switch_core::records::{Inbox, ServiceKeyEntry};
+    let w = World::new();
+    let fault = std::sync::Arc::new(FaultStore::new(crate::common::store(), Fault::None));
+    let scopes = AppScopes::new()
+        .pay()
+        .allowance()
+        .manage_contacts()
+        .build()
+        .unwrap();
+    let mut payer = Box::pin(w.join_with(
+        &w.alice,
+        "wallet",
+        scopes,
+        Default::default(),
+        fault.clone(),
+    ))
+    .await;
+    payer.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut seller = Box::pin(shop(&w)).await;
+    let (public, id) = if withdraw {
+        let sent = payer
+            .propose_allowance(w.bob_id(), AllowanceRole::Allower, terms())
+            .await
+            .unwrap();
+        seller.receive(None).await.unwrap();
+        (sent.record, sent.allowance_id)
+    } else {
+        let sent = seller
+            .propose_allowance(w.alice_id(), AllowanceRole::Allowee, terms())
+            .await
+            .unwrap();
+        payer.receive(None).await.unwrap();
+        (
+            payer
+                .app()
+                .record_key(&allowances_target(&w.bob_id(), &sent.allowance_id))
+                .unwrap(),
+            sent.allowance_id,
+        )
+    };
+    let key = pending_key(&payer, &w.bob_id(), &id);
+    let before = payer.app().shared_record(&key).await.unwrap().unwrap();
+    let app_id = payer.app_id();
+    let old = payer.app().own_identity().inbox().service_key;
+    let generation = payer.app().own_identity().generation();
+    fault.fail_put_once(b"p/paykit/aq/");
+    let answer = if withdraw {
+        payer.end_allowance(&public).await
+    } else {
+        payer.reject_allowance(&public).await
+    };
+    assert!(answer.is_err());
+    let (message, hash) = Box::pin(prepared_answer(&payer)).await;
+    assert!(matches!(
+        payer.app().delivery(&message).await.unwrap(),
+        Some(Delivery::Queued { .. })
+    ));
+    let marker = format!("aq/{}", pubky_switch_core::enc::b64(&hash));
+    assert!(payer
+        .app()
+        .protocol_get("paykit", marker.as_bytes())
+        .await
+        .unwrap()
+        .is_none());
+    let closed = payer.app().shared_record(&key).await.unwrap().unwrap();
+    assert!(
+        closed.authenticated
+            && closed.version.generation == generation
+            && closed.version.version > before.version.version
+    );
+    assert_eq!(closed.content, RecordContent::Deleted);
+    assert!(Box::pin(received_originals(&mut seller, &[&message]))
+        .await
+        .is_empty());
+    drop(payer);
+    let service = w.alice.switch().change_key_into([74; 32]);
+    w.router.add_switch(ALICE_ORIGIN, &service);
+    let doc = w
+        .alice
+        .sign_next(|body| {
+            if retain_key {
+                body.service_keys.push(ServiceKeyEntry {
+                    generation,
+                    key: old,
+                });
+            }
+            body.generation += 1;
+            body.inbox = Inbox::new(ALICE_ORIGIN, service.service_key());
+        })
+        .unwrap();
+    service.deliver_identity(&doc).unwrap();
+    let mut payer = Box::pin(Paykit::load(
+        w.env(&w.alice, fault.inner()),
+        Default::default(),
+        app_id,
+        w.rail.clone(),
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    payer.app_mut().refresh_identity().await.unwrap();
+    assert_eq!(payer.app().own_identity().generation(), generation + 1);
+    assert_eq!(
+        payer.app().own_identity().service_key_of(generation),
+        retain_key.then_some(old)
+    );
+    assert!(payer.app().own_identity().body().recovery_from.is_none());
+    Box::pin(payer.flush()).await.unwrap();
+    Box::pin(crate::common::finish_listing(&mut payer)).await;
+    Box::pin(payer.flush()).await.unwrap();
+    let received = Box::pin(received_originals(&mut seller, &[&message])).await;
+    if retain_key {
+        assert_eq!(received, [message.clone()]);
+        assert!(matches!(
+            payer.app().delivery(&message).await.unwrap(),
+            Some(Delivery::Accepted { .. })
+        ));
+        let bytes = payer
+            .app()
+            .protocol_get("paykit", marker.as_bytes())
+            .await
+            .unwrap()
+            .unwrap();
+        let mark: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(mark["d"]["retirement"]["generation"], generation);
+        assert_eq!(mark["d"]["retirement"]["version"], closed.version.version);
+        Box::pin(payer.flush()).await.unwrap();
+        assert!(Box::pin(received_originals(&mut seller, &[&message]))
+            .await
+            .is_empty());
+    } else {
+        assert!(received.is_empty());
+        assert!(payer
+            .app()
+            .protocol_get("paykit", marker.as_bytes())
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(Box::pin(prepared_answer(&payer)).await, (message, hash));
+    }
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_applied_rejection_before_an_orderly_key_change_is_delivered_on_reopen() {
+    Box::pin(applied_answer_before_key_change(false, true)).await;
+}
+#[tokio::test]
+async fn test_applied_withdrawal_before_an_orderly_key_change_is_delivered_on_reopen() {
+    Box::pin(applied_answer_before_key_change(true, true)).await;
+}
+#[tokio::test]
+async fn test_applied_rejection_without_the_previous_service_key_stays_held() {
+    Box::pin(applied_answer_before_key_change(false, false)).await;
+}
+#[tokio::test]
+async fn test_applied_withdrawal_without_the_previous_service_key_stays_held() {
+    Box::pin(applied_answer_before_key_change(true, false)).await;
+}
+
 #[tokio::test]
 async fn test_kept_rejection_delivers_after_a_service_key_change_preserves_its_selected_proposal() {
     Box::pin(kept_rejection_across_generations(false)).await;
@@ -11909,7 +12075,6 @@ async fn unsubmitted_answer(
     key: &[u8; 32],
     withdraw: bool,
 ) -> (String, [u8; 32]) {
-    use pubky_switch_core::{enc::unb64, message::MessagePlaintext};
     store.fail_before_keep();
     let result = if withdraw {
         wallet.end_allowance(key).await
@@ -11917,6 +12082,13 @@ async fn unsubmitted_answer(
         wallet.reject_allowance(key).await
     };
     assert!(result.is_err());
+    let (id, hash) = Box::pin(prepared_answer(wallet)).await;
+    assert!(wallet.app().delivery(&id).await.unwrap().is_none());
+    (id, hash)
+}
+
+async fn prepared_answer(wallet: &Paykit) -> (String, [u8; 32]) {
+    use pubky_switch_core::{enc::unb64, message::MessagePlaintext};
     let prepared = wallet.app().protocol_scan("paykit", b"ap/").await.unwrap();
     let [(_, bytes)] = prepared.as_slice() else {
         panic!("one prepared answer")
@@ -11928,7 +12100,6 @@ async fn unsubmitted_answer(
     .unwrap();
     let message: Value = serde_json::from_slice(original.json()).unwrap();
     let msg_id = message["msg_id"].as_str().unwrap().to_owned();
-    assert!(wallet.app().delivery(&msg_id).await.unwrap().is_none());
     (msg_id, original.hash())
 }
 
