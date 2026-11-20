@@ -107,26 +107,41 @@ impl OriginalApproval {
         Ok(())
     }
 
-    /// A matching batch can release the signed reply and preserve the exact payer
-    /// receipt together, even when the original submission answer was lost.
-    pub(super) fn applied(&mut self, commitment: [u8; 32], members: &[KeptOp]) -> Result<()> {
-        let opening = self.opening.as_mut().ok_or_else(PaykitError::corrupt)?;
-        let [a, l, d] = members else {
+    pub(super) fn awaiting_application(&self) -> bool {
+        self.opening.as_ref().is_some_and(|o| o.applied.is_none())
+    }
+
+    /// Match the approving app's signing key and the commitment to its three
+    /// ordered operations, including the selected pending write's deletion guard.
+    fn capture_application(
+        &mut self,
+        confirmed: &application::AppliedApplications,
+    ) -> Result<bool> {
+        let Some(opening) = &mut self.opening else {
+            return Ok(false);
+        };
+        if opening.applied.is_some() {
+            return Ok(false);
+        }
+        let signer = self.decision.stored(&self.peer)?.cert().signing_key();
+        let Some(batch) = confirmed.replies.get(&(signer, opening.application)) else {
+            return Ok(false);
+        };
+        let [a, l, d] = batch.members.as_slice() else {
             return Err(PaykitError::corrupt());
         };
-        if opening.application != commitment {
-            return Err(PaykitError::corrupt());
-        }
-        let applied = [a.clone(), l.clone(), d.clone()];
-        if opening
-            .applied
-            .as_ref()
-            .is_some_and(|prior| prior != &applied)
-        {
-            return Err(PaykitError::corrupt());
-        }
-        opening.applied = Some(applied);
-        Ok(())
+        opening.applied = Some([a.clone(), l.clone(), d.clone()]);
+        Ok(true)
+    }
+
+    pub(super) fn retains_application(&self, commitment: &[u8; 32], members: &[KeptOp]) -> bool {
+        self.opening.as_ref().is_some_and(|opening| {
+            &opening.application == commitment
+                && opening
+                    .applied
+                    .as_ref()
+                    .is_some_and(|a| a.as_slice() == members)
+        })
     }
 
     fn merge(&mut self, newer: Self) -> Result<()> {
@@ -333,6 +348,19 @@ impl Paykit {
         Ok(())
     }
 
+    pub(super) async fn capture_original_approval(
+        &mut self,
+        at: &str,
+        approval: &mut OriginalApproval,
+        confirmed: &application::AppliedApplications,
+    ) -> Result<bool> {
+        if !approval.capture_application(confirmed)? {
+            return Ok(false);
+        }
+        self.local_put(at, approval).await?;
+        Ok(true)
+    }
+
     /// Keep the payer's original three signed writes and their verified service proofs.
     pub(super) async fn applied_original_approval(
         &mut self,
@@ -342,20 +370,17 @@ impl Paykit {
         let Some(mut approval) = self.local_get::<OriginalApproval>(&at).await? else {
             return Ok(None);
         };
-        let Some(opening) = &mut approval.opening else {
+        if approval.opening.is_none() {
             return Ok(None);
-        };
-        if opening.applied.is_none() {
+        }
+        if approval.awaiting_application() {
             let confirmed = self.confirmed_pending_applications().await?;
-            let Some(batch) = confirmed
-                .replies
-                .get(&(self.app.cert().signing_key(), opening.application))
-            else {
+            if !self
+                .capture_original_approval(&at, &mut approval, &confirmed)
+                .await?
+            {
                 return Ok(None);
-            };
-            let commitment = opening.application;
-            approval.applied(commitment, &batch.members)?;
-            self.local_put(&at, &approval).await?;
+            }
         }
         Ok(Some(approval))
     }
