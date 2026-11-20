@@ -103,9 +103,10 @@ fn receipted_period_amount(
     let Some(receipt) = crate::receipts::displayed_receipt(activity, Some(request_body)) else {
         return false;
     };
-    let Some(period) = paid.billing_period else {
+    let Ok(Some(period)) = paid.check_against(request_body) else {
         return false;
     };
+    let period = paykit_lib::periods::PeriodRef::from(period);
     if receipt.message().refs != [proof.hash(), request.hash()] {
         return false;
     }
@@ -759,15 +760,27 @@ mod tests {
 
     #[test]
     fn test_journal_less_period_receipt_uses_the_original_requests_selling_scope() {
-        check_period_receipt_selling_scope(false);
+        check_receipted_period(false, "subscriptions", None, true);
     }
 
     #[test]
     fn test_journal_less_fixed_rate_period_with_a_signed_destination_checks_receipt_scope() {
-        check_period_receipt_selling_scope(true);
+        check_receipted_period(true, "subscriptions", None, true);
     }
 
-    fn check_period_receipt_selling_scope(later_destination: bool) {
+    #[test]
+    fn test_journal_less_later_destination_proof_matches_the_original_label_and_reference() {
+        check_receipted_period(true, "subscriptions", Some("subscription-1"), true);
+        check_receipted_period(true, "shipping", Some("subscription-1"), false);
+        check_receipted_period(true, "subscriptions", Some("subscription-2"), false);
+    }
+
+    fn check_receipted_period(
+        later_destination: bool,
+        proof_label: &str,
+        payment_reference: Option<&str>,
+        proof_matches: bool,
+    ) {
         use crate::testkit::{object, Party, NOW};
         use paykit_lib::bodies::{PaymentReceipt, PeriodDetails};
         use paykit_lib::periods::{AnchoredRule, PeriodRef, Recurrence, Unit};
@@ -829,17 +842,16 @@ mod tests {
             references.push(detail.hash());
         }
         let attempt = AttemptId::from_bytes([3; 16]);
-        let proof = payer.message(
-            &shop,
-            "paykit.payment_proof",
-            references,
-            object(json!({
-                "attempt_id": attempt.to_text(), "billing_period": period.to_json(),
-                "payment_endpoint_identifier": "btc-lightning-bolt11",
-                "payment_app_id": pubky_switch_core::enc::zbase32_encode(&shop.app_id()),
-                "label": "subscriptions", "proof": {}
-            })),
-        );
+        let mut proof_body = object(json!({
+            "attempt_id": attempt.to_text(), "billing_period": period.to_json(),
+            "payment_endpoint_identifier": "btc-lightning-bolt11",
+            "payment_app_id": pubky_switch_core::enc::zbase32_encode(&shop.app_id()),
+            "label": proof_label, "proof": {}
+        }));
+        if let Some(reference) = payment_reference {
+            proof_body.insert("payment_reference".into(), json!(reference));
+        }
+        let proof = payer.message(&shop, "paykit.payment_proof", references, proof_body);
         let transfer = PaymentAmount {
             asset: Asset::new("btc").unwrap(),
             value: Decimal::new("2").unwrap(),
@@ -875,16 +887,18 @@ mod tests {
                 vec![proof.hash(), request.hash()],
                 body.clone(),
             ));
-            assert_eq!(
-                crate::receipts::receipt_binding(&activity, Some(&parent))
-                    == crate::receipts::ReceiptBinding::Verified,
-                allowed,
-                "{scope}"
-            );
+            if proof_matches {
+                assert_eq!(
+                    crate::receipts::receipt_binding(&activity, Some(&parent))
+                        == crate::receipts::ReceiptBinding::Verified,
+                    allowed,
+                    "{scope}"
+                );
+            }
             assert_eq!(
                 receipted_period_amount(&activity, &request, &proof, &transfer),
-                allowed,
-                "{scope}"
+                allowed && proof_matches,
+                "{scope}, {proof_label}, {payment_reference:?}"
             );
         }
     }
