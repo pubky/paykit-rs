@@ -966,8 +966,12 @@ async fn test_divergent_kept_write_waits_while_its_record_may_be_missing_from_th
     let base = store();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = shop_on(&w, Arc::clone(&base)).await;
-    let mut till = w
-        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+    let mut seller_wallet = w
+        .join(
+            &w.bob,
+            "seller-wallet",
+            AppScopes::new().request().build().unwrap(),
+        )
         .await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     let record = sale(&shop, &request).await.record;
@@ -987,7 +991,7 @@ async fn test_divergent_kept_write_waits_while_its_record_may_be_missing_from_th
             .len(),
         2
     );
-    till.receive(None).await.unwrap();
+    seller_wallet.receive(None).await.unwrap();
     let target = RecordTarget::new(
         SwitchCollection::new(
             Collection::PayeeActivity.name(),
@@ -995,7 +999,8 @@ async fn test_divergent_kept_write_waits_while_its_record_may_be_missing_from_th
         ),
         &natural_key::request_record(&w.bob_id(), &request.request_hash),
     );
-    till.app_mut()
+    seller_wallet
+        .app_mut()
         .delete_record(&target, Vec::new())
         .await
         .unwrap();
@@ -2679,22 +2684,26 @@ async fn acceptance_over_unread_paused(blocked: bool) {
             Arc::clone(&base),
         )
         .await;
-    let mut till = w
-        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+    let mut seller_wallet = w
+        .join(
+            &w.bob,
+            "seller-wallet",
+            AppScopes::new().request().build().unwrap(),
+        )
         .await;
     let _carol = w
         .join(&w.carol, "wallet", AppScopes::new().pay().build().unwrap())
         .await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     let record = sale(&shop, &request).await.record;
-    till.receive(None).await.unwrap();
+    seller_wallet.receive(None).await.unwrap();
     let collection = Collection::PayeeActivity;
     let target = RecordTarget::new(
         SwitchCollection::new(collection.name(), collection.policy(None)),
         &natural_key::request_record(&w.bob_id(), &request.request_hash),
     );
-    assert_eq!(till.app().record_key(&target).unwrap(), record);
-    let good = till
+    assert_eq!(seller_wallet.app().record_key(&target).unwrap(), record);
+    let good = seller_wallet
         .app()
         .shared_record(&record)
         .await
@@ -2705,19 +2714,20 @@ async fn acceptance_over_unread_paused(blocked: bool) {
         .unwrap()
         .to_vec();
     seen.armed.store(true, std::sync::atomic::Ordering::SeqCst);
-    let till_writes = async |till: &mut Paykit, value: &[u8]| {
-        till.receive(None).await.unwrap();
-        let op = till
+    let seller_wallet_writes = async |seller_wallet: &mut Paykit, value: &[u8]| {
+        seller_wallet.receive(None).await.unwrap();
+        let op = seller_wallet
             .app_mut()
             .record_op(&target, Some(value), Vec::new())
             .await
             .unwrap();
-        till.app_mut()
+        seller_wallet
+            .app_mut()
             .submit_batch(pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(op))
             .await
             .unwrap();
     };
-    till_writes(&mut till, crate::outcome_record::INVALID).await;
+    seller_wallet_writes(&mut seller_wallet, crate::outcome_record::INVALID).await;
     shop.receive(None).await.unwrap();
     let held = shop.app().shared_record(&record).await.unwrap().unwrap();
     assert_eq!(held.content.value(), Some(crate::outcome_record::INVALID));
@@ -2764,7 +2774,7 @@ async fn acceptance_over_unread_paused(blocked: bool) {
             .len(),
         1
     );
-    till_writes(&mut till, &good).await;
+    seller_wallet_writes(&mut seller_wallet, &good).await;
     shop.receive(None).await.unwrap();
     assert!(shop
         .app()
@@ -3305,8 +3315,12 @@ mod durable_event {
         let base = store();
         let mut wallet = w.wallet("wallet").await;
         let mut shop = shop_on(&w, Arc::clone(&base)).await;
-        let mut till = w
-            .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        let mut seller_wallet = w
+            .join(
+                &w.bob,
+                "seller-wallet",
+                AppScopes::new().request().build().unwrap(),
+            )
             .await;
         let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
         wallet.receive(None).await.unwrap();
@@ -3330,7 +3344,7 @@ mod durable_event {
             SwitchCollection::new(collection.name(), collection.policy(None)),
             &natural_key::request_record(&w.bob_id(), &request.request_hash),
         );
-        divergent_again_cleared(&base, &mut shop, &mut till, &w.bob, &target, &paid).await;
+        divergent_again_cleared(&base, &mut shop, &mut seller_wallet, &w.bob, &target, &paid).await;
         shop.receive(None).await.unwrap();
         assert!(
             !shop
@@ -3840,17 +3854,17 @@ async fn list_asks(w: &World, wallet: &Paykit) -> Vec<Option<[u8; 16]>> {
 
 #[tokio::test]
 async fn test_divergent_paused_list_asks_the_app_whose_list_expired() {
-    // Bob's shop's list is paused as divergent; his till's list has merely expired. The
-    // payment waits for the user's confirmation of the shop's list, the till is asked for its
+    // Bob's shop's list is paused as divergent; his other wallet's list has merely expired. The
+    // payment waits for the user's confirmation of the shop's list, the seller wallet is asked for its
     // current list, and the shop isn't (Paykit spec 8.4).
     let w = World::new();
     let base = store();
     let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
     let mut shop = w.shop().await;
-    let mut till = w
+    let mut seller_wallet = w
         .join_with(
             &w.bob,
-            "till",
+            "seller-wallet",
             AppScopes::new().request().build().unwrap(),
             PaykitConfig::default(),
             store(),
@@ -3858,12 +3872,12 @@ async fn test_divergent_paused_list_asks_the_app_whose_list_expired() {
         .await;
     w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
-    till.app_mut().invite(&w.alice_id()).await.unwrap();
+    seller_wallet.app_mut().invite(&w.alice_id()).await.unwrap();
     let mut endpoints = std::collections::BTreeMap::new();
     endpoints.insert(
         endpoint("btc-lightning-bolt12"),
         paykit_lib::bodies::ListEndpoint {
-            payload: paykit_lib::PaymentEndpointPayload::new("lno1till").unwrap(),
+            payload: paykit_lib::PaymentEndpointPayload::new("lno1wallet").unwrap(),
             single_use: false,
         },
     );
@@ -3876,7 +3890,7 @@ async fn test_divergent_paused_list_asks_the_app_whose_list_expired() {
     .unwrap();
     w.inject(
         &w.bob,
-        "till",
+        "seller-wallet",
         &w.alice,
         &[wallet.app_id()],
         "paykit.private_payment_list",
@@ -3896,21 +3910,28 @@ async fn test_divergent_paused_list_asks_the_app_whose_list_expired() {
         .unwrap_err();
     assert_eq!(refused_records(&refused), vec![(record, true, true)]);
     assert!(w.rail.all_executions().is_empty());
-    assert_eq!(list_asks(&w, &wallet).await, vec![Some(till.app_id())]);
+    assert_eq!(
+        list_asks(&w, &wallet).await,
+        vec![Some(seller_wallet.app_id())]
+    );
 }
 
-/// Bob's till, joined, sends alice's `wallet` a Private Payment List of version 1 offering
+/// Bob's wallet, joined, sends alice's `wallet` a Private Payment List of version 1 offering
 /// `btc-lightning-bolt12`, used until `expires_at`.
-async fn till_list(w: &World, wallet: &Paykit, expires_at: u64) -> Paykit {
-    let mut till = w
-        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+async fn seller_wallet_list(w: &World, wallet: &Paykit, expires_at: u64) -> Paykit {
+    let mut seller_wallet = w
+        .join(
+            &w.bob,
+            "seller-wallet",
+            AppScopes::new().request().build().unwrap(),
+        )
         .await;
-    till.app_mut().invite(&w.alice_id()).await.unwrap();
+    seller_wallet.app_mut().invite(&w.alice_id()).await.unwrap();
     let mut endpoints = std::collections::BTreeMap::new();
     endpoints.insert(
         endpoint("btc-lightning-bolt12"),
         paykit_lib::bodies::ListEndpoint {
-            payload: paykit_lib::PaymentEndpointPayload::new("lno1till").unwrap(),
+            payload: paykit_lib::PaymentEndpointPayload::new("lno1wallet").unwrap(),
             single_use: false,
         },
     );
@@ -3923,14 +3944,14 @@ async fn till_list(w: &World, wallet: &Paykit, expires_at: u64) -> Paykit {
     .unwrap();
     w.inject(
         &w.bob,
-        "till",
+        "seller-wallet",
         &w.alice,
         &[wallet.app_id()],
         "paykit.private_payment_list",
         Vec::new(),
         body,
     );
-    till
+    seller_wallet
 }
 
 /// Bob's signer removes `app` from his `identity.json`, and the payer's copy of it is let
@@ -3952,7 +3973,7 @@ fn remove_from_bob(w: &World, app: [u8; 16]) {
 #[tokio::test]
 async fn test_divergent_list_of_a_removed_app_waits_for_a_current_list() {
     // Bob's shop's list is paused as divergent, and Bob's signer then removes the shop,
-    // leaving his till, which has sent no list. The shop's list can't be paid, whatever its
+    // leaving his seller wallet, which has sent no list. The shop's list can't be paid, whatever its
     // upload holds, so it pauses nothing: the payment takes the path of no usable list,
     // asking bob's current apps for a list and waiting for it, and asks no confirmation of
     // the shop's record (Paykit spec 8.4, 7.2).
@@ -3960,10 +3981,14 @@ async fn test_divergent_list_of_a_removed_app_waits_for_a_current_list() {
     let base = store();
     let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
     let mut shop = w.shop().await;
-    let mut till = w
-        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+    let mut seller_wallet = w
+        .join(
+            &w.bob,
+            "seller-wallet",
+            AppScopes::new().request().build().unwrap(),
+        )
         .await;
-    till.app_mut().invite(&w.alice_id()).await.unwrap();
+    seller_wallet.app_mut().invite(&w.alice_id()).await.unwrap();
     w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
@@ -3994,8 +4019,8 @@ async fn test_divergent_list_of_a_removed_app_waits_for_a_current_list() {
 
 #[tokio::test]
 async fn test_divergent_list_of_a_removed_app_leaves_an_expired_current_list_asked_for() {
-    // Bob's shop's list is paused as divergent and the shop removed; his till's list has
-    // merely expired. The till is asked for its current list and the payment waits for it,
+    // Bob's shop's list is paused as divergent and the shop removed; his other wallet's list has
+    // merely expired. The seller wallet is asked for its current list and the payment waits for it,
     // asking no confirmation of the shop's record (Paykit spec 8.4).
     let w = World::new();
     let base = store();
@@ -4003,7 +4028,7 @@ async fn test_divergent_list_of_a_removed_app_leaves_an_expired_current_list_ask
     let mut shop = w.shop().await;
     w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
-    let till = till_list(&w, &wallet, w.clock.now_ms() + HOUR_MS).await;
+    let seller_wallet = seller_wallet_list(&w, &wallet, w.clock.now_ms() + HOUR_MS).await;
     wallet.receive(None).await.unwrap();
     let record = list_record(&w, &wallet, &shop);
     set_divergent(&base, &wallet, &record, true);
@@ -4021,20 +4046,24 @@ async fn test_divergent_list_of_a_removed_app_leaves_an_expired_current_list_ask
         "{refused:?}"
     );
     assert!(w.rail.all_executions().is_empty());
-    assert_eq!(list_asks(&w, &wallet).await, vec![Some(till.app_id())]);
+    assert_eq!(
+        list_asks(&w, &wallet).await,
+        vec![Some(seller_wallet.app_id())]
+    );
 }
 
 #[tokio::test]
 async fn test_divergent_list_of_a_removed_app_leaves_a_current_list_paid() {
-    // Bob's shop's list is paused as divergent and the shop removed; his till's list is in
-    // use. The till's list is paid, with no refusal (Paykit spec 8.4).
+    // Bob's shop's list is paused as divergent and the shop removed; his other wallet's list is in
+    // use. The seller wallet's list is paid, with no refusal (Paykit spec 8.4).
     let w = World::new();
     let base = store();
     let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
     let mut shop = w.shop().await;
     w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
-    let mut till = till_list(&w, &wallet, w.clock.now_ms() + 30 * 24 * HOUR_MS).await;
+    let mut seller_wallet =
+        seller_wallet_list(&w, &wallet, w.clock.now_ms() + 30 * 24 * HOUR_MS).await;
     wallet.receive(None).await.unwrap();
     let record = list_record(&w, &wallet, &shop);
     set_divergent(&base, &wallet, &record, true);
@@ -4044,8 +4073,8 @@ async fn test_divergent_list_of_a_removed_app_leaves_a_current_list_paid() {
     let outcome = wallet.pay_without_request(payment).await.outcome.unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     assert_eq!(w.rail.all_executions().len(), 1);
-    till.receive(None).await.unwrap();
-    assert_eq!(till.payee_activity().await.unwrap().len(), 1);
+    seller_wallet.receive(None).await.unwrap();
+    assert_eq!(seller_wallet.payee_activity().await.unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -4281,8 +4310,12 @@ async fn test_divergent_stored_entry_neither_written_nor_given_up_while_its_reco
     let base = store();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = shop_on(&w, Arc::clone(&base)).await;
-    let mut till = w
-        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+    let mut seller_wallet = w
+        .join(
+            &w.bob,
+            "seller-wallet",
+            AppScopes::new().request().build().unwrap(),
+        )
         .await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     let record = sale(&shop, &request).await.record;
@@ -4304,7 +4337,7 @@ async fn test_divergent_stored_entry_neither_written_nor_given_up_while_its_reco
     );
     set_divergent(&base, &shop, &record, true);
     shop.receive(None).await.unwrap();
-    till.receive(None).await.unwrap();
+    seller_wallet.receive(None).await.unwrap();
     let target = RecordTarget::new(
         SwitchCollection::new(
             Collection::PayeeActivity.name(),
@@ -4312,7 +4345,8 @@ async fn test_divergent_stored_entry_neither_written_nor_given_up_while_its_reco
         ),
         &natural_key::request_record(&w.bob_id(), &request.request_hash),
     );
-    till.app_mut()
+    seller_wallet
+        .app_mut()
         .delete_record(&target, Vec::new())
         .await
         .unwrap();

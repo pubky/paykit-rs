@@ -178,7 +178,7 @@ fn offering(read: &PublicPaymentList) -> Vec<[u8; 16]> {
 async fn test_public_read_one_app_failure_keeps_the_others() {
     let w = World::new();
     let (mut wallet, reads) = wallet_reading_through(&w).await;
-    let apps = bob_apps(&w, &["shop", "till"]).await;
+    let apps = bob_apps(&w, &["shop", "seller-wallet"]).await;
     let (first, second) = (apps[0], apps[1]);
     publish_now(
         &w,
@@ -233,7 +233,7 @@ async fn test_public_read_one_app_failure_keeps_the_others() {
 async fn test_public_read_refused_or_expired_app_reported_others_kept() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
-    let apps = bob_apps(&w, &["shop", "till", "kiosk"]).await;
+    let apps = bob_apps(&w, &["shop", "seller-wallet", "kiosk"]).await;
     let now = w.clock.now_ms();
     // The first app's record expires in an hour; the second serves a record that doesn't
     // verify; the third's is good for 30 days.
@@ -308,19 +308,19 @@ async fn test_public_read_one_time_judges_every_app() {
         now,
         Some(now + HOUR_MS),
     );
-    // The Homeserver keeps serving the identity.json before the till joined, and bob's switch
-    // the newer one listing it after the shop: the till's record is read after the shop's,
+    // The Homeserver keeps serving the identity.json before the seller wallet joined, and bob's switch
+    // the newer one listing it after the shop: the seller wallet's record is read after the shop's,
     // and that read takes the hour.
     let older = w.homeserver.file(w.bob_id(), IDENTITY_PATH).unwrap();
-    let till = bob_apps(&w, &["till"]).await[0];
+    let seller_wallet = bob_apps(&w, &["seller-wallet"]).await[0];
     publish_now(
         &w,
-        till.0,
-        one_endpoint("btc-lightning-bolt11", "lnbc1till"),
+        seller_wallet.0,
+        one_endpoint("btc-lightning-bolt11", "lnbc1wallet"),
     );
     w.homeserver.put(w.bob_id(), IDENTITY_PATH, older);
     let clock = Arc::clone(&w.clock);
-    reads.on_read(&till.1, move || clock.advance_ms(HOUR_MS));
+    reads.on_read(&seller_wallet.1, move || clock.advance_ms(HOUR_MS));
     let looked_up = w.homeserver.identity_reads(&w.bob_id());
     let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
     // The copy of identity.json taken first is over 10 minutes old once the records are
@@ -330,8 +330,8 @@ async fn test_public_read_one_time_judges_every_app() {
         "{looked_up}"
     );
     // Both are judged at the read's one time: the shop has expired, and the bound goes to
-    // the till.
-    assert_eq!(offering(&read), [till.1], "{read:?}");
+    // the seller wallet.
+    assert_eq!(offering(&read), [seller_wallet.1], "{read:?}");
     assert_eq!(read.failures.len(), 1, "{read:?}");
     assert_eq!(read.failures[0].app_id, shop.1);
     assert!(
@@ -353,7 +353,7 @@ async fn test_public_read_identity_source_covers_both_ends_of_every_app_read() {
     ] {
         let w = Arc::new(World::new());
         let (mut wallet, reads) = wallet_reading_through(&w).await;
-        let apps = bob_apps(&w, &["shop", "till"]).await;
+        let apps = bob_apps(&w, &["shop", "seller-wallet"]).await;
         let (name, first_app) = apps[0];
         let observed = w.clock.now_ms();
         publish_app_at(
@@ -413,7 +413,7 @@ async fn test_public_read_identity_source_covers_both_ends_of_every_app_read() {
 async fn test_public_read_identity_source_rereads_a_directory_only_pass() {
     let w = Arc::new(World::new());
     let (mut wallet, reads) = wallet_reading_through(&w).await;
-    let apps = bob_apps(&w, &["shop", "till"]).await;
+    let apps = bob_apps(&w, &["shop", "seller-wallet"]).await;
     let (name, first) = apps[0];
     publish_now(
         &w,
@@ -454,7 +454,7 @@ async fn test_public_read_failed_lookup_time_does_not_shorten_the_homeserver_obs
     use pubky_switch_client::app::SwitchCopy;
     let w = Arc::new(World::new());
     let (mut wallet, reads) = wallet_reading_through(&w).await;
-    let apps = bob_apps(&w, &["shop", "till"]).await;
+    let apps = bob_apps(&w, &["shop", "seller-wallet"]).await;
     let (name, first) = apps[0];
     let observed = w.clock.now_ms();
     publish_now(&w, name, one_endpoint("btc-lightning-bolt11", "lnbc1first"));
@@ -508,7 +508,7 @@ async fn test_public_read_identity_source_rereads_after_rollback_past_either_obs
             Arc::clone(&bob_clock),
         ));
         let (mut wallet, reads) = wallet_reading_through(&w).await;
-        let apps = bob_apps(&w, &["shop", "till"]).await;
+        let apps = bob_apps(&w, &["shop", "seller-wallet"]).await;
         let (name, first) = apps[0];
         let expiry = Some(base + DAY_MS);
         publish_app_at(
@@ -582,26 +582,26 @@ async fn test_public_read_identity_source_rechecks_after_a_newly_listed_apps_rea
     let (mut wallet, reads) = wallet_reading_through(&w).await;
     bob_apps(&w, &["shop"]).await;
     let first_doc = w.homeserver.file(w.bob_id(), IDENTITY_PATH).unwrap();
-    let till = bob_apps(&w, &["till"]).await[0];
+    let seller_wallet = bob_apps(&w, &["seller-wallet"]).await[0];
     publish_now(
         &w,
-        till.0,
-        one_endpoint("btc-lightning-bolt11", "lnbc1till"),
+        seller_wallet.0,
+        one_endpoint("btc-lightning-bolt11", "lnbc1wallet"),
     );
     w.homeserver.put(w.bob_id(), IDENTITY_PATH, first_doc);
     let before = w.clock.now_ms();
     w.clock.advance_ms(4 * 60_000);
-    // The switch adds the till to the second pass. Its record returns after the
-    // clock moves behind that lookup. A new lookup now shows the till's removal.
+    // The switch adds the seller wallet to the second pass. Its record returns after the
+    // clock moves behind that lookup. A new lookup now shows the seller wallet's removal.
     let changed = Arc::clone(&w);
-    reads.on_read(&till.1, move || {
+    reads.on_read(&seller_wallet.1, move || {
         changed.clock.set_ms(before + 60_000);
         changed
             .bob
             .next_doc(|body| {
-                body.apps.retain(|a| a.app_id != till.1);
+                body.apps.retain(|a| a.app_id != seller_wallet.1);
                 body.removed.push(RemovedApp {
-                    app_id: till.1,
+                    app_id: seller_wallet.1,
                     distrust_from: changed.clock.now_ms(),
                 });
             })
@@ -609,7 +609,7 @@ async fn test_public_read_identity_source_rechecks_after_a_newly_listed_apps_rea
     });
     let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
     assert!(reads.on_read.lock().unwrap().is_empty());
-    assert!(!offering(&read).contains(&till.1), "{read:?}");
+    assert!(!offering(&read).contains(&seller_wallet.1), "{read:?}");
 }
 
 #[tokio::test]
@@ -629,7 +629,7 @@ async fn read_during_renewal(already_listed: bool) {
 
     let w = Arc::new(World::new());
     let (mut wallet, reads) = wallet_reading_through(&w).await;
-    let apps = bob_apps(&w, &["shop", "till"]).await;
+    let apps = bob_apps(&w, &["shop", "seller-wallet"]).await;
     let (name, id) = apps[0];
     publish_now(&w, name, one_endpoint("btc-lightning-bolt11", "lnbc1old"));
     let keys = w.bob.identity().app_keys(name);
@@ -707,33 +707,33 @@ async fn test_public_read_refreshes_after_a_newly_listed_apps_slow_read() {
     let (mut wallet, reads) = wallet_reading_through(&w).await;
     bob_apps(&w, &["shop"]).await;
     let first_doc = w.homeserver.file(w.bob_id(), IDENTITY_PATH).unwrap();
-    let till = bob_apps(&w, &["till"]).await[0];
+    let seller_wallet = bob_apps(&w, &["seller-wallet"]).await[0];
     publish_now(
         &w,
-        till.0,
-        one_endpoint("btc-lightning-bolt11", "lnbc1till"),
+        seller_wallet.0,
+        one_endpoint("btc-lightning-bolt11", "lnbc1wallet"),
     );
     w.homeserver.put(w.bob_id(), IDENTITY_PATH, first_doc);
 
-    // The switch lists the till. While its record is read a kiosk joins, so the next
+    // The switch lists the seller wallet. While its record is read a kiosk joins, so the next
     // identity lookup must also collect the kiosk's record.
     let kiosk = w.bob.identity().app_keys("kiosk").app_id_bytes();
     let world = Arc::clone(&w);
-    reads.on_read(&till.1, move || {
+    reads.on_read(&seller_wallet.1, move || {
         world.clock.advance_ms(HOUR_MS);
         let scopes = paykit_sdk::AppScopes::new().request().build().unwrap();
         world.approve(&world.bob, "kiosk", &scopes);
     });
-    // That read outlasts the new identity too. The final document no longer lists the till.
+    // That read outlasts the new identity too. The final document no longer lists the seller wallet.
     let world = Arc::clone(&w);
     reads.on_read(&kiosk, move || {
         world.clock.advance_ms(HOUR_MS);
         world
             .bob
             .next_doc(|body| {
-                body.apps.retain(|listed| listed.app_id != till.1);
+                body.apps.retain(|listed| listed.app_id != seller_wallet.1);
                 body.removed.push(RemovedApp {
-                    app_id: till.1,
+                    app_id: seller_wallet.1,
                     distrust_from: world.clock.now_ms(),
                 });
             })
@@ -741,7 +741,7 @@ async fn test_public_read_refreshes_after_a_newly_listed_apps_slow_read() {
     });
     let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
     assert!(reads.on_read.lock().unwrap().is_empty());
-    assert!(!offering(&read).contains(&till.1), "{read:?}");
+    assert!(!offering(&read).contains(&seller_wallet.1), "{read:?}");
 }
 
 #[tokio::test]
@@ -750,9 +750,16 @@ async fn test_public_read_refuses_when_the_directory_keeps_expiring() {
     let (mut wallet, reads) = wallet_reading_through(&w).await;
     bob_apps(&w, &["shop"]).await;
     let first_doc = w.homeserver.file(w.bob_id(), IDENTITY_PATH).unwrap();
-    bob_apps(&w, &["till"]).await;
+    bob_apps(&w, &["seller-wallet"]).await;
     w.homeserver.put(w.bob_id(), IDENTITY_PATH, first_doc);
-    let names = ["till", "kiosk", "counter", "desk", "terminal", "office"];
+    let names = [
+        "seller-wallet",
+        "kiosk",
+        "counter",
+        "desk",
+        "terminal",
+        "office",
+    ];
     for pair in names.windows(2) {
         let id = w.bob.identity().app_keys(pair[0]).app_id_bytes();
         let next = pair[1];
@@ -779,7 +786,7 @@ async fn test_public_read_refuses_when_the_directory_keeps_expiring() {
 async fn test_public_read_endpoint_bound_reports_an_app_that_does_not_fit() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
-    let apps = bob_apps(&w, &["shop", "till", "kiosk"]).await;
+    let apps = bob_apps(&w, &["shop", "seller-wallet", "kiosk"]).await;
     // The second app's endpoints don't fit after the first's; the third's fill what is left
     // exactly.
     let rest = 56;
@@ -798,7 +805,7 @@ async fn test_public_read_endpoint_bound_reports_an_app_that_does_not_fit() {
 async fn test_public_read_payload_bound_reports_an_app_that_does_not_fit() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
-    let apps = bob_apps(&w, &["shop", "till", "kiosk"]).await;
+    let apps = bob_apps(&w, &["shop", "seller-wallet", "kiosk"]).await;
     // 3 MiB, then 2 MiB that don't fit, then 1 MiB that fills the 4 MiB exactly.
     publish_now(&w, apps[0].0, many(1, MAX_PUBLIC_PAYLOAD_BYTES - MIB));
     publish_now(&w, apps[1].0, many(1, 2 * MIB));
@@ -820,12 +827,12 @@ async fn test_public_read_payload_bound_reports_an_app_that_does_not_fit() {
 async fn test_public_read_refused_record_gives_no_endpoints_of_the_held_one() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
-    let apps = bob_apps(&w, &["shop", "till"]).await;
+    let apps = bob_apps(&w, &["shop", "seller-wallet"]).await;
     publish_now(&w, apps[0].0, many(1, 8));
     publish_now(&w, apps[1].0, many(2, 8));
     let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
     assert_eq!(offering(&read), [apps[0].1, apps[1].1]);
-    // The till's newer record is refused: that is its failure, once, and the record it holds
+    // The seller wallet's newer record is refused: that is its failure, once, and the record it holds
     // gives no endpoints, so it takes none of the room the shop's newer record leaves.
     w.clock.advance_ms(1000);
     publish_now(&w, apps[0].0, many(MAX_PUBLIC_ENDPOINTS - 1, 8));
@@ -857,8 +864,8 @@ async fn test_public_read_discovery_and_payment_agree_on_a_failed_app() {
         )
         .await;
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
-    let till = bob_apps(&w, &["till"]).await;
-    let apps = [("shop", shop.app_id()), till[0]];
+    let seller_wallet = bob_apps(&w, &["seller-wallet"]).await;
+    let apps = [("shop", shop.app_id()), seller_wallet[0]];
     publish_now(
         &w,
         apps[0].0,
@@ -867,12 +874,12 @@ async fn test_public_read_discovery_and_payment_agree_on_a_failed_app() {
     publish_now(
         &w,
         apps[1].0,
-        one_endpoint("btc-lightning-bolt11", "lnbc1till"),
+        one_endpoint("btc-lightning-bolt11", "lnbc1wallet"),
     );
     let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
     assert_eq!(offering(&read), [apps[0].1, apps[1].1]);
     // The shop's newer record is refused: discovery gives the shop's failure and only the
-    // till's endpoint, not the shop's record kept.
+    // seller wallet's endpoint, not the shop's record kept.
     w.clock.advance_ms(1000);
     publish_now(
         &w,
@@ -903,7 +910,7 @@ async fn test_public_read_discovery_and_payment_agree_on_a_failed_app() {
     };
     assert!(text.contains("Paykit wire 3.2"), "{text}");
     assert!(w.rail.all_executions().is_empty());
-    // A payment to any app pays the till's endpoint, the one discovery offers, and tells
+    // A payment to any app pays the seller wallet's endpoint, the one discovery offers, and tells
     // the shop's failure with it.
     let paid = wallet.pay_without_request(public_to_bob(&w)).await;
     assert_eq!(paid.public_failures, read.failures);
@@ -983,7 +990,7 @@ async fn test_public_read_required_app_in_conflict_pays_the_earlier_record() {
 async fn test_public_read_failures_told_with_every_payment_result() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
-    let apps = bob_apps(&w, &["shop", "till"]).await;
+    let apps = bob_apps(&w, &["shop", "seller-wallet"]).await;
     publish_now(
         &w,
         apps[0].0,
@@ -992,7 +999,7 @@ async fn test_public_read_failures_told_with_every_payment_result() {
     publish_now(
         &w,
         apps[1].0,
-        one_endpoint("btc-lightning-bolt11", "lnbc1till"),
+        one_endpoint("btc-lightning-bolt11", "lnbc1wallet"),
     );
     wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
     w.clock.advance_ms(1000);
@@ -1081,7 +1088,7 @@ async fn test_public_read_required_app_cached_record_not_paid_over_a_refused_one
 async fn test_public_read_payment_tells_a_conflict_it_first_finds() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
-    let apps = bob_apps(&w, &["shop", "till"]).await;
+    let apps = bob_apps(&w, &["shop", "seller-wallet"]).await;
     let t0 = w.clock.now_ms();
     let expiry = Some(t0 + 30 * DAY_MS);
     publish_app_at(
@@ -1094,7 +1101,7 @@ async fn test_public_read_payment_tells_a_conflict_it_first_finds() {
     publish_now(
         &w,
         apps[1].0,
-        one_endpoint("btc-lightning-bolt11", "lnbc1till"),
+        one_endpoint("btc-lightning-bolt11", "lnbc1wallet"),
     );
     // The wallet's first payment reads both records and pays one.
     let outcome = wallet
@@ -1105,7 +1112,7 @@ async fn test_public_read_payment_tells_a_conflict_it_first_finds() {
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     let first_attempt = outcome.attempt_id();
     // Another body of the shop's record at the same updated_at: the next payment is the
-    // first read to find the conflict, pays the till, and tells the conflict.
+    // first read to find the conflict, pays the seller wallet, and tells the conflict.
     publish_app_at(
         &w,
         apps[0].0,
@@ -1234,11 +1241,11 @@ async fn test_public_read_withdrawal_served_after_a_clock_rollback_is_used() {
 async fn test_public_read_large_records_kept_per_app_within_the_store_bound() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
-    let apps = bob_apps(&w, &["shop", "till"]).await;
+    let apps = bob_apps(&w, &["shop", "seller-wallet"]).await;
     publish_now(
         &w,
         apps[1].0,
-        one_endpoint("btc-lightning-bolt11", "lnbc1till"),
+        one_endpoint("btc-lightning-bolt11", "lnbc1wallet"),
     );
     // The shop renews a 3 MiB record several times: more together than the store takes in
     // one value, so the oldest are dropped, and both apps stay readable.
@@ -1271,7 +1278,7 @@ async fn test_public_read_large_records_kept_per_app_within_the_store_bound() {
 async fn test_public_read_unretained_record_reports_its_remaining_endpoint_bound() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
-    let apps = bob_apps(&w, &["shop", "till", "kiosk"]).await;
+    let apps = bob_apps(&w, &["shop", "seller-wallet", "kiosk"]).await;
     publish_now(&w, apps[0].0, many(MAX_PUBLIC_ENDPOINTS - 1, 8));
     publish_now(
         &w,
@@ -1309,7 +1316,7 @@ async fn test_public_read_unretained_record_reports_its_remaining_endpoint_bound
 async fn test_public_read_unretained_conflicting_or_expired_record_is_refused() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
-    let apps = bob_apps(&w, &["shop", "till"]).await;
+    let apps = bob_apps(&w, &["shop", "seller-wallet"]).await;
     let original_time = w.clock.now_ms();
     publish_app_at(
         &w,
@@ -1321,7 +1328,7 @@ async fn test_public_read_unretained_conflicting_or_expired_record_is_refused() 
     publish_now(
         &w,
         apps[1].0,
-        one_endpoint("btc-lightning-bolt12", "lno1till"),
+        one_endpoint("btc-lightning-bolt12", "lno1wallet"),
     );
     let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
     assert_eq!(offering(&read), [apps[0].1, apps[1].1]);
@@ -1416,18 +1423,18 @@ async fn test_public_read_time_taken_once_before_any_app_is_judged() {
             store
         })
         .await;
-        let apps = bob_apps(&w, &["shop", "till"]).await;
+        let apps = bob_apps(&w, &["shop", "seller-wallet"]).await;
         let now = w.clock.now_ms();
         publish_now(
             &w,
             apps[0].0,
             one_endpoint("btc-lightning-bolt12", "lno1shop"),
         );
-        // The till's record expires in a minute.
+        // The seller wallet's record expires in a minute.
         publish_app_at(
             &w,
             apps[1].0,
-            one_endpoint("btc-lightning-bolt11", "lnbc1till"),
+            one_endpoint("btc-lightning-bolt11", "lnbc1wallet"),
             now,
             Some(now + 60_000),
         );
@@ -1468,7 +1475,7 @@ async fn test_public_read_failures_found_before_an_error_come_with_it() {
         store
     })
     .await;
-    let apps = bob_apps(&w, &["shop", "till"]).await;
+    let apps = bob_apps(&w, &["shop", "seller-wallet"]).await;
     publish_now(
         &w,
         apps[0].0,
@@ -1477,9 +1484,9 @@ async fn test_public_read_failures_found_before_an_error_come_with_it() {
     publish_now(
         &w,
         apps[1].0,
-        one_endpoint("btc-lightning-bolt11", "lnbc1till"),
+        one_endpoint("btc-lightning-bolt11", "lnbc1wallet"),
     );
-    // The shop's record can't be read, then keeping the till's record fails: the payment
+    // The shop's record can't be read, then keeping the seller wallet's record fails: the payment
     // stops with the store's error, and the shop's failure comes with it.
     reads.fail(&apps[0].1);
     fault.get().unwrap().fail_put_once(b"p/paykit/ar/");
@@ -1509,12 +1516,12 @@ async fn test_public_read_required_app_failure_leaves_no_public_destination() {
         )
         .await;
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
-    let apps = bob_apps(&w, &["till"]).await;
+    let apps = bob_apps(&w, &["seller-wallet"]).await;
     publish_now(&w, "shop", one_endpoint("btc-lightning-bolt12", "lno1shop"));
     publish_now(
         &w,
         apps[0].0,
-        one_endpoint("btc-lightning-bolt11", "lnbc1till"),
+        one_endpoint("btc-lightning-bolt11", "lnbc1wallet"),
     );
     let requiring = |now: u64| {
         paykit_sdk::RequestDraft::new(
@@ -1525,7 +1532,7 @@ async fn test_public_read_required_app_failure_leaves_no_public_destination() {
         .with_proposal_expires_at_ms(now + DAY_MS)
     };
     let public = || PayOptions::default().with_mode(PaymentMode::Public(UserConfirmed::new()));
-    // The request requires the shop, whose record can't be read now: the till's endpoint is
+    // The request requires the shop, whose record can't be read now: the seller wallet's endpoint is
     // fine, but only the shop's record is read, so there is no public destination.
     let draft = requiring(w.clock.now_ms());
     let request = request_from(&mut shop, w.alice_id(), draft).await;
@@ -1543,7 +1550,7 @@ async fn test_public_read_required_app_failure_leaves_no_public_destination() {
     assert!(text.contains("homeserver"), "{text}");
     assert!(w.rail.all_executions().is_empty());
     assert!(wallet.payments().await.unwrap().is_empty());
-    // Once the shop's record reads again, its endpoint is paid, never the till's.
+    // Once the shop's record reads again, its endpoint is paid, never the seller wallet's.
     reads.heal();
     let outcome = wallet
         .pay_request(&request, public())

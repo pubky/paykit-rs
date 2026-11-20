@@ -1116,19 +1116,19 @@ async fn test_public_endpoints_of_every_app_in_the_payment_methods_order() {
     ]);
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    let mut till = w
+    let mut seller_wallet = w
         .join(
             &w.bob,
-            "till",
+            "seller-wallet",
             paykit_sdk::AppScopes::new().request().build().unwrap(),
         )
         .await;
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
-    till.app_mut().invite(&w.alice_id()).await.unwrap();
-    let (earlier, later) = if shop.app_id() < till.app_id() {
-        ("shop", "till")
+    seller_wallet.app_mut().invite(&w.alice_id()).await.unwrap();
+    let (earlier, later) = if shop.app_id() < seller_wallet.app_id() {
+        ("shop", "seller-wallet")
     } else {
-        ("till", "shop")
+        ("seller-wallet", "shop")
     };
     let now = w.clock.now_ms();
     let expires_at = Some(now + 30 * DAY_MS);
@@ -1183,21 +1183,21 @@ async fn test_public_endpoints_of_every_app_in_the_payment_methods_order() {
 
 #[tokio::test]
 async fn test_public_same_identifier_from_two_apps_pays_the_first_by_app_id() {
-    // Bob's shop and till both offer `btc-lightning-bolt12`, each its own payload. The
+    // Bob's shop and second wallet both offer `btc-lightning-bolt12`, each its own payload. The
     // method is handed the endpoints by App ID (Paykit spec 4), and the fake rail's default
     // takes the first it is handed: the app with the lower App ID is paid.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    let mut till = w
+    let mut seller_wallet = w
         .join(
             &w.bob,
-            "till",
+            "seller-wallet",
             paykit_sdk::AppScopes::new().request().build().unwrap(),
         )
         .await;
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
-    till.app_mut().invite(&w.alice_id()).await.unwrap();
+    seller_wallet.app_mut().invite(&w.alice_id()).await.unwrap();
     let expires = Some(w.clock.now_ms() + 30 * DAY_MS);
     let now = w.clock.now_ms();
     publish_app_at(
@@ -1209,15 +1209,15 @@ async fn test_public_same_identifier_from_two_apps_pays_the_first_by_app_id() {
     );
     publish_app_at(
         &w,
-        "till",
-        one_endpoint("btc-lightning-bolt12", "lno1till"),
+        "seller-wallet",
+        one_endpoint("btc-lightning-bolt12", "lno1wallet"),
         now,
         expires,
     );
-    let (first, payload) = if shop.app_id() < till.app_id() {
+    let (first, payload) = if shop.app_id() < seller_wallet.app_id() {
         (shop.app_id(), "lno1shop")
     } else {
-        (till.app_id(), "lno1till")
+        (seller_wallet.app_id(), "lno1wallet")
     };
     let offered = wallet
         .public_endpoints(&w.bob_id(), None)

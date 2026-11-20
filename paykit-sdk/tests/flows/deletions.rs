@@ -12,8 +12,12 @@ async fn test_payee_deletion_observation_displays_the_original_receipt_and_prese
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    let mut till = w
-        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+    let mut seller_wallet = w
+        .join(
+            &w.bob,
+            "seller-wallet",
+            AppScopes::new().request().build().unwrap(),
+        )
         .await;
     let request = request_from(&mut shop, w.alice_id(), draft("0.00025", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
@@ -32,15 +36,15 @@ async fn test_payee_deletion_observation_displays_the_original_receipt_and_prese
         ),
         &natural_key::request_record(&w.bob_id(), &request.request_hash),
     );
-    till.receive(None).await.unwrap();
-    let original = till
+    seller_wallet.receive(None).await.unwrap();
+    let original = seller_wallet
         .app()
         .shared_record(&key)
         .await
         .unwrap()
         .unwrap()
         .content;
-    let deleted = till
+    let deleted = seller_wallet
         .app_mut()
         .delete_record(&target, Vec::new())
         .await
@@ -50,7 +54,7 @@ async fn test_payee_deletion_observation_displays_the_original_receipt_and_prese
     shop.receive(None).await.unwrap();
     let notices = shop.payee_deletion_notices().await.unwrap();
     assert_eq!(notices.len(), 1);
-    assert_eq!(notices[0].writer, Some(till.app_id()));
+    assert_eq!(notices[0].writer, Some(seller_wallet.app_id()));
     assert_eq!(notices[0].record, key);
     assert_eq!(notices[0].generation, deleted.version.generation);
     assert_eq!(notices[0].version, deleted.version.version);
@@ -59,7 +63,7 @@ async fn test_payee_deletion_observation_displays_the_original_receipt_and_prese
     assert_eq!(held.len(), 1);
     assert_eq!(held[0].record, key);
     assert_eq!(held[0].deletions[0].version, deleted.version);
-    assert_eq!(held[0].deletions[0].writer, Some(till.app_id()));
+    assert_eq!(held[0].deletions[0].writer, Some(seller_wallet.app_id()));
     assert_eq!(held[0].deletions[0].page_time_ms, Some(at));
     assert_eq!(held[0].deletions[0].delete, notices[0].delete);
     assert_eq!(held[0].receipt.message().msg_id, signed);
@@ -105,8 +109,11 @@ async fn test_payee_deletion_observation_displays_the_original_receipt_and_prese
         prior.hash()
     );
     assert_eq!(w.record_writes(&w.bob, &key), writes + 1);
-    let pubky_switch_client::app::RecordRead::Fresh(published) =
-        till.app_mut().read_record_fresh(&target).await.unwrap()
+    let pubky_switch_client::app::RecordRead::Fresh(published) = seller_wallet
+        .app_mut()
+        .read_record_fresh(&target)
+        .await
+        .unwrap()
     else {
         panic!("the switch must return the published receipt");
     };
@@ -117,7 +124,8 @@ async fn test_payee_deletion_observation_displays_the_original_receipt_and_prese
     )
     .unwrap();
     assert_eq!(published.receipt.unwrap().hash(), prior.hash());
-    till.app_mut()
+    seller_wallet
+        .app_mut()
         .put_record(&target, original.value().unwrap(), Vec::new())
         .await
         .unwrap();
@@ -141,7 +149,8 @@ async fn test_payee_deletion_observation_displays_the_original_receipt_and_prese
         format!("rc/{}", pubky_switch_core::enc::b64(&prior.hash())).as_bytes()
     );
     for count in 2..=8 {
-        till.app_mut()
+        seller_wallet
+            .app_mut()
             .delete_record(&target, Vec::new())
             .await
             .unwrap();
@@ -160,8 +169,13 @@ async fn test_payee_deletion_observation_displays_the_original_receipt_and_prese
             .iter()
             .all(|(_, value)| value.len() < original.value().unwrap().len()));
         assert_eq!(shop.payee_deletion_notices().await.unwrap().len(), 1);
-        till.app_mut().read_record_fresh(&target).await.unwrap();
-        till.app_mut()
+        seller_wallet
+            .app_mut()
+            .read_record_fresh(&target)
+            .await
+            .unwrap();
+        seller_wallet
+            .app_mut()
             .put_record(&target, original.value().unwrap(), Vec::new())
             .await
             .unwrap();
@@ -174,7 +188,7 @@ async fn test_payee_deletion_without_a_copy_keeps_the_delete_through_reload() {
     let w = World::new();
     let scopes = || AppScopes::new().request().build().unwrap();
     let mut shop = w.shop().await;
-    let mut till = w.join(&w.bob, "till", scopes()).await;
+    let mut seller_wallet = w.join(&w.bob, "seller-wallet", scopes()).await;
     let device = crate::common::store();
     let mut observer = w
         .join_with(
@@ -194,15 +208,16 @@ async fn test_payee_deletion_without_a_copy_keeps_the_delete_through_reload() {
         &natural_key::request_record(&w.bob_id(), &request.request_hash),
     );
     let key = shop.app().record_key(&target).unwrap();
-    till.receive(None).await.unwrap();
-    let previous = till
+    seller_wallet.receive(None).await.unwrap();
+    let previous = seller_wallet
         .app()
         .shared_record(&key)
         .await
         .unwrap()
         .unwrap()
         .content;
-    till.app_mut()
+    seller_wallet
+        .app_mut()
         .delete_record(&target, Vec::new())
         .await
         .unwrap();
@@ -260,7 +275,8 @@ async fn test_payee_deletion_without_a_copy_keeps_the_delete_through_reload() {
         .unwrap()
         .is_some());
     assert_eq!(w.record_writes(&w.bob, &key), before);
-    till.app_mut()
+    seller_wallet
+        .app_mut()
         .put_record(&target, previous.value().unwrap(), Vec::new())
         .await
         .unwrap();
@@ -293,8 +309,12 @@ async fn test_payee_deletion_an_older_receipt_survives_without_naming_the_writer
         )
         .await;
     let mut wallet = w.wallet("wallet").await;
-    let mut till = w
-        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+    let mut seller_wallet = w
+        .join(
+            &w.bob,
+            "seller-wallet",
+            AppScopes::new().request().build().unwrap(),
+        )
         .await;
     let request = request_from(&mut shop, w.alice_id(), draft("0.00025", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
@@ -306,7 +326,7 @@ async fn test_payee_deletion_an_older_receipt_survives_without_naming_the_writer
     shop.receive(None).await.unwrap();
     let key = shop.payee_activity().await.unwrap()[0].record;
     let receipt = shop.confirm_payment(&key).await.unwrap().unwrap();
-    till.receive(None).await.unwrap();
+    seller_wallet.receive(None).await.unwrap();
     let target = RecordTarget::new(
         SwitchCollection::new(
             Collection::PayeeActivity.name(),
@@ -314,36 +334,44 @@ async fn test_payee_deletion_an_older_receipt_survives_without_naming_the_writer
         ),
         &natural_key::request_record(&w.bob_id(), &request.request_hash),
     );
-    let older = till
+    let older = seller_wallet
         .app()
         .shared_record(&key)
         .await
         .unwrap()
         .unwrap()
         .content;
-    till.app_mut()
+    seller_wallet
+        .app_mut()
         .delete_record(&target, Vec::new())
         .await
         .unwrap();
     shop.receive(None).await.unwrap();
     let exact = shop.payee_deletion_notices().await.unwrap();
     assert_eq!(exact.len(), 1);
-    assert_eq!(exact[0].writer, Some(till.app_id()));
+    assert_eq!(exact[0].writer, Some(seller_wallet.app_id()));
     let older_layer = shop.backup().await.unwrap();
     shop.acknowledge_payee_deletion(&exact[0]).await.unwrap();
-    till.app_mut().read_record_fresh(&target).await.unwrap();
-    till.app_mut()
+    seller_wallet
+        .app_mut()
+        .read_record_fresh(&target)
+        .await
+        .unwrap();
+    seller_wallet
+        .app_mut()
         .put_record(&target, older.value().unwrap(), Vec::new())
         .await
         .unwrap();
     shop.receive(None).await.unwrap();
     let mut newer: serde_json::Value = serde_json::from_slice(older.value().unwrap()).unwrap();
     newer["order"] = serde_json::json!("delivered");
-    till.app_mut()
+    seller_wallet
+        .app_mut()
         .put_record(&target, &serde_json::to_vec(&newer).unwrap(), Vec::new())
         .await
         .unwrap();
-    till.app_mut()
+    seller_wallet
+        .app_mut()
         .delete_record(&target, Vec::new())
         .await
         .unwrap();
@@ -369,7 +397,8 @@ async fn test_payee_deletion_an_older_receipt_survives_without_naming_the_writer
     let pending = shop.payee_deletion_notices().await.unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].delete, notice[0].delete);
-    till.app_mut()
+    seller_wallet
+        .app_mut()
         .put_record(&target, older.value().unwrap(), Vec::new())
         .await
         .unwrap();
@@ -428,7 +457,7 @@ async fn receipt_on_older_restore(when: BeforeRestore) {
         .join_with(&w.bob, "shop", scopes(), Default::default(), device.clone())
         .await;
     let mut wallet = w.wallet("wallet").await;
-    let mut till = w.join(&w.bob, "till", scopes()).await;
+    let mut seller_wallet = w.join(&w.bob, "seller-wallet", scopes()).await;
     let request = request_from(&mut shop, w.alice_id(), draft("0.00025", w.clock.now_ms())).await;
     let mut backup = shop.backup().await.unwrap();
     wallet.receive(None).await.unwrap();
@@ -469,8 +498,9 @@ async fn receipt_on_older_restore(when: BeforeRestore) {
     } else {
         Some(shop.confirm_payment(&key).await.unwrap().unwrap())
     };
-    till.receive(None).await.unwrap();
-    till.app_mut()
+    seller_wallet.receive(None).await.unwrap();
+    seller_wallet
+        .app_mut()
         .delete_record(&target, Vec::new())
         .await
         .unwrap();
@@ -483,10 +513,15 @@ async fn receipt_on_older_restore(when: BeforeRestore) {
             backup = shop.backup().await.unwrap();
             shop.acknowledge_payee_deletion(&notices[0]).await.unwrap();
         }
-        till.app_mut().read_record_fresh(&target).await.unwrap();
+        seller_wallet
+            .app_mut()
+            .read_record_fresh(&target)
+            .await
+            .unwrap();
         observed = Some(notices[0].clone());
     }
-    till.app_mut()
+    seller_wallet
+        .app_mut()
         .put_record(&target, before.value().unwrap(), Vec::new())
         .await
         .unwrap();
@@ -585,7 +620,7 @@ async fn confirm_after_conflict(changed_proof: bool) {
             Arc::clone(&reads) as Arc<dyn Transport>,
         )
         .await;
-    let mut till = w.join(&w.bob, "till", scopes()).await;
+    let mut seller_wallet = w.join(&w.bob, "seller-wallet", scopes()).await;
     let request = request_from(&mut shop, w.alice_id(), draft("0.00025", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     wallet
@@ -594,7 +629,7 @@ async fn confirm_after_conflict(changed_proof: bool) {
         .outcome
         .unwrap();
     shop.receive(None).await.unwrap();
-    till.receive(None).await.unwrap();
+    seller_wallet.receive(None).await.unwrap();
     let target = RecordTarget::new(
         SwitchCollection::new(
             Collection::PayeeActivity.name(),
@@ -603,7 +638,7 @@ async fn confirm_after_conflict(changed_proof: bool) {
         &natural_key::request_record(&w.bob_id(), &request.request_hash),
     );
     let key = shop.app().record_key(&target).unwrap();
-    let prior = till
+    let prior = seller_wallet
         .app()
         .shared_record(&key)
         .await
@@ -645,7 +680,8 @@ async fn confirm_after_conflict(changed_proof: bool) {
     let mut winning: serde_json::Value =
         serde_json::from_slice(&record.to_json().unwrap()).unwrap();
     winning["counter_extension"] = serde_json::json!("retained");
-    till.app_mut()
+    seller_wallet
+        .app_mut()
         .put_record(&target, &serde_json::to_vec(&winning).unwrap(), Vec::new())
         .await
         .unwrap();

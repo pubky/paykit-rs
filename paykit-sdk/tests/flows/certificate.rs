@@ -1239,30 +1239,31 @@ async fn test_certificate_restored_payee_ends_reconcile_and_requests() {
     assert!(wallet.request(&request).await.is_ok());
 }
 
-/// Alice's till, holding `paykit_request`, sent bob a request: its `payee_activity` record is
+/// Alice's wallet, holding `paykit_request`, sent bob a request: its `payee_activity` record is
 /// alice's. Her wallet holds `paykit_pay` only and reads none of them. Its certificate is then
 /// renewed to hold `paykit_request` too, with the scope keys it needs, and listed: the wallet's
 /// next read takes it. Returns the wallet, on `base`, and the renewed certificate.
 async fn renewed_to_read_more_on(w: &World, base: Arc<dyn StateStore>) -> (Paykit, AppCert) {
-    let (wallet, wider, _) = renewed_to_read_more_with_till(w, base).await;
+    let (wallet, wider, _) = renewed_to_read_more_with_seller_wallet(w, base).await;
     (wallet, wider)
 }
 
-/// [`renewed_to_read_more_on`], with the till that sent the request.
-async fn renewed_to_read_more_with_till(
+/// [`renewed_to_read_more_on`], with the seller wallet that sent the request.
+async fn renewed_to_read_more_with_seller_wallet(
     w: &World,
     base: Arc<dyn StateStore>,
 ) -> (Paykit, AppCert, Paykit) {
     let mut wallet = w.wallet_on("wallet", base).await;
     let me = wallet.app_id();
-    let mut till = w
+    let mut seller_wallet = w
         .join(
             &w.alice,
-            "till",
+            "seller-wallet",
             AppScopes::new().request().build().unwrap(),
         )
         .await;
-    till.send_request(w.bob_id(), crate::common::draft("1", w.clock.now_ms()))
+    seller_wallet
+        .send_request(w.bob_id(), crate::common::draft("1", w.clock.now_ms()))
         .await
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -1297,7 +1298,7 @@ async fn renewed_to_read_more_with_till(
     }
     wallet.receive(None).await.unwrap();
     list(w, me, &old, &wider);
-    (wallet, wider, till)
+    (wallet, wider, seller_wallet)
 }
 
 async fn renewed_to_read_more(w: &World) -> (Paykit, AppCert) {
@@ -1353,7 +1354,7 @@ async fn read_payee_pages(wallet: &mut Paykit) {
 
 #[tokio::test]
 async fn test_certificate_renewal_reading_more_lists_its_records_first() {
-    // The wallet's copy lacks the till's record until the collection is listed: a call that
+    // The reader's copy lacks the seller wallet's record until the collection is listed: a call that
     // only reads is refused meanwhile, rather than show no requests sent. The read that
     // takes the certificate holds no scope key of it yet, so it doesn't list; the next one
     // fetches the keys, and the client lists before it reads the feed. A read whose
@@ -1402,7 +1403,7 @@ async fn test_certificate_renewal_reading_more_lists_its_records_first() {
     );
     let refused = wallet.payee_activity().await.unwrap_err();
     assert!(is_not_now(&refused), "{refused:?}");
-    // The next reads finish the remaining pages before the till's request can be shown.
+    // The next reads finish the remaining pages before the seller wallet's request can be shown.
     read_payee_pages(&mut wallet).await;
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
 }
@@ -2098,14 +2099,15 @@ async fn test_certificate_narrowed_then_widened_lists_again() {
     list(&w, me, &wider, &narrow);
     wallet.receive(None).await.unwrap();
     assert_eq!(wallet.app().cert().hash(), narrow.hash());
-    let mut till = w
+    let mut seller_wallet = w
         .join(
             &w.alice,
-            "till2",
+            "second-wallet",
             AppScopes::new().request().build().unwrap(),
         )
         .await;
-    till.send_request(w.bob_id(), crate::common::draft("2", w.clock.now_ms()))
+    seller_wallet
+        .send_request(w.bob_id(), crate::common::draft("2", w.clock.now_ms()))
         .await
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -2138,7 +2140,7 @@ enum Narrowed {
 }
 
 /// The wallet, listed under `paykit_pay` and `paykit_request`, is narrowed as `narrowed` says, in
-/// the read that also brings a request alice's till sent meanwhile, which the narrower certificate
+/// the read that also brings a request Alice's wallet sent meanwhile, which the narrower certificate
 /// doesn't read. It is renewed back to `paykit_pay` and `paykit_request` as the data epoch rotates,
 /// and bob's acceptance comes in the read that takes it, before any listing: the copy lacks the
 /// request's record, so the acceptance is held, not taken as a reply to a request the wallet didn't
@@ -2158,17 +2160,17 @@ async fn narrowed_then_renewed_back(narrowed: Narrowed) {
         .join(&w.bob, "bwallet", AppScopes::new().pay().build().unwrap())
         .await;
     payer.app_mut().invite(&w.alice_id()).await.unwrap();
-    let mut till = w
+    let mut seller_wallet = w
         .join(
             &w.alice,
-            "till2",
+            "second-wallet",
             AppScopes::new().request().build().unwrap(),
         )
         .await;
-    // Bob pays a first request of the till while the wallet reads `paykit_request`: his wallet
+    // Bob pays the seller wallet's first request while the wallet reads `paykit_request`: his wallet
     // reads alice's directory, which lists the wallet under the wider certificate, and
     // keeps that copy for the rest of the flow.
-    let first = till
+    let first = seller_wallet
         .send_request(w.bob_id(), crate::common::draft("1", w.clock.now_ms()))
         .await
         .unwrap()
@@ -2193,13 +2195,13 @@ async fn narrowed_then_renewed_back(narrowed: Narrowed) {
     let narrow = renew(&w, me, &scopes, 2_000);
     wallet.receive(None).await.unwrap();
     list(&w, me, &wider, &narrow);
-    let request = till
+    let request = seller_wallet
         .send_request(w.bob_id(), crate::common::draft("2", w.clock.now_ms()))
         .await
         .unwrap()
         .request
         .unwrap();
-    drop(till);
+    drop(seller_wallet);
     if narrowed == Narrowed::Refused {
         wallet.receive(None).await.unwrap();
         assert!(wallet.certificate_refused().is_some());
@@ -2728,16 +2730,17 @@ impl pubky_switch_client::transport::Transport for WriteBeforeSdkListing {
 
 #[tokio::test]
 async fn test_certificate_duty_event_raised_by_the_sdks_listing_reaches_a_report() {
-    // The till rewrites its request record with a member it doesn't know, over the bound on
+    // The seller wallet rewrites its request record with a member it doesn't know, over the bound on
     // what a reader keeps of a record it has seen: a reader that takes the write raises
     // `RecordUncheckable`, a duty event. The SDK's listing after the read takes it.
     let w = World::new();
     let base = store();
-    let (wallet, wider, mut till) = renewed_to_read_more_with_till(&w, Arc::clone(&base)).await;
+    let (wallet, wider, mut seller_wallet) =
+        renewed_to_read_more_with_seller_wallet(&w, Arc::clone(&base)).await;
     let me = wallet.app_id();
     drop(wallet);
-    let sale = till.payee_activity().await.unwrap().remove(0);
-    let held = till
+    let sale = seller_wallet.payee_activity().await.unwrap().remove(0);
+    let held = seller_wallet
         .app()
         .shared_record(&sale.record)
         .await
@@ -2756,10 +2759,13 @@ async fn test_certificate_duty_event_raised_by_the_sdks_listing_reaches_a_report
             &sale.request_hash.unwrap(),
         ),
     );
-    assert_eq!(till.app().record_key(&target).unwrap(), sale.record);
-    // The till's own client refuses a write over the bound, so the write is built small and
+    assert_eq!(
+        seller_wallet.app().record_key(&target).unwrap(),
+        sale.record
+    );
+    // The seller wallet's own client refuses a write over the bound, so the write is built small and
     // sealed again with the large value, as another writer would send it.
-    let (_, mut op) = till
+    let (_, mut op) = seller_wallet
         .app_mut()
         .record_op(&target, held.content.value(), Vec::new())
         .await
@@ -2767,10 +2773,10 @@ async fn test_certificate_duty_event_raised_by_the_sdks_listing_reaches_a_report
     let OpKind::RecordPut(put) = &mut op else {
         panic!("a record put");
     };
-    let epoch = till.app().data_epoch();
+    let epoch = seller_wallet.app().data_epoch();
     let scope = &target.collection.policy.read_scope;
     put.value_sealed = pubky_switch_core::sealed::SealedValue::seal(
-        &till.app().scope_key(epoch, scope).unwrap(),
+        &seller_wallet.app().scope_key(epoch, scope).unwrap(),
         &w.alice_id(),
         epoch,
         scope,
@@ -2781,7 +2787,7 @@ async fn test_certificate_duty_event_raised_by_the_sdks_listing_reaches_a_report
     let transport = Arc::new(WriteBeforeSdkListing {
         inner: Arc::clone(&w.router),
         switch: Arc::clone(w.alice.switch()),
-        keys: w.alice.identity().app_keys("till"),
+        keys: w.alice.identity().app_keys("seller-wallet"),
         op: std::sync::Mutex::new(Some(op)),
         skip: client_listing_requests(&wider),
         listed: std::sync::atomic::AtomicUsize::new(0),
@@ -2972,7 +2978,7 @@ async fn test_certificate_receipt_for_a_record_not_listed_yet_is_held_until_list
 
 #[tokio::test]
 async fn test_certificate_proof_for_a_payee_record_not_listed_yet_is_held_until_listed() {
-    // Alice's till sends bob a request; its payee record is written while the wallet, which
+    // Alice's wallet sends bob a request; its payee record is written while the wallet, which
     // holds `paykit_pay` only, can't read it. The wallet is renewed to read `paykit_request` too, with no
     // bundle, and bob pays. The record's absence from the wallet's copy decides nothing: the
     // proof's entry is held, not taken as a reply to a request the wallet didn't send.
@@ -2984,20 +2990,20 @@ async fn test_certificate_proof_for_a_payee_record_not_listed_yet_is_held_until_
         .join(&w.bob, "bwallet", AppScopes::new().pay().build().unwrap())
         .await;
     payer.app_mut().invite(&w.alice_id()).await.unwrap();
-    let mut till = w
+    let mut seller_wallet = w
         .join(
             &w.alice,
-            "till",
+            "seller-wallet",
             AppScopes::new().request().build().unwrap(),
         )
         .await;
-    let request = till
+    let request = seller_wallet
         .send_request(w.bob_id(), crate::common::draft("1", w.clock.now_ms()))
         .await
         .unwrap()
         .request
         .unwrap();
-    drop(till);
+    drop(seller_wallet);
     wallet.receive(None).await.unwrap();
     let old = wallet.app().cert().clone();
     let wider = renew(
@@ -3042,7 +3048,7 @@ async fn test_certificate_proof_for_a_payee_record_not_listed_yet_is_held_until_
 
 #[tokio::test]
 async fn test_certificate_restore_taking_a_wider_one_without_keys_stays_unlisted() {
-    // After the backup, the wallet is renewed to read `paykit_request` too, and alice's till sends
+    // After the backup, the wallet is renewed to read `paykit_request` too, and Alice's wallet sends
     // bob a request. The restored app takes the renewal from its record at its first read,
     // whose scope keys it lacks, so the client skips the restore's listing: the restore's
     // mark stays, and bob's proof, whose payee record the copy lacks, is held. Once the keys
@@ -3055,20 +3061,20 @@ async fn test_certificate_restore_taking_a_wider_one_without_keys_stays_unlisted
         .await;
     payer.app_mut().invite(&w.alice_id()).await.unwrap();
     let backup = wallet.backup().await.unwrap();
-    let mut till = w
+    let mut seller_wallet = w
         .join(
             &w.alice,
-            "till",
+            "seller-wallet",
             AppScopes::new().request().build().unwrap(),
         )
         .await;
-    let request = till
+    let request = seller_wallet
         .send_request(w.bob_id(), crate::common::draft("1", w.clock.now_ms()))
         .await
         .unwrap()
         .request
         .unwrap();
-    drop(till);
+    drop(seller_wallet);
     let old = wallet.app().cert().clone();
     let wider = renew(
         &w,

@@ -237,16 +237,16 @@ async fn test_extensions_record_accepts_registered_kinds_its_scopes_hold() {
     let shop = shop_on(&w, handling(), store()).await;
     assert!(accepts(&shop, w.bob_id()).contains(&"paykit-cap.offer".to_owned()));
     // Registered, but without `paykit_ext:paykit-cap`: not accepted.
-    let till = w
+    let seller_wallet = w
         .join_with(
             &w.bob,
-            "till",
+            "seller-wallet",
             AppScopes::new().request().build().unwrap(),
             handling(),
             store(),
         )
         .await;
-    assert!(!accepts(&till, w.bob_id()).contains(&"paykit-cap.offer".to_owned()));
+    assert!(!accepts(&seller_wallet, w.bob_id()).contains(&"paykit-cap.offer".to_owned()));
 }
 
 #[tokio::test]

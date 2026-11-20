@@ -1,4 +1,4 @@
-//! A labelled subscription can also be handled by other authorized tills of its seller.
+//! A labelled subscription can also be handled by the seller's other authorized wallets.
 
 use super::*;
 use paykit_lib::periods::{AnchoredRule, Recurrence, Unit};
@@ -22,11 +22,11 @@ async fn labelled_sale(world: &World) -> TestResult {
     let (mut buyer, mut owner, mut seller) =
         Box::pin(period_wallets(world, Arc::new(MemoryStore::new()), &rail)).await?;
     let label = Label::new("subscriptions")?;
-    let mut till = Box::pin(join(
+    let mut seller_wallet = Box::pin(join(
         world,
         &mut seller,
         "shop",
-        "subscription-till",
+        "subscription-wallet",
         AppScopes::new().request_label(&label).build()?,
         Arc::new(MemoryStore::new()),
         &rail,
@@ -42,15 +42,15 @@ async fn labelled_sale(world: &World) -> TestResult {
         &rail,
     ))
     .await?;
-    assert_ne!(till.app_id(), counter.app_id());
-    assert_ne!(till.app_id(), owner.app_id());
+    assert_ne!(seller_wallet.app_id(), counter.app_id());
+    assert_ne!(seller_wallet.app_id(), owner.app_id());
     let start = world.now_ms() / 1000 * 1000;
     let recurrence = Recurrence::new(AnchoredRule::new(start, 1, Unit::Month)?, start, None)?;
     let period = PeriodRef::from(recurrence.first()?);
     let request = Box::pin(subscribe(
         world,
         &mut buyer,
-        &mut till,
+        &mut seller_wallet,
         recurrence,
         PeriodPayment::ConfirmedRate,
     ))

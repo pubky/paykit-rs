@@ -3771,9 +3771,9 @@ mod receive_tests {
             "shop",
             &["paykit_request", "paykit_settlements", "paykit_contacts"],
         );
-        let till = Party::new(
+        let seller_wallet = Party::new(
             "bob",
-            "till",
+            "seller-wallet",
             &["paykit_request", "paykit_settlements", "paykit_contacts"],
         );
         let mut record = ActivityRecord::new(paykit_lib::records::ActivitySide::Payee, alice.id());
@@ -3800,13 +3800,13 @@ mod receive_tests {
             object(json!({ "reason": null })),
         ));
         assert_eq!(own(&record), ["paykit.payment_request_cancellation"]);
-        record.cancellation = Some(till.message(
+        record.cancellation = Some(seller_wallet.message(
             &alice,
             "paykit.payment_request_cancellation",
             vec![[4; 32]],
             object(json!({ "reason": null })),
         ));
-        record.receipt = Some(receipt(&till));
+        record.receipt = Some(receipt(&seller_wallet));
         assert!(own(&record).is_empty());
     }
 
@@ -3820,9 +3820,9 @@ mod receive_tests {
             "shop",
             &["paykit_request", "paykit_settlements", "paykit_contacts"],
         );
-        let till = Party::new(
+        let seller_wallet = Party::new(
             "bob",
-            "till",
+            "seller-wallet",
             &["paykit_request", "paykit_settlements", "paykit_contacts"],
         );
         let details = |by: &Party, expires: &str| {
@@ -3844,7 +3844,7 @@ mod receive_tests {
         for (by, expires) in [
             (&bob, "2026-03-01T00:00:00.000Z"),
             (&bob, "2026-03-02T00:00:00.000Z"),
-            (&till, "2026-03-03T00:00:00.000Z"),
+            (&seller_wallet, "2026-03-03T00:00:00.000Z"),
         ] {
             assert!(activity::place(
                 &mut record,
