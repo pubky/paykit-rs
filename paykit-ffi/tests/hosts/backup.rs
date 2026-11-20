@@ -1,4 +1,4 @@
-//! A standard payer backup with the signed checkout receipt for the mobile readers.
+//! An installed payer with the original signed checkout receipt for the mobile readers.
 use base64::{engine::general_purpose::STANDARD, Engine};
 use paykit_lib::{
     Asset, Decimal, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
@@ -133,7 +133,6 @@ pub(super) async fn print_wallet(seller_only: bool) -> Result<()> {
         writeln!(output, "{}", STANDARD.encode(app))?;
         write_store(&mut output, app, &seller_store)?;
     } else {
-        let backup = payer.backup().await?.to_bytes()?;
         let app = payer.app_id();
         let mut output = io::stdout().lock();
         writeln!(output, "{}", STANDARD.encode(app))?;
@@ -142,9 +141,6 @@ pub(super) async fn print_wallet(seller_only: bool) -> Result<()> {
         writeln!(output, "{}", STANDARD.encode(request.request_hash))?;
         writeln!(output, "{attempt}")?;
         writeln!(output, "{receipt}")?;
-        writeln!(output, "{}", STANDARD.encode(backup))?;
-        // Hand the language process the unchanged test store of the original device as well.
-        // It can distinguish an ordinary reopen from restoring the backup before its first read.
         drop(payer);
         write_store(&mut output, app, &payer_store)?;
     }

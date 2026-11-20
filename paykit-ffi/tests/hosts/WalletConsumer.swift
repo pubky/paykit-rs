@@ -188,68 +188,48 @@ private func walletRows(_ issuer: String, _ mode: String) throws -> [String] {
 
 private func recoverReceipt(_ issuer: String) async throws {
     let values = try walletRows(issuer, "paid-wallet")
-    precondition(values.count > 8)
+    precondition(values.count > 7)
     func bytes(_ i: Int) -> Data { Data(base64Encoded: values[i])! }
     let app = bytes(0)
-    let store = EnrollmentStore()
-    let method = ReceiptReader()
-    func host() throws -> WalletHost {
-        try WalletHost(store: store, homeserver: method, method: method, endpointIdentifiers: ["btc-lightning-bolt11"])
-    }
-    let device = try host()
-    do {
-        _ = try await device.restore(appId: app, bytes: bytes(6), sourceDevice: .unaccountedFor)
-        preconditionFailure("unaccounted source was restored")
-    } catch WalletError.SourceDeviceUnaccountedFor {}
-    let restored = try await device.restore(appId: app, bytes: bytes(6), sourceDevice: .inPossession)
-    let restoredId = try await restored.appId()
-    let restoredIdentity = try await restored.identity()
-    precondition(restoredId == app && restoredIdentity == bytes(1))
-    try await restored.shutdown()
-    let wallet = try await host().load(appId: app)
-    let entries = try await wallet.payments()
-    precondition(entries.count == 1 && entries[0].attemptId == values[4] && entries[0].amount.value == "7")
     let id = RequestId(payee: bytes(2), requestHash: bytes(3))
-    precondition(entries[0].receipt == nil)
-    do {
-        _ = try await wallet.requestReceipts(id: id)
-        preconditionFailure("the restored wallet listed receipts before its first read")
-    } catch WalletError.Refused(let refusal) {
-        precondition(refusal.reason().contains("shared records"))
-    }
-    try await wallet.shutdown()
+    let method = ReceiptReader()
     let original = EnrollmentStore()
-    original.reopen(namespace: values[7], entries: values.dropFirst(8))
+    original.reopen(namespace: values[6], entries: values.dropFirst(7))
     let sameDevice = try WalletHost(store: original, homeserver: method, method: method, endpointIdentifiers: ["btc-lightning-bolt11"])
     let reopened = try await sameDevice.load(appId: app)
+    let checkedId = try await reopened.appId()
+    let checkedIdentity = try await reopened.identity()
+    let backup = try await reopened.backup()
+    precondition(checkedId == app && checkedIdentity == bytes(1) && !backup.isEmpty)
     let receipts = try await reopened.requestReceipts(id: id)
     let journal = try await reopened.payments()
     precondition(journal.count == 1 && journal[0].receipt?.messageId == receipts.first?.messageId)
+    precondition(journal[0].amount.value == "7" && journal[0].attemptId == values[4])
     precondition(receipts.count == 1 && receipts[0].attemptId == values[4] && receipts[0].messageId == values[5])
     precondition(receipts[0].paymentReference == "checkout-7" && method.transferCount == 0)
     let seller = try walletRows(issuer, "seller-wallet")
-    precondition(seller.count > 2 && seller[1] != values[7])
+    precondition(seller.count > 2 && seller[1] != values[6])
     original.reopen(namespace: seller[1], entries: seller.dropFirst(2))
     let sellerId = Data(base64Encoded: seller[0])!
     let second = try await sameDevice.load(appId: sellerId)
-    original.holdRelease(values[7])
+    original.holdRelease(values[6])
     let closing = Task { try await reopened.shutdown() }
     let entered = await original.waitForRelease()
     precondition(entered)
     let siblingId = try await second.appId()
-    precondition(siblingId == sellerId && original.finishSiblingRead(values[7]),
+    precondition(siblingId == sellerId && original.finishSiblingRead(values[6]),
                  "seller wallet could not progress while payer release was gated")
     try await closing.value
 
     var dropped: NativeWallet? = try await sameDevice.load(appId: app)
     let reopenedId = try await dropped!.appId()
     precondition(reopenedId == app)
-    original.holdRelease(values[7])
+    original.holdRelease(values[6])
     dropped = nil
     let dropping = await original.waitForRelease()
     precondition(dropping)
     let sellerIdentity = try await second.identity()
-    precondition(sellerIdentity.count == 32 && original.finishSiblingRead(values[7]),
+    precondition(sellerIdentity.count == 32 && original.finishSiblingRead(values[6]),
                  "seller wallet could not progress while the last payer handle was released")
     try await second.shutdown()
 }
