@@ -80,7 +80,7 @@ pub(crate) async fn deliver_proved_receipt(
     shop: &paykit_sdk::Paykit,
     request: &RequestRef,
     attempt: paykit_lib::AttemptId,
-) {
+) -> paykit_lib::records::StoredMessage {
     let proof = requested_proof(w, payer, shop, request, attempt);
     let receipt = signed_receipt(w, shop, request, &proof);
     publish_requested_proof(payer, request, proof).await;
@@ -91,6 +91,7 @@ pub(crate) async fn deliver_proved_receipt(
         &[payer.app_id()],
         receipt.plaintext(),
     );
+    receipt
 }
 
 /// Bob's receipt for the payment Alice's signed proof identifies.

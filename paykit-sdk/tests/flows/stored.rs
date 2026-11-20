@@ -1970,9 +1970,27 @@ pub(crate) async fn restored(w: &World, mut app: Paykit) -> Paykit {
 /// A message given up, as [`given_up`], its receipt signed once so it can be sent again.
 struct GivenUp {
     notice: paykit_sdk::Notice,
-    receipt: pubky_switch_core::message::MessagePlaintext,
+    receipt: paykit_lib::records::StoredMessage,
     attempt_id: paykit_lib::AttemptId,
     obligation: [u8; 32],
+}
+
+impl GivenUp {
+    async fn assert_restored_notices(&self, app: &Paykit, expected: &[paykit_sdk::Notice]) {
+        let mut notices = app.notices().await.unwrap();
+        // The fresh store sees the payer's signed proof without its original delivery.
+        let proof = self.receipt.message().refs[0];
+        let delivery = notices
+            .iter()
+            .position(|notice| {
+                notice.kind == paykit_sdk::NoticeKind::PossiblyDelivered
+                    && notice.message_hash == Some(proof)
+                    && notice.counterparty == self.notice.counterparty
+            })
+            .expect("the restored proof has its own delivery notice");
+        notices.remove(delivery);
+        assert_eq!(notices, expected);
+    }
 }
 
 async fn given_up_signed(w: &World) -> (Paykit, GivenUp) {
@@ -1981,23 +1999,8 @@ async fn given_up_signed(w: &World) -> (Paykit, GivenUp) {
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     let attempt_id = pending(w, &mut wallet, &request).await;
     let obligation = wallet.payments().await.unwrap()[0].obligation;
-    let body = paykit_lib::bodies::PaymentReceipt {
-        attempt_id,
-        billing_period: None,
-        metadata: None,
-        payment_reference: None,
-    }
-    .to_body(2)
-    .unwrap();
-    let receipt = w.sign_as(
-        &w.bob,
-        "shop",
-        &w.alice,
-        "paykit.payment_receipt",
-        vec![[7; 32], request.request_hash],
-        body,
-    );
-    w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &receipt);
+    let receipt =
+        crate::receipts::deliver_proved_receipt(w, &mut wallet, &shop, &request, attempt_id).await;
     refuse_writes(&w.alice, 2);
     wallet.receive(None).await.unwrap();
     w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
@@ -2043,11 +2046,13 @@ async fn test_stored_given_up_message_stays_given_up_after_a_restore() {
     app.receive(None).await.unwrap();
     assert!(kept(&app, "se/").await.is_empty());
     assert_eq!(claim_outcome(&mut app, &given).await, Outcome::Open);
-    assert_eq!(app.notices().await.unwrap(), vec![given.notice.clone()]);
+    given
+        .assert_restored_notices(&app, std::slice::from_ref(&given.notice))
+        .await;
     assert_eq!(app.app_mut().parked_entries().await.unwrap().len(), 1);
     app.acknowledge_notice(&given.notice.id).await.unwrap();
     assert!(app.app_mut().parked_entries().await.unwrap().is_empty());
-    assert!(app.notices().await.unwrap().is_empty());
+    given.assert_restored_notices(&app, &[]).await;
 }
 
 #[tokio::test]
@@ -2056,12 +2061,20 @@ async fn test_stored_given_up_message_sent_again_after_a_restore_has_no_effect()
     let w = World::new();
     let (wallet, given) = given_up_signed(&w).await;
     let mut app = restored(&w, wallet).await;
-    w.deliver(&w.bob, "shop", &w.alice, &[app.app_id()], &given.receipt);
+    w.deliver(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[app.app_id()],
+        given.receipt.plaintext(),
+    );
     app.receive(None).await.unwrap();
     app.receive(None).await.unwrap();
     assert_eq!(claim_outcome(&mut app, &given).await, Outcome::Open);
     assert!(kept(&app, "se/").await.is_empty());
-    assert_eq!(app.notices().await.unwrap(), vec![given.notice]);
+    given
+        .assert_restored_notices(&app, std::slice::from_ref(&given.notice))
+        .await;
 }
 
 #[tokio::test]
@@ -2090,12 +2103,18 @@ async fn test_stored_given_up_and_acknowledged_message_sent_again_after_a_restor
     let (mut wallet, given) = given_up_signed(&w).await;
     wallet.acknowledge_notice(&given.notice.id).await.unwrap();
     let mut app = restored(&w, wallet).await;
-    w.deliver(&w.bob, "shop", &w.alice, &[app.app_id()], &given.receipt);
+    w.deliver(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[app.app_id()],
+        given.receipt.plaintext(),
+    );
     app.receive(None).await.unwrap();
     app.receive(None).await.unwrap();
     assert_eq!(claim_outcome(&mut app, &given).await, Outcome::Open);
     assert!(kept(&app, "se/").await.is_empty());
-    assert!(app.notices().await.unwrap().is_empty());
+    given.assert_restored_notices(&app, &[]).await;
 }
 
 #[tokio::test]
@@ -2763,10 +2782,12 @@ struct KeptOverUnread {
     phone: Paykit,
     request: paykit_sdk::RequestRef,
     attempt_id: paykit_lib::AttemptId,
-    /// The record's value before the phone's write, which reads.
+    /// The readable record the phone brings back, including the open attempt's proof.
     good: Vec<u8>,
     /// The first receipt Bob sent, as he signed it.
     receipt: pubky_switch_core::message::MessagePlaintext,
+    /// Bob's receipt naming the signed proof of the open attempt in the readable record.
+    open_receipt: paykit_lib::records::StoredMessage,
     at: u64,
 }
 
@@ -2809,6 +2830,9 @@ async fn receipts_kept_over_unread(
         .value()
         .unwrap()
         .to_vec();
+    let proof = crate::receipts::requested_proof(&w, &wallet, &shop, &request, attempt_id);
+    let open_receipt = crate::receipts::signed_receipt(&w, &shop, &request, &proof);
+    let good = crate::receipts::record_with_proof(&good, &wallet, proof);
     store.armed.store(true, std::sync::atomic::Ordering::SeqCst);
     crate::outcome_record::phone_writes(&mut phone, &request, Some(crate::outcome_record::INVALID))
         .await;
@@ -2816,22 +2840,21 @@ async fn receipts_kept_over_unread(
     let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
     assert_eq!(held.content.value(), Some(crate::outcome_record::INVALID));
     let at = w.clock.now_ms();
-    let first_attempt = match first {
-        ReceiptFor::OpenAttempt => attempt_id,
+    let receipt = match first {
+        ReceiptFor::OpenAttempt => open_receipt.plaintext().clone(),
         ReceiptFor::AnotherAttempt => {
             let other = paykit_lib::AttemptId::from_bytes([0xff; 16]);
             assert_ne!(other, attempt_id);
-            other
+            w.sign_as(
+                &w.bob,
+                "shop",
+                &w.alice,
+                "paykit.payment_receipt",
+                vec![[7; 32], request.request_hash],
+                receipt_body(other),
+            )
         }
     };
-    let receipt = w.sign_as(
-        &w.bob,
-        "shop",
-        &w.alice,
-        "paykit.payment_receipt",
-        vec![[7; 32], request.request_hash],
-        receipt_body(first_attempt),
-    );
     w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &receipt);
     wallet.receive(None).await.unwrap();
     assert_eq!(kept(&wallet, "pr/").await.len(), 1);
@@ -2861,6 +2884,7 @@ async fn receipts_kept_over_unread(
         attempt_id,
         good,
         receipt,
+        open_receipt,
         at,
     }
 }
@@ -2917,24 +2941,23 @@ async fn test_stored_receipt_dropped_over_an_unread_record_asked_for_before_it_r
     assert_eq!(reply_marks(&k.wallet).await, vec![(bob, k.at, true)]);
     assert_eq!(k.wallet.receive(None).await.unwrap().resends, 1);
     assert_eq!(asked(&k.wallet, &bob).await, vec![(Some(k.at), None)]);
+    let held = kept(&k.wallet, "pr/").await;
     assert_eq!(k.record_reads().await, 0);
-    // The kept receipts, naming attempts of no claim, are placed with no effect.
-    assert!(kept(&k.wallet, "pr/").await.is_empty());
+    // Reading the record still leaves these receipts waiting for their own proofs.
+    assert_eq!(kept(&k.wallet, "pr/").await, held);
     assert_eq!(outcome_of(&mut k.wallet, k.attempt_id).await, Outcome::Open);
     // Asked once: a later read within the day asks nothing more.
     assert_eq!(k.wallet.receive(None).await.unwrap().resends, 0);
     assert_eq!(asked(&k.wallet, &bob).await.len(), 1);
     assert!(k.receipt_sent_again().await);
-    assert!(kept(&k.wallet, "pr/").await.is_empty());
+    assert_eq!(kept(&k.wallet, "pr/").await.len(), held.len());
     assert_eq!(outcome_of(&mut k.wallet, k.attempt_id).await, Outcome::Open);
-    k.w.inject(
+    k.w.deliver(
         &k.w.bob,
         "shop",
         &k.w.alice,
         &[k.wallet.app_id()],
-        "paykit.payment_receipt",
-        vec![[7; 32], k.request.request_hash],
-        receipt_body(k.attempt_id),
+        k.open_receipt.plaintext(),
     );
     k.wallet.receive(None).await.unwrap();
     assert_eq!(outcome_of(&mut k.wallet, k.attempt_id).await, Outcome::Done);
@@ -2951,14 +2974,15 @@ async fn test_stored_receipts_kept_over_an_unread_record_up_to_the_bound_drop_no
     )
     .await;
     let bob = k.w.bob_id();
-    assert_eq!(
-        kept(&k.wallet, "pr/").await.len(),
-        paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER
-    );
+    let mut waiting = kept(&k.wallet, "pr/").await;
+    assert_eq!(waiting.len(), paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER);
     assert!(reply_marks(&k.wallet).await.is_empty());
     assert_eq!(k.record_reads().await, 0);
     assert!(asked(&k.wallet, &bob).await.is_empty());
-    assert!(kept(&k.wallet, "pr/").await.is_empty());
+    waiting.retain(|key| !key.ends_with(k.open_receipt.message().msg_id.as_bytes()));
+    assert_eq!(waiting.len(), paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER - 1);
+    assert_eq!(kept(&k.wallet, "pr/").await, waiting);
+    assert!(holds_receipt(&k.wallet, &k.request).await);
     assert_eq!(outcome_of(&mut k.wallet, k.attempt_id).await, Outcome::Done);
 }
 
