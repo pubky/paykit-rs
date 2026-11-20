@@ -89,6 +89,17 @@ private suspend fun recoverReceipt(issuer: String) {
             check(wallet.backup().isNotEmpty())
             val receipt = wallet.requestReceipts(request).single()
             val entry = wallet.payments().single()
+            val periodUsage = AllowancePeriodUsage(entry.amount.value, 1uL)
+            val descriptions: List<Pair<Any, String>> = listOf(
+                entry to "PaymentEntry", receipt to "Receipt", request to "RequestId", entry.amount to "Amount",
+                BillingPeriod(1uL, 2uL) to "BillingPeriod",
+                PaymentOutcome.Paid(entry.attemptId, null) to "PaymentOutcome",
+                MethodDispatch(entry.attemptId, entry.amount, MethodOutcome.Pending) to "MethodDispatch",
+                periodUsage to "AllowancePeriodUsage",
+                AllowanceUsage(entry.amount.value, listOf(periodUsage), 0uL, 1uL, 0uL) to "AllowanceUsage",
+                WalletException.Operation(WalletFailureKind.CLIENT, "operation failed", null, byteArrayOf(1)) to "WalletException",
+            )
+            for ((value, name) in descriptions) check(value.toString() == "$name(<redacted>)")
             check(entry.amount.value == "7" && entry.attemptId == values[4])
             check(entry.receipt?.messageId == receipt.messageId)
             check(receipt.attemptId == values[4] && receipt.messageId == values[5])

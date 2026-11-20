@@ -28,7 +28,7 @@ paykit-ffi/generate-bindings.sh target/release/paykit-bindgen \
     target/release/libpaykit_v2.dylib "$OUT"
 ```
 
-On Linux use `libpaykit_v2.so` for generation. Use the generated Swift support files and Kotlin source together with their matching native library. Generated descriptions redact the approval request and protected storage values.
+On Linux use `libpaykit_v2.so` for generation. Use the generated Swift support files and Kotlin source together with their matching native library. Default descriptions redact approval requests, protected store values, payment journal entries and their related payment data. Read typed fields explicitly when displaying a payment to the user.
 
 ### Android
 

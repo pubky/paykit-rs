@@ -204,6 +204,22 @@ private func recoverReceipt(_ issuer: String) async throws {
     let receipts = try await reopened.requestReceipts(id: id)
     let journal = try await reopened.payments()
     precondition(journal.count == 1 && journal[0].receipt?.messageId == receipts.first?.messageId)
+    let entry = journal[0]
+    let periodUsage = AllowancePeriodUsage(amount: entry.amount.value, count: 1)
+    let descriptions: [(Any, String)] = [
+        (entry, "PaymentEntry"), (receipts[0], "Receipt"), (id, "RequestId"), (entry.amount, "Amount"),
+        (BillingPeriod(startsAt: 1, endsAt: 2), "BillingPeriod"),
+        (PaymentOutcome.paid(attemptId: entry.attemptId, proofMessageId: nil), "PaymentOutcome"),
+        (MethodDispatch(attemptId: entry.attemptId, amount: entry.amount, outcome: .pending), "MethodDispatch"),
+        (periodUsage, "AllowancePeriodUsage"),
+        (AllowanceUsage(lifetime: entry.amount.value, periods: [periodUsage], reserved: 0, spent: 1, released: 0), "AllowanceUsage"),
+        (WalletError.Operation(kind: .client, detail: "operation failed", serviceCode: nil, keptBatch: Data([1])), "WalletError"),
+    ]
+    for (value, name) in descriptions {
+        let expected = "\(name)(<redacted>)"
+        precondition(String(describing: value) == expected && String(reflecting: value) == expected)
+        precondition(Mirror(reflecting: value).children.isEmpty)
+    }
     precondition(journal[0].amount.value == "7" && journal[0].attemptId == values[4])
     precondition(receipts.count == 1 && receipts[0].attemptId == values[4] && receipts[0].messageId == values[5])
     precondition(receipts[0].paymentReference == "checkout-7" && method.transferCount == 0)

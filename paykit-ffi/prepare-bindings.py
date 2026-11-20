@@ -12,16 +12,22 @@ def redact(kotlin_path, swift_path):
     if kotlin.count(length) != 1:
         raise ValueError("expected one generated JNA buffer method")
     kotlin = kotlin.replace(length, "getByteBuffer(0, this.len)")
-    types = ("StoreEntry", "StoreWrite", "EnrollmentRequest", "Receipt", "MethodProof", "MethodPayment", "MethodOutcome", "EndpointCandidate")
+    types = (
+        "StoreEntry", "StoreWrite", "EnrollmentRequest", "Receipt", "MethodProof",
+        "MethodPayment", "MethodOutcome", "EndpointCandidate", "PaymentEntry",
+        "PaymentOutcome", "RequestId", "BillingPeriod", "Amount", "MethodDispatch",
+        "AllowanceUsage", "AllowancePeriodUsage", "WalletError",
+    )
     swift = []
     for name in types:
-        sealed = rf"^sealed class {name}\b[^{{\n]*\{{\n"
-        record = rf"^data class {name} \(\n.*?^\)[^{{\n]*\{{\n"
+        kotlin_name = "WalletException" if name == "WalletError" else name
+        sealed = rf"^sealed class {kotlin_name}\b[^{{\n]*\{{\n"
+        record = rf"^data class {kotlin_name} \(\n.*?^\)[^{{\n]*\{{\n"
         pattern = sealed if re.search(sealed, kotlin, re.MULTILINE) else record
         override = "final override" if pattern == sealed else "override"
         kotlin, count = re.subn(
             pattern,
-            lambda m: m[0] + f'    {override} fun toString(): String = "{name}(<redacted>)"\n',
+            lambda m: m[0] + f'    {override} fun toString(): String = "{kotlin_name}(<redacted>)"\n',
             kotlin,
             flags=re.MULTILINE | re.DOTALL,
         )
