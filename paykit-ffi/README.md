@@ -24,6 +24,12 @@ Call `receive` on startup and after a feed wake. It returns one bounded report. 
 
 After an interruption, `unacknowledgedEvents` lists surviving Paykit duties in order. After a failed receive, keep those events and wait for a successful receive before acknowledging through the last duty in that report. `recoveryRequired` returns the current signed service notice across reopen even after acknowledging delivery. A clearance event names the generation that was held. The receive cursor can already be in the next generation.
 
+## Pay a one-time request
+
+After reading the feed, show the request from `requests` with its payee, amount, payment reference, selling label and status. Pass its original `RequestId` to `payRequest` when the user chooses to pay. The result includes the method outcome or typed failure and any failures for individual public Payment Endpoints. Inspect `refusal.kind()` to show a quote, earlier payment doubt, or other confirmation. Pass back the same refusal only after the user confirms it.
+
+After an interrupted payment, shut down the old handle, reopen the same App ID and use `resumePayments` to look up the original attempt. Use `reconcile` for obligations with an unknown outcome and show the remaining doubt before any user-confirmed resolution. `requestReceipts` returns the signed seller receipt after it arrives. On a newly restored store that lookup can be held until the first inventory completes. `notices` and the payee deletion notices each have their own acknowledgement, separate from feed duties.
+
 ## Generate both languages
 
 From the workspace root, build the generator and native library from this same checkout. Set `OUT` to a scratch directory. The commands below use the standard Cargo target directory. Substitute your configured target directory when it differs.

@@ -4,7 +4,7 @@ use paykit_lib::{
     Asset, Decimal, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
     PaymentReference,
 };
-use paykit_sdk::{AppScopes, PayOptions, Paykit, RequestDestination, RequestDraft};
+use paykit_sdk::{AppScopes, Paykit, RequestDestination, RequestDraft};
 use pubky_switch_client::{
     app::{HomeserverReader, HomeserverWriter},
     store::MemoryStore,
@@ -174,11 +174,7 @@ async fn payment(
     .await?;
     signer.claim_delivered(&approved.request).await?;
     let buyer = world.identity("buyer")?.public();
-    {
-        let mut app = payer.lock().await?;
-        Box::pin(receive(&mut app)).await?;
-        app.app_mut().allow_connect(&shop.public()).await?;
-    }
+    Box::pin(payer.allow_connect(shop.public().into())).await?;
     Box::pin(receive(&mut seller)).await?;
     seller.app_mut().allow_connect(&buyer).await?;
     let endpoint = PaymentEndpointIdentifier::new("btc-lightning-bolt11")?;
@@ -197,15 +193,40 @@ async fn payment(
     ))
     .await?;
     let request = sent.request.ok_or("missing signed request")?;
+    for _ in 0..8 {
+        if !Box::pin(payer.receive()).await?.more {
+            break;
+        }
+    }
+    let views = payer.requests().await?;
+    assert_eq!(views.len(), 1);
+    assert_eq!(views[0].id.request_hash, request.request_hash);
+    assert_eq!(views[0].id.payee, request.payee);
+    assert_eq!(views[0].payment_reference, "checkout-7");
+    assert!(matches!(views[0].status, OneTimeRequestStatus::Open));
+    assert!(!views[0].manual_only);
+    let missing = RequestId {
+        payee: request.payee.into(),
+        request_hash: vec![0; 32],
+    };
+    let refused = Box::pin(payer.pay_request(missing, PaymentOptions::default())).await?;
+    assert!(
+        matches!(refused.decision, PaymentDecision::Error { error: WalletError::Refused { refusal } } if matches!(refusal.kind(), RefusalKind::NotFound))
+    );
+    assert!(refused.public_failures.is_empty());
+    assert_eq!(account.count(), 0);
     {
-        let mut original = payer.lock().await?;
-        Box::pin(receive(&mut original)).await?;
-        let mut paying = Box::pin(original.pay_request(&request, PayOptions::default()));
-        tokio::select! { _ = account.entered.notified()=>{},_=&mut paying=>return Err("payment did not reach the interrupted method".into()) }
+        let mut paying =
+            Box::pin(payer.pay_request(views[0].id.clone(), PaymentOptions::default()));
+        tokio::select! {
+            _ = account.entered.notified() => {},
+            _ = &mut paying => return Err("payment did not reach the interrupted method".into()),
+        }
         assert_eq!(account.count(), 1);
     }
-    drop(payer);
-    let restored = host.load(app_id).await?;
+    assert!(matches!(payer.payments().await, Err(WalletError::Closed)));
+    payer.shutdown().await?;
+    let restored = host.load(app_id.clone()).await?;
     let pending = restored.payments().await?;
     assert_eq!(pending.len(), 1);
     assert!(matches!(pending[0].stage, PaymentStage::Paying));
@@ -227,15 +248,52 @@ async fn payment(
     let receipt = Box::pin(seller.confirm_payment(&activity.record))
         .await?
         .ok_or("missing seller receipt")?;
-    {
-        let mut original = restored.lock().await?;
-        Box::pin(receive(&mut original)).await?;
+    for _ in 0..8 {
+        if !Box::pin(restored.receive()).await?.more {
+            break;
+        }
     }
+    let final_views = restored.requests().await?;
+    assert!(matches!(final_views[0].status, OneTimeRequestStatus::Paid));
+    assert!(final_views[0]
+        .receipt
+        .as_ref()
+        .is_some_and(|r| r.message_id == receipt));
     let receipts = restored.request_receipts(request.into()).await?;
     assert!(receipts.iter().any(|r| r.message_id == receipt
         && &r.attempt_id == attempt
         && r.payment_reference.as_deref() == Some("checkout-7")));
     assert!(restored.reconcile_allowance(vec![0; 32]).await?.is_none());
+    let draft = RequestDraft::new(
+        PaymentAmount {
+            asset: Asset::new("btc")?,
+            value: Decimal::new("3")?,
+        },
+        PaymentReference::new("voided-checkout")?,
+        RequestDestination::Endpoints(BTreeMap::from([(
+            PaymentEndpointIdentifier::new("btc-lightning-bolt11")?,
+            PaymentEndpointPayload::new("lnbc1voided")?,
+        )])),
+    );
+    let other = Box::pin(seller.send_request(buyer, draft))
+        .await?
+        .request
+        .ok_or("missing second checkout")?;
+    for _ in 0..8 {
+        if !Box::pin(restored.receive()).await?.more {
+            break;
+        }
+    }
+    let cancelled = restored.cancel_request(other.into(), None).await?;
+    assert!(!cancelled.is_empty());
+    restored.shutdown().await?;
+    let reopened = host.load(app_id).await?;
+    let refused = Box::pin(reopened.pay_request(other.into(), PaymentOptions::default())).await?;
+    assert!(
+        matches!(refused.decision, PaymentDecision::Error { error: WalletError::Refused { refusal } } if matches!(refusal.kind(), RefusalKind::Cancelled))
+    );
+    assert_eq!(account.count(), 1);
+    assert_eq!(account.calls.load(Ordering::SeqCst), 1);
     Ok(())
 }
 async fn journey(world: &World) -> TestResult {
