@@ -5,7 +5,7 @@ member of app records, the executor grant, messages and shared record values. Ev
 keys and fixed randomness by `paykit-lib`'s vector tests on this repository's `v0.2` branch (How the files were generated, below), so any implementation can check
 them byte for byte. The conformance scope is described below.
 
-**This set builds on no vector of [the Switch's set](https://github.com/pubky/pubky-switch/tree/5f3209aae28d1b538a31c8ce43506b39df828b61/spec/vectors), at pubky-switch commit `5f3209aae28d1b538a31c8ce43506b39df828b61`, the normative baseline of Paykit's spec**: its fixed keys, certificates and records are its own (`keys.json`, `documents.json` `certificates`), and its seeds, encodings and times follow that set's conventions. The stored Paykit JSON files are unchanged by this baseline adoption. Their stated format coverage does not establish the newly adopted client contracts or outstanding protected-record paths; additional generated cases accompany their implementing code.
+**This set builds on no vector of [the Switch's set](https://github.com/pubky/pubky-switch/tree/5f3209aae28d1b538a31c8ce43506b39df828b61/spec/vectors), at pubky-switch commit `5f3209aae28d1b538a31c8ce43506b39df828b61`, the normative baseline of Paykit's spec**: its fixed keys, certificates and records are its own (`keys.json`, `documents.json` `certificates`), and its seeds, encodings and times follow that set's conventions. For wallet and service behavior, see the [implementation table](../implementation.md) and the [conformance cases](../conformance.md).
 
 ## App-record format coverage
 
@@ -36,7 +36,7 @@ marks, the result keeps the settlements in the current write and adds new seen m
 ascending byte order until the bucket is full. A result equal to the current write needs no new write.
 These vectors check bucket formats and pure merge rules. Reads from the Switch, the rollback
 alarm, repair after provider loss and settlement-credit enforcement belong to the SDK.
-The [settlement implementation status](../README.md#settlement-implementation-status) describes
+The [settlement implementation status](../implementation.md) describes
 the wallet tests for conditional credit and repair.
 
 ## Files
