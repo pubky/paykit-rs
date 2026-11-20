@@ -264,6 +264,21 @@ installed wallet still has that proof and its later ledger, reconciliation
 counts the outstanding reservations. Show the existing consent prompt if the
 restored Allowance requires confirmation.
 
+If `Paykit::ledger_alarm` returns an alarm, show its reason when opening the
+wallet and after a reconciliation error. The Switch client stops new payment
+attempts, including manual payments. Direct the user to the signer to move to
+another provider or declare provider loss (Switch spec 10.1).
+
+Call `Paykit::reserved_by_other_apps` with the permanent Allowance handle.
+For each returned attempt, show its ID and transfer amount in the Allowance's
+asset. If the user selects that attempt and confirms the release, pass its ID
+and `UserConfirmed` to `Paykit::release_allowance_attempt`. The wallet
+checks the current grant and failure and its own durable evidence that the
+attempt ended before dispatch. A restored journal cannot establish that.
+If the call returns a kept batch ID, show the release as pending. Receive or
+resume and read the verified usage again before showing a change in capacity.
+A later signed paid outcome still spends the amount (Paykit spec 8.3).
+
 To pay an eligible one-time request, call `Paykit::pay_under_allowance`
 with the same permanent Allowance handle. The wallet reserves the transfer
 amount under the grant before calling the payment method. A refused limit or
@@ -372,6 +387,8 @@ service. Acknowledging the deletion notice leaves the credit restriction in forc
 | `NoticeKind::HeldWithoutPay` | Show that the open attempt needs a wallet with `paykit_pay`. |
 | `NoticeKind::MessageGivenUp` | Show the message or request whose effect or delivery was given up. Acknowledgment can also retire the stored entry. |
 | `NoticeKind::AllowancePlacementExpired` | Ordinary placement expired. The wallet still holds evidence of a possible Allowance conflict. Acknowledge the notice after showing it. The hold survives acknowledgment and restart. |
+| `NoticeKind::AllowanceAcceptanceBeforeLoss` | Show that the identified acceptance cannot open a budget after the payer’s declared provider loss. The proposing wallet withdraws only its verified original pending write. An uncertain read or a later lifetime keeps that record intact. The seller ends its matching accepted Allowance when the withdrawal arrives. |
+| `NoticeKind::AllowanceWithdrawalConfirmed` | The seller returned its signed end for the proposal and acceptance this wallet withdrew. The notice identifies that end. The original Allowance stays closed after acknowledgement and reopen. |
 | `NoticeKind::PossiblyDelivered` | Reconcile the original message with its recipient using its ID and signed hash. Acknowledging the notice records that the host has seen it. It authorizes no send or replacement. |
 | `NoticeKind::BlockedMessagesLost` | Show the affected counterparty and acceptance-time range. Consult the payment method for payments that may have been among the lost messages. |
 | `NoticeKind::SettlementBucketFull` | Show that the payee cannot add a mark to this bucket. A warning from a bucket read has no payer. Explain that issuing a receipt without a mark can let another till credit the same settlement again. |
@@ -437,7 +454,7 @@ service. Acknowledging the deletion notice leaves the credit restriction in forc
 | `Refusal::NotCurrent` | Refresh authority and reconcile the existing attempt under the current provider and certificate. |
 | `Refusal::NotNow` | Inspect account, clock and restore state before continuing. |
 | `Refusal::Usage` | Correct the supplied API input. |
-| `Refusal::RecordHeld` | Wait until the record can be read or repaired. |
+| `Refusal::RecordHeld` | A payer record with payment history lost to deletion permanently holds that obligation. For a temporarily unreadable record, resume when it can be read or repaired. |
 | `Refusal::CertificateRefused` | Seek a suitable certificate from the signer and keep Paykit actions paused meanwhile. |
 | `Refusal::SwitchUnavailable` | Show the own Switch as unavailable and keep payment actions waiting. |
 | `Refusal::Blocked` | Show the blocked recipient and the exact payment to the user before any supported override. |

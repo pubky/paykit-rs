@@ -5,7 +5,9 @@ use paykit_lib::derive::natural_key;
 use paykit_lib::records::ListPublicationRecord;
 use paykit_lib::PaymentEndpointPayload;
 use paykit_sdk::{PayOutcome, Paykit, UnrequestedPayment};
-use pubky_switch_client::app::{Collection, KeptReason, RecordRead, RecordTarget};
+use pubky_switch_client::app::{
+    Collection, KeptReason, RecordApplication, RecordRead, RecordTarget,
+};
 use pubky_switch_core::ident::Policy;
 
 pub(super) fn target(shop: &Paykit, recipient: &[u8; 32], generation: u64) -> RecordTarget {
@@ -2611,7 +2613,11 @@ async fn test_publication_retry_after_a_move_requires_the_original_application()
     shop.app_mut().refresh_identity().await.unwrap();
     shop.app_mut().follow_provider().await.unwrap();
     let old = target(&shop, &payer, original.generation);
-    let (held, application, _) = shop
+    let RecordApplication {
+        record: held,
+        application,
+        ..
+    } = shop
         .app_mut()
         .read_record_application(&old)
         .await

@@ -19,6 +19,11 @@ pub enum WalletNoticeKind {
     /// Ordinary placement expired, but the wallet retained a hold on this Allowance because the
     /// signed message could still establish a conflict.
     AllowancePlacementExpired,
+    /// The seller accepted this payer's proposal from before provider loss. The acceptance
+    /// cannot open a budget. Withdrawal requires the verified live original proposal.
+    AllowanceAcceptanceBeforeLoss,
+    /// The seller confirmed the end of this wallet's withdrawn pre-loss proposal.
+    AllowanceWithdrawalConfirmed,
     /// An original outgoing message found after restore may have reached its recipient.
     PossiblyDelivered,
     /// Messages a blocked counterparty's inbox accepted from `Notice::lost_from_ms` to
@@ -47,6 +52,8 @@ impl From<paykit_sdk::NoticeKind> for WalletNoticeKind {
             K::HeldWithoutPay => Self::HeldWithoutPay,
             K::MessageGivenUp => Self::MessageGivenUp,
             K::AllowancePlacementExpired => Self::AllowancePlacementExpired,
+            K::AllowanceAcceptanceBeforeLoss => Self::AllowanceAcceptanceBeforeLoss,
+            K::AllowanceWithdrawalConfirmed => Self::AllowanceWithdrawalConfirmed,
             K::PossiblyDelivered => Self::PossiblyDelivered,
             K::BlockedMessagesLost => Self::BlockedMessagesLost,
             K::SettlementBucketFull => Self::SettlementBucketFull,

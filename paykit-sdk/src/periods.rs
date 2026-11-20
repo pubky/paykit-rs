@@ -43,8 +43,8 @@ use crate::paykit::Paykit;
 use crate::receipts::{period_request_target, received_receipt, ReceivedReceipt};
 use crate::records::{conflict, KeptMessage};
 use crate::requests::{
-    accepted, cancelled, payment_ended, rejected, request_of, MessageDelivery, RequestRef,
-    SentMessage,
+    accepted, cancelled, payment_ended, payment_history_lost, rejected, request_of,
+    MessageDelivery, RequestRef, SentMessage,
 };
 
 /// How many times a payee's write of period details is built again after its record changed
@@ -415,12 +415,6 @@ fn period_record_unread() -> PaykitError {
     Refusal::NotNow("Paykit wire 5.3: the period record held doesn't read".into()).into()
 }
 
-pub(crate) fn period_history_lost() -> Refusal {
-    Refusal::RecordHeld(
-        "Paykit spec 6: a deleted activity record may have held the payment's proof".into(),
-    )
-}
-
 impl Paykit {
     /// Open against the held write, or check the service before creating a period at zero.
     async fn period_payment_base(
@@ -459,7 +453,9 @@ impl Paykit {
             } => return Err(Refusal::SwitchUnavailable(why).into()),
             RecordRead::Kept {
                 record: Some(held), ..
-            } if held.content == RecordContent::Deleted => return Err(period_history_lost().into()),
+            } if held.content == RecordContent::Deleted => {
+                return Err(payment_history_lost().into())
+            }
             _ => return Err(period_record_unread()),
         };
         self.checked_period_activity(target, &held).map(Some)
@@ -472,7 +468,7 @@ impl Paykit {
         held: &SharedRecord,
     ) -> Result<ActivityRecord> {
         if held.content == RecordContent::Deleted {
-            return Err(period_history_lost().into());
+            return Err(payment_history_lost().into());
         }
         if crate::hold::awaits_key(&held.content) {
             return Err(crate::hold::value_awaits_key());
@@ -484,7 +480,7 @@ impl Paykit {
             .read_activity(target, Some(held))
             .ok_or_else(period_record_unread)?;
         if record.lost_to_delete.is_some() {
-            return Err(period_history_lost().into());
+            return Err(payment_history_lost().into());
         }
         Ok(record)
     }
@@ -690,7 +686,7 @@ impl Paykit {
             }
             let held = match held.map(|held| held.content) {
                 None => None,
-                Some(RecordContent::Deleted) => return Err(period_history_lost().into()),
+                Some(RecordContent::Deleted) => return Err(payment_history_lost().into()),
                 Some(content) if crate::hold::awaits_key(&content) => {
                     return Err(crate::hold::value_awaits_key());
                 }
@@ -1400,6 +1396,7 @@ impl Paykit {
             carrier_record: None,
             attempt_proof: None,
             failed_by_method: false,
+            never_dispatched: false,
             request: Some(KeptMessage::of(&stored)),
             record_held: false,
             transfer_bound: Some(bound),

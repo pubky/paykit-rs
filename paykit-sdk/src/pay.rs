@@ -46,7 +46,7 @@ use paykit_lib::{
 use pubky_switch_client::app::{
     claim_conflict, AppError, ClaimAttempt, ClaimOp, Initiator, KeptBatch, KeptBatchStatus,
     LocalWrite, ObligationDeadline, OpBatch, PeerIdentity, RecordContent, Refusal as ClientRefusal,
-    SharedRecord, SignedMessage, UserConfirmed, REVALIDATION_MS,
+    SharedRecord, SignedMessage, SwitchCopy, UserConfirmed, REVALIDATION_MS,
 };
 use pubky_switch_core::chain::TransitionProof;
 use pubky_switch_core::claims::{
@@ -71,7 +71,8 @@ use crate::rail::{
 };
 use crate::records::{list_target, KeptMessage};
 use crate::requests::{
-    cancelled, payment_ended, rejected, request_of, unreadable_request, Fresh, RequestRef,
+    cancelled, payment_ended, payment_history_lost, rejected, request_of, unreadable_request,
+    Fresh, RequestRef,
 };
 use crate::state::{self, key};
 
@@ -1163,6 +1164,9 @@ impl Paykit {
         if record.shows_paid() {
             return Err(Refusal::AlreadyPaid.into());
         }
+        if record.lost_to_delete.is_some() {
+            return Err(payment_history_lost().into());
+        }
         if rejected(&record) {
             return Err(Refusal::Rejected.into());
         }
@@ -1322,6 +1326,7 @@ impl Paykit {
             carrier_record: None,
             attempt_proof: None,
             failed_by_method: false,
+            never_dispatched: false,
             request: Some(KeptMessage::of(&stored)),
             record_held: false,
             transfer_bound: Some(bound),
@@ -1576,6 +1581,7 @@ impl Paykit {
             carrier_record: None,
             attempt_proof: None,
             failed_by_method: false,
+            never_dispatched: false,
             request: None,
             record_held: false,
             transfer_bound: Some(bound),
@@ -1737,6 +1743,9 @@ impl Paykit {
     }
 
     pub(crate) async fn set_stage(&mut self, entry: &mut JournalEntry, stage: Stage) -> Result<()> {
+        if matches!(stage, Stage::Finished | Stage::Abandoned) {
+            entry.end_before_the_call();
+        }
         entry.stage = stage;
         self.save(entry).await
     }
@@ -3349,29 +3358,7 @@ impl Paykit {
         if matches!(kind, Dispatch::First { .. }) {
             self.set_stage(&mut entry, Stage::Paying).await?;
         }
-        // The commit and the checks were awaits, during which another payer app can block the
-        // payee, raise the block floor, or record a cancellation, a rejection or `manual_only`
-        // in the request record ([`Paykit::fresh_record_withholds`]): an automatic
-        // payment, a first dispatch or a repeat, reads the deny list, the record and the floor
-        // again now, from the switch, judges them, and reads them once more, holding unless
-        // the second reads show what the first did; a read that fails holds it too
-        // ([`Paykit::automatic_dispatch_held`], Paykit spec 8.1, 8.3, `crate::floor`). A payment
-        // by hand judges its local pauses and the deny copy's age, refreshing it when due
-        // and accepting only its bound consent ([`Paykit::dispatch_held`]). A first
-        // dispatch goes back to `Attempted`, known unsubmitted, as it does when the fence
-        // stops it; a repeat stays open.
-        if self.dispatch_held(&entry, by, kind).await.unwrap_or(true)
-            || Box::pin(self.period_recovery_held(&entry))
-                .await
-                .unwrap_or(true)
-        {
-            return self
-                .stopped_before_the_call(entry, kind, FinalCheck::Hold)
-                .await;
-        }
-        // Those reads were awaits too: the fence judges every other gate again, and nothing
-        // awaits after the second reads and the fence before the call.
-        match self.payment_fence(&entry, &payee, by, confirmed, kind)? {
+        match Box::pin(self.payment_fence(&entry, payee, by, confirmed, kind)).await? {
             FinalCheck::Pay => {}
             stopped => return self.stopped_before_the_call(entry, kind, stopped).await,
         }
@@ -3668,10 +3655,15 @@ impl Paykit {
             if let Some(write) = record_write {
                 batch = batch.entry(write);
             }
-            if let Some(write) = Box::pin(self.executor_outcome(entry, paid)).await? {
-                batch = batch.entry(write);
+            if step.is_some() {
+                batch = Box::pin(self.executor_outcome(entry, paid, batch)).await?;
             }
             let mut finished = entry.clone();
+            if paid {
+                finished.never_dispatched = false;
+            } else {
+                finished.end_before_the_call();
+            }
             // An acceptance still owed keeps the entry where a resume visits it: the outcome
             // is written, the acceptance not yet sent or placed.
             finished.stage = if paid && entry.owes_acceptance()? {
@@ -4180,6 +4172,7 @@ impl Paykit {
         }
         if self.holds("paykit_pay") && !payer_waits {
             out.extend(self.recheck_failed().await?);
+            Box::pin(self.record_ledger_outcomes()).await?;
         }
         self.prune_journal().await?;
         // Last, after every payment's own work: what can't be delivered now stays queued.
@@ -4263,7 +4256,9 @@ impl Paykit {
         for entry in self.journal().await? {
             let Some(bound) = prune_bound(
                 entry.stage,
-                entry.failed_by_method || entry.failed_on_claim,
+                entry.failed_by_method
+                    || entry.failed_on_claim
+                    || (entry.never_dispatched && entry.stage == Stage::Finished),
                 entry.deadline,
                 entry.journaled_at_ms,
             ) else {
@@ -4492,7 +4487,8 @@ impl Paykit {
         target: &ActivityTarget,
         fresh: &ActivityRecord,
     ) -> Result<bool> {
-        Ok(cancelled(fresh)
+        Ok(fresh.lost_to_delete.is_some()
+            || cancelled(fresh)
             || rejected(fresh)
             || (fresh.manual_only && !entry.user_started)
             || self.held(&self.activity_key(target)?, fresh).await?
@@ -4657,6 +4653,15 @@ impl Paykit {
                 .automatic_dispatch_held(entry, kind, crossing_payee)
                 .await;
         }
+        // An already accepted first attempt may finish across the seller's cancellation.
+        // A deletion that could have hidden a paid proof still holds it (Paykit spec 6, 8.1).
+        if entry.billing_period.is_none() && entry.request_hash.is_some() {
+            let target = ActivityTarget::payer(entry.natural_key.clone());
+            if !matches!(Box::pin(self.fresh_request(&target)).await?, Fresh::Held(record) if record.lost_to_delete.is_none())
+            {
+                return Ok(true);
+            }
+        }
         if Box::pin(self.divergent_pauses(entry, crate::divergent::Pause::blocks_by_hand)).await? {
             return Ok(true);
         }
@@ -4679,8 +4684,8 @@ impl Paykit {
 
     /// Whether `entry` is held from an automatic dispatch, a first dispatch or a repeat, as
     /// the switch holds the identity's state now. Every automatic dispatch makes this check,
-    /// and after it only the fence runs ([`Paykit::payment_fence`], with no await) before the
-    /// payment method's call ([`Paykit::dispatch`]).
+    /// including after taking a late seller lookup. The final local checks follow the
+    /// last read without waiting ([`Paykit::payment_fence`]).
     ///
     /// It reads three things from the switch, one after the other ([`Paykit::shared_collect`]):
     /// the deny list, the request record ([`Paykit::fresh_request_stamped`]) and the block
@@ -4879,37 +4884,50 @@ impl Paykit {
         }))
     }
 
-    /// The fence before the payment method's call, after a first dispatch's journal write of
-    /// `Paying` and an automatic payment's reads ([`Paykit::automatic_dispatch_held`]) (Paykit
-    /// spec 7.2): each is an await, during which a lookup's answer can come and a freshness
-    /// limit pass, so every
-    /// gate of the final payment check is judged again here, with no await of its own and
-    /// none after it before the payment method's call:
-    ///
-    /// - a switch lookup kept for the payee that has answered meanwhile, polled once without
-    ///   waiting: its answer may remove the destination's app or show equivocation, and
-    ///   taking it is an await, so it stops the payment and is kept for the next check;
-    /// - every gate of [`Paykit::final_gates`], on the clock now.
-    ///
-    /// The kept stop and the restore hold aren't judged again: Paykit's own state, which
-    /// only this app's own calls change (a receive, a placement, a confirmation), and none
-    /// can run while the payment holds the app. The deny list, the block floor and the
-    /// request record are the identity's, which another payer app can change meanwhile: an
-    /// automatic payment reads them again, from the switch, twice, just before this fence,
-    /// and holds unless the second reads show what the first did
-    /// ([`Paykit::automatic_dispatch_held`]).
-    fn payment_fence(
+    /// Recheck the payer's shared state after journaling `Paying` and immediately before
+    /// dispatch (Paykit spec 7.2, 8.1, 8.3). A first payment to a message-carried
+    /// destination can use a late switch confirmation of the exact signed seller identity
+    /// already checked. Taking it awaits storage, so read the payer's state again. A
+    /// public endpoint needs its app record checked too, and a repeat may already have paid.
+    async fn payment_fence(
         &mut self,
         entry: &JournalEntry,
-        payee: &PeerIdentity,
+        mut payee: PeerIdentity,
         by: Initiator,
         confirmed: Option<UserConfirmed>,
         kind: Dispatch,
     ) -> Result<FinalCheck> {
-        if self.kept_lookup_answered(&entry.payee) {
-            return Ok(FinalCheck::Hold);
+        let mut may_take_answer = matches!(kind, Dispatch::First { .. });
+        loop {
+            if self.dispatch_held(entry, by, kind).await.unwrap_or(true)
+                || Box::pin(self.period_recovery_held(entry))
+                    .await
+                    .unwrap_or(true)
+            {
+                return Ok(FinalCheck::Hold);
+            }
+            let confirmed_document =
+                self.inspect_ready_lookup(&entry.payee, |answer| answer.confirms(&payee.doc));
+            let Some(confirmed_document) = confirmed_document else {
+                // No await from these checks through to the call of the payment method.
+                return self.final_gates(entry, &payee, by, confirmed, kind);
+            };
+            if !may_take_answer || entry.destination.source()? == DestinationSource::Public {
+                return Ok(FinalCheck::Hold);
+            }
+            match self.take_kept_lookup(&entry.payee).await? {
+                Ok(Some(answer))
+                    if confirmed_document
+                        && answer.switch_copy == SwitchCopy::Read
+                        && answer.doc.signed() == payee.doc.signed() =>
+                {
+                    payee = answer;
+                    may_take_answer = false;
+                }
+                Ok(_) => return Ok(FinalCheck::Hold),
+                Err(refusal) => return Ok(FinalCheck::Refused(refusal)),
+            }
         }
-        self.final_gates(entry, payee, by, confirmed, kind)
     }
 
     /// Whether a repeat made now completes, at the method's longest, before its attempt is

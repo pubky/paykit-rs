@@ -20,6 +20,8 @@ If an install or load fails after acquiring its writer, the call waits for relea
 
 Use `backup` to export the installed wallet’s SDK backup. Store its bytes and App ID together in protected storage. Use `load` to reopen the installed state on the same device. For a retained grant, `reconcileAllowance` reports usage only from the original authority and complete account-wide method history. An unknown result leaves spending held.
 
+A refused operation carries a `PaymentRefusal`. Use `kind()` to choose the next action and `reason()` for display. For example, `IdentityUnavailable` means the wallet needs a fresh identity before it can resume a payment. A `Divergent` refusal identifies the affected records and versions. `attemptedFailure()` exposes the original refusal when an attempt failed before dispatch. A client operation can also carry a typed `switchRefusal`, including the generation requiring recovery. `KeptBatchesAhead` identifies the earlier batch and its answer window. The separate `keptBatch` field identifies a batch retained for this call. Keep an unrecognized refusal held.
+
 ## Restore the wallet from a protected backup
 
 Ask whether the source device is still in the user's possession or known to have been wiped. If its custody is unknown, have the signer revoke the old app and enroll a new one. For a device the user can account for, pass the original App ID, backup bytes and custody decision to `restore` (Switch spec §12.4). If a storage commit has an unknown result, use `load` on that store to learn what was installed.
@@ -81,13 +83,9 @@ The native enrollment cases use the actual signer, SQLite-backed device storage,
 
 ### Run the generated-language consumers
 
-The test issuer uses Scripted by default. Set `PUBKY_SWITCH_REQUIRE_DB=1` and `PUBKY_SWITCH_TEST_DATABASE_URL` to run its signer and paid-wallet fixtures against the PostgreSQL-backed service.
+The test issuer and enrolled checkout use Scripted by default. Set `PUBKY_SWITCH_REQUIRE_DB=1` and `PUBKY_SWITCH_TEST_DATABASE_URL` to run the signer, checkout, paid-wallet and recovery fixtures against the PostgreSQL-backed service.
 
 On macOS, use the host library and the sources generated above. Set `LIB` to the absolute directory containing `libpaykit_v2.dylib`, and use an absolute `OUT` path. The Kotlin consumer runs with a local Gradle installation. The Swift consumer imports the generated module from a host compiled in Swift 6 mode.
-
-The test issuer and enrolled checkout use Scripted by default. Set `PUBKY_SWITCH_REQUIRE_DB=1` and
-`PUBKY_SWITCH_TEST_DATABASE_URL` to run its signer, seller and recovery cases
-against the PostgreSQL-backed Switch service.
 
 ```sh
 cargo build --locked -p paykit-ffi --example wallet-test-issuer

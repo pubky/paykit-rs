@@ -4,6 +4,7 @@ use pubky_switch_harness::{Backend, World};
 use std::{error::Error, sync::Arc};
 
 mod method;
+mod refusal;
 use crate::fixture_signer as signer;
 mod storage;
 mod wallet;

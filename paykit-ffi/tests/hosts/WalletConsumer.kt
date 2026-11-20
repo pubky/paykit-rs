@@ -126,10 +126,49 @@ internal open class ReceiptReader : WalletHomeserver, PaymentMethod {
     override fun settlementId(proofJson: ByteArray): ByteArray? = null
 }
 
-private suspend fun recoverReceipt(issuer: String) {
-    val producer = ProcessBuilder(issuer, "paid-wallet").redirectError(ProcessBuilder.Redirect.INHERIT).start()
+private fun walletRows(issuer: String, mode: String): List<String> {
+    val producer = ProcessBuilder(issuer, mode).redirectError(ProcessBuilder.Redirect.INHERIT).start()
     val values = producer.inputStream.bufferedReader().readLines()
-    check(producer.waitFor() == 0 && values.size > 7)
+    check(producer.waitFor() == 0)
+    return values
+}
+
+private suspend fun resumeRefusal(issuer: String, left: Boolean, request: RequestId) {
+    val values = walletRows(issuer, if (left) "departed-wallet" else "wallet-awaiting-identity")
+    val store = EnrollmentStore().apply { reopen(values[1], values.drop(2)) }
+    val method = ReceiptReader()
+    WalletHost(store, method, method, listOf("btc-lightning-bolt11")).use { host ->
+        host.load(Base64.getDecoder().decode(values[0])).use { wallet ->
+            if (!left) {
+                try {
+                    wallet.requestReceipts(request)
+                    error("read receipts before the restored records were listed")
+                } catch (error: WalletException.Refused) {
+                    error.refusal.use { check(it.kind() is RefusalKind.NotNow) }
+                }
+            }
+            try {
+                wallet.resumePayments()
+                error("resumed a held wallet")
+            } catch (error: WalletException.Refused) {
+                check(!left)
+                error.refusal.use { refusal ->
+                    check(refusal.kind() is RefusalKind.IdentityUnavailable)
+                    check(refusal.attemptedFailure() == null)
+                }
+            } catch (error: WalletException.Operation) {
+                check(left && error.kind == WalletFailureKind.CLIENT)
+                checkNotNull(error.switchRefusal).use { check(it.kind() is SwitchRefusalKind.Left) }
+            }
+            check(method.transfers == 0)
+            wallet.shutdown()
+        }
+    }
+}
+
+private suspend fun recoverReceipt(issuer: String): RequestId {
+    val values = walletRows(issuer, "paid-wallet")
+    check(values.size > 7)
     fun bytes(i: Int): ByteArray = Base64.getDecoder().decode(values[i])
     val app = bytes(0)
     val identity = bytes(1)
@@ -152,7 +191,7 @@ private suspend fun recoverReceipt(issuer: String) {
             val unavailable = failure.error as MethodException.Unavailable
             check(selection.payable == listOf(9u, 6u) && failure.id == 2u && unavailable.reason == "route unavailable")
             check(unavailable.message == "MethodException(<redacted>)")
-            val walletError = WalletException.Operation(WalletFailureKind.CLIENT, "operation failed", null, byteArrayOf(1))
+            val walletError = WalletException.Operation(WalletFailureKind.CLIENT, "operation failed", null, byteArrayOf(1), null)
             check(walletError.message == "WalletException(<redacted>)" && walletError.detail == "operation failed")
             val unknown: WalletException = WalletException.UnknownMethod()
             check(unknown is WalletException.UnknownMethod && unknown.toString() == "WalletException(<redacted>)")
@@ -199,11 +238,12 @@ private suspend fun recoverReceipt(issuer: String) {
             }
         }
     }
+    return request
 }
 
 private suspend fun acknowledgeRecovery(issuer: String, cleared: Boolean) {
     val mode = if (cleared) "cleared-wallet" else "notice-wallet"
-    val producer = ProcessBuilder(issuer, mode).start()
+    val producer = ProcessBuilder(issuer, mode).redirectError(ProcessBuilder.Redirect.INHERIT).start()
     val values = producer.inputStream.bufferedReader().readLines()
     check(producer.waitFor() == 0 && values.size > 6)
     val app = Base64.getDecoder().decode(values[0])
@@ -215,6 +255,8 @@ private suspend fun acknowledgeRecovery(issuer: String, cleared: Boolean) {
         host.load(app).use { wallet ->
             val event = wallet.unacknowledgedEvents().single { it.id.contentEquals(duty) }
             check(event.owners == listOf("paykit"))
+            check(event.toString() == "WalletEvent(<redacted>)")
+            check(event.data.toString() == "WalletEventData(<redacted>)")
             if (cleared) {
                 check(wallet.recoveryRequired() == null)
                 check((event.data as WalletEventData.RecoveryNoticeCleared).generation == generation)
@@ -277,8 +319,9 @@ fun main() = runBlocking {
         host().use { it.acceptApproval(reference, identity, byteArrayOf(1)) }
         error("replaced the stored approval")
     } catch (_: WalletException.EnrollmentConflict) {}
-    val issuerPath = checkNotNull(System.getenv("PAYKIT_TEST_ISSUER"))
-    recoverReceipt(issuerPath)
-    acknowledgeRecovery(issuerPath, false)
-    acknowledgeRecovery(issuerPath, true)
+    val path = checkNotNull(System.getenv("PAYKIT_TEST_ISSUER"))
+    val request = recoverReceipt(path)
+    for (left in listOf(false, true)) resumeRefusal(path, left, request)
+    acknowledgeRecovery(path, false)
+    acknowledgeRecovery(path, true)
 }

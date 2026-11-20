@@ -73,6 +73,8 @@ mod periods;
 mod protocol;
 mod publish;
 pub mod rail;
+#[cfg(feature = "test-support")]
+pub use executor::with_early_ledger_compaction;
 mod receipt_delivery;
 mod receipts;
 mod receive;
@@ -97,6 +99,7 @@ pub use deletions::{PayeeDeletionNotice, PayeeReceiptDeletion, RetainedPayeeRece
 pub use destination::IDENTITY_GRACE_MS;
 pub use divergent::DivergentRecord;
 pub use error::{PaykitError, Refusal, Result};
+pub use executor::ReservedByOtherApp;
 pub use extensions::{ExtensionMessage, MAX_EXTENSION_MESSAGES, MAX_EXTENSION_MESSAGES_PER_SENDER};
 pub use hold::HeldRequest;
 pub use journal::{PaymentView, Stage};

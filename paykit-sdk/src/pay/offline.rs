@@ -76,7 +76,7 @@ impl Paykit {
             Some(mark) => Some(self.own_change(&mark).await?),
             None => None,
         };
-        let lookup_answered = self.kept_lookup_answered(&entry.payee);
+        let lookup_answered = self.inspect_ready_lookup(&entry.payee, |_| ()).is_some();
         self.require_pay()?;
         self.transfer_holds(entry, peer, false)??;
         self.app.may_attempt(false).map_err(not_now)?;

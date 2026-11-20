@@ -161,6 +161,85 @@ async fn receive(wallet: &mut Paykit) -> TestResult {
     Err("wallet did not finish its pages".into())
 }
 
+async fn connect_after_earlier_batch(
+    world: &World,
+    payer: &mut Paykit,
+    shop: [u8; 32],
+) -> TestResult {
+    let app = payer.app_mut();
+    world.lose_answer("POST", "/ops");
+    let first = app.allow_connect(&shop).await.unwrap_err();
+    let first_id = first.kept_batch().ok_or("missing original batch")?;
+    let other = world.identity("other-shop")?.public();
+    world.unreachable("POST", "/ops");
+    let held = app.allow_connect(&other).await.unwrap_err();
+    let pubky_switch_client::app::AppError::Ahead { ahead, .. } = &held else {
+        return Err("later write did not wait for the original batch".into());
+    };
+    let since = ahead.kept_since_ms.ok_or("original batch was never sent")?;
+    let until = ahead
+        .answer_until_ms
+        .ok_or("missing original answer window")?;
+    let service_reply = pubky_switch_client::app::AppError::Ahead {
+        ahead: *ahead,
+        error: Box::new(
+            pubky_switch_client::error::ClientError::Switch {
+                status: 503,
+                code: pubky_switch_core::http::ErrorCode::Unavailable,
+                message: "unavailable".into(),
+                current: serde_json::Value::Null,
+                known_version: None,
+                retry_after: None,
+            }
+            .into(),
+        ),
+    };
+    assert!(
+        matches!(WalletError::from(service_reply), WalletError::Operation {
+        kept_batch: None, service_code: Some(code), switch_refusal: Some(_), ..
+    } if code == "unavailable")
+    );
+    let WalletError::Operation {
+        kept_batch: None,
+        service_code: None,
+        switch_refusal: Some(rule),
+        ..
+    } = held.into()
+    else {
+        return Err("transport failure lost the earlier batch".into());
+    };
+    assert!(matches!(rule.kind(), SwitchRefusalKind::KeptBatchesAhead {
+        batch_id, kept_since_ms: Some(start), answer_until_ms: Some(end), kept: 1,
+    } if batch_id == first_id && start == since && end == until && start < end));
+    Box::pin(receive(payer)).await?;
+    assert!(payer.app().admits(&shop).await?);
+    assert!(!payer.app().admits(&other).await?);
+    Ok(())
+}
+
+async fn received_message(wallet: &NativeWallet, expected: &str) -> TestResult<EntryReceipt> {
+    let mut receipt = None;
+    for _ in 0..8 {
+        let report = Box::pin(wallet.receive()).await?;
+        for event in report.events {
+            if let WalletEventData::MessageReceived {
+                msg_id,
+                receipt: seen,
+                ..
+            } = event.data
+            {
+                if msg_id == expected {
+                    assert!(receipt.replace(seen).is_none());
+                }
+            }
+        }
+        if !report.more {
+            return receipt.ok_or_else(|| "wallet did not receive the signed message".into());
+        }
+    }
+    Err("wallet did not finish its pages".into())
+}
+
 async fn payment(
     world: &World,
     host: &WalletHost,
@@ -172,7 +251,7 @@ async fn payment(
     let mut signer = Box::pin(signer::serving(world, "shop")).await?;
     let scopes = AppScopes::new().request().build()?;
     let names = scopes.scopes.iter().map(String::as_str).collect::<Vec<_>>();
-    let asking = Asking::for_scopes(world.app_keys(&shop, "till")?, &names)?;
+    let asking = Asking::for_scopes(world.app_keys(&shop, "wallet")?, &names)?;
     let review = signer.review(asking.request.signed(), &asking.auth)?;
     let approved = Box::pin(signer.approve(review)).await?;
     let mut seller = Box::pin(Paykit::join(
@@ -185,7 +264,14 @@ async fn payment(
     .await?;
     signer.claim_delivered(&approved.request).await?;
     let buyer = world.identity("buyer")?.public();
-    Box::pin(payer.allow_connect(shop.public().into())).await?;
+    let invitation = {
+        let mut app = payer.lock().await?;
+        Box::pin(receive(&mut app)).await?;
+        assert!(!app.app().admits(&shop.public()).await?);
+        app.app_mut()
+            .register_invite_code(world.now_ms() + 3_600_000, 1)
+            .await?
+    };
     Box::pin(receive(&mut seller)).await?;
     seller.app_mut().allow_connect(&buyer).await?;
     let endpoint = PaymentEndpointIdentifier::new("btc-lightning-bolt11")?;
@@ -194,34 +280,43 @@ async fn payment(
         asset: Asset::new("btc")?,
         value: Decimal::new("7")?,
     };
-    let sent = Box::pin(seller.send_request(
-        buyer,
-        RequestDraft::new(
-            amount,
-            PaymentReference::new("checkout-7")?,
-            RequestDestination::Endpoints(BTreeMap::from([(endpoint, payload)])),
+    let sent = Box::pin(
+        seller.send_request(
+            buyer,
+            RequestDraft::new(
+                amount,
+                PaymentReference::new("checkout-7")?,
+                RequestDestination::Endpoints(BTreeMap::from([(endpoint, payload)])),
+            )
+            .with_invite_code(invitation.code),
         ),
-    ))
+    )
     .await?;
     assert!(matches!(
         sent.delivery,
         paykit_sdk::MessageDelivery::Accepted { .. }
     ));
     let request = sent.request.ok_or("missing signed request")?;
-    // A request held during the first listing reports its original ID when the wallet
-    // has applied it. The service accepting delivery precedes that receive.
-    let mut applied = false;
-    for _ in 0..8 {
-        if Box::pin(payer.receive())
-            .await?
-            .applied
-            .contains(&sent.msg_id)
-        {
-            applied = true;
-            break;
-        }
+    let delivery = Box::pin(received_message(&payer, &sent.msg_id)).await?;
+    assert_eq!(
+        delivery.invite_code_hash.as_deref(),
+        Some(invitation.code_hash.as_slice())
+    );
+    assert_eq!(delivery.entry_id.len(), 16);
+    assert_eq!(delivery.read_at_ms, world.now_ms());
+    {
+        let mut original = payer.lock().await?;
+        assert_eq!(
+            delivery.service_key,
+            original.app().own_identity().inbox().service_key
+        );
+        Box::pin(connect_after_earlier_batch(
+            world,
+            &mut original,
+            shop.public(),
+        ))
+        .await?;
     }
-    assert!(applied);
     let views = payer.requests().await?;
     assert_eq!(views.len(), 1);
     assert_eq!(views[0].id.request_hash, request.request_hash);
@@ -272,11 +367,10 @@ async fn payment(
     let receipt = Box::pin(seller.confirm_payment(&activity.record))
         .await?
         .ok_or("missing seller receipt")?;
-    for _ in 0..8 {
-        if !Box::pin(restored.receive()).await?.more {
-            break;
-        }
-    }
+    let ordinary = Box::pin(received_message(&restored, &receipt)).await?;
+    assert!(ordinary.invite_code_hash.is_none());
+    assert_ne!(ordinary.entry_id, delivery.entry_id);
+    assert_eq!(ordinary.service_key, delivery.service_key);
     let final_views = restored.requests().await?;
     assert!(matches!(final_views[0].status, OneTimeRequestStatus::Paid));
     assert!(final_views[0]

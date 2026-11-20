@@ -1,7 +1,7 @@
 //! The final payment check (Paykit spec 4, 7.2): the last thing before the payment method's
 //! call, on a first dispatch, a resume and a recovery. A late switch answer that removes the
-//! destination's app, or a payee copy that aged past its limit meanwhile, pays nothing; nor
-//! does one that comes during the journal write of `Paying`, which the fence after it sees.
+//! destination's app, or a payee copy that aged past its limit meanwhile, pays nothing.
+//! An unchanged confirmation received while journaling `Paying` can complete the first call.
 
 use std::sync::{Arc, Mutex};
 
@@ -12,7 +12,7 @@ use pubky_switch_client::clock::Clock;
 use pubky_switch_client::error::{StoreError, TransportError};
 use pubky_switch_client::store::{KeyValue, MemoryStore, StateStore, Write};
 use pubky_switch_client::transport::{BoxFuture, Transport};
-use pubky_switch_core::records::{RemovedApp, IDENTITY_PATH};
+use pubky_switch_core::records::{IdentityBody, RemovedApp, IDENTITY_PATH};
 
 use crate::common::{draft, request_from, SlowSwitch, World, BOB_ORIGIN};
 
@@ -36,6 +36,7 @@ struct HookedStore {
     queueing_next: std::sync::atomic::AtomicBool,
     paying_hook: Mutex<Option<Hook>>,
     deny_hook: Mutex<Option<Hook>>,
+    lookup_hook: Mutex<Option<(Vec<u8>, Hook)>>,
     attempted_hook: Mutex<Option<Hook>>,
     stop_at_outbox: std::sync::atomic::AtomicBool,
     refuse_acceptances: std::sync::atomic::AtomicBool,
@@ -224,10 +225,22 @@ impl HookedStore {
         {
             return Err(StoreError::Unavailable);
         }
+        let mut lookup = self.lookup_hook.lock().unwrap();
+        let confirmed = lookup.as_ref().is_some_and(|(seller, _)| {
+            batch
+                .writes()
+                .iter()
+                .any(|write| matches!(write, Write::Put { key, .. } if key == seller))
+        });
         let applied = apply(batch)?;
         if applied != pubky_switch_client::store::CommitOutcome::Applied {
             return Ok(applied);
         }
+        if confirmed {
+            let (_, hook) = lookup.take().unwrap();
+            hook();
+        }
+        drop(lookup);
         if signed
             && self
                 .fail_queueing
@@ -341,24 +354,24 @@ fn held_switch(w: &World) -> Arc<SlowSwitch> {
     Arc::new(SlowSwitch::new(Arc::clone(&w.router), BOB_ORIGIN))
 }
 
-/// Bob's signer removes the shop, and only his switch has the copy saying so: his
-/// Homeserver still serves the one before.
-fn revoke_shop_on_the_switch_only(w: &World) {
-    let shop = w.bob.identity().app_keys("shop").app_id_bytes();
+/// Only bob's switch sees the new identity document; the Homeserver still serves its predecessor.
+fn change_shop_on_the_switch_only(w: &World, change: impl FnOnce(&mut IdentityBody)) {
     let older = w.homeserver.file(w.bob_id(), IDENTITY_PATH).unwrap();
-    let now = w.clock.now_ms();
-    let doc = w
-        .bob
-        .sign_next(|body| {
-            body.apps.retain(|a| a.app_id != shop);
-            body.removed.push(RemovedApp {
-                app_id: shop,
-                distrust_from: now,
-            });
-        })
-        .unwrap();
+    let doc = w.bob.sign_next(change).unwrap();
     w.bob.switch().deliver_identity(&doc).unwrap();
     w.homeserver.put(w.bob_id(), IDENTITY_PATH, older);
+}
+
+fn revoke_shop_on_the_switch_only(w: &World) {
+    let shop = w.bob.identity().app_keys("shop").app_id_bytes();
+    let now = w.clock.now_ms();
+    change_shop_on_the_switch_only(w, |body| {
+        body.apps.retain(|a| a.app_id != shop);
+        body.removed.push(RemovedApp {
+            app_id: shop,
+            distrust_from: now,
+        });
+    });
 }
 
 /// An idempotent rail without a history: a resume repeats the dispatch, through the checks.
@@ -1363,6 +1376,154 @@ async fn answered_during_paying(
 }
 
 #[tokio::test]
+async fn test_fence_unchanged_seller_during_paying_completes_the_original_attempt() {
+    use paykit_sdk::rail::{Rail, RailOutcome, FAKE_LONGEST_COMPLETION_MS};
+
+    let w = World::new();
+    let (_, _, request, mut wallet) = answered_during_paying(&w, |_| {}).await;
+    w.rail
+        .set_declaration(RailDeclaration::new(FAKE_LONGEST_COMPLETION_MS).with_history(true));
+    w.rail.next(Behaviour::InTransaction([17; 32]));
+    let paid = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    let PayOutcome::Paid {
+        attempt_id,
+        proof_msg_id: Some(_),
+        ..
+    } = paid
+    else {
+        panic!("{paid:?}");
+    };
+    let attempts = wallet.payments().await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].attempt_id, attempt_id);
+    assert_eq!(attempts[0].stage, paykit_sdk::Stage::Finished);
+    assert_eq!(w.rail.all_pay_calls(), [(attempt_id, 1)].into());
+    assert_eq!(w.rail.all_executions(), [(attempt_id, 1)].into());
+    assert!(matches!(
+        w.rail.payment(attempt_id).await.unwrap(),
+        Some(RailOutcome::Paid(_))
+    ));
+}
+
+#[tokio::test]
+async fn test_fence_unchanged_seller_cannot_authorize_a_changed_transfer() {
+    let w = World::new();
+    let (store, _, request, mut wallet) = answered_during_paying(&w, |_| {}).await;
+    let rail = Arc::clone(&w.rail);
+    // As the wallet records the seller's switch confirmation, the method changes
+    // what it would actually transfer for the selected endpoint.
+    let key = format!(
+        "ident/{}/sw",
+        pubky_switch_core::enc::pubky_id(&request.payee)
+    );
+    *store.lookup_hook.lock().unwrap() = Some((
+        key.into_bytes(),
+        Box::new(move || {
+            rail.set_transfer_amount(Some(crate::common::btc("2")));
+        }),
+    ));
+    let refusal = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(
+            refusal.refusal(),
+            Some(paykit_sdk::Refusal::AttemptFailed(reason))
+                if matches!(**reason, paykit_sdk::Refusal::Transfer { .. })
+        ),
+        "{refusal:?}"
+    );
+    assert!(store.lookup_hook.lock().unwrap().is_none());
+    assert!(w.rail.all_pay_calls().is_empty());
+}
+
+#[tokio::test]
+async fn test_fence_new_seller_document_during_paying_holds_even_when_the_shop_remains() {
+    let w = World::new();
+    let (_, _, request, mut wallet) = answered_during_paying(&w, |w| {
+        change_shop_on_the_switch_only(w, |body| body.record_max_age = Some(86_400));
+    })
+    .await;
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Pending { .. }), "{outcome:?}");
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Attempted
+    );
+    assert!(w.rail.all_pay_calls().is_empty());
+}
+
+#[tokio::test]
+async fn test_fence_older_switch_answer_with_a_newer_homeserver_copy_holds_the_payment() {
+    let w = World::new();
+    let (_, _, request, mut wallet) = answered_during_paying(&w, |w| {
+        // The seller publishes a new signed document that still lists the shop. The
+        // switch answers the ongoing lookup with its previous signed version.
+        w.bob
+            .sign_next(|body| body.record_max_age = Some(86_400))
+            .unwrap();
+    })
+    .await;
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Pending { .. }), "{outcome:?}");
+    let attempts = wallet.payments().await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].stage, paykit_sdk::Stage::Attempted);
+    assert!(w.rail.all_pay_calls().is_empty());
+    let held = wallet
+        .app_mut()
+        .identity_of(&request.payee, false)
+        .await
+        .unwrap();
+    assert_eq!(held.doc.version(), w.bob.body().version);
+    assert!(held.homeserver_read_ms.is_some());
+    assert!(held.switch_read_ms.is_none());
+}
+
+#[tokio::test]
+async fn test_fence_unchanged_seller_then_unanswered_dispatch_stays_uncertain_on_reopen() {
+    let w = World::new();
+    let (store, app_id, request, mut wallet) = answered_during_paying(&w, |_| {}).await;
+    w.rail.next(Behaviour::LoseAnswer);
+    let pending = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    let PayOutcome::Pending { attempt_id, .. } = pending else {
+        panic!("{pending:?}")
+    };
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Paying
+    );
+    drop(wallet);
+    let mut reopened = w
+        .load_on_clock(&w.alice, store, app_id, Arc::clone(&w.clock))
+        .await;
+    let outcomes = reopened.resume_payments().await.unwrap();
+    assert!(
+        matches!(outcomes.as_slice(), [PayOutcome::Uncertain { attempt_id: id, .. }] if *id == attempt_id)
+    );
+    assert_eq!(w.rail.all_pay_calls(), [(attempt_id, 1)].into());
+    assert_eq!(w.rail.all_executions(), [(attempt_id, 1)].into());
+}
+
+#[tokio::test]
 async fn test_fence_removal_answered_during_paying_not_paid() {
     let w = World::new();
     let (store, app_id, request, mut wallet) =
@@ -1489,6 +1650,60 @@ async fn test_acceptance_queued_once_the_call_is_made() {
         .await
         .unwrap()
         .is_some());
+}
+
+#[tokio::test]
+async fn test_fence_holds_a_marked_one_time_request_before_the_first_method_call() {
+    use paykit_lib::records::{ActivityRecord, ActivitySide};
+
+    let w = World::new();
+    let (store, app_id, request) = with_a_request(&w).await;
+    let mut other = w.wallet("other-payer").await;
+    other.receive(None).await.unwrap();
+    let target = crate::outcome_record::payer_record(&request);
+    let key = other.app().record_key(&target).unwrap();
+    store.on_paying(Box::new(move || {
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(async move {
+                    let current = other.app_mut().read_record(&target).await.unwrap().unwrap();
+                    let mut record = ActivityRecord::bind(
+                        current.content.value().unwrap(),
+                        &other.identity(),
+                        ActivitySide::Payer,
+                        other.app().naming_key(),
+                        &key,
+                        None,
+                    )
+                    .unwrap();
+                    record.lost_to_delete = Some([73; 32]);
+                    other
+                        .app_mut()
+                        .put_record(&target, &record.to_json().unwrap(), Vec::new())
+                        .await
+                        .unwrap();
+                });
+        })
+        .join()
+        .unwrap();
+    }));
+    let mut wallet = w
+        .load_on_clock(&w.alice, store, app_id, Arc::clone(&w.clock))
+        .await;
+    w.rail.next(Behaviour::Refuse);
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Pending { .. }), "{outcome:?}");
+    assert!(w.rail.all_pay_calls().is_empty());
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        paykit_sdk::RequestStatus::MayBePaid
+    );
 }
 
 // ---------------------------------------------------------------------------------------

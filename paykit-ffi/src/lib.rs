@@ -24,6 +24,7 @@ mod requests;
 mod restore;
 mod review;
 mod store;
+mod switch_refusal;
 mod wallet;
 #[cfg(feature = "test-wallet")]
 pub use checkout::{enrolled_test_checkout, CheckoutFixture};
@@ -40,6 +41,7 @@ pub use requests::*;
 pub use restore::*;
 pub use review::*;
 pub use store::*;
+pub use switch_refusal::*;
 pub use wallet::*;
 uniffi::setup_scaffolding!();
 #[cfg(test)]

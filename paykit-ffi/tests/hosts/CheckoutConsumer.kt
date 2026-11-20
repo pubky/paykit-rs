@@ -197,6 +197,10 @@ private fun driveCheckout() = runBlocking {
             val method = CheckoutMethod(File(directory, "settled"))
             val store = EnrollmentStore()
             enrolledTestCheckout(store, method).use { fixture ->
+                check(fixture.allowanceRecoveryNoticeKinds() == listOf(
+                    WalletNoticeKind.ALLOWANCE_ACCEPTANCE_BEFORE_LOSS,
+                    WalletNoticeKind.ALLOWANCE_WITHDRAWAL_CONFIRMED
+                ))
                 val reference = ByteArray(16) { 23 }
                 val secret = ByteArray(32) { 9 }
                 val enrolled = WalletEnrollment(store).use { owner ->
@@ -239,13 +243,32 @@ private fun driveCheckout() = runBlocking {
                         val sent = fixture.sendCheckout()
                         wallet.finishReceive()
                         val view = wallet.requests().single()
-                        check(view.id.requestHash.contentEquals(sent.requestHash) && view.paymentReference == "checkout-7")
+                        check(view.id.requestHash.contentEquals(sent.requestHash) && view.id.payee.contentEquals(sent.payee))
+                        check(view.paymentReference == "checkout-7" && view.amount.value == "7")
                         val options = PaymentOptions(null, null, false, false, emptyList())
-                        val payment = async { wallet.payRequest(view.id, options) }
-                        method.entered.await()
-                        payment.cancelAndJoin()
-                        method.release.complete(Unit)
-                        check(payment.isCancelled)
+                        val missing = RequestId(sent.payee, ByteArray(32))
+                        val skipped = wallet.payRequest(missing, options)
+                        val failure = skipped.decision as PaymentDecision.Error
+                        val refused = failure.error as WalletException.Refused
+                        refused.refusal.use { check(it.kind() is RefusalKind.NotFound) }
+                        check(skipped.publicFailures.isEmpty() && method.calls.get() == 0)
+                        wallet.finishReceive()
+                        withTimeout(15_000) {
+                            val watch = async { wallet.feedWait(25u) }
+                            fixture.waitForHeldFeed()
+                            check(watch.isActive)
+                            val payment = async { wallet.payRequest(view.id, options) }
+                            try {
+                                check(watch.await() == FeedWake.READY)
+                                method.entered.await()
+                                payment.cancelAndJoin()
+                                check(payment.isCancelled)
+                            } finally {
+                                payment.cancel()
+                                watch.cancel()
+                                method.release.complete(Unit)
+                            }
+                        }
                         wallet.shutdown()
                         sent
                     }
@@ -257,7 +280,8 @@ private fun driveCheckout() = runBlocking {
                         val receipt = fixture.confirmPayment(request)
                         payer.finishReceive()
                         check(payer.requestReceipts(request).single().let {
-                            it.messageId == receipt && it.attemptId == original.attemptId && it.paymentReference == "checkout-7"
+                            it.messageId == receipt && it.attemptId == original.attemptId && it.paymentReference == "checkout-7" &&
+                                it.payee.contentEquals(request.payee) && it.requestHash.contentEquals(request.requestHash)
                         })
                         check(payer.payments().single().receipt?.messageId == receipt && method.calls.get() == 1)
                         payer.shutdown()

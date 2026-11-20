@@ -1,4 +1,4 @@
-use crate::{NativeWallet, PaymentRefusal, Version, WalletError, WalletEventData};
+use crate::{Divergence, NativeWallet, PaymentRefusal, WalletError, WalletEventData};
 use paykit_sdk::Paykit;
 use pubky_switch_client::app::{AppEvent, EventId, HeldCursor, Woken};
 use std::sync::Arc;
@@ -53,46 +53,6 @@ impl From<HeldCursor> for CursorStatus {
             HeldCursor::Ahead { held, position, .. } => Self::Ahead { held, position },
             HeldCursor::Unknown => Self::Unknown,
             _ => Self::Other,
-        }
-    }
-}
-/// A record the app has seen divergent, as the host shows it (Paykit spec 6): from
-/// `Paykit::divergent_records`, a receive's summary, or a refusal (`Refusal::Divergent`).
-/// `Paykit::confirm_divergent` takes its `record`.
-#[derive(uniffi::Record)]
-pub struct Divergence {
-    /// The record key.
-    pub record: Vec<u8>,
-    /// Its collection: what the upload may hold a newer copy of, such as a cancellation in a
-    /// request record or a newer list in a `payment_lists` record.
-    pub collection: String,
-    /// Paused: nothing is paid, accepted or credited on it automatically, and by hand only once
-    /// the user confirms (`Paykit::confirm_divergent`).
-    pub paused: bool,
-    /// The latest view the app read shows it divergent now.
-    pub divergent: bool,
-    /// The write of the record the app holds, the one shown; `None` for a record it holds no
-    /// more. `Paykit::confirm_divergent` confirms only that write.
-    pub version: Option<Version>,
-    /// Shown for a credit (Paykit spec 8.1 step 4): the record may hold a credit of a settlement
-    /// its current write lacks, a receipt in its upload, so the app can't tell a proof isn't
-    /// credited already.
-    pub may_hold_credit: bool,
-    /// The user has confirmed it, and the messages kept over it, receipts included, are written
-    /// at the next receive (`Paykit::receive`): until then nothing is paid, accepted or credited
-    /// on it, by hand or automatically.
-    pub writes_waiting: bool,
-}
-impl From<paykit_sdk::DivergentRecord> for Divergence {
-    fn from(v: paykit_sdk::DivergentRecord) -> Self {
-        Self {
-            record: v.record.into(),
-            collection: v.collection.name().into(),
-            paused: v.paused,
-            divergent: v.divergent,
-            version: v.version.map(Into::into),
-            may_hold_credit: v.may_hold_credit,
-            writes_waiting: v.writes_waiting,
         }
     }
 }

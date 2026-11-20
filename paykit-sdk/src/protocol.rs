@@ -628,6 +628,28 @@ pub(crate) fn restore_paykit_layer(
             .map_err(|_| "the installed executor history does not verify")?;
         executor_history.insert(key, row);
     }
+    let mut proposals = std::collections::BTreeMap::new();
+    let mut ledger_batches = std::collections::BTreeMap::<_, std::collections::BTreeSet<_>>::new();
+    for (name, bytes) in restoring
+        .previous_local_scan(key::LEDGER_PROPOSALS.as_bytes())
+        .map_err(|_| "the installed ledger preparations cannot be read")?
+    {
+        state::restored::<crate::executor::LedgerProposal>(&name, &bytes, &binder)
+            .map_err(|_| "the installed ledger preparation does not verify")?;
+        proposals.insert(name, bytes);
+    }
+    for (name, bytes) in restoring
+        .previous_local_scan(key::LEDGER_BATCHES.as_bytes())
+        .map_err(|_| "the installed ledger batch IDs cannot be read")?
+    {
+        let Some(StateKey::LedgerBatch { record, digest }) = StateKey::parse(&name) else {
+            return Err("invalid installed ledger batch key".into());
+        };
+        ledger_batches.entry((record, digest)).or_default().extend(
+            state::restored::<state::LedgerBatchIds>(&name, &bytes, &binder)
+                .map_err(|_| "invalid installed ledger batch IDs")?,
+        );
+    }
     let mut compactions = std::collections::BTreeMap::new();
     for (key, value) in restoring
         .previous_local_scan(key::LEDGER_COMPACTIONS.as_bytes())
@@ -893,6 +915,24 @@ pub(crate) fn restore_paykit_layer(
                     )
                 })?;
                 writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::LedgerProposal { .. } => {
+                state::restored::<crate::executor::LedgerProposal>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                if proposals
+                    .insert(key, value.clone())
+                    .is_some_and(|old| old != value)
+                {
+                    return Err("two different proposals name the same ledger preparation".into());
+                }
+                continue;
+            }
+            StateKey::LedgerBatch { record, digest } => {
+                ledger_batches.entry((record, digest)).or_default().extend(
+                    state::restored::<state::LedgerBatchIds>(&key, &value, &binder)
+                        .map_err(|_| unread())?,
+                );
                 continue;
             }
             StateKey::LedgerCompaction { .. } => {
@@ -1185,6 +1225,7 @@ pub(crate) fn restore_paykit_layer(
         }
         journaled.insert(attempt);
         entry.restored = true;
+        entry.never_dispatched = false;
         let value = state::encode(&entry).map_err(|_| bad())?;
         writes.push(LocalWrite::Put { key, value });
     }
@@ -1281,6 +1322,27 @@ pub(crate) fn restore_paykit_layer(
             .writes()
             .map_err(|_| "the retained private list publications cannot be stored")?,
     );
+    // Only an ID committed with signed native bytes makes a proposal outstanding.
+    // Restore both sources' unresolved IDs, including same-proposal reseals.
+    for ((record, digest), ids) in ledger_batches {
+        let suffix = format!(
+            "{}/{}",
+            pubky_switch_core::enc::b64(&record),
+            pubky_switch_core::enc::b64(&digest)
+        );
+        let proposal = format!("{}{suffix}", key::LEDGER_PROPOSALS).into_bytes();
+        let value = proposals
+            .remove(&proposal)
+            .ok_or("the pending ledger batch has no proposed value")?;
+        writes.push(LocalWrite::Put {
+            key: proposal,
+            value,
+        });
+        writes.push(LocalWrite::Put {
+            key: format!("{}{suffix}", key::LEDGER_BATCHES).into_bytes(),
+            value: ids.into_iter().flatten().collect(),
+        });
+    }
     for (key, receipt) in compactions {
         writes.push(LocalWrite::Put {
             key,
@@ -2214,6 +2276,7 @@ mod receive_tests {
                 entry_id: [1; 16],
                 service_key: [2; 32],
                 read_at_ms: NOW,
+                invite_code_hash: None,
             },
             generation: 1,
             seq: 3,
@@ -2223,7 +2286,6 @@ mod receive_tests {
             plaintext: stored.plaintext().clone(),
             cert: stored.cert().clone(),
             standing: Standing::Listed,
-            context: None,
             parked: false,
             released: false,
             conflict: None,

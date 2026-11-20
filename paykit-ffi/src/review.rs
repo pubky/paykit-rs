@@ -1,9 +1,7 @@
-use crate::{Amount, Divergence, PaymentRefusal, RequestId};
+use crate::{Amount, PaymentRefusal, RequestId};
 use paykit_sdk::{RateSource, Refusal};
 
-/// A provider loss, as Paykit keeps the one the app followed last (`p/pl`) for the doubt it
-/// leaves (Paykit spec 7.3), and as a doubt after a loss names the loss that decides it
-/// (`PaymentDoubt::before_loss`, `Doubtful::before_loss`).
+/// The provider loss that decides a payment doubt (Paykit spec 7.3).
 #[derive(uniffi::Record)]
 pub struct ProviderLossBoundary {
     /// The generation the loss recovered at: of two losses, the newer is the one at the later
@@ -52,15 +50,12 @@ pub struct PriorPaymentDoubt {
 /// The SDK refusal, including the exact quote, restored obligation or other evidence for review.
 #[derive(uniffi::Enum)]
 pub enum RefusalKind {
-    /// The original request could have been cancelled while the wallet lacked coverage.
+    /// The payee may have cancelled the original request during the gap.
     HeldAfterRestore {
         /// The held activity record requiring the user's confirmation.
         record: Vec<u8>,
     },
-    /// The identity's deny list holds the payee: what is open with it is paused, and its request
-    /// is paid only once the user confirms (Paykit spec 8.1, "Blocked counterparties"). `payment`
-    /// is what the user is shown; paying anyway carries it back
-    /// (`PayOptions::with_blocked_confirmed`).
+    /// The payee is on the user's deny list. The user must see this exact payment before confirming it.
     Blocked {
         /// The payee's identity key.
         payee: Vec<u8>,
@@ -71,26 +66,17 @@ pub enum RefusalKind {
         /// The amount of the proposed payment to a blocked payee.
         amount: Amount,
     },
-    /// The obligation may already be paid: an `unknown` or orphaned attempt, a next attempt that
-    /// would be flagged `possibly_duplicate`, a pinned deadline other than the app's own, an
-    /// attempt a restore left unresolved, or an obligation payable before a provider loss (Paykit
-    /// spec 7.3).
+    /// An earlier attempt may have paid the obligation. Only a supplied doubt can be confirmed.
     MayBePaid {
         /// What the user may pay over.
         doubt: Option<PriorPaymentDoubt>,
     },
-    /// The user's answer names a provider loss that no longer decides the doubt it answers
-    /// (Paykit spec 7.3): a newer loss is kept, or followed before its step has run, since the
-    /// doubt was shown. `decisive` is the loss that decides now, `None` for none; the host shows
-    /// the doubt again under it.
+    /// The provider loss that decides the doubt changed before confirmation.
     LossChanged {
         /// The current provider-loss boundary the host must review.
         boundary: Option<ProviderLossBoundary>,
     },
-    /// The payment method would transfer another amount or asset, an amount it can't tell, or a
-    /// fee above the app's cap, and the user didn't choose it (Paykit spec 7.2 step 1). `quote`
-    /// is what it would transfer, to show the user; paying it anyway carries it back
-    /// (`PayOptions::with_transfer_confirmed`).
+    /// The method's proposed transfer requires the user's approval.
     Transfer {
         /// The payee's identity key.
         payee: Vec<u8>,
@@ -107,7 +93,7 @@ pub enum RefusalKind {
         /// The method's maximum fee, if known.
         max_fee: Option<String>,
     },
-    /// The selected payment requires confirmation of the original rate and transfer amount.
+    /// This payment requires authorization of the original rate, destination and resulting amount.
     PricedByRate {
         /// The original request associated with the refusal.
         request: RequestId,
@@ -135,18 +121,14 @@ pub enum RefusalKind {
         /// The settlement bucket that could not accept the mark.
         bucket: u16,
     },
-    /// A record the call acts on is divergent after a provider loss, or was seen so, and the user
-    /// hasn't confirmed it (Paykit spec 6, "Divergent records"): its upload may hold what the
-    /// current write lacks, such as a cancellation of the request, a receipt, or a newer list in
-    /// which the payee withdrew a destination.
+    /// The host must show the affected records and their observed versions before asking for confirmation.
     Divergent {
         /// The records the user is asked to confirm.
         records: Vec<Divergence>,
     },
     /// The app holds no such request, record or payment.
     NotFound,
-    /// The call needs a scope the app's certificate doesn't hold, such as `paykit_pay` to pay or
-    /// `paykit_request` to send a request (Paykit spec 3.1).
+    /// The certificate lacks a scope required for this call.
     ScopeMissing {
         /// The missing Paykit scope.
         scope: String,
@@ -169,13 +151,11 @@ pub enum RefusalKind {
     /// The obligation is paid: its claim is SETTLED, or its record holds the proof of a payment
     /// (Paykit spec 7.2).
     AlreadyPaid,
-    /// Another own app has an open attempt on the obligation: "being handled by your other
-    /// wallet" (Paykit spec 7.1, 8.5).
+    /// Another wallet owns an open attempt on this obligation.
     BeingHandledByOtherWallet,
     /// The attempt's deadline has passed, or the request's proposal expired (Paykit spec 7.1).
     DeadlinePassed,
-    /// A recurring request is paid per Billing Period (Paykit spec 8.2): `pay_request` refuses
-    /// it, and `Paykit::pay_period` pays it.
+    /// This request is payable per Billing Period.
     Recurring,
     /// The settlement may already have been credited.
     MaybeCredited,
@@ -184,67 +164,46 @@ pub enum RefusalKind {
     Subscribed,
     /// The payer must accept the recurring request before paying a Billing Period (Paykit spec 8.2).
     NotSubscribed,
-    /// The Billing Period hasn't started on the latest service time verified: it is paid only by
-    /// the user, after confirming paying it early (`PayOptions::with_early_payment_confirmed`;
-    /// Paykit spec 8.2, "Not before its start").
+    /// Automatic payment must wait for the period. Paying early requires explicit confirmation.
     PeriodNotStarted,
     /// The occurrence carries a manual-only mark or is funded under an Allowance.
     ManualOnly,
-    /// The authenticated subscription and service time do not authorize this automatic Billing
-    /// Period.
+    /// The subscription or service time does not authorize automatic payment.
     NotAutomatic,
-    /// The request record lists 16 Billing Periods that may have an open attempt and none of them
-    /// has finished: no attempt is made on another period until one does (Paykit spec 8.2,
-    /// "Attempted periods").
+    /// All retained period slots may have an open attempt.
     AttemptedPeriodsFull,
-    /// The destination check failed (Paykit spec 4, 7.2): the text names the rule.
+    /// The destination failed the payment checks.
     Destination,
-    /// The attempt was written, and a check before money moved then refused the payment: the app
-    /// wrote `failed` on it instead of paying, and nothing was paid (Paykit spec 7.2 step 1).
+    /// An attempt was written and failed before dispatch. Inspect attemptedFailure for the original refusal.
     AttemptFailed,
-    /// No usable destination: no endpoint of the request, no usable Private Payment List, no
-    /// usable public endpoint, or none the caller named (Paykit spec 4, 8.1, 8.4).
+    /// The wallet could not find a usable destination.
     NoDestination,
-    /// The destination offers endpoints the payment may use, but the payment method pays none of
-    /// them (`Rail::select_endpoints`), or the caller named one it doesn't pay.
+    /// The method cannot pay the selected endpoint.
     UnsupportedEndpoint,
-    /// No usable Private Payment List from the payee: none held, or each one expired, of a
-    /// version used up by a single-use endpoint of it reserved, or of a generation above the
-    /// payee's verified `identity.json` (Paykit spec 8.4, "No usable list"; Paykit wire 4.13);
-    /// also when lists in use offer only endpoints the payment method, the conversion terms, the
-    /// caller's endpoint or a request's accepted identifiers leave unusable, beside one used up,
-    /// or, for the first two, beside one expired, whose newer list may serve
-    /// (`Rail::select_endpoints`).
+    /// A usable Private Payment List is required.
     WaitingForList,
-    /// The payee's `identity.json` couldn't be read, or the app's own couldn't be revalidated,
-    /// before money moves (Paykit spec 4, 7.2).
+    /// The wallet could not read or revalidate the identity required for payment.
     IdentityUnavailable,
     /// The payee identity needs explicit confirmation.
     IdentityUnconfirmed,
     /// The claim's attempt is open: a rejection or cancellation is refused while a payment is in
     /// progress (Paykit spec 8.1).
     PaymentInProgress,
-    /// The own `identity.json` doesn't authorize the payment: it doesn't list this app with the
-    /// certificate it holds, or names another service or generation than the one the attempt was
-    /// written at, after a provider change (Paykit spec 4, Switch spec 12.5, 12.6).
+    /// The current identity does not authorize this installation or attempt.
     NotCurrent,
     /// The call doesn't apply now: the text says why.
     NotNow,
     /// A value the protocol or the host gave breaks a rule: the text names it.
     Usage,
-    /// `done` waits for the payer's activity record, which it never goes without (Paykit spec 7.2
-    /// step 3): the record holds a value that doesn't read, with no copy this app trusts, or is
-    /// gone with nothing to rebuild it from.
+    /// A payment action is held by its record. If the payer's payment history was lost to
+    /// deletion, the obligation stays held and the user cannot confirm another payment.
     RecordHeld,
-    /// The app's certificate fails Paykit's checks (Paykit wire 3.1), though the Switch took it:
-    /// at a join, before anything is written, or after a renewal the client adopted.
+    /// Paykit refused the app's certificate.
     CertificateRefused,
-    /// The app's own switch doesn't answer: the network, a `503`, a `5xx` its key didn't sign,
-    /// or, while the account may have been erased, the wait before the app takes it as gone
-    /// (`AppError::NotAnsweringAsAccount`, Switch spec 12.7).
+    /// The wallet's own Switch service did not answer.
     SwitchUnavailable,
     /// A native case that this binding does not recognize.
-    Other,
+    Unknown,
 }
 #[uniffi::export]
 impl PaymentRefusal {
@@ -297,7 +256,8 @@ impl PaymentRefusal {
                 requested: (&p.requested).into(),
                 detail_message_id: match &p.source {
                     RateSource::PeriodDetails { msg_id, .. } => Some(msg_id.clone()),
-                    _ => None,
+                    RateSource::Request => None,
+                    _ => return D::Unknown,
                 },
                 rate: Amount {
                     asset: p.rate.asset().as_str().into(),
@@ -344,7 +304,66 @@ impl PaymentRefusal {
             Refusal::RecordHeld(_) => D::RecordHeld,
             Refusal::CertificateRefused(_) => D::CertificateRefused,
             Refusal::SwitchUnavailable(_) => D::SwitchUnavailable,
-            _ => D::Other,
+            _ => D::Unknown,
+        }
+    }
+}
+
+/// A record version (Switch wire 1.7, 6.2): the (generation, `seq`) of the write that
+/// produced it, given by the service.
+#[derive(uniffi::Record)]
+pub struct Version {
+    /// The generation of the write.
+    pub generation: u64,
+    /// The `seq` of the write in its generation.
+    pub version: u64,
+}
+impl From<pubky_switch_core::ops::RecordVersion> for Version {
+    fn from(v: pubky_switch_core::ops::RecordVersion) -> Self {
+        Self {
+            generation: v.generation,
+            version: v.version,
+        }
+    }
+}
+
+/// A record the app has seen divergent, as the host shows it (Paykit spec 6): from
+/// `Paykit::divergent_records`, a receive's summary, or a refusal (`Refusal::Divergent`).
+/// `Paykit::confirm_divergent` takes its `record`.
+#[derive(uniffi::Record)]
+pub struct Divergence {
+    /// The record key.
+    pub record: Vec<u8>,
+    /// Its collection: what the upload may hold a newer copy of, such as a cancellation in a
+    /// request record or a newer list in a `payment_lists` record.
+    pub collection: String,
+    /// Paused: nothing is paid, accepted or credited on it automatically, and by hand only once
+    /// the user confirms (`Paykit::confirm_divergent`).
+    pub paused: bool,
+    /// The latest view the app read shows it divergent now.
+    pub divergent: bool,
+    /// The write of the record the app holds, the one shown; `None` for a record it holds no
+    /// more. `Paykit::confirm_divergent` confirms only that write.
+    pub version: Option<Version>,
+    /// Shown for a credit (Paykit spec 8.1 step 4): the record may hold a credit of a settlement
+    /// its current write lacks, a receipt in its upload, so the app can't tell a proof isn't
+    /// credited already.
+    pub may_hold_credit: bool,
+    /// The user has confirmed it, and the messages kept over it, receipts included, are written
+    /// at the next receive (`Paykit::receive`): until then nothing is paid, accepted or credited
+    /// on it, by hand or automatically.
+    pub writes_waiting: bool,
+}
+impl From<paykit_sdk::DivergentRecord> for Divergence {
+    fn from(v: paykit_sdk::DivergentRecord) -> Self {
+        Self {
+            record: v.record.into(),
+            collection: v.collection.name().into(),
+            paused: v.paused,
+            divergent: v.divergent,
+            version: v.version.map(Into::into),
+            may_hold_credit: v.may_hold_credit,
+            writes_waiting: v.writes_waiting,
         }
     }
 }

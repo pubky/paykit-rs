@@ -388,6 +388,9 @@ pub(crate) struct JournalEntry {
     /// after all is reported with its proof (Paykit spec 7.2, "What a payment method
     /// declares").
     pub(crate) failed_by_method: bool,
+    /// This device ended the Allowance attempt before entering the payment method.
+    /// Restore clears the evidence because the original device may have continued.
+    pub(crate) never_dispatched: bool,
     /// The attempt's transition proof, for the service and generation it was written at
     /// (Paykit spec 4, "Fresh before paying"). An entry without one is never dispatched again.
     pub(crate) attempt_proof: Option<SignedDoc>,
@@ -438,6 +441,16 @@ pub(crate) enum OfflineRecording {
 }
 
 impl JournalEntry {
+    /// Keep the original device's evidence when ending a reservation (Paykit spec 8.3).
+    pub(crate) fn end_before_the_call(&mut self) {
+        if self.allowance.is_some()
+            && !self.restored
+            && matches!(self.stage, Stage::Recorded | Stage::Attempted)
+        {
+            self.never_dispatched = true;
+        }
+    }
+
     /// The amount passed to the payment method, computed and bound before dispatch.
     pub(crate) fn call_amount(&self) -> Result<PaymentAmount> {
         self.payment_amount.amount()
@@ -711,6 +724,16 @@ impl JournalEntry {
         }
         let paid_members = self.paid_at_ms.is_some() || self.proof_msg_id.is_some();
         if (self.stage == Stage::RailPaid || paid_members) && self.rail_proof.is_none() {
+            return bad();
+        }
+        if self.never_dispatched
+            && (self.allowance.is_none()
+                || self.restored
+                || !matches!(self.stage, Stage::Finished | Stage::Abandoned)
+                || self.acceptance_released
+                || self.failed_by_method
+                || self.rail_proof.is_some())
+        {
             return bad();
         }
         if self.failed_by_method && self.rail_proof.is_some() {

@@ -42,7 +42,9 @@ pub enum OneTimeRequestStatus {
     BeingPaidHere,
     /// "Being handled by your other wallet": another own app's attempt is open.
     BeingHandledByOtherWallet,
-    /// An `unknown` or orphaned attempt: "may be paid" (Paykit spec 7.1).
+    /// An attempt has an unknown outcome, is orphaned, or the payer's one-time request
+    /// lost its payment history to deletion. The wallet offers no confirmation to pay a
+    /// deletion-marked request (Paykit spec 6, 7.1).
     MayBePaid,
     /// SETTLED, or the record holds the proof of a payment: "Paid" only then.
     Paid,

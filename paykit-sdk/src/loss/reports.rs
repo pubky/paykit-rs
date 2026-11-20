@@ -4,7 +4,7 @@ use paykit_lib::{
     recovery::RecoveryCommitments,
     scopes::{certificate_in_force_at_write, verify_certificate, RECOVERY},
 };
-use pubky_switch_client::app::RecordTarget;
+use pubky_switch_client::app::{RecordApplication, RecordTarget};
 use pubky_switch_core::{enc::lp, records::IdentityDoc, shared::ApplicationRef};
 
 use super::{LossBoundary, Paykit, Refusal, Result};
@@ -75,7 +75,12 @@ impl Paykit {
     ) -> Result<Option<RecoveryReport>> {
         let family = crate::activity::family(paykit_lib::collections::Collection::RecoveryUploads);
         let target = RecordTarget::new(family, &lp(&[original, &opening.hash()]));
-        let Some((record, applied, operation)) = self.app.read_record_application(&target).await?
+        let Some(RecordApplication {
+            record,
+            application: applied,
+            evidence: operation,
+            ..
+        }) = self.app.read_record_application(&target).await?
         else {
             return Ok(None);
         };
