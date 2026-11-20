@@ -458,7 +458,7 @@ async fn reserve_before_restore(
         deleted: false,
     };
     world.rail.set_history_payer(payer.identity());
-    for (amount, total) in [("40", "40"), ("30", "70")] {
+    for (amount, total, count) in [("40", "40", 1), ("30", "70", 2)] {
         let at = world.clock.now_ms();
         let request = Box::pin(request_from(shop, payer.identity(), draft(amount, at))).await;
         Box::pin(payer.receive(None)).await.unwrap();
@@ -509,16 +509,40 @@ async fn reserve_before_restore(
             .obligation_deadline(obligation, ObligationDeadline::NoDeadline)
             .entry(write);
         Box::pin(payer.app_mut().submit_batch(batch)).await.unwrap();
-        assert_eq!(
-            Box::pin(payer.reconcile_allowance(key))
-                .await
-                .unwrap()
-                .unwrap()
-                .lifetime()
-                .as_str(),
-            total
-        );
+        Box::pin(assert_reserved_usage(world, payer, key, total, count)).await;
     }
+}
+
+async fn assert_reserved_usage(
+    world: &World,
+    payer: &mut paykit_sdk::Paykit,
+    key: &[u8; 32],
+    total: &str,
+    count: u64,
+) {
+    let before = world.router.log().len();
+    let usage = Box::pin(payer.reconcile_allowance(key))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(usage.lifetime().as_str(), total);
+    assert_eq!(
+        (usage.reserved(), usage.spent(), usage.released()),
+        (count, 0, 0)
+    );
+    let requests = world.router.log();
+    let claims: Vec<_> = requests[before..]
+        .iter()
+        .filter(|r| r.starts_with("GET ") && r.contains("/claims/"))
+        .collect();
+    assert_eq!(claims.len() as u64, count);
+    assert_eq!(
+        claims
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        claims.len()
+    );
 }
 
 async fn restore_grant_proof_order(installed_verified: bool, evidence: RestoredGrantEvidence) {
@@ -754,15 +778,7 @@ async fn restore_grant_proof_order(installed_verified: bool, evidence: RestoredG
                 .unwrap()
                 .is_none());
             world.rail.set_history_payer(restored.identity());
-            assert_eq!(
-                Box::pin(restored.reconcile_allowance(&key))
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .lifetime()
-                    .as_str(),
-                "70"
-            );
+            Box::pin(assert_reserved_usage(&world, &mut restored, &key, "70", 2)).await;
         }
     }
     assert_eq!(world.record_writes(&world.alice, &key), writes);

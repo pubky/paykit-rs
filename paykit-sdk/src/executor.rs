@@ -55,6 +55,14 @@ fn reconciled_usage(
     let mut unclassified = Vec::new();
     let mut seen = HashSet::new();
     let mut evidence = HashMap::new();
+    for entry in &ledger.entries {
+        if let Some(claim) = claims.get(&entry.attempt_id) {
+            if claim.obligation != entry.obligation {
+                return None;
+            }
+            evidence.insert(entry.attempt_id, AttemptEvidence::from(claim.state));
+        }
+    }
     for dispatch in inventory {
         let id = dispatch.attempt_id;
         if !seen.insert(id) {
@@ -86,14 +94,7 @@ fn reconciled_usage(
             // The ledger already counts this failure in full. Its method history cannot release it.
             continue;
         }
-        evidence.insert(
-            id,
-            AttemptEvidence {
-                claim: Some(claim.state),
-                paid: matches!(dispatch.outcome, RailOutcome::Paid(_)),
-                never_dispatched: false,
-            },
-        );
+        evidence.get_mut(&id)?.paid = matches!(dispatch.outcome, RailOutcome::Paid(_));
     }
     Some(Accounting {
         counted: usage(terms, ledger, &evidence, at).ok()?,
@@ -222,6 +223,26 @@ mod tests {
             at: 1_001,
             outcome: None,
         });
+        for (state, reserved, spent) in [
+            (Some(ClaimState::Open), 1, 0),
+            (Some(ClaimState::Unknown), 1, 0),
+            (Some(ClaimState::Done), 0, 1),
+            (Some(ClaimState::Failed { by_owner: true }), 0, 1),
+            (None, 0, 1),
+        ] {
+            let claims = state
+                .map(|state| (id, ReservationClaim { obligation, state }))
+                .into_iter()
+                .collect();
+            let usage = reconciled_usage(Vec::new(), &terms, &ledger, &claims, 1_001)
+                .unwrap()
+                .counted;
+            assert_eq!(usage.lifetime().as_str(), "70");
+            assert_eq!(
+                (usage.reserved(), usage.spent(), usage.released()),
+                (reserved, spent, 0)
+            );
+        }
         rail.next(crate::rail::Behaviour::Hang);
         let outcome = rail
             .pay_outside(

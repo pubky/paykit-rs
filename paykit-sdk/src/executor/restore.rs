@@ -1,6 +1,6 @@
 //! Check the ordinary direct successor of the backed-up executor ledger (Paykit spec 8.3).
 
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 
 use paykit_lib::allowances::{
     check_successor, AllowanceTerms, CompactedFailed, Ledger, LedgerEntry, Usage,
@@ -214,6 +214,7 @@ impl Paykit {
             deleted: false,
         };
         let mut compaction = None;
+        let mut reads = HashMap::new();
         if current.revision != accepted.application.revision {
             if current.expected < accepted.application.version() {
                 let alarm = self
@@ -285,6 +286,7 @@ impl Paykit {
             }) {
                 return Ok(None);
             }
+            reads.insert(entry.obligation, Some(claim));
         }
         let Some(at) = self.service_time() else {
             return Ok(None);
@@ -306,50 +308,60 @@ impl Paykit {
                 compactions.push(receipt.clone());
             }
         }
-        // An older reservation needs its own opening only when the wallet actually
-        // reports a transfer or correction for it during this interval.
-        let mut reads = Vec::new();
-        let mut failed_reads = Vec::new();
-        for dispatch in &inventory {
-            if !claims.contains_key(&dispatch.attempt_id) {
-                if let Some(entry) = accepted
-                    .ledger
-                    .entries
-                    .iter()
-                    .find(|e| e.attempt_id == dispatch.attempt_id)
-                {
-                    if let Some(read) = self.app.read_claim(&entry.obligation).await? {
-                        reads.push((entry, read));
-                    }
-                } else if let Some(failed) = ledger
-                    .failed
-                    .iter()
-                    .find(|f| f.attempt_id == dispatch.attempt_id)
-                {
-                    if let Some(read) = self.app.read_claim(&failed.obligation).await? {
-                        failed_reads.push((failed, read));
-                    }
-                }
+        // An open claim reserves its entry even before dispatch (Paykit spec 8.3).
+        // Terminal entries only need a claim read when attributing a wallet attempt.
+        let dispatched: HashSet<_> = inventory.iter().map(|d| d.attempt_id).collect();
+        let entries: Vec<_> = ledger
+            .entries
+            .iter()
+            .filter(|entry| {
+                !claims.contains_key(&entry.attempt_id)
+                    && (entry.outcome.is_none() || dispatched.contains(&entry.attempt_id))
+            })
+            .collect();
+        let failed: Vec<_> = ledger
+            .failed
+            .iter()
+            .filter(|entry| dispatched.contains(&entry.attempt_id))
+            .collect();
+        for obligation in entries
+            .iter()
+            .map(|e| e.obligation)
+            .chain(failed.iter().map(|e| e.obligation))
+        {
+            if let Entry::Vacant(slot) = reads.entry(obligation) {
+                slot.insert(self.app.read_claim(&obligation).await?);
             }
         }
-        if !reads.is_empty() || !failed_reads.is_empty() {
+        if !entries.is_empty() || !failed.is_empty() {
             let ops = self.app.shared_evidence().await?;
-            // A fresh store can lack the original shared opening even when the checked
-            // claim still lists the attempt. The signed compacting batch carries it too.
             let openings = || ops.ops.iter().chain(compactions.iter().map(|c| &c.opening));
-            for (failed, read) in failed_reads {
-                if let Some(opening) = openings().find_map(|op| {
-                    current.failed_opening(&self.app, op, failed, &read, &exact_grant)
-                }) {
-                    claims.insert(failed.attempt_id, opening);
-                }
-            }
-            for (entry, read) in reads {
+            for entry in entries {
+                let Some(read) = reads.get(&entry.obligation).and_then(Option::as_ref) else {
+                    continue;
+                };
                 if let Some(opening) = openings().find_map(|op| {
                     accepted
                         .application
-                        .accepted_opening(&self.app, op, entry, &read, &exact_grant)
+                        .accepted_opening(&self.app, op, entry, read, &exact_grant)
                 }) {
+                    claims.insert(entry.attempt_id, opening);
+                } else if read.view.rebuilt
+                    || read.view.divergent
+                    || read.view.attempt(&entry.attempt_id.to_bytes()).is_some()
+                {
+                    // An uncertain view or an attempt without its bound opening doesn't
+                    // establish that this claim has disappeared.
+                    return Ok(None);
+                }
+            }
+            for entry in failed {
+                let Some(read) = reads.get(&entry.obligation).and_then(Option::as_ref) else {
+                    continue;
+                };
+                if let Some(opening) = openings()
+                    .find_map(|op| current.failed_opening(&self.app, op, entry, read, &exact_grant))
+                {
                     claims.insert(entry.attempt_id, opening);
                 }
             }
@@ -474,7 +486,9 @@ impl Paykit {
                     // The opening after the accepted ledger excludes lawful compaction
                     // before that checkpoint. A direct reservation successor only
                     // compacts existing final entries by the ordinary ledger rule.
-                    let _ = self.app.read_claim(&obligation).await?;
+                    if !reads.contains_key(&obligation) {
+                        let _ = self.app.read_claim(&obligation).await?;
+                    }
                     if self.app.shared_evidence().await?.ops.iter().any(|op| {
                         accepted.application.opening_after(
                             &self.app,
