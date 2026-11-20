@@ -15,11 +15,25 @@ async fn test_two_periods_under_app_policy_and_a_missed_period_end_at_cancellati
     Ok(())
 }
 
+struct Subscription {
+    buyer: Paykit,
+    phone: Paykit,
+    shop: Paykit,
+    buyer_signer: Signer,
+    store: Arc<MemoryStore>,
+    rail: Arc<FakeRail>,
+    request: RequestRef,
+    sale: [u8; 32],
+    periods: Vec<PeriodRef>,
+}
+
 async fn subscription_through_cancellation(world: &World, restore: bool) -> TestResult {
-    use paykit_lib::bodies::PeriodDetails;
+    let subscription = Box::pin(open_subscription(world)).await?;
+    Box::pin(check_subscription_periods(world, subscription, restore)).await
+}
+
+async fn open_subscription(world: &World) -> TestResult<Subscription> {
     use paykit_lib::periods::{AnchoredRule, Recurrence, Unit};
-    use paykit_sdk::{Refusal, RequestStatus};
-    use pubky_switch_client::app::{AppEvent, UserConfirmed};
 
     // The subscriber and a second enrolled wallet share a small service inbox. Only the
     // second wallet reads the period details while the subscriber is away.
@@ -33,7 +47,7 @@ async fn subscription_through_cancellation(world: &World, restore: bool) -> Test
     let mut shop_signer =
         Box::pin(setup_identity(world, "shop", "https://shop.payment.test")).await?;
     let rail = Arc::new(FakeRail::with_clock(world.clock().clone()));
-    let mut store = Arc::new(MemoryStore::new());
+    let store = Arc::new(MemoryStore::new());
     let mut buyer = Box::pin(join(
         world,
         &mut buyer_signer,
@@ -89,6 +103,39 @@ async fn subscription_through_cancellation(world: &World, restore: bool) -> Test
         .ok_or("missing subscription at the seller")?
         .record;
     phone.receive(None).await?;
+    Ok(Subscription {
+        buyer,
+        phone,
+        shop,
+        buyer_signer,
+        store,
+        rail,
+        request,
+        sale,
+        periods,
+    })
+}
+
+async fn check_subscription_periods(
+    world: &World,
+    subscription: Subscription,
+    restore: bool,
+) -> TestResult {
+    use paykit_lib::bodies::PeriodDetails;
+    use paykit_sdk::{Refusal, RequestStatus};
+    use pubky_switch_client::app::{AppEvent, UserConfirmed};
+
+    let Subscription {
+        mut buyer,
+        mut phone,
+        mut shop,
+        mut buyer_signer,
+        mut store,
+        rail,
+        request,
+        sale,
+        periods,
+    } = subscription;
     if restore {
         let backup = buyer.backup().await?;
         drop(buyer);
