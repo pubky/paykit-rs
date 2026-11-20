@@ -1,9 +1,11 @@
 use crate::{HostRail, PaymentMethod, WalletError, WalletStore};
-use paykit_sdk::{ PaymentEndpointIdentifier, Rail, Timer};
+use paykit_sdk::{PaymentEndpointIdentifier, Rail, Timer};
 use pubky_switch_client::app::{HomeserverReader, HomeserverWriter};
-use pubky_switch_client::clock::{Clock,SystemClock};
+use pubky_switch_client::clock::{Clock, SystemClock};
 
-use pubky_switch_client::transport::{BoxFuture, HttpConfig, HttpTransport, Transport, TransportError};
+use pubky_switch_client::transport::{
+    BoxFuture, HttpConfig, HttpTransport, Transport, TransportError,
+};
 use std::{sync::Arc, time::Duration};
 
 /// Failure reading or writing a Pubky Homeserver path.
@@ -119,8 +121,10 @@ impl WalletHost {
         let transport = HttpTransport::new(HttpConfig::default())
             .map_err(|_| WalletError::invalid("HTTPS transport configuration"))?;
         Ok(Arc::new(Self {
-            clock:Arc::new(SystemClock),
-            transport:Arc::new(transport), home:home.clone(), writer:home,
+            clock: Arc::new(SystemClock),
+            transport: Arc::new(transport),
+            home: home.clone(),
+            writer: home,
             store,
             rail: Arc::new(HostRail {
                 method,

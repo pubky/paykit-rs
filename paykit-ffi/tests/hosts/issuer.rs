@@ -7,9 +7,13 @@ use pubky_switch_core::{
 use pubky_switch_harness::{Backend, World};
 use std::error::Error;
 mod signer;
+mod backup;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
+    if std::env::args().nth(1).as_deref() == Some("paid-wallet") {
+        return backup::print_wallet().await;
+    }
     let signed: SignedDoc = serde_json::from_reader(std::io::stdin())?;
     let request = AppRequest::verify(&signed)?;
     let auth = AuthRequest {

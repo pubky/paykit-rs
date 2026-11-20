@@ -170,8 +170,10 @@ impl WalletEnrollment {
                 req
             }
             None => {
-                check_caps(&auth.caps,&id,&[]).map_err(|_| WalletError::invalid("capabilities"))?;
-                let body=AppRequestBody::new(&keys,AppScopes::new().pay().build()?.scopes,&auth);
+                check_caps(&auth.caps, &id, &[])
+                    .map_err(|_| WalletError::invalid("capabilities"))?;
+                let body =
+                    AppRequestBody::new(&keys, AppScopes::new().pay().build()?.scopes, &auth);
                 let req = AppRequest::sign(&keys, body)
                     .map_err(|_| WalletError::invalid("app request"))?;
                 EnrollmentState::Pending {

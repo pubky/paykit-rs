@@ -37,6 +37,7 @@ tokio = { version = "1", features = ["sync", "rt", "time"] }
 uniffi = { version = "=0.29.5", features = ["tokio"] }
 
 [dev-dependencies]
+paykit-sdk = { path = "../paykit-sdk", features = ["test-support"] }
 base64 = "0.22"
 paykit-lib = { workspace = true, features = ["signer"] }
 pubky-switch-harness.workspace = true

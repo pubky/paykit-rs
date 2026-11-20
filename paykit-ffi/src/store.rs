@@ -1,7 +1,10 @@
 //! Device-bound, durable storage supplied by the host.
-use pubky_switch_client::store::{check_owned_batch, AcquireOutcome, CommitOutcome, KeyValue, StateStore, StoreError, StoreLease, StoreOwner, Write, WriteBatch};
-use tokio::sync::watch;
+use pubky_switch_client::store::{
+    check_owned_batch, AcquireOutcome, CommitOutcome, KeyValue, StateStore, StoreError, StoreLease,
+    StoreOwner, Write, WriteBatch,
+};
 use std::sync::{Arc, Mutex};
+use tokio::sync::watch;
 
 /// One key and value from an ordered protected-store scan.
 #[derive(uniffi::Record)]
@@ -23,11 +26,15 @@ pub enum StoreWrite {
         value: Vec<u8>,
     },
     /// Remove this exact key when present.
-    Delete { /// The binary key in the owned namespace.
-        key: Vec<u8> },
+    Delete {
+        /// The binary key in the owned namespace.
+        key: Vec<u8>,
+    },
     /// Remove all keys with this prefix in the owned namespace.
-    DeletePrefix { /// The prefix, empty for the whole namespace.
-        prefix: Vec<u8> },
+    DeletePrefix {
+        /// The prefix, empty for the whole namespace.
+        prefix: Vec<u8>,
+    },
 }
 
 /// Unknown means a write or acquisition may have applied. Other errors report no change.
@@ -240,36 +247,73 @@ impl WalletStoreSession {
             .map_err(StoreError::from)?;
         let held = self.clone();
         tokio::task::spawn_blocking(move || held.commit(batch))
-            .await.map_err(|_| StoreError::Unknown)?
+            .await
+            .map_err(|_| StoreError::Unknown)?
     }
 }
 impl StoreLease for WalletStoreSession {}
 impl WalletStoreSession {
     fn owns(&self, namespace: &str) -> Result<(), StoreError> {
-        if self.ownership.namespace == namespace { Ok(()) } else { Err(StoreError::NotOwner) }
+        if self.ownership.namespace == namespace {
+            Ok(())
+        } else {
+            Err(StoreError::NotOwner)
+        }
     }
 }
 impl StateStore for WalletStoreSession {
     fn get(&self, ns: &str, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
         self.owns(ns)?;
-        Ok(self.ownership.host.get(ns.into(),key.into())?)
+        Ok(self.ownership.host.get(ns.into(), key.into())?)
     }
-    fn scan(&self, ns: &str, prefix: &[u8], after: Option<&[u8]>, limit: u32) -> Result<Vec<KeyValue>, StoreError> {
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<KeyValue>, StoreError> {
         self.owns(ns)?;
-        Ok(self.ownership.host.scan(ns.into(), prefix.into(), after.map(Vec::from), limit)?.into_iter().map(|e|(e.key,e.value)).collect())
+        Ok(self
+            .ownership
+            .host
+            .scan(ns.into(), prefix.into(), after.map(Vec::from), limit)?
+            .into_iter()
+            .map(|e| (e.key, e.value))
+            .collect())
     }
-    fn commit(&self, batch: WriteBatch) -> Result<(),StoreError> {
-        let owner=&self.ownership;
-        check_owned_batch(&owner.namespace,&batch)?;
-        let writes=batch.into_writes().into_iter().map(|w| match w {
-            Write::Put{key,value,..}=> StoreWrite::Put{key,value},
-            Write::Delete{key,..}=> StoreWrite::Delete{key},
-            Write::DeletePrefix{prefix,..}=> StoreWrite::DeletePrefix{prefix},
-        }).collect();
-        if owner.host.commit_if(owner.namespace.clone(),owner.token.to_vec(),writes)? {Ok(())} else {Err(StoreError::NotOwner)}
+    fn commit(&self, batch: WriteBatch) -> Result<(), StoreError> {
+        let owner = &self.ownership;
+        check_owned_batch(&owner.namespace, &batch)?;
+        let writes = batch
+            .into_writes()
+            .into_iter()
+            .map(|w| match w {
+                Write::Put { key, value, .. } => StoreWrite::Put { key, value },
+                Write::Delete { key, .. } => StoreWrite::Delete { key },
+                Write::DeletePrefix { prefix, .. } => StoreWrite::DeletePrefix { prefix },
+            })
+            .collect();
+        if owner
+            .host
+            .commit_if(owner.namespace.clone(), owner.token.to_vec(), writes)?
+        {
+            Ok(())
+        } else {
+            Err(StoreError::NotOwner)
+        }
     }
-    fn acquire(&self, _: &str,_:StoreOwner)->Result<AcquireOutcome,StoreError>{Ok(AcquireOutcome::Busy)}
-    fn commit_if(&self,_:&str,_:StoreOwner,_:WriteBatch)->Result<CommitOutcome,StoreError>{Ok(CommitOutcome::NotOwner)}
+    fn acquire(&self, _: &str, _: StoreOwner) -> Result<AcquireOutcome, StoreError> {
+        Ok(AcquireOutcome::Busy)
+    }
+    fn commit_if(
+        &self,
+        _: &str,
+        _: StoreOwner,
+        _: WriteBatch,
+    ) -> Result<CommitOutcome, StoreError> {
+        Ok(CommitOutcome::NotOwner)
+    }
 }
 impl Drop for WalletStoreSession {
     fn drop(&mut self) {
