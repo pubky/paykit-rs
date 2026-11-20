@@ -126,7 +126,6 @@ async fn in_flight_on(
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
-    phone.receive(None).await.unwrap();
     w.rail.next(Behaviour::Hang);
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
@@ -136,6 +135,7 @@ async fn in_flight_on(
     else {
         panic!("pending");
     };
+    phone.receive(None).await.unwrap();
     (wallet, phone, request, attempt_id)
 }
 

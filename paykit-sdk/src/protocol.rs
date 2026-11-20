@@ -1279,7 +1279,10 @@ pub(crate) fn restore_paykit_layer(
             value: state::encode(&receipt).map_err(|_| "cannot encode a ledger compaction")?,
         });
     }
-    for (key, history) in executor_history {
+    for (key, mut history) in executor_history {
+        for checkpoint in &mut history.0 {
+            checkpoint.restored = true;
+        }
         let value =
             state::encode(&history).map_err(|_| "the executor history cannot be retained")?;
         writes.push(LocalWrite::Put { key, value });

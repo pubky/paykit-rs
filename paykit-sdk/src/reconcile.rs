@@ -458,7 +458,7 @@ impl Paykit {
     /// details' destination, or a payment without a request, whose record doesn't keep the
     /// amount its proof states.
     async fn rebuilt_entry(
-        &self,
+        &mut self,
         obligation: &Obligation,
         attempt: AttemptId,
     ) -> Result<Option<JournalEntry>> {
@@ -574,9 +574,25 @@ impl Paykit {
         {
             return Ok(None);
         }
+        let allowance = if let Some(id) = &obligation.record.allowance_id {
+            let Some(under) = Box::pin(self.restored_payment_allowance(
+                &obligation.payee,
+                id,
+                &obligation.claim_key,
+                attempt,
+            ))
+            .await?
+            else {
+                return Ok(None);
+            };
+            Some(under)
+        } else {
+            None
+        };
         let mut entry = JournalEntry {
             // The claim alone cannot establish that the user started this payment.
             user_started: false,
+            allowance,
             attempt_id: attempt.to_text(),
             obligation: obligation.claim_key,
             payee: obligation.payee,

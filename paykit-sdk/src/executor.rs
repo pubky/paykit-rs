@@ -7,8 +7,10 @@ mod evidence;
 mod grant;
 mod ledger;
 mod restore;
+mod spend;
 pub(crate) use checkpoint::ExecutorHistory;
 pub(crate) use compaction::LedgerCompaction;
+pub(crate) use spend::{AllowanceReservation, JournalAllowance};
 
 use std::collections::{HashMap, HashSet};
 
@@ -22,8 +24,8 @@ fn in_grant_history(proposed: u64, grant_generation: u64, recovery_from: Option<
     proposed > recovery_from.unwrap_or(0) && proposed <= grant_generation
 }
 
-/// The verified opening claim for an Allowance reservation. Its signed batch, occurrence
-/// and attempt must agree with the ledger operation before it reaches accounting.
+/// Claim state for a verified reservation. A settled tombstone for an already accepted
+/// payment also needs the dated payer proof and the independently matched transfer.
 #[derive(Clone, Copy)]
 struct ReservationClaim {
     obligation: [u8; 32],

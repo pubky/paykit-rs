@@ -542,6 +542,7 @@ pub(crate) struct Plan {
     pub(crate) create: Option<ActivityRecord>,
     /// Condition the attempt on the version of the request record read.
     pub(crate) on_record: bool,
+    pub(crate) allowance: Option<crate::executor::AllowanceReservation>,
     /// Who starts the payment: the user, or an executor (Switch spec 4.3).
     pub(crate) by: Initiator,
     /// The user's confirmation of a payee identity its switch couldn't confirm.
@@ -1026,6 +1027,7 @@ impl Paykit {
             request,
             options,
             Initiator::User,
+            None,
             &mut public_failures,
         ))
         .await;
@@ -1036,10 +1038,9 @@ impl Paykit {
     }
 
     /// [`Paykit::pay_request`] started as an automatic payment ([`Initiator::Automatic`]), for
-    /// tests only (feature `test-support`): no public call starts a one-time request's payment
-    /// automatically, so the checks an automatic first dispatch passes once its attempt is
-    /// journaled are tested through this one. It makes none of the checks an executor makes
-    /// before it starts a payment.
+    /// tests only (feature `test-support`). This exercises a first dispatch after the attempt
+    /// is journaled. Wallet callers use [`Paykit::pay_under_allowance`] to check and reserve
+    /// the payment under the executor grant.
     ///
     /// # Errors
     ///
@@ -1056,6 +1057,36 @@ impl Paykit {
             request,
             options,
             Initiator::Automatic,
+            None,
+            &mut public_failures,
+        ))
+        .await;
+        PayResult {
+            outcome,
+            public_failures,
+        }
+    }
+
+    /// Pay an eligible one-time request under this app's accepted Allowance. The
+    /// signed opening claim, reservation and request association are one Switch batch.
+    /// Before each new payment, the wallet must account for its complete payment-method
+    /// history and the authenticated current ledger (Paykit spec 8.3).
+    ///
+    /// The returned outcome reports a refusal when the grant, ledger, payment history
+    /// or current request cannot authorize the transfer, including when the payment
+    /// would exceed a limit. Method, Switch and storage failures follow the ordinary
+    /// payment request flow.
+    pub async fn pay_under_allowance(
+        &mut self,
+        request: &RequestRef,
+        allowance: &[u8; 32],
+    ) -> PayResult {
+        let mut public_failures = Vec::new();
+        let outcome = Box::pin(self.pay_request_inner(
+            request,
+            PayOptions::default(),
+            Initiator::Automatic,
+            Some(*allowance),
             &mut public_failures,
         ))
         .await;
@@ -1070,10 +1101,12 @@ impl Paykit {
         request: &RequestRef,
         options: PayOptions,
         by: Initiator,
+        allowance: Option<[u8; 32]>,
         public_failures: &mut Vec<PublicAppFailure>,
     ) -> Result<PayOutcome> {
         // Finish the request reads before polling the payment and its outgoing messages.
-        let plan = Box::pin(self.plan_request(request, options, by, public_failures)).await?;
+        let plan =
+            Box::pin(self.plan_request(request, options, by, allowance, public_failures)).await?;
         Box::pin(self.execute(plan)).await
     }
 
@@ -1082,6 +1115,7 @@ impl Paykit {
         request: &RequestRef,
         options: PayOptions,
         by: Initiator,
+        allowance: Option<[u8; 32]>,
         public_failures: &mut Vec<PublicAppFailure>,
     ) -> Result<Plan> {
         self.refresh_own()?;
@@ -1089,7 +1123,9 @@ impl Paykit {
         self.refresh_own()?;
         self.records_known().await?;
         self.require_pay()?;
-        self.app.may_attempt(false).map_err(not_now)?;
+        self.app
+            .may_attempt(by == Initiator::Automatic)
+            .map_err(not_now)?;
         self.refuse_while_payer_pass_owed().await?;
         let (target, record) = self.payer_request(request).await?;
         let (stored, body) = request_of(&record).ok_or(Refusal::NotFound)?;
@@ -1143,15 +1179,52 @@ impl Paykit {
         let blocked = self.denied_for_user(&request.payee).await?;
         let obligation = self.obligation(&request.payee, &request.request_hash, 0);
         let restored = self.restored_attempts(&obligation).await?;
-        let step = self
-            .claim_step(&obligation, &stored, None, deadline, restored, &options, by)
+        let claim = self
+            .payable_claim(&obligation, &stored, None, deadline, restored, &options, by)
             .await?;
+        let step = claim.as_ref().map_or(0, |view| view.step);
         // No attempt once the deadline is at or before the highest service time verified
         // (Paykit spec 7.1); the service refuses one from its own clock anyway. The claim is
         // read first: a payment made, or another wallet's open attempt, is what the request
         // shows, though its deadline has passed; then the request record, read again.
         if self.deadline_passed(deadline) {
             return Err(self.past_deadline(&target, None).await?);
+        }
+        let allowance = if let Some(key) = allowance {
+            let reservation = Box::pin(self.allowance_reservation(&key, &request.payee)).await?;
+            reservation.request(&record, claim.as_ref())?;
+            if blocked
+                || self.floor_holds(&stored).await?
+                || self.held(&record_key, &record).await?
+                || self.pause_at(&record_key).await?.blocks_automatic()
+            {
+                return Err(
+                    Refusal::NotNow("this request is held from automatic payment".into()).into(),
+                );
+            }
+            Some(reservation)
+        } else {
+            None
+        };
+        let allowed = allowance.as_ref().and_then(|a| a.endpoints());
+        let accepted = match (
+            body.accepted_payment_endpoint_identifiers.as_deref(),
+            allowed,
+        ) {
+            (Some(request), Some(terms)) => Some(
+                request
+                    .iter()
+                    .filter(|id| terms.contains(id))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            ),
+            (request, terms) => request.or(terms).map(<[_]>::to_vec),
+        };
+        if accepted.as_ref().is_some_and(Vec::is_empty) {
+            return Err(Refusal::Destination(
+                "the request and Allowance share no permitted endpoint".into(),
+            )
+            .into());
         }
         // The amount to each endpoint, by the request's fixed rates under conversion terms
         // (Paykit spec 7.2 step 1); a one-time request has no period details to price it.
@@ -1171,7 +1244,7 @@ impl Paykit {
                 &stored,
                 &body,
                 &options,
-                body.accepted_payment_endpoint_identifiers.as_deref(),
+                accepted.as_deref(),
                 &pricing,
                 public_failures,
             )
@@ -1193,6 +1266,7 @@ impl Paykit {
         let entry = JournalEntry {
             user_started: by == Initiator::User,
             attempt_id: AttemptId::generate()?.to_text(),
+            allowance: None,
             obligation,
             payee: request.payee,
             request_hash: Some(pubky_switch_core::enc::b64(&request.request_hash)),
@@ -1233,7 +1307,12 @@ impl Paykit {
             carrier,
             step,
             reserve,
-            create: None,
+            create: if allowance.is_some() || by == Initiator::User && !record.manual_only {
+                Some(record)
+            } else {
+                None
+            },
+            allowance,
             on_record: true,
             by,
             unconfirmed: options.unconfirmed_identity_confirmed,
@@ -1447,6 +1526,7 @@ impl Paykit {
         record.status = Some("paying".into());
         let entry = JournalEntry {
             user_started: true,
+            allowance: None,
             attempt_id: attempt_id.to_text(),
             obligation: payment_obligation(&attempt_id),
             payee: payment.payee,
@@ -1493,6 +1573,7 @@ impl Paykit {
             reserve,
             create: Some(record),
             on_record: false,
+            allowance: None,
             by: Initiator::User,
             unconfirmed: options.unconfirmed_identity_confirmed,
             blocked_confirmed: options.blocked_confirmed,
@@ -1657,7 +1738,7 @@ impl Paykit {
         Ok(restored)
     }
 
-    /// The step to attempt at, after the claim's checks (Paykit spec 7.1, 7.2, 7.3): a
+    /// The claim to attempt at, after its checks (Paykit spec 7.1, 7.2, 7.3): a
     /// SETTLED claim is paid; another open attempt is another wallet's; a pinned deadline
     /// other than this app's may already be paid, with no confirmation passing it. Otherwise
     /// the doubt, `restored` with the claim's and a provider loss's for `request`, or its
@@ -1666,7 +1747,7 @@ impl Paykit {
     /// loss leaves in doubt is refused an automatic payment `by` whatever was confirmed.
     /// A Billing Period with unresolved pre-loss history also holds a manual payment.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn claim_step(
+    pub(crate) async fn payable_claim(
         &mut self,
         obligation: &[u8; 32],
         request: &StoredMessage,
@@ -1675,7 +1756,7 @@ impl Paykit {
         restored: Vec<AttemptId>,
         options: &PayOptions,
         by: Initiator,
-    ) -> Result<u64> {
+    ) -> Result<Option<ClaimView>> {
         let view = self.app.read_claim(obligation).await?.map(|read| read.view);
         if let Some(view) = &view {
             self.refuse_claim(view)?;
@@ -1740,7 +1821,7 @@ impl Paykit {
             }
             .into());
         }
-        Ok(view.map_or(0, |v| v.step))
+        Ok(view)
     }
 
     /// Refused when the app the destination of `request` must come from can't give one
@@ -2638,8 +2719,9 @@ impl Paykit {
             carrier,
             step,
             reserve,
-            create,
+            mut create,
             on_record,
+            allowance,
             by,
             unconfirmed,
             blocked_confirmed,
@@ -2713,6 +2795,25 @@ impl Paykit {
             }
             None => None,
         };
+        if let Some(original) = &mut create {
+            if on_record {
+                let (fresh, _) = self.fresh_request_stamped(&record).await?;
+                if !matches!(fresh, crate::requests::Fresh::Held(ref value) if value.to_json()? == original.to_json()?)
+                {
+                    return Err(PaykitError::Conflict(
+                        "the request changed while planning its payment".into(),
+                    ));
+                }
+                if let Some(under) = &allowance {
+                    original.allowance_id = Some(under.id.clone());
+                } else {
+                    original.manual_only = true;
+                }
+            }
+        }
+        if let Some(under) = &allowance {
+            conditions.push(under.grant());
+        }
         let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
             .op_if(op.kind(), conditions)
             .obligation_deadline(entry.obligation, own_deadline(entry.deadline));
@@ -2723,6 +2824,9 @@ impl Paykit {
             // The user saw the payee may have cancelled it (Paykit spec 7.2): the hold ends
             // with the attempt, and stays when the attempt isn't made.
             batch = batch.local(state::local_put(&key::hold_confirmed(&record_key), &true)?);
+        }
+        if let Some(under) = allowance {
+            batch = Box::pin(under.reserve(self, &mut entry, batch)).await?;
         }
         if let Some(mut list) = reserve {
             // A single-use endpoint is marked used in the attempt's batch (Paykit spec 7.2
@@ -2832,6 +2936,16 @@ impl Paykit {
             .map(|proof| ClaimView::from_value(&proof.body().state))
             .transpose()?;
         self.set_stage(&mut entry, Stage::Attempted).await?;
+        if !Box::pin(self.keep_executor_reply(&entry, &submitted.proofs)).await? {
+            return self
+                .fail_attempt(
+                    &mut entry,
+                    Refusal::NotNow(
+                        "the applied Allowance reservation could not be established".into(),
+                    ),
+                )
+                .await;
+        }
         // Before any money moves, the gate every dispatch passes (Paykit spec 4, 7.2 step 1).
         // The copies checked before the write are still fresh: this reads no network unless
         // they aged meanwhile (Switch spec 4.3). A failure writes `failed` instead of paying,
@@ -3520,6 +3634,9 @@ impl Paykit {
             if let Some(write) = record_write {
                 batch = batch.entry(write);
             }
+            if let Some(write) = Box::pin(self.executor_outcome(entry, paid)).await? {
+                batch = batch.entry(write);
+            }
             let mut finished = entry.clone();
             // An acceptance still owed keeps the entry where a resume visits it: the outcome
             // is written, the acceptance not yet sent or placed.
@@ -3543,7 +3660,8 @@ impl Paykit {
                 batch = batch.queue(*proof);
             }
             match self.submit(batch).await {
-                Ok(_) => {
+                Ok(result) => {
+                    Box::pin(self.keep_executor_reply(entry, &result.proofs)).await?;
                     *entry = finished;
                     return Ok(Written::Done);
                 }
@@ -3756,6 +3874,12 @@ impl Paykit {
                 if request.hash() != hash || request.sender() != entry.payee {
                     return Err(PaykitError::corrupt());
                 }
+                record.manual_only = entry.user_started;
+                record.allowance_id = entry
+                    .allowance
+                    .as_ref()
+                    .map(crate::executor::JournalAllowance::id)
+                    .transpose()?;
                 activity::place(&mut record, Role::Request, request);
             }
             None => {
@@ -3817,7 +3941,11 @@ impl Paykit {
                 .is_none()
                 .then(|| entry.amount.amount())
                 .transpose()?,
-            allowance_id: None,
+            allowance_id: entry
+                .allowance
+                .as_ref()
+                .map(crate::executor::JournalAllowance::id)
+                .transpose()?,
             label: entry.label()?,
             payment_reference: None,
             proof: entry.rail_proof.clone().ok_or_else(PaykitError::corrupt)?,
@@ -4293,7 +4421,10 @@ impl Paykit {
             return Ok(false);
         };
         let target = ActivityTarget::payer(natural);
-        if let Some(period) = entry.period()?.filter(|_| !entry.user_started) {
+        if let Some(period) = entry
+            .period()?
+            .filter(|_| !entry.user_started && entry.allowance.is_none())
+        {
             return Ok(
                 Box::pin(self.policy_period_conditions(entry, &target, period, None))
                     .await?
@@ -4491,7 +4622,9 @@ impl Paykit {
             }
         }
         if by == Initiator::Automatic {
-            return self.automatic_dispatch_held(entry, crossing_payee).await;
+            return self
+                .automatic_dispatch_held(entry, kind, crossing_payee)
+                .await;
         }
         if Box::pin(self.divergent_pauses(entry, crate::divergent::Pause::blocks_by_hand)).await? {
             return Ok(true);
@@ -4556,12 +4689,15 @@ impl Paykit {
     async fn automatic_dispatch_held(
         &mut self,
         entry: &JournalEntry,
+        kind: Dispatch,
         crossing_payee: Option<[u8; 32]>,
     ) -> Result<bool> {
-        let Some(judged) = Box::pin(self.shared_collect(entry, true, crossing_payee)).await? else {
+        let Some(judged) = Box::pin(self.shared_collect(entry, kind, true, crossing_payee)).await?
+        else {
             return Ok(true);
         };
-        let Some(confirmed) = Box::pin(self.shared_collect(entry, false, crossing_payee)).await?
+        let Some(confirmed) =
+            Box::pin(self.shared_collect(entry, kind, false, crossing_payee)).await?
         else {
             return Ok(true);
         };
@@ -4574,7 +4710,7 @@ impl Paykit {
             && matches!((&judged.policy_period, &confirmed.policy_period),
             (Some(before), Some(after)) if !before[0].crossed_stop && after[0].crossed_stop && before[1] == after[1])
         {
-            let latest = Box::pin(self.shared_collect(entry, false, crossing_payee)).await?;
+            let latest = Box::pin(self.shared_collect(entry, kind, false, crossing_payee)).await?;
             return Ok(latest.as_ref() != Some(&confirmed));
         }
         Ok(true)
@@ -4616,9 +4752,13 @@ impl Paykit {
     async fn shared_collect(
         &mut self,
         entry: &JournalEntry,
+        kind: Dispatch,
         judge: bool,
         crossing_payee: Option<[u8; 32]>,
     ) -> Result<Option<SharedState>> {
+        if Box::pin(self.executor_dispatch_held(entry, kind)).await? {
+            return Ok(None);
+        }
         let Ok(deny) = self.deny_list_now().await else {
             return Ok(None);
         };
@@ -4634,7 +4774,10 @@ impl Paykit {
             }));
         };
         let target = ActivityTarget::payer(natural);
-        if let Some(period) = entry.period()?.filter(|_| !entry.user_started) {
+        if let Some(period) = entry
+            .period()?
+            .filter(|_| !entry.user_started && entry.allowance.is_none())
+        {
             let Some(conditions) =
                 Box::pin(self.policy_period_conditions(entry, &target, period, crossing_payee))
                     .await?
@@ -4652,6 +4795,16 @@ impl Paykit {
             Ok((Fresh::Held(record), Some(stamp))) => (*record, stamp),
             Ok(_) | Err(_) => return Ok(None),
         };
+        let allowance = entry
+            .allowance
+            .as_ref()
+            .map(crate::executor::JournalAllowance::id)
+            .transpose()?;
+        let hand_repeat =
+            entry.user_started && allowance.is_none() && matches!(kind, Dispatch::Repeat { .. });
+        if !hand_repeat && record.allowance_id != allowance {
+            return Ok(None);
+        }
         if judge && self.fresh_record_withholds(entry, &target, &record).await? {
             return Ok(None);
         }
@@ -4837,7 +4990,9 @@ impl Paykit {
         confirmed: Option<UserConfirmed>,
         kind: Dispatch,
     ) -> Result<FinalCheck> {
-        if !self.holds("paykit_pay") {
+        if !self.holds("paykit_pay")
+            || entry.allowance.is_some() && !self.holds("paykit_allowance_execute")
+        {
             return Ok(FinalCheck::Hold);
         }
         let automatic_first = by == Initiator::Automatic && matches!(kind, Dispatch::First { .. });
