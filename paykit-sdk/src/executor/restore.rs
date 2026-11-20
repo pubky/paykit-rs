@@ -24,6 +24,7 @@ use crate::{Paykit, Result};
 /// The SDK keeps the authenticated application it accepted. The spending batch must still
 /// condition on both current records and atomically open the new attempt and reservation.
 pub(super) struct ReconciledLedger {
+    pub(super) applied_proposals: Vec<String>,
     pub(super) ledger: Ledger,
     pub(super) usage: Usage,
     pub(super) evidence: KeptOp,
@@ -297,7 +298,8 @@ impl Paykit {
         else {
             return Ok(None);
         };
-        if history.0.len() > 1
+        if !checked.applied_proposals.is_empty()
+            || history.0.len() > 1
             || (!checked.at_initial_ledger && checkpoint.later.as_ref() != Some(&checked.evidence))
         {
             Box::pin(self.keep_executor_checkpoint(record, &mut checkpoint, &checked)).await?;
@@ -312,6 +314,10 @@ impl Paykit {
         checked: &ReconciledLedger,
     ) -> Result<()> {
         let mut tx = crate::state::Tx::default();
+        for suffix in &checked.applied_proposals {
+            tx.delete(&format!("{}{suffix}", key::LEDGER_PROPOSALS));
+            tx.delete(&format!("{}{suffix}", key::LEDGER_BATCHES));
+        }
         if let Some(receipt) = &checked.compaction {
             let Condition::RecordCurrent { key, .. } = checked.current else {
                 return Err(crate::PaykitError::corrupt());
@@ -402,19 +408,31 @@ impl Paykit {
             revision: grant.revision,
             deleted: false,
         };
+        if current.revision != accepted.application.revision
+            && current.expected < accepted.application.version()
+        {
+            let alarm = self
+                .app
+                .raise_rollback(
+                    crate::protocol::BACKUP_NAME,
+                    "the ledger write is based before the executor's accepted version",
+                )
+                .await?;
+            return Err(pubky_switch_client::app::AppError::Alarm(alarm).into());
+        }
+        let Some(applied_proposals) = Box::pin(self.prepared_ledger(
+            permanent_key,
+            &accepted.application,
+            &current,
+            &exact_grant,
+        ))
+        .await?
+        else {
+            return Ok(None);
+        };
         let mut compaction = None;
         let mut reads = HashMap::new();
         if current.revision != accepted.application.revision {
-            if current.expected < accepted.application.version() {
-                let alarm = self
-                    .app
-                    .raise_rollback(
-                        crate::protocol::BACKUP_NAME,
-                        "the ledger write is based before the executor's accepted version",
-                    )
-                    .await?;
-                return Err(pubky_switch_client::app::AppError::Alarm(alarm).into());
-            }
             if !current.follows(&accepted.application)
                 || !current.cert.holds_scope("paykit_allowance_execute")
                 || current.op.body().app_id != Some(self.app_id())
@@ -489,6 +507,7 @@ impl Paykit {
             LedgerRead::Applied(_) => return Ok(None),
         };
         let result = |usage, ledger, grant, compaction| ReconciledLedger {
+            applied_proposals,
             compaction,
             at_initial_ledger: current.revision == approval.ledger.revision,
             at,

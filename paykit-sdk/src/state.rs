@@ -82,6 +82,8 @@
 //! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, with the entry's ID and message hash and the feed `seq` it was read at, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
 //! | `ae/<record key>/<msg_id>` | a counterparty's `allowance_end`, kept as the stop until the Allowance record holds an end or a rejection; every distinct end is kept, each under its `msg_id` and with the feed `seq` that orders it, until the record shows which one names what it holds (`allowances.rs`, Paykit spec 8.3) | |
 //! | `lv/<record key>` | the payer's pending or verified executor grant and its later accepted ledger | |
+//! | `lw/<record key>/<proposal hash>` | signed ledger predecessor and exact proposed value, staged before submission | |
+//! | `lb/<record key>/<proposal hash>` | native batch IDs committed before a ledger write leaves the wallet, retained across restore until resolved | |
 //! | `lx/<ledger key>/<application hash>` | the original applied writes and claim opening that account for compacted spending | |
 //! | `ac/<record key>` | the consent list: an Allowance this app may pay under, or removed from it for good (`allowances.rs`, Paykit spec 8.3); a restore marks every entry to confirm again | |
 //! | `ax/<record key>` | one signed input whose conflict check outlived placement, its pending record version when applicable, and whether further candidates remain unresolved (Paykit spec 8.1, 8.3.1) | |
@@ -494,6 +496,33 @@ fn corrupt() -> Result<()> {
 }
 
 impl sealed::Sealed for [u8; 16] {}
+
+pub(crate) type LedgerBatchIds = Vec<[u8; 16]>;
+
+/// The native batch ID, or distinct IDs retained together by a restore.
+fn batch_ids(bytes: &[u8]) -> Result<&[[u8; 16]]> {
+    let (ids, tail) = bytes.as_chunks::<16>();
+    if ids.is_empty() || !tail.is_empty() || ids.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(PaykitError::corrupt());
+    }
+    Ok(ids)
+}
+
+impl sealed::Sealed for LedgerBatchIds {}
+
+impl Stored for LedgerBatchIds {
+    fn read_bytes(bytes: &[u8], _: &Binder<'_>) -> Result<Self> {
+        Ok(batch_ids(bytes)?.to_vec())
+    }
+
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        if matches!(family, StateKey::LedgerBatch { .. }) {
+            Ok(())
+        } else {
+            corrupt()
+        }
+    }
+}
 
 /// The original batch ID is written by the Switch client as exactly sixteen bytes.
 impl Stored for [u8; 16] {
@@ -1493,6 +1522,19 @@ impl Stored for crate::executor::ExecutorHistory {
     }
 }
 
+impl sealed::Sealed for crate::executor::LedgerProposal {}
+
+impl Stored for crate::executor::LedgerProposal {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::LedgerProposal { record, digest } if self.bound(binder, record, digest) => {
+                Ok(())
+            }
+            _ => corrupt(),
+        }
+    }
+}
+
 impl sealed::Sealed for crate::executor::LedgerCompaction {}
 
 impl Stored for crate::executor::LedgerCompaction {
@@ -1705,15 +1747,10 @@ pub(crate) fn publication_entry(
     let Some(StateKey::Publication(original)) = StateKey::parse(key) else {
         return Err(PaykitError::corrupt());
     };
-    let (ids, tail) = bytes.as_chunks::<16>();
-    if &original.recipient == own
-        || ids.is_empty()
-        || !tail.is_empty()
-        || ids.windows(2).any(|pair| pair[0] >= pair[1])
-    {
+    if &original.recipient == own {
         return Err(PaykitError::corrupt());
     }
-    Ok((original, ids.iter().copied().collect()))
+    Ok((original, batch_ids(bytes)?.iter().copied().collect()))
 }
 
 /// A number in a key, zero-padded to 20 digits so keys sort numerically.
@@ -1940,6 +1977,12 @@ pub(crate) mod key {
         format!("{EXECUTOR_CHECKPOINTS}{}", b64(record))
     }
 
+    /// Staged complete values and the native batches that actually submitted them.
+    pub(crate) const LEDGER_PROPOSALS: &str = "lw/";
+    pub(crate) const LEDGER_BATCHES: &str = "lb/";
+    pub(crate) fn ledger_batches(record: &[u8; 32]) -> String {
+        format!("{LEDGER_BATCHES}{}/", b64(record))
+    }
     /// Original applied ledger transitions retained for compacted spending.
     pub(crate) const LEDGER_COMPACTIONS: &str = "lx/";
 
@@ -2433,6 +2476,16 @@ pub(crate) enum StateKey {
     Consent([u8; 32]),
     /// An executor grant with the later ledger accepted by the payer.
     ExecutorCheckpoint([u8; 32]),
+    /// A staged ledger successor, bound to its Allowance and content.
+    LedgerProposal {
+        record: [u8; 32],
+        digest: [u8; 32],
+    },
+    /// The native IDs that submitted this exact proposal.
+    LedgerBatch {
+        record: [u8; 32],
+        digest: [u8; 32],
+    },
     /// The original applied ledger writes on either side of a paid compaction.
     LedgerCompaction {
         ledger: [u8; 32],
@@ -2637,6 +2690,15 @@ impl StateKey {
                     }
                     "ac" => Self::Consent(b64_32(rest)?),
                     "lv" => Self::ExecutorCheckpoint(b64_32(rest)?),
+                    "lw" | "lb" => {
+                        let (r, h) = rest.split_once('/')?;
+                        let (record, digest) = (b64_32(r)?, b64_32(h)?);
+                        if text.starts_with("lw/") {
+                            Self::LedgerProposal { record, digest }
+                        } else {
+                            Self::LedgerBatch { record, digest }
+                        }
+                    }
                     "lx" => {
                         let (ledger, application) = rest.split_once('/')?;
                         Self::LedgerCompaction {
@@ -2961,6 +3023,24 @@ mod tests {
         assert_eq!(read(&marker, &[7; 16]).unwrap(), [7; 16]);
         assert!(read(&marker, &[7; 15]).is_err());
         assert!(read(&key::journal(&attempt), &[7; 16]).is_err());
+    }
+
+    #[test]
+    fn test_ledger_batch_ids_bind_to_a_proposal_and_remain_distinct_across_restore() {
+        let record = [3; 32];
+        let hash = pubky_switch_core::enc::b64(&[4; 32]);
+        let key = format!("{}{hash}", key::ledger_batches(&record));
+        let binder = Binder::unblinded([1; 32]);
+        let read = |key: &str, ids: &[u8]| restored::<LedgerBatchIds>(key.as_bytes(), ids, &binder);
+        assert_eq!(
+            read(&key, &[[1; 16], [2; 16]].concat()).unwrap(),
+            [[1; 16], [2; 16]]
+        );
+        assert!(read(&key, &[0; 15]).is_err());
+        assert!(read(&key, &[]).is_err());
+        assert!(read(&key, &[[1; 16], [1; 16]].concat()).is_err());
+        assert!(read(&key, &[[2; 16], [1; 16]].concat()).is_err());
+        assert!(read(&key::executor_checkpoint(&record), &[1; 16]).is_err());
     }
 
     /// `value` read at `key` as a `T`, through a reader without the naming key.
