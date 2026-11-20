@@ -107,7 +107,7 @@ private class ReceiptReader : WalletHomeserver, PaymentMethod {
 }
 
 private suspend fun recoverReceipt(issuer: String) {
-    val producer = ProcessBuilder(issuer, "paid-wallet").start()
+    val producer = ProcessBuilder(issuer, "paid-wallet").redirectError(ProcessBuilder.Redirect.INHERIT).start()
     val values = producer.inputStream.bufferedReader().readLines()
     check(producer.waitFor() == 0 && values.size > 7)
     fun bytes(i: Int): ByteArray = Base64.getDecoder().decode(values[i])
@@ -209,7 +209,8 @@ fun main() = runBlocking {
         } catch (_: WalletException.EnrollmentConflict) { }
     }
     check(StoreWrite.Put(byteArrayOf(1), secret).toString() == "StoreWrite(<redacted>)")
-    val issuer = ProcessBuilder(checkNotNull(System.getenv("PAYKIT_TEST_ISSUER"))).start()
+    val issuer = ProcessBuilder(checkNotNull(System.getenv("PAYKIT_TEST_ISSUER")))
+        .redirectError(ProcessBuilder.Redirect.INHERIT).start()
     issuer.outputStream.use { it.write(original.signedRequest) }
     val response = issuer.inputStream.bufferedReader().readLines()
     check(issuer.waitFor() == 0 && response.size == 2)

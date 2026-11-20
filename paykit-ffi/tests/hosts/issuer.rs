@@ -4,9 +4,9 @@ use pubky_switch_core::{
     records::{AppRequest, AuthRequest},
     sig::SignedDoc,
 };
-use pubky_switch_harness::{Backend, World};
 use std::error::Error;
 mod backup;
+mod service;
 mod signer;
 
 #[tokio::main(flavor = "current_thread")]
@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         caps: request.body().caps.clone(),
         secret: [9; 32],
     };
-    let world = World::start(Backend::Scripted)?.ok_or("missing signer world")?;
+    let world = service::start()?;
     let identity = world.identity("buyer")?.public();
     let mut signer = signer::serving(&world, "buyer").await?;
     let review = signer.review(&signed, &auth)?;
