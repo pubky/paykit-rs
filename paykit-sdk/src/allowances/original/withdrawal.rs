@@ -464,13 +464,20 @@ impl Paykit {
             revision: installed,
             deleted: false,
         };
-        Ok((verified
-            .pending_creates
-            .get(&(live.key, create))
-            .map(|(version, _)| version)
-            == Some(&live.version)
-            && self.app.record_condition(&live.key).await? == condition)
-            .then_some(LiveOriginal { condition, member }))
+        let Some((version, _)) = verified.pending_creates.get(&(live.key, create)) else {
+            return Ok(None);
+        };
+        let installed_version =
+            settlement::uploaded_create_version(*version, self.app.own_identity());
+        Ok(
+            ((live.version == *version || live.version == installed_version)
+                && self.app.record_condition(&live.key).await? == condition)
+                .then_some(LiveOriginal {
+                    condition,
+                    member,
+                    installed_version,
+                }),
+        )
     }
 
     /// These local writes take effect only when the native batch deletes the original

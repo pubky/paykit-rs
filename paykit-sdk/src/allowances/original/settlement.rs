@@ -5,8 +5,39 @@ use pubky_switch_core::records::IdentityDoc;
 use pubky_switch_core::sig::SignedDoc;
 
 pub(in crate::allowances) struct LiveOriginal {
-    pub(in crate::allowances) condition: Condition,
+    pub(super) condition: Condition,
     pub(super) member: KeptOp,
+    pub(super) installed_version: RecordVersion,
+}
+
+/// Switch wire 7.4.14 assigns an upload older than the lost generation its lower
+/// bound. A proved original create built on absence, so that bound is one.
+pub(super) fn uploaded_create_version(original: RecordVersion, doc: &IdentityDoc) -> RecordVersion {
+    if doc
+        .body()
+        .recovery_from
+        .is_some_and(|lost| original.generation < lost)
+    {
+        RecordVersion::new(original.generation, 1)
+    } else {
+        original
+    }
+}
+
+impl LiveOriginal {
+    pub(in crate::allowances) fn bind_deletion(
+        &self,
+        write: &mut application::RecordWrite,
+    ) -> Result<()> {
+        let (conditions, OpKind::RecordPut(put)) = write else {
+            return Err(PaykitError::corrupt());
+        };
+        if !conditions.contains(&self.condition) || !put.value_sealed.looks_like_delete() {
+            return Err(unconfirmed());
+        }
+        put.expected_version = self.installed_version;
+        Ok(())
+    }
 }
 
 /// The selected original, signed messages and service evidence stay together even
@@ -104,6 +135,7 @@ impl LossSettlement {
         if let Some(deletion) = &self.deletion {
             let member = &deletion.member;
             let selected_in = doc.generation();
+            let installed_version = uploaded_create_version(version, &doc);
             let generation = deletion.version.record_version().generation;
             let applied_doc = match &deletion.applied_under {
                 Some(signed) => {
@@ -130,7 +162,7 @@ impl LossSettlement {
                     if key == pending_key && revision.generation == selected_in
                         && revision.seq < applied.retirement.version && revision.item_hash == selected.item_hash)
             });
-            let expected = matches!(&op.body().kind, OpKind::RecordPut(put) if put.expected_version == version);
+            let expected = matches!(&op.body().kind, OpKind::RecordPut(put) if put.expected_version == installed_version);
             if applied.retirement != deletion.version.record_version()
                 || applied.pending_key != *pending_key
                 || !expected

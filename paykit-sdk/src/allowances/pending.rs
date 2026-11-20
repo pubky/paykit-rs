@@ -671,7 +671,7 @@ impl Paykit {
             return Err(not_current());
         };
         let kind = original.body().kind();
-        let (pending, permanent, delete) =
+        let (pending, permanent, mut delete) =
             Box::pin(self.checked_pending_answer(&selected, kind)).await?;
         if permanent != *key
             || self.app.own_identity().generation() != intent.prepared_in
@@ -683,13 +683,14 @@ impl Paykit {
         }
         if let Some(q) = &intent.fenced_acceptance {
             let reply = q.stored(&self.identity())?;
-            if !self.allowance_end_send_permitted(&intent.peer).await?
-                || Box::pin(self.live_original_after_loss(&selected, pending.proposal(), &reply))
-                    .await?
-                    .is_none_or(|original| !delete.0.contains(&original.condition))
-            {
+            if !self.allowance_end_send_permitted(&intent.peer).await? {
                 return Err(not_current());
             }
+            let selected =
+                Box::pin(self.live_original_after_loss(&selected, pending.proposal(), &reply))
+                    .await?
+                    .ok_or_else(not_current)?;
+            selected.bind_deletion(&mut delete)?;
         }
         let mut operations = self.answer_writes(&pending, &original, delete).await?;
         let mut retained = state::Tx::default();
@@ -862,13 +863,10 @@ impl Paykit {
         fenced: Option<(&StoredMessage, super::original::LiveOriginal)>,
     ) -> Result<String> {
         let own = self.identity();
-        let (pending, permanent_key, delete) =
+        let (pending, permanent_key, mut delete) =
             Box::pin(self.checked_pending_answer(selected, kind)).await?;
-        if fenced
-            .as_ref()
-            .is_some_and(|(_, original)| !delete.0.contains(&original.condition))
-        {
-            return Err(not_current());
+        if let Some((_, original)) = &fenced {
+            original.bind_deletion(&mut delete)?;
         }
         let p = pending.proposal();
         let peer = pending.counterparty();

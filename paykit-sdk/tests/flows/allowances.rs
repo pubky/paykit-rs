@@ -419,6 +419,14 @@ async fn acceptance_after_generation_change(change: AcceptanceGeneration, propos
         .record_key(&allowances_target(&w.alice_id(), &offer.allowance_id))
         .unwrap();
     let selected = Box::pin(pending_at(&payer, &public)).await;
+    let pending = pending_key(&payer, &w.bob_id(), &offer.allowance_id);
+    let original_version = payer
+        .app()
+        .shared_record(&pending)
+        .await
+        .unwrap()
+        .unwrap()
+        .version;
     let paykit_lib::Body::AllowanceProposal(body) = selected.proposal().body() else {
         panic!("proposal");
     };
@@ -529,10 +537,45 @@ async fn acceptance_after_generation_change(change: AcceptanceGeneration, propos
             .count()
     };
     if !eligible {
-        assert_eq!(
-            payer.allowance(&public).await.unwrap().status,
-            AllowanceStatus::Proposed
-        );
+        if proposer == AllowanceRole::Allower {
+            assert!(matches!(
+                payer.allowance(&public).await.unwrap_err().refusal(),
+                Some(Refusal::NotFound)
+            ));
+            assert_eq!(
+                seller.allowance(&mirror).await.unwrap().status,
+                AllowanceStatus::Ended
+            );
+            let deletions: Vec<_> = applied
+                .iter()
+                .filter_map(|op| match &op.body().kind {
+                    OpKind::RecordPut(put)
+                        if put.key == pending && put.value_sealed.looks_like_delete() =>
+                    {
+                        Some((op, put))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let [(op, deletion)] = deletions.as_slice() else {
+                panic!("expected one applied pending deletion");
+            };
+            let expected = match change {
+                AcceptanceGeneration::AtLoss => original_version,
+                AcceptanceGeneration::BeforeLoss => RecordVersion::new(original_generation, 1),
+                AcceptanceGeneration::OrderlyAdvance => unreachable!(),
+            };
+            assert_eq!(deletion.expected_version, expected);
+            assert!(op.body().conditions.iter().any(|condition| matches!(condition,
+                pubky_switch_core::ops::Condition::RecordCurrent { key, revision, deleted: false }
+                    if *key == pending && revision.generation == payer.app().own_identity().generation()
+            )));
+        } else {
+            assert_eq!(
+                payer.allowance(&public).await.unwrap().status,
+                AllowanceStatus::Proposed
+            );
+        }
         assert_eq!(writes(public), 0);
         assert_eq!(writes(ledger_key), 0);
         assert!(payer.app().shared_record(&public).await.unwrap().is_none());

@@ -3608,10 +3608,8 @@ mod tests {
         // In addition to pending writes, the accepting account prepares its permanent
         // Allowance and the payer prepares its original spending ledger.
         assert_eq!(pending.matches(".record_op(").count(), 6);
-        assert_eq!(
-            pending.matches("self.submit(batch.queue(reply))").count(),
-            1
-        );
+        assert_eq!(pending.matches("batch.queue(reply)").count(), 1);
+        assert!(pending.contains("if is_fenced { batch } else { batch.queue(reply) }"));
     }
 
     #[test]

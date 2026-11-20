@@ -1001,7 +1001,20 @@ mod own_message_tests {
         assert!(pending.contains("message: KeptMessage::of(&q)"));
         assert!(pending.contains("self.answer_writes(&pending, &q, delete)"));
         assert!(pending.contains("batch = batch.entry(operation)"));
-        assert!(pending.contains("self.submit(batch.queue(reply))"));
+        let (_, submission) = pending
+            .split_once("if is_fenced { batch } else { batch.queue(reply) }")
+            .unwrap();
+        assert!(submission.contains("self.submit(batch)"));
+        // The generated loss withdrawal is owed before submission. Its signed bytes
+        // may enter the outbox only after the exact applied deletion is protected.
+        assert!(pending.contains("self.prepare_loss_settlement("));
+        let recovery = body(
+            text("allowances/pending.rs"),
+            "recover_pending_applications",
+        );
+        let (_, capture) = recovery.split_once("self.capture_loss_deletion(").unwrap();
+        let (_, release) = capture.split_once("&[protected]").unwrap();
+        assert!(release.contains("self.app.queue_stored(msg.plaintext())"));
         let withdrawal = body(
             text("allowances/original/withdrawal.rs"),
             "withdraw_rejected_proposal<'a>",
