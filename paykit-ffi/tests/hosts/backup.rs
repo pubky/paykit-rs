@@ -66,7 +66,7 @@ pub(super) async fn print_resume_refusal(left: bool) -> Result<()> {
     let world = super::service::start()?;
     let rail = Arc::new(FakeRail::with_clock(world.clock().clone()));
     let source = Arc::new(MemoryStore::new());
-    let mut payer = Box::pin(enrolled(
+    let (mut payer, _) = Box::pin(enrolled(
         &world,
         "payer",
         AppScopes::new().pay(),

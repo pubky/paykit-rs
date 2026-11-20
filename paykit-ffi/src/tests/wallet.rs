@@ -306,7 +306,12 @@ async fn payment(
             delivery.service_key,
             original.app().own_identity().inbox().service_key
         );
-        Box::pin(connect_after_earlier_batch(world, &mut original, shop.public())).await?;
+        Box::pin(connect_after_earlier_batch(
+            world,
+            &mut original,
+            shop.public(),
+        ))
+        .await?;
         let mut paying = Box::pin(original.pay_request(&request, PayOptions::default()));
         tokio::select! { _ = account.entered.notified()=>{},_=&mut paying=>return Err("payment did not reach the interrupted method".into()) }
         assert_eq!(account.count(), 1);
