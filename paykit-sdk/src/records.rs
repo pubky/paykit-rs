@@ -907,6 +907,7 @@ mod own_message_tests {
             count("self.own_copy("),
             named(&[
                 ("allowances.rs", 3),
+                ("allowances/original/withdrawal.rs", 1),
                 ("allowances/pending.rs", 1),
                 ("pay.rs", 1),
                 ("records.rs", 2),
@@ -972,6 +973,15 @@ mod own_message_tests {
         assert!(pending.contains("self.answer_writes(&pending, &q, delete)"));
         assert!(pending.contains("batch = batch.entry(operation)"));
         assert!(pending.contains("self.submit(batch.queue(reply))"));
+        let withdrawal = body(
+            text("allowances/original/withdrawal.rs"),
+            "withdraw_rejected_proposal<'a>",
+        );
+        assert!(withdrawal.contains("self.own_copy(&signed)"));
+        assert!(withdrawal.contains("state::local_put(at, &approval)"));
+        assert!(
+            withdrawal.contains(".queue_signed_with(crate::protocol::BACKUP_NAME, signed, &local)")
+        );
         let answer = body(allowances, "answer_allowance");
         assert!(answer.contains("self.own_copy(&signed)"));
         assert!(answer.contains("let mut queue = vec![signed];"));

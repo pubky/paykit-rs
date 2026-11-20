@@ -104,9 +104,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::activity::{ActivityTarget, KeptSide};
-use crate::allowances::{
-    allowance_target, ConsentEntry, EndCause, EndOrigin, NoticeTarget, OwedEnd,
-};
+use crate::allowances::{allowance_target, ConsentEntry, EndOrigin, NoticeTarget, OwedEnd};
 use crate::app_records::SeenRecords;
 use crate::error::{PaykitError, Result};
 use crate::hold::HeldAnswer;
@@ -1594,7 +1592,7 @@ impl sealed::Sealed for NoticeTarget {}
 impl sealed::Sealed for EndOrigin {}
 
 /// An exact own end's origin: the key names its ID, and its identity, app and canonical
-/// Allowance tuple belong to this app. An automatic crossing always names an acceptance.
+/// Allowance tuple belong to this app. A crossing names the acceptance; a withdrawal names only its proposal.
 /// Its hash and references must also match the signed message before they can be used as
 /// that message's evidence (Paykit spec 8.1, 8.3).
 impl Stored for EndOrigin {
@@ -1609,7 +1607,7 @@ impl Stored for EndOrigin {
             || self.own != binder.own
             || self.app_id != cert.app_id()
             || self.counterparty == self.own
-            || (self.cause == EndCause::Automatic && self.acceptance.is_none())
+            || !self.cause.permits(self.acceptance.is_some())
             || self.acceptance == Some(self.proposal)
             || binder.record_key(&allowance_target(&self.counterparty, &allowance_id))?
                 != self.record
