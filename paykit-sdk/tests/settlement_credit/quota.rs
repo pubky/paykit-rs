@@ -2,7 +2,7 @@
 
 use super::*;
 use paykit_lib::records::{ActivityRecord, ActivitySide};
-use pubky_switch_client::app::{Collection as SwitchCollection, RecordTarget};
+use pubky_switch_client::app::{Collection as SwitchCollection, KeptBatchStatus, RecordTarget};
 use std::sync::Mutex;
 
 #[tokio::test]
@@ -93,10 +93,6 @@ async fn confirm_after_quota(world: &World) -> TestResult {
         .confirm_payment(&losing_key)
         .await
         .unwrap_err();
-    let kept = match refused.kept_batch() {
-        Some(id) => Some(wallets.labelled.app().kept_batch(id).await),
-        None => None,
-    };
     let trace = world.trace();
     let mut refusals = trace.lines[start..].iter().filter(|line| {
         line.call == Some("ops")
@@ -120,10 +116,49 @@ async fn confirm_after_quota(world: &World) -> TestResult {
     assert_eq!(body["code"], "quota_exceeded");
     assert_eq!(body["current"]["limit"], "record_keys");
     assert_eq!(
-        refused.refusal(),
-        Some(&paykit_sdk::Refusal::SettlementBucketFull { bucket: number }),
-        "after the merchant's signed record quota response: {refused:?}, original batch {kept:?}"
+        refused.code(),
+        Some(pubky_switch_core::http::ErrorCode::QuotaExceeded)
     );
+    let original = refused
+        .kept_batch()
+        .ok_or("missing original merchant batch")?;
+    assert!(matches!(
+        wallets.labelled.app().kept_batch(original).await?,
+        Some(KeptBatchStatus::Kept { wire_batch_id, sent_at_ms: Some(_) }) if wire_batch_id == original
+    ));
+    let markers = wallets
+        .labelled
+        .app()
+        .protocol_scan("paykit", b"ri/")
+        .await?;
+    let [(marker, batch)] = markers.as_slice() else {
+        return Err("expected the original receipt delivery marker".into());
+    };
+    assert_eq!(batch.as_slice(), original);
+    let messages = wallets.labelled.app().queued_messages("paykit").await?;
+    let receipt = messages
+        .iter()
+        .find(|item| item.kept_batch == Some(original))
+        .ok_or("missing the original batch's receipt delivery")?;
+    assert_eq!(receipt.kind, paykit_lib::Kind::PaymentReceipt.as_str());
+    assert_eq!(receipt.to, other.identity());
+    assert!(marker.ends_with(receipt.msg_id.as_bytes()));
+
+    let warnings = wallets.labelled.notices().await?;
+    let [warning] = warnings.as_slice() else {
+        return Err(format!(
+            "expected one settlement bucket warning, found {}",
+            warnings.len()
+        )
+        .into());
+    };
+    assert_eq!(warning.kind, paykit_sdk::NoticeKind::SettlementBucketFull);
+    assert_eq!(
+        warning.settlement,
+        Some(paykit_sdk::SettlementSubject::Bucket(number))
+    );
+    assert_eq!(warning.counterparty, Some(other.identity()));
+    wallets.labelled.acknowledge_notice(&warning.id).await?;
     let method_checks = wallets.rail.proof_checks();
     let [accepted_check] = &method_checks[checks_before_quota..] else {
         return Err("expected one verified proof before the quota refusal".into());
@@ -142,6 +177,7 @@ async fn confirm_after_quota(world: &World) -> TestResult {
         .confirm_payment(&winning_key)
         .await?
         .ok_or("missing winning receipt")?;
+    wallets.labelled.receive(None).await?;
     Box::pin(confirm_after_other_credit(
         &mut wallets.labelled,
         &losing_key,
@@ -149,6 +185,12 @@ async fn confirm_after_quota(world: &World) -> TestResult {
     ))
     .await?;
     assert_eq!(wallets.rail.proof_checks().last(), Some(accepted_check));
+    assert!(wallets
+        .labelled
+        .notices()
+        .await?
+        .iter()
+        .all(|notice| notice.id != warning.id));
 
     assert!(wallets
         .labelled
