@@ -150,6 +150,11 @@ async fn test_enrolled_payer_withdraws_a_recovered_proposal() -> TestResult {
 }
 
 #[tokio::test]
+async fn test_enrolled_payer_recognizes_only_its_withdrawn_allowances_return() -> TestResult {
+    Box::pin(terminal_after_loss(RecoveredProposal::Unrelated)).await
+}
+
+#[tokio::test]
 async fn test_enrolled_payer_holds_a_missing_proposal_after_loss() -> TestResult {
     Box::pin(terminal_after_loss(RecoveredProposal::Missing)).await
 }
@@ -179,6 +184,7 @@ async fn test_enrolled_payer_keeps_the_recovered_proposal_while_the_seller_is_de
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RecoveredProposal {
+    Unrelated,
     Original,
     Missing,
     MissingCreate,
@@ -220,6 +226,28 @@ async fn withdraw_recovered_proposal(w: &World, case: RecoveredProposal) -> Test
     ))
     .await?;
     let peer = shop.identity();
+    let unrelated = if case == RecoveredProposal::Unrelated {
+        let other =
+            Box::pin(payer.propose_executable_allowance(peer, terms()?, UserConfirmed::new()))
+                .await?;
+        Box::pin(shop.receive(None)).await?;
+        let mirror = shop
+            .allowances()
+            .await?
+            .into_iter()
+            .find(|v| v.allowance_id == other.allowance_id)
+            .ok_or("missing unrelated seller proposal")?
+            .record;
+        Box::pin(shop.accept_allowance(&mirror)).await?;
+        Box::pin(payer.receive(None)).await?;
+        assert_eq!(
+            payer.allowance(&other.record).await?.status,
+            AllowanceStatus::Accepted
+        );
+        Some(mirror)
+    } else {
+        None
+    };
     let before_proposal = payer.backup().await?;
     let original_generation = payer.app().own_identity().generation();
     if case == RecoveredProposal::Interrupted {
@@ -584,6 +612,49 @@ async fn withdraw_recovered_proposal(w: &World, case: RecoveredProposal) -> Test
         matches!(&op.body().kind, pubky_switch_core::ops::OpKind::RecordPut(put)
         if put.key == pending_key && put.expected_version == original.version)
     );
+    let id = payer.app_id();
+    drop(payer);
+    payer = Box::pin(Paykit::load(
+        w.app_env(payer_store.clone()),
+        Default::default(),
+        id,
+        rail.clone(),
+        Arc::new(TestTimer),
+    ))
+    .await?;
+    assert!(payer
+        .notices()
+        .await?
+        .iter()
+        .all(|n| n.kind != NoticeKind::AllowanceWithdrawalConfirmed));
+    if let Some(other) = unrelated {
+        let at = format!("ao/{}", pubky_switch_core::enc::b64(&offer.record));
+        let protected = payer
+            .app()
+            .protocol_get("paykit", at.as_bytes())
+            .await?
+            .ok_or("missing protected withdrawal")?;
+        let id = Box::pin(shop.end_allowance(&other)).await?;
+        let read = Box::pin(payer.receive(None)).await?;
+        assert!(read
+            .report
+            .events
+            .iter()
+            .any(|e| matches!(e,AppEvent::MessageReceived{msg_id,..} if msg_id==&id)));
+        assert!(payer
+            .notices()
+            .await?
+            .iter()
+            .all(|n| n.kind != NoticeKind::AllowanceWithdrawalConfirmed));
+        assert_eq!(
+            payer
+                .app()
+                .protocol_get("paykit", at.as_bytes())
+                .await?
+                .as_ref(),
+            Some(&protected)
+        );
+    }
     let read = Box::pin(shop.receive(None)).await?;
     assert!(
         read.report
@@ -628,6 +699,42 @@ async fn withdraw_recovered_proposal(w: &World, case: RecoveredProposal) -> Test
         |event| matches!(event, AppEvent::MessageReceived {msg_id,..}
         if msg_id == &ended.message().msg_id)
     ));
+    let receipt = payer
+        .notices()
+        .await?
+        .into_iter()
+        .find(|n| {
+            n.kind == NoticeKind::AllowanceWithdrawalConfirmed
+                && n.msg_id.as_deref() == Some(ended.message().msg_id.as_str())
+        })
+        .ok_or("the wallet did not recognize the seller's matching signed return")?;
+    payer.acknowledge_notice(&receipt.id).await?;
+    drop(payer);
+    payer = Box::pin(Paykit::load(
+        w.app_env(payer_store),
+        Default::default(),
+        id,
+        rail.clone(),
+        Arc::new(TestTimer),
+    ))
+    .await?;
+    Box::pin(payer.receive(None)).await?;
+    Box::pin(payer.flush()).await?;
+    assert!(payer.notices().await?.iter().all(|n| n.id != receipt.id));
+    assert_eq!(
+        payer
+            .app()
+            .sent_to(&peer, 0, u64::MAX)
+            .await?
+            .iter()
+            .filter(|m| m.kind == "paykit.allowance_end")
+            .count(),
+        1
+    );
+    assert!(payer
+        .resume_allowance_executor(&offer.record)
+        .await
+        .is_err());
     assert!(matches!(
         payer.allowance(&offer.record).await.unwrap_err().refusal(),
         Some(Refusal::NotFound)
@@ -636,11 +743,16 @@ async fn withdraw_recovered_proposal(w: &World, case: RecoveredProposal) -> Test
         ended.message().refs,
         [stored.proposal.hash(), response.hash()]
     );
+    let ledgers = paykit_lib::Collection::AllowanceLedgers;
+    let ledger = RecordTarget::new(
+        Collection::new(ledgers.name(), ledgers.policy(None)),
+        &natural_key::allowance(&peer, &offer.allowance_id),
+    );
     assert!(payer
         .app()
-        .records_of("allowance_ledgers")
+        .shared_record(&payer.app().record_key(&ledger)?)
         .await?
-        .is_empty());
+        .is_none());
     assert!(rail.all_executions().is_empty());
     Ok(())
 }

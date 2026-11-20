@@ -1540,6 +1540,7 @@ pub(crate) fn restore_conflicts(
                 notice.kind,
                 crate::NoticeKind::AllowancePlacementExpired
                     | crate::NoticeKind::AllowanceAcceptanceBeforeLoss
+                    | crate::NoticeKind::AllowanceWithdrawalConfirmed
             ) {
                 retained.insert(at, value);
             }

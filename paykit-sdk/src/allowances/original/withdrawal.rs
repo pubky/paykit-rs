@@ -10,7 +10,7 @@ use pubky_switch_core::records::IdentityDoc;
 #[serde(deny_unknown_fields)]
 pub(super) struct OriginalCreate {
     authority: pubky_switch_core::sig::SignedDoc,
-    proof: pubky_switch_core::sig::SignedDoc,
+    pub(super) proof: pubky_switch_core::sig::SignedDoc,
 }
 
 impl OriginalCreate {
@@ -395,7 +395,7 @@ impl Paykit {
         selected: &SharedRecord,
         proposal: &StoredMessage,
         reply: &StoredMessage,
-    ) -> Result<Option<Condition>> {
+    ) -> Result<Option<LiveOriginal>> {
         let Body::AllowanceProposal(p) = proposal.body() else {
             return Ok(None);
         };
@@ -418,7 +418,8 @@ impl Paykit {
         let Some(create) = approval.create else {
             return Ok(None);
         };
-        if approval.opening.is_some()
+        if approval.settled_loss_deletion()
+            || approval.opening.is_some()
             || approval.rejected.is_some()
             || approval
                 .reported_after_loss
@@ -457,7 +458,7 @@ impl Paykit {
             return Ok(None);
         }
         let verified =
-            application::applied_applications(vec![member], &original_doc, self.app_id())?;
+            application::applied_applications(vec![member.clone()], &original_doc, self.app_id())?;
         let condition = Condition::RecordCurrent {
             key: live.key,
             revision: installed,
@@ -469,7 +470,7 @@ impl Paykit {
             .map(|(version, _)| version)
             == Some(&live.version)
             && self.app.record_condition(&live.key).await? == condition)
-            .then_some(condition))
+            .then_some(LiveOriginal { condition, member }))
     }
 
     /// These local writes take effect only when the native batch deletes the original

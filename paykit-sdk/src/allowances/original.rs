@@ -19,7 +19,10 @@ use pubky_switch_core::shared::ApplicationRef;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+mod settlement;
 mod withdrawal;
+pub(super) use settlement::LiveOriginal;
+use settlement::LossSettlement;
 use withdrawal::{OriginalCreate, RejectedProposal};
 
 /// The same app's complete protected original, read again by its executor against the
@@ -53,6 +56,7 @@ pub(crate) struct OriginalAllowance {
     create_receipt: Option<OriginalCreate>,
     /// The acceptance reported to the host under this proposal's signed loss boundary.
     reported_after_loss: Option<[u8; 32]>,
+    settlement: Option<Box<LossSettlement>>,
     #[serde(deserialize_with = "Option::deserialize")]
     rejected: Option<RejectedProposal>,
     opening: Option<Opening>,
@@ -89,6 +93,7 @@ impl OriginalAllowance {
             create: None,
             create_receipt: None,
             reported_after_loss: None,
+            settlement: None,
             rejected: None,
             opening: None,
         }
@@ -146,6 +151,10 @@ impl OriginalAllowance {
                 self.generation,
                 &binder.record_key(&target)?,
             )?;
+        }
+        if let Some(settlement) = &self.settlement {
+            let target = allowance_record_target(Collection::AllowanceProposals, &self.peer, id);
+            settlement.check(self, &decision, record, &binder.record_key(&target)?)?;
         }
         if let Some(rejected) = &self.rejected {
             rejected.check_answer(&decision)?;
@@ -228,6 +237,7 @@ impl OriginalAllowance {
             }
             self.create_receipt = Some(receipt);
         }
+        self.merge_settlement(newer.settlement)?;
         self.merge_rejection(newer.rejected)?;
         match (&mut self.opening, newer.opening) {
             (Some(a), Some(mut b)) => {
@@ -270,6 +280,7 @@ pub(crate) fn restore_originals(
         }
     }
     for (record, value) in kept {
+        value.check(&record, binder)?;
         writes.push(state::local_put(&key::original_allowance(&record), &value)?);
     }
     Ok(())

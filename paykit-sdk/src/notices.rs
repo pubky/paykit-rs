@@ -69,6 +69,8 @@ pub enum NoticeKind {
     /// The named acceptance matches this payer's proposal from before its declared
     /// provider loss. It cannot open a budget. Withdrawal requires a verified live original.
     AllowanceAcceptanceBeforeLoss,
+    /// The seller confirmed the end of this wallet's withdrawn pre-loss proposal.
+    AllowanceWithdrawalConfirmed,
     /// An original outgoing message found after restore may have reached its recipient.
     /// Reconcile its outcome with the counterparty. Acknowledging it records that the host
     /// has seen it, without authorizing delivery or a replacement (Paykit spec 7.2).
@@ -102,6 +104,7 @@ impl NoticeKind {
             Self::MessageGivenUp => "given_up",
             Self::AllowancePlacementExpired => "allowance_placement_expired",
             Self::AllowanceAcceptanceBeforeLoss => "allowance_acceptance_before_loss",
+            Self::AllowanceWithdrawalConfirmed => "allowance_withdrawal_confirmed",
             Self::PossiblyDelivered => "possibly_delivered",
             Self::BlockedMessagesLost => "blocked_lost",
             Self::SettlementBucketFull => "settlement_bucket_full",
@@ -460,6 +463,23 @@ impl KeptNotice {
         }
     }
 
+    pub(crate) fn withdrawal_confirmed(end: &paykit_lib::records::StoredMessage) -> Result<Self> {
+        Ok(Self {
+            kind: NoticeKind::AllowanceWithdrawalConfirmed,
+            msg_id: Some(end.message().msg_id.clone()),
+            counterparty: Some(b64(&end.sender())),
+            raised_at_ms: end.accepted_at().ok_or_else(PaykitError::corrupt)?,
+            settlement: None,
+            attempt_id: None,
+            request_hash: None,
+            message_hash: None,
+            acknowledged: false,
+            stored: None,
+            origin: None,
+            lost: None,
+        })
+    }
+
     fn possibly_delivered(stored: &paykit_lib::records::StoredMessage, at: u64) -> Self {
         Self {
             kind: NoticeKind::PossiblyDelivered,
@@ -493,6 +513,7 @@ impl KeptNotice {
                 NoticeKind::MessageGivenUp
                     | NoticeKind::AllowancePlacementExpired
                     | NoticeKind::AllowanceAcceptanceBeforeLoss
+                    | NoticeKind::AllowanceWithdrawalConfirmed
                     | NoticeKind::PossiblyDelivered
                     | NoticeKind::BlockedMessagesLost
                     | NoticeKind::DroppedMessagesLost
@@ -565,6 +586,22 @@ impl KeptNotice {
         // so a valid run keeps none acknowledged. It holds its entry's handle exactly when it
         // names no origin: one raised for a stored entry always has it, and one with no
         // entry stored (a key wait's, a kept reply's) names where it came from instead.
+        if self.kind == NoticeKind::AllowanceWithdrawalConfirmed {
+            if self.msg_id.as_deref() != Some(msg_id)
+                || self.counterparty.as_deref() != Some(&b64(sender))
+                || self.message_hash.is_some()
+                || self.acknowledged
+                || self.attempt_id.is_some()
+                || self.stored.is_some()
+                || self.origin.is_some()
+                || self.lost.is_some()
+                || self.request_hash.is_some()
+                || self.settlement.is_some()
+            {
+                return Err(PaykitError::corrupt());
+            }
+            return Ok(());
+        }
         let expected = GivenUpOrigin::notice_kind(self.origin);
         if self.kind != expected
             || self.attempt_id.is_some()

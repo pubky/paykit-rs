@@ -410,6 +410,18 @@ pub(crate) fn may_deliver_end(
     let Some(origin) = fact.filter(|origin| origin.matches(message, delivery.hash())) else {
         return Ok(false);
     };
+    if origin.cause == EndCause::ProviderLoss {
+        let Some(original) = state::delivery_get::<OriginalAllowance>(
+            delivery,
+            &key::original_allowance(&origin.record),
+        )?
+        else {
+            return Ok(false);
+        };
+        if !original.owes_loss_withdrawal(delivery.hash())? {
+            return Ok(false);
+        }
+    }
     if origin.cause == EndCause::User
         && delivery.origin() == DeliveryOrigin::Original
         && !delivery.resend()
@@ -1207,6 +1219,30 @@ fn keep_end(
     let content = cx.record(target)?.map(|held| held.content);
     let mut evidence = KeptMessage::taken_at(stored, position);
     let record_key = cx.record_key(target)?;
+    if refs.len() == 2 && content.is_none() {
+        let pending =
+            allowance_record_target(Collection::AllowanceProposals, &sender, allowance_id);
+        let key = cx.record_key(&pending)?;
+        if let Some(live) = cx.record(&pending)?.filter(|p| {
+            p.content == RecordContent::Deleted
+                && replies::precedes_reply(p.version, position, |a, b| cx.received_order(a, b))
+                && replies::qualified_at(p, &pending, &key)
+        }) {
+            if let Some(mut original) =
+                state::cx_get::<OriginalAllowance>(cx, &key::original_allowance(&record_key))?
+            {
+                if let Some(writes) = original
+                    .finish_loss_return(stored, &record_key, live.version)
+                    .map_err(|_| Fail::corrupt())?
+                {
+                    for write in writes {
+                        receive::keep_local(cx, write);
+                    }
+                    return receive::note_peer(cx, &sender, stored);
+                }
+            }
+        }
+    }
     let ends = state::cx_scan::<KeptMessage>(cx, &key::allowance_ends(&record_key))?;
     if refs.len() == 2
         && !receive::holds_record(content.as_ref())
@@ -1897,6 +1933,27 @@ impl Paykit {
             }
             Box::pin(self.queue_stored_again(end)).await?;
             Box::pin(self.local_delete(&mark)).await?;
+        }
+        // The reply placement phase can create a proved withdrawal. Deliver it
+        // here, after that read and its conditional write have finished.
+        for queued in self
+            .app
+            .queued_messages(crate::protocol::BACKUP_NAME)
+            .await?
+        {
+            if queued.kind == "paykit.allowance_end"
+                && queued.kept_batch.is_none()
+                && !queued.resend
+            {
+                let origin = self
+                    .local_get::<EndOrigin>(&key::end_origin(&queued.msg_id))
+                    .await?;
+                if origin.is_some_and(|o| {
+                    o.cause == EndCause::ProviderLoss && o.message_hash == queued.hash
+                }) {
+                    Box::pin(self.delivered(&queued.msg_id)).await?;
+                }
+            }
         }
         Ok(())
     }
@@ -2683,6 +2740,12 @@ impl Paykit {
                             }
                             continue;
                         }
+                    }
+                    if end.message().refs.len() == 2
+                        && Box::pin(self.finish_held_loss_return(&end, &record, &evidence, &stop))
+                            .await?
+                    {
+                        continue;
                     }
                     if let Some(source) = evidence
                         .ended_acceptance

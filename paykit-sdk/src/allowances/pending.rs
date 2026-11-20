@@ -480,6 +480,21 @@ impl Paykit {
                 .replies
                 .get(&(msg.cert().signing_key(), intent.application))
                 .filter(|batch| batch.pending_key == pending_key);
+            let saved = if applied.is_none() && intent.fenced_acceptance.is_some() {
+                let record = self.app.record_key(&allowance_target(&intent.peer, id))?;
+                match self
+                    .local_get::<super::OriginalAllowance>(&key::original_allowance(&record))
+                    .await?
+                {
+                    Some(original) => {
+                        original.saved_loss_application(pending_key, &msg, intent.application)?
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+            let applied = applied.or(saved.as_ref());
             let mut writes = vec![LocalWrite::Delete {
                 key: format!("{}{at}", key::PENDING_REPLIES).into_bytes(),
             }];
@@ -494,6 +509,17 @@ impl Paykit {
                         continue;
                     }
                 }
+                if intent.fenced_acceptance.is_some() {
+                    let record = self.app.record_key(&allowance_target(&intent.peer, id))?;
+                    let Some(protected) =
+                        self.capture_loss_deletion(&record, &intent, batch).await?
+                    else {
+                        continue;
+                    };
+                    self.app
+                        .protocol_commit(crate::protocol::BACKUP_NAME, &[protected])
+                        .await?;
+                }
                 // Queue first. A stop before the local release still leaves the identical
                 // signed original recoverable from the applied delete.
                 match self.app.queue_stored(msg.plaintext()).await {
@@ -504,7 +530,7 @@ impl Paykit {
                     Err(error) => return Err(error.into()),
                 }
             } else {
-                if !self.past_replay_window(&msg) {
+                if intent.fenced_acceptance.is_some() || !self.past_replay_window(&msg) {
                     continue;
                 }
                 match self.app.delivery(&msg.message().msg_id).await? {
@@ -548,7 +574,9 @@ impl Paykit {
             self.app
                 .protocol_commit(crate::protocol::BACKUP_NAME, &writes)
                 .await?;
-            self.delivered(&msg_id).await?;
+            if allow_delivery {
+                Box::pin(self.delivered(&msg_id)).await?;
+            }
         }
         Ok(())
     }
@@ -656,7 +684,7 @@ impl Paykit {
             if !self.allowance_end_send_permitted(&intent.peer).await?
                 || Box::pin(self.live_original_after_loss(&selected, pending.proposal(), &reply))
                     .await?
-                    .is_none_or(|condition| !delete.0.contains(&condition))
+                    .is_none_or(|original| !delete.0.contains(&original.condition))
             {
                 return Err(not_current());
             }
@@ -790,7 +818,7 @@ impl Paykit {
         selected: &SharedRecord,
         record: &[u8; 32],
         acceptance: &StoredMessage,
-        condition: Condition,
+        original: super::original::LiveOriginal,
     ) -> Result<bool> {
         let intents = self
             .local_scan::<PreparedPendingReply>(&key::pending_replies(record))
@@ -801,7 +829,7 @@ impl Paykit {
                     selected,
                     Kind::AllowanceEnd,
                     None,
-                    Some((acceptance, condition)),
+                    Some((acceptance, original)),
                 ))
                 .await?,
             ),
@@ -829,14 +857,14 @@ impl Paykit {
         selected: &SharedRecord,
         kind: Kind,
         execution: Option<crate::UserConfirmed>,
-        fenced: Option<(&StoredMessage, Condition)>,
+        fenced: Option<(&StoredMessage, super::original::LiveOriginal)>,
     ) -> Result<String> {
         let own = self.identity();
         let (pending, permanent_key, delete) =
             Box::pin(self.checked_pending_answer(selected, kind)).await?;
         if fenced
             .as_ref()
-            .is_some_and(|(_, condition)| !delete.0.contains(condition))
+            .is_some_and(|(_, original)| !delete.0.contains(&original.condition))
         {
             return Err(not_current());
         }
@@ -898,6 +926,18 @@ impl Paykit {
                 seals,
             },
         )?;
+        let is_fenced = fenced.is_some();
+        if let Some((acceptance, create)) = fenced {
+            Box::pin(self.prepare_loss_settlement(
+                &permanent_key,
+                create,
+                acceptance,
+                &q,
+                application,
+                &mut prepare,
+            ))
+            .await?;
+        }
         if kind == Kind::AllowanceEnd {
             prepare.put(
                 &key::end_origin(&msg_id),
@@ -906,7 +946,7 @@ impl Paykit {
                     p,
                     None,
                     &q,
-                    if fenced.is_some() {
+                    if is_fenced {
                         EndCause::ProviderLoss
                     } else {
                         EndCause::User
@@ -915,9 +955,22 @@ impl Paykit {
             )?;
         }
         self.local_commit(prepare).await?;
-        match self.submit(batch.queue(reply)).await {
+        let batch = if is_fenced { batch } else { batch.queue(reply) };
+        match Box::pin(self.submit(batch)).await {
             Ok(submitted) => {
-                if kind == Kind::AllowanceAcceptance {
+                if is_fenced {
+                    let intent = self
+                        .local_get::<PreparedPendingReply>(&intent_key)
+                        .await?
+                        .ok_or_else(PaykitError::corrupt)?;
+                    let at = intent_key
+                        .strip_prefix(key::PENDING_REPLIES)
+                        .ok_or_else(PaykitError::corrupt)?;
+                    Box::pin(
+                        self.recover_pending_applications(vec![(at.to_owned(), intent)], false),
+                    )
+                    .await?;
+                } else if kind == Kind::AllowanceAcceptance {
                     Box::pin(self.recover_pending_replies()).await?;
                 } else {
                     let [proof] = submitted.proofs.as_slice() else {
@@ -934,7 +987,9 @@ impl Paykit {
                     writes.delete(&intent_key);
                     self.local_commit(writes).await?;
                 }
-                self.delivered(&msg_id).await?;
+                if !is_fenced {
+                    self.delivered(&msg_id).await?;
+                }
             }
             Err(error) if error.kept_batch().is_some() => (),
             Err(error) => {
@@ -944,7 +999,7 @@ impl Paykit {
                 // An acceptance also owns the exact sealed opening and its prior user
                 // choice. A later retry must always return to that signed answer.
                 if kind != Kind::AllowanceAcceptance
-                    && fenced.is_none()
+                    && !is_fenced
                     && (matches!(error, AppError::Ahead { .. } | AppError::Refused(_))
                         || error.code() == Some(pubky_switch_core::http::ErrorCode::Conflict))
                 {

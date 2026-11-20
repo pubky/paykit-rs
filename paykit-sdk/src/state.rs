@@ -204,7 +204,7 @@ impl Tx {
 impl Paykit {
     /// What binds a value read here to its key: this app's identity, and its naming key's
     /// blinding through the client.
-    fn binding<R>(&self, read: impl FnOnce(&Binder<'_>) -> R) -> R {
+    pub(crate) fn binding<R>(&self, read: impl FnOnce(&Binder<'_>) -> R) -> R {
         let blind = |input: &[u8]| self.app.blind(input);
         read(&Binder::new(self.identity(), self.app.cert(), &blind))
     }
