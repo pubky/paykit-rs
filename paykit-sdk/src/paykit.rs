@@ -238,6 +238,9 @@ pub struct ReceiveSummary {
     /// acknowledge its duty events for Paykit up to the last one the report shows, and
     /// app-wide only once every other protocol each is for has handled it
     /// ([`Paykit::receive`]).
+    /// A received message's entry receipt identifies any invitation redeemed for that
+    /// delivery. This service observation does not authorize a payment or replace the
+    /// signed request and its seller-scope checks.
     pub report: ReceiveReport,
     /// The `msg_id`s of the messages received, each with its effect committed with the
     /// cursor move (Switch spec 8.2).
@@ -1188,6 +1191,7 @@ impl Paykit {
         // they build on request records the copy may lack, and stay kept meanwhile.
         if !Box::pin(self.payer_waits(keys)).await? {
             Box::pin(self.place_kept_cancellations()).await?;
+            Box::pin(self.record_ledger_outcomes()).await?;
         }
         // Ask for replies dropped for a bound and entries dropped unverified as soon as
         // the sender's holds and mark cadence allow. Forget the pairs a block's marks

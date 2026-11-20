@@ -3,6 +3,17 @@
 use crate::Result;
 use paykit_lib::allowances::{compact, AllowanceTerms, EntryOutcome, Ledger, LedgerEntry};
 
+#[cfg(feature = "test-support")]
+tokio::task_local! { static COMPACT_ON_RESERVATION: (); }
+
+/// Exercise compaction on small wallet histories in the supplied test future.
+/// Only the byte threshold for attempting compaction changes. The complete record
+/// still has to fit its ordinary size limit and pass the age and accounting checks.
+#[cfg(feature = "test-support")]
+pub async fn with_early_ledger_compaction<F: std::future::Future>(run: F) -> F::Output {
+    COMPACT_ON_RESERVATION.scope((), run).await
+}
+
 /// Reserve room for every unresolved entry to take the larger final outcome.
 fn size_with_outcomes(ledger: &Ledger) -> Result<usize> {
     let mut resolved = ledger.clone();
@@ -21,8 +32,11 @@ pub(super) fn reserved_ledger(
     let at = entry.at;
     ledger.entries.push(entry);
     let limit = 256 * 1024 - 4;
+    let threshold = limit * 3 / 4;
+    #[cfg(feature = "test-support")]
+    let threshold = COMPACT_ON_RESERVATION.try_with(|()| 0).unwrap_or(threshold);
     let mut size = size_with_outcomes(&ledger)?;
-    if size > limit * 3 / 4 {
+    if size > threshold {
         if let Some(smaller) = compact(terms, &ledger, at)? {
             size = size_with_outcomes(&smaller)?;
             ledger = smaller;

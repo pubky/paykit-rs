@@ -1,6 +1,9 @@
 //! Independent tills confirm a shared invoice settlement through the ordinary wallet.
 #![recursion_limit = "256"]
 
+#[path = "settlement_credit/first_dispatch.rs"]
+mod first_dispatch;
+
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::sync::Arc;
@@ -87,24 +90,28 @@ async fn join(
     Ok((wallet, signer))
 }
 
-async fn paid_request(
-    shop: &mut Paykit,
-    mut buyer: Paykit,
-    endpoint_id: &str,
-    payload: &str,
-) -> TestResult<(Paykit, RequestRef, [u8; 32])> {
+fn invoice(endpoint_id: &str, payload: &str) -> TestResult<RequestDraft> {
     let endpoints = BTreeMap::from([(
         PaymentEndpointIdentifier::new(endpoint_id)?,
         PaymentEndpointPayload::new(payload)?,
     )]);
-    let draft = RequestDraft::new(
+    Ok(RequestDraft::new(
         PaymentAmount {
             asset: Asset::new("btc")?,
             value: Decimal::new("0.00025")?,
         },
         PaymentReference::new("invoice")?,
         RequestDestination::Endpoints(endpoints),
-    );
+    ))
+}
+
+async fn paid_request(
+    shop: &mut Paykit,
+    mut buyer: Paykit,
+    endpoint_id: &str,
+    payload: &str,
+) -> TestResult<(Paykit, RequestRef, [u8; 32])> {
+    let draft = invoice(endpoint_id, payload)?;
     let request = shop
         .send_request(buyer.identity(), draft)
         .await?
@@ -476,6 +483,15 @@ fn transactions_in_one_bucket<const N: usize>(
 /// method settlement ID under Paykit wire 1.5.
 async fn two_transactions(world: &World) -> TestResult {
     let mut wallets = Box::pin(enrolled_tills(world)).await?;
+    // Finish each buyer's authenticated seller lookup before the two tills compete.
+    let seller = wallets.till.identity();
+    for buyer in [&mut wallets.buyer, &mut wallets.other] {
+        let identity = buyer.app_mut().identity_of(&seller, true).await?;
+        assert_eq!(
+            identity.switch_copy,
+            pubky_switch_client::app::SwitchCopy::Read
+        );
+    }
     let naming = wallets.till.app().naming_key();
     let [first, second] = transactions_in_one_bucket(naming)?;
     let number = settlement_bucket(&first.1);
@@ -1305,6 +1321,7 @@ async fn test_absent_settlement_bucket_without_a_loss_keeps_the_wallet_stopped()
     )
     .await?;
     assert_eq!(shop.app().alarm(), Some(&alarm));
+    assert!(shop.ledger_alarm().is_none());
     assert!(shop.confirm_payment(&pending_record).await.is_err());
     let held = shop
         .app()

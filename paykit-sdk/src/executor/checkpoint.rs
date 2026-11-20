@@ -3,11 +3,14 @@
 use paykit_lib::allowances::{check_successor, Ledger};
 use paykit_lib::derive::natural_key;
 use paykit_lib::records::{bind_ledger, AllowanceRecord};
-use paykit_lib::{AllowanceId, Body, Collection};
+use paykit_lib::{AllowanceId, AttemptId, Body, Collection};
 use pubky_switch_client::app::{App, KeptOp, RecordTarget};
 use pubky_switch_core::enc::{hash, serde_b64};
 use pubky_switch_core::ops::Condition;
+use pubky_switch_core::sig::SignedDoc;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashSet};
 
 use super::approval::ApprovedOpening;
 use super::evidence::AppliedRecord;
@@ -28,6 +31,88 @@ pub(crate) struct ExecutorCheckpoint {
     pub(super) grant: GrantEvidence,
     #[serde(deserialize_with = "Option::deserialize")]
     pub(super) later: Option<KeptOp>,
+    pub(super) signers: ReservationSigners,
+}
+
+/// Certificates of accepted reservation batches, shared by the openings they signed.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct ReservationSigners(Vec<ReservationSigner>);
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReservationSigner {
+    cert: SignedDoc,
+    /// Attempt ID to the hash of the exact signed opening operation in that batch.
+    openings: BTreeMap<String, [u8; 32]>,
+}
+
+impl ReservationSigners {
+    pub(super) fn certificates(&self) -> impl Iterator<Item = &SignedDoc> {
+        self.0.iter().map(|signer| &signer.cert)
+    }
+
+    pub(super) fn keep(&mut self, id: String, opening: [u8; 32], cert: &SignedDoc) -> Option<()> {
+        for signer in &self.0 {
+            if let Some(hash) = signer.openings.get(&id) {
+                return (hash == &opening && &signer.cert == cert).then_some(());
+            }
+        }
+        if let Some(signer) = self.0.iter_mut().find(|s| &s.cert == cert) {
+            signer.openings.insert(id, opening);
+        } else {
+            self.0.push(ReservationSigner {
+                cert: cert.clone(),
+                openings: BTreeMap::from([(id, opening)]),
+            });
+        }
+        Some(())
+    }
+
+    pub(super) fn original<'a>(&self, id: AttemptId, op: &'a KeptOp) -> Option<Cow<'a, KeptOp>> {
+        let id = id.to_text();
+        let Some((cert, hash)) = self
+            .0
+            .iter()
+            .find_map(|s| Some((&s.cert, s.openings.get(&id)?)))
+        else {
+            return Some(Cow::Borrowed(op));
+        };
+        if &op.op.doc_hash().ok()? != hash {
+            return None;
+        }
+        if cert == &op.cert {
+            return Some(Cow::Borrowed(op));
+        }
+        Some(Cow::Owned(KeptOp {
+            cert: cert.clone(),
+            ..op.clone()
+        }))
+    }
+
+    fn bound(&self, identity: &[u8; 32], executor: [u8; 16]) -> bool {
+        let mut seen = HashSet::new();
+        self.0.iter().all(|signer| {
+            paykit_lib::scopes::verify_certificate(&signer.cert, identity).is_ok_and(|cert| {
+                cert.app_id() == executor && cert.holds_scope("paykit_allowance_execute")
+            }) && !signer.openings.is_empty()
+                && signer.openings.keys().all(|id| {
+                    AttemptId::parse(id).is_ok_and(|a| a.to_text() == *id && seen.insert(a))
+                })
+        })
+    }
+
+    pub(super) fn retain(&mut self, ledger: &Ledger) {
+        let active: HashSet<_> = ledger
+            .entries
+            .iter()
+            .map(|e| e.attempt_id.to_text())
+            .chain(ledger.failed.iter().map(|e| e.attempt_id.to_text()))
+            .collect();
+        self.0.retain_mut(|signer| {
+            signer.openings.retain(|id, _| active.contains(id));
+            !signer.openings.is_empty()
+        });
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,10 +172,13 @@ impl ExecutorHistory {
                     (put.key == *key && cert.app_id() == executor).then_some(())
                 };
                 let grant = match &c.grant {
-                    GrantEvidence::AwaitingProof { .. } => c.later.is_none(),
+                    GrantEvidence::AwaitingProof { .. } => {
+                        c.later.is_none() && c.signers.0.is_empty()
+                    }
                     GrantEvidence::Verified { write: kept } => write(kept, record_key).is_some(),
                 };
                 grant
+                    && c.signers.bound(binder.identity(), executor)
                     && c.later
                         .as_ref()
                         .is_none_or(|kept| write(kept, &ledger).is_some())
@@ -166,7 +254,19 @@ impl ExecutorHistory {
                 return None;
             }
         }
-        verified.last().map(|(source, _)| (*source).clone())
+        let (latest, accepted) = verified.last()?;
+        let mut selected = (*latest).clone();
+        if verified.len() > 1 {
+            for (source, _) in &verified {
+                for signer in &source.signers.0 {
+                    for (id, hash) in &signer.openings {
+                        selected.signers.keep(id.clone(), *hash, &signer.cert)?;
+                    }
+                }
+            }
+            selected.signers.retain(&accepted.ledger);
+        }
+        Some(selected)
     }
 }
 

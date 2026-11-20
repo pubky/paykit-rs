@@ -1379,6 +1379,55 @@ pub fn compact(terms: &AllowanceTerms, ledger: &Ledger, now: u64) -> Result<Opti
     }))
 }
 
+/// Copy verified outcomes into the executor's ledger (Paykit spec 8.3, Paykit wire 5.5).
+/// The caller binds each claim or payer proof to the reservation. For this write, `paid`
+/// means the payer record holds a verified proof for this attempt and Allowance.
+/// An owner-written failure can fill an unset outcome. A paid claim or proof takes
+/// precedence and moves a compacted failed attempt into the paid totals exactly once.
+/// Returns `None` if the evidence makes no change.
+///
+/// # Errors
+///
+/// Returns an error for an invalid ledger or terms, or if a paid total would overflow.
+pub fn record_outcomes(
+    terms: &AllowanceTerms,
+    ledger: &Ledger,
+    evidence: &HashMap<AttemptId, AttemptEvidence>,
+) -> Result<Option<Ledger>> {
+    ledger.check_valid(terms)?;
+    let paid = |fact: &AttemptEvidence| fact.paid || fact.claim == Some(ClaimState::Done);
+    let mut next = None;
+    for (index, entry) in ledger.entries.iter().enumerate() {
+        let Some(fact) = evidence.get(&entry.attempt_id) else {
+            continue;
+        };
+        let outcome = if entry.outcome != Some(EntryOutcome::Done) && paid(fact) {
+            EntryOutcome::Done
+        } else if entry.outcome.is_none()
+            && fact.claim == Some(ClaimState::Failed { by_owner: true })
+        {
+            EntryOutcome::Failed
+        } else {
+            continue;
+        };
+        next.get_or_insert_with(|| ledger.clone()).entries[index].outcome = Some(outcome);
+    }
+    let was_paid = |item: &CompactedFailed| evidence.get(&item.attempt_id).is_some_and(paid);
+    let mut spent = ledger.spent_scaled();
+    let mut count = ledger.count;
+    for item in ledger.failed.iter().filter(|item| was_paid(item)) {
+        spent = add(spent, item.value.scaled())?;
+        count = count.checked_add(1).ok_or_else(overflow)?;
+    }
+    if count != ledger.count {
+        let new = next.get_or_insert_with(|| ledger.clone());
+        new.spent = Some(Decimal::from_scaled(spent));
+        new.count = count;
+        new.failed.retain(|item| !was_paid(item));
+    }
+    Ok(next)
+}
+
 /// "From one version to the next" (Paykit spec 8.3, Paykit wire 5.5): a reader that holds
 /// `held`, written at service time `held_time`, accepts `newer`, written at service time
 /// `newer_time`, only if it counts no less.
@@ -2370,6 +2419,59 @@ mod tests {
         assert!(matches!(twice.to_json(), Err(Error::Validation(_))));
         assert!(Ledger::from_json(&twice.json_unchecked().unwrap()).is_err());
         assert!(Ledger::from_json(br#"{"v":2,"counterparty":"x","allowance_id":"y"}"#).is_err());
+    }
+
+    #[test]
+    fn test_record_outcomes_copies_paid_and_owner_failed_attempts_once() {
+        let terms = AllowanceTerms::from_json(&terms()).unwrap();
+        let mut held = ledger(vec![
+            entry(1, "0.01", "2026-03-01T00:00:00.000Z", None),
+            entry(2, "0.02", "2026-03-01T00:01:00.000Z", None),
+            entry(
+                3,
+                "0.03",
+                "2026-03-01T00:02:00.000Z",
+                Some(EntryOutcome::Failed),
+            ),
+            entry(4, "0.04", "2026-03-01T00:03:00.000Z", None),
+        ]);
+        let id = |n| AttemptId::from_bytes([n; 16]);
+        held.failed.push(CompactedFailed {
+            obligation: [5; 32],
+            attempt_id: id(5),
+            value: Decimal::new("0.05").unwrap(),
+        });
+        let proof = AttemptEvidence {
+            paid: true,
+            ..Default::default()
+        };
+        let evidence = HashMap::from([
+            (id(1), ClaimState::Done.into()),
+            (id(2), ClaimState::Failed { by_owner: true }.into()),
+            (id(3), proof),
+            (id(4), ClaimState::Failed { by_owner: false }.into()),
+            (id(5), proof),
+        ]);
+        let next = record_outcomes(&terms, &held, &evidence).unwrap().unwrap();
+        assert_eq!(
+            next.entries
+                .iter()
+                .map(|entry| entry.outcome)
+                .collect::<Vec<_>>(),
+            [
+                Some(EntryOutcome::Done),
+                Some(EntryOutcome::Failed),
+                Some(EntryOutcome::Done),
+                None
+            ]
+        );
+        assert!(next.failed.is_empty());
+        assert_eq!(next.spent.as_ref().unwrap().as_str(), "0.05");
+        assert_eq!(next.count, 1);
+        assert!(record_outcomes(&terms, &next, &evidence).unwrap().is_none());
+        assert!(record_outcomes(&terms, &held, &HashMap::new())
+            .unwrap()
+            .is_none());
     }
 
     #[test]

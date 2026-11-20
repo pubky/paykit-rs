@@ -6,6 +6,12 @@ mod compaction;
 mod evidence;
 mod grant;
 mod ledger;
+#[cfg(feature = "test-support")]
+pub use ledger::with_early_ledger_compaction;
+mod outcomes;
+pub use outcomes::ReservedByOtherApp;
+mod preparation;
+pub(crate) use preparation::LedgerProposal;
 mod restore;
 mod spend;
 pub(crate) use checkpoint::ExecutorHistory;
@@ -52,17 +58,18 @@ fn reconciled_usage(
     terms: &AllowanceTerms,
     ledger: &Ledger,
     claims: &HashMap<AttemptId, ReservationClaim>,
+    retired: &mut HashMap<AttemptId, compaction::Retired>,
+    mut evidence: HashMap<AttemptId, AttemptEvidence>,
     at: u64,
 ) -> Option<Accounting> {
     let mut unclassified = Vec::new();
     let mut seen = HashSet::new();
-    let mut evidence = HashMap::new();
     for entry in &ledger.entries {
         if let Some(claim) = claims.get(&entry.attempt_id) {
             if claim.obligation != entry.obligation {
                 return None;
             }
-            evidence.insert(entry.attempt_id, AttemptEvidence::from(claim.state));
+            evidence.entry(entry.attempt_id).or_default().claim = Some(claim.state);
         }
     }
     for dispatch in inventory {
@@ -76,27 +83,59 @@ fn reconciled_usage(
             .map(|e| (&e.obligation, &e.asset, &e.value))
             .or_else(|| failed.map(|f| (&f.obligation, &terms.asset, &f.value)));
         let Some((obligation, asset, value)) = member else {
+            if let Some(entry) = retired.get(&id).filter(|entry| {
+                matches!(&dispatch.outcome, RailOutcome::Failed)
+                    || matches!(
+                        (entry, &dispatch.outcome),
+                        (
+                            compaction::Retired::PreviouslyFailed(_),
+                            RailOutcome::Paid(_)
+                        )
+                    )
+            }) {
+                // The authenticated ledger transition already counted this reservation
+                // as paid. The same transfer can still show failed in the method's
+                // inventory or subsequently agree with the copied claim.
+                let (asset, value) = match entry {
+                    compaction::Retired::Paid(e) => (&e.asset, &e.value),
+                    compaction::Retired::PreviouslyFailed(e) => (&terms.asset, &e.value),
+                };
+                if &dispatch.amount.asset != asset || &dispatch.amount.value != value {
+                    return None;
+                }
+                retired.remove(&id);
+                continue;
+            }
             unclassified.push(dispatch);
             continue;
         };
-        let claim = claims.get(&id)?;
-        if *obligation != claim.obligation
+        let claim = claims.get(&id);
+        let payer_proved = evidence.get(&id).is_some_and(|fact| fact.paid);
+        if claim.is_some_and(|claim| *obligation != claim.obligation)
+            || (claim.is_none() && !payer_proved)
             || asset != &dispatch.amount.asset
             || value != &dispatch.amount.value
         {
             return None;
         }
         if failed.is_some() {
+            // A verified Done claim or dated payer proof settles this exact reservation
+            // even when the method inventory still reports its earlier failure.
+            if payer_proved || claim.is_some_and(|claim| claim.state == ClaimState::Done) {
+                continue;
+            }
             match &dispatch.outcome {
                 RailOutcome::Failed
-                    if matches!(claim.state, ClaimState::Failed { by_owner: true }) => {}
+                    if claim.is_some_and(|claim| {
+                        matches!(claim.state, ClaimState::Failed { by_owner: true })
+                    }) => {}
                 RailOutcome::Paid(_) => unclassified.push(dispatch),
                 _ => return None,
             }
             // The ledger already counts this failure in full. Its method history cannot release it.
             continue;
         }
-        evidence.get_mut(&id)?.paid = matches!(dispatch.outcome, RailOutcome::Paid(_));
+        evidence.get_mut(&id)?.paid |= matches!(dispatch.outcome, RailOutcome::Paid(_));
     }
     Some(Accounting {
         counted: usage(terms, ledger, &evidence, at).ok()?,
@@ -137,6 +176,8 @@ mod tests {
             terms,
             ledger,
             claims,
+            &mut HashMap::new(),
+            HashMap::new(),
             at,
         )
     }
@@ -178,7 +219,15 @@ mod tests {
             outcome: RailOutcome::Failed,
         };
         let read = |dispatch, claims: &HashMap<_, _>| {
-            reconciled_usage(vec![dispatch], &terms, &ledger, claims, 100_000_000)
+            reconciled_usage(
+                vec![dispatch],
+                &terms,
+                &ledger,
+                claims,
+                &mut HashMap::new(),
+                HashMap::new(),
+                100_000_000,
+            )
         };
         let accounting = read(dispatch.clone(), &claims).unwrap();
         assert_eq!(accounting.counted.lifetime().as_str(), "70");
@@ -236,9 +285,17 @@ mod tests {
                 .map(|state| (id, ReservationClaim { obligation, state }))
                 .into_iter()
                 .collect();
-            let usage = reconciled_usage(Vec::new(), &terms, &ledger, &claims, 1_001)
-                .unwrap()
-                .counted;
+            let usage = reconciled_usage(
+                Vec::new(),
+                &terms,
+                &ledger,
+                &claims,
+                &mut HashMap::new(),
+                HashMap::new(),
+                1_001,
+            )
+            .unwrap()
+            .counted;
             assert_eq!(usage.lifetime().as_str(), "70");
             assert_eq!(
                 (usage.reserved(), usage.spent(), usage.released()),

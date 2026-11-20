@@ -623,6 +623,7 @@ impl Paykit {
             carrier_record: None,
             attempt_proof: None,
             failed_by_method: false,
+            never_dispatched: false,
             request: Some(KeptMessage::of(stored)),
             record_held: false,
             transfer_bound: None,
@@ -776,11 +777,27 @@ impl Paykit {
         if let Some(write) = record_write {
             batch = batch.entry(write);
         }
-        if let Some(mut entry) = entry.filter(JournalEntry::open) {
-            entry.stage = Stage::Finished;
-            batch = batch.local(crate::pay::journal_write(&entry)?);
+        if let Some(own) = entry
+            .as_ref()
+            .filter(|_| basis == Basis::Owner && resolution != Resolution::Unknown)
+        {
+            batch =
+                Box::pin(self.executor_outcome(own, resolution == Resolution::Done, batch)).await?;
         }
-        self.submit(batch).await?;
+        if let Some(entry) = entry.as_mut().filter(|e| e.open()) {
+            if resolution == Resolution::Failed {
+                entry.end_before_the_call();
+            }
+            entry.stage = Stage::Finished;
+            batch = batch.local(crate::pay::journal_write(entry)?);
+        }
+        let applied = self.submit(batch).await?;
+        if let Some(own) = entry
+            .as_ref()
+            .filter(|_| basis == Basis::Owner && resolution != Resolution::Unknown)
+        {
+            Box::pin(self.keep_executor_reply(own, &applied.proofs)).await?;
+        }
         Ok(())
     }
 
