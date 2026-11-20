@@ -81,15 +81,11 @@ async fn join(
     .await??;
     let join = request.join_request(owner.public(), &approved)?;
     world.advance_ms(1000);
-    let mut wallet = Paykit::join(
-        world.app_env(store),
-        Default::default(),
-        join,
-        rail.clone(),
-        Arc::new(TestTimer),
-    )
-    .await?;
+    let env = world.app_env(store);
+    let rail = Arc::clone(rail);
     let wallet = tokio::spawn(Box::pin(async move {
+        let mut wallet =
+            Paykit::join(env, Default::default(), join, rail, Arc::new(TestTimer)).await?;
         wallet.receive(None).await?;
         Ok::<_, paykit_sdk::PaykitError>(wallet)
     }))
