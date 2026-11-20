@@ -93,10 +93,6 @@ async fn confirm_after_quota(world: &World) -> TestResult {
         .confirm_payment(&losing_key)
         .await
         .unwrap_err();
-    assert_eq!(
-        refused.refusal(),
-        Some(&paykit_sdk::Refusal::SettlementBucketFull { bucket: number })
-    );
     let trace = world.trace();
     let mut refusals = trace.lines[start..].iter().filter(|line| {
         line.call == Some("ops")
@@ -105,7 +101,7 @@ async fn confirm_after_quota(world: &World) -> TestResult {
     });
     let refusal = refusals
         .next()
-        .ok_or("missing merchant's service quota refusal")?;
+        .ok_or_else(|| format!("missing merchant's service quota refusal: {refused:?}"))?;
     assert!(refusals.next().is_none());
     assert!(refusal.facts.contains_key("answer signed with"));
     assert_eq!(
@@ -119,6 +115,11 @@ async fn confirm_after_quota(world: &World) -> TestResult {
     let body: serde_json::Value = serde_json::from_slice(answer)?;
     assert_eq!(body["code"], "quota_exceeded");
     assert_eq!(body["current"]["limit"], "record_keys");
+    assert_eq!(
+        refused.refusal(),
+        Some(&paykit_sdk::Refusal::SettlementBucketFull { bucket: number }),
+        "after the merchant's signed record quota response: {refused:?}"
+    );
     let method_checks = wallets.rail.proof_checks();
     let [accepted_check] = &method_checks[checks_before_quota..] else {
         return Err("expected one verified proof before the quota refusal".into());
