@@ -5226,6 +5226,252 @@ async fn test_allowances_restore_sends_nothing_for_a_conflicted_record() {
     Box::pin(restored_rejection_over_conflict(&w, &mut shop, true)).await;
 }
 
+#[derive(Clone, Copy)]
+enum RejectedWithdrawal {
+    Restore,
+    Fresh,
+    Blocked,
+    Recreated,
+    RecreatedAccepted,
+    LateAcceptance,
+}
+
+async fn withdraw_after_rejection(trigger: RejectedWithdrawal) {
+    let w = World::new();
+    let store = crate::common::store();
+    let mut payer = Box::pin(alice_on(
+        &w,
+        "wallet",
+        AppScopes::new()
+            .allowance_execute()
+            .manage_contacts()
+            .build()
+            .unwrap(),
+        store.clone(),
+    ))
+    .await;
+    let mut shop = Box::pin(shop(&w)).await;
+    let offer =
+        Box::pin(payer.propose_executable_allowance(w.bob_id(), terms(), UserConfirmed::new()))
+            .await
+            .unwrap();
+    let original = Box::pin(pending_at(&payer, &offer.record)).await;
+    let backup = payer.backup().await.unwrap();
+    assert_eq!(
+        Box::pin(taken(&mut shop, "paykit.allowance_proposal")).await,
+        1
+    );
+    let at_shop = shop.allowances().await.unwrap()[0].record;
+    let rejection = Box::pin(shop.reject_allowance(&at_shop)).await.unwrap();
+    assert_eq!(
+        Box::pin(received_originals(&mut payer, &[&rejection])).await,
+        [rejection]
+    );
+    let pending = pending_key(&payer, &w.bob_id(), &offer.allowance_id);
+    assert!(Box::pin(held_deleted(&payer, &pending)).await);
+    assert!(payer
+        .app()
+        .shared_record(&offer.record)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
+
+    if matches!(trigger, RejectedWithdrawal::RecreatedAccepted) {
+        Box::pin(records_proposal(
+            &mut payer,
+            original.proposal(),
+            &offer.allowance_id,
+        ))
+        .await;
+        Box::pin(records_proposal(
+            &mut shop,
+            original.proposal(),
+            &offer.allowance_id,
+        ))
+        .await;
+        let answer = Box::pin(shop.accept_allowance(&at_shop)).await.unwrap();
+        let received = Box::pin(payer.receive(None)).await.unwrap();
+        assert!(
+            received.report.events.iter().any(
+                |e| matches!(e, AppEvent::MessageReceived { msg_id, .. } if msg_id == &answer)
+            ),
+            "{received:?}"
+        );
+        Box::pin(payer.receive(None)).await.unwrap();
+        let accepted = Box::pin(payer.allowance(&offer.record)).await.unwrap();
+        assert_eq!(accepted.status, AllowanceStatus::Accepted);
+        assert_eq!(
+            payer
+                .app()
+                .records_of("allowance_ledgers")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
+        drop(payer);
+        let mut restored = Box::pin(restore_pending_wallet(&w, store, &backup)).await;
+        Box::pin(read_restored_records(&mut restored)).await;
+        let record = Box::pin(raw(&restored, &offer.record)).await;
+        let accepted = AllowanceRecord::read(&record, &w.alice_id()).unwrap();
+        assert_eq!(accepted.proposal.hash(), original.proposal().hash());
+        assert_eq!(accepted.response.unwrap().message().msg_id, answer);
+        assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
+        return;
+    }
+    let mut restored = match trigger {
+        RejectedWithdrawal::LateAcceptance => {
+            // Both answers are authentic; the second signed answer arrives after the guarded delete.
+            let q = w.sign_as(
+                &w.bob,
+                "shop",
+                &w.alice,
+                "paykit.allowance_acceptance",
+                vec![original.proposal().hash()],
+                json!({ "allowance_id": offer.allowance_id.as_str() })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            );
+            w.deliver(&w.bob, "shop", &w.alice, &[payer.app_id()], &q);
+            Box::pin(payer.receive(None)).await.unwrap();
+            payer
+        }
+        _ => {
+            if matches!(trigger, RejectedWithdrawal::Blocked) {
+                Box::pin(payer.block(&w.bob_id())).await.unwrap();
+            }
+            if matches!(trigger, RejectedWithdrawal::Recreated) {
+                Box::pin(records_proposal(
+                    &mut payer,
+                    original.proposal(),
+                    &offer.allowance_id,
+                ))
+                .await;
+            }
+            let backup = if matches!(trigger, RejectedWithdrawal::Fresh) {
+                // Even this later backup contains both P and the action that retired it.
+                payer.backup().await.unwrap()
+            } else {
+                backup.clone()
+            };
+            drop(payer);
+            let destination = if matches!(trigger, RejectedWithdrawal::Fresh) {
+                crate::common::store()
+            } else {
+                store.clone()
+            };
+            let mut restored = Box::pin(restore_pending_wallet(&w, destination, &backup)).await;
+            Box::pin(read_restored_records(&mut restored)).await;
+            restored
+        }
+    };
+    if matches!(
+        trigger,
+        RejectedWithdrawal::Fresh | RejectedWithdrawal::Recreated | RejectedWithdrawal::Blocked
+    ) {
+        Box::pin(restored.flush()).await.unwrap();
+        assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
+        match trigger {
+            RejectedWithdrawal::Recreated => {
+                assert_eq!(
+                    Box::pin(pending_at(&restored, &offer.record))
+                        .await
+                        .proposal()
+                        .hash(),
+                    original.proposal().hash()
+                );
+                return;
+            }
+            RejectedWithdrawal::Fresh => return,
+            _ => {
+                Box::pin(restored.unblock(&w.bob_id())).await.unwrap();
+                w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+            }
+        }
+        Box::pin(restored.receive(None)).await.unwrap();
+    }
+    Box::pin(restored.flush()).await.unwrap();
+    let sent = restored
+        .app()
+        .sent_to(&w.bob_id(), 0, u64::MAX)
+        .await
+        .unwrap();
+    let withdrawals: Vec<_> = sent
+        .iter()
+        .filter(|m| m.kind == "paykit.allowance_end")
+        .collect();
+    assert_eq!(withdrawals.len(), 1);
+    let end = StoredMessage::new(
+        restored.identity(),
+        restored.app().cert().signed(),
+        withdrawals[0].plaintext.clone(),
+        None,
+        &w.bob_id(),
+    )
+    .unwrap();
+    assert_eq!(end.message().refs.as_slice(), [original.proposal().hash()]);
+    assert_eq!(
+        Box::pin(received_originals(&mut shop, &[&withdrawals[0].msg_id])).await,
+        [withdrawals[0].msg_id.clone()]
+    );
+    Box::pin(restored.receive(None)).await.unwrap();
+    Box::pin(restored.flush()).await.unwrap();
+    assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
+    if matches!(trigger, RejectedWithdrawal::Restore) {
+        drop(restored);
+        restored = Box::pin(restore_pending_wallet(&w, store, &backup)).await;
+        Box::pin(read_restored_records(&mut restored)).await;
+        Box::pin(restored.flush()).await.unwrap();
+        assert_eq!(
+            Box::pin(taken_or_duplicate(&mut shop, "paykit.allowance_end")).await,
+            0
+        );
+    }
+    Box::pin(assert_pending_absent(
+        &mut restored,
+        &pending_target(&w.bob_id(), &offer.allowance_id),
+    ))
+    .await;
+    assert!(restored
+        .app()
+        .shared_record(&offer.record)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn test_original_rejection_withdrawal_after_in_place_restore() {
+    Box::pin(withdraw_after_rejection(RejectedWithdrawal::Restore)).await;
+}
+
+#[tokio::test]
+async fn test_original_rejection_withdrawal_waits_when_delivery_is_unknown_or_blocked() {
+    Box::pin(withdraw_after_rejection(RejectedWithdrawal::Fresh)).await;
+    Box::pin(withdraw_after_rejection(RejectedWithdrawal::Blocked)).await;
+}
+
+#[tokio::test]
+async fn test_original_rejection_withdrawal_preserves_a_recreated_proposal() {
+    Box::pin(withdraw_after_rejection(RejectedWithdrawal::Recreated)).await;
+}
+
+#[tokio::test]
+async fn test_original_rejection_withdrawal_preserves_the_new_lifetimes_acceptance() {
+    Box::pin(withdraw_after_rejection(
+        RejectedWithdrawal::RecreatedAccepted,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn test_original_rejection_withdrawal_on_a_late_acceptance() {
+    Box::pin(withdraw_after_rejection(RejectedWithdrawal::LateAcceptance)).await;
+}
+
 #[tokio::test]
 async fn test_allowances_restore_sends_no_proposal_after_the_counterpartys_answer() {
     // The wallet's proposal goes in a batch whose answer is lost, and the wallet is backed
@@ -5393,6 +5639,35 @@ async fn receives_resent_rejection(app: &mut Paykit, canonical: &[u8; 32], origi
     assert!(app.app().shared_record(canonical).await.unwrap().is_none());
 }
 
+async fn assert_pending_absent(app: &mut Paykit, target: &pubky_switch_client::app::RecordTarget) {
+    use pubky_switch_client::app::{KeptReason, RecordRead};
+    let physical = app.app().record_key(target).unwrap();
+    let observed = app.app_mut().read_record_fresh(target).await.unwrap();
+    assert!(
+        match &observed {
+            RecordRead::Kept {
+                reason: KeptReason::NotFound,
+                record: None,
+            } => true,
+            RecordRead::Fresh(r)
+            | RecordRead::Kept {
+                reason: KeptReason::NotFound,
+                record: Some(r),
+            } =>
+                r.key == physical
+                    && r.authenticated
+                    && !r.flagged
+                    && !r.doubtful
+                    && !r.not_taken
+                    && !r.divergent
+                    && !r.different_write_at_held_version
+                    && r.content == pubky_switch_client::app::RecordContent::Deleted,
+            _ => false,
+        },
+        "current proposal after restore: {observed:?}"
+    );
+}
+
 /// After an old backup is restored, the proposer receives the original signed rejection
 /// while its service shows no live proposal.
 async fn rejection_before_its_pending(
@@ -5401,7 +5676,6 @@ async fn rejection_before_its_pending(
     responder: &mut Paykit,
     role: AllowanceRole,
 ) -> (StoredMessage, paykit_lib::AllowanceId, String) {
-    use pubky_switch_client::app::{KeptReason, RecordRead};
     use pubky_switch_client::testing::Fault;
 
     let backup = proposer.backup().await.unwrap();
@@ -5414,7 +5688,7 @@ async fn rejection_before_its_pending(
         .await
         .unwrap();
     let target = pending_target(&responder.identity(), &sent.allowance_id);
-    let physical = proposer.app().record_key(&target).unwrap();
+
     let proposal = Box::pin(pending_at(proposer, &sent.record))
         .await
         .proposal()
@@ -5452,30 +5726,7 @@ async fn rejection_before_its_pending(
     .await
     .unwrap();
     let first_read = proposer.receive(None).await.unwrap();
-    let observed = proposer.app_mut().read_record_fresh(&target).await.unwrap();
-    assert!(
-        match &observed {
-            RecordRead::Kept {
-                reason: KeptReason::NotFound,
-                record: None,
-            } => true,
-            RecordRead::Fresh(r)
-            | RecordRead::Kept {
-                reason: KeptReason::NotFound,
-                record: Some(r),
-            } =>
-                r.key == physical
-                    && r.authenticated
-                    && !r.flagged
-                    && !r.doubtful
-                    && !r.not_taken
-                    && !r.divergent
-                    && !r.different_write_at_held_version
-                    && r.content == pubky_switch_client::app::RecordContent::Deleted,
-            _ => false,
-        },
-        "current proposal after restore: {observed:?}"
-    );
+    Box::pin(assert_pending_absent(proposer, &target)).await;
 
     w.clock.advance_ms(60_000);
     let delivery_state = responder.app_mut().flush_message(&rejected).await.unwrap();
