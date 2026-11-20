@@ -44,6 +44,21 @@ impl LossReturn {
 struct ProvedDeletion {
     member: KeptOp,
     version: SeenVersion,
+    /// The signed service-key history that dates a deletion applied after preparation.
+    applied_under: Option<SignedDoc>,
+}
+
+fn carries_selection(prepared: &IdentityDoc, applied: &IdentityDoc, generation: u64) -> bool {
+    prepared.generation() < generation
+        && generation <= applied.generation()
+        && prepared.check_successor(applied).is_ok()
+        && applied.body().recovery_from == prepared.body().recovery_from
+        && applied.service_key_of(prepared.generation()) == Some(prepared.inbox().service_key)
+        && applied.service_key_of(generation).is_some()
+        && crate::allowances::delivery::deletion_continues(
+            prepared.generation(),
+            applied.body().recovery_from,
+        )
 }
 
 impl LossSettlement {
@@ -88,7 +103,22 @@ impl LossSettlement {
         EndOrigin::of(*record, p, None, &w, EndCause::ProviderLoss)?;
         if let Some(deletion) = &self.deletion {
             let member = &deletion.member;
-            let applied = application::applied_applications(vec![member.clone()], &doc, app)?;
+            let selected_in = doc.generation();
+            let generation = deletion.version.record_version().generation;
+            let applied_doc = match &deletion.applied_under {
+                Some(signed) => {
+                    let authority =
+                        IdentityDoc::verify(signed, &own).map_err(|_| PaykitError::corrupt())?;
+                    if !carries_selection(&doc, &authority, generation) {
+                        return Err(PaykitError::corrupt());
+                    }
+                    authority
+                }
+                None if generation == doc.generation() => doc,
+                None => return Err(PaykitError::corrupt()),
+            };
+            let applied =
+                application::applied_applications(vec![member.clone()], &applied_doc, app)?;
             let applied = applied
                 .replies
                 .get(&(w.cert().signing_key(), self.application))
@@ -97,13 +127,12 @@ impl LossSettlement {
                 .map_err(|_| PaykitError::corrupt())?;
             let selects_original = op.body().conditions.iter().any(|condition| {
                 matches!(condition, Condition::RecordCurrent { key, revision, deleted: false }
-                    if key == pending_key && revision.generation == applied.retirement.generation
+                    if key == pending_key && revision.generation == selected_in
                         && revision.seq < applied.retirement.version && revision.item_hash == selected.item_hash)
             });
             let expected = matches!(&op.body().kind, OpKind::RecordPut(put) if put.expected_version == version);
             if applied.retirement != deletion.version.record_version()
                 || applied.pending_key != *pending_key
-                || applied.retirement.generation != doc.generation()
                 || !expected
                 || !selects_original
                 || !op.body().conditions.contains(&pending::absent(*record))
@@ -141,7 +170,7 @@ impl OriginalAllowance {
                         != imported.acceptance.stored(&own)?.hash()
                     || value.withdrawal.stored(&self.peer)?.hash()
                         != imported.withdrawal.stored(&self.peer)?.hash()
-                    || matches!((&value.deletion,&imported.deletion),(Some(a),Some(b)) if a!=b)
+                    || matches!((&value.deletion,&imported.deletion),(Some(a),Some(b)) if a.member != b.member || a.version != b.version)
                 {
                     return Err(PaykitError::corrupt());
                 }
@@ -429,10 +458,25 @@ impl Paykit {
         {
             return Ok(None);
         }
-        s.deletion = Some(ProvedDeletion {
-            member: deletion.clone(),
-            version: result.retirement.into(),
-        });
+        if s.deletion.is_none() {
+            let prepared = IdentityDoc::verify(&s.authority, &self.identity())
+                .map_err(|_| PaykitError::corrupt())?;
+            let generation = result.retirement.generation;
+            let applied_under = if generation == prepared.generation() {
+                None
+            } else {
+                let applied = self.app.own_identity();
+                if !carries_selection(&prepared, applied, generation) {
+                    return Ok(None);
+                }
+                Some(applied.signed().clone())
+            };
+            s.deletion = Some(ProvedDeletion {
+                member: deletion.clone(),
+                version: result.retirement.into(),
+                applied_under,
+            });
+        }
         self.binding(|binder| original.check(record, binder))?;
         Ok(Some(state::local_put(&key, &original)?))
     }
