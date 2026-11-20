@@ -89,3 +89,130 @@ jobs:
       - run: npx playwright install --with-deps ${{ matrix.engine }}
         working-directory: paykit-browser/rig
       - run: paykit-browser/rig/test.sh ${{ matrix.engine }} both
+
+  # Builds the pubky-switch service binary once per pinned rev, for the network tests below.
+  # The engine jobs restore it from the cache, so a cache miss builds it once, not per engine.
+  switch-service:
+    name: Switch service binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      rev: ${{ steps.switch.outputs.rev }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Cargo.lock holds the one pinned rev, so the lock sets the source that is built and the
+      # cache key. switch-pin.sh fails unless every Switch crate in the lock comes from that rev.
+      - name: Read the pubky-switch rev from Cargo.lock
+        id: switch
+        run: |
+          rev=$(paykit-browser/rig/switch-pin.sh --rev)
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+      # A hit needs no download here: the engine jobs restore the binary themselves.
+      - id: switch-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/pubky-switch-bin
+          key: pubky-switch-${{ runner.os }}-${{ steps.switch.outputs.rev }}
+          lookup-only: true
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        if: steps.switch-cache.outputs.cache-hit != 'true'
+        with:
+          toolchain: stable
+      # Cargo cannot build the service from this workspace, which has it only as a dependency of
+      # a dev-dependency, so it is installed from its own repository with upstream's Cargo.lock.
+      - name: Install pubky-switch
+        if: steps.switch-cache.outputs.cache-hit != 'true'
+        env:
+          REV: ${{ steps.switch.outputs.rev }}
+        run: >-
+          cargo install --locked --root ~/pubky-switch-bin
+          --git https://github.com/pubky/pubky-switch --rev "$REV" --bin pubky-switch pubky-switch
+
+  # The network test targets (fetch_transport, switch_flow) against a real Switch service on a
+  # fresh database, behind the TLS and CORS rig (rig/switch-rig.mjs). See rig/test.sh.
+  switch-tests:
+    name: Switch tests (${{ matrix.engine }})
+    needs: switch-service
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [chromium, firefox, webkit]
+    services:
+      # Default settings: the service refuses fsync=off and synchronous_commit=off. The password
+      # is a throwaway for a database that lives only as long as this job.
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: switch-rig-test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # The CLI must be the exact wasm-bindgen version in Cargo.lock, so the lock sets both the
+      # version that is installed and the cache key.
+      - name: Read the wasm-bindgen version from Cargo.lock
+        id: wasm-bindgen
+        run: |
+          version=$(paykit-browser/rig/wasm-bindgen-version.sh)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - id: wasm-bindgen-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/wasm-bindgen-cli
+          key: wasm-bindgen-cli-${{ runner.os }}-${{ steps.wasm-bindgen.outputs.version }}
+      - name: Install wasm-bindgen-cli
+        if: steps.wasm-bindgen-cache.outputs.cache-hit != 'true'
+        env:
+          VERSION: ${{ steps.wasm-bindgen.outputs.version }}
+        run: cargo install --locked --root ~/wasm-bindgen-cli wasm-bindgen-cli --version "$VERSION"
+      - run: echo "$HOME/wasm-bindgen-cli/bin" >> "$GITHUB_PATH"
+      - name: Restore the pubky-switch binary
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/pubky-switch-bin
+          key: pubky-switch-${{ runner.os }}-${{ needs.switch-service.outputs.rev }}
+          fail-on-cache-miss: true
+      # The runner image ships the PostgreSQL client; install it only when an image does not.
+      - name: PostgreSQL client
+        run: |
+          psql --version || {
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends postgresql-client
+            psql --version
+          }
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: paykit-browser/rig/package-lock.json
+      - run: npm ci --ignore-scripts
+        working-directory: paykit-browser/rig
+      - run: npx playwright install --with-deps ${{ matrix.engine }}
+        working-directory: paykit-browser/rig
+      - name: Run the network targets against the Switch service
+        env:
+          PAYKIT_BROWSER_SWITCH_DATABASE_URL: postgres://postgres:switch-rig-test@127.0.0.1:5432/postgres
+          PAYKIT_BROWSER_RIG_LOG_DIR: ${{ runner.temp }}/switch-rig-logs
+        run: |
+          export PAYKIT_BROWSER_SWITCH_BIN="$HOME/pubky-switch-bin/bin/pubky-switch"
+          paykit-browser/rig/test.sh --switch ${{ matrix.engine }} both
+      - name: Keep the service and rig logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: switch-rig-logs-${{ matrix.engine }}
+          path: ${{ runner.temp }}/switch-rig-logs
+          if-no-files-found: ignore
+          retention-days: 7

@@ -45,9 +45,48 @@ futures-channel = "0.3.34"
 js-sys = "0.3.107"
 wasm-bindgen = "0.2.130"
 wasm-bindgen-futures = "0.4.80"
+# The fetch transport (`src/fetch.rs`): the browser's `fetch`, its request, answer, header and
+# body stream types, `AbortController`, and the URL parser it checks the signed path with.
+web-sys = { version = "0.3.107", features = [
+  "AbortController",
+  "AbortSignal",
+  "Headers",
+  "ReadableStream",
+  "ReadableStreamDefaultReader",
+  "ReadableStreamReadResult",
+  "ReferrerPolicy",
+  "Request",
+  "RequestCache",
+  "RequestCredentials",
+  "RequestInit",
+  "RequestMode",
+  "RequestRedirect",
+  "Response",
+  "ResponseType",
+  "Url",
+] }
 
 [dev-dependencies]
 serde_json.workspace = true
+
+# The `switch-enroll` example (`rig/switch_enroll.rs`): the native program the browser rig runs to
+# enrol test identities on a running Switch service and approve their apps with the real signer,
+# which does not build for wasm32. As dev-dependencies of a native-only target table they are
+# resolved only when this crate's dev targets are built natively, and stay out of every wasm32
+# graph and of every plain build: the client's `http` transport, its `testing` module (seeded
+# identities and an in-memory Homeserver), the signer, paykit-lib's protocol for the signer, and a
+# runtime to drive them. paykit-sdk's own dev-dependencies turn on the same features, so the
+# workspace's native test builds get no new ones.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+paykit-lib = { workspace = true, features = ["signer"] }
+pubky-switch-client = { workspace = true, features = ["http", "test-support"] }
+pubky-switch-signer.workspace = true
+serde.workspace = true
+tokio = { version = "1.54.1", features = ["rt", "net", "time"] }
+
+[[example]]
+name = "switch-enroll"
+path = "rig/switch_enroll.rs"
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 # Each wasm-bindgen-test release requires one exact wasm-bindgen version, so Cargo.lock keeps the
@@ -55,6 +94,8 @@ serde_json.workspace = true
 wasm-bindgen-test = "0.3.80"
 # The flows in `tests/request_flow/` and `tests/pay_flow/`: the SDK's fake rail (`FakeRail`), and
 # the Switch client's scripted switch, signer, Homeserver and test clock (`testing`, `TestClock`).
+# The flow in `tests/switch_flow/` uses the fake rail, and the client's seeded identities and
+# in-memory Homeserver (`testing`) for the apps it joins to a real service.
 # Both features are for tests only: under resolver 2, a dev-dependency's features are on only
 # when a target that needs them, such as this crate's tests, is built.
 paykit-sdk = { path = "../paykit-sdk", features = ["test-support"] }

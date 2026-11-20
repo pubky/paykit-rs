@@ -2,8 +2,9 @@
 //! scripted switch at an origin of its own, one `Router` between the switches, a shared
 //! Homeserver, a test clock started at the browser's wall clock, and the SDK's fake rail.
 //!
-//! The `request_flow` and `pay_flow` targets both include this module. The items only one of
-//! them uses allow `dead_code`, as the other target builds them unused.
+//! The `request_flow` and `pay_flow` targets both include this module, and `switch_flow` takes
+//! its request draft and stored-request reader from it. The items only some of them use allow
+//! `dead_code`, as the others build them unused.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

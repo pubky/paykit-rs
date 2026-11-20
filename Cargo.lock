@@ -1568,10 +1568,14 @@ dependencies = [
  "paykit-sdk",
  "pubky-switch-client",
  "pubky-switch-core",
+ "pubky-switch-signer",
+ "serde",
  "serde_json",
+ "tokio",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
+ "web-sys",
 ]
 
 [[package]]

@@ -15,12 +15,15 @@
 //! - `timer`: `JsTimer`, the SDK's `Timer` on JavaScript's `setTimeout`;
 //! - `send`: `run_local`, which runs a future that waits on the browser, and so is not `Send`,
 //!   behind a `Send` future, as the host traits require;
-//! - `panic`: `install_panic_hook`, which reports a Rust panic to the browser console.
+//! - `panic`: `install_panic_hook`, which reports a Rust panic to the browser console;
+//! - `fetch`: `FetchTransport`, the Switch client's `Transport` on the browser's `fetch`.
 //!
 //! The tests under `tests/` run a subset of Paykit's vectors, the random generator, signing,
-//! and sealing natively and in browser engines; and, in browser engines only, the host pieces
-//! and a Payment Request flow of the SDK with no network. The crate's README lists what is
-//! covered, what is not run in a browser yet, and the known run-time hazards on wasm32.
+//! and sealing natively and in browser engines. In browser engines only, they run the host
+//! pieces, and the SDK's Payment Request and pay flows with no network; and, against a real
+//! Switch service behind a local TLS and CORS rig, `FetchTransport` and the one-time Payment
+//! Request flow. The crate's README lists what is covered, what is not run in a browser yet,
+//! the limits of the network tests, and the known run-time hazards on wasm32.
 //!
 //! On any other target the crate builds as an empty crate, so workspace-wide commands keep
 //! working.
@@ -44,6 +47,8 @@ compile_error!(
 // them: other wasm32 targets, such as WASI, have no JavaScript host to call.
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub mod clock;
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub mod fetch;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub mod panic;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
