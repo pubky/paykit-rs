@@ -154,6 +154,62 @@ async fn receive(wallet: &mut Paykit) -> TestResult {
     Err("wallet did not finish its pages".into())
 }
 
+async fn connect_after_earlier_batch(
+    world: &World,
+    payer: &mut Paykit,
+    shop: [u8; 32],
+) -> TestResult {
+    let app = payer.app_mut();
+    world.lose_answer("POST", "/ops");
+    let first = app.allow_connect(&shop).await.unwrap_err();
+    let first_id = first.kept_batch().ok_or("missing original batch")?;
+    let other = world.identity("other-shop")?.public();
+    world.unreachable("POST", "/ops");
+    let held = app.allow_connect(&other).await.unwrap_err();
+    let pubky_switch_client::app::AppError::Ahead { ahead, .. } = &held else {
+        return Err("later write did not wait for the original batch".into());
+    };
+    let since = ahead.kept_since_ms.ok_or("original batch was never sent")?;
+    let until = ahead
+        .answer_until_ms
+        .ok_or("missing original answer window")?;
+    let service_reply = pubky_switch_client::app::AppError::Ahead {
+        ahead: *ahead,
+        error: Box::new(
+            pubky_switch_client::error::ClientError::Switch {
+                status: 503,
+                code: pubky_switch_core::http::ErrorCode::Unavailable,
+                message: "unavailable".into(),
+                current: serde_json::Value::Null,
+                known_version: None,
+                retry_after: None,
+            }
+            .into(),
+        ),
+    };
+    assert!(
+        matches!(WalletError::from(service_reply), WalletError::Operation {
+        kept_batch: None, service_code: Some(code), switch_refusal: Some(_), ..
+    } if code == "unavailable")
+    );
+    let WalletError::Operation {
+        kept_batch: None,
+        service_code: None,
+        switch_refusal: Some(rule),
+        ..
+    } = held.into()
+    else {
+        return Err("transport failure lost the earlier batch".into());
+    };
+    assert!(matches!(rule.kind(), SwitchRefusalKind::KeptBatchesAhead {
+        batch_id, kept_since_ms: Some(start), answer_until_ms: Some(end), kept: 1,
+    } if batch_id == first_id && start == since && end == until && start < end));
+    Box::pin(receive(payer)).await?;
+    assert!(payer.app().admits(&shop).await?);
+    assert!(!payer.app().admits(&other).await?);
+    Ok(())
+}
+
 async fn payment(
     world: &World,
     host: &WalletHost,
@@ -181,7 +237,7 @@ async fn payment(
     {
         let mut app = payer.lock().await?;
         Box::pin(receive(&mut app)).await?;
-        app.app_mut().allow_connect(&shop.public()).await?;
+        Box::pin(connect_after_earlier_batch(world, &mut app, shop.public())).await?;
     }
     Box::pin(receive(&mut seller)).await?;
     seller.app_mut().allow_connect(&buyer).await?;

@@ -20,7 +20,7 @@ If an install or load fails after acquiring its writer, the call waits for relea
 
 Use `backup` to export the installed wallet’s SDK backup. Store its bytes and App ID together in protected storage. Use `load` to reopen the installed state on the same device. For a retained grant, `reconcileAllowance` reports usage only from the original authority and complete account-wide method history. An unknown result leaves spending held.
 
-A refused operation carries a `PaymentRefusal`. Use `kind()` to choose the next action and `reason()` for display. For example, `IdentityUnavailable` means the wallet needs a fresh identity before it can resume a payment. A `Divergent` refusal identifies the affected records and versions. `attemptedFailure()` exposes the original refusal when an attempt failed before dispatch. A client operation can also carry a typed `switchRefusal`, including the generation requiring recovery. Keep an unrecognized refusal held.
+A refused operation carries a `PaymentRefusal`. Use `kind()` to choose the next action and `reason()` for display. For example, `IdentityUnavailable` means the wallet needs a fresh identity before it can resume a payment. A `Divergent` refusal identifies the affected records and versions. `attemptedFailure()` exposes the original refusal when an attempt failed before dispatch. A client operation can also carry a typed `switchRefusal`, including the generation requiring recovery. `KeptBatchesAhead` identifies the earlier batch and its answer window. The separate `keptBatch` field identifies a batch retained for this call. Keep an unrecognized refusal held.
 
 ## Generate both languages
 

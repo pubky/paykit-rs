@@ -1,8 +1,22 @@
-use pubky_switch_client::app::{Refusal, WontDeliver};
+use pubky_switch_client::app::{AppError, Refusal, WontDeliver};
+use std::sync::Arc;
 
-/// A Switch rule that refused the operation, including a refusal beneath a retained batch.
+/// The Switch rule that held the operation, including an earlier batch waiting for an answer.
 #[derive(Debug, uniffi::Object)]
 pub struct SwitchRefusal(pub(crate) Refusal);
+
+impl SwitchRefusal {
+    pub(crate) fn from_error(error: &AppError) -> Option<Arc<Self>> {
+        let rule = match error {
+            AppError::Refused(rule) => rule.clone(),
+            AppError::Kept { error, .. } => return Self::from_error(error),
+            // The earlier batch blocks this write even if its resend failed in transport.
+            AppError::Ahead { ahead, .. } => Refusal::KeptBatchesAhead(*ahead),
+            _ => return None,
+        };
+        Some(Arc::new(Self(rule)))
+    }
+}
 
 #[uniffi::export]
 impl SwitchRefusal {
