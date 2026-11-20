@@ -668,10 +668,10 @@ fn check_payee_certificates(keys: &Keys, d: &Value) {
             refused.iter().zip(
                 PAYEE_REFUSED
                     .iter()
-                    .map(|(app, _, _, rule)| (*app, Some(*rule))),
+                    .map(|(app, removed, _, rule)| (*app, Some((*removed, *rule)))),
             ),
         );
-    for (case, (app, rule)) in cases {
+    for (case, (app, refusal)) in cases {
         let name = st(case, "name");
         let doc = signed(&case["signed"]);
         assert_eq!(body_text(&doc), st(case, "body"), "{name}");
@@ -686,14 +686,23 @@ fn check_payee_certificates(keys: &Keys, d: &Value) {
             permissions_for(c.scopes()).as_slice(),
             "{name}"
         );
-        match (verify_certificate(&doc, &bob), rule) {
+        match (verify_certificate(&doc, &bob), refusal) {
             (Ok(_), None) => {
                 for scope in [SETTLEMENTS, CONTACTS] {
                     assert!(c.scopes().iter().any(|s| s == scope), "{name}");
                 }
                 assert_eq!(doc, cert_doc(app), "{name}");
             }
-            (Err(error), Some(rule)) => {
+            (Err(error), Some((removed, rule))) => {
+                let mut expected = cert(keys.app(app)).body().clone();
+                let position = expected
+                    .scopes
+                    .iter()
+                    .position(|s| s == removed)
+                    .expect(name);
+                expected.scopes.remove(position);
+                expected.permissions = permission_names(&permissions_for(&expected.scopes));
+                assert_eq!(c.body(), &expected, "{name}");
                 assert!(error.to_string().contains(rule), "{name}: {error}");
                 assert_eq!(quoted(&error.to_string()), st(case, "reason"), "{name}");
             }
