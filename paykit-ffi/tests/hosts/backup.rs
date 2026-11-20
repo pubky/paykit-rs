@@ -9,7 +9,7 @@ use pubky_switch_client::{
     store::{client_namespace, MemoryStore, StateStore},
     transport::BoxFuture,
 };
-use pubky_switch_harness::{parties::Asking, Backend, World};
+use pubky_switch_harness::{parties::Asking, World};
 use std::{
     collections::BTreeMap,
     error::Error,
@@ -62,7 +62,7 @@ async fn receive(wallet: &mut Paykit) -> Result<()> {
 }
 
 pub(super) async fn print_wallet(seller_only: bool) -> Result<()> {
-    let world = World::start(Backend::Scripted)?.ok_or("missing wallet world")?;
+    let world = super::service::start()?;
     let rail = Arc::new(FakeRail::with_clock(world.clock().clone()));
     let payer_store = Arc::new(MemoryStore::new());
     let (mut payer, _) = Box::pin(enrolled(
@@ -171,7 +171,7 @@ fn write_store(output: &mut impl Write, app: [u8; 16], store: &MemoryStore) -> R
 pub(super) async fn print_notice(cleared: bool) -> Result<()> {
     use pubky_switch_client::app::AppEvent;
 
-    let world = World::start(Backend::Scripted)?.ok_or("missing wallet world")?;
+    let world = super::service::start()?;
     let store = Arc::new(MemoryStore::new());
     let owner = world.identity("payer")?;
     let (mut payer, mut signer) = Box::pin(enrolled(
