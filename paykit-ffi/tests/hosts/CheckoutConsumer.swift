@@ -178,14 +178,23 @@ private func restoreCheckout(
         let payer = try await host.load(appId: app)
         let finished = try await payer.restoreState()
         precondition(!finished.reconciling)
-        let next = try await fixture.sendCheckout()
         try await payer.finishReceive()
+        let requests = try await payer.requests().filter { $0.id.requestHash == original.requestHash }
+        precondition(requests.count == 1)
+        let refused = try await payer.payRequest(id: original, options: options)
+        guard case let .error(.Refused(confirmation)) = refused.decision,
+              case let .heldAfterRestore(record) = confirmation.kind() else {
+            preconditionFailure("missing original request hold")
+        }
+        precondition(record == requests[0].record && method.calls == 0)
         await method.release.signal()
-        let decision = try await payer.payRequest(id: next, options: options)
-        guard case let .outcome(.paid(attempt, _)) = decision.decision else { preconditionFailure("restored wallet did not pay the new request") }
-        let signed = try await fixture.confirmPayment(request: next)
+        var confirmed = options
+        confirmed.confirmedRefusals = [confirmation]
+        let decision = try await payer.payRequest(id: original, options: confirmed)
+        guard case let .outcome(.paid(attempt, _)) = decision.decision else { preconditionFailure("restored wallet did not pay the confirmed request") }
+        let signed = try await fixture.confirmPayment(request: original)
         try await payer.finishReceive()
-        let receipts = try await payer.requestReceipts(id: next)
+        let receipts = try await payer.requestReceipts(id: original)
         precondition(receipts.count == 1 && receipts[0].messageId == signed && receipts[0].attemptId == attempt && method.calls == 1)
         try await payer.shutdown()
     }

@@ -70,7 +70,7 @@ private suspend fun restoreCheckout(
 ) = coroutineScope {
     check(action in setOf("confirm", "refuse", "doubt"))
     val options = PaymentOptions(null, null, false, false, emptyList())
-    val backup = source.completeEnrollment(reference).use { wallet ->
+    val (backup, original) = source.completeEnrollment(reference).use { wallet ->
         wallet.finishReceive()
         wallet.allowConnect(fixture.payee())
         val original = fixture.sendCheckout()
@@ -86,7 +86,7 @@ private suspend fun restoreCheckout(
             method.pendingLookup = true
         }
         wallet.shutdown()
-        snapshot
+        snapshot to original
     }
     val destination = EnrollmentStore()
     fixture.hostForStore(destination).use { host ->
@@ -143,14 +143,18 @@ private suspend fun restoreCheckout(
         if (action == "confirm") {
             host.load(app).use { wallet ->
                 check(!wallet.restoreState().reconciling)
-                val next = fixture.sendCheckout()
                 wallet.finishReceive()
+                val request = wallet.requests().single { it.id.requestHash.contentEquals(original.requestHash) }
+                val refused = wallet.payRequest(original, options).decision as PaymentDecision.Error
+                val confirmation = (refused.error as WalletException.Refused).refusal
+                val hold = confirmation.kind() as RefusalKind.HeldAfterRestore
+                check(hold.record.contentEquals(request.record) && method.calls.get() == 0)
                 method.release.complete(Unit)
-                val result = wallet.payRequest(next, options)
+                val result = wallet.payRequest(original, options.copy(confirmedRefusals = listOf(confirmation)))
                 val paid = (result.decision as PaymentDecision.Outcome).outcome as PaymentOutcome.Paid
-                val receipt = fixture.confirmPayment(next)
+                val receipt = fixture.confirmPayment(original)
                 wallet.finishReceive()
-                val paidReceipt = wallet.requestReceipts(next).single()
+                val paidReceipt = wallet.requestReceipts(original).single()
                 check(paidReceipt.messageId == receipt && paidReceipt.attemptId == paid.attemptId)
                 check(method.calls.get() == 1)
                 wallet.shutdown()
