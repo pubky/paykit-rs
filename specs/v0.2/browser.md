@@ -1434,7 +1434,11 @@ implement in Rust, and which cross to JavaScript?
   profile, and 5.29 MB raw, 2.01 MB gzip, and 1.50 MB brotli with a size
   profile (`opt-level = "z"`, LTO, one codegen unit, stripped); its glue adds
   about 8 KB gzip. How v0.1 was measured is unknown, so the figures are not
-  comparable.
+  comparable. The bundle grows with the SDK: #603's size job on Linux
+  measured 15.18 MB (`release`) and 5.18 MB (size profile) raw on the `v0.2`
+  head the drafts started from, and 19.22 MB and 6.07 MB raw (size profile:
+  2.29 MB gzip, 1.69 MB brotli) on a `v0.2` head 30 merges later, 17% more
+  with the size profile.
 - Stack. wasm32's default stack is 1 MiB. The pay flow's debug test build
   needs 1216 KiB (1152 KiB fails) and its release build 192 KiB, in all three
   engines, page and worker, so the drafts give only their wasm32 test
