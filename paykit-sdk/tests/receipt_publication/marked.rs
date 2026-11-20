@@ -79,11 +79,7 @@ async fn read_repaired_marker(world: &World, sale: IssuedSale) -> TestResult {
     };
     let marked = till
         .app_mut()
-        .put_record(
-            &target,
-            &serde_json::to_vec(&eager)?,
-            vec![answers_delete.clone()],
-        )
+        .put_record(&target, &serde_json::to_vec(&eager)?, vec![answers_delete])
         .await?;
     let signed = record_op(&till, key, till.app().cert()).await?;
     assert_eq!(signed.body().conditions, [answers_delete]);
