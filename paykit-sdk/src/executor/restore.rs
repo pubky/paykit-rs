@@ -1,6 +1,6 @@
 //! Check the ordinary direct successor of the backed-up executor ledger (Paykit spec 8.3).
 
-use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::collections::{hash_map::Entry, HashMap};
 
 use paykit_lib::allowances::{
     check_successor, usage, AllowanceTerms, CompactedFailed, Ledger, LedgerEntry, Usage,
@@ -48,6 +48,41 @@ fn compacted_transfer_matches(
         _ => return false,
     };
     saved == (obligation, &amount.asset, &amount.value)
+}
+
+/// A settled tombstone can outlive its signed opening. It corroborates a Done entry
+/// already accepted under this grant, never a new reservation (Paykit spec 8.3).
+/// The caller must also verify the dated payer proof and the method's exact transfer.
+fn settled_after_accepted_payment(
+    read: &pubky_switch_client::app::ClaimRead,
+    previous: Option<&LedgerEntry>,
+    accepted_at: u64,
+    entry: &LedgerEntry,
+    executor: [u8; 16],
+) -> bool {
+    use paykit_lib::allowances::EntryOutcome;
+    use pubky_switch_core::claims::{ClaimStatus, Outcome};
+
+    let claim = &read.view;
+    claim.tombstone
+        && read.entries.is_empty()
+        && claim.status == ClaimStatus::Settled
+        && !claim.rebuilt
+        && !claim.divergent
+        && claim.claim_key == entry.obligation
+        && entry.outcome == Some(EntryOutcome::Done)
+        && previous == Some(entry)
+        && claim
+            .attempt(&entry.attempt_id.to_bytes())
+            .is_some_and(|attempt| {
+                attempt.owner == executor
+                    && attempt.outcome == Outcome::Done
+                    && attempt.resolved_by == Some(executor)
+                    && !attempt.duplicate
+                    && !attempt.possibly_duplicate
+                    && entry.at <= attempt.opened_at
+                    && attempt.opened_at <= accepted_at
+            })
 }
 
 /// How this executor established the application it is about to incorporate.
@@ -364,19 +399,20 @@ impl Paykit {
         }
         // An open claim reserves its entry even before dispatch (Paykit spec 8.3).
         // Terminal entries only need a claim read when attributing a wallet attempt.
-        let dispatched: HashSet<_> = inventory.iter().map(|d| d.attempt_id).collect();
+        let dispatched: HashMap<_, _> = inventory.iter().map(|d| (d.attempt_id, d)).collect();
+        let mut settled_payments = Vec::new();
         let entries: Vec<_> = ledger
             .entries
             .iter()
             .filter(|entry| {
                 !claims.contains_key(&entry.attempt_id)
-                    && (entry.outcome.is_none() || dispatched.contains(&entry.attempt_id))
+                    && (entry.outcome.is_none() || dispatched.contains_key(&entry.attempt_id))
             })
             .collect();
         let failed: Vec<_> = ledger
             .failed
             .iter()
-            .filter(|entry| dispatched.contains(&entry.attempt_id))
+            .filter(|entry| dispatched.contains_key(&entry.attempt_id))
             .collect();
         for obligation in entries
             .iter()
@@ -389,6 +425,12 @@ impl Paykit {
         }
         if !entries.is_empty() || !failed.is_empty() {
             let ops = self.app.shared_evidence().await?;
+            let accepted_entries: HashMap<_, _> = accepted
+                .ledger
+                .entries
+                .iter()
+                .map(|e| (e.attempt_id, e))
+                .collect();
             let openings = || ops.ops.iter().chain(compactions.iter().map(|c| &c.opening));
             for entry in entries {
                 let Some(read) = reads.get(&entry.obligation).and_then(Option::as_ref) else {
@@ -400,6 +442,24 @@ impl Paykit {
                         .accepted_opening(&self.app, op, entry, read, &exact_grant)
                 }) {
                     claims.insert(entry.attempt_id, opening);
+                } else if let Some(payment) = dispatched.get(&entry.attempt_id).filter(|payment| {
+                    matches!(payment.outcome, crate::rail::RailOutcome::Paid(_))
+                        && settled_after_accepted_payment(
+                            read,
+                            accepted_entries.get(&entry.attempt_id).copied(),
+                            accepted.application.at_ms,
+                            entry,
+                            self.app_id(),
+                        )
+                }) {
+                    claims.insert(
+                        entry.attempt_id,
+                        super::ReservationClaim {
+                            obligation: entry.obligation,
+                            state: paykit_lib::allowances::ClaimState::Done,
+                        },
+                    );
+                    settled_payments.push((*payment).clone());
                 } else if read.view.rebuilt
                     || read.view.divergent
                     || read.view.attempt(&entry.attempt_id.to_bytes()).is_some()
@@ -443,9 +503,9 @@ impl Paykit {
             };
             retired
         };
-        if !unclassified.is_empty() {
+        if !unclassified.is_empty() || !settled_payments.is_empty() {
             let records = self.payer_records().await?;
-            for dispatch in unclassified {
+            for dispatch in unclassified.into_iter().chain(settled_payments) {
                 let crate::rail::RailOutcome::Paid(method) = &dispatch.outcome else {
                     return Ok(None);
                 };
@@ -491,6 +551,23 @@ impl Paykit {
                 };
                 let this_allowance = activity.counterparty == checkpoint.counterparty
                     && paid.allowance_id.as_ref() == Some(&id);
+                if let Some(entry) = ledger
+                    .entries
+                    .iter()
+                    .find(|e| e.attempt_id == dispatch.attempt_id)
+                {
+                    // Only a paid tombstone reaches this branch. Its accepted reservation
+                    // pins the amount already matched to the method, including rounding.
+                    if !this_allowance
+                        || proof.cert().app_id() != self.app_id()
+                        || obligation != Some(entry.obligation)
+                        || request.is_none_or(|r| proof.message().refs.first() != Some(&r.hash()))
+                        || signed_amount.is_none_or(|amount| amount.asset != entry.asset)
+                    {
+                        return Ok(None);
+                    }
+                    continue;
+                }
                 let failed = ledger
                     .failed
                     .iter()
@@ -574,6 +651,67 @@ mod tests {
     use super::*;
     use paykit_lib::allowances::EntryOutcome;
     use paykit_lib::{Asset, AttemptId, Decimal};
+
+    #[test]
+    fn test_settled_claim_needs_an_exact_previously_accepted_payment() {
+        use pubky_switch_client::app::ClaimRead;
+        use pubky_switch_core::claims::{AttemptView, ClaimStatus, ClaimView, Outcome};
+
+        let executor = [7; 16];
+        let entry = LedgerEntry {
+            obligation: [2; 32],
+            attempt_id: AttemptId::from_bytes([4; 16]),
+            asset: Asset::new("btc").unwrap(),
+            value: Decimal::new("70").unwrap(),
+            at: 1000,
+            outcome: Some(EntryOutcome::Done),
+        };
+        let mut read = ClaimRead {
+            entries: Vec::new(),
+            view: ClaimView {
+                claim_key: entry.obligation,
+                status: ClaimStatus::Settled,
+                owner: None,
+                attempt_id: None,
+                step: 2,
+                attempts: vec![AttemptView {
+                    attempt_id: entry.attempt_id.to_bytes(),
+                    owner: executor,
+                    outcome: Outcome::Done,
+                    opened_at: 1002,
+                    orphan_after: 60,
+                    orphaned: false,
+                    possibly_duplicate: false,
+                    duplicate: false,
+                    resolved_by: Some(executor),
+                }],
+                tombstone: true,
+                deadline: None,
+                divergent: false,
+                rebuilt: false,
+                next_possibly_duplicate: false,
+            },
+        };
+        let matches = |read: &ClaimRead, previous: Option<&LedgerEntry>, current: &LedgerEntry| {
+            settled_after_accepted_payment(read, previous, 1004, current, executor)
+        };
+        assert!(matches(&read, Some(&entry), &entry));
+        assert!(!matches(&read, None, &entry));
+        let mut different = entry.clone();
+        different.value = Decimal::new("30").unwrap();
+        assert!(!matches(&read, Some(&entry), &different));
+        different = entry.clone();
+        different.outcome = None;
+        assert!(!matches(&read, Some(&different), &different));
+        read.view.attempts[0].duplicate = true;
+        assert!(!matches(&read, Some(&entry), &entry));
+        read.view.attempts[0].duplicate = false;
+        read.view.attempts[0].owner = [8; 16];
+        assert!(!matches(&read, Some(&entry), &entry));
+        read.view.attempts[0].owner = executor;
+        read.view.rebuilt = true;
+        assert!(!matches(&read, Some(&entry), &entry));
+    }
 
     #[test]
     fn test_compacted_reservation_uses_its_original_transfer_amount() {
