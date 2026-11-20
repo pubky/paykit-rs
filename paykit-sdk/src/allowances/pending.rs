@@ -265,6 +265,11 @@ impl Paykit {
         pending_key: &[u8; 32],
         permanent_key: &[u8; 32],
     ) -> Result<bool> {
+        if self.unresolved_allowance(pending_key).await?
+            || self.unresolved_allowance(permanent_key).await?
+        {
+            return Ok(true);
+        }
         let peer = pending.counterparty();
         let end = self
             .local_get::<super::PendingRetirement>(&key::pending_retirement(pending_key))
@@ -357,7 +362,12 @@ impl Paykit {
             {
                 continue;
             }
-            let status = if conflicted
+            let status = if !conflicted
+                && (self.unresolved_allowance(&pending_key).await?
+                    || self.unresolved_allowance(&permanent).await?)
+            {
+                AllowanceStatus::AwaitingConflictCheck
+            } else if conflicted
                 || self.conflict_kept(&permanent).await?
                 || self
                     .competing_proposal_owed(&pending, &pending_key, &permanent)
@@ -543,6 +553,9 @@ impl Paykit {
                 .is_some_and(|end| end.retires(intent.source))
             {
                 continue;
+            }
+            if self.unresolved_allowance(&pending).await? || self.unresolved_allowance(key).await? {
+                return Err(not_current());
             }
             if active.replace(intent).is_some() {
                 return Err(not_current());
@@ -1174,6 +1187,9 @@ impl Paykit {
             .unwrap_or(false);
         if current.conflicted().is_none()
             && !local_conflict
+            && !self
+                .may_discard_with_evidence(&target, &held, &current)
+                .await?
             && (current.proposal().sender() != *peer || !self.denied(peer).await?)
         {
             return Err(Refusal::Usage("only a conflicted proposal or a blocked counterparty's received proposal may be discarded".into()).into());
