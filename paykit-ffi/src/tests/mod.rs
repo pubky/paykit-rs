@@ -4,8 +4,7 @@ use pubky_switch_harness::{Backend, World};
 use std::{error::Error, sync::Arc};
 
 mod method;
-#[path = "../../tests/hosts/signer.rs"]
-mod signer;
+use crate::fixture_signer as signer;
 mod storage;
 mod wallet;
 

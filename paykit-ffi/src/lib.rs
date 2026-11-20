@@ -2,10 +2,16 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 #![recursion_limit = "512"]
+#[cfg(feature = "test-wallet")]
+#[path = "../tests/hosts/checkout.rs"]
+mod checkout;
 mod enrollment;
 mod environment;
 mod error;
 mod events;
+#[cfg(any(test, feature = "test-wallet"))]
+#[path = "../tests/hosts/signer.rs"]
+mod fixture_signer;
 mod method;
 mod notices;
 mod payments;
@@ -15,6 +21,8 @@ mod requests;
 mod review;
 mod store;
 mod wallet;
+#[cfg(feature = "test-wallet")]
+pub use checkout::{enrolled_test_checkout, CheckoutFixture};
 pub use enrollment::*;
 pub use environment::*;
 pub use error::*;
