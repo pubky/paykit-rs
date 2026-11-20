@@ -492,6 +492,75 @@ impl JournalEntry {
         Ok(Some(signed))
     }
 
+    /// The single details message named by this occurrence's proof. A later
+    /// destination and any per-period rate must come from that same signed message.
+    pub(crate) fn selected_period_details(&self, own: &[u8; 32]) -> Result<Option<StoredMessage>> {
+        let rates = self.selected_rate_details(own)?;
+        let carrier = self.kept_carrier(own)?;
+        let destination = match carrier {
+            Carrier::Message(message)
+                if matches!(message.body(), Body::PaymentPeriodDetails(_)) =>
+            {
+                Some(*message)
+            }
+            _ => None,
+        };
+        let Some(period) = self.period()? else {
+            return if destination.is_none() {
+                Ok(rates)
+            } else {
+                Err(PaykitError::corrupt())
+            };
+        };
+        let request = self
+            .request
+            .as_ref()
+            .ok_or_else(PaykitError::corrupt)?
+            .stored(own)?;
+        let Body::PaymentRequest(parent) = request.body() else {
+            return Err(PaykitError::corrupt());
+        };
+        let first = parent
+            .recurrence
+            .as_ref()
+            .ok_or_else(PaykitError::corrupt)?
+            .first()?;
+        if !parent.per_period_endpoints || period == PeriodRef::from(first) {
+            return if destination.is_none() {
+                Ok(rates)
+            } else {
+                Err(PaykitError::corrupt())
+            };
+        }
+        let signed = destination.ok_or_else(PaykitError::corrupt)?;
+        let Body::PaymentPeriodDetails(details) = signed.body() else {
+            return Err(PaykitError::corrupt());
+        };
+        let endpoint = self.destination.endpoint_id()?;
+        if Some(request.hash()) != self.request_hash()?
+            || request.sender() != self.payee
+            || signed.sender() != self.payee
+            || signed.message().refs != [request.hash()]
+            || signed.cert().app_id() != self.destination.app_id
+            || details.billing_period != period
+            || details.check_against(parent).is_err()
+            || signed.check_payee_sender(parent).is_err()
+            || self.destination.source()? != DestinationSource::Request
+            || !crate::destination::period_endpoint_matches(details, &self.destination)
+            || matches!(&parent.destination, paykit_lib::bodies::RequestDestination::RequiredApp(app) if *app != self.destination.app_id)
+            || parent
+                .accepted_payment_endpoint_identifiers
+                .as_ref()
+                .is_some_and(|ids| !ids.contains(&endpoint))
+            || rates
+                .as_ref()
+                .is_some_and(|source| source.hash() != signed.hash())
+        {
+            return Err(PaykitError::corrupt());
+        }
+        Ok(Some(signed))
+    }
+
     /// The originally authorized quote from the kept attempt and verified rate details.
     pub(crate) fn priced_payment(
         &self,
@@ -841,8 +910,7 @@ impl JournalEntry {
                 _ => return corrupt(),
             }
         }
-        self.selected_rate_details(own)?;
-        self.kept_carrier(own)?;
+        self.selected_period_details(own)?;
         if let Some(acceptance) = self
             .acceptance_message(own, own_cert)
             .map_err(|_| PaykitError::corrupt())?

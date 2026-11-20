@@ -127,6 +127,24 @@ pub(crate) fn valid_details<'a>(
         .collect()
 }
 
+/// A request's endpoints apply to every occurrence or just the first (Paykit spec 8.2).
+pub(crate) fn needs_period_destination(
+    request: &PaymentRequest,
+    period: PeriodRef,
+) -> Result<bool> {
+    let first = request
+        .recurrence
+        .as_ref()
+        .ok_or_else(PaykitError::corrupt)?
+        .first()?;
+    Ok(request.per_period_endpoints && period != PeriodRef::from(first))
+}
+
+/// A later destination must be supplied by the app named in the original request.
+pub(crate) fn destination_app_permitted(request: &PaymentRequest, app: [u8; 16]) -> bool {
+    !matches!(&request.destination, paykit_lib::bodies::RequestDestination::RequiredApp(required) if *required != app)
+}
+
 /// The signed rate interval of period details (Paykit wire 4.9), without a payer or
 /// payee time policy. Callers first validate the details against their request and use
 /// the interval only when the selected payment is priced by these rates.
@@ -935,7 +953,7 @@ impl Paykit {
     /// period record is divergent or was seen so, until the user confirms it;
     /// [`Refusal::AlreadyPaid`] for a period whose record holds its proof;
     /// [`Refusal::NoDestination`] for a later period of a request with
-    /// `per_period_endpoints`, paid only to its period details' destination;
+    /// `per_period_endpoints` until its signed details supply a usable destination;
     /// [`Refusal::PeriodNotStarted`]; [`Refusal::AttemptedPeriodsFull`];
     /// [`Refusal::NotNow`] while the period record's value waits for its scope key or
     /// doesn't read.
@@ -988,8 +1006,8 @@ impl Paykit {
     /// Pay one Billing Period under the Allowance named by the accepted subscription
     /// for this occurrence. Its executor reserves the amount and opens the period's
     /// claim in the same batch (Paykit spec 8.2, 8.3). A payment requiring currency
-    /// conversion is ineligible. A later period requiring a destination from period details
-    /// returns [`Refusal::NoDestination`].
+    /// conversion is ineligible. For a later occurrence that needs its own destination, the
+    /// wallet uses eligible signed period details. Missing details return [`Refusal::NoDestination`].
     ///
     /// # Errors
     ///
@@ -1130,22 +1148,6 @@ impl Paykit {
         {
             return Err(period_record_unread());
         }
-        // With `per_period_endpoints`, the request's destination serves only its first
-        // period: a later one is paid to its period details' destination, which this call
-        // doesn't pay (Paykit spec 8.2, "Destinations per period").
-        let first = body
-            .recurrence
-            .as_ref()
-            .ok_or_else(PaykitError::corrupt)?
-            .first()?;
-        if body.per_period_endpoints && billing != first {
-            return Err(Refusal::NoDestination(
-                "Paykit spec 8.2: a later Billing Period of this request is paid to its period \
-                 details' destination"
-                    .into(),
-            )
-            .into());
-        }
         // Divergent after a provider loss, or seen so: the request record pauses every period
         // of the request, its upload maybe holding a cancellation, and the period record its
         // own period. Paid by hand only once the user has seen that the payee may have
@@ -1253,13 +1255,38 @@ impl Paykit {
         } else {
             None
         };
-        let pricing =
-            self.period_pricing(request, period, &body, held_period.as_ref(), by, &options)?;
-        let pricing = if funding.is_some() {
-            pricing.under_allowance()
+        let allowance_endpoints = funding.as_ref().and_then(|under| under.endpoints());
+        let per_period_destination = needs_period_destination(&body, period)?;
+        let mut details = held_period
+            .as_ref()
+            .map_or_else(Vec::new, |held| valid_details(held, &body));
+        let mut destinations = if per_period_destination {
+            let now = self.now();
+            let named = options.selected_period_rate();
+            let mut destinations: Vec<_> = details
+                .iter()
+                .copied()
+                .filter(|signed| {
+                    let Body::PaymentPeriodDetails(detail) = signed.body() else {
+                        return false;
+                    };
+                    detail.payment_endpoints.is_some()
+                        && now < detail.expires_at
+                        && destination_app_permitted(&body, signed.cert().app_id())
+                        && named.is_none_or(|id| id == signed.message().msg_id)
+                })
+                .collect();
+            destinations.sort_by(|a, b| period_details_order(a.message(), b.message()));
+            destinations
         } else {
-            pricing
+            vec![&stored]
         };
+        let mut unavailable = Refusal::NoDestination(
+            "Paykit spec 8.2: no current signed details carry an eligible period destination"
+                .into(),
+        )
+        .into();
+        let mut payee_identity = None;
         let Chosen {
             destination,
             carrier,
@@ -1268,17 +1295,48 @@ impl Paykit {
             payment_amount,
             paid,
             price,
-        } = self
-            .request_destination(
-                &request.payee,
-                &stored,
-                &body,
-                &options,
-                funding.as_ref().and_then(|under| under.endpoints()),
-                &pricing,
-                public_failures,
-            )
-            .await?;
+        } = loop {
+            let Some(candidate) = destinations.pop() else {
+                return Err(unavailable);
+            };
+            // For a later destination its own signed details must supply any per-period rate.
+            let (rates, named) = if per_period_destination {
+                (vec![candidate], None)
+            } else {
+                (std::mem::take(&mut details), options.selected_period_rate())
+            };
+            let pricing = self.period_pricing(request, period, &body, rates, by, named)?;
+            let pricing = if funding.is_some() {
+                pricing.under_allowance()
+            } else {
+                pricing
+            };
+            match self
+                .request_destination(
+                    &request.payee,
+                    candidate,
+                    &body,
+                    &options,
+                    allowance_endpoints,
+                    &pricing,
+                    &mut payee_identity,
+                    public_failures,
+                )
+                .await
+            {
+                Ok(chosen) => break chosen,
+                Err(error)
+                    if per_period_destination
+                        && matches!(
+                            error.refusal(),
+                            Some(Refusal::NoDestination(_) | Refusal::UnsupportedEndpoint(_))
+                        ) =>
+                {
+                    unavailable = error
+                }
+                Err(error) => return Err(error),
+            }
+        };
         if blocked {
             let amount = paid.ok_or_else(|| {
                 Refusal::NotNow(
@@ -1374,9 +1432,9 @@ impl Paykit {
         request: &RequestRef,
         period: PeriodRef,
         body: &'a PaymentRequest,
-        held: Option<&'a ActivityRecord>,
+        mut details: Vec<&'a StoredMessage>,
         by: Initiator,
-        options: &PayOptions,
+        named: Option<&str>,
     ) -> Result<Pricing<'a>> {
         let pricing = Pricing::of_request(
             &body.amount,
@@ -1385,7 +1443,6 @@ impl Paykit {
             body.conversion.as_ref(),
             by,
         );
-        let named = options.selected_period_rate();
         if !matches!(
             body.conversion,
             Some(paykit_lib::bodies::Conversion::PerPeriod)
@@ -1402,7 +1459,6 @@ impl Paykit {
         let service = self.service_time();
         let device = self.now();
         // A quote held by this occurrence can still be used until its signed expiry.
-        let mut details = held.map_or_else(Vec::new, |record| valid_details(record, body));
         details.retain(|signed| {
             matches!(signed.body(), Body::PaymentPeriodDetails(details) if details.rates.is_some())
                 && named.is_none_or(|id| signed.message().msg_id == id)

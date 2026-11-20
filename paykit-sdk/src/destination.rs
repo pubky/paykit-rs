@@ -594,6 +594,20 @@ pub(crate) fn carries(
             }
             Ok(())
         }
+        (DestinationSource::Request, Body::PaymentPeriodDetails(details)) => {
+            if request_hash.is_none_or(|hash| carrier.message().refs.as_slice() != [*hash]) {
+                return Err("Paykit spec 8.2: the period details name another request".into());
+            }
+            if !period_endpoint_matches(details, destination) {
+                return Err(
+                    "Paykit spec 7.2: the period details do not carry the destination".into(),
+                );
+            }
+            if now >= details.expires_at {
+                return Err("Paykit wire 4.9: the period details have expired".into());
+            }
+            Ok(())
+        }
         (DestinationSource::List, Body::PrivatePaymentList(list)) => {
             let listed = list
                 .payment_endpoints
@@ -610,6 +624,18 @@ pub(crate) fn carries(
         }
         _ => Err("Paykit spec 7.2: no verified message carries the destination".into()),
     }
+}
+
+/// Match the signed endpoint identifier and its actual payment method payload.
+pub(crate) fn period_endpoint_matches(
+    details: &paykit_lib::bodies::PeriodDetails,
+    destination: &Destination,
+) -> bool {
+    destination
+        .endpoint_id()
+        .ok()
+        .and_then(|id| details.payment_endpoints.as_ref()?.get(&id))
+        .is_some_and(|payload| payload.as_str() == destination.payload)
 }
 
 /// A public endpoint's record carries it (Paykit spec 4, Paykit wire 3.2): the payee's

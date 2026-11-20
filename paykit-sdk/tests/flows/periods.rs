@@ -3564,7 +3564,7 @@ async fn test_periods_credit_stays_given_after_a_restore() {
 }
 
 /// Alice's payer period record of `request`'s `period`.
-fn payer_period_at(request: &RequestRef, period: PeriodRef) -> RecordTarget {
+pub(super) fn payer_period_at(request: &RequestRef, period: PeriodRef) -> RecordTarget {
     let collection = Collection::PayerActivity;
     RecordTarget::new(
         SwitchCollection::new(collection.name(), collection.policy(None)),
