@@ -270,6 +270,68 @@ impl CheckoutFixture {
         .await
     }
 
+    /// Seed the same observed divergent-write marker used in the SDK's checkout tests.
+    /// The wallet must be closed so this fixture can acquire its own protected writer.
+    pub async fn mark_divergent(
+        &self,
+        app_id: Vec<u8>,
+        record: Vec<u8>,
+    ) -> Result<(), WalletError> {
+        let app_id = crate::fixed(app_id, "test app ID")?;
+        let record: [u8; 32] = crate::fixed(record, "test record key")?;
+        let namespace = pubky_switch_client::store::client_namespace(&app_id);
+        let session = crate::WalletStoreSession::open(self.host.store.clone(), namespace).await?;
+        let owner = session.ownership.clone();
+        let key = format!("rcdiv/{}", pubky_switch_core::enc::b64(&record));
+        let result = session
+            .put(key.as_bytes(), br#"{"v":3,"d":null}"#.to_vec())
+            .await;
+        drop(session);
+        owner.finish().await?;
+        Ok(result?)
+    }
+
+    /// Replace the buyer's lost provider through its enrolled identity signer. Leave
+    /// the wallet's receive, reconciliation and user statements to the language caller.
+    pub async fn replace_lost_provider(self: Arc<Self>, second: bool) -> Result<(), WalletError> {
+        harness(async move || {
+            let world = self.world.lock().await;
+            let world = world
+                .as_ref()
+                .ok_or(WalletError::invalid("test service closed"))?;
+            let first = "https://recovered-buyer.payments.test";
+            let (old, next) = if second {
+                (first, "https://next-buyer.payments.test")
+            } else {
+                ("https://buyer.payments.test", first)
+            };
+            let buyer = world
+                .identity("buyer")
+                .map_err(|_| WalletError::invalid("test identity"))?;
+            world.advance_ms(11 * 60_000);
+            world
+                .set_account_missing(old, &buyer, true)
+                .await
+                .map_err(|_| WalletError::invalid("test lost service account"))?;
+            world
+                .add_switch(next, &[&buyer])
+                .await
+                .map_err(|_| WalletError::invalid("test replacement service"))?;
+            let mut signer = self.signer.lock().await;
+            Box::pin(signer.declare_provider_loss(
+                next,
+                pubky_switch_signer::UserConfirmed::shown_and_confirmed(),
+            ))
+            .await
+            .map_err(|_| WalletError::invalid("test provider loss declaration"))?;
+            Box::pin(signer.end_staged_admission())
+                .await
+                .map_err(|_| WalletError::invalid("test admission"))?;
+            Ok(())
+        })
+        .await
+    }
+
     /// Close both enrolled test services after the host shuts down its wallet.
     pub async fn finish(self: Arc<Self>) -> Result<(), WalletError> {
         harness(async move || {

@@ -32,6 +32,10 @@ After an interruption, `unacknowledgedEvents` lists surviving Paykit duties in o
 
 After reading the feed, show the request from `requests` with its payee, amount, payment reference, selling label and status. Pass its original `RequestId` to `payRequest` when the user chooses to pay. The result includes the method outcome or typed failure and any failures for individual public Payment Endpoints. Inspect `refusal.kind()` to show a quote, earlier payment doubt, or other confirmation. Pass back the same refusal only after the user confirms it.
 
+For a divergent request, show the original record, collection, version and warnings returned by the refusal or `divergentRecords`. After the user confirms that observation, call `confirmDivergent` with its `observation`. Run `receive` until its waiting writes are drained before trying the payment again. If the write changed, show the new observation and ask again.
+
+A one-time obligation can appear in `reconcile` with a provider-loss boundary and an empty attempt list. Show the original obligation and boundary, including that another wallet may already have paid it at the old service. Only if the user states it was unpaid, pass that boundary’s `payment` to `confirmNotPaidBeforeLoss`. A `LossChanged` refusal requires a fresh report and a new decision. The statement applies only to that obligation and loss. Other attempt uncertainties still require their original outcomes.
+
 After an interrupted payment, shut down the old handle, reopen the same App ID and use `resumePayments` to look up the original attempt. Use `reconcile` for obligations with an unknown outcome and show the remaining doubt before any user-confirmed resolution. `requestReceipts` returns the signed seller receipt after it arrives. On a newly restored store that lookup can be held until the first inventory completes. `notices` and the payee deletion notices each have their own acknowledgement, separate from feed duties.
 
 ## Generate both languages
@@ -93,4 +97,4 @@ swiftc -swift-version 6 -parse-as-library -I "$OUT" -I "$OUT/swift" \
 DYLD_LIBRARY_PATH="$OUT:$LIB" "$OUT/wallet-consumer"
 ```
 
-To exercise a full checkout from the host, build the host library with `--features bindgen,test-wallet` and regenerate the bindings. Supply `-PcheckoutTest=true` to the Kotlin command. For the Swift 6 command, add `-D PAYKIT_CHECKOUT_TEST` and `paykit-ffi/tests/hosts/CheckoutConsumer.swift`. Both consumers enroll with a local shop, acknowledge a recovery notice across reopen, and cancel the payment call after the host method has durably charged it. The reopened wallet uses the original attempt to obtain the signed seller receipt.
+To exercise a full checkout from the host, build the host library with `--features bindgen,test-wallet` and regenerate the bindings. Supply `-PcheckoutTest=true` to the Kotlin command. For the Swift 6 command, add `-D PAYKIT_CHECKOUT_TEST` and `paykit-ffi/tests/hosts/CheckoutConsumer.swift`. Both consumers enroll with a local shop, acknowledge a recovery notice across reopen, and cancel the payment call after the host method has durably charged it. The reopened wallet uses the original attempt to obtain the signed seller receipt. Set `PAYKIT_TEST_CHECKOUT_RECOVERY` to `divergence` or `loss` to exercise user confirmation of a changed record or provider loss before the same checkout.

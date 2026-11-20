@@ -62,6 +62,59 @@ private suspend fun NativeWallet.finishReceive() {
     error("wallet did not complete its feed")
 }
 
+private suspend fun NativeWallet.reviewLoss(
+    fixture: CheckoutFixture, request: RequestId, method: CheckoutMethod
+) {
+    suspend fun nextLoss(second: Boolean): DoubtfulPayment {
+        val before = receive().generation
+        fixture.replaceLostProvider(second)
+        var arrived = false
+        repeat(12) {
+            if (!arrived) {
+                val read = receive()
+                arrived = read.generation > before && !read.stopped && !read.more
+            }
+        }
+        check(arrived)
+        repeat(12) {
+            val report = try {
+                reconcile()
+            } catch (error: WalletException.Refused) {
+                if (error.refusal.kind() !is RefusalKind.NotNow) throw error
+                return@repeat
+            }
+            val row = report.doubtful.single { it.requestHash.contentEquals(request.requestHash) }
+            check(!report.payerSkipped && row.payee.contentEquals(request.payee) && row.attempts.isEmpty())
+            check(row.obligation.size == 32 && checkNotNull(row.beforeLoss).generation > before)
+            endConfirmedReconciliation()
+            return row
+        }
+        error("reconciliation did not finish its listing")
+    }
+
+    val first = nextLoss(false)
+    val current = nextLoss(true)
+    check(current.obligation.contentEquals(first.obligation))
+    val earlier = checkNotNull(first.beforeLoss)
+    val latest = checkNotNull(current.beforeLoss)
+    check(latest.generation > earlier.generation && latest.uncertainUntilMs >= latest.declaredAtMs)
+    try {
+        confirmNotPaidBeforeLoss(checkNotNull(earlier.payment))
+        error("the earlier loss was accepted")
+    } catch (error: WalletException.Refused) {
+        val changed = checkNotNull((error.refusal.kind() as RefusalKind.LossChanged).boundary)
+        check(changed.generation == latest.generation && changed.declaredAtMs == latest.declaredAtMs &&
+            changed.uncertainUntilMs == latest.uncertainUntilMs && changed.payment == null)
+    }
+    val refused = payRequest(request, PaymentOptions(null, null, false, false, emptyList())).decision as PaymentDecision.Error
+    val doubt = checkNotNull(((refused.error as WalletException.Refused).refusal.kind() as RefusalKind.MayBePaid).doubt)
+    check(doubt.obligation.contentEquals(first.obligation) && doubt.beforeLoss?.generation == latest.generation)
+    check(method.calls.get() == 0)
+    confirmNotPaidBeforeLoss(checkNotNull(latest.payment))
+    check(reconcile().doubtful.none { it.obligation.contentEquals(current.obligation) })
+    allowConnect(fixture.payee())
+}
+
 private fun driveCheckout() = runBlocking {
     withTimeout(60_000) {
         val directory = Files.createTempDirectory("paykit-method").toFile()
@@ -95,7 +148,10 @@ private fun driveCheckout() = runBlocking {
                         wallet.shutdown()
                         notice to checkNotNull(event.id)
                     }
-                    val request = host.load(enrolled.appId).use { wallet ->
+                    val recovery = System.getenv("PAYKIT_TEST_CHECKOUT_RECOVERY")
+                    var shown: Divergence? = null
+                    val request = host.load(enrolled.appId).use { originalWallet ->
+                        var wallet = originalWallet
                         check(wallet.unacknowledgedEvents().any {
                             it.id.contentEquals(duty) && it.owners == listOf("paykit")
                         })
@@ -118,6 +174,24 @@ private fun driveCheckout() = runBlocking {
                         val refused = failure.error as WalletException.Refused
                         refused.refusal.use { check(it.kind() is RefusalKind.NotFound) }
                         check(skipped.publicFailures.isEmpty() && method.calls.get() == 0)
+                        when (recovery) {
+                            "divergence" -> {
+                                wallet.shutdown()
+                                fixture.markDivergent(enrolled.appId, view.record)
+                                wallet = host.load(enrolled.appId)
+                                val held = wallet.payRequest(sent, options).decision as PaymentDecision.Error
+                                val refusedRecord = ((held.error as WalletException.Refused).refusal.kind() as RefusalKind.Divergent).records.single()
+                                val listed = wallet.divergentRecords().single()
+                                check(refusedRecord.record.contentEquals(view.record) && listed.record.contentEquals(view.record))
+                                check(refusedRecord.version != null && refusedRecord.version == listed.version && refusedRecord.paused &&
+                                    refusedRecord.divergent && !refusedRecord.mayHoldCredit && method.calls.get() == 0)
+                                shown = refusedRecord
+                                wallet.confirmDivergent(refusedRecord.observation)
+                                wallet.finishReceive()
+                                check(wallet.divergentRecords().none { it.paused || it.writesWaiting })
+                            }
+                            "loss" -> wallet.reviewLoss(fixture, sent, method)
+                        }
                         wallet.finishReceive()
                         withTimeout(15_000) {
                             val watch = async { wallet.feedWait(25u) }
@@ -138,13 +212,34 @@ private fun driveCheckout() = runBlocking {
                         wallet.shutdown()
                         sent
                     }
-                    host.load(enrolled.appId).use { payer ->
+                    host.load(enrolled.appId).use { opened ->
+                        var payer = opened
                         val original = payer.payments().single()
                         check(original.stage == PaymentStage.PAYING && original.amount.value == "7")
                         val resumed = payer.resumePayments()
                         check(resumed.any { it is PaymentOutcome.Paid && it.attemptId == original.attemptId })
+                        shown?.let { old ->
+                            payer.shutdown()
+                            fixture.markDivergent(enrolled.appId, old.record)
+                            payer = host.load(enrolled.appId)
+                        }
                         val receipt = fixture.confirmPayment(request)
                         payer.finishReceive()
+                        shown?.let { old ->
+                            val latest = payer.divergentRecords().single()
+                            check(latest.record.contentEquals(old.record) && latest.version != old.version)
+                            try {
+                                payer.confirmDivergent(old.observation)
+                                error("the earlier divergent write was accepted")
+                            } catch (error: WalletException.Operation) {
+                                check(error.kind == WalletFailureKind.CONFLICT)
+                            }
+                            check(payer.divergentRecords().single().paused)
+                            payer.confirmDivergent(latest.observation)
+                            check(payer.divergentRecords().single().writesWaiting)
+                            payer.finishReceive()
+                            check(payer.divergentRecords().none { it.writesWaiting })
+                        }
                         check(payer.requestReceipts(request).single().let {
                             it.messageId == receipt && it.attemptId == original.attemptId && it.paymentReference == "checkout-7" &&
                                 it.payee.contentEquals(request.payee) && it.requestHash.contentEquals(request.requestHash)
