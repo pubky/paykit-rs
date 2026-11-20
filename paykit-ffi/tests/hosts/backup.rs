@@ -56,7 +56,7 @@ async fn receive(wallet: &mut Paykit) -> Result<()> {
     Err("wallet did not complete its feed".into())
 }
 
-pub(super) async fn print_wallet() -> Result<()> {
+pub(super) async fn print_wallet(seller_only: bool) -> Result<()> {
     let world = World::start(Backend::Scripted)?.ok_or("missing wallet world")?;
     let rail = Arc::new(FakeRail::with_clock(world.clock().clone()));
     let payer_store = Arc::new(MemoryStore::new());
@@ -68,12 +68,13 @@ pub(super) async fn print_wallet() -> Result<()> {
         payer_store.clone(),
     ))
     .await?;
+    let seller_store = Arc::new(MemoryStore::new());
     let mut seller = Box::pin(enrolled(
         &world,
         "seller",
         AppScopes::new().request(),
         rail,
-        Arc::new(MemoryStore::new()),
+        seller_store.clone(),
     ))
     .await?;
     Box::pin(receive(&mut payer)).await?;
@@ -120,6 +121,14 @@ pub(super) async fn print_wallet() -> Result<()> {
     }) {
         return Err("payer did not hold the original signed receipt".into());
     }
+    if seller_only {
+        let app = seller.app_id();
+        drop(seller);
+        println!("{}", STANDARD.encode(app));
+        print_store(app, &seller_store)?;
+        world.close().await?;
+        return Ok(());
+    }
     let backup = payer.backup().await?.to_bytes()?;
     println!("{}", STANDARD.encode(payer.app_id()));
     println!("{}", STANDARD.encode(payer.identity()));
@@ -130,12 +139,18 @@ pub(super) async fn print_wallet() -> Result<()> {
     println!("{}", STANDARD.encode(backup));
     // Hand the language process the unchanged test store of the original device as well.
     // It can distinguish an ordinary reopen from restoring the backup before its first read.
-    let namespace = client_namespace(&payer.app_id());
+    let app = payer.app_id();
     drop(payer);
+    print_store(app, &payer_store)?;
+    world.close().await?;
+    Ok(())
+}
+
+fn print_store(app: [u8; 16], store: &MemoryStore) -> Result<()> {
+    let namespace = client_namespace(&app);
     println!("{namespace}");
-    for (key, value) in payer_store.scan(&namespace, b"", None, u32::MAX)? {
+    for (key, value) in store.scan(&namespace, b"", None, u32::MAX)? {
         println!("{} {}", STANDARD.encode(key), STANDARD.encode(value));
     }
-    world.close().await?;
     Ok(())
 }
