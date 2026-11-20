@@ -1182,13 +1182,14 @@ async fn test_executor_incorporates_an_unfunded_period_paid_at_an_authorized_rat
         .with_period_deadline_s(3600);
     let mut subscriptions =
         Box::pin(world.labelled_shop("subscription-till", "subscriptions")).await;
+    let mut shipping = Box::pin(world.labelled_shop("shipping-till", "shipping")).await;
     let req = Box::pin(request_from(
         &mut subscriptions,
         payer.identity(),
         subscription,
     ))
     .await;
-    Box::pin(payer.receive(None)).await.unwrap();
+    Box::pin(crate::common::finish_listing(&mut payer)).await;
     Box::pin(payer.accept_subscription(&req)).await.unwrap();
     let shown =
         Box::pin(payer.pay_period_automatically(&req, &period, PeriodPrice::RequestedAmount))
@@ -1221,19 +1222,32 @@ async fn test_executor_incorporates_an_unfunded_period_paid_at_an_authorized_rat
         .iter()
         .find(|p| p.billing_period == period)
         .unwrap();
-    let receipt = Box::pin(subscriptions.confirm_payment(&occurrence.record))
+    // This wallet also has a genuine receipt from a different labelled till of the same seller.
+    let parcel = Box::pin(request_from(
+        &mut shipping,
+        payer.identity(),
+        draft("1", start),
+    ))
+    .await;
+    Box::pin(crate::common::finish_listing(&mut payer)).await;
+    let parcel_attempt = Box::pin(payer.pay_request(&parcel, Default::default()))
+        .await
+        .outcome
+        .unwrap()
+        .attempt_id();
+    Box::pin(crate::common::finish_listing(&mut shipping)).await;
+    let parcel_sale = shipping
+        .payee_activity()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|sale| sale.attempt_id == Some(parcel_attempt))
+        .unwrap();
+    let shipping_receipt = Box::pin(shipping.confirm_payment(&parcel_sale.record))
         .await
         .unwrap()
         .unwrap();
-    Box::pin(payer.receive(None)).await.unwrap();
-    assert_eq!(
-        payer
-            .receipts(ReceiptsOf::Period(req, period))
-            .await
-            .unwrap()[0]
-            .msg_id,
-        receipt
-    );
+    Box::pin(crate::common::finish_listing(&mut payer)).await;
     assert_eq!(
         Box::pin(payer.reconcile_allowance(&key))
             .await
@@ -1243,7 +1257,7 @@ async fn test_executor_incorporates_an_unfunded_period_paid_at_an_authorized_rat
             .as_str(),
         "0"
     );
-    // A completed, receipted attempt with a deadline is lawfully pruned after 30 days.
+    // The original payment journal expires 30 days after the deadline.
     world.clock.advance_ms(32 * 86400000);
     let start = world.clock.now_ms() / 1000 * 1000;
     let schedule = Recurrence::new(
@@ -1259,7 +1273,8 @@ async fn test_executor_incorporates_an_unfunded_period_paid_at_an_authorized_rat
         draft("10", start).with_recurrence(schedule),
     ))
     .await;
-    Box::pin(payer.receive(None)).await.unwrap();
+    let next_payment = Box::pin(request_from(&mut shop, payer.identity(), draft("1", start))).await;
+    Box::pin(crate::common::finish_listing(&mut payer)).await;
     Box::pin(payer.resume_payments()).await.unwrap();
     assert!(payer
         .payments()
@@ -1267,6 +1282,35 @@ async fn test_executor_incorporates_an_unfunded_period_paid_at_an_authorized_rat
         .unwrap()
         .iter()
         .all(|entry| entry.attempt_id != attempt));
+    let retained = payer.receipts(ReceiptsOf::All).await.unwrap();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].msg_id, shipping_receipt);
+    assert!(payer
+        .receipts(ReceiptsOf::Period(req, period))
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(Box::pin(payer.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .is_none());
+    let calls = world.rail.all_executions();
+    assert!(
+        Box::pin(payer.accept_subscription_under_allowance(&funded, &key))
+            .await
+            .is_err()
+    );
+    let refused = Box::pin(payer.pay_under_allowance(&next_payment, &key))
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(refused.to_string().contains("wallet history"), "{refused}");
+    assert_eq!(world.rail.all_executions(), calls);
+    let receipt = Box::pin(subscriptions.confirm_payment(&occurrence.record))
+        .await
+        .unwrap()
+        .unwrap();
+    Box::pin(crate::common::finish_listing(&mut payer)).await;
     assert_eq!(
         payer
             .receipts(ReceiptsOf::Period(req, period))
