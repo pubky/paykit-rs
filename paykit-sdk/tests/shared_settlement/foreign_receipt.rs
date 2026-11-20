@@ -165,9 +165,8 @@ async fn receipt_after_loss(w: &World, remove_writer: bool) -> TestResult {
         .ok_or("request was not delivered")?;
     Box::pin(payer.receive(None)).await?;
     rail.next(Behaviour::Hang);
-    let unpaid = request.clone();
     let (mut payer, payment) = tokio::spawn(Box::pin(async move {
-        let paid = Box::pin(payer.pay_request(&unpaid, PayOptions::default())).await;
+        let paid = Box::pin(payer.pay_request(&request, PayOptions::default())).await;
         (payer, paid.outcome)
     }))
     .await?;
@@ -322,7 +321,7 @@ async fn receipt_after_loss(w: &World, remove_writer: bool) -> TestResult {
         open(&mut phone, &obligation, &attempt_id, owner).await?;
         assert_eq!(phone.app().protocol_scan("paykit", b"pr/").await?, kept);
         assert!(phone
-            .receipts(ReceiptsOf::Request(request.clone()))
+            .receipts(ReceiptsOf::Request(request))
             .await?
             .is_empty());
         assert_eq!(rail.executions(&attempt_id), 1);
@@ -353,7 +352,7 @@ async fn receipt_after_loss(w: &World, remove_writer: bool) -> TestResult {
         .protocol_scan("paykit", b"pr/")
         .await?
         .is_empty());
-    let shown = phone.receipts(ReceiptsOf::Request(request.clone())).await?;
+    let shown = phone.receipts(ReceiptsOf::Request(request)).await?;
     assert_eq!(shown.len(), 1);
     assert_eq!(shown[0].msg_id, msg_id);
     let evidence = phone.app().shared_evidence().await?;
