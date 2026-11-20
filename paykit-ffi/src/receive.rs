@@ -1,0 +1,248 @@
+use crate::{NativeWallet, PaymentRefusal, Version, WalletError, WalletEventData};
+use paykit_sdk::Paykit;
+use pubky_switch_client::app::{AppEvent, EventId, HeldCursor, Woken};
+use std::sync::Arc;
+
+/// One event in a receive report, with its durable duty identity when applicable.
+#[derive(uniffi::Record)]
+pub struct WalletEvent {
+    /// Opaque duty ID to use when acknowledging a processed prefix.
+    pub id: Option<Vec<u8>>,
+    /// The protocols that still own this duty.
+    pub owners: Vec<String>,
+    /// The typed outcome of the receive operation.
+    pub data: WalletEventData,
+}
+fn event(app: &Paykit, e: AppEvent) -> WalletEvent {
+    let id = e.id();
+    WalletEvent {
+        id: id.map(|id| id.to_bytes().to_vec()),
+        owners: id
+            .and_then(|id| app.app().event_owners(id))
+            .unwrap_or_default()
+            .to_vec(),
+        data: e.into(),
+    }
+}
+
+/// What the cursor the service holds says beside the app's own position (Switch spec 8.3).
+#[derive(uniffi::Enum)]
+pub enum CursorStatus {
+    /// At or behind the app's position: no device of the app passed an entry after it, so every
+    /// entry after it is still at the service, but for those a `missed` item shows deleted and
+    /// those sealed to a receive key the app doesn't hold.
+    Clean,
+    /// Ahead of the app's position: an instance of the app passed entries after it that the app's
+    /// state doesn't hold, and the service may have deleted them since.
+    Ahead {
+        /// The `seq` the service reports.
+        held: u64,
+        /// The `seq` of the app's position it was compared with.
+        position: u64,
+    },
+    /// Nothing to tell: a position a provider loss ended, an app whose devices share its cursor
+    /// reported ahead, or, at a restore, a condition the client checks that didn't hold.
+    Unknown,
+    /// A native case that this binding does not recognize.
+    Other,
+}
+/// A record the app has seen divergent, as the host shows it (Paykit spec 6): from
+/// `Paykit::divergent_records`, a receive's summary, or a refusal (`Refusal::Divergent`).
+/// `Paykit::confirm_divergent` takes its `record`.
+#[derive(uniffi::Record)]
+pub struct Divergence {
+    /// The record key.
+    pub record: Vec<u8>,
+    /// Its collection: what the upload may hold a newer copy of, such as a cancellation in a
+    /// request record or a newer list in a `payment_lists` record.
+    pub collection: String,
+    /// Paused: nothing is paid, accepted or credited on it automatically, and by hand only once
+    /// the user confirms (`Paykit::confirm_divergent`).
+    pub paused: bool,
+    /// The latest view the app read shows it divergent now.
+    pub divergent: bool,
+    /// The write of the record the app holds, the one shown; `None` for a record it holds no
+    /// more. `Paykit::confirm_divergent` confirms only that write.
+    pub version: Option<Version>,
+    /// Shown for a credit (Paykit spec 8.1 step 4): the record may hold a credit of a settlement
+    /// its current write lacks, a receipt in its upload, so the app can't tell a proof isn't
+    /// credited already.
+    pub may_hold_credit: bool,
+    /// The user has confirmed it, and the messages kept over it, receipts included, are written
+    /// at the next receive (`Paykit::receive`): until then nothing is paid, accepted or credited
+    /// on it, by hand or automatically.
+    pub writes_waiting: bool,
+}
+impl From<paykit_sdk::DivergentRecord> for Divergence {
+    fn from(v: paykit_sdk::DivergentRecord) -> Self {
+        Self {
+            record: v.record.into(),
+            collection: v.collection.name().into(),
+            paused: v.paused,
+            divergent: v.divergent,
+            version: v.version.map(Into::into),
+            may_hold_credit: v.may_hold_credit,
+            writes_waiting: v.writes_waiting,
+        }
+    }
+}
+/// What a `Paykit::receive` did.
+#[derive(uniffi::Record)]
+pub struct WalletReceiveReport {
+    /// The provider generation of the receive cursor.
+    pub generation: u64,
+    /// The verified sequence reached in that generation.
+    pub sequence: u64,
+    /// Whether processing stopped at an input that still needs attention.
+    pub stopped: bool,
+    /// Whether more feed or inventory work remains.
+    pub more: bool,
+    /// The authenticated status of the restored cursor, when being reconciled.
+    pub held_cursor: Option<CursorStatus>,
+    /// Switch events in their reported order.
+    pub events: Vec<WalletEvent>,
+    /// The `msg_id`s of the messages received, each with its effect committed with the cursor
+    /// move (Switch spec 8.2).
+    pub applied: Vec<String>,
+    /// The `resend_request`s answered and asked.
+    pub resends: u64,
+    /// A recovery ask waits because its sender certificate lacks `paykit_contacts`.
+    pub resend_refused: Option<Arc<PaymentRefusal>>,
+    /// The app's certificate fails Paykit's checks, as `Paykit::certificate_refused` gives it:
+    /// the read went on, holding Paykit's entries unprocessed, and none of the Paykit steps after
+    /// it ran.
+    pub certificate_refused: Option<Arc<PaymentRefusal>>,
+    /// The wallet's required listing under a new certificate or after a missed feed is
+    /// incomplete.
+    pub records_unlisted: Option<String>,
+    /// A certificate taken is another than the one the records were last listed under, and the
+    /// app waits for its scope keys, which the signer stores when it is next online (Switch spec
+    /// 3.5).
+    pub scope_keys_awaited: bool,
+    /// The data epochs whose scope keys entries stored by the client wait for, ascending, as the
+    /// read's `AppEvent::AwaitingKeys` names them: such an entry's record holds a value sealed at
+    /// that epoch, which the app can't open yet, or its write needs the current epoch's key.
+    pub key_epochs_awaited: Vec<u64>,
+    /// The account is gone at this switch: the client took it as erased (Switch spec 12.7), a
+    /// provider loss (Switch spec 12.6).
+    pub account_gone: bool,
+    /// The records this receive paused: a view showed them divergent after a provider loss
+    /// (Paykit spec 6).
+    pub divergent: Vec<Divergence>,
+}
+/// What a wait for the feed ended in (`FeedWait::wait`).
+#[derive(Clone, Copy, uniffi::Enum)]
+pub enum FeedWake {
+    /// The feed shows something past the position waited from: the host calls `App::receive` with
+    /// no wait.
+    Ready,
+    /// The wait passed with nothing to show: the host takes a fresh handle and waits again.
+    Quiet,
+    /// The app should read now: the switch refused the wait or couldn't be reached, an answer
+    /// didn't verify with the key the app pinned (a recovery in place answers a held read so,
+    /// Switch wire 7.4.4), the account is frozen, or a failed call left state only a read loads
+    /// again.
+    ReadNow,
+    /// Reads stop where the last one did, for something no wait on the feed shows, and the handle
+    /// sent nothing: the last read stopped (`ReceiveReport::stopped`: a key another device made
+    /// that this one lacks, a provider change or a move awaited), its owed listing waits for a
+    /// scope key (`AppEvent::ListingWaitsForKey`), or the app is removed, gone, departed or
+    /// stopped on an alarm.
+    ReadLater,
+    /// A native case that this binding does not recognize.
+    Other,
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl NativeWallet {
+    /// Wait on the feed and apply the native loop's retry pause before returning.
+    /// The wait releases the wallet lock. Cancellation during polling or the pause
+    /// leaves the durable cursor unchanged.
+    pub async fn feed_wait(&self, seconds: u32) -> Result<FeedWake, WalletError> {
+        let wait = {
+            let app = self.lock().await?;
+            app.app().feed_wait(seconds)
+        };
+        let requested = wait.seconds();
+        let started = std::time::Instant::now();
+        let wake = wait.wait().await;
+        let pause = self
+            .pace
+            .lock()
+            .await
+            .after_wait(wake, requested, started.elapsed());
+        if let Some(pause) = pause {
+            tokio::time::sleep(pause).await;
+        }
+        Ok(match wake {
+            Woken::Ready => FeedWake::Ready,
+            Woken::Quiet => FeedWake::Quiet,
+            Woken::ReadNow => FeedWake::ReadNow,
+            Woken::ReadLater => FeedWake::ReadLater,
+            _ => FeedWake::Other,
+        })
+    }
+    /// Delay in milliseconds before retrying a failed receive in this wallet's feed loop.
+    pub async fn failed_read_pause_ms(&self) -> u64 {
+        self.pace.lock().await.after_failed_read().as_millis() as u64
+    }
+    /// Process one bounded receive. Persist the handled effects before acknowledging their prefix.
+    pub async fn receive(&self) -> Result<WalletReceiveReport, WalletError> {
+        self.with_wallet(async |app| {
+            let s = app.receive(None).await?;
+            let r = s.report;
+            Ok(WalletReceiveReport {
+                generation: r.cursor.generation,
+                sequence: r.cursor.seq,
+                stopped: r.stopped,
+                more: r.more,
+                held_cursor: r.held_cursor.map(|v| match v {
+                    HeldCursor::Clean => CursorStatus::Clean,
+                    HeldCursor::Ahead { held, position, .. } => {
+                        CursorStatus::Ahead { held, position }
+                    }
+                    HeldCursor::Unknown => CursorStatus::Unknown,
+                    _ => CursorStatus::Other,
+                }),
+                events: r.events.into_iter().map(|e| event(app, e)).collect(),
+                applied: s.applied,
+                resends: s.resends,
+                resend_refused: s.resend_refused.map(|r| Arc::new(PaymentRefusal(r))),
+                certificate_refused: s.certificate_refused.map(|r| Arc::new(PaymentRefusal(r))),
+                records_unlisted: s.records_unlisted,
+                scope_keys_awaited: s.scope_keys_awaited,
+                key_epochs_awaited: s.key_epochs_awaited,
+                account_gone: s.account_gone,
+                divergent: s.divergent.into_iter().map(Into::into).collect(),
+            })
+        })
+        .await
+    }
+    /// Read the verified notice currently holding this installation, independently of
+    /// whether the host has already acknowledged its delivery (Switch spec 12.6).
+    pub async fn recovery_required(
+        &self,
+    ) -> Result<Option<crate::WalletRecoveryNotice>, WalletError> {
+        Ok(self.lock().await?.app().recovery_required().map(Into::into))
+    }
+
+    /// Recover the outstanding Paykit-owned duties after reopening or a failed receive.
+    pub async fn unacknowledged_events(&self) -> Result<Vec<WalletEvent>, WalletError> {
+        self.with_wallet(async |app| {
+            Ok(app
+                .app_mut()
+                .unacknowledged_events_for("paykit")
+                .await?
+                .into_iter()
+                .map(|e| event(app, e))
+                .collect())
+        })
+        .await
+    }
+    /// Acknowledge the already handled Paykit prefix through the last duty in a successful report.
+    pub async fn acknowledge_events(&self, through: Vec<u8>) -> Result<(), WalletError> {
+        let id = EventId::from_bytes(&through).map_err(|_| WalletError::invalid("event id"))?;
+        self.with_wallet(async |app| Ok(app.app_mut().ack_events_for("paykit", id).await?))
+            .await
+    }
+}

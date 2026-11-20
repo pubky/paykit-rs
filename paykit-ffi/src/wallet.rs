@@ -19,6 +19,7 @@ pub enum BackupDevice {
 #[derive(uniffi::Object)]
 pub struct NativeWallet {
     state: Mutex<Option<Paykit>>,
+    pub(crate) pace: Mutex<pubky_switch_client::app::WaitPace>,
     ownership: Option<Arc<crate::LeaseOwner>>,
 }
 impl NativeWallet {
@@ -32,6 +33,7 @@ impl NativeWallet {
     pub(crate) fn opened(app: Paykit, ownership: Option<Arc<crate::LeaseOwner>>) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(Some(app)),
+            pace: Mutex::default(),
             ownership,
         })
     }
