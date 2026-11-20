@@ -571,6 +571,7 @@ pub(crate) fn restore_paykit_layer(
     // and unresolved ones first observed since the backup (Paykit spec 7.2).
     let mut delivery_notices = std::collections::BTreeMap::new();
     let mut pending_conflicts = std::collections::BTreeMap::new();
+    let mut original_approvals = std::collections::BTreeMap::new();
     let mut prepared_replies = std::collections::BTreeMap::new();
     let mut retirements = std::collections::BTreeMap::new();
     let mut sourced_replies = std::collections::BTreeMap::new();
@@ -896,6 +897,13 @@ pub(crate) fn restore_paykit_layer(
                 prepared_replies.insert((record, hash), reply);
                 continue;
             }
+            StateKey::OriginalApproval(record) => {
+                let original =
+                    state::restored::<crate::allowances::OriginalApproval>(&key, &value, &binder)
+                        .map_err(|_| unread())?;
+                original_approvals.insert(record, original);
+                continue;
+            }
             StateKey::AppliedReply(_) => {
                 state::restored::<crate::allowances::AppliedReply>(&key, &value, &binder)
                     .map_err(|_| unread())?;
@@ -1133,6 +1141,8 @@ pub(crate) fn restore_paykit_layer(
         let value = state::encode(&entry).map_err(|_| bad())?;
         writes.push(LocalWrite::Put { key, value });
     }
+    crate::allowances::restore_originals(restoring, &binder, original_approvals, &mut writes)
+        .map_err(|_| "the original payer approval cannot be retained")?;
     crate::allowances::restore_conflicts(
         restoring,
         &binder,
@@ -1320,8 +1330,8 @@ impl Protocol for PaykitProtocol {
         restore_paykit_layer(layer, restoring, &|proof| self.settlement_id(proof))
     }
 
-    /// Hold every attempt to deliver an Allowance acceptance, including a re-send or an
-    /// acceptance already in the outbox (Paykit spec 8.3.1). Proposals, rejections,
+    /// Check the applied original before delivering any Allowance reply (Paykit spec
+    /// 8.3.1). Proposals, acceptances, rejections,
     /// re-send requests and extensions require current sender scopes and a permitting
     /// deny copy. An original user end has its own delivery rule (Paykit spec 3.1).
     /// A Private Payment List must still match the current sharing choice (Paykit spec 8.4).
@@ -1339,7 +1349,6 @@ impl Protocol for PaykitProtocol {
         }
         match kind {
             Ok(MessageKind::Paykit(Kind::PrivatePaymentList)) => crate::publish::may_send(delivery),
-            Ok(MessageKind::Paykit(Kind::AllowanceAcceptance)) => Ok(false),
             Ok(MessageKind::Paykit(Kind::AllowanceEnd)) => {
                 crate::allowances::may_deliver_end(delivery).map_err(view_failure)
             }
@@ -1350,7 +1359,9 @@ impl Protocol for PaykitProtocol {
                 crate::reply_asks::may_deliver_request(delivery).map_err(view_failure)
             }
             Ok(
-                MessageKind::Paykit(Kind::AllowanceProposal | Kind::AllowanceRejection)
+                MessageKind::Paykit(
+                    Kind::AllowanceProposal | Kind::AllowanceAcceptance | Kind::AllowanceRejection,
+                )
                 | MessageKind::Extension(_),
             ) => may_deliver_to_contact(delivery).map_err(view_failure),
             _ => Ok(true),
@@ -1519,7 +1530,7 @@ impl Protocol for PaykitProtocol {
                         reason: "Switch spec 8.2: a released entry whose effect the app wrote \
                                  since"
                             .into(),
-                    }
+                    };
                 }
                 Ok(_) => {}
                 Err(Fail::Store(failure)) => return Outcome::Retry(failure),
@@ -1535,7 +1546,7 @@ impl Protocol for PaykitProtocol {
             Ok(Some(notice)) if notice.keeps_processed() => {
                 return Outcome::Drop {
                     reason: "Paykit spec 8.1: a message given up stays processed".into(),
-                }
+                };
             }
             Ok(_) => {}
             Err(Fail::Store(failure)) => return Outcome::Retry(failure),

@@ -1,8 +1,8 @@
 //! Admission, views and replies to current pending Allowance proposals.
 
 use super::{
-    allowance_record_target, allowance_target, AllowanceStatus, AllowanceView, Paykit,
-    PendingConflict,
+    allowance_record_target, allowance_target, application, AllowanceId, AllowanceRecord,
+    AllowanceStatus, AllowanceView, Body, Paykit, PendingConflict, StoredMessage,
 };
 use crate::allowances::{AllowanceReply, AppliedReply, EndCause, EndOrigin};
 use crate::error::{PaykitError, Refusal, Result};
@@ -12,14 +12,14 @@ use crate::stored::{submitted, Placed, StoredNote};
 use paykit_lib::collections::Collection;
 use paykit_lib::kinds::Kind;
 use paykit_lib::records::PendingAllowanceRecord;
-use paykit_lib::scopes::{certificate_in_force_at_write, verify_certificate};
+use paykit_lib::{allowances::Ledger, bodies::ProposerRole};
 use pubky_switch_client::app::{
     AppError, KeptReason, LocalWrite, OpBatch, RecordContent, RecordRead, RecordTarget,
     SharedRecord,
 };
-use pubky_switch_core::chain::{bind_answer, TransitionProof};
-use pubky_switch_core::enc::{hash, serde_b64};
-use pubky_switch_core::ops::{BatchRef, Condition, OpBody, OpKind, RecordVersion, SignedOp};
+use pubky_switch_core::enc::serde_b64;
+use pubky_switch_core::ops::{Condition, OpKind, RecordVersion};
+use pubky_switch_core::sealed::SealedValue;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -31,43 +31,13 @@ pub(crate) struct PreparedPendingReply {
     #[serde(with = "serde_b64")]
     pub(crate) peer: [u8; 32],
     pub(crate) message: KeptMessage,
-    /// Commitment to this reply's exact sealed delete and original application conditions.
+    /// Commitment to every ordered operation, including its seal and application conditions.
     #[serde(with = "serde_b64")]
-    pub(crate) delete: [u8; 32],
+    pub(crate) application: [u8; 32],
     pub(crate) source: crate::divergent::SeenVersion,
     /// Only the Switch may carry an unanswered submission across a provider change.
     pub(crate) prepared_in: u64,
-    pub(crate) sealed_delete: pubky_switch_core::sealed::SealedValue,
-}
-
-/// The native client chooses the batch ID and may re-sign a kept deletion for a new
-/// generation. Its exact sealed value, source version and conditions stay unchanged.
-/// A create remains tied to the generation in which it was prepared.
-fn prepared_write(
-    identity: [u8; 32],
-    app_id: [u8; 16],
-    generation: u64,
-    conditions: &[Condition],
-    kind: &OpKind,
-) -> Result<[u8; 32]> {
-    let generation = match kind {
-        OpKind::RecordPut(put) if put.value_sealed.looks_like_delete() => {
-            put.expected_version.generation
-        }
-        _ => generation,
-    };
-    let body = OpBody {
-        identity,
-        app_id: Some(app_id),
-        generation,
-        batch: BatchRef {
-            id: [0; 16],
-            count: 1,
-        },
-        conditions: conditions.to_vec(),
-        kind: kind.clone(),
-    };
-    Ok(hash(&body.to_json().map_err(|_| PaykitError::corrupt())?))
+    pub(crate) seals: Vec<SealedValue>,
 }
 
 /// An unplaced signed proposal still belongs to the current pending lifetime
@@ -103,14 +73,11 @@ pub(super) fn awaits_competing_proposal(
     Ok(false)
 }
 
-fn applied_version(proof: &TransitionProof) -> Option<RecordVersion> {
-    let at = proof.record_revision().ok()?;
-    Some(RecordVersion::new(at.generation, at.seq))
-}
-
-struct ConfirmedWrite {
-    signing_key: [u8; 32],
-    version: RecordVersion,
+pub(super) enum Acceptance {
+    Eligible { ledger: Option<RecordTarget> },
+    BeforeLoss,
+    MissingExecutionScope,
+    Unconfirmed,
 }
 
 fn not_current() -> PaykitError {
@@ -172,6 +139,105 @@ impl Paykit {
             } => Ok(()),
             _ => Err(not_current()),
         }
+    }
+
+    pub(super) async fn acceptance(
+        &mut self,
+        p: &StoredMessage,
+        q: &StoredMessage,
+        peer: &[u8; 32],
+        id: &AllowanceId,
+    ) -> Result<Acceptance> {
+        let Body::AllowanceProposal(proposal) = p.body() else {
+            return Err(PaykitError::corrupt());
+        };
+        let allower = match proposal.proposer_role {
+            ProposerRole::Allower => p.sender() == self.identity(),
+            ProposerRole::Allowee => p.message().to == self.identity(),
+        };
+        if !allower {
+            return Ok(Acceptance::Eligible { ledger: None });
+        }
+        let approving = match proposal.proposer_role {
+            ProposerRole::Allower => p,
+            ProposerRole::Allowee => q,
+        };
+        if approving.sender() != self.identity() || approving.cert().app_id() != self.app_id() {
+            return Ok(Acceptance::Unconfirmed);
+        }
+        if !self.holds("paykit_allowance_execute") {
+            return Ok(Acceptance::MissingExecutionScope);
+        }
+        let doc = self.app.own_identity();
+        let generation = proposal.allower_generation;
+        if doc
+            .body()
+            .recovery_from
+            .is_some_and(|lost| generation <= lost)
+        {
+            return Ok(Acceptance::BeforeLoss);
+        }
+        if generation > doc.generation() {
+            return Ok(Acceptance::Unconfirmed);
+        }
+        let ledger = allowance_record_target(Collection::AllowanceLedgers, peer, id);
+        if !matches!(
+            self.app.read_record_fresh(&ledger).await?,
+            RecordRead::Kept {
+                reason: KeptReason::NotFound,
+                record: None
+            }
+        ) {
+            return Ok(Acceptance::Unconfirmed);
+        }
+        Ok(Acceptance::Eligible {
+            ledger: Some(ledger),
+        })
+    }
+
+    pub(super) async fn acceptance_records(
+        &mut self,
+        p: &StoredMessage,
+        q: &StoredMessage,
+        peer: &[u8; 32],
+        id: &AllowanceId,
+        ledger: Option<RecordTarget>,
+    ) -> Result<Option<Vec<application::RecordWrite>>> {
+        let permanent = allowance_target(peer, id);
+        let accepted = AllowanceRecord {
+            counterparty: *peer,
+            allowance_id: id.clone(),
+            proposal: p.clone(),
+            response: Some(q.clone()),
+            end: None,
+            conflicted: None,
+            grant: None,
+            grants: Vec::new(),
+            ledger_handoff: None,
+            ledger_handoff_unread: None,
+            msg_ids: Vec::new(),
+            unknown: Default::default(),
+        };
+        let put = self
+            .app
+            .record_op(&permanent, Some(&accepted.to_json()?), Vec::new())
+            .await?;
+        if !is_create(&put.1) {
+            return Ok(None);
+        }
+        let mut operations = vec![put];
+        if let Some(ledger) = ledger {
+            let value = Ledger::initial_value(peer, id, &q.hash());
+            let put = self
+                .app
+                .record_op(&ledger, Some(&value), Vec::new())
+                .await?;
+            if !is_create(&put.1) {
+                return Ok(None);
+            }
+            operations.push(put);
+        }
+        Ok(Some(operations))
     }
 
     pub(super) fn selected_pending(
@@ -311,95 +377,78 @@ impl Paykit {
         Ok(out)
     }
 
-    /// Verify each original application with the service key its signed generation names.
-    async fn confirmed_pending_writes(
+    pub(super) async fn confirmed_pending_applications(
         &self,
-        deleted: bool,
-    ) -> Result<BTreeMap<([u8; 32], [u8; 32]), ConfirmedWrite>> {
-        let own = self.identity();
-        let app_id = self.app_id();
-        let doc = self.app.own_identity();
-        let mut confirmed = BTreeMap::new();
-        for held in self.app.shared_evidence().await?.ops {
-            let Some(proof) = held.proof else { continue };
-            let Ok(cert) = verify_certificate(&held.cert, &own) else {
-                continue;
-            };
-            if cert.app_id() != app_id {
-                continue;
-            }
-            let Ok(op) = SignedOp::verify(&held.op, &cert.signing_key(), &own, Some(&app_id))
-            else {
-                continue;
-            };
-            let body = op.body();
-            let OpKind::RecordPut(put) = &body.kind else {
-                continue;
-            };
-            let Some(service) = doc.service_key_of(body.generation) else {
-                continue;
-            };
-            if body.batch.count != 1
-                || put.policy != Collection::AllowanceProposals.fixed_policy()
-                || put.value_sealed.looks_like_delete() != deleted
-            {
-                continue;
-            }
-            let Ok(proofs) = bind_answer(std::slice::from_ref(&op), &[proof], &service, &own)
-            else {
-                continue;
-            };
-            let [proof] = proofs.as_slice() else { continue };
-            if put
-                .policy
-                .write_scopes
-                .iter()
-                .any(|scope| cert.holds_scope(scope))
-                && certificate_in_force_at_write(doc, &cert, proof.envelope().server_time)
-            {
-                if let Some(version) = applied_version(proof) {
-                    let operation =
-                        prepared_write(own, app_id, body.generation, &body.conditions, &body.kind)?;
-                    confirmed.insert(
-                        (put.key, operation),
-                        ConfirmedWrite {
-                            signing_key: cert.signing_key(),
-                            version,
-                        },
-                    );
-                }
-            }
-        }
-        Ok(confirmed)
+    ) -> Result<application::AppliedApplications> {
+        application::applied_applications(
+            self.app.shared_evidence().await?.ops,
+            self.app.own_identity(),
+            self.app_id(),
+        )
     }
 
     /// Restore a prepared reply only from the signed operation and the complete service
     /// result for its exact delete. A retained tombstone or a hosted absence alone cannot
     /// tell whether this app's write applied.
-    pub(crate) async fn recover_pending_deletes(&mut self) -> Result<()> {
+    pub(crate) async fn recover_pending_replies(&mut self) -> Result<()> {
         let intents = self
             .local_scan::<PreparedPendingReply>(key::PENDING_REPLIES)
             .await?;
-        if intents.is_empty() {
+        self.recover_pending_applications(intents).await
+    }
+
+    /// Reopen from the local store alone. An incoming acceptance has no outgoing
+    /// reply intent, but the payer still needs the applied batch before a grant.
+    pub(crate) async fn recover_original_approvals(&mut self) -> Result<()> {
+        self.recover_pending_applications(Vec::new()).await
+    }
+
+    async fn recover_pending_applications(
+        &mut self,
+        intents: Vec<(String, PreparedPendingReply)>,
+    ) -> Result<()> {
+        let approvals: Vec<_> = self
+            .local_scan::<super::OriginalApproval>(key::ORIGINAL_APPROVALS)
+            .await?
+            .into_iter()
+            .filter(|(_, approval)| approval.awaiting_application())
+            .collect();
+        if intents.is_empty() && approvals.is_empty() {
             return Ok(());
         }
-        let deletes = self.confirmed_pending_writes(true).await?;
+        let confirmed = self.confirmed_pending_applications().await?;
+        for (record, mut approval) in approvals {
+            let at = format!("{}{record}", key::ORIGINAL_APPROVALS);
+            self.capture_original_approval(&at, &mut approval, &confirmed)
+                .await?;
+        }
         for (at, intent) in intents {
             let msg = intent.message.stored(&intent.peer)?;
             let id = super::named_allowance(msg.body()).ok_or_else(PaykitError::corrupt)?;
-            let target = allowance_record_target(Collection::AllowanceProposals, &intent.peer, id);
-            let pending_key = self.app.record_key(&target)?;
-            let applied = deletes
-                .get(&(pending_key, intent.delete))
-                .filter(|write| write.signing_key == msg.cert().signing_key());
+            let pending = allowance_record_target(Collection::AllowanceProposals, &intent.peer, id);
+            let pending_key = self.app.record_key(&pending)?;
+            let applied = confirmed
+                .replies
+                .get(&(msg.cert().signing_key(), intent.application))
+                .filter(|batch| batch.pending_key == pending_key);
             let mut writes = vec![LocalWrite::Delete {
                 key: format!("{}{at}", key::PENDING_REPLIES).into_bytes(),
             }];
-            let queued = if let Some(applied) = applied {
+            let queued = if let Some(batch) = applied {
+                if batch.members.len() == 3 {
+                    let approval = self.app.record_key(&allowance_target(&intent.peer, id))?;
+                    if !self
+                        .local_get::<super::OriginalApproval>(&key::original_approval(&approval))
+                        .await?
+                        .is_some_and(|a| a.retains_application(&intent.application, &batch.members))
+                    {
+                        continue;
+                    }
+                }
                 // Queue first. A stop before the local release still leaves the identical
                 // signed original recoverable from the applied delete.
                 match self.app.queue_stored(msg.plaintext()).await {
-                    Ok(id) => Some((id, applied.version)),
+                    Ok(id) => Some((id, batch.retirement)),
                     Err(pubky_switch_client::app::AppError::Refused(
                         pubky_switch_client::app::Refusal::WontDeliver(_),
                     )) => None,
@@ -517,7 +566,7 @@ impl Paykit {
         key: &[u8; 32],
         intent: &PreparedPendingReply,
     ) -> Result<()> {
-        Box::pin(self.recover_pending_deletes()).await?;
+        Box::pin(self.recover_pending_replies()).await?;
         let original = intent.message.stored(&intent.peer)?;
         if self
             .app
@@ -539,9 +588,9 @@ impl Paykit {
         let Some((selected, _)) = self.pending_by_allowance_key(key).await? else {
             return Err(not_current());
         };
-        let (pending, permanent, (conditions, mut op)) =
-            Box::pin(self.checked_pending_answer(&selected, original.body().kind())).await?;
-        let own = self.identity();
+        let kind = original.body().kind();
+        let (pending, permanent, delete) =
+            Box::pin(self.checked_pending_answer(&selected, kind)).await?;
         if permanent != *key
             || self.app.own_identity().generation() != intent.prepared_in
             || selected.version != intent.source.record_version()
@@ -550,38 +599,30 @@ impl Paykit {
         {
             return Err(not_current());
         }
-        let OpKind::RecordPut(put) = &mut op else {
-            return Err(PaykitError::corrupt());
-        };
-        let sealed = &intent.sealed_delete;
-        if sealed.data_epoch != put.value_sealed.data_epoch || sealed.scope != put.policy.read_scope
-        {
-            return Err(not_current());
+        let mut operations = self.answer_writes(&pending, &original, delete).await?;
+        let mut retained = state::Tx::default();
+        Box::pin(self.keep_original_selection(
+            &selected,
+            pending.proposal(),
+            &original,
+            &mut operations,
+            None,
+            &mut retained,
+        ))
+        .await?;
+        self.local_commit(retained).await?;
+        application::restore_seals(
+            &self.app,
+            &mut operations,
+            &intent.seals,
+            intent.application,
+        )?;
+        let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME);
+        for op in operations {
+            batch = batch.entry(op);
         }
-        let scope = self
-            .app
-            .scope_key(sealed.data_epoch, &sealed.scope)
-            .ok_or_else(not_current)?;
-        if !matches!(
-            sealed.open(&scope, &own, &put.key),
-            Ok(pubky_switch_core::sealed::RecordValue::Delete)
-        ) {
-            return Err(PaykitError::corrupt());
-        }
-        put.value_sealed = sealed.clone();
-        if prepared_write(
-            own,
-            self.app_id(),
-            self.app.own_identity().generation(),
-            &conditions,
-            &op,
-        )? != intent.delete
-        {
-            return Err(not_current());
-        }
-        let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME).entry((conditions, op));
         match self.submit(batch).await {
-            Ok(_) => Box::pin(self.recover_pending_deletes()).await,
+            Ok(_) => Box::pin(self.recover_pending_replies()).await,
             Err(error) if error.kept_batch().is_some() => Ok(()),
             Err(error) => Err(error.into()),
         }
@@ -637,12 +678,48 @@ impl Paykit {
         if kind != Kind::AllowanceEnd {
             self.refuse_while_sends_held(peer).await?;
         }
+        let mut conditions = vec![condition];
+        if kind == Kind::AllowanceAcceptance {
+            self.refuse_while_paused(&[selected.key]).await?;
+        } else {
+            conditions.push(absent(permanent_key));
+        }
         // The same guarded write serves a fresh decision and its exact signed retry.
-        let delete = self
-            .app
-            .record_op(&target, None, vec![condition, absent(permanent_key)])
-            .await?;
+        let delete = self.app.record_op(&target, None, conditions).await?;
         Ok((pending, permanent_key, delete))
+    }
+
+    async fn answer_writes(
+        &mut self,
+        pending: &PendingAllowanceRecord,
+        reply: &StoredMessage,
+        delete: application::RecordWrite,
+    ) -> Result<Vec<application::RecordWrite>> {
+        let mut operations = Vec::new();
+        if reply.body().kind() == Kind::AllowanceAcceptance {
+            let p = pending.proposal();
+            let peer = pending.counterparty();
+            let id = pending.allowance_id();
+            let ledger = match self.acceptance(p, reply, peer, id).await? {
+                Acceptance::Eligible { ledger } => ledger,
+                Acceptance::BeforeLoss => {
+                    return Err(Refusal::NotNow(
+                        "the proposal predates the Allower's provider loss".into(),
+                    )
+                    .into());
+                }
+                Acceptance::MissingExecutionScope => {
+                    return Err(Refusal::ScopeMissing("paykit_allowance_execute".into()).into());
+                }
+                Acceptance::Unconfirmed => return Err(not_current()),
+            };
+            operations = self
+                .acceptance_records(p, reply, peer, id, ledger)
+                .await?
+                .ok_or_else(not_current)?;
+        }
+        operations.push(delete);
+        Ok(operations)
     }
 
     /// Open only the current pending value at the user's selected key, followed by its
@@ -651,16 +728,26 @@ impl Paykit {
         &mut self,
         selected: &SharedRecord,
         kind: Kind,
+        execution: Option<crate::UserConfirmed>,
     ) -> Result<String> {
         let own = self.identity();
-        if kind == Kind::AllowanceAcceptance {
-            return Err(Refusal::AllowanceAcceptanceUnavailable.into());
-        }
         let (pending, permanent_key, delete) =
             Box::pin(self.checked_pending_answer(selected, kind)).await?;
         let p = pending.proposal();
         let peer = pending.counterparty();
         let id = pending.allowance_id();
+        if kind == Kind::AllowanceAcceptance {
+            let Body::AllowanceProposal(proposal) = p.body() else {
+                return Err(PaykitError::corrupt());
+            };
+            if proposal.proposer_role == ProposerRole::Allowee {
+                self.require_payer_choice(execution.as_ref())?;
+            } else if execution.is_some() {
+                return Err(
+                    Refusal::Usage("only the payer can approve automatic payment".into()).into(),
+                );
+            }
+        }
         let body = AllowanceReply {
             allowance_id: id.clone(),
             executor_app_id: None,
@@ -669,26 +756,38 @@ impl Paykit {
         let reply = self.sign(*peer, kind, vec![p.hash()], body)?;
         let q = self.own_copy(&reply)?;
         let intent_key = key::pending_reply(&permanent_key, &q.hash());
-        // Guard the very version the user answered. A recovery upload also gets the
-        // client's exact application condition; a concurrent change refuses the batch.
-        let generation = self.app.own_identity().generation();
-        let delete_hash = prepared_write(own, self.app_id(), generation, &delete.0, &delete.1)?;
-        let OpKind::RecordPut(put) = &delete.1 else {
-            return Err(PaykitError::corrupt());
-        };
-        let sealed_delete = put.value_sealed.clone();
-        let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME).entry(delete);
-        let msg_id = reply.msg_id().to_owned();
+        let mut operations = self.answer_writes(&pending, &q, delete).await?;
         let mut prepare = state::Tx::default();
+        Box::pin(self.keep_original_selection(
+            selected,
+            p,
+            &q,
+            &mut operations,
+            Some(execution.is_some()),
+            &mut prepare,
+        ))
+        .await?;
+        let application = application::prepared_application(
+            own,
+            self.app_id(),
+            self.app.own_identity().generation(),
+            &operations,
+        )?;
+        let seals = application::seals(&operations)?;
+        let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME);
+        for operation in operations {
+            batch = batch.entry(operation);
+        }
+        let msg_id = reply.msg_id().to_owned();
         prepare.put(
             &intent_key,
             &PreparedPendingReply {
                 peer: *peer,
                 message: KeptMessage::of(&q),
-                delete: delete_hash,
+                application,
                 source: selected.version.into(),
-                prepared_in: generation,
-                sealed_delete,
+                prepared_in: self.app.own_identity().generation(),
+                seals,
             },
         )?;
         if kind == Kind::AllowanceEnd {
@@ -700,19 +799,23 @@ impl Paykit {
         self.local_commit(prepare).await?;
         match self.submit(batch.queue(reply)).await {
             Ok(submitted) => {
-                // Settlement may follow a provider change. Release the prepared reply
-                // only with the authenticated application of this exact guarded deletion.
-                let [proof] = submitted.proofs.as_slice() else {
-                    return Err(PaykitError::corrupt());
-                };
-                let version = applied_version(proof).ok_or_else(PaykitError::corrupt)?;
-                let mut writes = state::Tx::default();
-                writes.put(
-                    &key::applied_reply(&q.hash()),
-                    &AppliedReply::new(&q, version),
-                )?;
-                writes.delete(&intent_key);
-                self.local_commit(writes).await?;
+                if kind == Kind::AllowanceAcceptance {
+                    Box::pin(self.recover_pending_replies()).await?;
+                } else {
+                    let [proof] = submitted.proofs.as_slice() else {
+                        return Err(PaykitError::corrupt());
+                    };
+                    let at = proof
+                        .record_revision()
+                        .map_err(|_| PaykitError::corrupt())?;
+                    let mut writes = state::Tx::default();
+                    writes.put(
+                        &key::applied_reply(&q.hash()),
+                        &AppliedReply::new(&q, RecordVersion::new(at.generation, at.seq)),
+                    )?;
+                    writes.delete(&intent_key);
+                    self.local_commit(writes).await?;
+                }
                 self.delivered(&msg_id).await?;
             }
             Err(error) if error.kept_batch().is_some() => (),
@@ -720,8 +823,11 @@ impl Paykit {
                 // An earlier batch can fail before this one is signed. These local
                 // refusals likewise mean it was never kept or sent. An unreadable
                 // store leaves its outcome unknown, so the original stays prepared.
-                if matches!(error, AppError::Ahead { .. } | AppError::Refused(_))
-                    || error.code() == Some(pubky_switch_core::http::ErrorCode::Conflict)
+                // An acceptance also owns the exact sealed opening and its prior user
+                // choice. A later retry must always return to that signed answer.
+                if kind != Kind::AllowanceAcceptance
+                    && (matches!(error, AppError::Ahead { .. } | AppError::Refused(_))
+                        || error.code() == Some(pubky_switch_core::http::ErrorCode::Conflict))
                 {
                     self.local_delete(&intent_key).await?;
                 }
@@ -873,10 +979,11 @@ impl Paykit {
             {
                 stop.pending_create = Some(crate::records::PendingCreate {
                     proposal_at: position,
-                    operation: prepared_write(
+                    operation: application::prepared_member(
                         own,
                         self.app_id(),
                         self.app.own_identity().generation(),
+                        1,
                         &put.0,
                         &put.1,
                     )?,
@@ -970,13 +1077,14 @@ impl Paykit {
             if self.app.received_order(create.proposal_at, position)
                 != Some(std::cmp::Ordering::Less)
                 || self
-                    .confirmed_pending_writes(false)
+                    .confirmed_pending_applications()
                     .await?
+                    .pending_creates
                     .get(&(key, create.operation))
-                    .is_none_or(|write| {
-                        write.version != selected.version
+                    .is_none_or(|version| {
+                        *version != selected.version
                             || !super::delivery::deletion_continues(
-                                write.version.generation,
+                                version.generation,
                                 self.app.own_identity().body().recovery_from,
                             )
                     })

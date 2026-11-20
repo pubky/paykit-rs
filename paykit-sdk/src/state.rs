@@ -1467,6 +1467,16 @@ impl Stored for OwedEnd {
     }
 }
 
+impl sealed::Sealed for crate::allowances::OriginalApproval {}
+impl Stored for crate::allowances::OriginalApproval {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let StateKey::OriginalApproval(record) = family else {
+            return corrupt();
+        };
+        self.check(record, binder)
+    }
+}
+
 impl sealed::Sealed for crate::allowances::PreparedPendingReply {}
 
 impl Stored for crate::allowances::PreparedPendingReply {
@@ -1484,15 +1494,22 @@ impl Stored for crate::allowances::PreparedPendingReply {
         let target = crate::allowances::allowance_target(&self.peer, id);
         if self.source.record_version().is_none()
             || reply.hash() != *hash
-            || !self.sealed_delete.looks_like_delete()
-            || self
-                .sealed_delete
-                .check_shape(
-                    &paykit_lib::collections::Collection::AllowanceProposals
-                        .fixed_policy()
-                        .read_scope,
-                )
-                .is_err()
+            || !self.seals.last().is_some_and(|s| s.looks_like_delete())
+            || !self.seals.iter().enumerate().all(|(index, s)| {
+                let valid = s
+                    .check_shape(
+                        &paykit_lib::collections::Collection::AllowanceProposals
+                            .fixed_policy()
+                            .read_scope,
+                    )
+                    .is_ok();
+                valid && (s.looks_like_delete() == (index + 1 == self.seals.len()))
+            })
+            || if reply.body().kind() == paykit_lib::kinds::Kind::AllowanceAcceptance {
+                !(2..=3).contains(&self.seals.len())
+            } else {
+                self.seals.len() != 1
+            }
             || reply.sender() != binder.own
             || binder
                 .cert
@@ -1501,7 +1518,7 @@ impl Stored for crate::allowances::PreparedPendingReply {
             || reply.message().refs.len() != 1
             || !matches!(
                 reply.body(),
-                Body::AllowanceRejection(_) | Body::AllowanceEnd(_)
+                Body::AllowanceAcceptance(_) | Body::AllowanceRejection(_) | Body::AllowanceEnd(_)
             )
             || binder.record_key(&target)? != *record
         {
@@ -1789,6 +1806,12 @@ pub(crate) mod key {
     pub(crate) const PENDING_CONFLICTS: &str = "pc/";
 
     pub(crate) const PENDING_REPLIES: &str = "ap/";
+    pub(crate) const ORIGINAL_APPROVALS: &str = "ao/";
+
+    pub(crate) fn original_approval(record: &[u8; 32]) -> String {
+        format!("{ORIGINAL_APPROVALS}{}", b64(record))
+    }
+
     pub(crate) const APPLIED_REPLIES: &str = "aq/";
 
     pub(crate) fn pending_replies(record: &[u8; 32]) -> String {
@@ -2295,6 +2318,7 @@ pub(crate) enum StateKey {
     },
     /// A signed reply whose exact proposal deletion was applied.
     AppliedReply([u8; 32]),
+    OriginalApproval([u8; 32]),
     /// The latest verified end of a conflict at the named pending key.
     PendingRetirement([u8; 32]),
     /// `cf/<record key>`: a conflicting proposal or response kept as the stop.
@@ -2481,6 +2505,7 @@ impl StateKey {
                             reply: b64_32(reply)?,
                         }
                     }
+                    "ao" => Self::OriginalApproval(b64_32(rest)?),
                     "aq" => Self::AppliedReply(b64_32(rest)?),
                     "pce" => Self::PendingRetirement(b64_32(rest)?),
                     "cf" => Self::Conflict(b64_32(rest)?),
@@ -3573,6 +3598,10 @@ mod tests {
                 },
             ),
             (key::applied_reply(&pubky), StateKey::AppliedReply(pubky)),
+            (
+                key::original_approval(&pubky),
+                StateKey::OriginalApproval(pubky),
+            ),
             (key::conflict(&pubky), StateKey::Conflict(pubky)),
             (key::notice_target(id), StateKey::NoticeTarget(id.into())),
             (key::end_origin(id), StateKey::EndOrigin(id.into())),

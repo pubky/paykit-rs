@@ -877,15 +877,14 @@ mod own_message_tests {
         // the message in the batch that writes the record (`allowances.rs`, whose own test
         // checks every record write goes through these).
         let allowances = text("allowances.rs");
-        let propose = body(allowances, "propose_allowance_inner");
+        let propose = body(allowances, "propose_allowance_with_consent");
         assert!(propose.contains("self.own_copy(&signed)"));
         assert!(propose.contains(".queue(signed)"));
         let pending = body(text("allowances/pending.rs"), "answer_pending");
         assert!(pending.contains("self.own_copy(&reply)"));
         assert!(pending.contains("message: KeptMessage::of(&q)"));
-        assert!(
-            pending.contains("OpBatch::for_protocol(crate::protocol::BACKUP_NAME).entry(delete)")
-        );
+        assert!(pending.contains("self.answer_writes(&pending, &q, delete)"));
+        assert!(pending.contains("batch = batch.entry(operation)"));
         assert!(pending.contains("self.submit(batch.queue(reply))"));
         let answer = body(allowances, "answer_allowance");
         assert!(answer.contains("self.own_copy(&signed)"));

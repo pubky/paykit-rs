@@ -216,6 +216,11 @@ pub(super) fn check(keys: &Keys, cases: &Value) {
         };
         assert_eq!(put.collection, collection_id(COLLECTION, &owner.public()));
         assert_eq!(put.policy, policy);
+        assert_eq!(
+            put.expected_version,
+            RecordVersion::new(held.generation, 11)
+        );
+        assert!(put.id_inputs.is_none());
         assert_eq!(put.key, b64n::<32>(st(case, "record_key")));
         let opened = put
             .value_sealed

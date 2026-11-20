@@ -3534,15 +3534,11 @@ async fn wallet_with_multiple_listing_pages(w: &World, storage: Arc<dyn StateSto
 
 #[tokio::test]
 async fn test_reconcile_waits_for_the_last_collection_of_the_wallet() {
-    use pubky_switch_client::app::{Protocol, LISTING_PAGES_PER_READ};
+    use pubky_switch_client::app::LISTING_PAGES_PER_READ;
     let w = World::new();
     let storage = store();
     let mut wallet = wallet_with_multiple_listing_pages(&w, Arc::clone(&storage)).await;
-    let collections = paykit_sdk::PaykitProtocol::new()
-        .collections()
-        .iter()
-        .filter(|c| c.readable_by(wallet.app().cert()))
-        .count();
+    let collections = client_listing_requests(wallet.app().cert());
     let budget = LISTING_PAGES_PER_READ as usize;
     assert!(collections > budget);
     for _ in 0..3 {
@@ -3582,13 +3578,25 @@ async fn test_reconcile_waits_for_the_last_collection_of_the_wallet() {
         .await;
     // The next collection is unavailable once. Its error leaves the listing at that page.
     assert!(wallet.reconcile().await.is_err());
-    let before = w.router.log().len();
-    wallet.reconcile().await.unwrap();
-    let remaining = w.router.log()[before..]
-        .iter()
-        .filter(|request| request.contains("records?collection"))
-        .count();
-    assert_eq!(remaining, collections - budget);
+    let mut remaining = collections - budget;
+    while remaining > 0 {
+        let before = w.router.log().len();
+        let result = wallet.reconcile().await;
+        let pages = w.router.log()[before..]
+            .iter()
+            .filter(|request| request.contains("records?collection"))
+            .count();
+        assert_eq!(pages, remaining.min(budget));
+        remaining -= pages;
+        if remaining == 0 {
+            result.unwrap();
+        } else {
+            assert!(matches!(
+                result.unwrap_err().refusal(),
+                Some(Refusal::NotNow(reason)) if reason.contains("Call reconcile again")
+            ));
+        }
+    }
 }
 
 #[tokio::test]
@@ -3608,6 +3616,9 @@ async fn test_restore_keeps_records_unlisted_until_the_last_page_after_reload() 
     ))
     .await
     .unwrap();
+    let collections = client_listing_requests(wallet.app().cert());
+    let budget = pubky_switch_client::app::LISTING_PAGES_PER_READ as usize;
+    assert!(collections > budget);
     let partial = wallet.receive(None).await.unwrap();
     assert!(partial.report.more);
     assert!(!partial.report.stopped);
@@ -3629,8 +3640,20 @@ async fn test_restore_keeps_records_unlisted_until_the_last_page_after_reload() 
         .await
         .unwrap()
         .is_some());
-    wallet.receive(None).await.unwrap();
-    assert!(!wallet.app().listing_owed().await.unwrap());
+    for first_page in (budget..collections).step_by(budget) {
+        let read = wallet.receive(None).await.unwrap();
+        let more = collections - first_page > budget;
+        assert_eq!(wallet.app().listing_owed().await.unwrap(), more);
+        if more {
+            assert!(read.report.more && !read.report.stopped);
+            assert!(wallet
+                .app()
+                .protocol_get("paykit", b"nl")
+                .await
+                .unwrap()
+                .is_some());
+        }
+    }
     assert!(wallet
         .app()
         .protocol_get("paykit", b"nl")

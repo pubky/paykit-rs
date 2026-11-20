@@ -83,7 +83,7 @@ impl Collection {
             }
             Self::AllowanceProposals => Policy::new("paykit_allowance", &["paykit_allowance"]),
             Self::AllowanceLedgers => {
-                Policy::new("paykit_allowance", &["paykit_allowance_execute"])
+                Policy::new("paykit_allowance", &["paykit_allowance_execute"]).permanent(None)
             }
             Self::Settlements => {
                 Policy::new("paykit_settlements", &["paykit_settlements"]).permanent(None)
@@ -164,7 +164,7 @@ mod tests {
         );
         assert_eq!(
             Collection::AllowanceLedgers.fixed_policy(),
-            Policy::new("paykit_allowance", &["paykit_allowance_execute"])
+            Policy::new("paykit_allowance", &["paykit_allowance_execute"]).permanent(None)
         );
         assert_eq!(
             Collection::BlockFloor.fixed_policy(),
@@ -212,6 +212,19 @@ mod tests {
                 None,
                 "{policy:?}"
             );
+        }
+    }
+
+    #[test]
+    fn test_collections_ledger_requires_the_permanent_executor_policy() {
+        let ledger = Collection::AllowanceLedgers;
+        assert_eq!(ledger.policy_label(&ledger.fixed_policy()), Some(None));
+        for other in [
+            Policy::new("paykit_allowance", &["paykit_allowance_execute"]),
+            Policy::new("paykit_allowance", &["paykit_allowance"]).permanent(None),
+            Policy::new("paykit_allowance", &["paykit_allowance_execute"]).permanent(Some(1)),
+        ] {
+            assert_eq!(ledger.policy_label(&other), None);
         }
     }
 

@@ -95,6 +95,18 @@ pub(crate) fn check() {
     );
 
     check_policies(&v);
+    let ledgers: Vec<_> = arr(&v["record_keys"], "cases")
+        .iter()
+        .filter(|case| case["collection"] == Collection::AllowanceLedgers.name())
+        .collect();
+    let [alice, bob] = ledgers.as_slice() else {
+        panic!("expected both payer accounts");
+    };
+    assert_eq!(st(alice, "identity"), ALICE);
+    assert_eq!(st(bob, "identity"), BOB);
+    assert_eq!(alice["policy_hash"], bob["policy_hash"]);
+    assert_ne!(alice["blinded_natural_key"], bob["blinded_natural_key"]);
+    assert_ne!(alice["record_key"], bob["record_key"]);
 }
 
 /// The cases paykit-lib generates in `identifiers.json`, compared with the file, and written
@@ -172,8 +184,8 @@ const POLICIES_DESCRIPTION: &str = "Wire 1.5, Switch wire 1.5: the policies of P
 collections, each with its read scope, its write scopes and its policy hash, \
 hash(lp(\"pubky-switch/v1/policy\", read_scope, u64(n), write_scope_1, ..., write_scope_n)), \
 hashed_bytes_hex being the bytes hashed: the fixed policy of each collection, by its name, \
-the permanent allowances and settlements policies use the permanent-policy label and append \
-u64(0) for their null generation, and, last, \
+permanent policies use the permanent-policy label and append their generation as a u64, \
+or zero for a null generation, and, last, \
 payee_activity's policy for a request labelled shop1.";
 
 /// `policies`: each collection's fixed policy, and `payee_activity`'s under the label
@@ -273,8 +285,7 @@ occurrence_blinded_natural_key), the blind of the natural key of the occurrence 
 credited to, bob's payee record of that payment.";
 
 /// `record_keys` (Paykit wire 1.5): Paykit's natural keys, each blinded into its record key
-/// with the naming key of the identity whose switch holds it: bob's for his payee records,
-/// alice's for every other.
+/// with the naming key of the identity whose switch holds it.
 fn record_keys(keys: &Keys) -> Value {
     let (alice, bob) = (pubky(ALICE), pubky(BOB));
     let one_time = request_hash(&message_json("payment_request"));
@@ -285,34 +296,39 @@ fn record_keys(keys: &Keys) -> Value {
     let shop = keys.app("shop").keys.app_id_bytes();
     let txid = UNREQUESTED_TXID;
     let shop1 = Label::parse(SHOP1).unwrap();
-    let named: [(&str, Collection, Vec<u8>, Option<&Label>); 10] = [
+    let named = [
         (
             "payer request record",
             Collection::PayerActivity,
+            alice,
             natural_key::request_record(&bob, &one_time),
             None,
         ),
         (
             "payer period record (February)",
             Collection::PayerActivity,
+            alice,
             natural_key::period_record(&bob, &recurring, 1_772_236_800),
             None,
         ),
         (
             "payer record of a payment without a request",
             Collection::PayerActivity,
+            alice,
             natural_key::payer_payment_record(&alice, &attempt),
             None,
         ),
         (
             "payee request record",
             Collection::PayeeActivity,
+            bob,
             natural_key::request_record(&bob, &one_time),
             None,
         ),
         (
             "payee record of a payment without a request",
             Collection::PayeeActivity,
+            bob,
             natural_key::payee_payment_record(
                 &PaymentEndpointIdentifier::parse("btc-bitcoin-p2wpkh").unwrap(),
                 txid.as_bytes(),
@@ -322,42 +338,50 @@ fn record_keys(keys: &Keys) -> Value {
         (
             "payment_lists record of the shop app",
             Collection::PaymentLists,
+            alice,
             natural_key::payment_list(&bob, &shop),
             None,
         ),
         (
             "pending Allowance proposal",
             Collection::AllowanceProposals,
+            alice,
             natural_key::allowance(&bob, &allowance),
             None,
         ),
         (
             "Allowance record",
             Collection::Allowances,
+            alice,
             natural_key::allowance(&bob, &allowance),
             None,
         ),
         (
             "Allowance ledger",
             Collection::AllowanceLedgers,
+            alice,
             natural_key::allowance(&bob, &allowance),
+            None,
+        ),
+        (
+            "Allowance ledger when bob is the payer",
+            Collection::AllowanceLedgers,
+            bob,
+            natural_key::allowance(&alice, &allowance),
             None,
         ),
         (
             "payee request record of the request labelled shop1",
             Collection::PayeeActivity,
+            bob,
             natural_key::request_record(&bob, &labelled),
             Some(&shop1),
         ),
     ];
     let cases: Vec<Value> = named
         .iter()
-        .map(|(name, collection, natural, label)| {
-            let holder = match collection {
-                Collection::PayeeActivity => bob,
-                _ => alice,
-            };
-            let nk = keys.identity(&holder).naming_key();
+        .map(|(name, collection, holder, natural, label)| {
+            let nk = keys.identity(holder).naming_key();
             let policy_hash = collection.policy(*label).hash().unwrap();
             let blinded = nk.blind(natural);
             let material = lp(&[collection.name().as_bytes(), &blinded, &policy_hash]);
@@ -370,7 +394,7 @@ fn record_keys(keys: &Keys) -> Value {
             json!({
                 "blinded_natural_key": b64(&blinded),
                 "collection": collection.name(),
-                "identity": pubky_id(&holder),
+                "identity": pubky_id(holder),
                 "key_material_hex": hex(&material),
                 "name": name,
                 "natural_key": b64(natural),
