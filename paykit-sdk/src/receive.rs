@@ -267,14 +267,12 @@ pub(crate) fn effect(
                 return keep_cancellation(cx, &payer_target, stored, position, true);
             }
             let mut owed = holds_activity(payer_record.as_ref());
-            let own = cx.identity();
-            for (_, note) in
-                state::cx_scan::<crate::stored::StoredNote>(cx, &key::stored_notes_of(&sender))?
+            for (_, crate::stored::BoundNote { note, message }) in
+                state::cx_scan(cx, &key::stored_notes_of(&sender))?
             {
                 if note.placed {
                     continue;
                 }
-                let message = note.message.stored(&own).map_err(|_| Fail::corrupt())?;
                 if matches!(message.body(), Body::PaymentRequest(_)) && message.hash() == request {
                     return keep_cancellation(cx, &payer_target, stored, position, true);
                 }
@@ -1046,12 +1044,11 @@ fn step_replies_kept(
         let reply = message.stored(&own).map_err(|_| Fail::corrupt())?;
         kept.push((reply, ordered(&message)?));
     }
-    for (name, note) in
-        state::cx_scan::<crate::stored::StoredNote>(cx, &key::stored_notes_of(&sender))?
+    for (_, crate::stored::BoundNote { note, message }) in
+        state::cx_scan(cx, &key::stored_notes_of(&sender))?
     {
         if !note.placed {
-            let reply = note.bound(&name, &own).map_err(|_| Fail::corrupt())?;
-            kept.push((reply, ordered(&note.message)?));
+            kept.push((message, ordered(&note.message)?));
         }
     }
     kept.extend(crate::divergent::step_responses_kept(cx, record)?);
@@ -1259,7 +1256,7 @@ pub(crate) enum StopAdmission {
 /// bound in all (Paykit spec 8.3, "Ends reach the executor"). Left out of the bounds,
 /// neither counted nor dropped, are:
 /// - a request's stop for a request the copy holds ([`holds_record`]), and one for a request
-///   the app keeps a stored message of to write ([`crate::stored::writes_request`]), the
+///   the app keeps a stored message of to write ([`crate::stored::BoundNote::writes_request`]), the
 ///   request's own entry among them. Potentially applicable originals for those requests
 ///   stay protected until the authenticated parent can be judged (Paykit spec 3.4, 8.1);
 /// - an Allowance's stop over a record held that doesn't read, or that reads and holds what
@@ -1539,16 +1536,15 @@ fn kept_with_time(
 }
 
 /// Whether the app keeps a stored message from `sender` of `request` still to write
-/// ([`crate::stored::writes_request`]).
+/// ([`crate::stored::BoundNote::writes_request`]).
 fn keeps_stored_of(
     cx: &ReceiveContext<'_>,
     sender: &[u8; 32],
     request: &[u8; 32],
 ) -> Result<bool, Fail> {
-    let own = cx.identity();
-    for (_, note) in state::cx_scan::<crate::stored::StoredNote>(cx, &key::stored_notes_of(sender))?
+    for (_, note) in state::cx_scan::<crate::stored::BoundNote>(cx, &key::stored_notes_of(sender))?
     {
-        if crate::stored::writes_request(&note, &own, request).map_err(|_| Fail::corrupt())? {
+        if note.writes_request(request) {
             return Ok(true);
         }
     }

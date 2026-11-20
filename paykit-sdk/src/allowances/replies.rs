@@ -7,7 +7,7 @@ use crate::protocol::{step_failure, store_failure, view_failure};
 use crate::receive::{self, Fail};
 use crate::records::KeptMessage;
 use crate::state::{self, key, Binder, StateKey};
-use crate::stored::StoredNote;
+use crate::stored::{BoundNote, StoredNote};
 use paykit_lib::bodies::ProposerRole;
 use paykit_lib::collections::Collection;
 use paykit_lib::records::{PendingAllowanceRecord, StoredMessage};
@@ -162,31 +162,30 @@ pub(crate) fn holds_delivery(
     }) {
         return Ok(true);
     }
-    let rejects = |held: &KeptMessage| -> Result<bool> {
-        let r = held.stored(binder.identity())?;
-        Ok(matches!(r.body(), Body::AllowanceRejection(_))
+    let rejects = |held: &KeptMessage, r: &StoredMessage| {
+        matches!(r.body(), Body::AllowanceRejection(_))
             && named_allowance(r.body()) == Some(id)
             && r.sender() == message.to
             && r.message().refs.as_slice() == [delivery.hash()]
             && held
                 .pending_source
-                .is_some_and(|source| retired.as_ref().is_none_or(|end| source > end.version)))
+                .is_some_and(|source| retired.as_ref().is_none_or(|end| source > end.version))
     };
     for (_, kept) in state::bound_view_scan::<KeptMessage>(
         delivery.local(),
         &key::kept_reply(&message.to, &permanent, ""),
         &binder,
     )? {
-        if rejects(&kept)? {
+        if rejects(&kept, &kept.stored(binder.identity())?) {
             return Ok(true);
         }
     }
-    for (_, note) in state::bound_view_scan::<StoredNote>(
+    for (_, bound) in state::bound_view_scan::<BoundNote>(
         delivery.local(),
         &key::stored_notes_of(&message.to),
         &binder,
     )? {
-        if !note.placed && rejects(&note.message)? {
+        if !bound.note.placed && rejects(&bound.note.message, &bound.message) {
             return Ok(true);
         }
     }
@@ -748,7 +747,7 @@ fn retire(
     key: &[u8; 32],
     p: &StoredMessage,
     kept: Vec<(String, KeptMessage)>,
-    notes: Vec<(String, StoredNote)>,
+    notes: Vec<(String, BoundNote)>,
 ) -> Result<Vec<LocalWrite>> {
     let mut writes = vec![LocalWrite::Delete {
         key: key::pending_conflict(key).into_bytes(),
@@ -760,8 +759,8 @@ fn retire(
             });
         }
     }
-    for (at, mut note) in notes {
-        if !note.placed && answers(p, &note.bound(&at, own)?) {
+    for (at, BoundNote { mut note, message }) in notes {
+        if !note.placed && answers(p, &message) {
             note.placed = true;
             writes.push(state::local_put(&at, &note)?);
         }
@@ -815,7 +814,7 @@ pub(crate) fn lifetime_ended(
         let held = state::cx_scan::<KeptMessage>(cx, &key::kept_reply(peer, &permanent, ""))
             .map_err(step_failure)?;
         let stored =
-            state::cx_scan::<StoredNote>(cx, &key::stored_notes_of(peer)).map_err(step_failure)?;
+            state::cx_scan::<BoundNote>(cx, &key::stored_notes_of(peer)).map_err(step_failure)?;
         let earlier = |message: &KeptMessage| {
             end.compare(message.pending_source, message.position(), |a, b| {
                 cx.received_order(a, b)
@@ -829,7 +828,7 @@ pub(crate) fn lifetime_ended(
                 held.into_iter().filter(|(_, m)| earlier(m)).collect(),
                 stored
                     .into_iter()
-                    .filter(|(_, n)| earlier(&n.message))
+                    .filter(|(_, n)| earlier(&n.note.message))
                     .collect(),
             )
             .map_err(view_failure)?,
