@@ -76,42 +76,21 @@ private class ReceiptReader : WalletHomeserver, PaymentMethod {
 private suspend fun recoverReceipt(issuer: String) {
     val producer = ProcessBuilder(issuer, "paid-wallet").start()
     val values = producer.inputStream.bufferedReader().readLines()
-    check(producer.waitFor() == 0 && values.size > 8)
+    check(producer.waitFor() == 0 && values.size > 7)
     fun bytes(i: Int): ByteArray = Base64.getDecoder().decode(values[i])
     val app = bytes(0)
     val identity = bytes(1)
     val request = RequestId(bytes(2), bytes(3))
-    val store = EnrollmentStore()
+    val original = EnrollmentStore().apply { reopen(values[6], values.drop(7)) }
     val method = ReceiptReader()
-    fun host(storage: EnrollmentStore = store) = WalletHost(storage, method, method, listOf("btc-lightning-bolt11"))
-    host().use { device ->
-        try {
-            device.restore(app, bytes(6), BackupDevice.UNACCOUNTED_FOR).use { error("unaccounted source was restored") }
-        } catch (_: WalletException.SourceDeviceUnaccountedFor) {}
-        device.restore(app, bytes(6), BackupDevice.IN_POSSESSION).use { wallet ->
-            check(wallet.appId().contentEquals(app))
-            check(wallet.identity().contentEquals(identity))
-            wallet.shutdown()
-        }
-    }
-    host().use { device ->
+    WalletHost(original, method, method, listOf("btc-lightning-bolt11")).use { device ->
         device.load(app).use { wallet ->
-            val entry = wallet.payments().single()
-            check(entry.attemptId == values[4] && entry.amount.value == "7")
-            check(entry.receipt == null)
-            try {
-                wallet.requestReceipts(request)
-                error("the restored wallet listed receipts before its first read")
-            } catch (e: WalletException.Refused) { check(e.refusal.reason().contains("shared records")) }
-            wallet.shutdown()
-        }
-    }
-    val original = EnrollmentStore().apply { reopen(values[7], values.drop(8)) }
-    host(original).use { device ->
-        device.load(app).use { wallet ->
+            check(wallet.appId().contentEquals(app) && wallet.identity().contentEquals(identity))
+            check(wallet.backup().isNotEmpty())
             val receipt = wallet.requestReceipts(request).single()
-            val journalReceipt = checkNotNull(wallet.payments().single().receipt)
-            check(journalReceipt.messageId == receipt.messageId)
+            val entry = wallet.payments().single()
+            check(entry.amount.value == "7" && entry.attemptId == values[4])
+            check(entry.receipt?.messageId == receipt.messageId)
             check(receipt.attemptId == values[4] && receipt.messageId == values[5])
             check(receipt.paymentReference == "checkout-7" && method.transfers == 0)
             wallet.shutdown()

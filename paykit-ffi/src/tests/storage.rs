@@ -49,11 +49,6 @@ impl DeviceStore {
         db.execute_batch(statement).unwrap();
     }
 
-    pub(super) fn rows(&self) -> u64 {
-        self.db()
-            .query_row("SELECT count(*) FROM wallet", [], |r| r.get(0))
-            .unwrap()
-    }
     fn db(&self) -> Connection {
         Connection::open(self.root.join("wallet.sqlite")).unwrap()
     }

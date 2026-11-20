@@ -1,19 +1,8 @@
 use crate::{fixed, WalletError, WalletHost};
-use paykit_sdk::{AppEnv, Paykit, PaykitBackup, PaykitError};
+use paykit_sdk::{AppEnv, Paykit, PaykitError};
 use pubky_switch_client::store::StoreHandle;
 use std::sync::Arc;
 use tokio::sync::{MappedMutexGuard, Mutex, MutexGuard};
-
-/// Whether the user can still account for the source device (Switch spec 12.4).
-#[derive(uniffi::Enum)]
-pub enum BackupDevice {
-    /// The device is still in the user's possession.
-    InPossession,
-    /// The user knows that the previous device was wiped.
-    KnownWiped,
-    /// The source device was lost, stolen or its custody is unknown.
-    UnaccountedFor,
-}
 
 /// One open, exclusively owned Paykit wallet.
 #[derive(uniffi::Object)]
@@ -119,31 +108,5 @@ impl WalletHost {
             self.load_app(env, id).await?,
             Some(owner),
         ))
-    }
-    /// Ask the user about the source device first (Switch spec 12.4). A lost or stolen
-    /// device requires revoking the old app and enrolling new keys.
-    /// Supply the App ID saved alongside the protected backup. The exclusive store
-    /// rejects reads and writes to any other app before an installation can change.
-    pub async fn restore(
-        &self,
-        app_id: Vec<u8>,
-        bytes: Vec<u8>,
-        source_device: BackupDevice,
-    ) -> Result<Arc<NativeWallet>, WalletError> {
-        if matches!(source_device, BackupDevice::UnaccountedFor) {
-            return Err(WalletError::SourceDeviceUnaccountedFor);
-        }
-        let id = fixed(app_id, "app id")?;
-        let backup = PaykitBackup::from_bytes(&bytes)?;
-        let (env, owner) = self.session_env(id).await?;
-        let app = Paykit::restore(
-            env,
-            Default::default(),
-            &backup,
-            self.rail.clone(),
-            self.timer.clone(),
-        )
-        .await?;
-        Ok(NativeWallet::opened(app, Some(owner)))
     }
 }

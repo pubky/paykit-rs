@@ -16,7 +16,7 @@ Create a `WalletHost` with the same protected store, the user's authenticated Ho
 
 `payments` reads the original attempts and their stored stages. `resumePayments` uses the SDK's paying order and the method's lookup of the original attempt ID, including after a lost result. The method must keep that same ID as its idempotency key. Return a definitive refusal only when submission was excluded. Persist a method outcome before returning it, and keep method callbacks independent of the wallet lock. `requestReceipts` reads the original seller's signed receipt references.
 
-Keep backups and their App IDs in protected storage. Before calling `restore`, ask whether the original device is in the user's possession or known to have been wiped. An unaccounted-for device requires revocation and a new enrollment (Switch spec 12.4). The SDK reads and reconciles the restored state under the original App ID. For a retained grant, `reconcileAllowance` reports usage only from the original authority and complete account-wide method history. An unknown result leaves spending held.
+Use `backup` to export the installed wallet’s SDK backup. Store its bytes and App ID together in protected storage. Use `load` to reopen the installed state on the same device. For a retained grant, `reconcileAllowance` reports usage only from the original authority and complete account-wide method history. An unknown result leaves spending held.
 
 ## Receive and acknowledge
 
