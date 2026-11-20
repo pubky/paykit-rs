@@ -79,8 +79,12 @@ internal open class ReceiptReader : WalletHomeserver, PaymentMethod {
     override suspend fun put(identity: ByteArray, path: String, bytes: ByteArray) = error("unexpected public write")
     override suspend fun delete(identity: ByteArray, path: String) = error("unexpected public delete")
     override fun declaration() = MethodDeclaration(true, null, true, null, true, 3600000uL)
-    override fun selectEndpoints(candidates: List<EndpointCandidate>, amount: Amount?) =
-        SelectedEndpoints(candidates.map { it.id }, emptyList())
+    override fun selectEndpoints(candidates: List<EndpointCandidate>, amount: Amount?): SelectedEndpoints {
+        val (unavailable, usable) = candidates.partition { it.identifier == "btc-lightning-bolt12" }
+        return SelectedEndpoints(usable.asReversed().map { it.id }, unavailable.map {
+            EndpointFailure(it.id, MethodException.Unavailable("route unavailable"))
+        })
+    }
     override fun transfer(endpoint: String, payload: String, amount: Amount) = MethodTransfer(amount, null)
     override fun fractionDigits(endpoint: String): UInt? = 8u
     override suspend fun pay(payment: MethodPayment): MethodOutcome {
@@ -109,6 +113,29 @@ private suspend fun recoverReceipt(issuer: String) {
             check(wallet.backup().isNotEmpty())
             val receipt = wallet.requestReceipts(request).single()
             val entry = wallet.payments().single()
+            val periodUsage = AllowancePeriodUsage(entry.amount.value, 1uL)
+            val selection = method.selectEndpoints(listOf(
+                EndpointCandidate(6u, "btc-onchain", "address"),
+                EndpointCandidate(2u, "btc-lightning-bolt12", "offer"),
+                EndpointCandidate(9u, entry.endpoint, "invoice"),
+            ), entry.amount)
+            val failure = selection.failures.single()
+            val unavailable = failure.error as MethodException.Unavailable
+            check(selection.payable == listOf(9u, 6u) && failure.id == 2u && unavailable.reason == "route unavailable")
+            check(unavailable.message == "MethodException(<redacted>)")
+            val walletError = WalletException.Operation(WalletFailureKind.CLIENT, "operation failed", null, byteArrayOf(1))
+            check(walletError.message == "WalletException(<redacted>)" && walletError.detail == "operation failed")
+            val descriptions: List<Pair<Any, String>> = listOf(
+                entry to "PaymentEntry", receipt to "Receipt", request to "RequestId", entry.amount to "Amount",
+                BillingPeriod(1uL, 2uL) to "BillingPeriod",
+                PaymentOutcome.Paid(entry.attemptId, null) to "PaymentOutcome",
+                MethodDispatch(entry.attemptId, entry.amount, MethodOutcome.Pending) to "MethodDispatch",
+                periodUsage to "AllowancePeriodUsage",
+                AllowanceUsage(entry.amount.value, listOf(periodUsage), 0uL, 1uL, 0uL) to "AllowanceUsage",
+                selection to "SelectedEndpoints", failure to "EndpointFailure", unavailable to "MethodException",
+                method.declaration() to "MethodDeclaration", walletError to "WalletException",
+            )
+            for ((value, name) in descriptions) check(value.toString() == "$name(<redacted>)")
             check(entry.amount.value == "7" && entry.attemptId == values[4])
             check(entry.receipt?.messageId == receipt.messageId)
             check(receipt.attemptId == values[4] && receipt.messageId == values[5])
