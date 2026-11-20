@@ -33,7 +33,7 @@ const MISSING_PAYMENT: &str =
 pub(super) struct ReconciledLedger {
     pub(super) facts: super::outcomes::LedgerFacts,
     pub(super) signers: super::checkpoint::ReservationSigners,
-    pub(super) applied_proposal: Option<String>,
+    pub(super) applied_proposals: Vec<String>,
     pub(super) ledger: Ledger,
     pub(super) usage: Usage,
     pub(super) evidence: KeptOp,
@@ -330,7 +330,7 @@ impl Paykit {
         else {
             return Ok(None);
         };
-        if checked.applied_proposal.is_some()
+        if !checked.applied_proposals.is_empty()
             || history.0.len() > 1
             || (!checked.at_initial_ledger && checkpoint.later.as_ref() != Some(&checked.evidence))
         {
@@ -346,7 +346,7 @@ impl Paykit {
         checked: &ReconciledLedger,
     ) -> Result<()> {
         let mut tx = crate::state::Tx::default();
-        if let Some(suffix) = &checked.applied_proposal {
+        for suffix in &checked.applied_proposals {
             tx.delete(&format!("{}{suffix}", key::LEDGER_PROPOSALS));
             tx.delete(&format!("{}{suffix}", key::LEDGER_BATCHES));
         }
@@ -447,14 +447,16 @@ impl Paykit {
                 .await?;
             return Err(pubky_switch_client::app::AppError::Alarm(alarm).into());
         }
-        let (standalone, applied_proposal) =
-            match Box::pin(self.prepared_ledger(permanent_key, &current, &exact_grant)).await? {
-                super::preparation::Prepared::Waiting => return Ok(None),
-                super::preparation::Prepared::Clear => (false, None),
-                super::preparation::Prepared::Applied { standalone, suffix } => {
-                    (standalone, Some(suffix))
-                }
-            };
+        let Some(applied_proposals) = Box::pin(self.prepared_ledger(
+            permanent_key,
+            &accepted.application,
+            &current,
+            &exact_grant,
+        ))
+        .await?
+        else {
+            return Ok(None);
+        };
         let mut signers = checkpoint.signers.clone();
         let mut compaction = None;
         let mut reads = HashMap::new();
@@ -478,7 +480,7 @@ impl Paykit {
                 return Ok(None);
             }
             let mut reservation = None;
-            if !standalone {
+            if applied_proposals.current_standalone != Some(true) {
                 match ledger_change(&accepted.ledger, &ledger, &proposed.terms)? {
                     Some(LedgerChange::Reservation(entry)) => {
                         if !current.opens_in_window(&proposed.terms, entry)? {
@@ -549,7 +551,7 @@ impl Paykit {
                     None => recovered_copy = true,
                 }
                 if recovered_copy
-                    && (applied_proposal.is_some()
+                    && (applied_proposals.current_standalone.is_some()
                         || !Box::pin(self.copied_successor(
                             &accepted,
                             &signers,
@@ -591,7 +593,7 @@ impl Paykit {
         let result = |usage, ledger, grant, compaction, facts| ReconciledLedger {
             signers,
             facts,
-            applied_proposal,
+            applied_proposals: applied_proposals.suffixes,
             compaction,
             at_initial_ledger: current.revision == approval.ledger.revision,
             at,
