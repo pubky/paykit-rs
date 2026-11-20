@@ -337,6 +337,24 @@ impl AppliedRecord {
                 })
     }
 
+    /// A separately retained complete ledger can pin a write after its original zero.
+    /// This cannot establish the authority of a newly observed service write.
+    pub(super) fn pins_write_after(&self, original: &Self) -> bool {
+        let OpKind::RecordPut(put) = &self.op.body().kind else {
+            return false;
+        };
+        self.revision.generation == original.revision.generation
+            && self.expected.generation == original.revision.generation
+            && self.at_ms >= original.at_ms
+            && original.version() < self.expected
+            && self.expected < self.version()
+            && self.op.body().conditions.iter().any(|condition| {
+                matches!(condition, Condition::RecordCurrent { key, revision, deleted: false }
+                    if *key == put.key
+                        && RecordVersion::new(revision.generation, revision.seq) == self.expected)
+            })
+    }
+
     pub(super) fn version(&self) -> RecordVersion {
         RecordVersion {
             generation: self.revision.generation,

@@ -438,13 +438,13 @@ enum RestoredGrantEvidence {
     UnrelatedVerifiedWrite,
 }
 
-// Open two real claim/ledger batches as the enrolled executor, without dispatching
-// a payment. The second ledger no longer directly follows the original zero.
+// Each reservation opens its own claim in the same batch, before any method dispatch.
 async fn reserve_before_restore(
     world: &World,
     payer: &mut paykit_sdk::Paykit,
     shop: &mut paykit_sdk::Paykit,
     key: &[u8; 32],
+    reservations: &[(&str, &str, u64)],
 ) {
     use paykit_lib::allowances::LedgerEntry;
     use pubky_switch_client::app::{
@@ -468,7 +468,7 @@ async fn reserve_before_restore(
         deleted: false,
     };
     world.rail.set_history_payer(payer.identity());
-    for (amount, total, count) in [("40", "40", 1), ("30", "70", 2)] {
+    for &(amount, total, count) in reservations {
         let at = world.clock.now_ms();
         let request = Box::pin(request_from(shop, payer.identity(), draft(amount, at))).await;
         Box::pin(payer.receive(None)).await.unwrap();
@@ -640,7 +640,14 @@ async fn restore_grant_proof_order(installed_verified: bool, evidence: RestoredG
         .unwrap();
     assert_eq!(checkpoint(&verified)["d"][0]["grant"]["kind"], "verified");
     if matches!(evidence, RestoredGrantEvidence::LaterReservations) {
-        Box::pin(reserve_before_restore(&world, &mut payer, &mut shop, &key)).await;
+        Box::pin(reserve_before_restore(
+            &world,
+            &mut payer,
+            &mut shop,
+            &key,
+            &[("40", "40", 1), ("30", "70", 2)],
+        ))
+        .await;
     }
     let verified_backup = payer.backup().await.unwrap();
     let grant = payer.app().shared_record(&key).await.unwrap().unwrap();
@@ -780,6 +787,52 @@ async fn restore_grant_proof_order(installed_verified: bool, evidence: RestoredG
     assert_eq!(
         applied_put(restored.app(), key, current.version).await.1,
         revision
+    );
+    assert!(world.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_restore_holds_a_gap_between_two_noninitial_allowance_ledgers() {
+    let storage = crate::common::store();
+    let (world, mut payer, mut shop, key) =
+        Box::pin(first_grant_in(storage.clone(), terms())).await;
+    Box::pin(reserve_before_restore(
+        &world,
+        &mut payer,
+        &mut shop,
+        &key,
+        &[("10", "10", 1)],
+    ))
+    .await;
+    let backup = Box::pin(payer.backup()).await.unwrap();
+    Box::pin(reserve_before_restore(
+        &world,
+        &mut payer,
+        &mut shop,
+        &key,
+        &[("20", "30", 2), ("30", "60", 3)],
+    ))
+    .await;
+    drop(payer);
+    let mut restored = Box::pin(paykit_sdk::Paykit::restore(
+        world.env(&world.alice, storage),
+        Default::default(),
+        &backup,
+        world.rail.clone(),
+        world.timer(),
+    ))
+    .await
+    .unwrap();
+    Box::pin(crate::common::finish_listing(&mut restored)).await;
+    Box::pin(finish_restored_reconciliation(&mut restored)).await;
+    assert!(Box::pin(restored.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .is_none());
+    assert!(
+        Box::pin(restored.confirm_allowance_executor(&key, UserConfirmed::new()))
+            .await
+            .is_err()
     );
     assert!(world.rail.all_executions().is_empty());
 }
