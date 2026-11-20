@@ -69,6 +69,10 @@ private fun driveCheckout() = runBlocking {
             val method = CheckoutMethod(File(directory, "settled"))
             val store = EnrollmentStore()
             enrolledTestCheckout(store, method).use { fixture ->
+                check(fixture.allowanceRecoveryNoticeKinds() == listOf(
+                    WalletNoticeKind.ALLOWANCE_ACCEPTANCE_BEFORE_LOSS,
+                    WalletNoticeKind.ALLOWANCE_WITHDRAWAL_CONFIRMED
+                ))
                 val reference = ByteArray(16) { 23 }
                 val secret = ByteArray(32) { 9 }
                 val enrolled = WalletEnrollment(store).use { owner ->

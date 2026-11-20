@@ -148,6 +148,7 @@ func driveCheckout() async throws {
     let method = CheckoutMethod(ledger: directory.appendingPathComponent("settled"))
     let store = EnrollmentStore()
     let fixture = try await enrolledTestCheckout(store: store, method: method)
+    precondition(fixture.allowanceRecoveryNoticeKinds() == [.allowanceAcceptanceBeforeLoss, .allowanceWithdrawalConfirmed])
     let reference = Data(repeating: 23, count: 16)
     let secret = Data(repeating: 9, count: 32)
     let owner = WalletEnrollment(store: store)

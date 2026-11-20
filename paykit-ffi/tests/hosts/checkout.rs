@@ -177,6 +177,14 @@ impl CheckoutFixture {
     pub fn payee(&self) -> Vec<u8> {
         self.payee.into()
     }
+    /// The SDK's pre-loss acceptance and confirmed withdrawal, projected for the host enum check.
+    pub fn allowance_recovery_notice_kinds(&self) -> Vec<crate::WalletNoticeKind> {
+        use paykit_sdk::NoticeKind::{AllowanceAcceptanceBeforeLoss, AllowanceWithdrawalConfirmed};
+        vec![
+            AllowanceAcceptanceBeforeLoss.into(),
+            AllowanceWithdrawalConfirmed.into(),
+        ]
+    }
     /// Approve the actual host request using the independent signer.
     pub async fn approve(
         self: Arc<Self>,
