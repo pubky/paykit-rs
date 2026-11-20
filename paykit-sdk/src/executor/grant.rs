@@ -51,8 +51,8 @@ impl Paykit {
     /// Confirm this app's previously approved execution again after a consent hold.
     /// The host shows the counterparty, terms and executor. An earlier approval of
     /// automatic execution by this app is required (Paykit spec 8.3).
-    /// If the ledger has changed, its application and this wallet's complete method history
-    /// must establish the amount already spent under the same grant.
+    /// This app can renew held consent against its own already incorporated ledger. A
+    /// restored or unrecognized later ledger requires complete wallet history.
     ///
     /// # Errors
     ///
@@ -104,7 +104,6 @@ impl Paykit {
             let original_ledger = current_ledger.revision == opening.ledger.revision
                 && accepted.application.revision == opening.ledger.revision;
             if fresh.revision != accepted.grant.revision
-                || (!original_ledger && Box::pin(self.reconcile_allowance(record)).await?.is_none())
                 || view.status != AllowanceStatus::Accepted
                 || view.blocked != Some(false)
                 || self
@@ -119,6 +118,23 @@ impl Paykit {
                 .await?
                 .ok_or_else(held)?;
             if !matches!(consent.consent, Consent::Held { .. }) {
+                return Err(held().into());
+            }
+            // A missed inbox entry can hold an already dispatched attempt. The user can
+            // renew its consent against the exact ledger this installation incorporated.
+            // Every new reservation still needs the method's complete history.
+            let renews_known_consent = matches!(
+                consent.consent,
+                Consent::Held {
+                    confirm_again: true
+                }
+            ) && confirmed.is_some()
+                && !checkpoint.restored
+                && current_ledger.revision == accepted.application.revision;
+            if !original_ledger
+                && !renews_known_consent
+                && Box::pin(self.reconcile_allowance(record)).await?.is_none()
+            {
                 return Err(held().into());
             }
             if let Consent::Held {
@@ -239,6 +255,7 @@ impl Paykit {
         ];
         let op = self.app.record_op(&allow, Some(&value), conditions).await?;
         let checkpoint = ExecutorCheckpoint {
+            restored: false,
             counterparty: view.counterparty,
             allowance_id: view.allowance_id.as_str().into(),
             later: None,
