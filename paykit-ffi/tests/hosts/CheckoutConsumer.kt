@@ -114,11 +114,18 @@ private fun driveCheckout() = runBlocking {
                         val refused = failure.error as WalletException.Refused
                         refused.refusal.use { check(it.kind() is RefusalKind.NotFound) }
                         check(skipped.publicFailures.isEmpty() && method.calls.get() == 0)
-                        val payment = async { wallet.payRequest(view.id, options) }
-                        method.entered.await()
-                        payment.cancelAndJoin()
-                        method.release.complete(Unit)
-                        check(payment.isCancelled)
+                        wallet.finishReceive()
+                        withTimeout(15_000) {
+                            val watch = async { wallet.feedWait(25u) }
+                            fixture.waitForHeldFeed()
+                            check(watch.isActive)
+                            val payment = async { wallet.payRequest(view.id, options) }
+                            check(watch.await() == FeedWake.READY)
+                            method.entered.await()
+                            payment.cancelAndJoin()
+                            method.release.complete(Unit)
+                            check(payment.isCancelled)
+                        }
                         wallet.shutdown()
                         sent
                     }

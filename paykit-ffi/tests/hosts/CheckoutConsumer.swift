@@ -8,6 +8,13 @@ private actor PaymentGate {
     func wait() async {
         if !open { await withCheckedContinuation { waiters.append($0) } }
     }
+    func wait(before deadline: DispatchTime) async throws {
+        while !open && DispatchTime.now() < deadline {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        precondition(open && DispatchTime.now() < deadline, "foreground payment missed its deadline")
+    }
+
     func signal() {
         open = true
         for waiter in waiters { waiter.resume() }
@@ -132,8 +139,14 @@ func driveCheckout() async throws {
     guard case let .error(.Refused(refusal)) = skipped.decision,
           case .notFound = refusal.kind() else { preconditionFailure("missing request was not refused") }
     precondition(skipped.publicFailures.isEmpty && method.calls == 0)
+    try await payer.finishReceive()
+    let deadline = DispatchTime.now() + .seconds(15)
+    let watch = Task { try await payer.feedWait(seconds: 25) }
+    try await fixture.waitForHeldFeed()
     let paying = Task { _ = try await payer.payRequest(id: request, options: options) }
-    await method.entered.wait()
+    let wake = try await watch.value
+    precondition(wake == .ready)
+    try await method.entered.wait(before: deadline)
     paying.cancel()
     do { try await paying.value; preconditionFailure("cancelled native payment returned success") }
     catch is CancellationError {}

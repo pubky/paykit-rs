@@ -17,7 +17,7 @@ use pubky_switch_core::{
 };
 use pubky_switch_harness::{parties::Asking, World};
 use pubky_switch_signer::Signer;
-use std::{collections::BTreeMap, error::Error, sync::Arc};
+use std::{collections::BTreeMap, error::Error, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 
 use crate::fixture_signer as signer;
@@ -191,6 +191,27 @@ impl CheckoutFixture {
         })
         .await
     }
+    /// Wait until the enrolled service actually holds the payer's long feed read.
+    pub async fn wait_for_held_feed(&self) -> Result<(), WalletError> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let held = self
+                    .world
+                    .lock()
+                    .await
+                    .as_ref()
+                    .ok_or(WalletError::invalid("test service closed"))?
+                    .held_reads();
+                if held > 0 {
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .map_err(|_| WalletError::invalid("service did not hold the feed read"))?
+    }
+
     /// Send a seven-unit signed checkout from the shop after the buyer admits its conversation.
     pub async fn send_checkout(&self) -> Result<RequestId, WalletError> {
         let mut seller = self.seller.lock().await;
