@@ -3,6 +3,7 @@ use super::*;
 use crate::allowances::{delivery, replies, AllowanceReply, AppliedReply, EndCause, EndOrigin};
 use paykit_lib::kinds::Kind;
 use pubky_switch_client::app::AppendDecision;
+use pubky_switch_core::records::IdentityDoc;
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Withdrawal {
@@ -24,6 +25,11 @@ pub(super) struct RejectedProposal {
     #[serde(with = "serde_b64")]
     application: [u8; 32],
     withdrawal: Withdrawal,
+}
+
+fn proposal_history_is_known(doc: &IdentityDoc, generation: u64) -> bool {
+    doc.service_key_of(generation).is_some()
+        && delivery::deletion_continues(generation, doc.body().recovery_from)
 }
 
 impl OriginalApproval {
@@ -117,7 +123,7 @@ impl Paykit {
         };
         if approval.opening.is_some()
             || approval.rejected.is_some()
-            || approval.generation != self.app.own_identity().generation()
+            || !proposal_history_is_known(self.app.own_identity(), approval.generation)
             || approval.decision.stored(&approval.peer)?.hash() != proposal.hash()
             || self
                 .confirmed_pending_applications()
@@ -174,7 +180,6 @@ impl Paykit {
                 return Ok(());
             };
             if rejected.withdrawal != Withdrawal::Owed
-                || self.app.own_identity().generation() != approval.generation
                 || !self.allowance_end_send_permitted(&approval.peer).await?
             {
                 return Ok(());
@@ -194,12 +199,15 @@ impl Paykit {
             let record = self.app.record_key(&permanent)?;
             if result.members.len() != 1
                 || result.pending_key != key
-                || result.retirement.generation != approval.generation
+                || SeenVersion::from(result.retirement) <= rejected.selected
             {
                 return Ok(());
             }
             let pending_read = self.app.read_record_fresh(&pending).await?;
             let permanent_read = self.app.read_record_fresh(&permanent).await?;
+            if !proposal_history_is_known(self.app.own_identity(), approval.generation) {
+                return Ok(());
+            }
             let Some(retirement) = self
                 .local_get::<replies::PendingRetirement>(&key::pending_retirement(&key))
                 .await?

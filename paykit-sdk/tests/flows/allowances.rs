@@ -4916,6 +4916,10 @@ async fn test_allowances_restore_sends_nothing_for_a_conflicted_record() {
 #[derive(Clone, Copy)]
 enum RejectedWithdrawal {
     Restore,
+    ServiceChange {
+        before_rejection: bool,
+        keep_key: bool,
+    },
     Fresh,
     Blocked,
     Recreated,
@@ -4950,12 +4954,51 @@ async fn withdraw_after_rejection(trigger: RejectedWithdrawal) {
     );
     let at_shop = shop.allowances().await.unwrap()[0].record;
     let rejection = Box::pin(shop.reject_allowance(&at_shop)).await.unwrap();
+    let first_generation = payer.app().own_identity().generation();
+    let first_key = payer.app().own_identity().inbox().service_key;
+    if let RejectedWithdrawal::ServiceChange {
+        before_rejection: true,
+        keep_key,
+    } = trigger
+    {
+        change_payer_service_key(&w, first_generation, first_key, keep_key);
+        payer.app_mut().refresh_identity().await.unwrap();
+        assert_eq!(
+            payer.app().own_identity().generation(),
+            first_generation + 1
+        );
+    }
     assert_eq!(
         Box::pin(received_originals(&mut payer, &[&rejection])).await,
         [rejection]
     );
     let pending = pending_key(&payer, &w.bob_id(), &offer.allowance_id);
     assert!(Box::pin(held_deleted(&payer, &pending)).await);
+    let retirement = payer
+        .app()
+        .shared_record(&pending)
+        .await
+        .unwrap()
+        .unwrap()
+        .version;
+    let moved_first = matches!(
+        trigger,
+        RejectedWithdrawal::ServiceChange {
+            before_rejection: true,
+            ..
+        }
+    );
+    assert_eq!(
+        retirement.generation,
+        first_generation + u64::from(moved_first)
+    );
+    if let RejectedWithdrawal::ServiceChange {
+        before_rejection: false,
+        keep_key,
+    } = trigger
+    {
+        change_payer_service_key(&w, first_generation, first_key, keep_key);
+    }
     assert!(payer
         .app()
         .shared_record(&offer.record)
@@ -5051,13 +5094,29 @@ async fn withdraw_after_rejection(trigger: RejectedWithdrawal) {
                 store.clone()
             };
             let mut restored = Box::pin(restore_pending_wallet(&w, destination, &backup)).await;
+            if let RejectedWithdrawal::ServiceChange { keep_key, .. } = trigger {
+                restored.app_mut().refresh_identity().await.unwrap();
+                let doc = restored.app().own_identity();
+                assert_eq!(doc.generation(), first_generation + 1);
+                assert_eq!(
+                    doc.service_key_of(first_generation),
+                    keep_key.then_some(first_key)
+                );
+                assert!(doc.body().recovery_from.is_none());
+            }
             Box::pin(read_restored_records(&mut restored)).await;
             restored
         }
     };
     if matches!(
         trigger,
-        RejectedWithdrawal::Fresh | RejectedWithdrawal::Recreated | RejectedWithdrawal::Blocked
+        RejectedWithdrawal::Fresh
+            | RejectedWithdrawal::Recreated
+            | RejectedWithdrawal::Blocked
+            | RejectedWithdrawal::ServiceChange {
+                keep_key: false,
+                ..
+            }
     ) {
         Box::pin(restored.flush()).await.unwrap();
         assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
@@ -5072,7 +5131,10 @@ async fn withdraw_after_rejection(trigger: RejectedWithdrawal) {
                 );
                 return;
             }
-            RejectedWithdrawal::Fresh => return,
+            RejectedWithdrawal::Fresh
+            | RejectedWithdrawal::ServiceChange {
+                keep_key: false, ..
+            } => return,
             _ => {
                 Box::pin(restored.unblock(&w.bob_id())).await.unwrap();
                 w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
@@ -5100,6 +5162,21 @@ async fn withdraw_after_rejection(trigger: RejectedWithdrawal) {
     )
     .unwrap();
     assert_eq!(end.message().refs.as_slice(), [original.proposal().hash()]);
+    if matches!(trigger, RejectedWithdrawal::ServiceChange { .. }) {
+        let marker = format!("aq/{}", b64_of(&end.hash()));
+        let bytes = restored
+            .app()
+            .protocol_get("paykit", marker.as_bytes())
+            .await
+            .unwrap()
+            .unwrap();
+        let applied: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            applied["d"]["retirement"]["generation"],
+            retirement.generation
+        );
+        assert_eq!(applied["d"]["retirement"]["version"], retirement.version);
+    }
     assert_eq!(
         Box::pin(received_originals(&mut shop, &[&withdrawals[0].msg_id])).await,
         [withdrawals[0].msg_id.clone()]
@@ -5128,6 +5205,30 @@ async fn withdraw_after_rejection(trigger: RejectedWithdrawal) {
         .await
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+async fn test_original_rejection_withdrawal_with_the_previous_service_key() {
+    for before_rejection in [false, true] {
+        Box::pin(withdraw_after_rejection(
+            RejectedWithdrawal::ServiceChange {
+                before_rejection,
+                keep_key: true,
+            },
+        ))
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn test_original_rejection_withdrawal_without_the_previous_service_key_stays_held() {
+    Box::pin(withdraw_after_rejection(
+        RejectedWithdrawal::ServiceChange {
+            before_rejection: false,
+            keep_key: false,
+        },
+    ))
+    .await;
 }
 
 #[tokio::test]
@@ -11642,13 +11743,32 @@ async fn test_queued_withdrawal_after_reload_keeps_identical_recreated_proposals
     Box::pin(queued_withdrawal_after_reload(LaterProposal::Pending)).await;
 }
 
+fn change_payer_service_key(w: &World, generation: u64, old: [u8; 32], retain_key: bool) {
+    use crate::common::ALICE_ORIGIN;
+    use pubky_switch_core::records::{Inbox, ServiceKeyEntry};
+    let service = w.alice.switch().change_key_into([74; 32]);
+    w.router.add_switch(ALICE_ORIGIN, &service);
+    let doc = w
+        .alice
+        .sign_next(|body| {
+            if retain_key {
+                body.service_keys.push(ServiceKeyEntry {
+                    generation,
+                    key: old,
+                });
+            }
+            body.generation += 1;
+            body.inbox = Inbox::new(ALICE_ORIGIN, service.service_key());
+        })
+        .unwrap();
+    service.deliver_identity(&doc).unwrap();
+}
+
 /// Stop after the confirmed deletion and before Paykit releases the original signed message.
 /// An orderly change keeps the service history; an identity without the old key cannot date it.
 async fn applied_answer_before_key_change(withdraw: bool, retain_key: bool) {
-    use crate::common::ALICE_ORIGIN;
     use pubky_switch_client::app::{Delivery, RecordContent};
     use pubky_switch_client::store::{Fault, FaultStore};
-    use pubky_switch_core::records::{Inbox, ServiceKeyEntry};
     let w = World::new();
     let fault = std::sync::Arc::new(FaultStore::new(crate::common::store(), Fault::None));
     let scopes = AppScopes::new().pay().allowance().manage_contacts();
@@ -11724,22 +11844,7 @@ async fn applied_answer_before_key_change(withdraw: bool, retain_key: bool) {
         .await
         .is_empty());
     drop(payer);
-    let service = w.alice.switch().change_key_into([74; 32]);
-    w.router.add_switch(ALICE_ORIGIN, &service);
-    let doc = w
-        .alice
-        .sign_next(|body| {
-            if retain_key {
-                body.service_keys.push(ServiceKeyEntry {
-                    generation,
-                    key: old,
-                });
-            }
-            body.generation += 1;
-            body.inbox = Inbox::new(ALICE_ORIGIN, service.service_key());
-        })
-        .unwrap();
-    service.deliver_identity(&doc).unwrap();
+    change_payer_service_key(&w, generation, old, retain_key);
     let mut payer = Box::pin(Paykit::load(
         w.env(&w.alice, fault.inner()),
         Default::default(),
