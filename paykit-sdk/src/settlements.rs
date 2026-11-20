@@ -372,8 +372,28 @@ mod tests {
                 panic!("second request is eligible before either is applied")
             };
             assert_ne!(first, second);
-            assert_eq!(bucket_conditions(key, version, compare).unwrap(), [compare]);
+            let receipt_conditions = bucket_conditions(key, version, compare).unwrap();
+            assert_eq!(receipt_conditions, [compare]);
+            let application = |v: RecordVersion| ApplicationRef {
+                generation: v.generation,
+                seq: v.version,
+                item_hash: [4; 32],
+            };
+            let before = (!version.is_none()).then(|| (version, application(version)));
+            assert!(pubky_switch_core::shared::version_holds(
+                &key,
+                version,
+                before,
+                &receipt_conditions
+            ));
             let next = RecordVersion::new(1, 49);
+            // The same receipt-only comparison no longer holds after the first request wins.
+            assert!(!pubky_switch_core::shared::version_holds(
+                &key,
+                version,
+                Some((next, application(next))),
+                &receipt_conditions
+            ));
             assert!(bucket_conditions(
                 key,
                 version,
