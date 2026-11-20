@@ -8,13 +8,6 @@ private actor PaymentGate {
     func wait() async {
         if !open { await withCheckedContinuation { waiters.append($0) } }
     }
-    func wait(before deadline: DispatchTime) async throws {
-        while !open && DispatchTime.now() < deadline {
-            try await Task.sleep(nanoseconds: 5_000_000)
-        }
-        precondition(open && DispatchTime.now() < deadline, "foreground payment missed its deadline")
-    }
-
     func signal() {
         open = true
         for waiter in waiters { waiter.resume() }
@@ -22,11 +15,19 @@ private actor PaymentGate {
     }
 }
 
+private enum CheckoutStep: Equatable, Sendable {
+    case feedReady, methodEntered, paymentCancelled
+}
+
+private enum CheckoutFailure: Error {
+    case timedOut, unexpectedWake(FeedWake), paymentReturned, missingStep
+}
+
 private final class CheckoutMethod: ReceiptReader, @unchecked Sendable {
     private let ledger: URL
     private let guardLock = NSLock()
     private var dispatches = 0
-    let entered = PaymentGate()
+    let progress = AsyncThrowingStream<CheckoutStep, Error>.makeStream()
     let release = PaymentGate()
     var calls: Int { guardLock.withLock { dispatches } }
 
@@ -58,7 +59,7 @@ private final class CheckoutMethod: ReceiptReader, @unchecked Sendable {
                 try output.close()
             }
         }
-        await entered.signal()
+        progress.continuation.yield(.methodEntered)
         await release.wait()
         return paid(payment.attemptId)
     }
@@ -87,6 +88,57 @@ private extension NativeWallet {
         for _ in 0..<8 { if !(try await receive()).more { return } }
         preconditionFailure("wallet did not complete its feed")
     }
+}
+
+private func payWhileWaiting(
+    payer: NativeWallet, fixture: CheckoutFixture, method: CheckoutMethod,
+    request: RequestId, options: PaymentOptions
+) async throws {
+    let report = method.progress.continuation
+    let timer = DispatchSource.makeTimerSource(queue: .global())
+    timer.setEventHandler { report.finish(throwing: CheckoutFailure.timedOut) }
+    timer.schedule(deadline: .now() + .seconds(15))
+    timer.activate()
+    defer {
+        timer.cancel()
+        report.finish()
+    }
+
+    let watch = Task {
+        do {
+            let wake = try await payer.feedWait(seconds: 25)
+            guard wake == .ready else { throw CheckoutFailure.unexpectedWake(wake) }
+            report.yield(.feedReady)
+        } catch { report.finish(throwing: error) }
+    }
+    let paying = Task {
+        do {
+            try await fixture.waitForHeldFeed()
+            try Task.checkCancellation()
+            _ = try await payer.payRequest(id: request, options: options)
+            report.finish(throwing: CheckoutFailure.paymentReturned)
+        } catch is CancellationError {
+            report.yield(.paymentCancelled)
+        } catch { report.finish(throwing: error) }
+    }
+
+    do {
+        var steps = method.progress.stream.makeAsyncIterator()
+        let first = try await steps.next()
+        let second = try await steps.next()
+        switch (first, second) {
+        case (.feedReady?, .methodEntered?), (.methodEntered?, .feedReady?): break
+        default: throw CheckoutFailure.missingStep
+        }
+        paying.cancel()
+        guard try await steps.next() == .paymentCancelled else { throw CheckoutFailure.missingStep }
+    } catch {
+        watch.cancel()
+        paying.cancel()
+        await method.release.signal()
+        throw error
+    }
+    await method.release.signal()
 }
 
 func driveCheckout() async throws {
@@ -140,17 +192,7 @@ func driveCheckout() async throws {
           case .notFound = refusal.kind() else { preconditionFailure("missing request was not refused") }
     precondition(skipped.publicFailures.isEmpty && method.calls == 0)
     try await payer.finishReceive()
-    let deadline = DispatchTime.now() + .seconds(15)
-    let watch = Task { try await payer.feedWait(seconds: 25) }
-    try await fixture.waitForHeldFeed()
-    let paying = Task { _ = try await payer.payRequest(id: request, options: options) }
-    let wake = try await watch.value
-    precondition(wake == .ready)
-    try await method.entered.wait(before: deadline)
-    paying.cancel()
-    do { try await paying.value; preconditionFailure("cancelled native payment returned success") }
-    catch is CancellationError {}
-    await method.release.signal()
+    try await payWhileWaiting(payer: payer, fixture: fixture, method: method, request: request, options: options)
     try await payer.shutdown()
 
     let reopened = try await host.load(appId: enrolled.appId)

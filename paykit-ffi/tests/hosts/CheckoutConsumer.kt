@@ -120,11 +120,16 @@ private fun driveCheckout() = runBlocking {
                             fixture.waitForHeldFeed()
                             check(watch.isActive)
                             val payment = async { wallet.payRequest(view.id, options) }
-                            check(watch.await() == FeedWake.READY)
-                            method.entered.await()
-                            payment.cancelAndJoin()
-                            method.release.complete(Unit)
-                            check(payment.isCancelled)
+                            try {
+                                check(watch.await() == FeedWake.READY)
+                                method.entered.await()
+                                payment.cancelAndJoin()
+                                check(payment.isCancelled)
+                            } finally {
+                                payment.cancel()
+                                watch.cancel()
+                                method.release.complete(Unit)
+                            }
                         }
                         wallet.shutdown()
                         sent
