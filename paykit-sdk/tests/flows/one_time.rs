@@ -1457,7 +1457,8 @@ async fn test_one_time_cancellation_while_its_record_awaits_its_key_stops_it_pas
     assert!(!value["cancellation"].is_null(), "{value}");
 }
 
-/// Whether `wallet` keeps a stop for bob's request `hash`.
+/// Whether `wallet` keeps a stop for bob's request `hash`, from any of bob's apps: one copy is
+/// kept per original signing certificate (Paykit spec 8.1).
 async fn keeps_stop(w: &World, wallet: &paykit_sdk::Paykit, hash: [u8; 32]) -> bool {
     let request = paykit_sdk::RequestRef {
         payee: w.bob_id(),
@@ -1467,14 +1468,14 @@ async fn keeps_stop(w: &World, wallet: &paykit_sdk::Paykit, hash: [u8; 32]) -> b
         .app()
         .record_key(&crate::outcome_record::payer_record(&request))
         .unwrap();
-    let stop = format!("kc/{}", pubky_switch_core::enc::b64(&key));
+    let stops = format!("kc/{}/", pubky_switch_core::enc::b64(&key));
     wallet
         .app()
-        .protocol_scan("paykit", stop.as_bytes())
+        .protocol_scan("paykit", stops.as_bytes())
         .await
         .unwrap()
         .iter()
-        .any(|(found, _)| found == stop.as_bytes())
+        .any(|(found, _)| found.starts_with(stops.as_bytes()))
 }
 
 #[tokio::test]
@@ -1815,7 +1816,7 @@ async fn test_one_time_stops_bound_never_drops_a_stop_for_a_request_kept_to_writ
 #[tokio::test]
 async fn test_one_time_cancellation_of_a_request_not_held_kept_as_stop_and_reply_at_an_app_paying_and_requesting(
 ) {
-    // Alice's till both pays and requests. Bob cancels a request it holds on neither side:
+    // Both apps can pay and sell. Bob cancels a request the recipient holds on neither side:
     // it keeps the cancellation as the stop and as a payer's reply, one of each.
     let w = World::new();
     let till = w
@@ -1831,7 +1832,17 @@ async fn test_one_time_cancellation_of_a_request_not_held_kept_as_stop_and_reply
         .await;
     let mut till = till;
     till.app_mut().invite(&w.bob_id()).await.unwrap();
-    let _shop = w.shop().await;
+    let _shop = w
+        .join(
+            &w.bob,
+            "shop",
+            paykit_sdk::AppScopes::new()
+                .pay()
+                .request()
+                .build()
+                .unwrap(),
+        )
+        .await;
     let hash = [7; 32];
     crate::common::finish_listing(&mut till).await;
     let id = cancel_to(&w, &[till.app_id()], hash);
@@ -2055,20 +2066,8 @@ async fn test_one_time_restore_asks_wait_for_a_sealed_records_key() {
     assert_eq!(crate::common::asked(&restored, &w.bob_id()).await.len(), 1);
 }
 
-/// The value Paykit keeps at `key` in `app`'s state.
-async fn state_value(app: &paykit_sdk::Paykit, key: &[u8]) -> Vec<u8> {
-    app.app()
-        .protocol_scan("paykit", key)
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|(found, _)| found == key)
-        .unwrap()
-        .1
-}
-
-/// The stop key of bob's request `hash` at `wallet`.
-fn stop_key(w: &World, wallet: &paykit_sdk::Paykit, hash: [u8; 32]) -> Vec<u8> {
+/// The stop key at `wallet` of bob's shop's cancellation of his request `hash`.
+pub(crate) fn stop_key(w: &World, wallet: &paykit_sdk::Paykit, hash: [u8; 32]) -> Vec<u8> {
     let request = paykit_sdk::RequestRef {
         payee: w.bob_id(),
         request_hash: hash,
@@ -2077,7 +2076,31 @@ fn stop_key(w: &World, wallet: &paykit_sdk::Paykit, hash: [u8; 32]) -> Vec<u8> {
         .app()
         .record_key(&crate::outcome_record::payer_record(&request))
         .unwrap();
-    format!("kc/{}", pubky_switch_core::enc::b64(&key)).into_bytes()
+    let shop = w.bob.identity().app_keys("shop").app_id_bytes();
+    format!(
+        "kc/{}/{}/{:020}",
+        pubky_switch_core::enc::b64(&key),
+        pubky_switch_core::enc::b64(&w.bob.switch().app(&shop).cert.unwrap().hash()),
+        wallet.app().own_identity().generation(),
+    )
+    .into_bytes()
+}
+
+/// Receive a cancellation before its request and read the copy kept by the wallet.
+pub(crate) async fn receive_stop(
+    w: &World,
+    wallet: &mut paykit_sdk::Paykit,
+    hash: [u8; 32],
+) -> Vec<u8> {
+    let id = cancel_to(w, &[wallet.app_id()], hash);
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(summary.applied.contains(&id), "{summary:?}");
+    wallet
+        .app()
+        .protocol_get("paykit", &stop_key(w, wallet, hash))
+        .await
+        .unwrap()
+        .unwrap()
 }
 
 #[tokio::test]
@@ -2091,9 +2114,7 @@ async fn test_one_time_stop_naming_another_request_refused_as_corrupt() {
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     let other = [7; 32];
-    cancel_to(&w, &[wallet.app_id()], other);
-    wallet.receive(None).await.unwrap();
-    let value = state_value(&wallet, &stop_key(&w, &wallet, other)).await;
+    let value = receive_stop(&w, &mut wallet, other).await;
     let key = stop_key(&w, &wallet, request.request_hash);
     wallet
         .app_mut()
@@ -2471,9 +2492,7 @@ async fn test_one_time_stop_at_another_key_refuses_the_receive_steps_bounds() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let _shop = w.shop().await;
-    cancel_to(&w, &[wallet.app_id()], [7; 32]);
-    wallet.receive(None).await.unwrap();
-    let value = state_value(&wallet, &stop_key(&w, &wallet, [7; 32])).await;
+    let value = receive_stop(&w, &mut wallet, [7; 32]).await;
     let key = stop_key(&w, &wallet, [8; 32]);
     wallet
         .app_mut()

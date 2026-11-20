@@ -481,6 +481,7 @@ impl JournalEntry {
             || signed.message().refs != [request.hash()]
             || Some(body.billing_period) != self.period()?
             || body.check_against(parent).is_err()
+            || signed.check_payee_sender(parent).is_err()
             || rate != Some(&price.rate()?)
         {
             return Err(PaykitError::corrupt());
