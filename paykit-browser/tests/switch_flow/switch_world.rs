@@ -1,6 +1,9 @@
 //! The test worlds the rig enrols on the real service (`POST /rig/world`), whose Paykit Apps
 //! join it through `FetchTransport`, the rig's or one a test configures. The `switch_flow`,
-//! `switch_faults` and `switch_http` targets include this module.
+//! `switch_faults` and `switch_http` targets include this module, and so does the harness
+//! bundle in `rig/harness/`, which joins its apps on durable stores and reports a failure as
+//! an error rather than a panic: hence the `try_` forms below, which the tests' panicking
+//! forms wrap.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -11,7 +14,7 @@ use paykit_sdk::rail::FakeRail;
 use paykit_sdk::{Paykit, PaykitConfig};
 use pubky_switch_client::app::{AppEnv, HomeserverReader, HomeserverWriter, JoinRequest};
 use pubky_switch_client::clock::Clock;
-use pubky_switch_client::store::{MemoryStore, StoreHandle};
+use pubky_switch_client::store::{MemoryStore, StateStore, StoreHandle};
 use pubky_switch_client::testing::{Seeds, TestHomeserver, TestIdentity};
 use pubky_switch_client::transport::{Header, Transport};
 use pubky_switch_core::enc::unb64;
@@ -19,7 +22,7 @@ use pubky_switch_core::records::{AppRequest, IdentityDoc, IDENTITY_PATH};
 use pubky_switch_core::sig::SignedDoc;
 use serde_json::{json, Value};
 
-use crate::switch_rig::{origin, request, rig_token, transport, transport_with};
+use crate::switch_rig::{request, transport, transport_with, try_origin, try_rig_token};
 
 /// The payer's identity.
 pub const PAYER: &str = "payer";
@@ -65,9 +68,17 @@ impl SwitchWorld {
     ///
     /// # Panics
     ///
-    /// When the target was built without the rig's token, when the rig refuses or fails, or
-    /// when its answer is not a world for these names.
+    /// When [`SwitchWorld::try_enrol`] fails.
     pub async fn enrol(identities: &[&str], apps: &[(&str, &str)]) -> Self {
+        Self::try_enrol(identities, apps)
+            .await
+            .unwrap_or_else(|reason| panic!("{reason}"))
+    }
+
+    /// [`SwitchWorld::enrol`], or why it failed: the target was built without the rig's
+    /// origin or token, the rig refused or failed, or its answer is not a world for these
+    /// names.
+    pub async fn try_enrol(identities: &[&str], apps: &[(&str, &str)]) -> Result<Self, String> {
         let body = json!({
             "identities": identities,
             "apps": apps
@@ -75,74 +86,87 @@ impl SwitchWorld {
                 .map(|(identity, app)| json!({ "identity": identity, "app": app }))
                 .collect::<Vec<_>>(),
         });
-        let mut post = request("POST", &format!("/rig/world?token={}", rig_token()));
+        let origin = try_origin()?;
+        let mut post = request("POST", &format!("/rig/world?token={}", try_rig_token()?));
         post.headers
             .push(Header::new("content-type", "application/json"));
-        post.body = serde_json::to_vec(&body).expect("the world request is JSON");
+        post.body = serde_json::to_vec(&body).map_err(|_| "the world request is not JSON")?;
         let response = transport_with(|config| config.request_timeout_ms = WORLD_TIMEOUT_MS)
             .send(post)
             .await
-            .expect("the rig answers /rig/world");
-        assert_eq!(
-            response.status,
-            200,
-            "/rig/world: {}",
-            String::from_utf8_lossy(&response.body)
-        );
-        let world: Value = serde_json::from_slice(&response.body).expect("/rig/world answers JSON");
-        assert_eq!(text(&world, "origin"), origin(), "the world's origin");
-        let seeds = Seeds::new(text(&world, "seed_prefix"));
+            .map_err(|error| format!("the rig does not answer /rig/world: {error:?}"))?;
+        if response.status != 200 {
+            return Err(format!(
+                "/rig/world answers {}: {}",
+                response.status,
+                String::from_utf8_lossy(&response.body)
+            ));
+        }
+        let world: Value = serde_json::from_slice(&response.body)
+            .map_err(|_| "/rig/world answers no JSON".to_owned())?;
+        check_eq(text(&world, "origin")?, origin, "the world's origin")?;
+        let seeds = Seeds::new(text(&world, "seed_prefix")?);
 
         let homeserver = Arc::new(TestHomeserver::new());
         let enrolled = world["identities"]
             .as_object()
-            .expect("the world lists its identities");
-        assert_eq!(enrolled.len(), identities.len(), "the world's identities");
+            .ok_or("the world lists no identities")?;
+        check_eq(
+            enrolled.len(),
+            identities.len(),
+            "the number of the world's identities",
+        )?;
         for name in identities {
-            let entry = &enrolled[*name];
+            let entry = enrolled
+                .get(*name)
+                .ok_or_else(|| format!("the world has no identity {name}"))?;
             let identity = TestIdentity::new(&seeds, name);
-            assert_eq!(
-                text(entry, "id"),
-                identity.key().id(),
-                "the Pubky ID of {name}"
-            );
+            check_eq(
+                text(entry, "id")?,
+                identity.key().id().as_str(),
+                &format!("the Pubky ID of {name}"),
+            )?;
             homeserver.put(
                 identity.public(),
                 IDENTITY_PATH,
-                bytes(entry, "identity_json"),
+                bytes(entry, "identity_json")?,
             );
         }
 
-        let listed = world["apps"].as_object().expect("the world lists its apps");
-        assert_eq!(listed.len(), apps.len(), "the world's apps");
+        let listed = world["apps"].as_object().ok_or("the world lists no apps")?;
+        check_eq(listed.len(), apps.len(), "the number of the world's apps")?;
         let mut enrolled_apps = BTreeMap::new();
         for (identity, app) in apps {
             let label = format!("{identity}:{app}");
-            let entry = &listed[&label];
-            assert_eq!(
-                (text(entry, "identity"), text(entry, "app")),
+            let entry = listed
+                .get(&label)
+                .ok_or_else(|| format!("the world has no app {label}"))?;
+            check_eq(
+                (text(entry, "identity")?, text(entry, "app")?),
                 (*identity, *app),
-                "{label}"
-            );
-            assert_eq!(
-                text(entry, "app_id"),
-                TestIdentity::new(&seeds, identity).app_keys(app).app_id(),
-                "the App ID of {label}"
-            );
+                &label,
+            )?;
+            check_eq(
+                text(entry, "app_id")?,
+                TestIdentity::new(&seeds, identity)
+                    .app_keys(app)
+                    .app_id()
+                    .as_str(),
+                &format!("the App ID of {label}"),
+            )?;
             let enrolled = EnrolledApp {
-                request: bytes(entry, "request"),
-                approval: bytes(entry, "approval"),
+                request: bytes(entry, "request")?,
+                approval: bytes(entry, "approval")?,
             };
             enrolled_apps.insert(label, enrolled);
         }
 
-        let rail = Arc::new(FakeRail::with_clock(Arc::new(JsClock) as Arc<dyn Clock>));
-        Self {
+        Ok(Self {
             seeds,
             homeserver,
             apps: enrolled_apps,
-            rail,
-        }
+            rail: js_rail(),
+        })
     }
 
     /// Identity `name` of this world, with the keys its seed gives, enrolled or not.
@@ -180,43 +204,73 @@ impl SwitchWorld {
     ///
     /// # Panics
     ///
-    /// When the world has no such app, or the join or its first receive fails.
+    /// When [`SwitchWorld::try_join_on`] fails.
     pub async fn join_with(&self, label: &str, transport: Arc<dyn Transport>) -> Paykit {
+        self.try_join_on(label, transport, Arc::new(MemoryStore::new()))
+            .await
+            .unwrap_or_else(|reason| panic!("{reason}"))
+    }
+
+    /// Joins app `label` as [`SwitchWorld::join_with`] does, with its state in `store`, or
+    /// says why it failed: the world has no such app, or the join or its first receive
+    /// failed.
+    pub async fn try_join_on(
+        &self,
+        label: &str,
+        transport: Arc<dyn Transport>,
+        store: Arc<dyn StateStore>,
+    ) -> Result<Paykit, String> {
         let (Some(app), Some((identity, name))) = (self.apps.get(label), label.split_once(':'))
         else {
-            panic!("the world has no app {label}");
+            return Err(format!("the world has no app {label}"));
         };
         let identity = self.identity(identity);
-        let signed: SignedDoc =
-            serde_json::from_slice(&app.request).expect("the app request is a signed document");
+        let signed: SignedDoc = serde_json::from_slice(&app.request)
+            .map_err(|_| format!("the app request of {label} is not a signed document"))?;
         let join = JoinRequest {
             identity: identity.public(),
             keys: identity.app_keys(name),
-            request: AppRequest::verify(&signed).expect("the app request verifies"),
+            request: AppRequest::verify(&signed).map_err(|error| {
+                format!("the app request of {label} does not verify: {error:?}")
+            })?,
             approval: app.approval.clone(),
         };
-        let env = AppEnv {
-            store: StoreHandle::inline(Arc::new(MemoryStore::new())),
-            transport,
-            clock: Arc::new(JsClock),
-            homeserver: Arc::clone(&self.homeserver) as Arc<dyn HomeserverReader>,
-            homeserver_writer: Some(Arc::clone(&self.homeserver) as Arc<dyn HomeserverWriter>),
-        };
         let mut paykit = Paykit::join(
-            env,
+            app_env(store, transport, &self.homeserver),
             PaykitConfig::default(),
             join,
             Arc::clone(&self.rail) as Arc<_>,
             Arc::new(JsTimer),
         )
         .await
-        .unwrap_or_else(|error| panic!("{label} joins: {error:?}"));
+        .map_err(|error| format!("{label} joins: {error:?}"))?;
         paykit
             .receive(None)
             .await
-            .unwrap_or_else(|error| panic!("{label}'s first receive: {error:?}"));
-        paykit
+            .map_err(|error| format!("{label}'s first receive: {error:?}"))?;
+        Ok(paykit)
     }
+}
+
+/// The environment of an app with its state in `store`, reaching the service through
+/// `transport`, reading the browser's clock, and reading and writing `homeserver`.
+pub fn app_env(
+    store: Arc<dyn StateStore>,
+    transport: Arc<dyn Transport>,
+    homeserver: &Arc<TestHomeserver>,
+) -> AppEnv {
+    AppEnv {
+        store: StoreHandle::inline(store),
+        transport,
+        clock: Arc::new(JsClock),
+        homeserver: Arc::clone(homeserver) as Arc<dyn HomeserverReader>,
+        homeserver_writer: Some(Arc::clone(homeserver) as Arc<dyn HomeserverWriter>),
+    }
+}
+
+/// A fake rail on the browser's clock.
+pub fn js_rail() -> Arc<FakeRail> {
+    Arc::new(FakeRail::with_clock(Arc::new(JsClock) as Arc<dyn Clock>))
 }
 
 /// Reads `paykit`'s feed to its end and sends the cursor move the read deferred (Switch spec
@@ -239,15 +293,32 @@ pub async fn settle(paykit: &mut Paykit) {
         .unwrap_or_else(|error| panic!("the deferred cursor move: {error:?}"));
 }
 
+/// `Ok` when `actual` equals `expected`, else an error naming `what` with both values. Only
+/// public values of a world are compared (origins, counts, names, Pubky IDs and App IDs), so
+/// the text holds no secret.
+fn check_eq<T: PartialEq + std::fmt::Debug>(
+    actual: T,
+    expected: T,
+    what: &str,
+) -> Result<(), String> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "the world does not match: {what}: {actual:?}, expected {expected:?}"
+        ))
+    }
+}
+
 /// The text member `name` of `object`, from a world's output.
-fn text<'a>(object: &'a Value, name: &str) -> &'a str {
+fn text<'a>(object: &'a Value, name: &str) -> Result<&'a str, String> {
     object[name]
         .as_str()
-        .unwrap_or_else(|| panic!("the world has no text {name}"))
+        .ok_or_else(|| format!("the world has no text {name}"))
 }
 
 /// The bytes member `name` of `object`, from a world's output, base64url without padding
 /// (Switch wire 1.2).
-fn bytes(object: &Value, name: &str) -> Vec<u8> {
-    unb64(text(object, name)).unwrap_or_else(|_| panic!("{name} is not base64url"))
+fn bytes(object: &Value, name: &str) -> Result<Vec<u8>, String> {
+    unb64(text(object, name)?).map_err(|_| format!("{name} is not base64url"))
 }

@@ -2,6 +2,7 @@
 # Run the paykit-browser tests in browser engines, through Playwright (runner.mjs).
 #
 #   paykit-browser/rig/test.sh [--switch] <chromium|firefox|webkit|chrome|all> [page|worker|both] [cargo test args...]
+#   paykit-browser/rig/test.sh --harness <chromium|firefox|webkit|chrome|all>
 #
 # "all" is Playwright's chromium, firefox and webkit; "chrome" is the installed Google Chrome.
 # The context defaults to both. Any further arguments go to `cargo test`, such as a test name
@@ -47,7 +48,27 @@
 # waits for the answer (runner.mjs, "Environment"). Each test left out is printed, and the
 # summary counts them: such a run does not cover WebKit fully. 0 or unset runs every test. It
 # is reported apart from the store targets that runner.mjs excludes in an engine build with no
-# Origin Private File System (NO_OPFS there), which the summary lists as warnings.
+# Origin Private File System (NO_OPFS in engines.mjs), which the summary lists as warnings.
+#
+# --harness runs the hosted test harness instead of the test targets: the harness bundle
+# (rig/harness/, built by rig/harness/build.sh) in a dedicated module worker, under a strict
+# Content Security Policy, against the real Switch service, in each engine given, through
+# harness-runner.mjs (its header says what it checks). It starts the service, the database and
+# the rig as --switch does, with the same variables, and has the rig also serve the harness on
+# a second port, https://localhost:<harness port>; it then builds the bundle with the rig's
+# origin and the run's token, runs harness-runner.mjs, and removes everything on every exit. It
+# skips nothing: a bundle that does not build, a rig that does not start or any failed case
+# fails the run. PAYKIT_BROWSER_SKIP_KEYCHAIN_TESTS does not apply: the harness stores no
+# CryptoKey in WebKit on macOS. It also reads:
+#
+#   PAYKIT_BROWSER_HARNESS_PORT         the harness's TLS port, in its origin. Default 18444.
+#   PAYKIT_BROWSER_HARNESS_PROFILE      the cargo profile of the bundle: dev, release or
+#                                       browser-release. Default release.
+#   PAYKIT_BROWSER_HARNESS_TIMINGS      a file harness-runner.mjs writes the timings to, as JSON.
+#                                       Default: none; the timings are printed either way.
+#
+# The bundle goes where rig/harness/build.sh puts it:
+# <cargo target directory>/paykit-browser-harness/<profile>/.
 
 set -euo pipefail
 
@@ -56,6 +77,7 @@ network_targets=(fetch_transport switch_flow transport_faults switch_faults swit
 
 usage() {
   echo "usage: $0 [--switch] <chromium|firefox|webkit|chrome|all> [page|worker|both] [cargo test args...]" >&2
+  echo "       $0 --harness <chromium|firefox|webkit|chrome|all>" >&2
   exit 2
 }
 
@@ -65,9 +87,16 @@ die() {
 }
 
 switch=0
+harness=0
 if [[ "${1:-}" == "--switch" ]]; then
   switch=1
   shift
+elif [[ "${1:-}" == "--harness" ]]; then
+  # The harness runs against the Switch service, so it starts it as --switch does.
+  switch=1
+  harness=1
+  shift
+  [[ $# -eq 1 ]] || usage
 fi
 [[ $# -ge 1 ]] || usage
 case "$1" in
@@ -90,11 +119,12 @@ case "$skip_keychain" in
     exit 2
     ;;
 esac
-if [[ $skip_keychain == 1 && $(uname -s) != Darwin ]]; then
+# The harness stores no CryptoKey in WebKit on macOS, so the setting does not apply to it.
+if [[ $harness -eq 0 && $skip_keychain == 1 && $(uname -s) != Darwin ]]; then
   echo "error: PAYKIT_BROWSER_SKIP_KEYCHAIN_TESTS=1 is for macOS only" >&2
   exit 2
 fi
-if [[ $skip_keychain == 1 && " ${engines[*]} " == *" webkit "* ]]; then
+if [[ $harness -eq 0 && $skip_keychain == 1 && " ${engines[*]} " == *" webkit "* ]]; then
   echo "PAYKIT_BROWSER_SKIP_KEYCHAIN_TESTS=1: WebKit runs leave out the tests that store a" \
     "CryptoKey in IndexedDB; this is not full WebKit coverage"
 fi
@@ -164,25 +194,15 @@ if [[ $given_targets -eq 0 ]]; then
   fi
 fi
 
-locked=$("$rig/wasm-bindgen-version.sh")
-install_hint="cargo install wasm-bindgen-cli --version $locked --locked"
-runner_bin=${WASM_BINDGEN_TEST_RUNNER:-wasm-bindgen-test-runner}
-if ! command -v "$runner_bin" >/dev/null 2>&1; then
-  die "$runner_bin not found; install it with: $install_hint"
-fi
-if ! version_line=$("$runner_bin" --version); then
-  die "$runner_bin --version failed; install it with: $install_hint"
-fi
-installed=$(awk '{ print $2 }' <<<"$version_line")
-if [[ "$installed" != "$locked" ]]; then
-  die "$runner_bin is $installed, but Cargo.lock has wasm-bindgen $locked;" \
-    "install the matching CLI with: $install_hint"
+# The harness needs no test runner: rig/harness/build.sh checks the wasm-bindgen CLI it uses.
+if [[ $harness -eq 0 ]]; then
+  "$rig/wasm-bindgen-version.sh" --check "${WASM_BINDGEN_TEST_RUNNER:-wasm-bindgen-test-runner}" >/dev/null
 fi
 if [[ ! -d "$rig/node_modules/playwright" ]]; then
   die "Playwright is not installed; run: (cd $rig && npm ci --ignore-scripts)"
 fi
-# Cargo splits the runner setting on whitespace.
-if [[ "$rig" =~ [[:space:]] ]]; then
+# Cargo splits the runner setting on whitespace. The harness uses no cargo runner.
+if [[ $harness -eq 0 && "$rig" =~ [[:space:]] ]]; then
   die "the path $rig contains whitespace, which a cargo runner setting cannot hold"
 fi
 export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="node $rig/runner.mjs"
@@ -310,8 +330,15 @@ start_switch_rig() {
   admin_port=$(port_setting PAYKIT_BROWSER_SWITCH_ADMIN_PORT 18490)
   closed_port=$(port_setting PAYKIT_BROWSER_RIG_CLOSED_PORT 18449)
   local ports=("$rig_port" "$switch_port" "$admin_port" "$closed_port")
+  # With --harness, the rig also serves the harness on its own port.
+  local harness_args=()
+  if [[ $harness -eq 1 ]]; then
+    harness_port=$(port_setting PAYKIT_BROWSER_HARNESS_PORT 18444)
+    ports+=("$harness_port")
+    harness_args=(--harness-port "$harness_port" --harness-bundle "$harness_bundle")
+  fi
   if [[ $(printf '%s\n' "${ports[@]}" | sort -u | wc -l) -ne ${#ports[@]} ]]; then
-    die "the rig, service, admin and closed ports must differ"
+    die "the rig, service, admin, closed and harness ports must differ"
   fi
   local port
   for port in "${ports[@]}"; do
@@ -384,15 +411,20 @@ start_switch_rig() {
     die "could not make a random token for the rig"
   [[ "$rig_token" =~ ^[0-9a-f]{32}$ ]] || die "could not make a random token for the rig"
   PAYKIT_BROWSER_RIG_TOKEN=$rig_token node "$rig/switch-rig.mjs" --listen "$rig_port" \
-    --upstream "$switch_port" --enroll-bin "$enroll_bin" >"$logs/rig.log" 2>&1 &
+    --upstream "$switch_port" --enroll-bin "$enroll_bin" ${harness_args[@]+"${harness_args[@]}"} \
+    >"$logs/rig.log" 2>&1 &
   rig_pid=$!
 
   origin="https://localhost:$rig_port"
   local deadline=$((SECONDS + 60))
-  # The rig's own ready line, so a rig left running by another run cannot answer for it.
+  # The rig's own ready line, so a rig left running by another run cannot answer for it. With
+  # --harness, the rig prints it once the harness port serves too, and the harness page must
+  # answer (index.html comes from the source tree, so it is there before the bundle is built).
   until curl -fsS -o /dev/null --max-time 2 "http://127.0.0.1:$admin_port/health/ready" 2>/dev/null &&
     grep -q '^\[switch-rig\] ready ' "$logs/rig.log" &&
-    curl -kfsS -o /dev/null --max-time 2 "$origin/rig/health" 2>/dev/null; do
+    curl -kfsS -o /dev/null --max-time 2 "$origin/rig/health" 2>/dev/null &&
+    { [[ $harness -eq 0 ]] || curl -kfsS -o /dev/null --max-time 2 \
+      "https://localhost:$harness_port/harness/strict/index.html" 2>/dev/null; }; do
     kill -0 "$switch_pid" 2>/dev/null || die_with_logs "the Switch service exited while starting"
     kill -0 "$rig_pid" 2>/dev/null || die_with_logs "switch-rig.mjs exited while starting"
     [[ $SECONDS -lt $deadline ]] ||
@@ -401,6 +433,59 @@ start_switch_rig() {
   done
   echo "== Switch service ready behind $origin (database $database, logs in $logs)"
 }
+
+# Run a step of the harness in the background, so that a signal stops it at once through the
+# traps above, and return its exit status.
+run_step() {
+  ("$@") &
+  tests_pid=$!
+  local status=0
+  wait "$tests_pid" || status=$?
+  tests_pid=""
+  return "$status"
+}
+
+# --harness: start the service and the rig with the harness port, build the bundle against
+# them, and run harness-runner.mjs in the engines given.
+run_harness() {
+  local profile=${PAYKIT_BROWSER_HARNESS_PROFILE:-release}
+  case "$profile" in
+    dev | release | browser-release) ;;
+    *) die "PAYKIT_BROWSER_HARNESS_PROFILE must be dev, release or browser-release, not \"$profile\"" ;;
+  esac
+  [[ -x "$rig/harness/build.sh" ]] || die "$rig/harness/build.sh is missing or not executable"
+  # The rig serves the bundle from where build.sh writes it. build.sh empties that folder
+  # before it writes the new bundle and fails unless both files are there.
+  harness_bundle=$("$rig/harness/build.sh" --print-out-dir "$profile") ||
+    die "could not read the harness bundle folder"
+  start_switch_rig
+
+  echo "== building the harness bundle ($profile) for $origin"
+  run_step env PAYKIT_BROWSER_RIG_ORIGIN="$origin" PAYKIT_BROWSER_RIG_CLOSED_PORT="$closed_port" \
+    PAYKIT_BROWSER_RIG_TOKEN="$rig_token" "$rig/harness/build.sh" "$profile" ||
+    die_with_logs "$rig/harness/build.sh $profile failed"
+
+  echo "== hosted harness: ${engines[*]}, harness origin https://localhost:$harness_port"
+  local status=0
+  run_step env PAYKIT_BROWSER_RIG_ORIGIN="$origin" \
+    PAYKIT_BROWSER_HARNESS_ORIGIN="https://localhost:$harness_port" \
+    node "$rig/harness-runner.mjs" "${engines[@]}" ||
+    status=$?
+  # A harness run must never pass without its service: fail when either one stopped.
+  kill -0 "$switch_pid" 2>/dev/null || { echo "error: the Switch service exited during the run" >&2; status=1; }
+  kill -0 "$rig_pid" 2>/dev/null || { echo "error: switch-rig.mjs exited during the run" >&2; status=1; }
+  if [[ $status -ne 0 ]]; then
+    [[ -n "${PAYKIT_BROWSER_RIG_LOG_DIR:-}" ]] || tail_logs
+    echo "failed: hosted harness (${engines[*]})" >&2
+    exit 1
+  fi
+  echo "all passed: hosted harness, ${engines[*]}"
+  exit 0
+}
+
+if [[ $harness -eq 1 ]]; then
+  run_harness
+fi
 
 if [[ $switch -eq 1 ]]; then
   start_switch_rig
@@ -415,7 +500,7 @@ failed=()
 # Test targets that run in one context only, and so were skipped in the other (runner.mjs).
 skipped=()
 # Store targets not run in an engine build without the Origin Private File System, with the
-# reason (runner.mjs, NO_OPFS).
+# reason (runner.mjs; NO_OPFS in engines.mjs).
 excluded=()
 # Tests left out as they need Keychain access (PAYKIT_BROWSER_SKIP_KEYCHAIN_TESTS).
 not_run=()

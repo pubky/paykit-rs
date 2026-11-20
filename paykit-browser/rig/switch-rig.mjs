@@ -5,6 +5,7 @@
 // on request.
 //
 //   PAYKIT_BROWSER_RIG_TOKEN=<32 hex> node switch-rig.mjs --listen <port> --upstream <port> [--enroll-bin <path>]
+//     [--harness-port <port> --harness-bundle <dir>]
 //
 // `test.sh --switch` starts it; the service listens on 127.0.0.1:<upstream> in plain HTTP with
 // the origin https://localhost:<listen>. PAYKIT_BROWSER_RIG_TOKEN is a random token of the run,
@@ -20,11 +21,13 @@
 //   so that no other process can listen on [::1] either, does it serve on 127.0.0.1 alone,
 //   with a warning in its log.
 // - It answers CORS only for the test page's origin: http://127.0.0.1, http://localhost or
-//   http://[::1], on any port, since wasm-bindgen-test-runner picks one. A dedicated worker's
-//   requests carry its page's origin. A request from such an origin gets that origin back in
-//   access-control-allow-origin; a request from any other origin, or with none, gets no CORS
-//   headers, so a browser hides the answer from any other page. Every answer has
-//   vary: origin.
+//   http://[::1], on any port, since wasm-bindgen-test-runner picks one, and, given
+//   --harness-port, the harness origin https://localhost:<harness port> (see "The hosted
+//   harness" below). A dedicated worker's requests carry its page's origin. A request from
+//   such an origin gets that origin back in access-control-allow-origin; a request from any
+//   other origin, or with none, gets no CORS headers, so a browser hides the answer from any
+//   other page. Every answer has vary: origin, a harness file's aside, which has no CORS
+//   headers at all (see "The hosted harness" below).
 // - It answers every OPTIONS request itself, as a CORS preflight, and forwards none to the
 //   service, with access-control-max-age: 600. A preflight whose query has max_age=none gets
 //   no access-control-max-age, and one with max_age=0 gets 0, on any path. The query of a
@@ -133,6 +136,9 @@
 //                                     fired on, and set "resent" to 0. /rig/fault checks the
 //                                     Origin header and the token as POST /rig/world does,
 //                                     with the same 403s.
+//   GET /rig/harness/strict/<file>    given --harness-bundle, the hosted harness's files on
+//                                     the rig's own origin, with the strict policy, for the
+//                                     same-origin arrangement (see below).
 // - It forwards every other request to the service as received: the method, the raw request
 //   target, the raw headers in their order except the hop-by-hop ones, and the body. It passes
 //   the status and the raw response headers back the same way, and the body. When the service
@@ -142,15 +148,39 @@
 //   one line per fired fault: the kind, the method and the path without the query, and one
 //   line per resend of a faulted request: the method and the path without the query. It
 //   never logs header values, bodies or the token.
+//
+// The hosted harness. Given --harness-port and --harness-bundle (both or neither), the rig
+// also serves the hosted test harness (harness-runner.mjs, rig/harness/) over HTTPS on
+// https://localhost:<harness port>, with the same certificate, on both loopback addresses as
+// above, and prints "[switch-rig] harness ready <origin>" before its ready line. That origin
+// differs from the Switch's, the rig's own, so the harness page and its worker reach the
+// Switch cross-origin, as a web app would. The harness port serves only
+//   GET /harness/<variant>/<file>
+// where <file> is one of HARNESS_FILES below: index.html, page.mjs, worker.mjs and sw.mjs
+// from rig/harness/www/, harness.js and harness_bg.wasm from the --harness-bundle folder.
+// Any other path, method or name gets a 404 or a 405: no request reaches another file. Every
+// file is served with cache-control: no-store and no CORS headers, as only its own origin
+// loads it and the bundle holds the run's token, and the bundle as application/wasm. <variant>
+// picks the Content Security Policy (harnessPolicy below), sent on index.html and, separately,
+// on worker.mjs and sw.mjs, since a worker script runs under its own response's policy, not
+// its page's:
+//   strict            the policy under test, on the page and the worker scripts;
+//   no-wasm           the same without 'wasm-unsafe-eval', on the page and the worker scripts;
+//   worker-no-header  the page strict, the worker scripts with no policy header at all;
+//   no-switch         connect-src without the Switch origin, on the page and the worker scripts.
+// The rig's port serves the same files, strict only, under /rig/harness/strict/<file>, so
+// that the harness can also run on the Switch's own origin and send no preflight.
 
 import { execFile, execFileSync } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Readable, finished, pipeline } from "node:stream";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 // The request headers a Switch request carries (RECEIVED_HEADERS of pubky_switch_core::http,
@@ -194,9 +224,11 @@ const HOP_BY_HOP = new Set([
   "upgrade",
 ]);
 
-// Whether the request's Origin header names the test page.
+// Whether the request's Origin header names the test page: a wasm-bindgen-test-runner page,
+// or the hosted harness's page when the rig serves it.
 function fromPage(req) {
-  return PAGE_ORIGIN.test(req.headers.origin ?? "");
+  const value = req.headers.origin ?? "";
+  return PAGE_ORIGIN.test(value) || (harnessOrigin !== undefined && value === harnessOrigin);
 }
 
 // The CORS headers of an answer to `req`, with `headers` added for the test page's origin:
@@ -230,6 +262,51 @@ const FAULT_ERROR =
   'optionally "after" in 0..16}';
 // The most matching requests a fault lets through before it fires.
 const MAX_FAULT_AFTER = 16;
+
+// The hosted harness's files (see "The hosted harness" above), by name: the folder each is
+// read from, "www" (rig/harness/www/) or "bundle" (--harness-bundle), its content type, and
+// which policy its response carries: "page", "worker" or none. Only these names are served.
+const HARNESS_WWW = join(dirname(fileURLToPath(import.meta.url)), "harness", "www");
+const JAVASCRIPT = "text/javascript; charset=utf-8";
+const HARNESS_FILES = {
+  "index.html": { folder: "www", type: "text/html; charset=utf-8", policy: "page" },
+  "page.mjs": { folder: "www", type: JAVASCRIPT, policy: null },
+  "worker.mjs": { folder: "www", type: JAVASCRIPT, policy: "worker" },
+  "sw.mjs": { folder: "www", type: JAVASCRIPT, policy: "worker" },
+  "harness.js": { folder: "bundle", type: JAVASCRIPT, policy: null },
+  // instantiateStreaming refuses any other type, and the glue then falls back to a slower path
+  // with a console warning, which the harness runner fails on.
+  "harness_bg.wasm": { folder: "bundle", type: "application/wasm", policy: null },
+};
+// The policy variants of the harness port, and the one variant the rig's port serves.
+const HARNESS_VARIANTS = ["strict", "no-wasm", "worker-no-header", "no-switch"];
+const SAME_ORIGIN_VARIANTS = ["strict"];
+
+// The Content Security Policy of the hosted harness: the one place it is defined. `variant`
+// is one of HARNESS_VARIANTS, `role` "page" or "worker" (the dedicated and service worker
+// scripts). Returns the header value, or null for no header. The Switch origin is the rig's
+// own, `origin`. No variant ever allows 'unsafe-eval', 'unsafe-inline', blob: or data:.
+function harnessPolicy(variant, role) {
+  if (variant === "worker-no-header" && role === "worker") return null;
+  const directives = [
+    // Nothing loads that no directive below allows.
+    ["default-src", "'none'"],
+    // Scripts only from the harness's own origin, never inline; 'wasm-unsafe-eval' lets the
+    // bundle compile WebAssembly without allowing JavaScript eval.
+    ["script-src", variant === "no-wasm" ? "'self'" : "'self' 'wasm-unsafe-eval'"],
+    // Workers only from the harness's own script files: no blob: or data: workers.
+    ["worker-src", "'self'"],
+    // The bundle's fetch from the harness's own origin, and the Switch's requests.
+    ["connect-src", variant === "no-switch" ? "'self'" : `'self' ${origin}`],
+    // No <base> element can move the page's relative URLs.
+    ["base-uri", "'none'"],
+    // No form can post anywhere.
+    ["form-action", "'none'"],
+    // No other page can frame the harness.
+    ["frame-ancestors", "'none'"],
+  ];
+  return directives.map(([name, sources]) => `${name} ${sources}`).join("; ");
+}
 
 // The rig's routes: path -> [methods, or null for any, handler].
 const ROUTES = {
@@ -271,14 +348,29 @@ try {
       listen: { type: "string" },
       upstream: { type: "string" },
       "enroll-bin": { type: "string" },
+      "harness-port": { type: "string" },
+      "harness-bundle": { type: "string" },
     },
   }));
 } catch (error) {
-  fail(`${error.message}\nusage: switch-rig.mjs --listen <port> --upstream <port> [--enroll-bin <path>]`);
+  fail(
+    `${error.message}\nusage: switch-rig.mjs --listen <port> --upstream <port> [--enroll-bin <path>] ` +
+      "[--harness-port <port> --harness-bundle <dir>]",
+  );
 }
 const listenPort = port(options.listen, "listen");
 const upstreamPort = port(options.upstream, "upstream");
 const enrollBin = options["enroll-bin"];
+if ((options["harness-port"] === undefined) !== (options["harness-bundle"] === undefined)) {
+  fail("--harness-port and --harness-bundle go together");
+}
+const harnessPort =
+  options["harness-port"] === undefined ? undefined : port(options["harness-port"], "harness-port");
+if (harnessPort === listenPort) fail("--harness-port must differ from --listen");
+// The folder of harness.js and harness_bg.wasm. It is read at each request, so the bundle may
+// be built after the rig starts, as test.sh does once it knows the rig's origin.
+const harnessBundle = options["harness-bundle"];
+const harnessOrigin = harnessPort === undefined ? undefined : `https://localhost:${harnessPort}`;
 // The run's token for /rig/world and /rig/fault, which test.sh makes and builds into the
 // network tests.
 const runToken = process.env.PAYKIT_BROWSER_RIG_TOKEN ?? "";
@@ -379,8 +471,10 @@ function entry(map, key, make) {
   return map.get(key);
 }
 
-function answer(res, code, type, body, headers = []) {
-  const head = [...headers, ...corsHeaders(res.req)];
+// Answers with `headers`, the content type and length and, unless `cors` is false, the CORS
+// headers of the request.
+function answer(res, code, type, body, headers = [], { cors = true } = {}) {
+  const head = cors ? [...headers, ...corsHeaders(res.req)] : [...headers];
   if (type) head.push(["content-type", type]);
   if (code !== 204) head.push(["content-length", String(Buffer.byteLength(body))]);
   res.writeHead(code, head.flat());
@@ -727,6 +821,61 @@ async function fault(req, res, query) {
   json(res, { armed: true });
 }
 
+// The variant and file name of a raw path `<prefix><variant>/<name>`, with the variant one of
+// `variants` and the name one of HARNESS_FILES; otherwise null. The raw path is compared as
+// it is, never decoded, so no spelling of it can name another file.
+function harnessFile(path, prefix, variants) {
+  if (harnessBundle === undefined || !path.startsWith(prefix)) return null;
+  const parts = path.slice(prefix.length).split("/");
+  if (parts.length !== 2) return null;
+  const [variant, name] = parts;
+  if (!variants.includes(variant) || !Object.hasOwn(HARNESS_FILES, name)) return null;
+  return { variant, name };
+}
+
+// Answers a GET of one harness file, read from its folder now, with its variant's policy.
+// `path` is the raw path without the query, for the log. Never rejects: an error is logged
+// and cuts the connection.
+async function serveHarness(req, res, path, { variant, name }) {
+  try {
+    req.resume();
+    if (req.method !== "GET") return text(res, 405, "method not allowed", [["allow", "GET"]]);
+    const file = HARNESS_FILES[name];
+    let body;
+    try {
+      body = await readFile(join(file.folder === "www" ? HARNESS_WWW : harnessBundle, name));
+    } catch {
+      return text(res, 404, `the harness file ${name} is missing; is the bundle built?`);
+    }
+    const headers = [["cache-control", "no-store"], ["x-content-type-options", "nosniff"]];
+    const policy = file.policy === null ? null : harnessPolicy(variant, file.policy);
+    if (policy !== null) headers.push(["content-security-policy", policy]);
+    // No CORS headers: only the harness's own origin loads its files, and the bundle holds
+    // the run's token, which no other page may read.
+    answer(res, 200, file.type, body, headers, { cors: false });
+  } catch (error) {
+    log(`${req.method} ${path}: ${error.message}`);
+    cut(res);
+  }
+}
+
+// The harness port's handler: the harness files and nothing else.
+function handleHarness(req, res) {
+  const target = req.url ?? "";
+  const queryStart = target.indexOf("?");
+  const path = queryStart < 0 ? target : target.slice(0, queryStart);
+  res.on("close", () => {
+    const code = res.headersSent ? res.statusCode : "no answer";
+    log(`harness ${req.method} ${path} ${code}${res.writableFinished ? "" : " (connection closed early)"}`);
+  });
+  const file = harnessFile(path, "/harness/", HARNESS_VARIANTS);
+  if (file === null) {
+    req.resume();
+    return text(res, 404, "no such harness file");
+  }
+  serveHarness(req, res, path, file);
+}
+
 // Makes the browser's connection of `res`, an answer in progress, close once the answer has
 // ended, without cutting it: before the head is sent, the head says connection: close, and
 // Node closes the connection after the answer; after, once the answer's last byte is handed
@@ -749,6 +898,10 @@ function closeAfterAnswer(res) {
 }
 
 function serveRig(req, res, path, query) {
+  const file = harnessFile(path, "/rig/harness/", SAME_ORIGIN_VARIANTS);
+  if (file !== null) {
+    return serveHarness(req, res, path, file);
+  }
   if (!Object.hasOwn(ROUTES, path)) {
     req.resume();
     return text(res, 404, "no such rig route");
@@ -955,15 +1108,15 @@ function handle(req, res) {
 }
 
 // One server per loopback address, with the same certificate and handler.
-function serve(tls, address) {
+function serve(tls, address, listenOn, handler) {
   return new Promise((resolve, reject) => {
-    const server = https.createServer(tls, handle);
+    const server = https.createServer(tls, handler);
     server.on("tlsClientError", (error, socket) => {
       log(`TLS client error: ${error.code ?? error.message}`);
       socket.destroy();
     });
     server.once("error", reject);
-    server.listen(listenPort, address, () => {
+    server.listen(listenOn, address, () => {
       server.off("error", reject);
       server.on("error", (error) => fail(`serving on ${address}: ${error.message}`));
       servers.push(server);
@@ -972,21 +1125,30 @@ function serve(tls, address) {
   });
 }
 
-const tls = makeCertificate();
-try {
-  await serve(tls, "127.0.0.1");
-} catch (error) {
-  fail(`cannot serve on 127.0.0.1:${listenPort}: ${error.message}`);
-}
-try {
-  await serve(tls, "::1");
-} catch (error) {
-  // No IPv6 loopback address on this host: nothing can listen on [::1], and no browser
-  // reaches localhost there.
-  if (error.code !== "EADDRNOTAVAIL" && error.code !== "EAFNOSUPPORT") {
-    fail(`cannot serve on [::1]:${listenPort}: ${error.message}`);
+// Serves `handler` on `listenOn` on 127.0.0.1 and ::1.
+async function serveLoopback(tls, listenOn, handler) {
+  try {
+    await serve(tls, "127.0.0.1", listenOn, handler);
+  } catch (error) {
+    fail(`cannot serve on 127.0.0.1:${listenOn}: ${error.message}`);
   }
-  log(`warning: no IPv6 loopback address (${error.code}); serving on 127.0.0.1 only`);
+  try {
+    await serve(tls, "::1", listenOn, handler);
+  } catch (error) {
+    // No IPv6 loopback address on this host: nothing can listen on [::1], and no browser
+    // reaches localhost there.
+    if (error.code !== "EADDRNOTAVAIL" && error.code !== "EAFNOSUPPORT") {
+      fail(`cannot serve on [::1]:${listenOn}: ${error.message}`);
+    }
+    log(`warning: no IPv6 loopback address (${error.code}); serving on 127.0.0.1:${listenOn} only`);
+  }
+}
+
+const tls = makeCertificate();
+await serveLoopback(tls, listenPort, handle);
+if (harnessPort !== undefined) {
+  await serveLoopback(tls, harnessPort, handleHarness);
+  log(`harness ready ${harnessOrigin}`);
 }
 log(`ready ${origin}`);
 

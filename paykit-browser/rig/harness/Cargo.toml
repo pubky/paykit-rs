@@ -1,0 +1,46 @@
+# Test rig code only: the WebAssembly bundle that the hosted-page tests of paykit-browser load in a
+# dedicated worker (`src/lib.rs`). It is not a proposal for the SDK's JavaScript surface.
+#
+# A workspace member, so `--locked` and the workspace's settings and lock cover it. On every target
+# but `wasm32-unknown-unknown` it is an empty library: all its dependencies are in the target table
+# below, which resolver 2 leaves out of native builds, so the test-only features it turns on
+# (paykit-sdk's `test-support`, pubky-switch-client's `test-support`) never reach a native
+# `--workspace` build, and a native build of this crate compiles nothing. On wasm32 they do reach
+# the graph of paykit-browser in any build that includes this crate, `--workspace` among them: a
+# wasm32 build of the SDK selects `-p paykit-browser`, as CI and `../check-wasm-deps.sh` do.
+[package]
+name = "paykit-browser-harness"
+description = "Test harness: runs Paykit scenarios in a browser worker for the paykit-browser rig"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+test = false
+doctest = false
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+paykit-browser = { path = "../.." }
+paykit-lib.workspace = true
+# The fake rail (`FakeRail`) and the Switch client's seeded test identities and in-memory
+# Homeserver (`testing`), as the network test targets use them (`tests/switch_flow/`).
+paykit-sdk = { path = "../../../paykit-sdk", features = ["test-support"] }
+pubky-switch-core.workspace = true
+pubky-switch-client = { workspace = true, features = ["test-support"] }
+serde_json.workspace = true
+js-sys = "0.3.107"
+wasm-bindgen = "0.2.130"
+wasm-bindgen-futures = "0.4.80"
+# The host's test wrapping key (`WebCrypto` `importKey`) and the monotonic clock of the `pure`
+# scenario.
+web-sys = { version = "0.3.107", features = [
+  "Crypto",
+  "CryptoKey",
+  "Performance",
+  "SubtleCrypto",
+] }

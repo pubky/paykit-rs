@@ -33,6 +33,11 @@ pub const HOUR_MS: u64 = 3_600_000;
 #[allow(dead_code)] // `pay_flow` only.
 pub const DAY_MS: u64 = 24 * HOUR_MS;
 
+/// The asset of every request [`draft`] makes.
+pub const ASSET: &str = "btc";
+/// The Payment Reference of every request [`draft`] makes.
+pub const PAYMENT_REFERENCE: &str = "order-1";
+
 /// Where the payer's switch is.
 const PAYER_ORIGIN: &str = "https://payer-switch.example";
 /// Where the payee's switch is.
@@ -216,9 +221,9 @@ pub fn draft(value: &str, expires_at_ms: u64) -> RequestDraft {
     RequestDraft::new(
         PaymentAmount {
             value: Decimal::new(value).unwrap(),
-            asset: Asset::new("btc").unwrap(),
+            asset: Asset::new(ASSET).unwrap(),
         },
-        PaymentReference::new("order-1").unwrap(),
+        PaymentReference::new(PAYMENT_REFERENCE).unwrap(),
         RequestDestination::Endpoints(endpoints),
     )
     .with_proposal_expires_at_ms(expires_at_ms)
