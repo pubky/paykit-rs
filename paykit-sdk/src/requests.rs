@@ -633,6 +633,13 @@ pub(crate) fn cancelled(record: &ActivityRecord) -> bool {
     record.cancellation.is_some()
 }
 
+/// A deleted payer record may have held the only proof of payment (Paykit spec 6).
+pub(crate) fn payment_history_lost() -> Refusal {
+    Refusal::RecordHeld(
+        "Paykit spec 6: a deleted activity record may have held the payment's proof".into(),
+    )
+}
+
 /// A payment stops for a proof, rejection or cancellation. An accepted attempt finishes
 /// across its payee's cancellation of the parent request (Paykit spec 8.1).
 pub(crate) fn payment_ended(record: &ActivityRecord, crossing_payee: Option<[u8; 32]>) -> bool {
@@ -2020,7 +2027,7 @@ impl Paykit {
         // with a restore's hold, a block or a divergent record: none of them ends the request,
         // and the block floor holds an open one whatever its status shows.
         let open = live(&status);
-        let held = if self.held(&record_key, record).await? {
+        let held = if record.lost_to_delete.is_none() && self.held(&record_key, record).await? {
             if live(&status) {
                 status = RequestStatus::Held;
             }
@@ -2219,6 +2226,9 @@ impl Paykit {
         }
         if cancelled(record) {
             return Ok(RequestStatus::Cancelled);
+        }
+        if record.lost_to_delete.is_some() {
+            return Ok(RequestStatus::MayBePaid);
         }
         if let Some(view) = view {
             match view.status {
