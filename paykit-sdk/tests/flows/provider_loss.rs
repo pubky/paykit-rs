@@ -2,6 +2,8 @@
 //! signer declares alice's generation lost at a new service, the old one stops answering,
 //! and her apps follow the loss there.
 
+mod notice;
+
 use std::sync::Arc;
 
 use paykit_sdk::rail::Behaviour;
