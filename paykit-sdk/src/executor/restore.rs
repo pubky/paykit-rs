@@ -769,7 +769,7 @@ mod tests {
 
     fn check_period_receipt_selling_scope(later_destination: bool) {
         use crate::testkit::{object, Party, NOW};
-        use paykit_lib::bodies::PaymentReceipt;
+        use paykit_lib::bodies::{PaymentReceipt, PeriodDetails};
         use paykit_lib::periods::{AnchoredRule, PeriodRef, Recurrence, Unit};
         use paykit_lib::records::ActivitySide;
         use serde_json::json;
@@ -806,11 +806,17 @@ mod tests {
         }
         let request = shop.message(&payer, "paykit.payment_request", vec![], subscription);
         let selected = later_destination.then(|| {
-            let details = object(json!({
-                "billing_period": period.to_json(),
-                "payment_endpoints": { "btc-lightning-bolt11": "lnbc1period" },
-                "expires_at": period.ends_at
-            }));
+            let details = PeriodDetails {
+                billing_period: period,
+                payment_endpoints: Some(std::collections::BTreeMap::from([(
+                    paykit_lib::PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+                    paykit_lib::PaymentEndpointPayload::new("lnbc1period").unwrap(),
+                )])),
+                rates: None,
+                expires_at: period.ends_at,
+            }
+            .to_body()
+            .unwrap();
             shop.message(
                 &payer,
                 "paykit.payment_period_details",
