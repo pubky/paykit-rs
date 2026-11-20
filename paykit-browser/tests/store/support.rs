@@ -9,9 +9,9 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::DedicatedWorkerGlobalScope;
 
-/// The offset of a slot's payload: after the magic, the format version, the generation and the
-/// payload length (`src/store/format.rs`).
-pub const PAYLOAD_AT: usize = 28;
+/// The offset of a slot's sealed payload: after the magic, the format version, the generation,
+/// the store identifier, the nonce and the sealed length (`src/store/format.rs`).
+pub const PAYLOAD_AT: usize = 68;
 
 fn scope() -> DedicatedWorkerGlobalScope {
     js_sys::global()
