@@ -1,6 +1,8 @@
 //! Another wallet of the same seller can recover an already-issued receipt after the issuing shop restarts.
 #![recursion_limit = "256"]
 
+#[path = "receipt_publication/marked.rs"]
+mod marked;
 #[path = "receipt_publication/older_backup.rs"]
 mod older_backup;
 
@@ -255,6 +257,32 @@ async fn shared_position(client: &SwitchClient, key: &[u8; 32]) -> TestResult<(u
     Ok((record.version, service_cursor(client).await?))
 }
 
+const SHOP: &str = "https://shop.payment.test";
+
+fn shop_client(
+    world: &World,
+    signer: &Signer,
+    wallet: &Paykit,
+    name: &str,
+) -> TestResult<SwitchClient> {
+    let identity = wallet.identity();
+    Ok(SwitchClient::new(
+        SHOP,
+        identity,
+        Credentials::App {
+            identity,
+            keys: world.app_keys(&world.identity("shop")?, name)?,
+            cert: wallet.app().cert().clone(),
+        },
+        signer
+            .identity_doc()?
+            .ok_or("missing identity document")?
+            .service_key_of(1),
+        world.transport(),
+        world.clock().clone(),
+    )?)
+}
+
 struct IssuedSale {
     seller: Signer,
     buyer: Paykit,
@@ -272,7 +300,6 @@ struct IssuedSale {
 }
 
 async fn issued_sale(world: &World) -> TestResult<IssuedSale> {
-    const SHOP: &str = "https://shop.payment.test";
     let payer = setup_identity(world, "buyer", "https://buyer.payment.test").await?;
     let seller = setup_identity(world, "shop", SHOP).await?;
     let rail = Arc::new(FakeRail::with_clock(world.clock().clone()));
@@ -317,21 +344,7 @@ async fn issued_sale(world: &World) -> TestResult<IssuedSale> {
     ))
     .await?;
     let identity = shop.identity();
-    let observer = SwitchClient::new(
-        SHOP,
-        identity,
-        Credentials::App {
-            identity,
-            keys: world.app_keys(&world.identity("shop")?, "issuer")?,
-            cert: shop.app().cert().clone(),
-        },
-        seller
-            .identity_doc()?
-            .ok_or("missing identity document")?
-            .service_key_of(1),
-        world.transport(),
-        world.clock().clone(),
-    )?;
+    let observer = shop_client(world, &seller, &shop, "issuer")?;
     let target = RecordTarget::new(
         SwitchCollection::new(
             Collection::PayeeActivity.name(),
