@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use paykit_browser::store::OpfsStore;
+use paykit_browser::store::{OpfsStore, WrappingKey};
 use pubky_switch_client::store::StateStore;
 use wasm_bindgen_test::wasm_bindgen_test;
 
@@ -17,13 +17,14 @@ use crate::opfs;
 /// Run `case` on a fresh store, then check that what it left survives opening the store again.
 async fn run(case: impl FnOnce(Arc<dyn StateStore>) -> Namespaces) {
     let name = opfs::fresh_name("contract");
-    let store: Arc<dyn StateStore> = Arc::new(OpfsStore::open(&name).await.unwrap());
+    let store: Arc<dyn StateStore> =
+        Arc::new(OpfsStore::open(&name, WrappingKey::Origin).await.unwrap());
     let namespaces = case(Arc::clone(&store));
     let left = contract::contents(store.as_ref(), namespaces);
     // The case kept no handle on the store, so this drop closes its files.
     assert_eq!(Arc::strong_count(&store), 1);
     drop(store);
-    let store = OpfsStore::open(&name).await.unwrap();
+    let store = OpfsStore::open(&name, WrappingKey::Origin).await.unwrap();
     assert!(
         contract::contents(&store, namespaces) == left,
         "the contents read back after opening the store again differ"

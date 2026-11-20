@@ -19,6 +19,16 @@
 //   PAYKIT_BROWSER_RIG_ORIGIN    set by `test.sh --switch` for the network tests, whose rig
 //                                (switch-rig.mjs) serves a self-signed certificate. When it is
 //                                set, the page and its worker ignore certificate errors.
+//   PAYKIT_BROWSER_SKIP_KEYCHAIN_TESTS  1 leaves the tests named in KEYCHAIN_TESTS below out of
+//                                WebKit runs, for local runs on macOS only, and is refused on
+//                                any other platform; 0 or unset runs every test. Playwright's
+//                                WebKit on macOS protects a CryptoKey stored in IndexedDB with a
+//                                key from the user's Keychain, and asks for Keychain access in a
+//                                dialog that stops the test until someone answers it. Each test
+//                                left out is printed as "[runner] NOT RUN <target>::<test>:
+//                                needs Keychain access ...", and test.sh counts them. CI never
+//                                sets it. It is separate from NO_OPFS below, which leaves out
+//                                whole targets on Linux and is reported on its own.
 //
 // wasm-bindgen-test-runner runs with NO_HEADLESS=1, so it only generates the bindings and
 // serves the test page on a free loopback port. This script opens that page in the engine,
@@ -46,12 +56,14 @@
 //               launchPersistentContext), deleted on every exit. The Origin Private File System
 //               needs it: in a context without a profile, WebKit refuses it and Chromium keeps
 //               it in memory only. On every exit with the test page still served, this script
-//               closes the page, so its worker's file locks are released, and removes every
-//               entry left in the origin's OPFS root. The origin, a random loopback port, is
-//               this run's alone. The tests remove what they create, so a passing run that left
-//               an entry, or whose entries cannot be removed, fails; a failed test cannot, and
-//               this keeps its files from staying on the machine (Playwright's WebKit on macOS
-//               keeps OPFS in the user's Library).
+//               closes the page, so its worker's file locks and database connections are
+//               released, and removes every entry left in the origin's OPFS root and every
+//               IndexedDB database of the origin. The origin, a random loopback port, is this
+//               run's alone. The tests remove what they create, so a passing run that left an
+//               entry or an IndexedDB record, or whose leftovers cannot be removed, fails (an
+//               empty database does not: the store keeps its key database); a failed test
+//               cannot, and this keeps its files from staying on the machine (Playwright's
+//               WebKit on macOS keeps OPFS and IndexedDB in the user's Library).
 //   reload      after the first test result, the page is reloaded and the tests run again in a
 //               new WebAssembly instance of the same origin and profile. The run passes only if
 //               both results pass and the tests printed RELOAD_MARKERS[0] before the reload and
@@ -67,7 +79,7 @@
 // a target whose name starts with "store" but has no entry stops its run, so a renamed or new
 // store target never runs without its mode.
 
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -117,6 +129,25 @@ const NO_OPFS = {
     linux: "Playwright's WebKit for Linux has no navigator.storage, so no Origin Private File System",
   },
 };
+// The tests that store a wrapping CryptoKey in IndexedDB, by test target and test name: every
+// test that opens a store with `WrappingKey::Origin`, which is all of `store_flow` and
+// `store_reload`. In `store`, the host-key tests, the in-memory tests and the invalid-name test
+// store none. See PAYKIT_BROWSER_SKIP_KEYCHAIN_TESTS.
+const KEYCHAIN_TESTS = {
+  store: /^(on_opfs::|opening::(?!test_store_opfs_invalid_name_creates_nothing$)|sealing::test_store_seal_)/,
+  store_flow: /^/,
+  store_reload: /^/,
+};
+const KEYCHAIN_REASON = "needs Keychain access for Playwright's WebKit on macOS";
+const skipKeychainTests = process.env.PAYKIT_BROWSER_SKIP_KEYCHAIN_TESTS || "0";
+if (skipKeychainTests !== "0" && skipKeychainTests !== "1") {
+  log(`[runner] PAYKIT_BROWSER_SKIP_KEYCHAIN_TESTS must be 0 or 1, not "${skipKeychainTests}"`);
+  process.exit(2);
+}
+if (skipKeychainTests === "1" && process.platform !== "darwin") {
+  log(`[runner] PAYKIT_BROWSER_SKIP_KEYCHAIN_TESTS=1 is for macOS only, not ${process.platform}`);
+  process.exit(2);
+}
 // What a reload target prints before the reload and after it.
 const RELOAD_MARKERS = ["BEFORE RELOAD DONE", "AFTER RELOAD DONE"];
 const CONTEXT_WORDS = { page: "a page", worker: "a dedicated worker" };
@@ -152,7 +183,7 @@ let child;
 let closeable;
 // A persistent context's temporary profile folder, removed on exit.
 let profileDir;
-// A persistent target's test page URL, whose origin's OPFS finish() empties.
+// A persistent target's test page URL, whose origin's OPFS and IndexedDB finish() empties.
 let sweepUrl;
 let finished = false;
 
@@ -168,23 +199,32 @@ async function finish(code, why) {
     // `undefined` when the origin could not be emptied, which fails a run that passed: it
     // may leave files behind.
     const left = await Promise.race([
-      sweepOpfs(closeable, sweepUrl).catch((error) => {
-        log(`[runner] cannot empty the Origin Private File System: ${errorText(error)}`);
+      sweepOrigin(closeable, sweepUrl).catch((error) => {
+        log(`[runner] cannot empty the origin's storage: ${errorText(error)}`);
         return undefined;
       }),
       sleep(15000).then(() => {
-        log("[runner] emptying the Origin Private File System timed out");
+        log("[runner] emptying the origin's storage timed out");
         return undefined;
       }),
     ]);
     if (left === undefined && code === 0) {
       code = 1;
-      why = "FAIL: the Origin Private File System could not be checked and emptied";
-    } else if (left?.length > 0) {
-      log(`[runner] removed what the tests left in the Origin Private File System: ${left.join(", ")}`);
-      if (code === 0) {
+      why = "FAIL: the Origin Private File System and IndexedDB could not be checked and emptied";
+    } else if (left) {
+      const kinds = [];
+      if (left.entries.length > 0) {
+        log(`[runner] removed what the tests left in the Origin Private File System: ${left.entries.join(", ")}`);
+        kinds.push("entries in the Origin Private File System");
+      }
+      if (left.databases.length > 0) {
+        const found = left.databases.map(({ name, records }) => `${name} (${records} records)`);
+        log(`[runner] removed the origin's IndexedDB databases: ${found.join(", ")}`);
+      }
+      if (left.databases.some(({ records }) => records > 0)) kinds.push("records in IndexedDB");
+      if (kinds.length > 0 && code === 0) {
         code = 1;
-        why = "FAIL: the tests passed but left entries in the Origin Private File System";
+        why = `FAIL: the tests passed but left ${kinds.join(" and ")}`;
       }
     }
   }
@@ -340,14 +380,15 @@ async function hasOpfs(context, url) {
 }
 
 // Close the persistent context's test pages, which ends their workers and releases the file
-// locks they hold, then remove every entry of the OPFS root of `url`'s origin from an empty
-// page there. That page opens first: Playwright's Firefox cannot open a page in a persistent
-// context whose last page has closed. Returns the names removed.
-async function sweepOpfs(context, url) {
+// locks and database connections they hold, then remove every entry of the OPFS root of
+// `url`'s origin and every IndexedDB database of that origin, from an empty page there. That
+// page opens first: Playwright's Firefox cannot open a page in a persistent context whose last
+// page has closed. Returns what it removed: { entries: names, databases: [{ name, records }] }.
+async function sweepOrigin(context, url) {
   const tests = context.pages();
   const page = await emptyPage(context, url, "/opfs-cleanup");
   for (const test of tests) await test.close();
-  return page.evaluate(async () => {
+  const entries = await page.evaluate(async () => {
     const root = await navigator.storage.getDirectory();
     const names = [];
     for await (const name of root.keys()) names.push(name);
@@ -365,6 +406,55 @@ async function sweepOpfs(context, url) {
     }
     return names.sort();
   });
+  // Each database is counted before it is deleted: the store's key database stays, empty, once
+  // its last store is destroyed (src/store/keys.rs), so only records left fail a run. Counting
+  // reads no record, so no stored CryptoKey is read.
+  const databases = await page.evaluate(async () => {
+    const found = [];
+    for (const { name } of await indexedDB.databases()) {
+      const records = await new Promise((resolve, reject) => {
+        const request = indexedDB.open(name);
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => {
+          const database = request.result;
+          const storeNames = [...database.objectStoreNames];
+          if (storeNames.length === 0) {
+            database.close();
+            resolve(0);
+            return;
+          }
+          const transaction = database.transaction(storeNames, "readonly");
+          let total = 0;
+          for (const storeName of storeNames) {
+            const counting = transaction.objectStore(storeName).count();
+            counting.onsuccess = () => {
+              total += counting.result;
+            };
+          }
+          transaction.oncomplete = () => {
+            database.close();
+            resolve(total);
+          };
+          transaction.onabort = () => {
+            database.close();
+            reject(transaction.error);
+          };
+        };
+      });
+      found.push({ name, records });
+      await new Promise((resolve, reject) => {
+        const request = indexedDB.deleteDatabase(name);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+        // A connection still open delays the deletion until it closes: wait about 5 s for that.
+        request.onblocked = () => {
+          setTimeout(() => reject(new Error(`deleting the database ${name} stays blocked`)), 5000);
+        };
+      });
+    }
+    return found.sort((a, b) => (a.name < b.name ? -1 : 1));
+  });
+  return { entries, databases };
 }
 
 // Check the last test result in `text`: at least one test passed and none failed, and, given a
@@ -394,6 +484,28 @@ function listTests(args) {
   });
 }
 
+// The arguments with the tests of `target` that KEYCHAIN_TESTS names left out: list the tests
+// the arguments select, print a NOT RUN line for each one left out, and add a `--skip` for it.
+// When every test is left out, wasm-bindgen-test-runner finds none to run and the target passes
+// without a PASS line, as for a filter that matches nothing.
+async function withoutKeychainTests(target, args) {
+  const listed = await new Promise((resolve, reject) => {
+    execFile(runnerBin, [...args, "--list"], { maxBuffer: 16 << 20 }, (error, stdout) => {
+      if (error) reject(new Error(`${runnerBin} --list failed: ${error.message}`));
+      else resolve(stdout);
+    });
+  });
+  const names = [...listed.matchAll(/^(.+): test\r?$/gm)].map((match) => match[1]);
+  const excluded = names.filter((name) => KEYCHAIN_TESTS[target].test(name));
+  // Without `--exact`, `--skip` leaves out every test whose name contains the given text.
+  const left = new Set(excluded);
+  const kept = names.filter((name) => !left.has(name));
+  const clash = kept.find((name) => excluded.some((skip) => name.includes(skip)));
+  if (clash) throw new Error(`leaving out the Keychain tests would also leave out ${clash}`);
+  for (const name of excluded) log(`[runner] NOT RUN ${target}::${name}: ${KEYCHAIN_REASON}`);
+  return [...args, ...excluded.flatMap((name) => ["--skip", name])];
+}
+
 async function main() {
   // Own properties only, so a name such as "toString" is not taken from Object.prototype.
   if (!Object.hasOwn(ENGINES, engineName)) {
@@ -404,7 +516,7 @@ async function main() {
   }
   const engine = ENGINES[engineName];
 
-  const args = process.argv.slice(2);
+  let args = process.argv.slice(2);
   if (args.includes("--list")) return listTests(args);
   const { target, mode } = targetOf(args[0]);
   if (target.startsWith("store") && mode === DEFAULT_MODE) {
@@ -417,9 +529,16 @@ async function main() {
     log(`[runner] ${target} runs only in ${CONTEXT_WORDS[mode.context]}: running it there`);
     contextName = mode.context;
   }
+  const noOpfs = mode.persistent ? NO_OPFS[engineName]?.[process.platform] : undefined;
+  // A target that NO_OPFS excludes runs no test at all, so none is reported as not run for the
+  // Keychain: its EXCLUDED line below is the reason.
+  const leaveOutKeychainTests =
+    skipKeychainTests === "1" && engineName === "webkit" && Object.hasOwn(KEYCHAIN_TESTS, target);
+  if (leaveOutKeychainTests && noOpfs === undefined) {
+    args = await withoutKeychainTests(target, args);
+  }
   const url = await serveTests(args);
   const { browser, page } = await openPage(engine, mode.persistent);
-  const noOpfs = mode.persistent ? NO_OPFS[engineName]?.[process.platform] : undefined;
   if (noOpfs !== undefined) {
     if (!(await hasOpfs(closeable, url))) return finish(0, `EXCLUDED ${target}: ${noOpfs}`);
     return finish(1, `${engineName} on ${process.platform} has the Origin Private File System: remove its NO_OPFS entry`);

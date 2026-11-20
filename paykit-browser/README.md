@@ -42,7 +42,8 @@ JavaScript host, and do not get them.
   against a service on the local machine only. The type's docs list what it does and what it
   cannot do.
 - `store::OpfsStore`: the Switch client's `StateStore` on the browser's Origin Private File
-  System. Not for production use yet: see [Durable store](#durable-store).
+  System, with every snapshot sealed. See [Durable store](#durable-store) for what sealing
+  protects and what it does not.
 
 ## Durable store
 
@@ -50,31 +51,85 @@ JavaScript host, and do not get them.
 System (OPFS), so the SDK's state outlives the WebAssembly instance that wrote it. Its rustdoc
 covers names, the contract's guarantees, errors and failure handling.
 
-**Not for production use: it writes every value to disk in plaintext.** A deleted value is
-overwritten in both files within two commits. Whether a commit's `flush()` reaches the storage
-device before a power loss is up to the engine, and cannot be tested here. The browser may
-evict the origin's storage unless the origin was granted persistent storage
-(`navigator.storage.persist()`), which the store does not ask for; an evicted store opens
-again as a new, empty store, with no error.
+Every snapshot is sealed: encrypted and authenticated with XChaCha20-Poly1305 under the store's
+data key, with a fresh random 24-byte nonce for every write. The files hold no plaintext:
+namespaces, keys and values are all inside the sealed part. A snapshot that was changed,
+written without the key, or moved to another store, generation or format version does not
+open. A deleted value is overwritten in both files within two commits. Whether a commit's
+`flush()`, or the key record's IndexedDB transaction, reaches the storage device before a power
+loss is up to the engine, and cannot be tested here. The browser may evict the origin's storage
+unless the origin was granted persistent storage (`navigator.storage.persist()`), which the
+store does not ask for; a store whose files were evicted opens again as a new, empty store,
+with no error.
+
+Sealing does not protect against:
+
+- **Script in the origin.** Any script running in the origin can do everything the SDK can.
+  Sealing does not defend against it.
+- **A copied browser profile.** Chromium and Firefox store the non-extractable wrapping key's
+  raw bytes in the profile, so sealing does not stop someone who copies the whole profile
+  there. WebKit on Apple platforms wraps stored keys with a Keychain key, and Playwright's
+  WebKit on Linux uses an empty key. These three statements come from reading the engines, and
+  the tests here do not verify them. A host key kept outside the profile is not in the copy.
+- **Rollback.** Someone who can write the files can put back an older valid snapshot. Sealing
+  does not detect that.
+- **Memory.** The data key and all values are in WebAssembly memory in the clear while the
+  store is open.
+
+The data key is 32 random bytes, made in WebAssembly with the store, along with a 16-byte store
+identifier. It is never written in the clear: a record in the origin's IndexedDB, under the
+store's name, keeps it wrapped with AES-GCM under an AES-GCM wrapping key, with a fresh random
+IV and the store identifier as associated data. The record is written in one transaction that
+asks for strict durability, before the store's first snapshot. By default (`WrappingKey::Origin`)
+the wrapping key is a non-extractable 256-bit `CryptoKey` that the record also holds, so the
+store opens again with no step from the host. A host can pass its own `CryptoKey` instead
+(`WrappingKey::Host`), for example one it keeps behind its own unlock step: the record then
+holds no key, and every open needs that same key. `OpfsStore::destroy` deletes the record
+first, so whatever is left of the files can no longer be opened (as long as the engine erases
+the deleted record, which IndexedDB engines may keep on disk until they compact), then the
+files. It refuses a store that is open, or that a lease it granted still keeps open
+(`OpenError::InUse`). The key database, shared by the origin's stores, stays even when empty:
+deleting it could delete the record of a store that another tab creates at the same moment.
+
+What an open finds, and what it does (no failed open writes the files or the record):
+
+| Files | No key record | Record that unwraps | Record that does not unwrap, or of the other mode |
+| --- | --- | --- | --- |
+| Both empty | New store: new identifier, data key and record | New store with the record's key and identifier | `OpenError::KeyLost` |
+| Sealed slots | `OpenError::KeyLost` | The slot rules below | `OpenError::KeyLost` |
+| A slot of the earlier unsealed format | `OpenError::UnsealedFormat` | `OpenError::UnsealedFormat` | `OpenError::UnsealedFormat` |
+| A slot of a newer format | `OpenError::NewerFormat` | `OpenError::NewerFormat` | `OpenError::NewerFormat` |
+
+A key record of a newer record format is `OpenError::NewerFormat` too, whatever the files
+hold. Files that hold no complete sealed header (bytes of no format, or a header cut short)
+are `OpenError::Corrupt` rather than `KeyLost` when the record does not give a key: there is no
+sealed data to lose. A host key that is not AES-GCM, or lacks the `encrypt` or `decrypt` usage,
+is refused with `OpenError::Unavailable` before anything is opened, as a store made with it
+could never be opened again. `KeyLost`
+means sealed data is present but its key is gone or wrong; the store is never replaced by a
+new one over it. The earlier unsealed format is refused on a file's header and never read,
+upgraded or overwritten. The rustdoc of `OpfsStore` has the complete table.
 
 The store, the SDK and the Switch client run in the same dedicated worker: `StateStore` calls
 are synchronous, and only a dedicated worker has synchronous file handles. Open the store there
 once and hand it to the SDK.
 
-The store is a directory of two slot files. Each slot holds a whole snapshot: a header (magic,
-format version, generation, payload length), the payload, and a BLAKE3 tag over every byte
-before it. A commit writes the new state over the slot that is not current, cuts that file to
-the new length, flushes it, and only then makes it current.
+The store is a directory of two slot files. Each slot holds a whole sealed snapshot: a header
+(magic, format version, generation, store identifier, nonce, sealed length), then the encrypted
+payload and its 16-byte Poly1305 tag, which also covers the header. A commit writes the new
+state over the slot that is not current, cuts that file to the new length, flushes it, and only
+then makes it current.
 
 On open, the valid slot with the higher generation is current, and a torn or damaged slot next
 to it is ignored. If the damaged slot held the newest state, the store opens without the last
-commit that returned `Ok`. Files with no slot to trust fail the open with `OpenError::Corrupt`: two
-invalid slots, a damaged slot next to an empty one, a slot that passes its tag but does not
-decode, or two valid slots of one generation. Only a first commit that stopped part way, next to
-an empty file, opens as a new store; so does the file of a store's only commit if it later loses
-its end, as the two cannot be told apart. A slot of a newer format fails the open with
+commit that returned `Ok`. Files with no slot to trust fail the open with `OpenError::Corrupt`:
+two invalid slots, a damaged slot next to an empty one, a slot that passes its tag but does not
+decode, or two valid slots of one generation. A slot whose header names another store is
+`OpenError::KeyLost`. Only a first commit that stopped part way, next to an empty file, opens
+as a new store; so does the file of a store's only commit if it later loses its end, as the two
+cannot be told apart. A slot of a newer format fails the open with
 `OpenError::NewerFormat`, even next to a valid one. Opening writes nothing. The tag detects torn
-and damaged writes, not tampering.
+and damaged writes and tampering, not rollback.
 
 A real page reload is tested at the store level only: the payment tests reopen the store in
 the same worker, as their in-memory test world would not survive a reload.
@@ -82,22 +137,27 @@ the same worker, as their in-memory test world would not survive a reload.
 ### Measurements
 
 Measured on macOS arm64 with Playwright 1.62.1 (Chromium 151.0.7922.34, Firefox 153.0, WebKit
-26.5), release build, in a dedicated worker of a persistent context. A commit is one 64-byte
-put into a store of the given encoded state size; an open is the whole `OpfsStore::open`.
-Medians in milliseconds, over 21 runs (5 runs at 250 MiB):
+26.5), release build, in a dedicated worker of a persistent context, with the origin-held key in
+Chromium and Firefox and a host key in WebKit. A commit is one 64-byte put into a store of the
+given encoded state size; an open is the whole `OpfsStore::open`, the key record and its unwrap
+included. Medians in milliseconds over 21 runs; in parentheses, the earlier unsealed store, with
+a BLAKE3 tag and no encryption:
 
 | Encoded state | Chromium commit | Chromium open | Firefox commit | Firefox open | WebKit commit | WebKit open |
 | --- | --- | --- | --- | --- | --- | --- |
-| 73.5 KiB | 0.38 | 0.66 | 1.30 | 3.90 | 0.20 | 0.62 |
-| 1 MiB | 1.57 | 2.45 | 16.5 | 34.3 | 2.22 | 4.46 |
-| 16 MiB | 19.6 | 33.5 | 267 | 527 | 36.1 | 66.8 |
-| 250 MiB | 300 | 516 | 4229 | 8409 | 570 | 1041 |
+| 73.5 KiB | 0.45 (0.38) | 0.88 (0.66) | 2.12 (1.30) | 6.06 (3.90) | 0.42 (0.20) | 1.58 (0.62) |
+| 1 MiB | 2.45 (1.57) | 4.69 (2.45) | 27.9 (16.5) | 59.3 (34.3) | 2.20 (2.22) | 5.32 (4.46) |
+| 16 MiB | 32.6 (19.6) | 64.9 (33.5) | 446 (267) | 918 (527) | 35.9 (36.1) | 74.0 (66.8) |
 
-Most of the time goes to the BLAKE3 tag (at 16 MiB: 13.8 ms in Chromium, 29.8 ms in WebKit,
-250 ms in Firefox; about 2 ms each for the write and the flush). An open hashes both slots.
+Most of the time goes to the cipher: at
+16 MiB, sealing takes 28.8 ms in Chromium, 33.3 ms in WebKit and 445 ms in Firefox, against
+13.8, 29.8 and 250 ms for the BLAKE3 tag before; the write and the flush take about 2 ms each.
+An open decrypts both slots. Reading the key record and unwrapping the data key takes about
+0.1 ms in Chromium and WebKit and about 0.35 ms in Firefox.
 
 Paying one Payment Request with `Paykit::pay_request` makes 27 commits to the payer's store
-and writes about 1.25 MB, for a slot that grows from about 28 KB to about 65 KB. A snapshot
+and writes about 1.25 MB, for a slot that grows from about 28 KB to about 65 KB. Sealing adds 24
+bytes to each slot (a 68-byte header and a 16-byte tag, against 28 and 32 before). A snapshot
 rewrites the whole live state on every commit. A log would write roughly the batches
 themselves, about 192 KB, but it needs compaction and has more states to recover from.
 
@@ -113,7 +173,8 @@ target feature) is refused at compile time.
   Firefox and WebKit. The store targets run in one of the two contexts only, and not in
   Playwright's WebKit for Linux, which has no OPFS (see
   [Run the tests in a browser](#run-the-tests-in-a-browser)): they run in WebKit on macOS
-  only.
+  only, and there without the tests that keep the wrapping key in IndexedDB (see the
+  `OpfsStore` item below).
 - The host pieces above are tested on their own. The no-network flows below give their apps
   `JsTimer` as their `Timer`, and start their test clock at `JsClock`'s reading. The network
   flow gives its apps `JsClock` as their clock and `JsTimer` as their `Timer`.
@@ -150,7 +211,15 @@ target feature) is refused at compile time.
   connection limit, and lost or refused payment batches against the real service (see
   [When the network misbehaves](#when-the-network-misbehaves)).
 - `OpfsStore` runs on real OPFS files in a dedicated worker, across a page reload, and under a
-  payment that closes and opens it again part way (see [Tests](#tests)).
+  payment that closes and opens it again part way, with its snapshots sealed (see
+  [Tests](#tests)). The tests that keep the wrapping key in IndexedDB (`WrappingKey::Origin`,
+  every `store_flow` and `store_reload` test included) run in Chromium and Firefox, locally
+  and in CI. **In WebKit they run nowhere today:** on macOS, Playwright's WebKit asks for
+  Keychain access to store that key, and local runs leave them out; Playwright's WebKit for
+  Linux, which CI uses, has no OPFS (see
+  [Run the tests in a browser](#run-the-tests-in-a-browser)). The store tests with a host's
+  key run in WebKit on macOS, locally only. The library's unit tests of the sealed format,
+  tampering and nonces run in all three engines, locally and in CI.
 
 The network tests have these limits:
 
@@ -449,14 +518,27 @@ is the only `cargo` target option it takes.
 The store targets run in one context only, with a browser profile on disk, and
 `tests/store_reload/` across a page reload: see "Target modes" in `rig/runner.mjs`. Given one
 context, `test.sh` still runs the targets of the other context, in their own context. After a
-store target, the runner removes whatever is left in its origin's OPFS, and fails a passing run
-that left anything, or whose leftovers it cannot remove: the tests remove what they create.
+store target, the runner removes whatever is left in its origin's OPFS and IndexedDB, and fails
+a passing run that left an OPFS entry or an IndexedDB record, or whose leftovers it cannot
+remove: the tests remove what they create. An empty key database is not a failure, as
+`OpfsStore::destroy` keeps it.
+
+On macOS, Playwright's WebKit protects a `CryptoKey` stored in IndexedDB with a key from the
+user's Keychain, and asks for Keychain access in a dialog; the test waits until someone answers
+it. For a local run there, `PAYKIT_BROWSER_SKIP_KEYCHAIN_TESTS=1` leaves out of WebKit runs the
+tests that store such a key (those that open a store with `WrappingKey::Origin`): each one is
+printed as not run, and the summary counts them, so such a run does not cover WebKit fully.
+The tests with a host's key, which the test keeps in memory, still run. The switch is refused
+on any other platform, and CI never sets it. This was seen with Playwright's WebKit build;
+Safari itself was not tried.
 
 Playwright's WebKit for Linux has no OPFS: no `navigator.storage` in a page, and no
 `FileSystemSyncAccessHandle` in a dedicated worker. There, the runner checks from a page of the
 test origin that `navigator.storage` is still missing, does not run the store target, and
 prints it as excluded; `test.sh` lists every excluded target at the end as a warning. If that
 engine gains OPFS, the run fails until its entry in `NO_OPFS` (`rig/runner.mjs`) is removed.
+The summary line names what did not run, each with its reason: targets excluded for want of
+OPFS, and tests left out for the Keychain.
 
 To run one engine and context without `test.sh`, set `rig/runner.mjs` as Cargo's wasm32 runner
 as its header comment shows; that comment also lists the runner's environment variables and
@@ -732,7 +814,9 @@ Its `browser-tests` job runs once per engine (`chromium`, `firefox`, `webkit`), 
 each runs `rig/test.sh` in a page and then in a dedicated worker, with `wasm-bindgen-cli`
 installed at the version in `Cargo.lock`. Each store target runs in its one context there,
 except in the `webkit` job: Playwright's WebKit for Linux has no OPFS, so the runner excludes
-the store targets there, and the job shows a warning annotation for each.
+the store targets there, and the job shows a warning annotation for each. CI therefore runs no
+store target in WebKit, and no test of the origin-held wrapping key in WebKit (see
+[What this covers](#what-this-covers-and-what-it-does-not-yet)).
 The runner stops a target whose name starts with `store` but has no mode, and a mode whose
 target does not exist, so a store target never runs without its mode.
 

@@ -7,13 +7,15 @@
 //!
 //! - Before the reload, it commits several batches, drops the store, tears the file the next
 //!   commit would write, and prints [`BEFORE_RELOAD_MARKER`].
-//! - After the reload, it opens the store again, reads its contents, commits once more and
-//!   reads them again, removes the store, then checks what it read and prints
-//!   [`AFTER_RELOAD_MARKER`].
+//! - After the reload, it checks that the store's key record outlived the reload, and that
+//!   opening the store with a host's wrapping key instead of the origin's is `KeyLost` and
+//!   writes nothing; then it opens the store again with the stored key, reads its contents,
+//!   commits once more and reads them again, removes the store with its key record, then
+//!   checks what it read and prints [`AFTER_RELOAD_MARKER`].
 
 #![cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 
-use paykit_browser::store::OpfsStore;
+use paykit_browser::store::{OpenError, OpfsStore, WrappingKey};
 use pubky_switch_client::store::{KeyValue, StateStore, WriteBatch};
 use wasm_bindgen_test::{console_log, wasm_bindgen_test, wasm_bindgen_test_configure};
 
@@ -59,7 +61,9 @@ async fn test_store_reload_reopens_last_commit() {
 /// Commit four batches, drop the store, tear the file the fifth commit would write, and leave
 /// the store in place for the run after the reload.
 async fn before_reload() {
-    let store = OpfsStore::open(STORE_NAME).await.expect("open the store");
+    let store = OpfsStore::open(STORE_NAME, WrappingKey::Origin)
+        .await
+        .expect("open the store");
 
     // 1: entries in both namespaces.
     let mut batch = WriteBatch::new();
@@ -109,9 +113,11 @@ async fn before_reload() {
 /// check what each step read. The store is removed before any check, so a failing check, or a
 /// directory left by an interrupted run of this origin, does not fail every later run.
 async fn after_reload() {
+    let refused = other_mode_refused().await;
     let read = reopen_commit_and_reopen().await;
     opfs::remove_store(STORE_NAME).await;
 
+    refused.unwrap_or_else(|error| panic!("{error}"));
     let [reopened, committed, reopened_again] = read.unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(reopened, contents_after_four_commits());
     let expected = contents_after_five_commits();
@@ -120,10 +126,43 @@ async fn after_reload() {
     console_log!("{AFTER_RELOAD_MARKER}");
 }
 
+/// Check, after the reload, that the store's key record is the one made before it, holding
+/// the origin's wrapping key and the store identifier of the files written before the reload,
+/// and that opening the store with a host's wrapping key instead is `KeyLost` and leaves the
+/// files and the record as they were. Returns the first failure.
+async fn other_mode_refused() -> Result<(), String> {
+    let files = opfs::read_files(STORE_NAME).await;
+    let record = opfs::key_record(STORE_NAME)
+        .await
+        .ok_or("the store has no key record after the reload")?;
+    if record.wrapping_key.is_none() {
+        return Err("the key record holds no wrapping key after the reload".into());
+    }
+    // File `b` holds the fourth commit, written before the reload.
+    if opfs::store_id(&files[1]) != record.store_id {
+        return Err("the key record names another store than the files".into());
+    }
+    let host = WrappingKey::Host(opfs::host_key().await);
+    match OpfsStore::open(STORE_NAME, host).await {
+        Err(OpenError::KeyLost) => {}
+        other => return Err(format!("open with a host key: {other:?}, not KeyLost")),
+    }
+    if opfs::read_files(STORE_NAME).await != files {
+        return Err("the refused open changed the files".into());
+    }
+    let after = opfs::key_record(STORE_NAME)
+        .await
+        .ok_or("the refused open deleted the key record")?;
+    if after.fields() != record.fields() {
+        return Err("the refused open changed the key record".into());
+    }
+    Ok(())
+}
+
 /// The store's contents when opened again with one file torn, after the fifth commit, and
 /// after another open, or the first error. Every store it opens is dropped when it returns.
 async fn reopen_commit_and_reopen() -> Result<[Vec<Vec<KeyValue>>; 3], String> {
-    let store = OpfsStore::open(STORE_NAME)
+    let store = OpfsStore::open(STORE_NAME, WrappingKey::Origin)
         .await
         .map_err(|error| format!("open the store again, with one file torn: {error:?}"))?;
     let reopened = contents(&store)?;
@@ -139,22 +178,26 @@ async fn reopen_commit_and_reopen() -> Result<[Vec<Vec<KeyValue>>; 3], String> {
     let committed = contents(&store)?;
     drop(store);
 
-    let store = OpfsStore::open(STORE_NAME)
+    let store = OpfsStore::open(STORE_NAME, WrappingKey::Origin)
         .await
         .map_err(|error| format!("open the store after the fifth commit: {error:?}"))?;
     let reopened_again = contents(&store)?;
     Ok([reopened, committed, reopened_again])
 }
 
-/// Write the start of a fifth commit into [`NEXT_FILE`]: a header that promises a payload of
-/// 4096 bytes, then 16 bytes of it, as a write that stopped part way leaves the file. The
-/// header's layout is the one `src/store/format.rs` describes. The file is cut to those bytes,
-/// so its size is wrong for its header, and it held generation 3 before.
+/// Write the start of a fifth commit into [`NEXT_FILE`]: a header of this store that promises
+/// a sealed payload of 4096 bytes, then 16 bytes of it, as a write that stopped part way leaves
+/// the file. The header's layout is the one `src/store/format.rs` describes; its store
+/// identifier is copied from the other file, as the store's own commit would write it. The file
+/// is cut to those bytes, so its size is wrong for its header, and it held generation 3 before.
 async fn tear_next_file() {
+    let current = opfs::read_file(STORE_NAME, "b").await;
     let mut torn = Vec::new();
     torn.extend_from_slice(b"PKBSTORE");
-    torn.extend_from_slice(&1u32.to_le_bytes());
+    torn.extend_from_slice(&2u32.to_le_bytes());
     torn.extend_from_slice(&NEXT_GENERATION.to_le_bytes());
+    torn.extend_from_slice(opfs::store_id(&current));
+    torn.extend_from_slice(&[0x5a; 24]);
     torn.extend_from_slice(&4096u64.to_le_bytes());
     torn.extend_from_slice(&[0xa5; 16]);
     opfs::write_file(STORE_NAME, NEXT_FILE, &torn).await;

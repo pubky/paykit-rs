@@ -1,10 +1,14 @@
 //! The host's durable store in a browser: [`OpfsStore`], the Switch client's `StateStore` on
-//! the Origin Private File System, for a dedicated worker.
+//! the Origin Private File System, for a dedicated worker, with its snapshots sealed under a
+//! data key that [`WrappingKey`] wraps.
 //!
-//! The store's format and logic (`format.rs`, `core.rs`) do not call the browser: they work on
-//! two slot files through a small crate-private file interface (`file.rs`), whose browser side
-//! is in `opfs.rs`, next to `OpfsStore` itself. That keeps them testable with torn writes and
-//! failing calls, natively and in browser engines.
+//! The store's format, sealing and logic (`format.rs`, `seal.rs`, `core.rs`) do not call the
+//! browser: they work on two slot files through a small crate-private file interface
+//! (`file.rs`), whose browser side is in `opfs.rs`, next to `OpfsStore` itself, and they take
+//! the data key as a value. Keeping that key between sessions is the browser's side too: its
+//! record in IndexedDB and the WebCrypto calls that wrap it are in `keys.rs`. That keeps the
+//! format and logic testable with torn writes and failing calls, natively and in browser
+//! engines.
 
 /// A unit test that runs under libtest natively and under wasm-bindgen-test on wasm32.
 #[cfg(test)]
@@ -21,18 +25,26 @@ mod core;
 mod file;
 mod format;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+mod keys;
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 mod opfs;
+mod seal;
 
 use std::fmt;
 
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub use self::keys::WrappingKey;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub use self::opfs::OpfsStore;
 
 /// The longest store name, in bytes.
 const MAX_NAME_LEN: usize = 64;
 
-/// Why [`OpfsStore::open`] failed. No state was written in any case, though the store's
-/// directory and empty files may have been created before the failure.
+/// Why [`OpfsStore::open`] or [`OpfsStore::destroy`] failed.
+///
+/// A failed open wrote no state in any case, though the store's directory and empty files may
+/// have been created before the failure, and, for a new store, its key record. A failed
+/// destroy may have deleted the key record already; calling it again finishes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum OpenError {
@@ -44,27 +56,40 @@ pub enum OpenError {
     /// error, checked before any file system call.
     NotDedicatedWorker,
     /// Another worker or tab of this origin has the store open: the browser refused the
-    /// exclusive handle on one of its files. Open it again once that one has dropped its store.
+    /// exclusive handle on one of its files. Open or destroy it again once that one has dropped
+    /// its store and every lease the store granted.
     InUse,
     /// The store's files hold no state this build can trust: both are damaged or torn, one is
     /// damaged, or torn in a way a first commit cannot leave, next to an empty one, or one
-    /// passes its integrity check but holds a state no writer produces. The store is not
-    /// repaired by discarding either file; recover it from a backup or remove it. The store is
-    /// the directory of its name in the origin's OPFS root: once no worker holds it open,
-    /// `removeEntry(name, { recursive: true })` on that root removes it.
+    /// opens under the store's key but holds a state no writer produces. The store is not
+    /// repaired by discarding either file; recover it from a backup or remove it with
+    /// [`OpfsStore::destroy`], which also deletes its key record, once no worker holds it open.
     Corrupt,
-    /// One of the store's files was written in a newer format than this build reads, so this
-    /// build must not write over it. A file of this build's format whose format version alone
-    /// changed on disk is a damaged file instead, not a newer format.
+    /// One of the store's files, or its key record, was written in a newer format than this
+    /// build reads, so this build must not write over it. A file of this build's format whose
+    /// format version alone changed on disk is a damaged file instead, not a newer format.
     NewerFormat {
-        /// The format version found.
+        /// The format version found: the file's, or the key record's format number.
         version: u32,
     },
-    /// The browser refused a file system call, for example because the origin has no storage
-    /// it may use in this context.
+    /// One of the store's files is in the earlier unsealed format, which kept values in
+    /// plaintext. This build reads only sealed files: it refuses the store on the file's header
+    /// alone, and never reads, upgrades or overwrites it. Nothing was written.
+    UnsealedFormat,
+    /// Sealed data is present but its key is gone or wrong: the store's files hold sealed
+    /// slots, and the key that opens them is missing, cannot be recovered, or belongs to
+    /// another store. Nothing was written, and no new store was made over the files.
+    KeyLost,
+    /// The browser refused a file system, IndexedDB or WebCrypto call, for example because the
+    /// origin has no storage it may use in this context; or a host's wrapping key that the
+    /// store cannot use, as it is not an AES-GCM key with the `encrypt` and `decrypt` usages,
+    /// which is a caller's error to fix, not one to retry. A key that does not unwrap is
+    /// [`OpenError::KeyLost`] instead.
     Unavailable {
-        /// The name of the browser's error, such as `SecurityError` or `UnknownError`, or, for
-        /// a read that failed in this crate, a short description such as `short read`.
+        /// The name of the browser's error, such as `SecurityError` or `UnknownError`; or what
+        /// happened when there is no error to name, such as `short read` for a read that failed
+        /// in this crate, or `IndexedDB blocked` when another connection kept the key database
+        /// from opening.
         name: String,
     },
 }
@@ -87,8 +112,15 @@ impl fmt::Display for OpenError {
                 f,
                 "the store was written in format version {version}, newer than this build reads"
             ),
+            OpenError::UnsealedFormat => f.write_str(
+                "the store is in the earlier unsealed format, which this build does not read; \
+                 nothing was written",
+            ),
+            OpenError::KeyLost => f.write_str(
+                "sealed data is present but its key is gone or wrong; nothing was written",
+            ),
             OpenError::Unavailable { name } => {
-                write!(f, "the browser refused to open the store: {name}")
+                write!(f, "the browser refused a call the store needs, or the store cannot use the host's key: {name}")
             }
         }
     }

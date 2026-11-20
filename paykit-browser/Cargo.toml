@@ -19,9 +19,15 @@ paykit-lib.workspace = true
 paykit-sdk = { path = "../paykit-sdk" }
 pubky-switch-core.workspace = true
 pubky-switch-client.workspace = true
-# The integrity tag of the store's files (`src/store/`). It is already in the graph through
-# pubky-switch-core.
-blake3 = "1.8.7"
+# The authenticated cipher that seals the store's snapshots (`src/store/seal.rs`):
+# XChaCha20-Poly1305, whose 24-byte nonces are safe to draw at random for every write. The same
+# version is already in the graph through pubky-switch-core, which turns on the same features as
+# its defaults: `alloc`, and `getrandom` for the OS random number generator.
+chacha20poly1305 = "0.10.1"
+# Wipes the store's data key, and the buffers that hold a snapshot while it is sealed or
+# opened, when they are dropped; the decoded state in memory is not wiped. Already in the graph
+# through the cipher and pubky-switch-core.
+zeroize = "1.9.1"
 
 # Browser random number backends. A browser has no OS entropy source, so on wasm32-unknown-unknown
 # each getrandom major version in the graph refuses to build until its JavaScript backend is
@@ -49,19 +55,33 @@ wasm-bindgen = "0.2.130"
 wasm-bindgen-futures = "0.4.80"
 # The fetch transport (`src/fetch.rs`): the browser's `fetch`, its request, answer, header and
 # body stream types, `AbortController`, and the URL parser it checks the signed path with. The
-# store's files in the Origin Private File System (`src/store/opfs.rs`): stable APIs only.
+# store's files in the Origin Private File System (`src/store/opfs.rs`), and its key record in
+# IndexedDB with the WebCrypto calls that wrap its data key (`src/store/keys.rs`): stable APIs
+# only.
 web-sys = { version = "0.3.107", features = [
   "AbortController",
   "AbortSignal",
+  "AesGcmParams",
+  "AesKeyGenParams",
+  "Crypto",
+  "CryptoKey",
   "DedicatedWorkerGlobalScope",
   "DomException",
+  "EventTarget",
   "FileSystemDirectoryHandle",
   "FileSystemFileHandle",
   "FileSystemGetDirectoryOptions",
   "FileSystemGetFileOptions",
   "FileSystemReadWriteOptions",
+  "FileSystemRemoveOptions",
   "FileSystemSyncAccessHandle",
   "Headers",
+  "IdbDatabase",
+  "IdbFactory",
+  "IdbObjectStore",
+  "IdbOpenDbRequest",
+  "IdbRequest",
+  "IdbTransaction",
   "ReadableStream",
   "ReadableStreamDefaultReader",
   "ReadableStreamReadResult",
@@ -75,6 +95,7 @@ web-sys = { version = "0.3.107", features = [
   "Response",
   "ResponseType",
   "StorageManager",
+  "SubtleCrypto",
   "Url",
   "WorkerGlobalScope",
   "WorkerNavigator",
@@ -114,5 +135,3 @@ wasm-bindgen-test = "0.3.80"
 # when a target that needs them, such as this crate's tests, is built.
 paykit-sdk = { path = "../paykit-sdk", features = ["test-support"] }
 pubky-switch-client = { workspace = true, features = ["test-support"] }
-# The tests remove the stores they create from the Origin Private File System.
-web-sys = { version = "0.3.107", features = ["FileSystemRemoveOptions"] }

@@ -9,9 +9,11 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::DedicatedWorkerGlobalScope;
 
-/// The offset of a slot's payload: after the magic, the format version, the generation and the
-/// payload length (`src/store/format.rs`).
-pub const PAYLOAD_AT: usize = 28;
+use crate::opfs;
+
+/// The offset of a slot's sealed payload: after the magic, the format version, the generation,
+/// the store identifier, the nonce and the sealed length (`src/store/format.rs`).
+pub const PAYLOAD_AT: usize = 68;
 
 fn scope() -> DedicatedWorkerGlobalScope {
     js_sys::global()
@@ -35,10 +37,13 @@ async fn call_js(args: &str, body: &str, values: &[&str]) -> String {
     JsFuture::from(promise).await.unwrap().as_string().unwrap()
 }
 
+/// The offset of a slot's generation (`src/store/format.rs`).
+pub const GENERATION_AT: usize = 12;
+
 /// The generation in a slot's header.
 pub fn generation(slot: &[u8]) -> u64 {
     assert_eq!(&slot[..8], b"PKBSTORE", "not a slot");
-    u64::from_le_bytes(slot[12..20].try_into().unwrap())
+    u64::from_le_bytes(slot[GENERATION_AT..opfs::STORE_ID_AT].try_into().unwrap())
 }
 
 /// The names in the origin's OPFS root, sorted.
