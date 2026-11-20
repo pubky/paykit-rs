@@ -363,6 +363,25 @@ async fn test_first_grant_confirmation_refuses_a_rewritten_initial_ledger() {
     );
 }
 
+async fn finish_restored_reconciliation(restored: &mut paykit_sdk::Paykit) {
+    for _ in 0..8 {
+        match Box::pin(restored.reconcile()).await {
+            Ok(report) => {
+                assert!(!report.payer_skipped);
+                Box::pin(restored.end_reconcile(UserConfirmed::new()))
+                    .await
+                    .unwrap();
+                return;
+            }
+            Err(paykit_sdk::PaykitError::Refused(paykit_sdk::Refusal::NotNow(reason))) => {
+                assert!(reason.contains("Call reconcile again"), "{reason}");
+            }
+            Err(error) => panic!("{error}"),
+        }
+    }
+    panic!("the restored wallet did not finish reconciliation");
+}
+
 #[tokio::test]
 async fn test_first_grant_restores_its_complete_original_after_reconciliation() {
     use crate::common::store;
@@ -391,24 +410,7 @@ async fn test_first_grant_restores_its_complete_original_after_reconciliation() 
     assert!(Box::pin(restored.resume_allowance_executor(&key))
         .await
         .is_err());
-    let mut reconciled = None;
-    for _ in 0..8 {
-        match Box::pin(restored.reconcile()).await {
-            Ok(report) => {
-                reconciled = Some(report);
-                break;
-            }
-            Err(paykit_sdk::PaykitError::Refused(paykit_sdk::Refusal::NotNow(reason))) => {
-                assert!(reason.contains("Call reconcile again"), "{reason}");
-            }
-            Err(error) => panic!("{error}"),
-        }
-    }
-    let report = reconciled.expect("the restored wallet completed its listing");
-    assert!(!report.payer_skipped);
-    Box::pin(restored.end_reconcile(UserConfirmed::new()))
-        .await
-        .unwrap();
+    Box::pin(finish_restored_reconciliation(&mut restored)).await;
     Box::pin(restored.resume_allowance_executor(&key))
         .await
         .unwrap();
@@ -730,24 +732,7 @@ async fn restore_grant_proof_order(installed_verified: bool, evidence: RestoredG
     assert!(Box::pin(restored.resume_allowance_executor(&key))
         .await
         .is_err());
-    let mut complete = false;
-    for _ in 0..8 {
-        match Box::pin(restored.reconcile()).await {
-            Ok(report) => {
-                assert!(!report.payer_skipped);
-                complete = true;
-                break;
-            }
-            Err(paykit_sdk::PaykitError::Refused(paykit_sdk::Refusal::NotNow(reason))) => {
-                assert!(reason.contains("Call reconcile again"), "{reason}");
-            }
-            Err(error) => panic!("{error}"),
-        }
-    }
-    assert!(complete);
-    Box::pin(restored.end_reconcile(UserConfirmed::new()))
-        .await
-        .unwrap();
+    Box::pin(finish_restored_reconciliation(&mut restored)).await;
     if matches!(
         evidence,
         RestoredGrantEvidence::DifferentPendingValue
@@ -884,7 +869,9 @@ async fn test_executor_pays_the_period_of_its_accepted_subscription() {
     use paykit_lib::periods::{AnchoredRule, PeriodRef, Recurrence, Unit};
     use paykit_sdk::{PeriodPrice, ReceiptsOf, Refusal};
 
-    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    let storage = crate::common::store();
+    let (world, mut payer, mut shop, key) =
+        Box::pin(first_grant_in(storage.clone(), terms())).await;
     world.rail.set_history_payer(payer.identity());
     let start = world.clock.now_ms() / 1_000 * 1_000;
     let schedule = Recurrence::new(
@@ -919,6 +906,7 @@ async fn test_executor_pays_the_period_of_its_accepted_subscription() {
             .outcome
             .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::ManualOnly));
+    let backup = Box::pin(payer.backup()).await.unwrap();
     let outcome = Box::pin(payer.pay_period_under_allowance(&req, &period))
         .await
         .outcome
@@ -971,6 +959,40 @@ async fn test_executor_pays_the_period_of_its_accepted_subscription() {
             .as_str(),
         "70"
     );
+
+    drop(payer);
+    let mut restored = Box::pin(paykit_sdk::Paykit::restore(
+        world.env(&world.alice, storage),
+        Default::default(),
+        &backup,
+        world.rail.clone(),
+        world.timer(),
+    ))
+    .await
+    .unwrap();
+    Box::pin(crate::common::finish_listing(&mut restored)).await;
+    Box::pin(finish_restored_reconciliation(&mut restored)).await;
+    let usage = Box::pin(restored.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .expect("the settled payment of this occurrence stays charged after restore");
+    assert_eq!(
+        (usage.reserved(), usage.spent(), usage.lifetime().as_str()),
+        (0, 1, "70")
+    );
+    assert_eq!(
+        restored
+            .receipts(ReceiptsOf::Period(req, period))
+            .await
+            .unwrap(),
+        held
+    );
+    assert!(restored
+        .receipts(ReceiptsOf::Period(req, next))
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(world.rail.pay_calls(&attempt), 1);
 }
 
 #[tokio::test]
