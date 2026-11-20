@@ -2,7 +2,7 @@
 use super::*;
 use paykit_lib::allowances::AllowanceTerms;
 use paykit_sdk::{AllowanceRole, AllowanceStatus, NoticeKind, Refusal};
-use pubky_switch_client::app::{AppEvent, UserConfirmed};
+use pubky_switch_client::app::{AppEvent, RecordApplication, UserConfirmed};
 
 #[tokio::test]
 async fn test_enrolled_allowance_ends_before_and_after_placing_the_original() -> TestResult {
@@ -150,6 +150,12 @@ async fn test_enrolled_payer_withdraws_a_recovered_proposal() -> TestResult {
 }
 
 #[tokio::test]
+async fn test_enrolled_payer_withdraws_at_the_installed_version_after_a_size_refusal() -> TestResult
+{
+    Box::pin(terminal_after_loss(RecoveredProposal::UploadWithoutProof)).await
+}
+
+#[tokio::test]
 async fn test_enrolled_payer_recognizes_only_its_withdrawn_allowances_return() -> TestResult {
     Box::pin(terminal_after_loss(RecoveredProposal::Unrelated)).await
 }
@@ -192,6 +198,7 @@ enum RecoveredProposal {
     Unrelated,
     Collected,
     Original,
+    UploadWithoutProof,
     Missing,
     MissingCreate,
     Recreated,
@@ -230,6 +237,66 @@ struct Withdrawn {
     unrelated: Option<[u8; 32]>,
     end: String,
     answer: String,
+}
+
+// A second enrolled app uploads the original signed write without its service proof.
+// The payer keeps that proof, with enough other records that its own upload exceeds
+// the normal 16 MiB request limit (Switch wire 7.1, 7.4.14).
+async fn retain_large_inventory(payer: &mut Paykit) -> TestResult {
+    use pubky_switch_client::app::{Collection, RecordTarget};
+    let collection = Collection::new(
+        "notes",
+        pubky_switch_core::ident::Policy::new("paykit_allowance", &["paykit_allowance"]),
+    );
+    let value = serde_json::to_vec(&"a".repeat(200 << 10))?;
+    for number in 0u8..36 {
+        let target = RecordTarget::new(collection.clone(), &[number]);
+        payer.app_mut().put_record(&target, &value, vec![]).await?;
+    }
+    payer.app_mut().retain_loss_uploads().await?;
+    Ok(())
+}
+
+async fn upload_without_proof(
+    world: &World,
+    phone: &mut Paykit,
+    origin: &str,
+    opening: pubky_switch_core::sig::SignedDoc,
+    original: &pubky_switch_client::app::KeptOp,
+) -> TestResult {
+    use pubky_switch_client::client::answers::{RecoveryUpload, UploadedOp};
+    use pubky_switch_client::client::{Credentials, SwitchClient};
+    phone.app_mut().refresh_identity().await?;
+    phone.app_mut().follow_provider().await?;
+    let buyer = world.identity("buyer")?;
+    let client = SwitchClient::new(
+        origin,
+        buyer.public(),
+        Credentials::App {
+            identity: buyer.public(),
+            keys: world.app_keys(&buyer, "phone")?,
+            cert: phone.app().cert().clone(),
+        },
+        Some(phone.app().own_identity().body().inbox.service_key),
+        world.transport(),
+        world.clock().clone(),
+    )?;
+    let answer = client
+        .recovery_upload(
+            &RecoveryUpload {
+                lost_identity: Some(opening),
+                records: vec![UploadedOp {
+                    op: original.op.clone(),
+                    cert: original.cert.clone(),
+                    proof: None,
+                }],
+                ..Default::default()
+            },
+            true,
+        )
+        .await?;
+    assert!(answer.proof.is_some());
+    Ok(())
 }
 
 async fn receive_fenced_acceptance(
@@ -278,6 +345,22 @@ async fn receive_fenced_acceptance(
     } else {
         None
     };
+    let mut phone = if case == RecoveredProposal::UploadWithoutProof {
+        let phone = Box::pin(join(
+            w,
+            &mut signer,
+            "buyer",
+            "phone",
+            AppScopes::new().allowance().build()?,
+            Arc::new(MemoryStore::new()),
+            &rail,
+        ))
+        .await?;
+        payer.app_mut().refresh_identity().await?;
+        Some(phone)
+    } else {
+        None
+    };
     let before_proposal = payer.backup().await?;
     let original_generation = payer.app().own_identity().generation();
     if case == RecoveredProposal::Interrupted {
@@ -316,7 +399,12 @@ async fn receive_fenced_acceptance(
         &natural_key::allowance(&peer, &offer.allowance_id),
     );
     let pending_key = payer.app().record_key(&target)?;
-    let (original, created_at, original_op) = payer
+    let RecordApplication {
+        record: original,
+        application: created_at,
+        evidence: original_op,
+        ..
+    } = payer
         .app_mut()
         .read_record_application(&target)
         .await?
@@ -337,7 +425,11 @@ async fn receive_fenced_acceptance(
         ))
         .await?;
         Box::pin(finish_restored_withdrawal(&mut payer)).await?;
-        let (known, source, _) = payer
+        let RecordApplication {
+            record: known,
+            application: source,
+            ..
+        } = payer
             .app_mut()
             .read_record_application(&target)
             .await?
@@ -349,6 +441,10 @@ async fn receive_fenced_acceptance(
             .protocol_scan("paykit", b"ao/")
             .await?
             .is_empty());
+    }
+    let opening = payer.app().own_identity().signed().clone();
+    if phone.is_some() {
+        Box::pin(retain_large_inventory(&mut payer)).await?;
     }
     let next = "https://replacement.buyer.allowance.test";
     w.lose_switch("https://buyer.allowance.test");
@@ -372,8 +468,21 @@ async fn receive_fenced_acceptance(
         // The restored wallet first reads with its original enrollment.
         Box::pin(payer.receive(None)).await?;
     }
+    if let Some(phone) = phone.as_mut() {
+        Box::pin(upload_without_proof(w, phone, next, opening, &original_op)).await?;
+    }
     payer.app_mut().refresh_identity().await?;
     payer.app_mut().follow_provider().await?;
+    if phone.is_some() {
+        let uploads = payer
+            .app()
+            .loss_uploads(payer.app().own_identity().generation())
+            .await?;
+        assert!(uploads.iter().any(|upload| matches!(
+            upload.outcome,
+            pubky_switch_client::app::LossUploadOutcome::TooLarge
+        )));
+    }
     Box::pin(finish_restored_withdrawal(&mut payer)).await?;
     assert_eq!(
         payer.app().own_identity().body().recovery_from,
@@ -381,6 +490,12 @@ async fn receive_fenced_acceptance(
     );
     payer.app_mut().invite(&peer).await?;
     shop.app_mut().identity_of(&payer.identity(), true).await?;
+    let expected_version = if case == RecoveredProposal::UploadWithoutProof {
+        assert!(original.version.version > 1);
+        pubky_switch_core::ops::RecordVersion::new(original_generation, 1)
+    } else {
+        original.version
+    };
     let selection = if case != RecoveredProposal::Missing {
         let restored = payer.app_mut().read_record_fresh(&target).await?;
         let live = match restored {
@@ -401,12 +516,19 @@ async fn receive_fenced_acceptance(
             if *key == pending_key && revision.generation == payer.app().own_identity().generation()
                 && revision.item_hash == created_at.item_hash)
         );
-        let (_, installed, member) = payer
+        let RecordApplication {
+            application: installed,
+            evidence: member,
+            installed_version,
+            ..
+        } = payer
             .app_mut()
             .read_record_application(&target)
             .await?
             .expect("installed proposal");
         assert_eq!(member, original_op);
+        assert_eq!(installed_version, expected_version);
+        assert_eq!(live.version, original.version);
         assert_eq!(installed.item_hash, created_at.item_hash);
         assert!(payer
             .app()
@@ -439,7 +561,9 @@ async fn receive_fenced_acceptance(
         assert_ne!(later.version, original.version);
         Box::pin(payer.receive(None)).await?;
         Box::pin(payer.flush()).await?;
-        let (retained, _, _) = payer
+        let RecordApplication {
+            record: retained, ..
+        } = payer
             .app_mut()
             .read_record_application(&target)
             .await?
@@ -457,7 +581,10 @@ async fn receive_fenced_acceptance(
         Box::pin(payer.block(&peer)).await?;
         Box::pin(payer.receive(None)).await?;
         Box::pin(payer.flush()).await?;
-        let (_, revision, _) = payer
+        let RecordApplication {
+            application: revision,
+            ..
+        } = payer
             .app_mut()
             .read_record_application(&target)
             .await?
@@ -493,6 +620,8 @@ async fn receive_fenced_acceptance(
     }
     if case == RecoveredProposal::Interrupted {
         w.lose_answer("POST", "/ops");
+    } else if case == RecoveredProposal::UploadWithoutProof {
+        w.unreachable("POST", "/ops");
     }
     let read = Box::pin(payer.receive(None)).await?;
     assert!(read
@@ -513,7 +642,11 @@ async fn receive_fenced_acceptance(
         Box::pin(payer.receive(None)).await?;
         Box::pin(payer.flush()).await?;
         assert!(payer.notices().await?.iter().all(|n| n.id != notice.id));
-        let (_, installed, member) = payer
+        let RecordApplication {
+            application: installed,
+            evidence: member,
+            ..
+        } = payer
             .app_mut()
             .read_record_application(&target)
             .await?
@@ -593,6 +726,67 @@ async fn receive_fenced_acceptance(
         .iter()
         .any(|n| n.kind == NoticeKind::AllowanceAcceptanceBeforeLoss
             && n.msg_id.as_deref() == Some(&answer)));
+    let mut prepared_key = None;
+    if case == RecoveredProposal::UploadWithoutProof {
+        let kept = payer.app().protocol_scan("paykit", b"ap/").await?;
+        let [(key, _)] = kept.as_slice() else {
+            panic!("one prepared withdrawal")
+        };
+        prepared_key = Some(key.clone());
+        let before_delete = payer
+            .app_mut()
+            .read_record_application(&target)
+            .await?
+            .ok_or("the unanswered submission changed the live proposal")?;
+        assert_eq!(before_delete.installed_version, expected_version);
+        assert_eq!(before_delete.application.item_hash, created_at.item_hash);
+        assert!(before_delete.record.content.value().is_some());
+        let backup = payer.backup().await?;
+        let id = payer.app_id();
+        drop(payer);
+        let mut restored = Box::pin(Paykit::restore(
+            w.app_env(Arc::new(MemoryStore::new())),
+            Default::default(),
+            &backup,
+            rail.clone(),
+            Arc::new(TestTimer),
+        ))
+        .await?;
+        Box::pin(finish_restored_withdrawal(&mut restored)).await?;
+        assert!(restored
+            .app_mut()
+            .read_record_application(&target)
+            .await?
+            .is_none());
+        assert!(matches!(
+            restored
+                .end_allowance(&offer.record)
+                .await
+                .unwrap_err()
+                .refusal(),
+            Some(Refusal::NotNow(_))
+        ));
+        assert_eq!(
+            restored.app().protocol_scan("paykit", b"ap/").await?.len(),
+            1
+        );
+        assert!(restored
+            .app()
+            .sent_to(&peer, 0, u64::MAX)
+            .await?
+            .iter()
+            .all(|message| message.kind != "paykit.allowance_end"));
+        drop(restored);
+        payer = Box::pin(Paykit::load(
+            w.app_env(payer_store.clone()),
+            Default::default(),
+            id,
+            rail.clone(),
+            Arc::new(TestTimer),
+        ))
+        .await?;
+        Box::pin(finish_restored_withdrawal(&mut payer)).await?;
+    }
     if case == RecoveredProposal::Interrupted {
         let kept = payer.app().protocol_scan("paykit", b"ap/").await?;
         assert_eq!(
@@ -622,10 +816,17 @@ async fn receive_fenced_acceptance(
     let end = sent
         .iter()
         .find(|item| item.kind == "paykit.allowance_end")
-        .expect("receiving the fenced original acceptance withdraws the exact live proposal")
-        .msg_id
-        .clone();
-    let (deleted, at, deletion) = payer
+        .expect("receiving the fenced original acceptance withdraws the exact live proposal");
+    if let Some(key) = prepared_key {
+        assert!(key.ends_with(pubky_switch_core::enc::b64(&end.plaintext.hash()).as_bytes()));
+    }
+    let end = end.msg_id.clone();
+    let RecordApplication {
+        record: deleted,
+        application: at,
+        evidence: deletion,
+        ..
+    } = payer
         .app_mut()
         .read_record_application(&target)
         .await?
@@ -640,7 +841,7 @@ async fn receive_fenced_acceptance(
     assert!(op.body().conditions.contains(&selection));
     assert!(
         matches!(&op.body().kind, pubky_switch_core::ops::OpKind::RecordPut(put)
-        if put.key == pending_key && put.expected_version == original.version)
+        if put.key == pending_key && put.expected_version == expected_version)
     );
     Ok(Some(Box::new(Withdrawn {
         case,

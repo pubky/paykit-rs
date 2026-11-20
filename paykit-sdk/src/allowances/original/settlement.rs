@@ -10,18 +10,20 @@ pub(in crate::allowances) struct LiveOriginal {
     pub(super) installed_version: RecordVersion,
 }
 
-/// Switch wire 7.4.14 assigns an upload older than the lost generation its lower
-/// bound. A proved original create built on absence, so that bound is one.
-pub(super) fn uploaded_create_version(original: RecordVersion, doc: &IdentityDoc) -> RecordVersion {
-    if doc
-        .body()
-        .recovery_from
-        .is_some_and(|lost| original.generation < lost)
-    {
-        RecordVersion::new(original.generation, 1)
-    } else {
-        original
-    }
+/// Recovery uploads use the exact proved version or the lower bound of the signed
+/// create. Only the lost generation's proof establishes a version at the new service
+/// (Switch wire 7.4.14). The authenticated current read selects between them.
+pub(super) fn valid_uploaded_create(
+    installed: RecordVersion,
+    original: RecordVersion,
+    doc: &IdentityDoc,
+) -> bool {
+    let Some(lost) = doc.body().recovery_from else {
+        return false;
+    };
+    original.generation <= lost
+        && (installed == RecordVersion::new(original.generation, 1)
+            || (original.generation == lost && installed == original))
 }
 
 impl LiveOriginal {
@@ -46,6 +48,7 @@ impl LiveOriginal {
 #[serde(deny_unknown_fields)]
 pub(super) struct LossSettlement {
     create: KeptOp,
+    installed_version: SeenVersion,
     acceptance: KeptMessage,
     withdrawal: KeptMessage,
     #[serde(with = "serde_b64")]
@@ -113,17 +116,15 @@ impl LossSettlement {
         let made = application::applied_applications(vec![self.create.clone()], &first, app)?;
         let digest = original.create.ok_or_else(PaykitError::corrupt)?;
         let version = RecordVersion::new(selected.generation, selected.seq);
-        if !original.confirmed_for_execution
+        let installed_version = self.installed_version.record_version();
+        if !valid_uploaded_create(installed_version, version, &doc)
+            || !original.confirmed_for_execution
             || !replies::answers(p, &q)
             || !matches!(q.body(), Body::AllowanceAcceptance(_))
             || q.accepted_at().is_none()
             || w.accepted_at().is_some()
             || w.cert().app_id() != app
             || original.reported_after_loss != Some(q.hash())
-            || doc
-                .body()
-                .recovery_from
-                .is_none_or(|lost| original.generation > lost)
             || made
                 .pending_creates
                 .get(&(*pending_key, digest))
@@ -135,7 +136,6 @@ impl LossSettlement {
         if let Some(deletion) = &self.deletion {
             let member = &deletion.member;
             let selected_in = doc.generation();
-            let installed_version = uploaded_create_version(version, &doc);
             let generation = deletion.version.record_version().generation;
             let applied_doc = match &deletion.applied_under {
                 Some(signed) => {
@@ -196,6 +196,7 @@ impl OriginalAllowance {
             if let Some(imported) = self.settlement.take() {
                 let own = self.decision.stored(&self.peer)?.sender();
                 if value.create != imported.create
+                    || value.installed_version != imported.installed_version
                     || value.application != imported.application
                     || value.authority != imported.authority
                     || value.acceptance.stored(&own)?.hash()
@@ -448,6 +449,7 @@ impl Paykit {
         }
         original.settlement = Some(Box::new(LossSettlement {
             create: selected.member,
+            installed_version: selected.installed_version.into(),
             acceptance: KeptMessage::of(acceptance),
             withdrawal: KeptMessage::of(withdrawal),
             application,

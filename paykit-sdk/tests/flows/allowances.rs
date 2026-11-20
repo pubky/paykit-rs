@@ -8,7 +8,7 @@ use paykit_sdk::{
     AllowanceRole, AllowanceStatus, AppScopes, Paykit, PaykitError, Refusal, RequestedScopes,
     UserConfirmed,
 };
-use pubky_switch_client::app::{AppEvent, LocalWrite, OpBatch, OutgoingMessage};
+use pubky_switch_client::app::{AppEvent, LocalWrite, OpBatch, OutgoingMessage, RecordApplication};
 use pubky_switch_client::clock::Clock;
 use serde_json::{json, Value};
 
@@ -602,7 +602,11 @@ async fn acceptance_after_generation_change(change: AcceptanceGeneration, propos
         assert_eq!(accepted.proposal.hash(), selected.proposal().hash());
         let q = accepted.response.as_ref().unwrap();
         assert_eq!(q.message().refs, [selected.proposal().hash()]);
-        let (initial, _, evidence) = payer
+        let RecordApplication {
+            record: initial,
+            evidence,
+            ..
+        } = payer
             .app_mut()
             .read_record_application(&ledger)
             .await
@@ -12983,7 +12987,10 @@ async fn carried_loss_withdrawal(keep_key: bool) {
     let old = payer.app().own_identity().generation();
     let target = pending_target(&w.bob_id(), &offer.allowance_id);
     let pending = payer.app().record_key(&target).unwrap();
-    let (_, original, _) = payer
+    let RecordApplication {
+        application: original,
+        ..
+    } = payer
         .app_mut()
         .read_record_application(&target)
         .await
@@ -13063,7 +13070,12 @@ async fn carried_loss_withdrawal(keep_key: bool) {
     for _ in 0..4 {
         Box::pin(payer.receive(None)).await.unwrap();
     }
-    let (closed, result, deletion) = payer
+    let RecordApplication {
+        record: closed,
+        application: result,
+        evidence: deletion,
+        ..
+    } = payer
         .app_mut()
         .read_record_application(&target)
         .await
@@ -14140,7 +14152,9 @@ async fn test_original_payer_reopens_the_selected_proposal_and_sends_the_same_pr
     let (_, record) = Box::pin(proposed(&w, &mut shop, &mut payer)).await;
     let proposal = Box::pin(pending_at(&payer, &record)).await;
     let target = pending_target(&w.bob_id(), proposal.allowance_id());
-    let (_, _, selected) = payer
+    let RecordApplication {
+        evidence: selected, ..
+    } = payer
         .app_mut()
         .read_record_application(&target)
         .await
@@ -14195,7 +14209,9 @@ async fn test_original_payer_reopens_the_selected_proposal_and_sends_the_same_pr
             pubky_switch_client::app::Collection::new(family.name(), family.fixed_policy()),
             &paykit_lib::derive::natural_key::allowance(&w.bob_id(), proposal.allowance_id()),
         );
-        let (_, _, applied) = payer
+        let RecordApplication {
+            evidence: applied, ..
+        } = payer
             .app_mut()
             .read_record_application(&target)
             .await
@@ -14948,7 +14964,9 @@ async fn test_pending_unanswered_acceptance_after_restore_observes_the_original_
             &paykit_lib::derive::natural_key::allowance(&w.bob_id(), &view.allowance_id),
         )
     };
-    let (_, _, selected) = alice
+    let RecordApplication {
+        evidence: selected, ..
+    } = alice
         .app_mut()
         .read_record_application(&target(Collection::AllowanceProposals))
         .await

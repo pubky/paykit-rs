@@ -1685,10 +1685,11 @@ impl Paykit {
             RecordRead::Fresh(_) => {
                 let applied = self.app.read_record_application(&target).await?;
                 Ok(applied
-                    .is_some_and(|(r, revision, _)| {
-                        revision == deletion
-                            && replies::qualified_at(&r, &target, &key)
-                            && r.content == pubky_switch_client::app::RecordContent::Deleted
+                    .is_some_and(|current| {
+                        current.application == deletion
+                            && replies::qualified_at(&current.record, &target, &key)
+                            && current.record.content
+                                == pubky_switch_client::app::RecordContent::Deleted
                     })
                     .then_some(Condition::RecordCurrent {
                         key,

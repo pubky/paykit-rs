@@ -10,7 +10,9 @@ use crate::error::{PaykitError, Refusal, Result};
 use crate::records::KeptMessage;
 use crate::state::{self, key, Binder, StateKey, Tx};
 use paykit_lib::{bodies::ProposerRole, Collection};
-use pubky_switch_client::app::{KeptOp, LocalWrite, RestoreContext, SharedRecord};
+use pubky_switch_client::app::{
+    KeptOp, LocalWrite, RecordApplication, RestoreContext, SharedRecord,
+};
 use pubky_switch_core::chain::TransitionProof;
 use pubky_switch_core::enc::serde_b64;
 use pubky_switch_core::ops::{Condition, OpKind, RecordVersion, SignedOp};
@@ -340,8 +342,12 @@ impl Paykit {
             return Err(unconfirmed());
         }
         let pending = allowance_record_target(Collection::AllowanceProposals, &peer, id);
-        let Some((current, revision, evidence)) =
-            self.app.read_record_application(&pending).await?
+        let Some(RecordApplication {
+            record: current,
+            application: revision,
+            evidence,
+            ..
+        }) = self.app.read_record_application(&pending).await?
         else {
             return Err(unconfirmed());
         };

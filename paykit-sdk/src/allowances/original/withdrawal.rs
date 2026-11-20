@@ -2,7 +2,7 @@
 use super::*;
 use crate::allowances::{delivery, replies, AllowanceReply, AppliedReply, EndCause, EndOrigin};
 use paykit_lib::kinds::Kind;
-use pubky_switch_client::app::AppendDecision;
+use pubky_switch_client::app::{AppendDecision, RecordApplication};
 use pubky_switch_core::records::IdentityDoc;
 
 /// Evidence observed at the service that applied the proposer's original write.
@@ -434,7 +434,13 @@ impl Paykit {
         }
         let target =
             allowance_record_target(Collection::AllowanceProposals, &peer, &p.allowance_id);
-        let Some((live, installed, member)) = self.app.read_record_application(&target).await?
+        let Some(RecordApplication {
+            record: live,
+            application: installed,
+            evidence: mut member,
+            installed_version,
+            ..
+        }) = self.app.read_record_application(&target).await?
         else {
             return Ok(None);
         };
@@ -452,11 +458,17 @@ impl Paykit {
         };
         let (original_doc, original) =
             receipt.verify(&self.identity(), approval.generation, &selected.key)?;
-        if member.proof.as_ref() != Some(&receipt.proof)
+        if member
+            .proof
+            .as_ref()
+            .is_some_and(|proof| proof != &receipt.proof)
             || original.item_hash != installed.item_hash
         {
             return Ok(None);
         }
+        // The service can install exactly this signed operation without the old proof.
+        // Verify it with the original payer's protected proof before using either version.
+        member.proof.get_or_insert_with(|| receipt.proof.clone());
         let verified =
             application::applied_applications(vec![member.clone()], &original_doc, self.app_id())?;
         let condition = Condition::RecordCurrent {
@@ -467,17 +479,17 @@ impl Paykit {
         let Some((version, _)) = verified.pending_creates.get(&(live.key, create)) else {
             return Ok(None);
         };
-        let installed_version =
-            settlement::uploaded_create_version(*version, self.app.own_identity());
-        Ok(
-            ((live.version == *version || live.version == installed_version)
-                && self.app.record_condition(&live.key).await? == condition)
-                .then_some(LiveOriginal {
-                    condition,
-                    member,
-                    installed_version,
-                }),
-        )
+        Ok((settlement::valid_uploaded_create(
+            installed_version,
+            *version,
+            self.app.own_identity(),
+        ) && (live.version == *version || live.version == installed_version)
+            && self.app.record_condition(&live.key).await? == condition)
+            .then_some(LiveOriginal {
+                condition,
+                member,
+                installed_version,
+            }))
     }
 
     /// These local writes take effect only when the native batch deletes the original
