@@ -367,8 +367,7 @@ pub struct TransferQuote {
 /// The payment outcome or error and any payee apps whose public endpoints the call
 /// could not use, with the reason for each (Paykit spec 4).
 ///
-/// Returned by [`Paykit::pay_request`], [`Paykit::pay_request_automatically`],
-/// [`Paykit::pay_under_allowance`], [`Paykit::pay_period`],
+/// Returned by [`Paykit::pay_request`], [`Paykit::pay_under_allowance`], [`Paykit::pay_period`],
 /// [`Paykit::pay_period_automatically`], [`Paykit::pay_period_under_allowance`]
 /// and [`Paykit::pay_without_request`].
 ///

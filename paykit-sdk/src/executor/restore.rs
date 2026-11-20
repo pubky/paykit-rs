@@ -100,7 +100,7 @@ fn receipted_period_amount(
     let Body::PaymentProof(paid) = proof.body() else {
         return false;
     };
-    let Some(receipt) = crate::receipts::displayed_receipt(activity) else {
+    let Some(receipt) = crate::receipts::displayed_receipt(activity, Some(request_body)) else {
         return false;
     };
     if receipt.message().refs != [proof.hash(), request.hash()]
@@ -720,6 +720,98 @@ mod tests {
     use super::*;
     use paykit_lib::allowances::EntryOutcome;
     use paykit_lib::{Asset, AttemptId, Decimal};
+
+    #[test]
+    fn test_journal_less_period_receipt_uses_the_original_requests_selling_scope() {
+        use crate::testkit::{object, Party, NOW};
+        use paykit_lib::bodies::PaymentReceipt;
+        use paykit_lib::periods::{AnchoredRule, PeriodRef, Recurrence, Unit};
+        use paykit_lib::records::ActivitySide;
+        use serde_json::json;
+
+        let payer = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let shop = Party::new(
+            "bob",
+            "subscriptions",
+            &[
+                "paykit_request:subscriptions",
+                "paykit_settlements",
+                "paykit_contacts",
+            ],
+        );
+        let schedule =
+            Recurrence::new(AnchoredRule::new(NOW, 1, Unit::Hour).unwrap(), NOW, None).unwrap();
+        let period = PeriodRef::from(schedule.first().unwrap());
+        let request = shop.message(
+            &payer,
+            "paykit.payment_request",
+            vec![],
+            object(json!({
+                "amount": { "asset": "usd", "value": "1" },
+                "payment_reference": "subscription-1", "proposal_expires_at": null,
+                "label": "subscriptions", "recurrence": schedule.to_json(),
+                "conversion": { "type": "fixed", "rates": [{ "asset": "btc", "value": "2" }] }
+            })),
+        );
+        let attempt = AttemptId::from_bytes([3; 16]);
+        let proof = payer.message(
+            &shop,
+            "paykit.payment_proof",
+            vec![request.hash()],
+            object(json!({
+                "attempt_id": attempt.to_text(), "billing_period": period.to_json(),
+                "payment_endpoint_identifier": "btc-lightning-bolt11",
+                "payment_app_id": pubky_switch_core::enc::zbase32_encode(&shop.app_id()),
+                "label": "subscriptions", "proof": {}
+            })),
+        );
+        let transfer = PaymentAmount {
+            asset: Asset::new("btc").unwrap(),
+            value: Decimal::new("2").unwrap(),
+        };
+        let body = PaymentReceipt {
+            attempt_id: attempt,
+            billing_period: Some(period),
+            metadata: None,
+            payment_reference: None,
+        }
+        .to_body(2)
+        .unwrap();
+        let mut parent = ActivityRecord::new(ActivitySide::Payer, shop.id());
+        parent.request = Some(request.clone());
+        let mut activity = ActivityRecord::new(ActivitySide::Payer, shop.id());
+        activity.request_hash = Some(request.hash());
+        activity.billing_period = Some(period);
+        activity.proof = Some(proof.clone());
+        for (scope, allowed) in [
+            ("paykit_request:subscriptions", true),
+            ("paykit_request", true),
+            ("paykit_request:shipping", false),
+        ] {
+            let counter = Party::new(
+                "bob",
+                scope,
+                &[scope, "paykit_settlements", "paykit_contacts"],
+            );
+            activity.receipt = Some(counter.message(
+                &payer,
+                "paykit.payment_receipt",
+                vec![proof.hash(), request.hash()],
+                body.clone(),
+            ));
+            assert_eq!(
+                crate::receipts::receipt_binding(&activity, Some(&parent))
+                    == crate::receipts::ReceiptBinding::Verified,
+                allowed,
+                "{scope}"
+            );
+            assert_eq!(
+                receipted_period_amount(&activity, &request, &proof, &transfer),
+                allowed,
+                "{scope}"
+            );
+        }
+    }
 
     #[test]
     fn test_settled_claim_needs_an_exact_previously_accepted_payment() {

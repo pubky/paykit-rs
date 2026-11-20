@@ -43,7 +43,8 @@ use crate::paykit::Paykit;
 use crate::periods::PeriodView;
 use crate::rail::ProofCheck;
 use crate::receipts::{
-    receipt_binding, received_receipt, ReceiptBinding, ReceiptDetails, ReceivedReceipt,
+    displayed_receipt, receipt_binding, received_receipt, ReceiptBinding, ReceiptDetails,
+    ReceivedReceipt,
 };
 use crate::receive::KEPT_MESSAGE_MS;
 use crate::records::{compare_received, conflict, first_received, KeptMessage, ReceivedAt};
@@ -2846,7 +2847,7 @@ fn payee_view(
         record.response.as_ref().map(StoredMessage::body),
         Some(Body::PaymentRequestRejection(_))
     );
-    let status = if crate::receipts::displayed_receipt(record).is_some() {
+    let status = if displayed_receipt(record, request.map(|(_, body)| body)).is_some() {
         PayeeStatus::Receipted
     } else if record.proof.is_some() {
         PayeeStatus::ProofReceived

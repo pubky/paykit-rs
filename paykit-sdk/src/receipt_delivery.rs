@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::activity::ActivityTarget;
 use crate::error::{PaykitError, Result};
 use crate::paykit::Paykit;
-use crate::receipts::{displayed_receipt, receipt_binding, ReceiptBinding};
+use crate::receipts::{receipt_binding, ReceiptBinding};
 use crate::state::StateKey;
 
 /// The client first writes the sixteen-byte ID. A verified answer for this exact write
@@ -216,7 +216,9 @@ impl Paykit {
         if receipt_binding(&activity, parent.as_ref()) != ReceiptBinding::Verified {
             return Ok(None);
         }
-        Ok(displayed_receipt(&activity)
+        Ok(activity
+            .receipt
+            .as_ref()
             .filter(|stored| {
                 stored.sender() == self.identity() && stored.cert().app_id() == self.app_id()
             })
@@ -257,11 +259,10 @@ impl Paykit {
             return Ok(None);
         };
         let parent = self.payee_request_record(target, &activity).await?;
-        Ok(
-            (receipt_binding(&activity, parent.as_ref()) == ReceiptBinding::Verified)
-                .then(|| displayed_receipt(&activity).cloned())
-                .flatten(),
-        )
+        if receipt_binding(&activity, parent.as_ref()) != ReceiptBinding::Verified {
+            return Ok(None);
+        }
+        Ok(activity.receipt)
     }
 }
 

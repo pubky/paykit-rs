@@ -1180,7 +1180,14 @@ async fn test_executor_incorporates_an_unfunded_period_paid_at_an_authorized_rat
         .with_conversion(Conversion::Fixed(vec![rate]))
         .with_recurrence(schedule)
         .with_period_deadline_s(3600);
-    let req = Box::pin(request_from(&mut shop, payer.identity(), subscription)).await;
+    let mut subscriptions =
+        Box::pin(world.labelled_shop("subscription-till", "subscriptions")).await;
+    let req = Box::pin(request_from(
+        &mut subscriptions,
+        payer.identity(),
+        subscription,
+    ))
+    .await;
     Box::pin(payer.receive(None)).await.unwrap();
     Box::pin(payer.accept_subscription(&req)).await.unwrap();
     let shown =
@@ -1201,8 +1208,8 @@ async fn test_executor_incorporates_an_unfunded_period_paid_at_an_authorized_rat
         world.rail.paid_amount(&attempt).unwrap().value.as_str(),
         "20"
     );
-    Box::pin(shop.receive(None)).await.unwrap();
-    let sale = shop
+    Box::pin(subscriptions.receive(None)).await.unwrap();
+    let sale = subscriptions
         .payee_activity()
         .await
         .unwrap()
@@ -1214,7 +1221,7 @@ async fn test_executor_incorporates_an_unfunded_period_paid_at_an_authorized_rat
         .iter()
         .find(|p| p.billing_period == period)
         .unwrap();
-    let receipt = Box::pin(shop.confirm_payment(&occurrence.record))
+    let receipt = Box::pin(subscriptions.confirm_payment(&occurrence.record))
         .await
         .unwrap()
         .unwrap();
