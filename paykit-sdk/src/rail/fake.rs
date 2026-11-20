@@ -259,6 +259,11 @@ impl FakeRail {
         self.lock().calls.get(key).copied().unwrap_or(0)
     }
 
+    /// Every attempt passed to [`Rail::pay`] and its call count, including repeats.
+    pub fn all_pay_calls(&self) -> BTreeMap<AttemptId, u64> {
+        self.lock().calls.clone()
+    }
+
     /// The amount each call of [`Rail::pay`] under `key` was asked to transfer, repeats
     /// included, in the order of the calls.
     pub fn pay_call_amounts(&self, key: &AttemptId) -> Vec<PaymentAmount> {

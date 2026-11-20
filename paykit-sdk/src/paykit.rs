@@ -1121,10 +1121,12 @@ impl Paykit {
             });
         }
         self.refresh_own()?;
-        // The client retries kept batches before the feed. Until a floor batch settles,
-        // its local mark and restore updates still belong to that batch. Hand the host
-        // the read normally and leave those updates and outgoing asks for the next pass.
-        if self.first_read_pending() || self.floor_write_is_kept().await? {
+        // A recovery notice holds own writes. Return the client's report before upkeep
+        // can try a held write. A restore or a kept floor batch also defers that work.
+        if self.app.recovery_required().is_some()
+            || self.first_read_pending()
+            || self.floor_write_is_kept().await?
+        {
             let applied = report
                 .events
                 .iter()
