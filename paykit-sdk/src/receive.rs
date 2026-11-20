@@ -1153,7 +1153,11 @@ fn cancellation_writes(
         }
     }
     if !held && superseded.is_empty() {
-        make_room_for_stop(cx, &stored.sender(), (order.0, position.seq))?;
+        make_room_for_stop(
+            cx,
+            &stored.sender(),
+            StopAdmission::Counted((order.0, position.seq)),
+        )?;
     }
     let put = local(&name, &KeptMessage::taken_at(stored, position))?;
     let reserved = pubky_switch_client::app::local_writes_bytes(std::slice::from_ref(&put));
@@ -1243,6 +1247,11 @@ fn ordered(kept: &KeptMessage) -> Result<crate::records::KeptOrder, Fail> {
     kept.order().map_err(|_| Fail::corrupt())
 }
 
+pub(crate) enum StopAdmission {
+    Counted(crate::records::KeptOrder),
+    Matched([u8; 32]),
+}
+
 /// Make room for a new stop from `sender` among the stops kept for records not held, in the
 /// step: those the bounds drop ([`kept_reply_evicted`]) go, until there is room. The payees'
 /// cancellations of requests not held (`kc/`) and the counterparties' ends of Allowances not
@@ -1257,7 +1266,8 @@ fn ordered(kept: &KeptMessage) -> Result<crate::records::KeptOrder, Fail> {
 ///   the end names ([`crate::allowances::end_bounded`]), and one whose Allowance has a stored
 ///   message kept to write ([`crate::allowances::keeps_stored_message`]): the message could
 ///   open the record, and the stop must then be there. Of the ends kept for one Allowance,
-///   only the earliest accepted is judged so; each later one counts, since until the record
+///   the end matched to the current signed acceptance, or otherwise the earliest, is
+///   judged so; the others count, since until the record
 ///   reads none of them can be told to name what it holds, and a sender's ends past its
 ///   bound are asked for again like any stop dropped for the bounds.
 ///
@@ -1283,7 +1293,7 @@ fn ordered(kept: &KeptMessage) -> Result<crate::records::KeptOrder, Fail> {
 pub(crate) fn make_room_for_stop(
     cx: &mut ReceiveContext<'_>,
     sender: &[u8; 32],
-    new: crate::records::KeptOrder,
+    admission: StopAdmission,
 ) -> Result<(), Fail> {
     // Each stop counted, with the order its inbox accepted it in (`records::KeptOrder`).
     let mut counted = Vec::new();
@@ -1313,8 +1323,8 @@ pub(crate) fn make_room_for_stop(
         }
     }
     if !side_may_lack(cx, RecordSide::Allowances)? {
-        // Every end kept for one Allowance record, earliest first: the earliest is judged as
-        // the record's stop, and each later one counts.
+        // The verified match takes the exemption, including the incoming match.
+        // Without one, only the earliest end can qualify for it.
         let mut ends: std::collections::BTreeMap<[u8; 32], Vec<_>> =
             std::collections::BTreeMap::new();
         for (name, stop) in state::cx_scan::<KeptMessage>(cx, key::ALLOWANCE_ENDS)? {
@@ -1324,15 +1334,25 @@ pub(crate) fn make_room_for_stop(
                 return Err(Fail::corrupt());
             };
             let (end, _) = kept_with_time(cx, &stop)?;
-            ends.entry(record)
-                .or_default()
-                .push((ordered(&stop)?, name, end));
+            ends.entry(record).or_default().push((
+                ordered(&stop)?,
+                name,
+                end,
+                stop.ended_acceptance.is_some(),
+            ));
         }
         for (record, mut group) in ends {
-            group.sort_by_key(|(order, _, _)| *order);
+            group.sort_by_key(|(order, _, _, _)| *order);
             let content = cx.record_at(&record)?.map(|held| held.content);
-            for (index, (order, name, end)) in group.into_iter().enumerate() {
-                if index == 0
+            let replaced = matches!(admission, StopAdmission::Matched(key) if key == record);
+            let matched = group.iter().position(|(_, _, _, matched)| *matched);
+            for (index, (order, name, end, _)) in group.into_iter().enumerate() {
+                if matched == Some(index) {
+                    continue;
+                }
+                if !replaced
+                    && matched.is_none()
+                    && index == 0
                     && (!crate::allowances::end_bounded(cx, content.as_ref(), &end)?
                         || crate::allowances::keeps_stored_message(cx, &end.sender(), &record)?)
                 {
@@ -1361,7 +1381,11 @@ pub(crate) fn make_room_for_stop(
     }
     let mut dropped: std::collections::BTreeMap<[u8; 32], (u64, u64)> =
         std::collections::BTreeMap::new();
-    while let Some(index) = kept_reply_evicted(&kept, sender, new) {
+    let victim = |kept: &[CountedReply]| match admission {
+        StopAdmission::Counted(order) => kept_reply_evicted(kept, sender, order),
+        StopAdmission::Matched(_) => stop_victim(kept, sender, None),
+    };
+    while let Some(index) = victim(&kept) {
         let (from, (at, _)) = kept[index];
         match cx.forget_processed(from, &msg_ids[index]) {
             Ok(_) => {}
@@ -2378,11 +2402,12 @@ pub(crate) type CountedReply = ([u8; 32], crate::records::KeptOrder);
 fn overflow_sender(
     counts: &std::collections::BTreeMap<[u8; 32], usize>,
     sender: &[u8; 32],
+    additional: usize,
 ) -> Option<[u8; 32]> {
-    if counts.get(sender).copied().unwrap_or(0) >= MAX_KEPT_REPLIES_PER_SENDER {
+    if counts.get(sender).copied().unwrap_or(0) + additional > MAX_KEPT_REPLIES_PER_SENDER {
         return Some(*sender);
     }
-    if counts.values().sum::<usize>() < MAX_KEPT_REPLIES {
+    if counts.values().sum::<usize>() + additional <= MAX_KEPT_REPLIES {
         return None;
     }
     counts
@@ -2404,11 +2429,19 @@ pub(crate) fn kept_reply_evicted(
     sender: &[u8; 32],
     new: crate::records::KeptOrder,
 ) -> Option<usize> {
+    stop_victim(kept, sender, Some(new))
+}
+
+fn stop_victim(
+    kept: &[CountedReply],
+    sender: &[u8; 32],
+    incoming: Option<crate::records::KeptOrder>,
+) -> Option<usize> {
     let mut counts = std::collections::BTreeMap::new();
     for (from, _) in kept {
         *counts.entry(*from).or_default() += 1;
     }
-    let donor = overflow_sender(&counts, sender)?;
+    let donor = overflow_sender(&counts, sender, usize::from(incoming.is_some()))?;
     let index = kept
         .iter()
         .enumerate()
@@ -2416,7 +2449,7 @@ pub(crate) fn kept_reply_evicted(
         .min_by_key(|(_, (_, at))| *at)?
         .0;
     let (from, at) = kept[index];
-    (from != *sender || at < new).then_some(index)
+    (from != *sender || incoming.is_none_or(|new| at < new)).then_some(index)
 }
 
 /// Make room for a new reply from `sender`, accepted at `new`, among the kept replies, in
@@ -2487,7 +2520,7 @@ pub(crate) fn make_room_for_reply(
         };
         group.push(members.len());
     }
-    let Some(donor) = overflow_sender(&counts, &sender) else {
+    let Some(donor) = overflow_sender(&counts, &sender, 1) else {
         return Ok(());
     };
     let arriving = members.len();

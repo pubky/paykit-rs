@@ -618,6 +618,15 @@ pub(crate) fn restore_paykit_layer(
         .transpose()
         .map_err(|_| String::from("the backup's restore hold cannot be read"))?;
     let mut confirmed_before = std::collections::BTreeSet::new();
+    let mut executor_history = std::collections::BTreeMap::new();
+    for (key, value) in restoring
+        .previous_local_scan(key::EXECUTOR_CHECKPOINTS.as_bytes())
+        .map_err(|_| "the installed executor history cannot be read")?
+    {
+        let row = state::restored::<crate::executor::ExecutorHistory>(&key, &value, &binder)
+            .map_err(|_| "the installed executor history does not verify")?;
+        executor_history.insert(key, row);
+    }
     let mut open = std::collections::BTreeSet::new();
     let mut recordings = std::collections::BTreeSet::new();
     let mut receipt_batches = std::collections::BTreeMap::new();
@@ -867,6 +876,17 @@ pub(crate) fn restore_paykit_layer(
                     )
                 })?;
                 writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::ExecutorCheckpoint(_) => {
+                let selected =
+                    state::restored::<crate::executor::ExecutorHistory>(&key, &value, &binder)
+                        .map_err(|_| unread())?;
+                if let Some(held) = executor_history.get_mut(&key) {
+                    held.include(selected);
+                } else {
+                    executor_history.insert(key, selected);
+                }
                 continue;
             }
             StateKey::Consent(record_key) => {
@@ -1234,6 +1254,11 @@ pub(crate) fn restore_paykit_layer(
             .writes()
             .map_err(|_| "the retained private list publications cannot be stored")?,
     );
+    for (key, history) in executor_history {
+        let value =
+            state::encode(&history).map_err(|_| "the executor history cannot be retained")?;
+        writes.push(LocalWrite::Put { key, value });
+    }
     // A previous publication can outlive both the backup and a narrowed certificate.
     // Discovery waits until this app holds plain paykit_request (Paykit spec 8.4.1).
     writes.push(state::local_put(key::LIST_DISCOVERY, &true).map_err(|e| e.to_string())?);

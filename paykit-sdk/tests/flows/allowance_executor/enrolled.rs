@@ -1,0 +1,493 @@
+//! The approving wallet's first grant after ordinary enrollment and acceptance.
+
+use std::error::Error;
+use std::sync::Arc;
+
+use paykit_lib::{records::AllowanceRecord, Collection};
+use paykit_sdk::{AppScopes, Paykit, Rail, RequestedScopes};
+use pubky_switch_client::app::{AppEnv, KeptOp, UserConfirmed};
+use pubky_switch_client::store::{Fault, FaultStore, MemoryStore, StateStore};
+use pubky_switch_client::transport::{BoxFuture, Request, Response, Transport, TransportError};
+use pubky_switch_harness::{parties::Asking, Backend, World};
+use pubky_switch_signer::{Protocols, Signer};
+
+use super::{applied_put, terms, AllowanceRole, AllowanceStatus, Condition, Ledger};
+use crate::common::{finish_listing, TestTimer};
+
+type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+
+// The real service handles each request on a separate task, as at its HTTP boundary.
+struct ServiceTask(Arc<dyn Transport>);
+
+impl Transport for ServiceTask {
+    fn send(&self, request: Request) -> BoxFuture<'_, Result<Response, TransportError>> {
+        let service = self.0.clone();
+        Box::pin(async move {
+            tokio::spawn(async move { service.send(request).await })
+                .await
+                .expect("service task completed")
+        })
+    }
+}
+
+fn app_env(world: &World, storage: Arc<dyn StateStore>) -> AppEnv {
+    let mut env = world.app_env(storage);
+    if matches!(world.backend(), Backend::Service) {
+        env.transport = Arc::new(ServiceTask(env.transport));
+    }
+    env
+}
+
+async fn join(
+    world: &World,
+    name: &str,
+    scopes: RequestedScopes,
+    storage: Arc<dyn StateStore>,
+    rail: Arc<dyn Rail>,
+) -> TestResult<Paykit> {
+    let identity = world.identity(name)?;
+    let origin = format!("https://{name}.allowance.test");
+    Box::pin(world.add_switch(&origin, &[&identity])).await?;
+    let mut env = world.signer_env(&identity, Arc::new(MemoryStore::new()))?;
+    env.protocols = Protocols::new(vec![Arc::new(paykit_lib::signer::PaykitProtocol)])?;
+    if matches!(world.backend(), Backend::Service) {
+        env.transport = Arc::new(ServiceTask(env.transport));
+    }
+    let keys = world.keyring(&identity)?;
+    let origin_for_signer = origin.clone();
+    let mut signer = tokio::task::spawn_local(async move {
+        let mut signer = Box::pin(Signer::create(env, keys, &origin_for_signer)).await?;
+        Box::pin(signer.resume()).await?;
+        Ok::<_, Box<dyn Error>>(signer)
+    })
+    .await??;
+    let names = scopes.scopes.iter().map(String::as_str).collect::<Vec<_>>();
+    let asking = Asking::for_scopes(world.app_keys(&identity, name)?, &names)?;
+    let own = identity.public();
+    let request = tokio::task::spawn_local(async move {
+        let reviewed = signer.review(asking.request.signed(), &asking.auth)?;
+        let approved = Box::pin(signer.approve(reviewed)).await?;
+        signer.claim_delivered(&approved.request).await?;
+        Ok::<_, Box<dyn Error>>(asking.join_request(own, &approved)?)
+    })
+    .await??;
+    world.advance_ms(1_000);
+    let env = app_env(world, storage);
+    let timer = Arc::new(TestTimer {
+        clock: world.clock().clone(),
+    });
+    tokio::task::spawn_local(async move {
+        let mut wallet =
+            Box::pin(Paykit::join(env, Default::default(), request, rail, timer)).await?;
+        Box::pin(finish_listing(&mut wallet)).await;
+        Ok::<_, Box<dyn Error>>(wallet)
+    })
+    .await?
+}
+
+async fn grant(world: &World, proposer: AllowanceRole) -> TestResult {
+    let storage = Arc::new(MemoryStore::new());
+    let rail = Arc::new(paykit_sdk::rail::FakeRail::new());
+    let mut payer = Box::pin(join(
+        world,
+        "payer",
+        AppScopes::new().allowance_execute().build()?,
+        storage.clone(),
+        rail.clone(),
+    ))
+    .await?;
+    let mut seller = Box::pin(join(
+        world,
+        "seller",
+        AppScopes::new().allowance().request().build()?,
+        Arc::new(MemoryStore::new()),
+        rail.clone(),
+    ))
+    .await?;
+    payer.app_mut().allow_connect(&seller.identity()).await?;
+    seller.app_mut().allow_connect(&payer.identity()).await?;
+    let proposal = match proposer {
+        AllowanceRole::Allower => {
+            Box::pin(payer.propose_executable_allowance(
+                seller.identity(),
+                terms(),
+                UserConfirmed::new(),
+            ))
+            .await?
+        }
+        AllowanceRole::Allowee => {
+            Box::pin(seller.propose_allowance(payer.identity(), proposer, terms())).await?
+        }
+        _ => unreachable!("the fixture selects Allower or Allowee"),
+    };
+    let (receiver, peer) = match proposer {
+        AllowanceRole::Allower => (&mut seller, payer.identity()),
+        AllowanceRole::Allowee => (&mut payer, seller.identity()),
+        _ => unreachable!("the fixture selects Allower or Allowee"),
+    };
+    Box::pin(finish_listing(receiver)).await;
+    let offer = receiver
+        .allowances()
+        .await?
+        .into_iter()
+        .find(|view| view.allowance_id == proposal.allowance_id && view.counterparty == peer)
+        .expect("received proposal");
+    let (key, seller_key) = match proposer {
+        AllowanceRole::Allower => (proposal.record, offer.record),
+        AllowanceRole::Allowee => (offer.record, proposal.record),
+        _ => unreachable!("the fixture selects Allower or Allowee"),
+    };
+    assert!(Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .is_err());
+    match proposer {
+        AllowanceRole::Allower => {
+            Box::pin(seller.accept_allowance(&seller_key)).await?;
+            Box::pin(finish_listing(&mut payer)).await;
+        }
+        AllowanceRole::Allowee => {
+            Box::pin(payer.accept_executable_allowance(&key, UserConfirmed::new())).await?;
+            Box::pin(finish_listing(&mut seller)).await;
+        }
+        _ => unreachable!("the fixture selects Allower or Allowee"),
+    }
+    assert_eq!(
+        payer.allowance(&key).await?.status,
+        AllowanceStatus::Accepted
+    );
+    assert_eq!(
+        seller.allowance(&seller_key).await?.status,
+        AllowanceStatus::Accepted
+    );
+    let permanent = payer
+        .app()
+        .shared_record(&key)
+        .await?
+        .expect("original accepted record");
+    let bound = AllowanceRecord::bind(
+        permanent.content.value().unwrap(),
+        &payer.identity(),
+        payer.app().naming_key(),
+        &key,
+    )?;
+    let natural =
+        paykit_lib::derive::natural_key::allowance(&seller.identity(), &proposal.allowance_id);
+    let ledger_key =
+        Collection::AllowanceLedgers.record_key(payer.app().naming_key(), &natural, None)?;
+    let ledger = payer
+        .app()
+        .shared_record(&ledger_key)
+        .await?
+        .expect("original zero ledger");
+    assert_eq!(
+        ledger.content.value(),
+        Some(
+            Ledger::initial_value(
+                &seller.identity(),
+                &proposal.allowance_id,
+                &bound.response.as_ref().unwrap().hash()
+            )
+            .as_slice()
+        )
+    );
+    let (original, permanent_revision) = applied_put(payer.app(), key, permanent.version).await;
+    let (zero, ledger_revision) = applied_put(payer.app(), ledger_key, ledger.version).await;
+    assert_eq!(original.body().batch, zero.body().batch);
+    assert_eq!(original.body().batch.count, 3);
+    assert_eq!(permanent_revision.seq + 1, ledger_revision.seq);
+    Box::pin(payer.resume_allowance_executor(&key)).await?;
+    let granted = payer.app().shared_record(&key).await?.expect("first grant");
+    let (write, _) = applied_put(payer.app(), key, granted.version).await;
+    for (key, revision) in [(key, permanent_revision), (ledger_key, ledger_revision)] {
+        assert!(write.body().conditions.contains(&Condition::RecordCurrent {
+            key,
+            revision,
+            deleted: false
+        }));
+    }
+    let app_id = payer.app_id();
+    drop(payer);
+    let mut payer = Box::pin(Paykit::load(
+        app_env(world, storage),
+        Default::default(),
+        app_id,
+        rail.clone(),
+        Arc::new(TestTimer {
+            clock: world.clock().clone(),
+        }),
+    ))
+    .await?;
+    Box::pin(payer.resume_allowance_executor(&key)).await?;
+    let view = payer.allowance(&key).await?;
+    assert_eq!(view.executor_app_id, Some(app_id));
+    assert!(view.consented);
+    assert_eq!(
+        payer.app().shared_record(&key).await?.unwrap().version,
+        granted.version
+    );
+    assert!(rail.all_executions().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_enrolled_wallet_first_grant_on_both_services() -> TestResult {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for backend in [Backend::Scripted, Backend::Service] {
+                for proposer in [AllowanceRole::Allower, AllowanceRole::Allowee] {
+                    let Some(world) = World::start(backend)? else {
+                        continue;
+                    };
+                    let result = Box::pin(grant(&world, proposer)).await;
+                    world.close().await?;
+                    result?;
+                }
+            }
+            Ok(())
+        })
+        .await
+}
+
+struct IncomingAcceptance {
+    payer: Paykit,
+    storage: Arc<FaultStore>,
+    rail: Arc<paykit_sdk::rail::FakeRail>,
+    keys: [[u8; 32]; 3],
+    prepared: Vec<u8>,
+}
+
+async fn incoming_acceptance(world: &World) -> TestResult<IncomingAcceptance> {
+    let storage = Arc::new(FaultStore::new(Arc::new(MemoryStore::new()), Fault::None));
+    let rail = Arc::new(paykit_sdk::rail::FakeRail::new());
+    let mut payer = Box::pin(join(
+        world,
+        "payer",
+        AppScopes::new().allowance_execute().build()?,
+        storage.clone(),
+        rail.clone(),
+    ))
+    .await?;
+    let mut seller = Box::pin(join(
+        world,
+        "seller",
+        AppScopes::new().allowance().manage_contacts().build()?,
+        Arc::new(MemoryStore::new()),
+        rail.clone(),
+    ))
+    .await?;
+    payer.app_mut().allow_connect(&seller.identity()).await?;
+    seller.app_mut().allow_connect(&payer.identity()).await?;
+    let offer = Box::pin(payer.propose_executable_allowance(
+        seller.identity(),
+        terms(),
+        UserConfirmed::new(),
+    ))
+    .await?;
+    Box::pin(finish_listing(&mut seller)).await;
+    let peer = seller.allowances().await?.pop().expect("incoming proposal");
+    Box::pin(seller.accept_allowance(&peer.record)).await?;
+    storage.refuse_puts_as_too_large(Some(b"opq/"));
+    assert!(Box::pin(payer.receive(None)).await.is_err());
+    let at = format!("ao/{}", pubky_switch_core::enc::b64(&offer.record));
+    let prepared = payer
+        .app()
+        .protocol_get("paykit", at.as_bytes())
+        .await?
+        .unwrap();
+    let original: serde_json::Value = serde_json::from_slice(&prepared)?;
+    assert!(original["d"]["opening"].is_object());
+    assert!(original["d"]["opening"]["applied"].is_null());
+    assert!(payer
+        .app()
+        .protocol_scan("paykit", b"ap/")
+        .await?
+        .is_empty());
+    let natural =
+        paykit_lib::derive::natural_key::allowance(&seller.identity(), &offer.allowance_id);
+    let keys = [
+        Collection::Allowances,
+        Collection::AllowanceLedgers,
+        Collection::AllowanceProposals,
+    ]
+    .map(|collection| {
+        collection
+            .record_key(payer.app().naming_key(), &natural, None)
+            .unwrap()
+    });
+    assert_eq!(keys[0], offer.record);
+    Ok(IncomingAcceptance {
+        payer,
+        storage,
+        rail,
+        keys,
+        prepared,
+    })
+}
+
+async fn original_bytes(payer: &Paykit, key: &[u8; 32]) -> TestResult<Vec<u8>> {
+    let at = format!("ao/{}", pubky_switch_core::enc::b64(key));
+    Ok(payer
+        .app()
+        .protocol_get("paykit", at.as_bytes())
+        .await?
+        .unwrap())
+}
+
+async fn grant_without_original_application(world: &World) -> TestResult {
+    let IncomingAcceptance {
+        mut payer,
+        storage: _,
+        rail,
+        keys,
+        prepared,
+    } = Box::pin(incoming_acceptance(world)).await?;
+    assert!(Box::pin(payer.resume_allowance_executor(&keys[0]))
+        .await
+        .is_err());
+    assert!(
+        Box::pin(payer.confirm_allowance_executor(&keys[0], UserConfirmed::new()))
+            .await
+            .is_err()
+    );
+    assert_eq!(Box::pin(original_bytes(&payer, &keys[0])).await?, prepared);
+    assert!(payer
+        .app()
+        .protocol_scan("paykit", b"lv/")
+        .await?
+        .is_empty());
+    for key in &keys[..2] {
+        assert!(payer.app().shared_record(key).await?.is_none());
+    }
+    assert!(rail.all_executions().is_empty());
+    Ok(())
+}
+
+async fn grant_after_original_application(world: &World) -> TestResult {
+    let IncomingAcceptance {
+        mut payer,
+        storage,
+        rail,
+        keys,
+        prepared,
+    } = Box::pin(incoming_acceptance(world)).await?;
+    storage.refuse_puts_as_too_large_over(Some(b"p/paykit/ao/"), prepared.len());
+    let failure = Box::pin(payer.receive(None)).await.unwrap_err();
+    assert!(matches!(
+        failure,
+        paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::Store(
+            pubky_switch_client::error::StoreError::TooLarge { .. }
+        ))
+    ));
+    assert_eq!(Box::pin(original_bytes(&payer, &keys[0])).await?, prepared);
+    assert!(payer
+        .app()
+        .protocol_scan("paykit", b"ap/")
+        .await?
+        .is_empty());
+    let evidence = payer.app().shared_evidence().await?;
+    let originals: Vec<KeptOp> = keys
+        .iter()
+        .map(|key| {
+            evidence
+                .ops
+                .iter()
+                .find(|kept| {
+                    let cert =
+                        paykit_lib::scopes::verify_certificate(&kept.cert, &payer.identity())
+                            .unwrap();
+                    let op = pubky_switch_core::ops::SignedOp::verify_with_cert(
+                        &kept.op,
+                        &cert,
+                        &payer.identity(),
+                    )
+                    .unwrap();
+                    matches!(&op.body().kind, pubky_switch_core::ops::OpKind::RecordPut(put)
+                if &put.key == key && op.body().batch.count == 3 && cert.app_id() == payer.app_id())
+                })
+                .expect("applied original member")
+                .clone()
+        })
+        .collect();
+    assert!(originals.iter().all(|kept| kept.proof.is_some()));
+    let before = [
+        payer.app().shared_record(&keys[0]).await?.unwrap().version,
+        payer.app().shared_record(&keys[1]).await?.unwrap().version,
+    ];
+    let id = payer.app_id();
+    drop(payer);
+    storage.refuse_puts_as_too_large(None);
+    let mut payer = Box::pin(Paykit::load(
+        app_env(world, storage),
+        Default::default(),
+        id,
+        rail.clone(),
+        Arc::new(TestTimer {
+            clock: world.clock().clone(),
+        }),
+    ))
+    .await?;
+    let captured: serde_json::Value =
+        serde_json::from_slice(&Box::pin(original_bytes(&payer, &keys[0])).await?)?;
+    assert_eq!(
+        serde_json::from_value::<Vec<KeptOp>>(captured["d"]["opening"]["applied"].clone(),)?,
+        originals
+    );
+    let (_, a) = applied_put(payer.app(), keys[0], before[0]).await;
+    let (_, l) = applied_put(payer.app(), keys[1], before[1]).await;
+    Box::pin(payer.resume_allowance_executor(&keys[0])).await?;
+    let granted = payer.app().shared_record(&keys[0]).await?.unwrap();
+    let (grant, _) = applied_put(payer.app(), keys[0], granted.version).await;
+    for (key, revision) in [(keys[0], a), (keys[1], l)] {
+        assert!(grant.body().conditions.contains(&Condition::RecordCurrent {
+            key,
+            revision,
+            deleted: false,
+        }));
+    }
+    Box::pin(payer.resume_allowance_executor(&keys[0])).await?;
+    assert_eq!(
+        payer.app().shared_record(&keys[0]).await?.unwrap().version,
+        granted.version
+    );
+    assert_eq!(
+        payer.app().shared_record(&keys[1]).await?.unwrap().version,
+        before[1]
+    );
+    assert!(payer.allowance(&keys[0]).await?.consented);
+    assert!(rail.all_executions().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_enrolled_first_grant_holds_without_the_original_application() -> TestResult {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for backend in [Backend::Scripted, Backend::Service] {
+                let Some(world) = World::start(backend)? else {
+                    continue;
+                };
+                let result = Box::pin(grant_without_original_application(&world)).await;
+                world.close().await?;
+                result?;
+            }
+            Ok(())
+        })
+        .await
+}
+
+#[tokio::test]
+async fn test_enrolled_first_grant_uses_the_recovered_incoming_acceptance() -> TestResult {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for backend in [Backend::Scripted, Backend::Service] {
+                let Some(world) = World::start(backend)? else {
+                    continue;
+                };
+                let result = Box::pin(grant_after_original_application(&world)).await;
+                world.close().await?;
+                result?;
+            }
+            Ok(())
+        })
+        .await
+}
