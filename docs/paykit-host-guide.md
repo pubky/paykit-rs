@@ -452,7 +452,7 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `Refusal::NotCurrent` | Refresh authority and reconcile the existing attempt under the current provider and certificate. |
 | `Refusal::NotNow` | Inspect account, clock and restore state before continuing. |
 | `Refusal::Usage` | Correct the supplied API input. |
-| `Refusal::RecordHeld` | Wait until the record can be read or repaired. |
+| `Refusal::RecordHeld` | A payer record with payment history lost to deletion permanently holds that obligation. For a temporarily unreadable record, resume when it can be read or repaired. |
 | `Refusal::CertificateRefused` | Seek a suitable certificate from the signer and keep Paykit actions paused meanwhile. |
 | `Refusal::SwitchUnavailable` | Show the own Switch as unavailable and keep payment actions waiting. |
 | `Refusal::Blocked` | Show the blocked recipient and the exact payment to the user before any supported override. |

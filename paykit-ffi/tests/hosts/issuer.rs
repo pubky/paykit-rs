@@ -4,12 +4,22 @@ use pubky_switch_core::{
     records::{AppRequest, AuthRequest},
     sig::SignedDoc,
 };
-use pubky_switch_harness::{Backend, World};
 use std::error::Error;
+mod backup;
+mod service;
 mod signer;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
+    match std::env::args().nth(1).as_deref() {
+        Some("paid-wallet") => return backup::print_wallet(false).await,
+        Some("seller-wallet") => return backup::print_wallet(true).await,
+        Some("wallet-awaiting-identity") => return backup::print_resume_refusal(false).await,
+        Some("departed-wallet") => return backup::print_resume_refusal(true).await,
+        Some("notice-wallet") => return backup::print_notice(false).await,
+        Some("cleared-wallet") => return backup::print_notice(true).await,
+        _ => {}
+    }
     let signed: SignedDoc = serde_json::from_reader(std::io::stdin())?;
     let request = AppRequest::verify(&signed)?;
     let auth = AuthRequest {
@@ -18,7 +28,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         caps: request.body().caps.clone(),
         secret: [9; 32],
     };
-    let world = World::start(Backend::Scripted)?.ok_or("missing signer world")?;
+    let world = service::start()?;
     let identity = world.identity("buyer")?.public();
     let mut signer = signer::serving(&world, "buyer").await?;
     let review = signer.review(&signed, &auth)?;

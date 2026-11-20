@@ -871,7 +871,7 @@ impl Paykit {
             Some(RecordContent::Deleted)
                 if entry.is_some_and(|entry| entry.billing_period.is_some()) =>
             {
-                return Err(crate::periods::period_history_lost().into())
+                return Err(crate::requests::payment_history_lost().into())
             }
             None | Some(RecordContent::Deleted) => None,
             Some(_) => match self.read_activity(target, current.as_ref()) {
