@@ -3075,18 +3075,21 @@ impl Paykit {
     ///   one is the record's response (Paykit spec 8.1, 8.3).
     /// - It waits while the copy of `allowances` may lack records ([`Placed::Waits`]), never
     ///   given up meanwhile, whatever else holds.
+    /// - With no permanent record, a stopped or applied pending reply is done
+    ///   ([`Placed::Done`]); an undecided reply waits ([`Placed::Waits`]); an unrelated or
+    ///   still-unplaced reply isn't written now ([`Placed::Not`]). A proposal without a
+    ///   permanent record isn't written by this path either.
     /// - It isn't written now ([`Placed::Not`]) while the current epoch's `paykit_allowance` key is
     ///   missing or the record waits for its key, over a value that doesn't read or bind,
-    ///   never written over, for an answer whose record is absent or deleted (given up past
-    ///   its window with the notice, as Stored entries says), or when the switch
-    ///   refuses the write ([`crate::stored::submitted`]): tried again, and given up once
-    ///   [`crate::KEPT_MESSAGE_MS`] have passed since its acceptance (Paykit spec 8.1).
+    ///   never written over, for an answer over a deleted record, or when the switch
+    ///   refuses the write ([`crate::stored::submitted`]). The caller applies the retry,
+    ///   retention and give-up rules; this result alone doesn't give up the message
+    ///   (Paykit spec 8.1, "Stored entries").
     /// - One the record reflects already, or that makes the Allowance conflicted, is done:
     ///   the conflict is kept as its stop (`cf/`) in the commit of `locals`.
     /// - An acceptance that would fill an existing permanent record's empty response
     ///   ([`would_accept`]) isn't written now ([`Placed::Not`]). The first acceptance belongs
-    ///   to the original conditional batch (Paykit spec 8.3.1). It stays kept, and is given
-    ///   up past its window with the notice.
+    ///   to the original conditional batch (Paykit spec 8.3.1).
     /// - A failure of the app's own store, or a switch that doesn't answer, is the call's
     ///   error, never a message not written.
     async fn place_allowance_later(
