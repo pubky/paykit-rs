@@ -327,7 +327,10 @@ async fn withdraw_recovered_proposal(w: &World, case: RecoveredProposal) -> Test
         let pending = original.content.value().ok_or("missing proposal value")?;
         payer
             .app_mut()
-            .delete_record(&target, vec![selection.clone().unwrap()])
+            .delete_record(
+                &target,
+                vec![selection.ok_or("missing original selection")?],
+            )
             .await?;
         let condition = payer.app().record_condition(&pending_key).await?;
         let later = payer
@@ -382,6 +385,10 @@ async fn withdraw_recovered_proposal(w: &World, case: RecoveredProposal) -> Test
             .records_of("allowance_ledgers")
             .await?
             .is_empty());
+        assert!(payer
+            .resume_allowance_executor(&offer.record)
+            .await
+            .is_err());
         assert!(rail.all_executions().is_empty());
         return Ok(());
     }
@@ -426,6 +433,10 @@ async fn withdraw_recovered_proposal(w: &World, case: RecoveredProposal) -> Test
             .records_of("allowance_ledgers")
             .await?
             .is_empty());
+        assert!(payer
+            .resume_allowance_executor(&offer.record)
+            .await
+            .is_err());
         assert!(rail.all_executions().is_empty());
         return Ok(());
     }
