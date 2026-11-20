@@ -174,6 +174,12 @@ pub(crate) struct StoredNote {
     pub(crate) placed: bool,
 }
 
+/// A stored note with the message verified for its physical key during this read.
+pub(crate) struct BoundNote {
+    pub(crate) note: StoredNote,
+    pub(crate) message: StoredMessage,
+}
+
 /// The host's notice that `stored`, which no entry keeps stored, was given up at `origin`,
 /// raised at `at`, service time.
 pub(crate) fn given_up_notice(
@@ -190,18 +196,12 @@ pub(crate) fn given_up_notice(
     )
 }
 
-/// Whether `note`, a stored note read bound to its key, keeps a message of `request` still
-/// to write: one not in its record yet, whether it waits for a write that failed or for a
-/// listing. A payee's cancellation of that request kept as a stop stays while one does
-/// ([`Paykit::place_kept_cancellations`]): the request's own entry may be among them, and
-/// written without the stop it would be payable.
-pub(crate) fn writes_request(
-    note: &StoredNote,
-    own: &[u8; 32],
-    request: &[u8; 32],
-) -> Result<bool> {
-    let stored = note.message.stored(own)?;
-    Ok(!note.placed && named_request(&stored) == Some(*request))
+impl BoundNote {
+    /// Whether the kept effect for this request still needs a record write. A kept
+    /// cancellation waits for that write before it can release its stop.
+    pub(crate) fn writes_request(&self, request: &[u8; 32]) -> bool {
+        !self.note.placed && named_request(&self.message) == Some(*request)
+    }
 }
 
 impl StoredNote {
@@ -213,8 +213,8 @@ impl StoredNote {
     /// # Errors
     ///
     /// A corrupt store, for a note at another key or a message that doesn't verify.
-    pub(crate) fn bound(&self, key: &str, own: &[u8; 32]) -> Result<StoredMessage> {
-        let Some(StateKey::StoredNote { sender, msg_id }) = StateKey::parse(key.as_bytes()) else {
+    pub(crate) fn bound(&self, key: &StateKey, own: &[u8; 32]) -> Result<StoredMessage> {
+        let StateKey::StoredNote { sender, msg_id } = key else {
             return Err(PaykitError::corrupt());
         };
         let stored = self.message.stored(own)?;
@@ -224,10 +224,10 @@ impl StoredNote {
         {
             return Err(PaykitError::corrupt());
         }
-        if self.sender != sender
-            || self.msg_id != msg_id
-            || stored.sender() != sender
-            || stored.message().msg_id != msg_id
+        if self.sender != *sender
+            || self.msg_id != *msg_id
+            || stored.sender() != *sender
+            || stored.message().msg_id != *msg_id
             || stored.hash() != self.hash
         {
             return Err(PaykitError::corrupt());
@@ -331,13 +331,12 @@ impl Paykit {
     /// The requests received whose record write the switch refused, kept to write later,
     /// as the payer sees them ([`RequestStatus::Unrecorded`]).
     pub(crate) async fn unrecorded_requests(&self) -> Result<Vec<RequestView>> {
-        let own = self.identity();
         let mut out = Vec::new();
-        for (rest, note) in self.local_scan::<StoredNote>(key::STORED_NOTES).await? {
-            let stored = note.bound(&format!("{}{rest}", key::STORED_NOTES), &own)?;
-            if note.placed {
+        for (_, bound) in self.local_scan::<BoundNote>(key::STORED_NOTES).await? {
+            if bound.note.placed {
                 continue;
             }
+            let stored = bound.message;
             let Body::PaymentRequest(request) = stored.body() else {
                 continue;
             };
@@ -841,16 +840,14 @@ impl Paykit {
         &mut self,
         pending_read: Option<&pubky_switch_client::app::ReceiveReport>,
     ) -> Result<()> {
-        let own = self.identity();
         // Every note in the order its inbox accepted its message, never in the order of the
         // keys, which end in a `msg_id` its sender chooses: by acceptance time, then by the
         // feed `seq` its entry was read at (`records::KeptOrder`, Paykit spec 8.1), the
         // token the kept replies carry too. Each is read bound to its key first.
         let mut notes = Vec::new();
-        for (rest, note) in self.local_scan::<StoredNote>(key::STORED_NOTES).await? {
+        for (rest, BoundNote { note, message }) in self.local_scan(key::STORED_NOTES).await? {
             let note_key = format!("{}{rest}", key::STORED_NOTES);
-            let stored = note.bound(&note_key, &own)?;
-            notes.push((note.message.order()?, note_key, note, stored));
+            notes.push((note.message.order()?, note_key, note, message));
         }
         notes.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
         for (order, note_key, mut note, stored) in notes {
@@ -858,7 +855,7 @@ impl Paykit {
                 // A kept message carries its entry's acceptance time; one without it is a
                 // corrupt store, never a message past its window.
                 let accepted_at = stored.accepted_at().ok_or_else(PaykitError::corrupt)?;
-                let placed = match self.place_of(&stored.clone(), order.1).await? {
+                let placed = match self.place_of(&stored, order.1).await? {
                     Some(Place::List(hold)) | Some(Place::Stop(hold)) => {
                         if let Some((held, kept)) = hold {
                             self.local_put(&held, &kept).await?;
@@ -1133,12 +1130,9 @@ impl Paykit {
             kept.push((message.stored(&own)?, message.order()?));
         }
         let prefix = key::stored_notes_of(&sender);
-        for (rest, note) in self.local_scan::<StoredNote>(&prefix).await? {
+        for (_, BoundNote { note, message }) in self.local_scan(&prefix).await? {
             if !note.placed {
-                kept.push((
-                    note.bound(&format!("{prefix}{rest}"), &own)?,
-                    note.message.order()?,
-                ));
+                kept.push((message, note.message.order()?));
             }
         }
         kept.extend(Box::pin(self.responses_kept_over(record)).await?);
