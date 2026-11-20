@@ -61,6 +61,15 @@ def swift_cancellation(source):
         swift = swift.replace(original, replacement)
 
     replace_once("    completeFunc: (UInt64,", "    cancelFunc: ((UInt64) -> Void)? = nil,\n    completeFunc: (UInt64,")
+    replace_once("    pollFunc: (UInt64,", "    pollFunc: @escaping (UInt64,")
+    replace_once("""            pollFunc(
+                rustFuture,
+                uniffiFutureContinuationCallback,
+                uniffiContinuationHandleMap.insert(obj: $0)
+            )""", """            let continuation = uniffiContinuationHandleMap.insert(obj: $0)
+            WalletPoller.shared.schedule {
+                pollFunc(rustFuture, uniffiFutureContinuationCallback, continuation)
+            }""")
     replace_once("    let rustFuture = rustFutureFunc()", """    if cancelFunc != nil { try Task.checkCancellation() }
     let rustFuture = rustFutureFunc()
     let lifetime = cancelFunc.map { WalletFuture(rustFuture, cancel: $0) }""")
