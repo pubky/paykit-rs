@@ -1225,6 +1225,7 @@ pub(crate) fn restore_paykit_layer(
         }
         journaled.insert(attempt);
         entry.restored = true;
+        entry.never_dispatched = false;
         let value = state::encode(&entry).map_err(|_| bad())?;
         writes.push(LocalWrite::Put { key, value });
     }

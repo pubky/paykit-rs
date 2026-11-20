@@ -1305,6 +1305,7 @@ async fn test_absent_settlement_bucket_without_a_loss_keeps_the_wallet_stopped()
     )
     .await?;
     assert_eq!(shop.app().alarm(), Some(&alarm));
+    assert!(shop.ledger_alarm().is_none());
     assert!(shop.confirm_payment(&pending_record).await.is_err());
     let held = shop
         .app()
