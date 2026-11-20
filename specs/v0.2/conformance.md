@@ -476,7 +476,11 @@ A message of any recorded kind (wire 4.3), Allowance messages and period details
 
 ### Invitation delivery reference
 
-invitation delivery uses the scoped Switch contract named in the preamble. Its authenticated delivery reference does not authorize a payment or replace the sender's selling scope or signed request. Required SDK cases cover distinct invitations and ordinary admission, a sibling receiver, a valid backup taken before registration, an unanswered append retried with the same sealed envelope and signed request, and refusal without the sender's required scope. These runtime cases await integration on `v0.2`; Paykit's message-body formats and stored vectors are unchanged
+Invitation delivery follows the Switch contract in the specification’s introduction. The receiver still verifies the sender’s selling scope and signed Paykit request. The invitation grants no payment authority.
+
+Accept a request using one invitation and interrupt delivery of the append answer. Retry the same sealed envelope and signed Paykit request in a newly signed HTTP request carrying a different valid invite code. Require the same append answer and retained entry. A sibling receiver and a wallet restored from a backup taken before registration must both observe the first invitation’s authenticated hash for that entry. Verify that the second code still has zero uses after the retry and can admit a distinct request.
+
+Also exercise ordinary admission without an invitation and refusal when the sender lacks the required scope. These are wallet conformance requirements. The invitation reference changes no signed Paykit body or stored vector.
 
 ### Queued sends
 
