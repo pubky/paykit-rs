@@ -1273,6 +1273,7 @@ impl Paykit {
                 &options,
                 accepted.as_deref(),
                 &pricing,
+                &mut None,
                 public_failures,
             )
             .await?;
@@ -1363,6 +1364,7 @@ impl Paykit {
         options: &PayOptions,
         accepted: Option<&[PaymentEndpointIdentifier]>,
         pricing: &Pricing<'_>,
+        identity: &mut Option<PeerIdentity>,
         public_failures: &mut Vec<PublicAppFailure>,
     ) -> Result<Chosen> {
         let accepted_ids = accepted_request_endpoints(body, accepted);
@@ -1399,15 +1401,17 @@ impl Paykit {
                     Choice::new(id, payload, destination, carrier, None)
                 })
                 .collect();
-            if gathered.is_empty() {
+            let Some(first) = gathered.first() else {
                 return Err(Refusal::NoDestination(
                     "Paykit spec 8.1: the request has no such endpoint".into(),
                 )
                 .into());
-            }
-            let identity = if matches!(&pricing.rates, Rates::Period(details) if !details.is_empty())
-            {
-                Some(
+            };
+            let period_destination = matches!(stored.body(), Body::PaymentPeriodDetails(_));
+            let period_rates =
+                matches!(&pricing.rates, Rates::Period(details) if !details.is_empty());
+            if identity.is_none() && (period_destination || period_rates) {
+                *identity = Some(
                     self.payee_identity(
                         payee,
                         Need::FreshCopy,
@@ -1415,10 +1419,19 @@ impl Paykit {
                         options.unconfirmed_identity_confirmed,
                     )
                     .await??,
+                );
+            }
+            // All endpoints in this message have the same sender. Skip its offer before
+            // choosing a price if its certificate no longer counts (Paykit spec 4, 8.2).
+            if let Some(peer) = identity.as_ref().filter(|_| period_destination) {
+                crate::destination::current(
+                    &peer.doc,
+                    &stored.message().from.app_id,
+                    &first.carrier,
+                    self.now(),
                 )
-            } else {
-                None
-            };
+                .map_err(Refusal::NoDestination)?;
+            }
             return self
                 .choose(payee, gathered, pricing, options, identity.as_ref())?
                 .ok_or_else(|| unsupported("the signed endpoints"));

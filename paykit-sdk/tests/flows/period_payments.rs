@@ -3657,59 +3657,124 @@ async fn test_period_payments_required_app_accepts_rates_from_another_app() {
     .await;
 }
 
+enum PeriodSenders {
+    RequiredShop,
+    BothCurrent,
+    TillRemoved,
+}
+
+async fn pay_with_two_destination_senders(senders: PeriodSenders) {
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut till = w
+        .join(
+            &w.bob,
+            "till",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    let mut wallet = w.wallet("wallet").await;
+    let draft = match senders {
+        PeriodSenders::RequiredShop => monthly_requiring(shop.app_id()),
+        _ => monthly(),
+    };
+    let (request, sale) = subscribed_to(
+        &w,
+        &mut shop,
+        &mut wallet,
+        draft.with_per_period_endpoints(),
+    )
+    .await;
+    till.receive(None).await.unwrap();
+    w.clock.set_ms(february().starts_at);
+    let expires = w.clock.now_ms() + DAY_MS;
+    let older = shop
+        .send_period_details(&sale, details(february(), "lnbc1shop", expires))
+        .await
+        .unwrap()
+        .msg_id;
+    w.clock.advance_ms(1_000);
+    let newest = till
+        .send_period_details(&sale, details(february(), "lnbc1till", expires))
+        .await
+        .unwrap()
+        .msg_id;
+    assert_ne!(older, newest);
+    wallet.receive(None).await.unwrap();
+
+    if matches!(senders, PeriodSenders::TillRemoved) {
+        w.homeserver
+            .remove(w.bob_id(), pubky_switch_core::records::IDENTITY_PATH);
+        w.router.remove(w.bob.origin());
+        w.clock.advance_ms(11 * 60_000);
+        let unavailable = by_user(&mut wallet, &request, february(), PayOptions::default())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(unavailable.refusal(), Some(Refusal::IdentityUnavailable(_))),
+            "{unavailable:?}"
+        );
+        assert!(wallet.payments().await.unwrap().is_empty());
+        assert!(w.rail.all_executions().is_empty());
+
+        w.router.add_switch(w.bob.origin(), w.bob.switch());
+        let removed = till.app_id();
+        w.bob
+            .next_doc(|doc| {
+                doc.apps.retain(|app| app.app_id != removed);
+                doc.removed.push(pubky_switch_core::records::RemovedApp {
+                    app_id: removed,
+                    distrust_from: w.clock.now_ms(),
+                });
+            })
+            .unwrap();
+        let selected = PayOptions::default().with_period_details(&newest);
+        let refused = by_user(&mut wallet, &request, february(), selected)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(refused.refusal(), Some(Refusal::NoDestination(_))),
+            "{refused:?}"
+        );
+        assert!(wallet.payments().await.unwrap().is_empty());
+        assert!(w.rail.all_executions().is_empty());
+    }
+
+    let outcome = by_user(&mut wallet, &request, february(), PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    assert_eq!(
+        w.rail.all_executions(),
+        BTreeMap::from([(outcome.attempt_id(), 1)])
+    );
+    let paid = period_record(&w, &wallet, &request, february())
+        .await
+        .unwrap();
+    let (app_id, msg_id) = match senders {
+        PeriodSenders::BothCurrent => (till.app_id(), newest),
+        PeriodSenders::RequiredShop | PeriodSenders::TillRemoved => (shop.app_id(), older),
+    };
+    assert_eq!(wallet.payments().await.unwrap().len(), 1);
+    assert_eq!(proof_of(&paid).1.payment_app_id, app_id);
+    assert_eq!(
+        paid.period_details.as_ref().unwrap().message().msg_id,
+        msg_id
+    );
+}
+
 #[tokio::test]
 async fn test_period_payments_required_app_selects_its_older_details() {
-    Box::pin(async {
-        let w = World::new();
-        let mut shop = w.shop().await;
-        let mut till = w
-            .join(
-                &w.bob,
-                "till",
-                paykit_sdk::AppScopes::new().request().build().unwrap(),
-            )
-            .await;
-        let mut wallet = w.wallet("wallet").await;
-        let draft = monthly_requiring(shop.app_id()).with_per_period_endpoints();
-        let (request, sale) = subscribed_to(&w, &mut shop, &mut wallet, draft).await;
-        till.receive(None).await.unwrap();
-        w.clock.set_ms(february().starts_at);
-        let selected = shop
-            .send_period_details(
-                &sale,
-                details(february(), "lnbc1shop", w.clock.now_ms() + DAY_MS),
-            )
-            .await
-            .unwrap()
-            .msg_id;
-        w.clock.set_ms(w.clock.now_ms() + 1_000);
-        let other = till
-            .send_period_details(
-                &sale,
-                details(february(), "lnbc1till", w.clock.now_ms() + DAY_MS),
-            )
-            .await
-            .unwrap()
-            .msg_id;
-        assert_ne!(selected, other);
-        wallet.receive(None).await.unwrap();
-        let outcome = by_user(&mut wallet, &request, february(), PayOptions::default()).await;
-        assert!(
-            matches!(outcome, Ok(PayOutcome::Paid { .. })),
-            "{outcome:?}"
-        );
-        assert_eq!(w.rail.all_executions().len(), 1);
-        assert_eq!(wallet.payments().await.unwrap().len(), 1);
-        let record = period_record(&w, &wallet, &request, february())
-            .await
-            .unwrap();
-        assert_eq!(proof_of(&record).1.payment_app_id, shop.app_id());
-        assert_eq!(
-            record.period_details.as_ref().unwrap().message().msg_id,
-            selected
-        );
-    })
+    Box::pin(pay_with_two_destination_senders(
+        PeriodSenders::RequiredShop,
+    ))
     .await;
+}
+
+#[tokio::test]
+async fn test_period_payments_selects_the_latest_current_destination_sender() {
+    Box::pin(pay_with_two_destination_senders(PeriodSenders::BothCurrent)).await;
+    Box::pin(pay_with_two_destination_senders(PeriodSenders::TillRemoved)).await;
 }
 
 #[tokio::test]

@@ -169,6 +169,7 @@ impl AllowanceReservation {
                 &crate::PayOptions::default(),
                 Some(ids),
                 &pricing,
+                &mut None,
                 &mut Vec::new(),
             ))
             .await?;

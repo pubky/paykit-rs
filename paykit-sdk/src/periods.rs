@@ -1286,6 +1286,7 @@ impl Paykit {
                 .into(),
         )
         .into();
+        let mut payee_identity = None;
         let Chosen {
             destination,
             carrier,
@@ -1318,6 +1319,7 @@ impl Paykit {
                     &options,
                     allowance_endpoints,
                     &pricing,
+                    &mut payee_identity,
                     public_failures,
                 )
                 .await
