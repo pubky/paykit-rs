@@ -33,3 +33,13 @@ rustls-platform-verifier-android = { path = "vendor/rustls-platform-verifier-and
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# For the size of a browser bundle: `cargo build --profile browser-release` for
+# wasm32-unknown-unknown, as paykit-browser/rig/harness/build.sh does. It optimizes for size
+# over speed. Only a build that names this profile uses it; it changes no other build.
+[profile.browser-release]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
