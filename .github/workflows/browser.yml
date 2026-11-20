@@ -30,10 +30,13 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # The browser build's clippy settings (rig/wasm-clippy/clippy.toml) reject the std clocks,
       # which panic on wasm32. Clippy reads no settings when the folder holds no clippy.toml, so
-      # the step checks the file is there first.
+      # the step checks the file is there first. The harness bundle (rig/harness/) is linted on
+      # its own: a build that selects both packages would unify the harness's test-only features
+      # into paykit-browser.
       - run: |
           test -f "$CLIPPY_CONF_DIR/clippy.toml"
           cargo clippy --locked --target wasm32-unknown-unknown -p paykit-browser --all-targets -- -D warnings
+          cargo clippy --locked --target wasm32-unknown-unknown -p paykit-browser-harness --all-targets -- -D warnings
         env:
           CLIPPY_CONF_DIR: ${{ github.workspace }}/paykit-browser/rig/wasm-clippy
       # The library alone: `--all-targets` above also turns on the test-only features of the
@@ -92,7 +95,7 @@ jobs:
       # (store_page in a page; rig/runner.mjs). An engine that gives that context no Origin
       # Private File System fails the store tests, except Playwright's WebKit for Linux, which
       # has none: the runner checks that, excludes the store targets, and test.sh prints a
-      # warning annotation for each (NO_OPFS in rig/runner.mjs).
+      # warning annotation for each (NO_OPFS in rig/engines.mjs).
       - run: paykit-browser/rig/test.sh ${{ matrix.engine }} both
 
   # Builds the pubky-switch service binary once per pinned rev, for the network tests below.
@@ -133,6 +136,57 @@ jobs:
           cargo install --locked --root ~/pubky-switch-bin
           --git https://github.com/pubky/pubky-switch --rev "$REV" --bin pubky-switch pubky-switch
 
+  # The sizes of the harness bundle (rig/harness/) in its release and browser-release builds,
+  # on the run's summary page. It needs no Switch service and no database, so it runs beside
+  # the other jobs. No size limit applies.
+  harness-size:
+    name: Harness bundle sizes
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # The CLI must be the exact wasm-bindgen version in Cargo.lock, so the lock sets both the
+      # version that is installed and the cache key.
+      - name: Read the wasm-bindgen version from Cargo.lock
+        id: wasm-bindgen
+        run: |
+          version=$(paykit-browser/rig/wasm-bindgen-version.sh)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - id: wasm-bindgen-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/wasm-bindgen-cli
+          key: wasm-bindgen-cli-${{ runner.os }}-${{ steps.wasm-bindgen.outputs.version }}
+      - name: Install wasm-bindgen-cli
+        if: steps.wasm-bindgen-cache.outputs.cache-hit != 'true'
+        env:
+          VERSION: ${{ steps.wasm-bindgen.outputs.version }}
+        run: cargo install --locked --root ~/wasm-bindgen-cli wasm-bindgen-cli --version "$VERSION"
+      - run: echo "$HOME/wasm-bindgen-cli/bin" >> "$GITHUB_PATH"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      # The scenarios read the rig's origin and token at compile time, and a build without a
+      # token compiles the network code out, so the sizes would read too small. A placeholder
+      # origin and a placeholder token of the real token's length (32 characters) link it; the
+      # bundles never run here.
+      - name: Harness bundle sizes
+        env:
+          PAYKIT_BROWSER_RIG_ORIGIN: https://localhost:18443
+          PAYKIT_BROWSER_RIG_TOKEN: 00000000000000000000000000000000
+        run: |
+          build=paykit-browser/rig/harness/build.sh
+          "$build" release
+          "$build" browser-release
+          node paykit-browser/rig/harness/size.mjs \
+            release="$("$build" --print-out-dir release)/harness_bg.wasm" \
+            browser-release="$("$build" --print-out-dir browser-release)/harness_bg.wasm"
+
   # The network test targets (fetch_transport, switch_flow, transport_faults, switch_faults,
   # switch_http) against a real Switch service on a fresh database, behind the TLS and CORS rig
   # (rig/switch-rig.mjs). See rig/test.sh.
@@ -140,7 +194,10 @@ jobs:
     name: Switch tests (${{ matrix.engine }})
     needs: switch-service
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    # The network targets and then the hosted harness, whose runner stops itself after 20
+    # minutes (PAYKIT_BROWSER_HARNESS_TIMEOUT_SECS), so the harness gets its full time after
+    # the targets.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -214,8 +271,26 @@ jobs:
         run: |
           export PAYKIT_BROWSER_SWITCH_BIN="$HOME/pubky-switch-bin/bin/pubky-switch"
           paykit-browser/rig/test.sh --switch ${{ matrix.engine }} both
+      # The hosted harness (rig/harness-runner.mjs): the bundle, in its default release build, in
+      # a module worker under a strict Content Security Policy, against the Switch service on a
+      # fresh database. Chromium and Firefox pay with the origin-held key and read the receipt
+      # back after a page reload. Playwright's WebKit for Linux has no Origin Private File
+      # System, so the webkit job pays with the in-memory store and does no read-back; the
+      # runner checks that and shows a warning annotation. It writes its service and rig logs to
+      # the same folder as the step above, replacing them, so a failure keeps the failing step's.
+      # Its timings go to the run's summary page as a table, and as JSON to that folder, which
+      # the step below keeps when the job fails or is cancelled, such as at its timeout. A run
+      # stopped early that way writes what it collected.
+      - name: Run the hosted harness against the Switch service
+        env:
+          PAYKIT_BROWSER_SWITCH_DATABASE_URL: postgres://postgres:switch-rig-test@127.0.0.1:5432/postgres
+          PAYKIT_BROWSER_RIG_LOG_DIR: ${{ runner.temp }}/switch-rig-logs
+          PAYKIT_BROWSER_HARNESS_TIMINGS: ${{ runner.temp }}/switch-rig-logs/harness-timings.json
+        run: |
+          export PAYKIT_BROWSER_SWITCH_BIN="$HOME/pubky-switch-bin/bin/pubky-switch"
+          paykit-browser/rig/test.sh --harness ${{ matrix.engine }}
       - name: Keep the service and rig logs
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: switch-rig-logs-${{ matrix.engine }}
