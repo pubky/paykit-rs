@@ -423,8 +423,102 @@ async fn test_first_grant_restores_its_complete_original_after_reconciliation() 
 #[derive(Clone, Copy)]
 enum RestoredGrantEvidence {
     Matching,
+    LaterReservations,
     DifferentPendingValue,
     UnrelatedVerifiedWrite,
+}
+
+// Open two real claim/ledger batches as the enrolled executor, without dispatching
+// a payment. The second ledger no longer directly follows the original zero.
+async fn reserve_before_restore(
+    world: &World,
+    payer: &mut paykit_sdk::Paykit,
+    shop: &mut paykit_sdk::Paykit,
+    key: &[u8; 32],
+) {
+    use paykit_lib::allowances::LedgerEntry;
+    use pubky_switch_client::app::{
+        ClaimOp, Collection, ObligationDeadline, OpBatch, RecordTarget,
+    };
+
+    let view = payer.allowance(key).await.unwrap();
+    let natural =
+        paykit_lib::derive::natural_key::allowance(&view.counterparty, &view.allowance_id);
+    let collection = paykit_lib::Collection::AllowanceLedgers;
+    let target = RecordTarget::new(
+        Collection::new(collection.name(), collection.fixed_policy()),
+        &natural,
+    );
+    let ledger_key = payer.app().record_key(&target).unwrap();
+    let grant = payer.app().shared_record(key).await.unwrap().unwrap();
+    let (_, revision) = applied_put(payer.app(), *key, grant.version).await;
+    let grant = Condition::RecordCurrent {
+        key: *key,
+        revision,
+        deleted: false,
+    };
+    world.rail.set_history_payer(payer.identity());
+    for (amount, total) in [("40", "40"), ("30", "70")] {
+        let at = world.clock.now_ms();
+        let request = Box::pin(request_from(shop, payer.identity(), draft(amount, at))).await;
+        Box::pin(payer.receive(None)).await.unwrap();
+        let obligation = paykit_lib::derive::request_obligation(
+            payer.app().naming_key(),
+            &request.payee,
+            &request.request_hash,
+            0,
+        );
+        let attempt = paykit_lib::AttemptId::generate().unwrap();
+        let claim = ClaimOp::attempt(obligation, 0, attempt.to_bytes(), 4200, None);
+        let current = payer
+            .app()
+            .shared_record(&ledger_key)
+            .await
+            .unwrap()
+            .unwrap();
+        let (_, revision) = applied_put(payer.app(), ledger_key, current.version).await;
+        let mut ledger = Ledger::from_json(current.content.value().unwrap()).unwrap();
+        let amount = crate::common::btc(amount);
+        ledger.entries.push(LedgerEntry {
+            obligation,
+            attempt_id: attempt,
+            value: amount.value,
+            asset: amount.asset,
+            at,
+            outcome: None,
+        });
+        let conditions = vec![
+            grant,
+            Condition::RecordCurrent {
+                key: ledger_key,
+                revision,
+                deleted: false,
+            },
+            Condition::ServerTimeIn {
+                start: Some(at),
+                end: Some(terms().entry_window_end(at).unwrap()),
+            },
+        ];
+        let write = payer
+            .app_mut()
+            .record_op(&target, Some(&ledger.to_json().unwrap()), conditions)
+            .await
+            .unwrap();
+        let batch = OpBatch::for_protocol("paykit")
+            .op_if(claim.kind(), vec![grant])
+            .obligation_deadline(obligation, ObligationDeadline::NoDeadline)
+            .entry(write);
+        Box::pin(payer.app_mut().submit_batch(batch)).await.unwrap();
+        assert_eq!(
+            Box::pin(payer.reconcile_allowance(key))
+                .await
+                .unwrap()
+                .unwrap()
+                .lifetime()
+                .as_str(),
+            total
+        );
+    }
 }
 
 async fn restore_grant_proof_order(installed_verified: bool, evidence: RestoredGrantEvidence) {
@@ -511,6 +605,9 @@ async fn restore_grant_proof_order(installed_verified: bool, evidence: RestoredG
         .unwrap()
         .unwrap();
     assert_eq!(checkpoint(&verified)["d"][0]["grant"]["kind"], "verified");
+    if matches!(evidence, RestoredGrantEvidence::LaterReservations) {
+        Box::pin(reserve_before_restore(&world, &mut payer, &mut shop, &key)).await;
+    }
     let verified_backup = payer.backup().await.unwrap();
     let grant = payer.app().shared_record(&key).await.unwrap().unwrap();
     let (_, revision) = applied_put(payer.app(), key, grant.version).await;
@@ -619,7 +716,11 @@ async fn restore_grant_proof_order(installed_verified: bool, evidence: RestoredG
     Box::pin(restored.end_reconcile(UserConfirmed::new()))
         .await
         .unwrap();
-    if !matches!(evidence, RestoredGrantEvidence::Matching) {
+    if matches!(
+        evidence,
+        RestoredGrantEvidence::DifferentPendingValue
+            | RestoredGrantEvidence::UnrelatedVerifiedWrite
+    ) {
         assert!(Box::pin(restored.resume_allowance_executor(&key))
             .await
             .is_err());
@@ -629,13 +730,40 @@ async fn restore_grant_proof_order(installed_verified: bool, evidence: RestoredG
                 .is_err()
         );
     } else {
-        Box::pin(restored.resume_allowance_executor(&key))
-            .await
-            .unwrap();
+        if matches!(evidence, RestoredGrantEvidence::LaterReservations) {
+            // The backup predates both received requests. Confirm the existing Allowance
+            // after restoring it; the confirmed budget still includes both reservations.
+            let view = restored.allowance(&key).await.unwrap();
+            assert!(!view.consented);
+            assert!(Box::pin(restored.resume_allowance_executor(&key))
+                .await
+                .is_err());
+        } else {
+            Box::pin(restored.resume_allowance_executor(&key))
+                .await
+                .unwrap();
+        }
         Box::pin(restored.confirm_allowance_executor(&key, UserConfirmed::new()))
             .await
             .unwrap();
         assert!(restored.allowance(&key).await.unwrap().consented);
+        if matches!(evidence, RestoredGrantEvidence::LaterReservations) {
+            world.rail.set_history_payer(shop.identity());
+            assert!(Box::pin(restored.reconcile_allowance(&key))
+                .await
+                .unwrap()
+                .is_none());
+            world.rail.set_history_payer(restored.identity());
+            assert_eq!(
+                Box::pin(restored.reconcile_allowance(&key))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .lifetime()
+                    .as_str(),
+                "70"
+            );
+        }
     }
     assert_eq!(world.record_writes(&world.alice, &key), writes);
     let current = restored.app().shared_record(&key).await.unwrap().unwrap();
@@ -645,6 +773,15 @@ async fn restore_grant_proof_order(installed_verified: bool, evidence: RestoredG
         revision
     );
     assert!(world.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_restore_of_an_older_pending_grant_keeps_later_reservations() {
+    Box::pin(restore_grant_proof_order(
+        true,
+        RestoredGrantEvidence::LaterReservations,
+    ))
+    .await;
 }
 
 #[tokio::test]

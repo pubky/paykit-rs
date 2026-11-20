@@ -259,6 +259,10 @@ The method adapter supplies `Rail::allowance_history` for the payer's entire
 wallet account, including other installations and previous certificate lifetimes.
 Return `None` when that history is incomplete. When reconciliation returns
 `None`, show usage as unknown and keep automatic payment on hold.
+An older backup can predate the proof of the original grant. When the
+installed wallet still has that proof and its later ledger, reconciliation
+counts the outstanding reservations. Show the existing consent prompt if the
+restored Allowance requires confirmation.
 
 | Case | What to show or do |
 |---|---|

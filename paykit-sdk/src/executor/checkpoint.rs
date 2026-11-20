@@ -111,7 +111,9 @@ impl ExecutorHistory {
         let first = self.0.first()?;
         let mut verified = Vec::new();
         for source in &self.0 {
-            if source.counterparty != first.counterparty || source.allowance_id != first.allowance_id {
+            if source.counterparty != first.counterparty
+                || source.allowance_id != first.allowance_id
+            {
                 return None;
             }
             if matches!(source.grant, GrantEvidence::Verified { .. }) {
@@ -119,7 +121,11 @@ impl ExecutorHistory {
             }
         }
         let Some((_, original)) = verified.first() else {
-            return self.0.iter().all(|source| source == first && source.later.is_none()).then(|| first.clone());
+            return self
+                .0
+                .iter()
+                .all(|source| source == first && source.later.is_none())
+                .then(|| first.clone());
         };
         // The applied-local marker can only match the authenticated original grant.
         // Its backup contains no ledger write to order with the verified checkpoints.
