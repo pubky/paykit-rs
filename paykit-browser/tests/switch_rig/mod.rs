@@ -6,7 +6,8 @@
 //! `rig/test.sh --switch` starts a real Switch service behind the rig, on
 //! `https://localhost:<rig port>`, and passes that origin to the build in
 //! `PAYKIT_BROWSER_RIG_ORIGIN`. A network test target includes this module with
-//! `#[path = "../switch_rig/mod.rs"]`; the `fetch_transport` and `switch_flow` targets both do.
+//! `#[path = "../switch_rig/mod.rs"]`; every network target does: `fetch_transport`,
+//! `switch_flow`, `transport_faults`, `switch_faults` and `switch_http`.
 
 pub mod wait;
 
@@ -93,6 +94,12 @@ pub fn request(method: &str, path_and_query: &str) -> Request {
         body: Vec::new(),
         timeout: TimeoutClass::Ordinary,
     }
+}
+
+/// The path of the account of `identity` at the service, followed by `rest`, as the client
+/// builds it (Switch wire 7.4): `/v1/<Pubky ID>/<rest>`.
+pub fn account_path(identity: &[u8; 32], rest: &str) -> String {
+    format!("/v1/{}/{rest}", pubky_switch_core::enc::pubky_id(identity))
 }
 
 /// A tag no other request to this rig has used: `name`, the wall clock and a random number.

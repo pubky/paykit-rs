@@ -2,7 +2,7 @@
 //! in a network test has a bound, and a test fails rather than hangs.
 
 use std::future::{poll_fn, Future};
-use std::pin::Pin;
+use std::pin::{pin, Pin};
 use std::task::Poll;
 
 use paykit_browser::timer::JsTimer;
@@ -36,6 +36,37 @@ where
         timer.as_mut().poll(cx).map(|()| None)
     })
     .await
+}
+
+/// Runs `a` and `b` at once until both finish or `ms` milliseconds pass: the output of each
+/// one that finished in time.
+pub async fn both<A, B>(a: A, b: B, ms: u64) -> (Option<A::Output>, Option<B::Output>)
+where
+    A: Future,
+    B: Future,
+{
+    let mut a = pin!(a);
+    let mut b = pin!(b);
+    let (mut out_a, mut out_b) = (None, None);
+    let mut timer = JsTimer.sleep(ms);
+    poll_fn(|cx| {
+        if out_a.is_none() {
+            if let Poll::Ready(output) = a.as_mut().poll(cx) {
+                out_a = Some(output);
+            }
+        }
+        if out_b.is_none() {
+            if let Poll::Ready(output) = b.as_mut().poll(cx) {
+                out_b = Some(output);
+            }
+        }
+        if out_a.is_some() && out_b.is_some() {
+            return Poll::Ready(());
+        }
+        timer.as_mut().poll(cx)
+    })
+    .await;
+    (out_a, out_b)
 }
 
 /// Reads with `read` until `done` holds for what it read or `bound_ms` milliseconds pass,

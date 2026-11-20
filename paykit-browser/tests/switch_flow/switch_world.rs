@@ -1,11 +1,11 @@
 //! The test worlds the rig enrols on the real service (`POST /rig/world`), whose Paykit Apps
-//! join it through `FetchTransport`.
+//! join it through `FetchTransport`, the rig's or one a test configures. The `switch_flow`,
+//! `switch_faults` and `switch_http` targets include this module.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use paykit_browser::clock::JsClock;
-use paykit_browser::fetch::FetchTransport;
 use paykit_browser::timer::JsTimer;
 use paykit_sdk::rail::FakeRail;
 use paykit_sdk::{Paykit, PaykitConfig};
@@ -15,12 +15,16 @@ use pubky_switch_client::store::{MemoryStore, StoreHandle};
 use pubky_switch_client::testing::{Seeds, TestHomeserver, TestIdentity};
 use pubky_switch_client::transport::{Header, Transport};
 use pubky_switch_core::enc::unb64;
-use pubky_switch_core::records::{AppRequest, IDENTITY_PATH};
+use pubky_switch_core::records::{AppRequest, IdentityDoc, IDENTITY_PATH};
 use pubky_switch_core::sig::SignedDoc;
 use serde_json::{json, Value};
-use wasm_bindgen_test::wasm_bindgen_test;
 
-use crate::switch_rig::{config, origin, request, transport};
+use crate::switch_rig::{origin, request, rig_token, transport, transport_with};
+
+/// The payer's identity.
+pub const PAYER: &str = "payer";
+/// The payee's identity.
+pub const PAYEE: &str = "payee";
 
 /// How long the rig may take to enrol a world, in milliseconds: it runs the real signer for
 /// every identity and app, on a service other engines and contexts of the run also use. The
@@ -28,29 +32,14 @@ use crate::switch_rig::{config, origin, request, transport};
 /// rather than this timeout.
 const WORLD_TIMEOUT_MS: u64 = 60_000;
 
-/// The token the rig requires for `POST /rig/world`, which `rig/test.sh --switch` makes for
-/// each run and sets at compile time: the rig refuses a request without it, so a page or
-/// program that does not know it cannot make the rig enrol.
-///
-/// # Panics
-///
-/// When the target was built without it: a network test never passes without its rig.
-fn rig_token() -> &'static str {
-    option_env!("PAYKIT_BROWSER_RIG_TOKEN").unwrap_or_else(|| {
-        panic!(
-            "PAYKIT_BROWSER_RIG_TOKEN is not set: run the network tests with \
-             `paykit-browser/rig/test.sh --switch`"
-        )
-    })
-}
-
 /// A world the rig enrolled on the real service for one test (`POST /rig/world`): its
 /// identities, enrolled by their signers, and their apps, approved but not joined yet; the
 /// in-memory Homeserver the apps read and write, holding each identity's latest
 /// `identity.json`; and the SDK's fake rail, on the browser's clock.
 ///
 /// Each world has keys of its own, from a seed prefix the rig picks at random, so no two
-/// tests, engines, contexts or runs share an identity or an app: an app joins a service once.
+/// tests, engines, contexts or runs share an identity, an app or a path at the service: an
+/// app joins a service once.
 pub struct SwitchWorld {
     seeds: Seeds,
     homeserver: Arc<TestHomeserver>,
@@ -90,9 +79,7 @@ impl SwitchWorld {
         post.headers
             .push(Header::new("content-type", "application/json"));
         post.body = serde_json::to_vec(&body).expect("the world request is JSON");
-        let mut slow = config();
-        slow.request_timeout_ms = WORLD_TIMEOUT_MS;
-        let response = FetchTransport::allowing_localhost_for_loopback_tests(slow)
+        let response = transport_with(|config| config.request_timeout_ms = WORLD_TIMEOUT_MS)
             .send(post)
             .await
             .expect("the rig answers /rig/world");
@@ -158,25 +145,48 @@ impl SwitchWorld {
         }
     }
 
+    /// Identity `name` of this world, with the keys its seed gives, enrolled or not.
+    pub fn identity(&self, name: &str) -> TestIdentity {
+        TestIdentity::new(&self.seeds, name)
+    }
+
     /// The public key of identity `name` of this world, enrolled or not.
     pub fn id(&self, name: &str) -> [u8; 32] {
-        TestIdentity::new(&self.seeds, name).public()
+        self.identity(name).public()
+    }
+
+    /// The `identity.json` the rig's signer published for identity `name`, verified.
+    ///
+    /// # Panics
+    ///
+    /// When the world enrolled no such identity.
+    #[allow(dead_code)] // `switch_http` and `switch_faults` only.
+    pub fn identity_doc(&self, name: &str) -> IdentityDoc {
+        self.homeserver
+            .identity_doc(&self.id(name))
+            .unwrap_or_else(|| panic!("the world has no identity.json for {name}"))
+    }
+
+    /// Joins app `label` (`<identity>:<app>`) with the default transport of the network
+    /// targets ([`transport`]); see [`SwitchWorld::join_with`].
+    pub async fn join(&self, label: &str) -> Paykit {
+        self.join_with(label, Arc::new(transport())).await
     }
 
     /// Joins app `label` (`<identity>:<app>`) to the service with the request and approval
     /// the rig's signer made, and finishes the join with a first receive. The app reaches the
-    /// service through [`transport`], keeps its state in memory, reads the browser's clock,
+    /// service through `transport`, keeps its state in memory, reads the browser's clock,
     /// waits on the browser's timers, and pays through the world's rail.
     ///
     /// # Panics
     ///
     /// When the world has no such app, or the join or its first receive fails.
-    pub async fn join(&self, label: &str) -> Paykit {
+    pub async fn join_with(&self, label: &str, transport: Arc<dyn Transport>) -> Paykit {
         let (Some(app), Some((identity, name))) = (self.apps.get(label), label.split_once(':'))
         else {
             panic!("the world has no app {label}");
         };
-        let identity = TestIdentity::new(&self.seeds, identity);
+        let identity = self.identity(identity);
         let signed: SignedDoc =
             serde_json::from_slice(&app.request).expect("the app request is a signed document");
         let join = JoinRequest {
@@ -187,7 +197,7 @@ impl SwitchWorld {
         };
         let env = AppEnv {
             store: StoreHandle::inline(Arc::new(MemoryStore::new())),
-            transport: Arc::new(transport()),
+            transport,
             clock: Arc::new(JsClock),
             homeserver: Arc::clone(&self.homeserver) as Arc<dyn HomeserverReader>,
             homeserver_writer: Some(Arc::clone(&self.homeserver) as Arc<dyn HomeserverWriter>),
@@ -209,6 +219,26 @@ impl SwitchWorld {
     }
 }
 
+/// Reads `paykit`'s feed to its end and sends the cursor move the read deferred (Switch spec
+/// 8.2), so a wait on the feed taken next starts quiet: neither woken at once by what the
+/// join left on the feed nor cut short when the deferred move falls due.
+///
+/// # Panics
+///
+/// When the read or the move fails.
+#[allow(dead_code)] // `switch_http` only.
+pub async fn settle(paykit: &mut Paykit) {
+    paykit
+        .receive(None)
+        .await
+        .unwrap_or_else(|error| panic!("the settling receive: {error:?}"));
+    paykit
+        .app_mut()
+        .flush_cursor()
+        .await
+        .unwrap_or_else(|error| panic!("the deferred cursor move: {error:?}"));
+}
+
 /// The text member `name` of `object`, from a world's output.
 fn text<'a>(object: &'a Value, name: &str) -> &'a str {
     object[name]
@@ -220,28 +250,4 @@ fn text<'a>(object: &'a Value, name: &str) -> &'a str {
 /// (Switch wire 1.2).
 fn bytes(object: &Value, name: &str) -> Vec<u8> {
     unb64(text(object, name)).unwrap_or_else(|_| panic!("{name} is not base64url"))
-}
-
-/// The rig refuses `POST /rig/world` with `403`, before it enrols anything, without the run's
-/// token and with a wrong token of the same length. Every other test here enrols its world
-/// with the right token.
-#[wasm_bindgen_test]
-async fn test_switch_flow_rig_world_refuses_a_missing_or_wrong_token() {
-    let token = rig_token();
-    let (head, last) = token.split_at(token.len().saturating_sub(1));
-    let wrong = format!("{head}{}", if last == "0" { "1" } else { "0" });
-    for (case, path) in [
-        ("no token", "/rig/world".to_owned()),
-        ("a wrong token", format!("/rig/world?token={wrong}")),
-    ] {
-        let mut post = request("POST", &path);
-        post.headers
-            .push(Header::new("content-type", "application/json"));
-        post.body = br#"{"identities": ["payer"], "apps": []}"#.to_vec();
-        let response = transport()
-            .send(post)
-            .await
-            .expect("the rig answers /rig/world");
-        assert_eq!(response.status, 403, "{case}");
-    }
 }
