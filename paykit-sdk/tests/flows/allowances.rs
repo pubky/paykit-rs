@@ -5559,10 +5559,7 @@ async fn test_seller_withdrawal_after_a_late_acceptance_uses_its_own_create() {
         Box::pin(seller.propose_allowance(payer.identity(), AllowanceRole::Allowee, terms()))
             .await
             .unwrap();
-    assert_eq!(
-        Box::pin(received_originals(&mut payer, &[&other.msg_id])).await,
-        [other.msg_id]
-    );
+    Box::pin(crate::common::receive_message(&mut payer, &other.msg_id)).await;
     let other_key = payer
         .app()
         .record_key(&allowances_target(&seller.identity(), &other.allowance_id))
