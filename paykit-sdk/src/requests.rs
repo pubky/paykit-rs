@@ -27,8 +27,8 @@ use paykit_lib::{
     AttemptId, Body, Label, PaymentAmount, PaymentEndpointIdentifier, PaymentReference,
 };
 use pubky_switch_client::app::{
-    claim_conflict, AppError, Delivery, FeedPosition, KeptReason, OpBatch, RecordContent,
-    RecordRead, UndeliverableReason,
+    claim_conflict, AppError, Delivery, FeedPosition, KeptReason, OpBatch, OutgoingMessage,
+    RecordContent, RecordRead, UndeliverableReason,
 };
 use pubky_switch_client::error::ClientError;
 use pubky_switch_core::claims::{ClaimStatus, Outcome};
@@ -76,7 +76,7 @@ pub struct RequestRef {
 
 /// A request to send (Paykit wire 4.5): one-time, or recurring with a
 /// [`RequestDraft::recurrence`]. Its `Debug` shows neither the payment reference nor the
-/// metadata, and no endpoint payload.
+/// metadata, endpoint payload or invitation code.
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RequestDraft {
@@ -108,6 +108,10 @@ pub struct RequestDraft {
     pub conversion: Option<Conversion>,
     /// Opaque metadata.
     pub metadata: Option<Map<String, Value>>,
+    /// An invitation to present when delivering this request to the payer's Switch
+    /// (Switch spec 7). It is transport data, outside the signed payment request body,
+    /// and grants no payment approval. `None` uses ordinary admission.
+    pub invite_code: Option<String>,
 }
 
 impl std::fmt::Debug for RequestDraft {
@@ -140,8 +144,8 @@ impl std::fmt::Debug for RequestDraft {
 impl RequestDraft {
     /// A one-time request for `amount`, with the reference copied into the payment where the
     /// method allows it, paid to `destination`. It has no expiry, no payment deadline, no
-    /// limit on the identifiers the payer may use, no recurrence and no metadata until a
-    /// `with_` setter adds one.
+    /// limit on the identifiers the payer may use, no recurrence, no metadata and no
+    /// invitation until a `with_` setter adds one.
     pub fn new(
         amount: PaymentAmount,
         payment_reference: PaymentReference,
@@ -159,6 +163,7 @@ impl RequestDraft {
             accepted_endpoint_identifiers: None,
             conversion: None,
             metadata: None,
+            invite_code: None,
         }
     }
 
@@ -225,6 +230,14 @@ impl RequestDraft {
     #[must_use]
     pub fn with_metadata(mut self, metadata: Map<String, Value>) -> Self {
         self.metadata = Some(metadata);
+        self
+    }
+
+    /// Present `code` when the Switch delivers this request. Queuing and retrying keep
+    /// the same signed request; the code is not payment consent (Switch spec 7, 11).
+    #[must_use]
+    pub fn with_invite_code(mut self, code: String) -> Self {
+        self.invite_code = Some(code);
         self
     }
 }
@@ -669,7 +682,8 @@ impl Paykit {
 
     /// Send a request to `to` (Paykit spec 8.1 step 1, 8.2; Paykit wire 4.5), under this
     /// app's selling label: one-time, or recurring with a recurrence. The payer must admit
-    /// this identity, for example after an invite (Paykit spec 1). The request is signed, and
+    /// this identity, for example with [`RequestDraft::invite_code`] (Paykit spec 1).
+    /// The request is signed, and
     /// its record written in the batch that queues it, then it is sent. Nothing is signed,
     /// written or queued while sends to `to` are held: at an app holding `paykit_contacts`, while
     /// the copy of the deny list holds it, or while that copy isn't known, which a read of
@@ -736,7 +750,9 @@ impl Paykit {
         };
         // The writer reads back what it writes by the recipient's rules (Paykit wire 4.5).
         let body = request.to_body()?;
-        let signed = self.sign(to, Kind::PaymentRequest, Vec::new(), body)?;
+        let mut message = OutgoingMessage::new(to, Kind::PaymentRequest.as_str(), body);
+        message.invite_code = draft.invite_code;
+        let signed = self.app.sign_message(message)?;
         let msg_id = signed.msg_id().to_owned();
         let hash = signed.hash();
         // The payee's request record, from the signed request, in the batch that queues it
