@@ -25,7 +25,7 @@ Ask whether the source device is still in the user's possession or known to have
 1. Run the normal foreground `receive`. Follow additional pages and handle its recovery or availability notices. `restoreState` reports the current cursor verdict, any questioned registrations and whether reconciliation continues. After interruption, load the same App ID and read this state again.
 2. Show the questioned registrations to the user and ask whether the original device ran after the backup. Call `confirmRestoredRegistrations` with the displayed numbers only if the user recognizes them. Otherwise, `refuseRestoredRegistrations` stops the app and requests revocation. Read the resulting alarm. If the question changed, show its current registrations before asking again.
 3. Call `reconcile` and show any doubtful attempts. If `payerSkipped` is set, the payer pass still needs the proper certificate and record coverage. An uncertain attempt may already have paid. Use `resolveConfirmedAttempt` for the exact obligation and attempt only after the user chooses its outcome. An absent receipt alone cannot establish failure.
-4. After the user reviews the results, call `endConfirmedReconciliation`. Reopen and check `restoreState` when interrupted. Each registered protocol must finish its own reconciliation. The SDK keeps its usual payment, record and certificate checks throughout.
+4. After the user reviews the results, call `endConfirmedReconciliation`. Reopen and check `restoreState` when interrupted. Each registered protocol must finish its own reconciliation. A request may still be held because the seller could have cancelled it since the backup. Show that request and its `heldAfterRestore` refusal before passing the user's confirmation to `payRequest`.
 
 ## Receive and acknowledge
 
@@ -101,3 +101,5 @@ DYLD_LIBRARY_PATH="$OUT:$LIB" "$OUT/wallet-consumer"
 ```
 
 To exercise a full checkout from the host, build the host library with `--features bindgen,test-wallet` and regenerate the bindings. Supply `-PcheckoutTest=true` to the Kotlin command. For the Swift 6 command, add `-D PAYKIT_CHECKOUT_TEST` and `paykit-ffi/tests/hosts/CheckoutConsumer.swift`. Both consumers enroll with a local shop, acknowledge a recovery notice across reopen, and cancel the payment call after the host method has durably charged it. The reopened wallet uses the original attempt to obtain the signed seller receipt.
+
+Run either checkout consumer with `PAYKIT_TEST_RESTORE=confirm` to restore a backup into a fresh store, review a registration made since the backup, and pay the original held request after confirmation. Use `refuse` to decline the registration and observe the compromise alarm, or `doubt` to reconcile an interrupted, already charged attempt.
