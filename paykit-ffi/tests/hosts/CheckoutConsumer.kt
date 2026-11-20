@@ -62,38 +62,41 @@ private suspend fun NativeWallet.finishReceive() {
     error("wallet did not complete its feed")
 }
 
+private suspend fun NativeWallet.followLoss(fixture: CheckoutFixture, second: Boolean) {
+    val before = receive().generation
+    fixture.replaceLostProvider(second)
+    repeat(12) {
+        val read = receive()
+        if (read.generation > before && !read.stopped && !read.more) return
+    }
+    error("wallet did not follow the replacement provider")
+}
+
+private suspend fun NativeWallet.lossReport(): WalletReconciliation {
+    repeat(12) {
+        try {
+            return reconcile()
+        } catch (error: WalletException.Refused) {
+            if (error.refusal.kind() !is RefusalKind.NotNow) throw error
+        }
+    }
+    error("reconciliation did not finish its listing")
+}
+
 private suspend fun NativeWallet.reviewLoss(
     fixture: CheckoutFixture, request: RequestId, method: CheckoutMethod
 ) {
-    suspend fun nextLoss(second: Boolean): DoubtfulPayment {
-        val before = receive().generation
-        fixture.replaceLostProvider(second)
-        var arrived = false
-        repeat(12) {
-            if (!arrived) {
-                val read = receive()
-                arrived = read.generation > before && !read.stopped && !read.more
-            }
-        }
-        check(arrived)
-        repeat(12) {
-            val report = try {
-                reconcile()
-            } catch (error: WalletException.Refused) {
-                if (error.refusal.kind() !is RefusalKind.NotNow) throw error
-                return@repeat
-            }
-            val row = report.doubtful.single { it.requestHash.contentEquals(request.requestHash) }
-            check(!report.payerSkipped && row.payee.contentEquals(request.payee) && row.attempts.isEmpty())
-            check(row.obligation.size == 32 && checkNotNull(row.beforeLoss).generation > before)
-            endConfirmedReconciliation()
-            return row
-        }
-        error("reconciliation did not finish its listing")
+    suspend fun shown(): DoubtfulPayment {
+        val report = lossReport()
+        val row = report.doubtful.single { it.requestHash.contentEquals(request.requestHash) }
+        check(!report.payerSkipped && row.payee.contentEquals(request.payee) && row.attempts.isEmpty())
+        check(row.obligation.size == 32 && row.beforeLoss != null)
+        return row
     }
-
-    val first = nextLoss(false)
-    val current = nextLoss(true)
+    val first = shown()
+    followLoss(fixture, true)
+    val current = shown()
+    endConfirmedReconciliation()
     check(current.obligation.contentEquals(first.obligation))
     val earlier = checkNotNull(first.beforeLoss)
     val latest = checkNotNull(current.beforeLoss)
@@ -115,7 +118,9 @@ private suspend fun NativeWallet.reviewLoss(
     allowConnect(fixture.payee())
 }
 
-private fun driveCheckout() = runBlocking {
+private enum class CheckoutReview { ORDINARY, DIVERGENCE, PROVIDER_LOSS }
+
+private fun driveCheckout(recovery: CheckoutReview) = runBlocking {
     withTimeout(60_000) {
         val directory = Files.createTempDirectory("paykit-method").toFile()
         try {
@@ -148,7 +153,6 @@ private fun driveCheckout() = runBlocking {
                         wallet.shutdown()
                         notice to checkNotNull(event.id)
                     }
-                    val recovery = System.getenv("PAYKIT_TEST_CHECKOUT_RECOVERY")
                     var shown: Divergence? = null
                     val request = host.load(enrolled.appId).use { originalWallet ->
                         var wallet = originalWallet
@@ -162,6 +166,12 @@ private fun driveCheckout() = runBlocking {
                             (it.data as? WalletEventData.RecoveryNoticeCleared)?.generation == notice.generation
                         })
                         wallet.allowConnect(fixture.payee())
+                        if (recovery == CheckoutReview.PROVIDER_LOSS) {
+                            wallet.followLoss(fixture, false)
+                            check(wallet.lossReport().doubtful.isEmpty())
+                            wallet.endConfirmedReconciliation()
+                            wallet.allowConnect(fixture.payee())
+                        }
                         val sent = fixture.sendCheckout()
                         wallet.finishReceive()
                         val view = wallet.requests().single()
@@ -175,7 +185,7 @@ private fun driveCheckout() = runBlocking {
                         refused.refusal.use { check(it.kind() is RefusalKind.NotFound) }
                         check(skipped.publicFailures.isEmpty() && method.calls.get() == 0)
                         when (recovery) {
-                            "divergence" -> {
+                            CheckoutReview.DIVERGENCE -> {
                                 wallet.shutdown()
                                 fixture.markDivergent(enrolled.appId, view.record)
                                 wallet = host.load(enrolled.appId)
@@ -190,7 +200,8 @@ private fun driveCheckout() = runBlocking {
                                 wallet.finishReceive()
                                 check(wallet.divergentRecords().none { it.paused || it.writesWaiting })
                             }
-                            "loss" -> wallet.reviewLoss(fixture, sent, method)
+                            CheckoutReview.PROVIDER_LOSS -> wallet.reviewLoss(fixture, sent, method)
+                            CheckoutReview.ORDINARY -> Unit
                         }
                         wallet.finishReceive()
                         withTimeout(15_000) {
@@ -257,5 +268,5 @@ private fun driveCheckout() = runBlocking {
 }
 
 object CheckoutConsumer {
-    @JvmStatic fun main(args: Array<String>) = driveCheckout()
+    @JvmStatic fun main(args: Array<String>) = CheckoutReview.entries.forEach { driveCheckout(it) }
 }

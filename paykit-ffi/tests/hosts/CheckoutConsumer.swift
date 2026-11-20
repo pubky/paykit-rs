@@ -141,37 +141,40 @@ private func payWhileWaiting(
     await method.release.signal()
 }
 
-private func reviewLoss(_ wallet: NativeWallet, _ fixture: CheckoutFixture, _ request: RequestId, _ method: CheckoutMethod) async throws {
-    func nextLoss(second: Bool) async throws -> DoubtfulPayment {
-        let before = try await wallet.receive().generation
+private extension NativeWallet {
+    func followLoss(_ fixture: CheckoutFixture, second: Bool) async throws {
+        let before = try await receive().generation
         try await fixture.replaceLostProvider(second: second)
-        var arrived = false
         for _ in 0..<12 {
-            let read = try await wallet.receive()
-            if read.generation > before && !read.stopped && !read.more { arrived = true; break }
+            let read = try await receive()
+            if read.generation > before && !read.stopped && !read.more { return }
         }
-        precondition(arrived)
+        preconditionFailure("wallet did not follow the replacement provider")
+    }
+    func lossReport() async throws -> WalletReconciliation {
         for _ in 0..<12 {
-            let report: WalletReconciliation
-            do { report = try await wallet.reconcile() }
+            do { return try await reconcile() }
             catch WalletError.Refused(let refusal) {
                 guard case .notNow = refusal.kind() else { throw WalletError.Refused(refusal: refusal) }
-                continue
             }
-            let rows = report.doubtful.filter { $0.requestHash == request.requestHash }
-            guard rows.count == 1, let row = rows.first, let loss = row.beforeLoss else {
-                preconditionFailure("missing original pre-loss obligation")
-            }
-            precondition(!report.payerSkipped && row.payee == request.payee && row.attempts.isEmpty)
-            precondition(row.obligation.count == 32 && loss.generation > before)
-            try await wallet.endConfirmedReconciliation()
-            return row
         }
         preconditionFailure("reconciliation did not finish its listing")
     }
+}
 
-    let first = try await nextLoss(second: false)
-    let current = try await nextLoss(second: true)
+private func reviewLoss(_ wallet: NativeWallet, _ fixture: CheckoutFixture, _ request: RequestId, _ method: CheckoutMethod) async throws {
+    func shown() async throws -> DoubtfulPayment {
+        let report = try await wallet.lossReport()
+        let rows = report.doubtful.filter { $0.requestHash == request.requestHash }
+        guard rows.count == 1, let row = rows.first else { preconditionFailure("missing original pre-loss obligation") }
+        precondition(!report.payerSkipped && row.payee == request.payee && row.attempts.isEmpty)
+        precondition(row.obligation.count == 32 && row.beforeLoss != nil)
+        return row
+    }
+    let first = try await shown()
+    try await wallet.followLoss(fixture, second: true)
+    let current = try await shown()
+    try await wallet.endConfirmedReconciliation()
     guard let earlier = first.beforeLoss, let latest = current.beforeLoss,
           let oldPayment = earlier.payment, let currentPayment = latest.payment else {
         preconditionFailure("missing original obligation and loss")
@@ -198,7 +201,13 @@ private func reviewLoss(_ wallet: NativeWallet, _ fixture: CheckoutFixture, _ re
     try await wallet.allowConnect(payee: fixture.payee())
 }
 
+private enum CheckoutReview: CaseIterable { case ordinary, divergence, providerLoss }
+
 func driveCheckout() async throws {
+    for review in CheckoutReview.allCases { try await driveCheckout(review) }
+}
+
+private func driveCheckout(_ recovery: CheckoutReview) async throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -238,6 +247,13 @@ func driveCheckout() async throws {
         return false
     })
     try await payer.allowConnect(payee: fixture.payee())
+    if recovery == .providerLoss {
+        try await payer.followLoss(fixture, second: false)
+        let report = try await payer.lossReport()
+        precondition(report.doubtful.isEmpty)
+        try await payer.endConfirmedReconciliation()
+        try await payer.allowConnect(payee: fixture.payee())
+    }
     let request = try await fixture.sendCheckout()
     try await payer.finishReceive()
     let views = try await payer.requests()
@@ -250,8 +266,8 @@ func driveCheckout() async throws {
           case .notFound = refusal.kind() else { preconditionFailure("missing request was not refused") }
     precondition(skipped.publicFailures.isEmpty && method.calls == 0)
     var shown: Divergence?
-    switch ProcessInfo.processInfo.environment["PAYKIT_TEST_CHECKOUT_RECOVERY"] {
-    case "divergence":
+    switch recovery {
+    case .divergence:
         try await payer.shutdown()
         try await fixture.markDivergent(appId: enrolled.appId, record: views[0].record)
         payer = try await host.load(appId: enrolled.appId)
@@ -267,9 +283,9 @@ func driveCheckout() async throws {
         try await payer.finishReceive()
         let drained = try await payer.divergentRecords()
         precondition(!drained.contains { $0.paused || $0.writesWaiting })
-    case "loss":
+    case .providerLoss:
         try await reviewLoss(payer, fixture, request, method)
-    default: break
+    case .ordinary: break
     }
     try await payer.finishReceive()
     try await payWhileWaiting(payer: payer, fixture: fixture, method: method, request: request, options: options)
