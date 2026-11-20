@@ -181,6 +181,41 @@ private suspend fun recoverReceipt(issuer: String) {
     }
 }
 
+private suspend fun acknowledgeRecovery(issuer: String, cleared: Boolean) {
+    val mode = if (cleared) "cleared-wallet" else "notice-wallet"
+    val producer = ProcessBuilder(issuer, mode).start()
+    val values = producer.inputStream.bufferedReader().readLines()
+    check(producer.waitFor() == 0 && values.size > 6)
+    val app = Base64.getDecoder().decode(values[0])
+    val generation = values[1].toULong()
+    val duty = Base64.getDecoder().decode(values[4])
+    val store = EnrollmentStore().apply { reopen(values[5], values.drop(6)) }
+    val method = ReceiptReader()
+    WalletHost(store, method, method, listOf("btc-lightning-bolt11")).use { host ->
+        host.load(app).use { wallet ->
+            val event = wallet.unacknowledgedEvents().single { it.id.contentEquals(duty) }
+            check(event.owners == listOf("paykit"))
+            if (cleared) {
+                check(wallet.recoveryRequired() == null)
+                check((event.data as WalletEventData.RecoveryNoticeCleared).generation == generation)
+            } else {
+                val notice = checkNotNull(wallet.recoveryRequired())
+                check((event.data as WalletEventData.RecoveryRequired).notice == notice)
+                check(notice.generation == generation && notice.reason == RecoveryReason.BEHIND && !notice.permanent)
+                check(notice.firstSeenMs == values[2].toULong() && notice.serviceTimeMs == values[3].toULong())
+            }
+            wallet.acknowledgeEvents(duty)
+            wallet.shutdown()
+        }
+        host.load(app).use { wallet ->
+            check(wallet.unacknowledgedEvents().none { it.id.contentEquals(duty) })
+            check(wallet.recoveryRequired()?.generation == if (cleared) null else generation)
+            check(method.transfers == 0)
+            wallet.shutdown()
+        }
+    }
+}
+
 fun main() = runBlocking {
     val store = EnrollmentStore()
     val reference = ByteArray(16) { 7 }
@@ -222,5 +257,8 @@ fun main() = runBlocking {
         host().use { it.acceptApproval(reference, identity, byteArrayOf(1)) }
         error("replaced the stored approval")
     } catch (_: WalletException.EnrollmentConflict) {}
-    recoverReceipt(checkNotNull(System.getenv("PAYKIT_TEST_ISSUER")))
+    val issuerPath = checkNotNull(System.getenv("PAYKIT_TEST_ISSUER"))
+    recoverReceipt(issuerPath)
+    acknowledgeRecovery(issuerPath, false)
+    acknowledgeRecovery(issuerPath, true)
 }

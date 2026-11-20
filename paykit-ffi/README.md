@@ -20,6 +20,12 @@ If an install or load fails after acquiring its writer, the call waits for relea
 
 Use `backup` to export the installed wallet’s SDK backup. Store its bytes and App ID together in protected storage. Use `load` to reopen the installed state on the same device. For a retained grant, `reconcileAllowance` reports usage only from the original authority and complete account-wide method history. An unknown result leaves spending held.
 
+## Receive and acknowledge
+
+Call `receive` on startup and after a feed wake. It returns one bounded report. Use `more` to decide when to read another page. If `stopped` is set, inspect the reported event. Persist or show each duty before acknowledging its ID with `acknowledgeEvents`. This acknowledges the processed prefix for Paykit. Each other protocol in a shared app remains responsible for its own duties.
+
+After an interruption, `unacknowledgedEvents` lists surviving Paykit duties in order. After a failed receive, keep those events and wait for a successful receive before acknowledging through the last duty in that report. `recoveryRequired` returns the current signed service notice across reopen even after acknowledging delivery. A clearance event names the generation that was held. The receive cursor can already be in the next generation.
+
 ## Generate both languages
 
 From the workspace root, build the generator and native library from this same checkout. Set `OUT` to a scratch directory. The commands below use the standard Cargo target directory. Substitute your configured target directory when it differs.
@@ -60,7 +66,7 @@ The native enrollment cases use the actual signer, SQLite-backed device storage,
 
 ### Run the generated-language consumers
 
-The test issuer uses Scripted by default. Set `PUBKY_SWITCH_REQUIRE_DB=1` and `PUBKY_SWITCH_TEST_DATABASE_URL` to run its signer and paid-wallet fixtures against the PostgreSQL-backed service.
+The test issuer uses Scripted by default. Set `PUBKY_SWITCH_REQUIRE_DB=1` and `PUBKY_SWITCH_TEST_DATABASE_URL` to run its signer, paid-wallet and recovery fixtures against the PostgreSQL-backed service.
 
 On macOS, use the host library and the sources generated above. Set `LIB` to the absolute directory containing `libpaykit_v2.dylib`, and use an absolute `OUT` path. The Kotlin consumer runs with a local Gradle installation. The Swift consumer imports the generated module from a host compiled in Swift 6 mode.
 

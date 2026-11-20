@@ -302,6 +302,48 @@ private func recoverReceipt(_ issuer: String) async throws {
     try await second.shutdown()
 }
 
+private func acknowledgeRecovery(_ issuer: String, cleared: Bool) async throws {
+    let producer = Process()
+    producer.executableURL = URL(fileURLWithPath: issuer)
+    producer.arguments = [cleared ? "cleared-wallet" : "notice-wallet"]
+    let output = Pipe()
+    producer.standardOutput = output
+    try producer.run()
+    let bytes = output.fileHandleForReading.readDataToEndOfFile()
+    producer.waitUntilExit()
+    let values = String(decoding: bytes, as: UTF8.self).split(separator: "\n").map(String.init)
+    precondition(producer.terminationStatus == 0 && values.count > 6)
+    let app = Data(base64Encoded: values[0])!
+    let generation = UInt64(values[1])!
+    let duty = Data(base64Encoded: values[4])!
+    let store = EnrollmentStore()
+    store.reopen(namespace: values[5], entries: values.dropFirst(6))
+    let method = ReceiptReader()
+    let host = try WalletHost(store: store, homeserver: method, method: method, endpointIdentifiers: ["btc-lightning-bolt11"])
+    let wallet = try await host.load(appId: app)
+    let matching = try await wallet.unacknowledgedEvents().filter { $0.id == duty }
+    precondition(matching.count == 1 && matching[0].owners == ["paykit"])
+    let current = try await wallet.recoveryRequired()
+    switch matching[0].data {
+    case let .recoveryNoticeCleared(original):
+        precondition(cleared && current == nil && original == generation)
+    case let .recoveryRequired(notice):
+        precondition(!cleared && notice == current && notice.generation == generation)
+        precondition(notice.reason == .behind && !notice.permanent)
+        precondition(notice.firstSeenMs == UInt64(values[2]) && notice.serviceTimeMs == UInt64(values[3]))
+    default:
+        preconditionFailure("unexpected recovery duty")
+    }
+    try await wallet.acknowledgeEvents(through: duty)
+    try await wallet.shutdown()
+    let reopened = try await host.load(appId: app)
+    let pending = try await reopened.unacknowledgedEvents()
+    let held = try await reopened.recoveryRequired()
+    precondition(!pending.contains { $0.id == duty } && held?.generation == (cleared ? nil : generation))
+    precondition(method.transferCount == 0)
+    try await reopened.shutdown()
+}
+
 @main
 private enum WalletConsumer {
     static func main() async throws {
@@ -393,5 +435,7 @@ private enum WalletConsumer {
             preconditionFailure("replaced the stored approval")
         } catch WalletError.EnrollmentConflict {}
         try await recoverReceipt(issuer)
+        try await acknowledgeRecovery(issuer, cleared: false)
+        try await acknowledgeRecovery(issuer, cleared: true)
     }
 }
