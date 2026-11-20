@@ -27,6 +27,7 @@
 
 mod delivery;
 mod one_time;
+#[allow(dead_code)]
 #[path = "../switch_rig/mod.rs"]
 mod switch_rig;
 mod switch_world;

@@ -44,7 +44,7 @@
 set -euo pipefail
 
 # The test targets that need the Switch service; they run only with --switch.
-network_targets=(fetch_transport switch_flow)
+network_targets=(fetch_transport switch_flow transport_faults)
 
 usage() {
   echo "usage: $0 [--switch] <chromium|firefox|webkit|chrome|all> [page|worker|both] [cargo test args...]" >&2
