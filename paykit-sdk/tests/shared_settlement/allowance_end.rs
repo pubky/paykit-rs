@@ -299,6 +299,50 @@ async fn upload_without_proof(
     Ok(())
 }
 
+async fn check_incomplete_backup(
+    w: &World,
+    payer: &mut Paykit,
+    target: &pubky_switch_client::app::RecordTarget,
+    offer: &paykit_sdk::SentAllowance,
+    seller: &[u8; 32],
+    rail: &Arc<FakeRail>,
+) -> TestResult<Vec<u8>> {
+    let kept = payer.app().protocol_scan("paykit", b"ap/").await?;
+    let [(key, _)] = kept.as_slice() else {
+        panic!("one prepared withdrawal")
+    };
+    let backup = payer.backup().await?;
+    let mut restored = Box::pin(Paykit::restore(
+        w.app_env(Arc::new(MemoryStore::new())),
+        Default::default(),
+        &backup,
+        rail.clone(),
+        Arc::new(TestTimer),
+    ))
+    .await?;
+    Box::pin(finish_restored_withdrawal(&mut restored)).await?;
+    assert!(restored
+        .app_mut()
+        .read_record_application(target)
+        .await?
+        .is_none());
+    assert!(matches!(
+        Box::pin(restored.end_allowance(&offer.record))
+            .await
+            .unwrap_err()
+            .refusal(),
+        Some(Refusal::NotNow(_))
+    ));
+    assert_eq!(restored.app().protocol_scan("paykit", b"ap/").await?, kept);
+    assert!(restored
+        .app()
+        .sent_to(seller, 0, u64::MAX)
+        .await?
+        .iter()
+        .all(|message| message.kind != "paykit.allowance_end"));
+    Ok(key.clone())
+}
+
 async fn receive_fenced_acceptance(
     w: &World,
     case: RecoveredProposal,
@@ -726,13 +770,7 @@ async fn receive_fenced_acceptance(
         .iter()
         .any(|n| n.kind == NoticeKind::AllowanceAcceptanceBeforeLoss
             && n.msg_id.as_deref() == Some(&answer)));
-    let mut prepared_key = None;
-    if case == RecoveredProposal::UploadWithoutProof {
-        let kept = payer.app().protocol_scan("paykit", b"ap/").await?;
-        let [(key, _)] = kept.as_slice() else {
-            panic!("one prepared withdrawal")
-        };
-        prepared_key = Some(key.clone());
+    let prepared_key = if case == RecoveredProposal::UploadWithoutProof {
         let before_delete = payer
             .app_mut()
             .read_record_application(&target)
@@ -741,53 +779,19 @@ async fn receive_fenced_acceptance(
         assert_eq!(before_delete.installed_version, expected_version);
         assert_eq!(before_delete.application.item_hash, created_at.item_hash);
         assert!(before_delete.record.content.value().is_some());
-        let backup = payer.backup().await?;
-        let id = payer.app_id();
-        drop(payer);
-        let mut restored = Box::pin(Paykit::restore(
-            w.app_env(Arc::new(MemoryStore::new())),
-            Default::default(),
-            &backup,
-            rail.clone(),
-            Arc::new(TestTimer),
-        ))
-        .await?;
-        Box::pin(finish_restored_withdrawal(&mut restored)).await?;
-        assert!(restored
-            .app_mut()
-            .read_record_application(&target)
-            .await?
-            .is_none());
-        assert!(matches!(
-            restored
-                .end_allowance(&offer.record)
-                .await
-                .unwrap_err()
-                .refusal(),
-            Some(Refusal::NotNow(_))
-        ));
-        assert_eq!(
-            restored.app().protocol_scan("paykit", b"ap/").await?.len(),
-            1
-        );
-        assert!(restored
-            .app()
-            .sent_to(&peer, 0, u64::MAX)
-            .await?
-            .iter()
-            .all(|message| message.kind != "paykit.allowance_end"));
-        drop(restored);
-        payer = Box::pin(Paykit::load(
-            w.app_env(payer_store.clone()),
-            Default::default(),
-            id,
-            rail.clone(),
-            Arc::new(TestTimer),
-        ))
-        .await?;
-        Box::pin(finish_restored_withdrawal(&mut payer)).await?;
-    }
-    if case == RecoveredProposal::Interrupted {
+        Some(
+            Box::pin(check_incomplete_backup(
+                w, &mut payer, &target, &offer, &peer, &rail,
+            ))
+            .await?,
+        )
+    } else {
+        None
+    };
+    if matches!(
+        case,
+        RecoveredProposal::Interrupted | RecoveredProposal::UploadWithoutProof
+    ) {
         let kept = payer.app().protocol_scan("paykit", b"ap/").await?;
         assert_eq!(
             kept.len(),
