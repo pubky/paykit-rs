@@ -18,7 +18,8 @@
 //! - `panic`: `install_panic_hook`, which reports a Rust panic to the browser console;
 //! - `fetch`: `FetchTransport`, the Switch client's `Transport` on the browser's `fetch`;
 //! - `store`: `OpfsStore`, the Switch client's `StateStore` on the Origin Private File System,
-//!   in a dedicated worker only. It writes plaintext, so it is not for production use yet.
+//!   in a dedicated worker only, with every snapshot sealed under a data key kept wrapped in
+//!   IndexedDB. Its docs say what sealing protects against and what it does not.
 //!
 //! The tests under `tests/` run a subset of Paykit's vectors, the random generator, signing,
 //! and sealing natively and in browser engines. In browser engines only, they run the host

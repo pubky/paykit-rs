@@ -18,10 +18,10 @@
 //! In the browser only (`opening.rs`), on the store's real files: committed state survives
 //! dropping and opening the store again; a store open in this worker cannot be opened again,
 //! from this worker or from a nested dedicated worker, until it is dropped; a lease that
-//! outlives its store keeps it open until the lease drops; damage to the newest file opens the
-//! store at the other file's older state, and the next commit lands and survives; damage to
-//! both files is refused as corrupt and leaves both unchanged; an invalid name creates
-//! nothing. Every test removes the directory it created.
+//! outlives its store keeps it open, and refuses `destroy`, until the lease drops; damage to
+//! the newest file opens the store at the other file's older state, and the next commit lands
+//! and survives; damage to both files is refused as corrupt and leaves both unchanged; an
+//! invalid name creates nothing. Every test removes the store it created, its key record included.
 //!
 //! The target runs in a dedicated worker only, with a browser profile on disk
 //! (`rig/runner.mjs`, "Target modes").

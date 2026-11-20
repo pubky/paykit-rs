@@ -1,15 +1,17 @@
 //! What the store targets share about the Origin Private File System: fresh store names, the
-//! origin's OPFS root, the raw bytes of a store's files, and removing a store.
+//! origin's OPFS root, the raw bytes of a store's files, and removing a store with its key
+//! record.
 //!
 //! Each store target includes this module; the items a target does not use allow `dead_code`
 //! there.
 
 use js_sys::{Promise, Reflect};
+use paykit_browser::store::OpfsStore;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
     DomException, FileSystemDirectoryHandle, FileSystemFileHandle, FileSystemReadWriteOptions,
-    FileSystemRemoveOptions, FileSystemSyncAccessHandle, StorageManager,
+    FileSystemSyncAccessHandle, StorageManager,
 };
 
 /// A store name no other test or run uses: `label`, a dash and 16 random hex digits. A run
@@ -66,17 +68,14 @@ pub async fn exists(root: &FileSystemDirectoryHandle, name: &str) -> bool {
     }
 }
 
-/// Remove the store `name`, its directory and both files, and check that it is gone. Every
-/// store must be removed: WebKit, as Playwright runs it on macOS, keeps every origin's OPFS in
-/// one folder of the user's Library, whatever the profile, so a store left behind stays on the
-/// machine. The store must be dropped first, as its open files hold the directory.
+/// Remove the store `name` with `OpfsStore::destroy`: its key record in IndexedDB, then its
+/// directory and both files; and check that the directory is gone. Every store must be
+/// removed: WebKit, as Playwright runs it on macOS, keeps every origin's OPFS in one folder of
+/// the user's Library, whatever the profile, so a store left behind stays on the machine. The
+/// store must be dropped first, as its open files hold the directory.
 pub async fn remove_store(name: &str) {
+    OpfsStore::destroy(name).await.expect("remove the store");
     let root = root().await;
-    let options = FileSystemRemoveOptions::new();
-    options.set_recursive(true);
-    JsFuture::from(root.remove_entry_with_options(name, &options))
-        .await
-        .expect("remove the store");
     assert!(
         !exists(&root, name).await,
         "the store {name} is still there"

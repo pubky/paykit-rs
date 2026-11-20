@@ -1,5 +1,10 @@
 //! The store's logic over two slot files, generic over [`SlotFile`] so the unit tests can run
-//! it on in-memory files: opening, the five `StateStore` calls, ownership and leases.
+//! it on in-memory files: inspecting the files without a key, opening, the five `StateStore`
+//! calls, ownership and leases.
+//!
+//! Every slot is sealed by the store's [`SnapshotSealer`] (`seal.rs`, `format.rs`). The sealer,
+//! and with it the data key, is in memory for the store's life; how the key is kept between
+//! sessions is the browser side's.
 
 use std::collections::BTreeMap;
 use std::ops::Bound;
@@ -11,7 +16,8 @@ use pubky_switch_client::store::{
 };
 
 use super::file::{FileError, SlotFile};
-use super::format::{self, Entries, Slot, SlotId, HEADER_LEN};
+use super::format::{self, Entries, Inspection, Slot, SlotHeader, SlotId, HEADER_LEN};
+use super::seal::{self, SnapshotSealer};
 use super::OpenError;
 
 /// A store on two slot files, shared with its leases.
@@ -21,6 +27,8 @@ pub(crate) struct SlotStore<F> {
 
 struct Core<F> {
     files: [F; 2],
+    /// Seals every slot this store writes and opens every slot it reads.
+    sealer: SnapshotSealer,
     /// The slot that holds `entries`, or `None` before the first commit.
     current: Option<SlotId>,
     /// The generation of `entries`; 0 before the first commit.
@@ -49,12 +57,32 @@ fn lock<F>(core: &Mutex<Core<F>>) -> MutexGuard<'_, Core<F>> {
 }
 
 impl<F: SlotFile> SlotStore<F> {
-    /// Read both slots and open the store at the current one. Opening writes nothing.
-    pub(crate) fn open(mut files: [F; 2]) -> Result<Self, OpenError> {
-        let current = read_current(&mut files)?;
+    /// What the two files' headers show, read without a key: both empty, a slot of the earlier
+    /// unsealed format, or the headers of the slots present, with their format versions and
+    /// store identifiers. It reads at most a header of each file and writes nothing, so the
+    /// browser side can decide how to find the key before it opens the store.
+    pub(crate) fn inspect(files: &mut [F; 2]) -> Result<Inspection, OpenError> {
+        let [a, b] = read_prefixes(files)?;
+        Ok(Inspection::of([a.header(), b.header()]))
+    }
+
+    /// Read both slots, open them with `sealer`, and open the store at the current one.
+    /// Opening writes nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`OpenError::UnsealedFormat`] when a file starts as a slot of the earlier unsealed
+    /// format, decided on its header before anything is decrypted;
+    /// [`OpenError::NewerFormat`] for a slot of a newer format; [`OpenError::KeyLost`] when a
+    /// complete header of this format names another store than `sealer`'s;
+    /// [`OpenError::Corrupt`] when the slots hold no state to trust (a slot that does not open
+    /// under the key counts as damaged); [`OpenError::Unavailable`] when a file call fails.
+    pub(crate) fn open(mut files: [F; 2], sealer: SnapshotSealer) -> Result<Self, OpenError> {
+        let current = read_current(&mut files, &sealer)?;
         Ok(Self {
             core: Arc::new(Mutex::new(Core {
                 files,
+                sealer,
                 current: current.slot,
                 generation: current.generation,
                 entries: current.entries,
@@ -75,34 +103,101 @@ impl<F: SlotFile> SlotStore<F> {
     }
 }
 
-/// Read both slots and pick the current state, as opening does. Nothing is written.
-fn read_current<F: SlotFile>(files: &mut [F; 2]) -> Result<format::Current, OpenError> {
-    let unavailable = |error: FileError| OpenError::Unavailable {
+fn unavailable(error: FileError) -> OpenError {
+    OpenError::Unavailable {
         name: error.name().to_owned(),
-    };
+    }
+}
+
+/// Read both slots and pick the current state, as opening does. Nothing is written.
+///
+/// The order of the checks: a slot of the unsealed format is refused on its header, before
+/// anything is decrypted. Then both slots are opened with `sealer`; a slot of a newer format
+/// refuses the store, as a newer build may keep its key differently; then a complete header of
+/// this format that names another store is [`OpenError::KeyLost`], whatever the other slot
+/// holds: such a slot is never this store's, and the key in hand may be the wrong one. Only
+/// then do the two-slot rules of [`format::pick_current`] apply.
+fn read_current<F: SlotFile>(
+    files: &mut [F; 2],
+    sealer: &SnapshotSealer,
+) -> Result<format::Current, OpenError> {
+    let [a_prefix, b_prefix] = read_prefixes(files)?;
     let [a, b] = files;
-    let a = read_slot(a).map_err(unavailable)?;
-    let b = read_slot(b).map_err(unavailable)?;
+    let headers = [a_prefix.header(), b_prefix.header()];
+    if Inspection::of(headers) == Inspection::UnsealedFormat {
+        return Err(OpenError::UnsealedFormat);
+    }
+    let a = read_rest(a, sealer, a_prefix).map_err(unavailable)?;
+    let b = read_rest(b, sealer, b_prefix).map_err(unavailable)?;
+    let newer = matches!(a, Slot::NewerFormat(_)) || matches!(b, Slot::NewerFormat(_));
+    let other_store = headers
+        .into_iter()
+        .filter_map(SlotHeader::store_id)
+        .any(|store_id| store_id != sealer.store_id());
+    if other_store && !newer {
+        return Err(OpenError::KeyLost);
+    }
     format::pick_current(a, b)
 }
 
-/// Read one slot: its header first, so a length on disk is checked against the file size and
-/// the state cap before the rest of the slot is read or allocated.
-fn read_slot<F: SlotFile>(file: &mut F) -> Result<Slot, FileError> {
+/// A slot file's size and its first bytes, up to a header.
+struct Prefix {
+    size: u64,
+    bytes: Vec<u8>,
+}
+
+impl Prefix {
+    /// What the header shows without a key.
+    fn header(&self) -> SlotHeader {
+        format::inspect_header(&self.bytes, self.size)
+    }
+}
+
+/// Read both slot files' sizes and first bytes, at most a header of each.
+fn read_prefixes<F: SlotFile>(files: &mut [F; 2]) -> Result<[Prefix; 2], OpenError> {
+    let [a, b] = files;
+    Ok([
+        read_prefix(a).map_err(unavailable)?,
+        read_prefix(b).map_err(unavailable)?,
+    ])
+}
+
+/// Read a slot file's size and its first bytes, at most a header.
+fn read_prefix<F: SlotFile>(file: &mut F) -> Result<Prefix, FileError> {
     let size = file.size()?;
     if size == 0 {
-        return Ok(Slot::Empty);
+        return Ok(Prefix {
+            size,
+            bytes: Vec::new(),
+        });
     }
     // At most `HEADER_LEN`, so the conversion cannot fail.
     let prefix_len = usize::try_from(size.min(HEADER_LEN as u64)).unwrap_or(HEADER_LEN);
-    let prefix = file.read_all(prefix_len)?;
-    if let Some(slot) = format::read_header(&prefix, size) {
+    let bytes = file.read_all(prefix_len)?;
+    Ok(Prefix { size, bytes })
+}
+
+/// Read the rest of a slot whose `prefix` was read: the header decides first, so a length on
+/// disk is checked against the file size and the caps before the rest of the slot is read or
+/// allocated.
+fn read_rest<F: SlotFile>(
+    file: &mut F,
+    sealer: &SnapshotSealer,
+    prefix: Prefix,
+) -> Result<Slot, FileError> {
+    if let Some(slot) = format::read_header(&prefix.bytes, prefix.size) {
         return Ok(slot);
     }
-    // `read_header` bounded the size by the state cap, which fits in wasm32's `usize`.
-    let len =
-        usize::try_from(size).map_err(|_| FileError::Failed("slot larger than memory".into()))?;
-    Ok(format::decode_slot(&file.read_all(len)?))
+    // `read_header` bounded the size by the caps, which fit in wasm32's `usize`.
+    let len = usize::try_from(prefix.size)
+        .map_err(|_| FileError::Failed("slot larger than memory".into()))?;
+    Ok(format::decode_slot(sealer, file.read_all(len)?))
+}
+
+/// Read one slot whole, as opening does.
+fn read_slot<F: SlotFile>(file: &mut F, sealer: &SnapshotSealer) -> Result<Slot, FileError> {
+    let prefix = read_prefix(file)?;
+    read_rest(file, sealer, prefix)
 }
 
 impl<F: SlotFile> Core<F> {
@@ -116,16 +211,19 @@ impl<F: SlotFile> Core<F> {
     ///
     /// On failure the store stays broken, and the call fails: `Unavailable` when a file call
     /// fails, the flushes included, which a later call may get past; `Corrupt` when the slots
-    /// hold no state an open would accept. A slot of a newer format counts as corrupt here:
-    /// this store holds both files under the browser's exclusive lock and writes only its own
-    /// format, so such a slot can only be damage.
+    /// hold no state an open would accept. A slot of a newer or the unsealed format, or of
+    /// another store, counts as corrupt here: this store holds both files under the browser's
+    /// exclusive lock and writes only its own sealed slots, so such a slot can only be damage.
     fn reload(&mut self) -> Result<(), StoreError> {
         for file in &mut self.files {
             file.flush().map_err(|_| StoreError::Unavailable)?;
         }
-        let current = read_current(&mut self.files).map_err(|error| match error {
+        let current = read_current(&mut self.files, &self.sealer).map_err(|error| match error {
             OpenError::Unavailable { .. } => StoreError::Unavailable,
-            OpenError::Corrupt | OpenError::NewerFormat { .. } => StoreError::Corrupt,
+            OpenError::Corrupt
+            | OpenError::NewerFormat { .. }
+            | OpenError::UnsealedFormat
+            | OpenError::KeyLost => StoreError::Corrupt,
             // Not returned by reading the slots.
             OpenError::InvalidName | OpenError::NotDedicatedWorker | OpenError::InUse => {
                 StoreError::Unavailable
@@ -150,14 +248,25 @@ impl<F: SlotFile> Core<F> {
     /// failed flush is left, and then nobody can tell whether the slot will survive. An
     /// unknown outcome returns `Unknown` and marks the store broken, so the next call flushes
     /// again and reads the state from disk.
+    ///
+    /// When the random number generator fails, the commit writes nothing and returns
+    /// `StoreError::Other`, as the Switch client does when its own randomness fails.
     fn commit(&mut self, writes: Vec<Write>) -> Result<(), StoreError> {
         // Nothing is written when the counter is spent; it takes 2^64 - 1 commits.
         let generation = self.generation.checked_add(1).ok_or_else(|| {
             StoreError::Other("the store's generation counter is exhausted".into())
         })?;
+        // A fresh random nonce for every write, never one derived from the generation or any
+        // other counter: after a torn or failed write, the same generation is written again
+        // with different content, and a counter nonce would then be used twice under one key,
+        // which breaks both the secrecy and the authenticity of XChaCha20-Poly1305. 24 random
+        // bytes make a repeat negligible.
+        let nonce = seal::random_nonce()
+            .map_err(|_| StoreError::Other("the store's randomness is unavailable".into()))?;
         let mut next = self.entries.clone();
         apply(&mut next, writes);
-        let slot = format::encode_slot(generation, &next).ok_or(StoreError::Full)?;
+        let slot =
+            format::encode_slot(&self.sealer, generation, &nonce, &next).ok_or(StoreError::Full)?;
         let target = self.current.map_or(SlotId::A, SlotId::other);
         let file = &mut self.files[target.index()];
         let new_len = u64::try_from(slot.len()).unwrap_or(u64::MAX);
@@ -196,7 +305,7 @@ impl<F: SlotFile> Core<F> {
     /// it cannot be read back, the outcome is unknown: `Unknown`, and the store is marked
     /// broken.
     fn failed_write(&mut self, target: SlotId, generation: u64, error: FileError) -> StoreError {
-        match read_slot(&mut self.files[target.index()]) {
+        match read_slot(&mut self.files[target.index()], &self.sealer) {
             Ok(Slot::Valid {
                 generation: found, ..
             }) if found == generation => {}
@@ -350,13 +459,24 @@ mod tests {
     use pubky_switch_client::store::StoreHandle;
 
     use super::super::file::{MemoryDisk, MemoryFile, Op, OpKind};
-    use super::super::format::{encode_slot, retag, seal, FORMAT_VERSION};
+    use super::super::format::tests::{
+        decode, encode, sealer, test_key, unsealed_slot, TEST_STORE,
+    };
+    use super::super::format::{
+        seal_raw, FORMAT_VERSION, GENERATION_AT, NONCE_AT, SEALED_LEN_AT, STORE_ID_AT,
+    };
+    use super::super::seal::{fault, DataKey, StoreId, NONCE_LEN, STORE_ID_LEN, TAG_LEN};
     use super::*;
 
     type Store = SlotStore<MemoryFile>;
 
     fn open(disk: &MemoryDisk) -> Store {
-        SlotStore::open(disk.files()).unwrap()
+        SlotStore::open(disk.files(), sealer()).unwrap()
+    }
+
+    /// The error opening the tests' store on `disk` fails with.
+    fn open_error(disk: &MemoryDisk) -> Option<OpenError> {
+        SlotStore::open(disk.files(), sealer()).err()
     }
 
     fn put(ns: &str, key: &[u8], value: &[u8]) -> WriteBatch {
@@ -378,9 +498,20 @@ mod tests {
         entries
     }
 
-    /// A slot on disk holding `k = value` in `ns` at `generation`.
+    /// A slot of the tests' store holding `k = value` in `ns` at `generation`.
     fn slot(generation: u64, value: &[u8]) -> Vec<u8> {
-        encode_slot(generation, &state(value)).unwrap()
+        encode(generation, &state(value)).unwrap()
+    }
+
+    /// The nonce of the slot in `bytes`.
+    fn nonce_of(bytes: &[u8]) -> [u8; NONCE_LEN] {
+        bytes[NONCE_AT..SEALED_LEN_AT].try_into().unwrap()
+    }
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
     }
 
     /// The generation and slot the store holds in memory.
@@ -462,8 +593,8 @@ mod tests {
             drop(store);
 
             // The commits went to alternate slots, each holding the whole state.
-            assert!(matches!(format::decode_slot(&disk.bytes(0)), Slot::Valid { generation: 1, .. }));
-            assert!(matches!(format::decode_slot(&disk.bytes(1)), Slot::Valid { generation: 2, .. }));
+            assert!(matches!(decode(&disk.bytes(0)), Slot::Valid { generation: 1, .. }));
+            assert!(matches!(decode(&disk.bytes(1)), Slot::Valid { generation: 2, .. }));
             let store = open(&disk);
             assert_eq!(position(&store), (2, Some(SlotId::B)));
             assert_eq!(get(&store, b"a"), None);
@@ -480,7 +611,7 @@ mod tests {
             // Slot A holds generation 1 and slot B generation 2; generation 3 goes over A, the
             // same length as the slot it replaces, so a torn write leaves old bytes behind it.
             let len = slot(3, b"value-3").len();
-            for cut in [0, 10, HEADER_LEN - 1, HEADER_LEN + 5, len - 32, len - 5, len - 1] {
+            for cut in [0, 10, HEADER_LEN - 1, HEADER_LEN + 5, len - TAG_LEN, len - 5, len - 1] {
                 let disk = MemoryDisk::default();
                 let store = open(&disk);
                 store.commit(put("ns", b"k", b"value-1")).unwrap();
@@ -518,8 +649,10 @@ mod tests {
         fn test_store_open_ignores_a_damaged_slot() {
             let current = slot(2, b"value-2");
             let len = current.len();
-            // The magic, the generation, the payload length, the payload and the tag.
-            for at in [0, 14, 21, HEADER_LEN + 2, len - 32, len - 1] {
+            // The magic, the version, the generation, the nonce, the sealed length, the
+            // ciphertext at its start, middle and end, and the tag. (A changed store identifier
+            // is another store's slot: `KeyLost`, below.)
+            for at in [0, 8, 14, NONCE_AT, NONCE_AT + 23, SEALED_LEN_AT + 1, HEADER_LEN, (HEADER_LEN + len - TAG_LEN) / 2, len - TAG_LEN - 1, len - TAG_LEN, len - 1] {
                 let disk = MemoryDisk::default();
                 disk.set_bytes(0, slot(1, b"value-1"));
                 let mut damaged = current.clone();
@@ -575,12 +708,12 @@ mod tests {
             let mut torn = slot(2, b"value-2");
             torn.pop();
             disk.set_bytes(1, torn);
-            assert_eq!(SlotStore::open(disk.files()).err(), Some(OpenError::Corrupt));
-            // A slot whose tag matches but whose payload does not decode is corrupt as well,
-            // even next to a valid slot.
+            assert_eq!(open_error(&disk), Some(OpenError::Corrupt));
+            // A slot that opens under the key but whose payload does not decode is corrupt as
+            // well, even next to a valid slot.
             disk.set_bytes(0, slot(1, b"value-1"));
-            disk.set_bytes(1, seal(2, &[1, 2, 3]));
-            assert_eq!(SlotStore::open(disk.files()).err(), Some(OpenError::Corrupt));
+            disk.set_bytes(1, seal_raw(&sealer(), FORMAT_VERSION, 2, &[1, 2, 3]));
+            assert_eq!(open_error(&disk), Some(OpenError::Corrupt));
             assert!(!writes_anything(&disk.take_ops()));
         }
     }
@@ -597,26 +730,28 @@ mod tests {
             assert_eq!(position(&open(&disk)), (0, None));
             // A torn slot that does not start as a first commit is not.
             disk.set_bytes(1, b"torn".to_vec());
-            assert_eq!(SlotStore::open(disk.files()).err(), Some(OpenError::Corrupt));
+            assert_eq!(open_error(&disk), Some(OpenError::Corrupt));
         }
     }
 
     store_test! {
         fn test_store_open_refuses_a_newer_format_and_writes_nothing() {
             let newer_version = FORMAT_VERSION + 1;
-            let mut newer = slot(9, b"value-9");
-            newer[8..12].copy_from_slice(&newer_version.to_le_bytes());
             // A newer build's slot has its version under its tag.
-            let newer = retag(newer);
+            let newer = seal_raw(&sealer(), newer_version, 9, b"anything");
             // Only the magic and the version, of a format whose header may be shorter.
             let short = newer[..12].to_vec();
+            // A newer slot next to a slot of another store is still a newer format: a newer
+            // build may keep its key differently.
+            let mut other_store = slot(1, b"value-1");
+            other_store[STORE_ID_AT] ^= 0x01;
             for (bytes, version) in [(newer.clone(), newer_version), (short, newer_version)] {
-                for at in [0, 1] {
+                for (at, other) in [(0, slot(1, b"value-1")), (1, slot(1, b"value-1")), (0, other_store.clone())] {
                     let disk = MemoryDisk::default();
-                    disk.set_bytes(1 - at, slot(1, b"value-1"));
+                    disk.set_bytes(1 - at, other);
                     disk.set_bytes(at, bytes.clone());
                     assert_eq!(
-                        SlotStore::open(disk.files()).err(),
+                        open_error(&disk),
                         Some(OpenError::NewerFormat { version })
                     );
                     assert!(!writes_anything(&disk.take_ops()));
@@ -628,8 +763,8 @@ mod tests {
 
     store_test! {
         fn test_store_open_ignores_a_changed_version_field_in_the_stale_slot() {
-            // The version changes to a newer one (0x81) or an older one (0).
-            for flip in [0x80, 0x01] {
+            // The version changes to a newer one (0x82 or 3) or an older one (0).
+            for flip in [0x80, 0x01, 0x02] {
                 let disk = MemoryDisk::default();
                 let mut stale = slot(1, b"value-1");
                 stale[8] ^= flip;
@@ -648,16 +783,16 @@ mod tests {
     store_test! {
         fn test_store_open_damaged_only_slot_is_corrupt_and_torn_first_commit_is_new() {
             // A store with one commit: slot A holds generation 1 and slot B is empty. A changed
-            // byte in A's magic, version, generation, payload length, payload or tag leaves a
-            // slot that fails its checks, with nothing to fall back to.
+            // byte in A's magic, version, generation, nonce, sealed length, ciphertext or tag
+            // leaves a slot that fails its checks, with nothing to fall back to.
             let complete = slot(1, b"value-1");
             let len = complete.len();
-            for at in [0, 8, 14, 20, 21, 27, HEADER_LEN + 2, len - 32, len - 1] {
+            for at in [0, 8, 14, NONCE_AT, SEALED_LEN_AT, SEALED_LEN_AT + 1, HEADER_LEN - 1, HEADER_LEN + 2, len - TAG_LEN, len - 1] {
                 let disk = MemoryDisk::default();
                 let mut damaged = complete.clone();
                 damaged[at] ^= 0x01;
                 disk.set_bytes(0, damaged.clone());
-                assert_eq!(SlotStore::open(disk.files()).err(), Some(OpenError::Corrupt), "byte {at}");
+                assert_eq!(open_error(&disk), Some(OpenError::Corrupt), "byte {at}");
                 assert!(!writes_anything(&disk.take_ops()));
                 assert_eq!(disk.bytes(0), damaged, "byte {at}");
             }
@@ -690,21 +825,25 @@ mod tests {
         fn test_store_open_reads_no_more_than_a_header_for_absurd_lengths() {
             let valid = slot(2, b"value-2");
             let size = u64::try_from(valid.len()).unwrap();
-            for payload_len in [size, format::MAX_STATE_BYTES + 1, u64::MAX] {
+            // A sealed length of zero, shorter than a tag, larger than the file, over the cap,
+            // and the largest.
+            let tag_len = u64::try_from(TAG_LEN).unwrap();
+            for sealed_len in [0, tag_len - 1, size, format::MAX_STATE_BYTES + tag_len + 1, u64::MAX] {
                 let mut bytes = valid.clone();
-                bytes[20..28].copy_from_slice(&payload_len.to_le_bytes());
+                bytes[SEALED_LEN_AT..HEADER_LEN].copy_from_slice(&sealed_len.to_le_bytes());
                 let disk = MemoryDisk::default();
                 disk.set_bytes(0, slot(1, b"value-1"));
                 disk.set_bytes(1, bytes);
-                assert_eq!(position(&open(&disk)), (1, Some(SlotId::A)), "{payload_len}");
+                assert_eq!(position(&open(&disk)), (1, Some(SlotId::A)), "{sealed_len}");
                 let reads: Vec<_> = disk.take_ops().into_iter().filter(|op| matches!(op, Op::Read(1, _))).collect();
-                assert_eq!(reads, vec![Op::Read(1, HEADER_LEN)], "{payload_len}");
+                assert_eq!(reads, vec![Op::Read(1, HEADER_LEN)], "{sealed_len}");
             }
             // A file the browser reports as larger than any valid slot, with a header that asks
             // for that size.
             for claimed in [2 * format::MAX_STATE_BYTES, u64::MAX] {
                 let mut header = slot(1, b"value-1")[..HEADER_LEN].to_vec();
-                header[20..28].copy_from_slice(&claimed.saturating_sub(60).to_le_bytes());
+                let header_len = u64::try_from(HEADER_LEN).unwrap();
+                header[SEALED_LEN_AT..].copy_from_slice(&claimed.saturating_sub(header_len).to_le_bytes());
                 let disk = MemoryDisk::default();
                 disk.set_bytes(1, header);
                 disk.claim_size(1, claimed);
@@ -923,7 +1062,8 @@ mod tests {
             // stay behind it.
             assert_eq!(store.commit(put("ns", b"k", b"value-3")), Err(StoreError::Unavailable));
             assert_eq!(get(&store, b"k"), Some(b"value-2".to_vec()));
-            assert_eq!(&disk.bytes(0)[..slot(3, b"value-3").len()], slot(3, b"value-3"));
+            let complete = disk.bytes(0)[..slot(3, b"value-3").len()].to_vec();
+            assert_eq!(decode(&complete), Slot::Valid { generation: 3, entries: state(b"value-3") });
             drop(store);
             let store = open(&disk);
             assert_eq!(position(&store), (2, Some(SlotId::B)));
@@ -998,6 +1138,295 @@ mod tests {
             assert_eq!(disk.take_ops(), vec![]);
             drop(lease);
             assert_eq!(disk.take_ops(), vec![Op::Close(0), Op::Close(1)]);
+        }
+    }
+
+    store_test! {
+        fn test_store_seal_round_trip_keeps_no_plaintext_or_key_on_disk() {
+            let marker = b"PLAINTEXT-MARKER-5f3a9c";
+            let key = DataKey::generate().unwrap();
+            let store_id = StoreId::generate().unwrap();
+            let disk = MemoryDisk::default();
+            let store = SlotStore::open(disk.files(), SnapshotSealer::new(&key, store_id)).unwrap();
+            store.commit(put("ns", b"k", marker)).unwrap();
+            store.commit(put("marker-namespace", b"marker-key", b"v")).unwrap();
+            drop(store);
+            // Neither file holds the value, the namespace, the key or the data key's bytes.
+            for slot in [0, 1] {
+                let bytes = disk.bytes(slot);
+                assert!(!bytes.is_empty());
+                for needle in [&marker[..], b"marker-namespace", b"marker-key", key.as_bytes()] {
+                    assert!(!contains(&bytes, needle), "slot {slot}");
+                }
+            }
+            // The same key and store identifier open the store again.
+            let again = DataKey::from_bytes(key.as_bytes()).unwrap();
+            let store = SlotStore::open(disk.files(), SnapshotSealer::new(&again, store_id)).unwrap();
+            assert_eq!(position(&store), (2, Some(SlotId::B)));
+            assert_eq!(get(&store, b"k"), Some(marker.to_vec()));
+        }
+    }
+
+    store_test! {
+        fn test_store_seal_every_changed_byte_is_refused() {
+            let older = slot(1, b"value-1");
+            let newer = slot(2, b"value-2");
+            let store_id = STORE_ID_AT..STORE_ID_AT + STORE_ID_LEN;
+            // Each byte of the newer slot, next to the older one: the store opens at the older
+            // slot, or for a changed store identifier refuses with `KeyLost`.
+            for at in 0..newer.len() {
+                let disk = MemoryDisk::default();
+                disk.set_bytes(0, older.clone());
+                let mut changed = newer.clone();
+                changed[at] ^= 0x01;
+                disk.set_bytes(1, changed.clone());
+                match SlotStore::open(disk.files(), sealer()) {
+                    Ok(store) => {
+                        assert!(!store_id.contains(&at), "byte {at}");
+                        assert_eq!(position(&store), (1, Some(SlotId::A)), "byte {at}");
+                    }
+                    Err(error) => {
+                        assert!(store_id.contains(&at), "byte {at}");
+                        assert_eq!(error, OpenError::KeyLost, "byte {at}");
+                    }
+                }
+                assert!(!writes_anything(&disk.take_ops()), "byte {at}");
+                assert_eq!(disk.bytes(1), changed);
+            }
+            // Each byte of a store's only slot: corrupt, or `KeyLost` for the store identifier.
+            for at in 0..older.len() {
+                let disk = MemoryDisk::default();
+                let mut changed = older.clone();
+                changed[at] ^= 0x01;
+                disk.set_bytes(0, changed);
+                let expected = if store_id.contains(&at) { OpenError::KeyLost } else { OpenError::Corrupt };
+                assert_eq!(open_error(&disk), Some(expected), "byte {at}");
+                assert!(!writes_anything(&disk.take_ops()), "byte {at}");
+            }
+        }
+    }
+
+    store_test! {
+        fn test_store_seal_slot_copied_between_slots_or_stores_is_refused() {
+            let first = slot(1, b"value-1");
+            let second = slot(2, b"value-2");
+            // A slot copied whole over the other slot: two valid slots of one generation.
+            let disk = MemoryDisk::default();
+            disk.set_bytes(0, second.clone());
+            disk.set_bytes(1, second.clone());
+            assert_eq!(open_error(&disk), Some(OpenError::Corrupt));
+            // The nonce, ciphertext and tag of generation 2 moved under a header of generation 3
+            // in the other slot: it does not open, and the store opens at generation 2.
+            let mut moved = slot(3, b"value-2")[..NONCE_AT].to_vec();
+            moved.extend_from_slice(&second[NONCE_AT..]);
+            let disk = MemoryDisk::default();
+            disk.set_bytes(0, moved);
+            disk.set_bytes(1, second.clone());
+            assert_eq!(position(&open(&disk)), (2, Some(SlotId::B)));
+            // The same with generation 1's blob under generation 2's header, with nothing else
+            // to fall back to.
+            let mut moved = second[..NONCE_AT].to_vec();
+            moved.extend_from_slice(&first[NONCE_AT..]);
+            let disk = MemoryDisk::default();
+            disk.set_bytes(1, moved);
+            assert_eq!(open_error(&disk), Some(OpenError::Corrupt));
+            // A slot of another store, under the same key or another one, next to a valid slot
+            // of this store: `KeyLost`, and nothing is written.
+            let other_id = StoreId::from_bytes([1; STORE_ID_LEN]);
+            let same_key = SnapshotSealer::new(&test_key(), other_id);
+            let other_key = SnapshotSealer::new(&DataKey::generate().unwrap(), other_id);
+            for other in [&same_key, &other_key] {
+                let foreign = format::encode_slot(other, 2, &seal::random_nonce().unwrap(), &state(b"other")).unwrap();
+                let disk = MemoryDisk::default();
+                disk.set_bytes(0, first.clone());
+                disk.set_bytes(1, foreign.clone());
+                assert_eq!(open_error(&disk), Some(OpenError::KeyLost));
+                assert!(!writes_anything(&disk.take_ops()));
+                assert_eq!(disk.bytes(1), foreign);
+                // Its blob under this store's header does not open either.
+                let mut renamed = foreign.clone();
+                renamed[STORE_ID_AT..NONCE_AT].copy_from_slice(&TEST_STORE.to_bytes());
+                disk.set_bytes(1, renamed);
+                assert_eq!(position(&open(&disk)), (1, Some(SlotId::A)));
+            }
+            // This store's files under a wrong key with the right store identifier: nothing
+            // opens, and the store is corrupt rather than new.
+            let wrong = SnapshotSealer::new(&DataKey::generate().unwrap(), TEST_STORE);
+            let disk = MemoryDisk::default();
+            disk.set_bytes(0, first);
+            disk.set_bytes(1, second);
+            assert_eq!(SlotStore::open(disk.files(), wrong).err(), Some(OpenError::Corrupt));
+            assert!(!writes_anything(&disk.take_ops()));
+        }
+    }
+
+    store_test! {
+        fn test_store_seal_key_lost_for_another_store() {
+            let other_id = StoreId::from_bytes([1; STORE_ID_LEN]);
+            let other_key = DataKey::generate().unwrap();
+            // A store of two commits under another key and store identifier.
+            let disk = MemoryDisk::default();
+            let other = SlotStore::open(disk.files(), SnapshotSealer::new(&other_key, other_id)).unwrap();
+            other.commit(put("ns", b"k", b"value-1")).unwrap();
+            other.commit(put("ns", b"k", b"value-2")).unwrap();
+            drop(other);
+            let before = [disk.bytes(0), disk.bytes(1)];
+            disk.take_ops();
+            assert_eq!(open_error(&disk), Some(OpenError::KeyLost));
+            assert!(!writes_anything(&disk.take_ops()));
+            assert_eq!([disk.bytes(0), disk.bytes(1)], before);
+            // A torn first commit of another store, whose header is complete, next to an empty
+            // file: `KeyLost`, not a new store.
+            let foreign = format::encode_slot(&SnapshotSealer::new(&other_key, other_id), 1, &seal::random_nonce().unwrap(), &state(b"v")).unwrap();
+            let disk = MemoryDisk::default();
+            disk.set_bytes(0, foreign[..HEADER_LEN + 3].to_vec());
+            assert_eq!(open_error(&disk), Some(OpenError::KeyLost));
+            // Cut before its store identifier is complete, it cannot be told from this store's
+            // own torn first commit, and opens as a new store.
+            disk.set_bytes(0, foreign[..STORE_ID_AT + 3].to_vec());
+            assert_eq!(position(&open(&disk)), (0, None));
+            // The display says what happened, and that nothing was written.
+            assert_eq!(
+                OpenError::KeyLost.to_string(),
+                "sealed data is present but its key is gone or wrong; nothing was written"
+            );
+        }
+    }
+
+    store_test! {
+        fn test_store_seal_nonce_is_fresh_after_a_failed_write() {
+            let disk = MemoryDisk::default();
+            let store = open(&disk);
+            store.commit(put("ns", b"k", b"value-1")).unwrap();
+            // The write of generation 2 stops after its header, nonce included, and applies
+            // nothing.
+            disk.tear_next_write_at(HEADER_LEN);
+            assert_eq!(store.commit(put("ns", b"k", b"value-2")), Err(StoreError::Unavailable));
+            let failed = disk.bytes(1);
+            assert_eq!(failed[GENERATION_AT..STORE_ID_AT], 2u64.to_le_bytes());
+            // Generation 2 is written again, with other content: under another nonce.
+            store.commit(put("ns", b"k", b"other value")).unwrap();
+            let written = disk.bytes(1);
+            assert_eq!(written[GENERATION_AT..STORE_ID_AT], 2u64.to_le_bytes());
+            assert_ne!(nonce_of(&failed), nonce_of(&written));
+            assert_eq!(position(&store), (2, Some(SlotId::B)));
+        }
+    }
+
+    store_test! {
+        fn test_store_seal_nonces_never_repeat_over_many_commits() {
+            let disk = MemoryDisk::default();
+            let store = open(&disk);
+            let mut nonces = std::collections::BTreeSet::new();
+            for index in 0..200u32 {
+                store.commit(put("ns", b"k", &index.to_le_bytes())).unwrap();
+                let (_, Some(current)) = position(&store) else {
+                    panic!("no slot after a commit");
+                };
+                assert!(nonces.insert(nonce_of(&disk.bytes(current.index()))), "commit {index}");
+            }
+            assert_eq!(nonces.len(), 200);
+        }
+    }
+
+    store_test! {
+        fn test_store_seal_unsealed_format_is_refused_untouched() {
+            let unsealed = unsealed_slot(1, b"\x02\0\0\0ns\x01\0\0\0k\x01\0\0\0v");
+            let cases = [
+                (unsealed.clone(), Vec::new()),
+                (Vec::new(), unsealed.clone()),
+                (slot(1, b"value-1"), unsealed_slot(2, b"")),
+                (unsealed.clone(), unsealed_slot(2, b"")),
+            ];
+            for (a, b) in cases {
+                let disk = MemoryDisk::default();
+                disk.set_bytes(0, a.clone());
+                disk.set_bytes(1, b.clone());
+                let mut files = disk.files();
+                assert_eq!(SlotStore::inspect(&mut files), Ok(Inspection::UnsealedFormat));
+                drop(files);
+                assert_eq!(open_error(&disk), Some(OpenError::UnsealedFormat));
+                let ops = disk.take_ops();
+                assert!(!writes_anything(&ops));
+                // Only headers were read: nothing was decrypted, not even a sealed slot next
+                // to it.
+                assert!(ops.iter().all(|op| !matches!(op, Op::Read(_, len) if *len > HEADER_LEN)), "{ops:?}");
+                assert_eq!([disk.bytes(0), disk.bytes(1)], [a, b]);
+            }
+        }
+    }
+
+    store_test! {
+        fn test_store_seal_torn_first_commit_next_to_an_empty_slot_is_a_new_store() {
+            let disk = MemoryDisk::default();
+            let store = open(&disk);
+            disk.tear_next_write_at(HEADER_LEN + 3);
+            assert_eq!(store.commit(put("ns", b"k", b"value-1")), Err(StoreError::Unavailable));
+            drop(store);
+            let mut files = disk.files();
+            assert_eq!(
+                SlotStore::inspect(&mut files),
+                Ok(Inspection::Present([
+                    SlotHeader::Versioned { version: FORMAT_VERSION, store_id: Some(TEST_STORE) },
+                    SlotHeader::Empty,
+                ]))
+            );
+            drop(files);
+            let store = open(&disk);
+            assert_eq!(position(&store), (0, None));
+            store.commit(put("ns", b"k", b"value-2")).unwrap();
+            assert_eq!(position(&store), (1, Some(SlotId::A)));
+        }
+    }
+
+    store_test! {
+        fn test_store_seal_randomness_failure_at_commit_writes_nothing() {
+            let disk = MemoryDisk::default();
+            let store = open(&disk);
+            store.commit(put("ns", b"k", b"value-1")).unwrap();
+            disk.take_ops();
+            fault::fail_next_random();
+            assert!(matches!(store.commit(put("ns", b"k", b"value-2")), Err(StoreError::Other(_))));
+            assert_eq!(disk.take_ops(), Vec::new());
+            assert_eq!(get(&store, b"k"), Some(b"value-1".to_vec()));
+            assert_eq!(position(&store), (1, Some(SlotId::A)));
+            // The next commit goes ahead.
+            store.commit(put("ns", b"k", b"value-3")).unwrap();
+            assert_eq!(position(&store), (2, Some(SlotId::B)));
+        }
+    }
+
+    store_test! {
+        fn test_store_seal_inspect_reads_only_headers() {
+            let disk = MemoryDisk::default();
+            let mut files = disk.files();
+            assert_eq!(SlotStore::inspect(&mut files), Ok(Inspection::Empty));
+            drop(files);
+            assert_eq!(disk.take_ops(), vec![Op::Size(0), Op::Size(1), Op::Close(0), Op::Close(1)]);
+            let store = open(&disk);
+            store.commit(put("ns", b"k", b"value-1")).unwrap();
+            store.commit(put("ns", b"k", b"value-2")).unwrap();
+            drop(store);
+            disk.take_ops();
+            let mut files = disk.files();
+            let header = SlotHeader::Versioned { version: FORMAT_VERSION, store_id: Some(TEST_STORE) };
+            let inspection = SlotStore::inspect(&mut files).unwrap();
+            assert_eq!(inspection, Inspection::Present([header, header]));
+            assert_eq!(inspection.newer_version(), None);
+            drop(files);
+            let ops = disk.take_ops();
+            assert!(!writes_anything(&ops));
+            assert_eq!(ops.iter().filter(|op| matches!(op, Op::Read(..))).collect::<Vec<_>>(), [&Op::Read(0, HEADER_LEN), &Op::Read(1, HEADER_LEN)]);
+            // A slot claiming a newer version.
+            disk.set_bytes(1, seal_raw(&sealer(), FORMAT_VERSION + 1, 3, b"anything"));
+            let mut files = disk.files();
+            assert_eq!(SlotStore::inspect(&mut files).unwrap().newer_version(), Some(FORMAT_VERSION + 1));
+            // A failed file call is `Unavailable`.
+            disk.fail_next(OpKind::Size, FileError::Failed("InvalidStateError".into()));
+            assert_eq!(
+                SlotStore::inspect(&mut files),
+                Err(OpenError::Unavailable { name: "InvalidStateError".into() })
+            );
         }
     }
 }
