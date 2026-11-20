@@ -1218,6 +1218,9 @@ impl Paykit {
             self.local_commit(tx).await?;
             return Ok(Placed::Done);
         };
+        if found.waits_for_proof {
+            return Ok(Placed::Not);
+        }
         let sender = stored.sender();
         let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME);
         let mut writes = false;
@@ -1273,14 +1276,10 @@ impl Paykit {
                     view: view.as_ref(),
                     service_time: self.service_time(),
                     journaled,
-                    on_record: found,
-                    own_app: self.app_id(),
+                    first_receipt: found.first_receipt,
                 })?,
                 FailureView::Refused | FailureView::ReadSwitch => ReceiptSettles::default(),
             };
-            if settles.waits_for_proof {
-                return Ok(Placed::Not);
-            }
             if let Some((op, deadline)) = settles.claim {
                 batch = batch
                     .op_if(op.kind(), conditions)

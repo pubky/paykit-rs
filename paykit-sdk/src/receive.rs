@@ -1794,7 +1794,7 @@ fn receipt_effect(
         }
         return Ok(());
     };
-    if waits_for_requested_record(stored, held.as_ref()) {
+    if found.waits_for_proof || waits_for_requested_record(stored, held.as_ref()) {
         return keep_reply(cx, &target, stored, position);
     }
     let mut conditions = Vec::new();
@@ -1882,12 +1882,8 @@ fn receipt_effect(
         view: view.as_ref(),
         service_time: cx.highest_service_time(),
         journaled,
-        on_record: found,
-        own_app: cx.app_id(),
+        first_receipt: found.first_receipt,
     })?;
-    if settles.waits_for_proof {
-        return keep_reply(cx, &target, stored, position);
-    }
     if let Some((op, deadline)) = settles.claim {
         cx.claim(op, conditions, deadline)?;
     }
@@ -2073,6 +2069,8 @@ pub(crate) fn period_receipt(
 /// What a receipt finds in the payer's record it names ([`receipt_on_record`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ReceiptOnRecord {
+    /// A one-time requested receipt stays in custody until its signed request and proof match.
+    pub(crate) waits_for_proof: bool,
     /// The record holds the proof the receipt names, so the receipt goes beside it.
     pub(crate) names_held_proof: bool,
     /// The record holds the proof the receipt names and no receipt yet: this receipt is the
@@ -2081,7 +2079,7 @@ pub(crate) struct ReceiptOnRecord {
 }
 
 /// Match the signed receipt to its counterparty, request and proof before placing it
-/// beside that proof or using it to resolve another app's requested attempt (Paykit
+/// beside that proof or using it to resolve the requested attempt (Paykit
 /// spec 3.4, 7.3, Paykit wire 4.11). A period's signed parent is read separately.
 pub(crate) fn receipt_on_record(
     record: &ActivityRecord,
@@ -2121,6 +2119,9 @@ pub(crate) fn receipt_on_record(
     let names_held_proof = named.is_some()
         && (requested.is_none() || receipt.billing_period.is_some() || terms.is_some());
     Some(ReceiptOnRecord {
+        waits_for_proof: requested.is_some()
+            && receipt.billing_period.is_none()
+            && !names_held_proof,
         names_held_proof,
         first_receipt: names_held_proof && record.receipt.is_none(),
     })
@@ -2183,17 +2184,14 @@ pub(crate) struct ReceiptClaim<'a> {
     pub(crate) service_time: Option<u64>,
     /// The attempt's journal entry, if this app holds it.
     pub(crate) journaled: Option<JournalEntry>,
-    /// The signed request and proof found in the payer's record.
-    pub(crate) on_record: ReceiptOnRecord,
-    pub(crate) own_app: [u8; 16],
+    /// This is the first receipt of the proof held in the payer's record.
+    pub(crate) first_receipt: bool,
 }
 
 /// What a receipt does beside its placing ([`receipt_settles`]), each part in the batch that
 /// places it.
 #[derive(Debug, Default)]
 pub(crate) struct ReceiptSettles {
-    /// Another wallet's requested attempt awaits its signed proof and request.
-    pub(crate) waits_for_proof: bool,
     /// The attempt settled by evidence, and the obligation's deadline.
     pub(crate) claim: Option<(ClaimOp, ObligationDeadline)>,
     /// The notice "marked failed, was paid", kept unless one is held at its key already.
@@ -2246,7 +2244,7 @@ pub(crate) fn receipt_settles(claim: &ReceiptClaim<'_>) -> Result<ReceiptSettles
             .view
             .and_then(|view| view.attempt(&claim.attempt_id.to_bytes()))
             .is_some_and(|attempt| attempt.outcome == Outcome::Failed);
-        if waiting.is_some() || (claim.on_record.first_receipt && failed_on_view) {
+        if waiting.is_some() || (claim.first_receipt && failed_on_view) {
             out.notice = Some(KeptNotice::late(
                 claim.attempt_id,
                 claim.stored.sender(),
@@ -2261,20 +2259,12 @@ pub(crate) fn receipt_settles(claim: &ReceiptClaim<'_>) -> Result<ReceiptSettles
         out.received = waiting;
         return Ok(out);
     }
-    if let Some(attempt) = view.attempt(&claim.attempt_id.to_bytes()).filter(|a| {
+    if view.attempt(&claim.attempt_id.to_bytes()).is_some_and(|a| {
         matches!(
             a.outcome,
             Outcome::Open | Outcome::Unknown | Outcome::Failed
         )
     }) {
-        if attempt.owner != claim.own_app
-            && claim.stored.message().refs.get(1).is_some()
-            && claim.stored.body().billing_period().is_none()
-            && !claim.on_record.names_held_proof
-        {
-            out.waits_for_proof = true;
-            return Ok(out);
-        }
         let op = ClaimOp::done(
             claim.obligation,
             view.step,

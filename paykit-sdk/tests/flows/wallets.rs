@@ -586,7 +586,7 @@ async fn test_wallets_status_shows_the_records_cancellation_over_a_kept_open_att
 }
 
 #[tokio::test]
-async fn test_wallets_receipt_reads_an_unseen_claim_and_waits_for_its_proof() {
+async fn test_wallets_receipt_waits_for_its_proof_before_reading_an_unseen_claim() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -603,8 +603,8 @@ async fn test_wallets_receipt_reads_an_unseen_claim_and_waits_for_its_proof() {
     };
     let obligation = wallet.payments().await.unwrap()[0].obligation;
 
-    // The new wallet must fetch the claim itself. Its view identifies the foreign
-    // attempt, but the payer record does not hold the proof the receipt names.
+    // The payer record does not yet hold the named proof. The receipt waits even
+    // though the new wallet has never read the claim.
     let mut tablet = w.wallet("tablet").await;
     assert!(tablet
         .app()
@@ -629,9 +629,12 @@ async fn test_wallets_receipt_reads_an_unseen_claim_and_waits_for_its_proof() {
         .unwrap(),
     );
     tablet.receive(None).await.unwrap();
+    let kept = tablet.app().protocol_scan("paykit", b"pr/").await.unwrap();
+    assert_eq!(kept.len(), 1);
+    assert!(kept[0].0.ends_with(receipt.as_bytes()));
     let claim = tablet
-        .app()
-        .claim_evidence(&obligation)
+        .app_mut()
+        .read_claim(&obligation)
         .await
         .unwrap()
         .unwrap();
@@ -640,7 +643,4 @@ async fn test_wallets_receipt_reads_an_unseen_claim_and_waits_for_its_proof() {
         claim.view.attempt(&attempt_id.to_bytes()).unwrap().outcome,
         pubky_switch_core::claims::Outcome::Open
     );
-    let kept = tablet.app().protocol_scan("paykit", b"pr/").await.unwrap();
-    assert_eq!(kept.len(), 1);
-    assert!(kept[0].0.ends_with(receipt.as_bytes()));
 }
