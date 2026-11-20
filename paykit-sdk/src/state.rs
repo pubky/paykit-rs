@@ -894,7 +894,9 @@ impl Stored for KeptMessage {
         } else if self.seq().is_some() {
             return corrupt();
         }
-        if self.pending_create.is_some() && !matches!(family, StateKey::AllowanceEnd { .. }) {
+        if (self.pending_create.is_some() || self.ended_acceptance.is_some())
+            && !matches!(family, StateKey::AllowanceEnd { .. })
+        {
             return corrupt();
         }
         let message = self.stored(&binder.own)?;

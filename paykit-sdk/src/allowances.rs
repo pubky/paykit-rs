@@ -1162,7 +1162,40 @@ fn keep_end(
     let sender = stored.sender();
     let refs = &stored.message().refs;
     let content = cx.record(target)?.map(|held| held.content);
-    let bounded = end_bounded(cx, content.as_ref(), stored)?;
+    let mut evidence = KeptMessage::taken_at(stored, position);
+    let record_key = cx.record_key(target)?;
+    let ends = state::cx_scan::<KeptMessage>(cx, &key::allowance_ends(&record_key))?;
+    if refs.len() == 2
+        && !receive::holds_record(content.as_ref())
+        && ends.iter().all(|(_, e)| e.ended_acceptance.is_none())
+    {
+        let pending =
+            allowance_record_target(Collection::AllowanceProposals, &sender, allowance_id);
+        let key = cx.record_key(&pending)?;
+        if let Some(live) = cx.record(&pending)? {
+            for answer in step_answers_kept(cx, target, stored)? {
+                if answer
+                    .source
+                    .is_some_and(|source| source.record_version() == live.version)
+                    && replies::original_for(&live, &pending, &key, &cx.identity(), &answer.message)
+                        .is_some()
+                {
+                    evidence.ended_acceptance = pending_end_acceptance(
+                        stored,
+                        position,
+                        &answer.message,
+                        answer.position,
+                        live.version,
+                        |a, b| cx.received_order(a, b),
+                    );
+                    if evidence.ended_acceptance.is_some() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    let bounded = evidence.ended_acceptance.is_none() && end_bounded(cx, content.as_ref(), stored)?;
     let held = receive::holds_record(content.as_ref()) || !bounded;
     let record = content
         .as_ref()
@@ -1196,24 +1229,21 @@ fn keep_end(
             return Ok(());
         }
     }
-    let record_key = cx.record_key(target)?;
     let stop = key::allowance_end(&record_key, &stored.message().msg_id);
     if state::cx_get::<KeptMessage>(cx, &stop)?.is_none() {
-        // A second end of the Allowance counts under the bounds whatever the record holds
-        // (`receive::make_room_for_stop`).
-        let second =
-            !state::cx_scan::<KeptMessage>(cx, &key::allowance_ends(&record_key))?.is_empty();
-        if second || (bounded && !keeps_stored_message(cx, &sender, &record_key)?) {
+        // A newly matched end takes the exemption. Its predecessor may now
+        // count even when the sender already has a full pool.
+        if evidence.ended_acceptance.is_some() && !ends.is_empty() {
+            receive::make_room_for_stop(cx, &sender, receive::StopAdmission::Matched(record_key))?;
+        } else if !ends.is_empty() || (bounded && !keeps_stored_message(cx, &sender, &record_key)?)
+        {
             let order = (
                 stored.accepted_at().ok_or_else(Fail::corrupt)?,
                 position.seq,
             );
-            receive::make_room_for_stop(cx, &sender, order)?;
+            receive::make_room_for_stop(cx, &sender, receive::StopAdmission::Counted(order))?;
         }
-        receive::keep_local(
-            cx,
-            receive::local(&stop, &KeptMessage::taken_at(stored, position))?,
-        );
+        receive::keep_local(cx, receive::local(&stop, &evidence)?);
     }
     if checked && scopes.iter().any(|s| s == "paykit_allowance_execute") {
         drop_consent(cx, &record_key, (sender, allowance_id), ConsentEnd::Ended)?;
@@ -1274,6 +1304,45 @@ pub(crate) fn end_bounded(
         return Ok(false);
     };
     Ok(!names_held(&record, &end.message().refs))
+}
+
+/// Both signatures name this proposal, this acceptance and the same parties.
+pub(crate) fn end_names_acceptance(end: &StoredMessage, q: &StoredMessage) -> bool {
+    let (Body::AllowanceEnd(e), Body::AllowanceAcceptance(a)) = (end.body(), q.body()) else {
+        return false;
+    };
+    let [p] = q.message().refs.as_slice() else {
+        return false;
+    };
+    e.allowance_id == a.allowance_id
+        && end.sender() == q.sender()
+        && end.message().to == q.message().to
+        && end.message().refs.as_slice() == [*p, q.hash()]
+}
+
+/// The proposal must already have been live at both inbox positions. A reused
+/// signed proposal after deletion does not make either old message current.
+fn pending_end_acceptance(
+    end: &StoredMessage,
+    end_at: pubky_switch_client::app::FeedPosition,
+    q: &StoredMessage,
+    q_at: Option<pubky_switch_client::app::FeedPosition>,
+    source: pubky_switch_core::ops::RecordVersion,
+    order: impl Fn(
+        pubky_switch_client::app::FeedPosition,
+        pubky_switch_client::app::FeedPosition,
+    ) -> Option<std::cmp::Ordering>,
+) -> Option<Box<KeptMessage>> {
+    let q_at = q_at?;
+    if !end_names_acceptance(end, q)
+        || !replies::precedes_reply(source, q_at, &order)
+        || !replies::precedes_reply(source, end_at, order)
+    {
+        return None;
+    }
+    let mut proof = KeptMessage::taken_at(q, q_at);
+    proof.pending_source = Some(source.into());
+    Some(Box::new(proof))
 }
 
 /// Whether `record` holds the proposal `refs` names first and, when it names a second, the
@@ -2565,6 +2634,31 @@ impl Paykit {
                             }
                             continue;
                         }
+                    }
+                    if let Some(source) = evidence
+                        .ended_acceptance
+                        .as_ref()
+                        .and_then(|q| q.pending_source)
+                    {
+                        let pending = allowance_record_target(
+                            Collection::AllowanceProposals,
+                            &end.sender(),
+                            &allowance_id,
+                        );
+                        let key = self.app.record_key(&pending)?;
+                        let retired = self
+                            .local_get::<PendingRetirement>(&key::pending_retirement(&key))
+                            .await?;
+                        if retired.is_none_or(|r| !r.retires(source)) {
+                            continue;
+                        }
+                        // A sibling may have created the permanent pair in the same batch
+                        // that retired P. Keep the end until that record can be checked.
+                        let read = self.app.read_record_fresh(&target).await?;
+                        if delivery::current(&target, &record, &read, false) == Some(None) {
+                            self.local_delete(&stop).await?;
+                        }
+                        continue;
                     }
                     if stale(&end, self.service_time())?
                         && !Box::pin(self.keeps_stored_message(&end.sender(), &record)).await?
