@@ -11,8 +11,11 @@ mod signer;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
-    if std::env::args().nth(1).as_deref() == Some("paid-wallet") {
-        return backup::print_wallet().await;
+    match std::env::args().nth(1).as_deref() {
+        Some("paid-wallet") => return backup::print_wallet().await,
+        Some("notice-wallet") => return backup::print_notice(false).await,
+        Some("cleared-wallet") => return backup::print_notice(true).await,
+        _ => {}
     }
     let signed: SignedDoc = serde_json::from_reader(std::io::stdin())?;
     let request = AppRequest::verify(&signed)?;

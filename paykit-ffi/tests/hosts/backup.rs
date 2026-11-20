@@ -27,7 +27,7 @@ async fn enrolled(
     scopes: AppScopes,
     rail: Arc<FakeRail>,
     store: Arc<MemoryStore>,
-) -> Result<Paykit> {
+) -> Result<(Paykit, pubky_switch_signer::Signer)> {
     let identity = world.identity(name)?;
     let mut signer = super::signer::serving(world, name).await?;
     let scopes = scopes.build()?;
@@ -44,7 +44,7 @@ async fn enrolled(
     ))
     .await?;
     signer.claim_delivered(&approved.request).await?;
-    Ok(app)
+    Ok((app, signer))
 }
 
 async fn receive(wallet: &mut Paykit) -> Result<()> {
@@ -60,7 +60,7 @@ pub(super) async fn print_wallet() -> Result<()> {
     let world = World::start(Backend::Scripted)?.ok_or("missing wallet world")?;
     let rail = Arc::new(FakeRail::with_clock(world.clock().clone()));
     let payer_store = Arc::new(MemoryStore::new());
-    let mut payer = Box::pin(enrolled(
+    let (mut payer, _) = Box::pin(enrolled(
         &world,
         "payer",
         AppScopes::new().pay(),
@@ -68,7 +68,7 @@ pub(super) async fn print_wallet() -> Result<()> {
         payer_store.clone(),
     ))
     .await?;
-    let mut seller = Box::pin(enrolled(
+    let (mut seller, _) = Box::pin(enrolled(
         &world,
         "seller",
         AppScopes::new().request(),
@@ -130,12 +130,85 @@ pub(super) async fn print_wallet() -> Result<()> {
     println!("{}", STANDARD.encode(backup));
     // Hand the language process the unchanged test store of the original device as well.
     // It can distinguish an ordinary reopen from restoring the backup before its first read.
-    let namespace = client_namespace(&payer.app_id());
+    let app_id = payer.app_id();
     drop(payer);
+    print_store(app_id, &payer_store)?;
+    world.close().await?;
+    Ok(())
+}
+
+fn print_store(app_id: [u8; 16], store: &MemoryStore) -> Result<()> {
+    let namespace = client_namespace(&app_id);
     println!("{namespace}");
-    for (key, value) in payer_store.scan(&namespace, b"", None, u32::MAX)? {
+    for (key, value) in store.scan(&namespace, b"", None, u32::MAX)? {
         println!("{} {}", STANDARD.encode(key), STANDARD.encode(value));
     }
+    Ok(())
+}
+
+/// Hand over the protected state with one genuine Paykit duty after the native wallet closes.
+pub(super) async fn print_notice(cleared: bool) -> Result<()> {
+    use pubky_switch_client::app::AppEvent;
+
+    let world = World::start(Backend::Scripted)?.ok_or("missing wallet world")?;
+    let store = Arc::new(MemoryStore::new());
+    let owner = world.identity("payer")?;
+    let (mut payer, mut signer) = Box::pin(enrolled(
+        &world,
+        "payer",
+        AppScopes::new().pay(),
+        Arc::new(FakeRail::with_clock(world.clock().clone())),
+        store.clone(),
+    ))
+    .await?;
+    Box::pin(receive(&mut payer)).await?;
+    Box::pin(world.set_account_missing("https://payer.payments.test", &owner, true)).await?;
+    let stopped = Box::pin(payer.receive(None)).await?.report;
+    let notice = payer
+        .app()
+        .recovery_required()
+        .ok_or("no verified notice")?;
+    let mut duty = stopped
+        .events
+        .iter()
+        .find(|event| {
+            matches!(event,
+                AppEvent::RecoveryRequired { notice: seen, .. } if *seen == notice
+            )
+        })
+        .and_then(AppEvent::id)
+        .ok_or("missing original notice duty")?;
+    if cleared {
+        payer.app_mut().ack_events_for("paykit", duty).await?;
+        let successor = "https://new-payer.payments.test";
+        world.add_switch(successor, &[&owner]).await?;
+        let current = Box::pin(signer.declare_provider_loss(
+            successor,
+            pubky_switch_signer::UserConfirmed::shown_and_confirmed(),
+        ))
+        .await?;
+        let mut clearance = None;
+        for _ in 0..8 {
+            let report = Box::pin(payer.receive(None)).await?.report;
+            clearance = report.events.iter().find(|event| matches!(event,
+                AppEvent::RecoveryNoticeCleared { generation, .. } if *generation == notice.generation
+            )).and_then(AppEvent::id);
+            if clearance.is_some() {
+                assert_eq!(report.cursor.generation, current.generation());
+                assert!(report.cursor.generation > notice.generation);
+                break;
+            }
+        }
+        duty = clearance.ok_or("missing clearance for the original generation")?;
+    }
+    let app_id = payer.app_id();
+    println!("{}", STANDARD.encode(app_id));
+    println!("{}", notice.generation);
+    println!("{}", notice.first_seen_ms);
+    println!("{}", notice.service_time_ms);
+    println!("{}", STANDARD.encode(duty.to_bytes()));
+    drop(payer);
+    print_store(app_id, &store)?;
     world.close().await?;
     Ok(())
 }
