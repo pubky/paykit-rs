@@ -3668,8 +3668,8 @@ impl Paykit {
             if let Some(write) = record_write {
                 batch = batch.entry(write);
             }
-            if let Some(write) = Box::pin(self.executor_outcome(entry, paid)).await? {
-                batch = batch.entry(write);
+            if step.is_some() {
+                batch = Box::pin(self.executor_outcome(entry, paid, batch)).await?;
             }
             let mut finished = entry.clone();
             // An acceptance still owed keeps the entry where a resume visits it: the outcome

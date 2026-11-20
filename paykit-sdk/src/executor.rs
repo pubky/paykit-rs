@@ -6,6 +6,8 @@ mod compaction;
 mod evidence;
 mod grant;
 mod ledger;
+mod preparation;
+pub(crate) use preparation::LedgerProposal;
 mod restore;
 mod spend;
 pub(crate) use checkpoint::ExecutorHistory;

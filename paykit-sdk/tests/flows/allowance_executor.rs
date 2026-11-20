@@ -209,6 +209,112 @@ async fn test_first_grant_requires_the_accepted_record_and_repeats_once() {
 }
 
 #[tokio::test]
+async fn test_unanswered_owner_resolution_advances_the_reserved_ledger_once() {
+    use paykit_lib::allowances::EntryOutcome;
+    use paykit_sdk::{rail::Behaviour, PayOutcome, Resolution};
+    use pubky_switch_client::testing::Fault;
+
+    let store = crate::common::store();
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant_in(store.clone(), terms())).await;
+    let identity = payer.identity();
+    let app_id = payer.app_id();
+    world.rail.set_history_payer(identity);
+    let request = Box::pin(request_from(
+        &mut shop,
+        identity,
+        draft("7", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    world.rail.next(Behaviour::Hang);
+    let pending = Box::pin(payer.pay_under_allowance(&request, &key))
+        .await
+        .outcome
+        .unwrap();
+    let PayOutcome::Pending { attempt_id, .. } = pending else {
+        panic!("{pending:?}");
+    };
+    let ledger = payer
+        .app()
+        .records_of("allowance_ledgers")
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let reservation = Ledger::from_json(ledger.content.value().unwrap()).unwrap();
+    let entry = &reservation.entries[0];
+    assert_eq!((entry.attempt_id, entry.outcome), (attempt_id, None));
+    let writes = world.record_writes(&world.alice, &ledger.key);
+    world.rail.settle(&attempt_id, false);
+    world.alice.switch().fail_next(Fault::LoseAnswer {
+        path: "/ops".into(),
+    });
+    assert!(Box::pin(payer.resolve_attempt(
+        &entry.obligation,
+        attempt_id,
+        Resolution::Failed,
+        UserConfirmed::new()
+    ))
+    .await
+    .is_err());
+    assert_eq!(world.record_writes(&world.alice, &ledger.key), writes + 1);
+    let backup = Box::pin(payer.backup()).await.unwrap();
+    drop(payer);
+
+    let mut reopened =
+        Box::pin(world.load_on_clock(&world.alice, store, app_id, world.clock.clone())).await;
+    Box::pin(crate::common::finish_listing(&mut reopened)).await;
+    let usage = Box::pin(reopened.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .expect("applied resolution");
+    assert_eq!((usage.lifetime().as_str(), usage.spent()), ("7", 1));
+    let applied = reopened
+        .app()
+        .shared_record(&ledger.key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        Ledger::from_json(applied.content.value().unwrap())
+            .unwrap()
+            .entries[0]
+            .outcome,
+        Some(EntryOutcome::Failed)
+    );
+    drop(reopened);
+    let mut restored = Box::pin(paykit_sdk::Paykit::restore(
+        world.env(&world.alice, crate::common::store()),
+        Default::default(),
+        &backup,
+        world.rail.clone(),
+        world.timer(),
+    ))
+    .await
+    .unwrap();
+    Box::pin(crate::common::finish_listing(&mut restored)).await;
+    assert_eq!(
+        Box::pin(restored.reconcile_allowance(&key))
+            .await
+            .unwrap()
+            .unwrap(),
+        usage
+    );
+    assert_eq!(
+        restored
+            .app()
+            .shared_record(&ledger.key)
+            .await
+            .unwrap()
+            .unwrap()
+            .version,
+        applied.version
+    );
+    assert_eq!(world.record_writes(&world.alice, &ledger.key), writes + 1);
+    assert_eq!(world.rail.pay_calls(&attempt_id), 1);
+}
+
+#[tokio::test]
 async fn test_original_grant_and_ledger_require_the_payers_complete_history() {
     let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
     // This hand payment shares the wallet account but spends none of the Allowance.

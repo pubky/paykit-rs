@@ -52,14 +52,14 @@ impl JournalAllowance {
             && r.generation <= pubky_switch_core::json::MAX_INT
     }
 
-    fn revision(&self) -> ApplicationRef {
+    pub(super) fn revision(&self) -> ApplicationRef {
         ApplicationRef {
             generation: self.generation,
             seq: self.seq,
             item_hash: self.item_hash,
         }
     }
-    fn new(id: &AllowanceId, revision: ApplicationRef) -> Self {
+    pub(super) fn new(id: &AllowanceId, revision: ApplicationRef) -> Self {
         Self {
             id: id.as_str().into(),
             generation: revision.generation,
@@ -201,7 +201,7 @@ impl AllowanceReservation {
         entry: &mut JournalEntry,
         batch: OpBatch,
     ) -> Result<OpBatch> {
-        let checked = self.checked;
+        let mut checked = self.checked;
         let amount = entry
             .paid_amount()?
             .ok_or_else(|| held("the transfer amount is unknown"))?;
@@ -212,7 +212,7 @@ impl AllowanceReservation {
             .map_err(|_| held("the transfer does not satisfy the Allowance terms"))?;
         check_limits(&checked.terms, &checked.usage, &amount.value)
             .map_err(|limit| held(&format!("the {} limit has no room", limit.as_str())))?;
-        let ledger = reserved_ledger(
+        checked.ledger = reserved_ledger(
             &checked.terms,
             checked.ledger,
             LedgerEntry {
@@ -236,24 +236,15 @@ impl AllowanceReservation {
             return Err(crate::PaykitError::corrupt());
         }
         entry.allowance = Some(JournalAllowance::new(&self.id, revision));
-        let target = ledger_target(&entry.payee, &self.id);
         let mut end = checked.terms.entry_window_end(checked.at)?;
         if let Some(expiry) = &checked.terms.expires_at {
             end = end.min(expiry.ms());
         }
-        let conditions = vec![
-            checked.grant,
-            checked.current,
-            Condition::ServerTimeIn {
-                start: Some(checked.at),
-                end: Some(end),
-            },
-        ];
-        let op = app
-            .app
-            .record_op(&target, Some(&ledger.to_json()?), conditions)
-            .await?;
-        Ok(batch.entry(op))
+        let window = Condition::ServerTimeIn {
+            start: Some(checked.at),
+            end: Some(end),
+        };
+        checked.stage(app, batch, vec![window]).await
     }
 }
 
@@ -336,23 +327,29 @@ impl Paykit {
         &mut self,
         entry: &JournalEntry,
         paid: bool,
-    ) -> Result<Option<(Vec<Condition>, pubky_switch_core::ops::OpKind)>> {
+        batch: OpBatch,
+    ) -> Result<OpBatch> {
         let Some(under) = &entry.allowance else {
-            return Ok(None);
+            return Ok(batch);
         };
         let id = under.id()?;
         let key = self.app.record_key(&allowance_target(&entry.payee, &id))?;
-        let Some(checked) = Box::pin(self.executor_base(&key, LedgerRead::Outcome)).await? else {
-            return Ok(None);
+        let Some(mut checked) = Box::pin(self.executor_base(&key, LedgerRead::Outcome)).await?
+        else {
+            return Ok(batch);
         };
-        let mut ledger = checked.ledger;
+        if !matches!(checked.grant, Condition::RecordCurrent { revision, .. } if revision == under.revision())
+        {
+            return Ok(batch);
+        }
         let attempt = entry.attempt()?;
-        let Some(reserved) = ledger
+        let Some(reserved) = checked
+            .ledger
             .entries
             .iter_mut()
             .find(|e| e.attempt_id == attempt && e.obligation == entry.obligation)
         else {
-            return Ok(None);
+            return Ok(batch);
         };
         let outcome = if paid {
             EntryOutcome::Done
@@ -360,18 +357,10 @@ impl Paykit {
             EntryOutcome::Failed
         };
         if reserved.outcome == Some(EntryOutcome::Done) || reserved.outcome == Some(outcome) {
-            return Ok(None);
+            return Ok(batch);
         }
         reserved.outcome = Some(outcome);
-        let op = self
-            .app
-            .record_op(
-                &ledger_target(&entry.payee, &id),
-                Some(&ledger.to_json()?),
-                vec![checked.grant, checked.current],
-            )
-            .await?;
-        Ok(Some(op))
+        checked.stage(self, batch, Vec::new()).await
     }
 
     pub(crate) async fn allowance_reservation(
