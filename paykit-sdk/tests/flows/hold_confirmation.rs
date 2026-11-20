@@ -436,6 +436,142 @@ async fn test_hold_confirmation_cancellation_overrides_a_current_token() {
     assert!(w.rail.all_executions().is_empty());
 }
 
+async fn request_without_expiry(w: &World, shop: &mut Paykit) -> RequestRef {
+    let mut order = draft("1", w.clock.now_ms());
+    order.proposal_expires_at_ms = None;
+    assert!(order.payment_deadline_ms.is_none());
+    request_from(shop, w.alice_id(), order).await
+}
+
+#[tokio::test]
+async fn test_hold_confirmation_paid_request_stays_unpayable_after_deletion_and_claim_expiry() {
+    let w = World::new();
+    let mut payer = w.wallet("payer").await;
+    let mut shop = w.shop().await;
+    let request = request_without_expiry(&w, &mut shop).await;
+    payer.receive(None).await.unwrap();
+    missed(&w, &mut payer).await;
+    let consent = shown(&payer, &request).await;
+    let options = PayOptions::default().with_possibly_cancelled_confirmed(consent);
+    let payment = payer
+        .pay_request(&request, options.clone())
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(payment, PayOutcome::Paid { .. }));
+    let obligation = payer.payments().await.unwrap()[0].obligation;
+    let calls = w.rail.all_pay_calls();
+    assert_eq!(calls.get(&payment.attempt_id()), Some(&1));
+    let target = crate::outcome_record::payer_record(&request);
+    payer
+        .app_mut()
+        .delete_record(&target, Vec::new())
+        .await
+        .unwrap();
+    w.clock.advance_ms(401 * pubky_switch_core::records::DAY_MS);
+    let mut later = w.wallet("later").await;
+    assert!(later
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .is_none());
+    w.rail.next(paykit_sdk::rail::Behaviour::Refuse);
+    let error = later
+        .pay_request(&request, options)
+        .await
+        .outcome
+        .unwrap_err();
+    assert_eq!(error.refusal(), Some(&paykit_sdk::Refusal::NotFound));
+    let held = later
+        .app()
+        .shared_record(&later.app().record_key(&target).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        held.content,
+        pubky_switch_client::app::RecordContent::Deleted
+    );
+    assert!(later.payments().await.unwrap().is_empty());
+    assert_eq!(w.rail.all_pay_calls(), calls);
+}
+
+#[tokio::test]
+async fn test_hold_confirmation_signed_payer_loss_outlives_consent_to_a_missed_item() {
+    use paykit_lib::records::{ActivityRecord, ActivitySide};
+
+    let w = World::new();
+    let mut payer = w.wallet("payer").await;
+    let mut shop = w.shop().await;
+    let request = request_without_expiry(&w, &mut shop).await;
+    payer.receive(None).await.unwrap();
+    missed(&w, &mut payer).await;
+    let consent = shown(&payer, &request).await;
+    payer
+        .confirm_possibly_cancelled(&request, &consent, UserConfirmed::new())
+        .await
+        .unwrap();
+    missed(&w, &mut payer).await;
+    let current = shown(&payer, &request).await;
+    assert_ne!(consent, current);
+    let target = crate::outcome_record::payer_record(&request);
+    let key = payer.app().record_key(&target).unwrap();
+    let original = payer.app().shared_record(&key).await.unwrap().unwrap();
+    let mut record = ActivityRecord::read(
+        original.content.value().unwrap(),
+        &w.alice_id(),
+        ActivitySide::Payer,
+    )
+    .unwrap();
+    // Check the reader of a signed marked value independently of how it was published.
+    record.lost_to_delete = Some([73; 32]);
+    payer
+        .app_mut()
+        .put_record(&target, &record.to_json().unwrap(), Vec::new())
+        .await
+        .unwrap();
+    let view = payer.request(&request).await.unwrap();
+    assert_eq!(view.status, RequestStatus::MayBePaid);
+    assert!(view.held.is_none());
+    let prior_consent = payer.app().protocol_scan("paykit", b"hc/").await.unwrap();
+    for token in [&consent, &current] {
+        let refused = payer
+            .confirm_possibly_cancelled(&request, token, UserConfirmed::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::RecordHeld(_))
+        ));
+    }
+    assert_eq!(
+        payer.app().protocol_scan("paykit", b"hc/").await.unwrap(),
+        prior_consent
+    );
+    w.rail.next(paykit_sdk::rail::Behaviour::Refuse);
+    let error = payer
+        .pay_request(
+            &request,
+            PayOptions::default().with_possibly_cancelled_confirmed(consent),
+        )
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(matches!(
+        error.refusal(),
+        Some(paykit_sdk::Refusal::RecordHeld(_))
+    ));
+    assert!(payer.payments().await.unwrap().is_empty());
+    assert!(w.rail.all_pay_calls().is_empty());
+
+    let mut later = record.clone();
+    later.lost_to_delete = Some([74; 32]);
+    record.check_later_write(&later).unwrap();
+    later.lost_to_delete = None;
+    assert!(record.check_later_write(&later).is_err());
+}
+
 #[derive(Default)]
 struct HoldCommitStore {
     inner: pubky_switch_client::store::MemoryStore,

@@ -71,7 +71,8 @@ use crate::rail::{
 };
 use crate::records::{list_target, KeptMessage};
 use crate::requests::{
-    cancelled, payment_ended, rejected, request_of, unreadable_request, Fresh, RequestRef,
+    cancelled, payment_ended, payment_history_lost, rejected, request_of, unreadable_request,
+    Fresh, RequestRef,
 };
 use crate::state::{self, key};
 
@@ -1162,6 +1163,9 @@ impl Paykit {
         }
         if record.shows_paid() {
             return Err(Refusal::AlreadyPaid.into());
+        }
+        if record.lost_to_delete.is_some() {
+            return Err(payment_history_lost().into());
         }
         if rejected(&record) {
             return Err(Refusal::Rejected.into());
@@ -4483,7 +4487,8 @@ impl Paykit {
         target: &ActivityTarget,
         fresh: &ActivityRecord,
     ) -> Result<bool> {
-        Ok(cancelled(fresh)
+        Ok(fresh.lost_to_delete.is_some()
+            || cancelled(fresh)
             || rejected(fresh)
             || (fresh.manual_only && !entry.user_started)
             || self.held(&self.activity_key(target)?, fresh).await?
@@ -4647,6 +4652,15 @@ impl Paykit {
             return self
                 .automatic_dispatch_held(entry, kind, crossing_payee)
                 .await;
+        }
+        // An already accepted first attempt may finish across the seller's cancellation.
+        // A deletion that could have hidden a paid proof still holds it (Paykit spec 6, 8.1).
+        if entry.billing_period.is_none() && entry.request_hash.is_some() {
+            let target = ActivityTarget::payer(entry.natural_key.clone());
+            if !matches!(Box::pin(self.fresh_request(&target)).await?, Fresh::Held(record) if record.lost_to_delete.is_none())
+            {
+                return Ok(true);
+            }
         }
         if Box::pin(self.divergent_pauses(entry, crate::divergent::Pause::blocks_by_hand)).await? {
             return Ok(true);
