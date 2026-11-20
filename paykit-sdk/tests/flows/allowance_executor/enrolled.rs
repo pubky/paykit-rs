@@ -12,6 +12,7 @@ use pubky_switch_harness::{parties::Asking, Backend, World};
 use pubky_switch_signer::{Protocols, Signer};
 
 mod payments;
+mod sibling;
 
 use super::{applied_put, terms, AllowanceRole, AllowanceStatus, Condition, Ledger};
 use crate::common::{finish_listing, ListsStore, TestTimer};
@@ -47,6 +48,12 @@ async fn join(
     storage: Arc<dyn StateStore>,
     rail: Arc<dyn Rail>,
 ) -> TestResult<Paykit> {
+    let signer = Box::pin(start_signer(world, name)).await?;
+    let (_, wallet) = Box::pin(join_app(world, name, name, signer, scopes, storage, rail)).await?;
+    Ok(wallet)
+}
+
+async fn start_signer(world: &World, name: &str) -> TestResult<Signer> {
     let identity = world.identity(name)?;
     let origin = format!("https://{name}.allowance.test");
     Box::pin(world.add_switch(&origin, &[&identity])).await?;
@@ -56,21 +63,32 @@ async fn join(
         env.transport = Arc::new(ServiceTask(env.transport));
     }
     let keys = world.keyring(&identity)?;
-    let origin_for_signer = origin.clone();
-    let mut signer = tokio::task::spawn_local(async move {
-        let mut signer = Box::pin(Signer::create(env, keys, &origin_for_signer)).await?;
+    tokio::task::spawn_local(async move {
+        let mut signer = Box::pin(Signer::create(env, keys, &origin)).await?;
         Box::pin(signer.resume()).await?;
         Ok::<_, Box<dyn Error>>(signer)
     })
-    .await??;
+    .await?
+}
+
+async fn join_app(
+    world: &World,
+    name: &str,
+    app_name: &str,
+    mut signer: Signer,
+    scopes: RequestedScopes,
+    storage: Arc<dyn StateStore>,
+    rail: Arc<dyn Rail>,
+) -> TestResult<(Signer, Paykit)> {
+    let identity = world.identity(name)?;
     let names = scopes.scopes.iter().map(String::as_str).collect::<Vec<_>>();
-    let asking = Asking::for_scopes(world.app_keys(&identity, name)?, &names)?;
+    let asking = Asking::for_scopes(world.app_keys(&identity, app_name)?, &names)?;
     let own = identity.public();
-    let request = tokio::task::spawn_local(async move {
+    let (signer, request) = tokio::task::spawn_local(async move {
         let reviewed = signer.review(asking.request.signed(), &asking.auth)?;
         let approved = Box::pin(signer.approve(reviewed)).await?;
         signer.claim_delivered(&approved.request).await?;
-        Ok::<_, Box<dyn Error>>(asking.join_request(own, &approved)?)
+        Ok::<_, Box<dyn Error>>((signer, asking.join_request(own, &approved)?))
     })
     .await??;
     world.advance_ms(1_000);
@@ -78,13 +96,14 @@ async fn join(
     let timer = Arc::new(TestTimer {
         clock: world.clock().clone(),
     });
-    tokio::task::spawn_local(async move {
+    let wallet = tokio::task::spawn_local(async move {
         let mut wallet =
             Box::pin(Paykit::join(env, Default::default(), request, rail, timer)).await?;
         Box::pin(finish_listing(&mut wallet)).await;
         Ok::<_, Box<dyn Error>>(wallet)
     })
-    .await?
+    .await??;
+    Ok((signer, wallet))
 }
 
 #[derive(Clone, Copy)]
@@ -115,61 +134,7 @@ async fn grant(world: &World, proposer: AllowanceRole, flow: GrantFlow) -> TestR
         rail.clone(),
     ))
     .await?;
-    payer.app_mut().allow_connect(&seller.identity()).await?;
-    seller.app_mut().allow_connect(&payer.identity()).await?;
-    let proposal = match proposer {
-        AllowanceRole::Allower => {
-            Box::pin(payer.propose_executable_allowance(
-                seller.identity(),
-                terms(),
-                UserConfirmed::new(),
-            ))
-            .await?
-        }
-        AllowanceRole::Allowee => {
-            Box::pin(seller.propose_allowance(payer.identity(), proposer, terms())).await?
-        }
-        _ => unreachable!("the fixture selects Allower or Allowee"),
-    };
-    let (receiver, peer) = match proposer {
-        AllowanceRole::Allower => (&mut seller, payer.identity()),
-        AllowanceRole::Allowee => (&mut payer, seller.identity()),
-        _ => unreachable!("the fixture selects Allower or Allowee"),
-    };
-    Box::pin(finish_listing(receiver)).await;
-    let offer = receiver
-        .allowances()
-        .await?
-        .into_iter()
-        .find(|view| view.allowance_id == proposal.allowance_id && view.counterparty == peer)
-        .expect("received proposal");
-    let (key, seller_key) = match proposer {
-        AllowanceRole::Allower => (proposal.record, offer.record),
-        AllowanceRole::Allowee => (offer.record, proposal.record),
-        _ => unreachable!("the fixture selects Allower or Allowee"),
-    };
-    assert!(Box::pin(payer.resume_allowance_executor(&key))
-        .await
-        .is_err());
-    match proposer {
-        AllowanceRole::Allower => {
-            Box::pin(seller.accept_allowance(&seller_key)).await?;
-            Box::pin(finish_listing(&mut payer)).await;
-        }
-        AllowanceRole::Allowee => {
-            Box::pin(payer.accept_executable_allowance(&key, UserConfirmed::new())).await?;
-            Box::pin(finish_listing(&mut seller)).await;
-        }
-        _ => unreachable!("the fixture selects Allower or Allowee"),
-    }
-    assert_eq!(
-        payer.allowance(&key).await?.status,
-        AllowanceStatus::Accepted
-    );
-    assert_eq!(
-        seller.allowance(&seller_key).await?.status,
-        AllowanceStatus::Accepted
-    );
+    let (key, allowance_id) = Box::pin(accept(&mut payer, &mut seller, proposer)).await?;
     let permanent = payer
         .app()
         .shared_record(&key)
@@ -181,8 +146,7 @@ async fn grant(world: &World, proposer: AllowanceRole, flow: GrantFlow) -> TestR
         payer.app().naming_key(),
         &key,
     )?;
-    let natural =
-        paykit_lib::derive::natural_key::allowance(&seller.identity(), &proposal.allowance_id);
+    let natural = paykit_lib::derive::natural_key::allowance(&seller.identity(), &allowance_id);
     let ledger_key =
         Collection::AllowanceLedgers.record_key(payer.app().naming_key(), &natural, None)?;
     let ledger = payer
@@ -195,7 +159,7 @@ async fn grant(world: &World, proposer: AllowanceRole, flow: GrantFlow) -> TestR
         Some(
             Ledger::initial_value(
                 &seller.identity(),
-                &proposal.allowance_id,
+                &allowance_id,
                 &bound.response.as_ref().unwrap().hash()
             )
             .as_slice()
@@ -330,6 +294,69 @@ async fn enrolled_on(backend: Backend, flow: GrantFlow) -> TestResult {
             Ok(())
         })
         .await
+}
+
+async fn accept(
+    payer: &mut Paykit,
+    seller: &mut Paykit,
+    proposer: AllowanceRole,
+) -> TestResult<([u8; 32], paykit_lib::identifiers::AllowanceId)> {
+    payer.app_mut().allow_connect(&seller.identity()).await?;
+    seller.app_mut().allow_connect(&payer.identity()).await?;
+    let proposal = match proposer {
+        AllowanceRole::Allower => {
+            Box::pin(payer.propose_executable_allowance(
+                seller.identity(),
+                terms(),
+                UserConfirmed::new(),
+            ))
+            .await?
+        }
+        AllowanceRole::Allowee => {
+            Box::pin(seller.propose_allowance(payer.identity(), proposer, terms())).await?
+        }
+        _ => unreachable!("the fixture selects Allower or Allowee"),
+    };
+    let (receiver, peer) = match proposer {
+        AllowanceRole::Allower => (&mut *seller, payer.identity()),
+        AllowanceRole::Allowee => (&mut *payer, seller.identity()),
+        _ => unreachable!("the fixture selects Allower or Allowee"),
+    };
+    Box::pin(finish_listing(receiver)).await;
+    let offer = receiver
+        .allowances()
+        .await?
+        .into_iter()
+        .find(|view| view.allowance_id == proposal.allowance_id && view.counterparty == peer)
+        .expect("received proposal");
+    let (key, seller_key) = match proposer {
+        AllowanceRole::Allower => (proposal.record, offer.record),
+        AllowanceRole::Allowee => (offer.record, proposal.record),
+        _ => unreachable!("the fixture selects Allower or Allowee"),
+    };
+    assert!(Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .is_err());
+    match proposer {
+        AllowanceRole::Allower => {
+            Box::pin(seller.accept_allowance(&seller_key)).await?;
+            Box::pin(finish_listing(payer)).await;
+        }
+        AllowanceRole::Allowee => {
+            Box::pin(payer.accept_executable_allowance(&key, UserConfirmed::new())).await?;
+            Box::pin(finish_listing(seller)).await;
+        }
+        _ => unreachable!("the fixture selects Allower or Allowee"),
+    }
+    assert_eq!(
+        payer.allowance(&key).await?.status,
+        AllowanceStatus::Accepted
+    );
+    assert_eq!(
+        seller.allowance(&seller_key).await?.status,
+        AllowanceStatus::Accepted
+    );
+    Ok((key, proposal.allowance_id))
 }
 
 struct IncomingAcceptance {
