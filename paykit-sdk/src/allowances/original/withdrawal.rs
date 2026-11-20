@@ -18,6 +18,7 @@ enum Withdrawal {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RejectedProposal {
+    selected: SeenVersion,
     #[serde(with = "serde_b64")]
     signer: [u8; 32],
     #[serde(with = "serde_b64")]
@@ -43,10 +44,24 @@ impl OriginalApproval {
         Ok(self)
     }
 
+    /// An opening can coexist with an earlier rejection when a later pending write
+    /// carried the same signed proposal. Its selected version belongs to that later write.
+    pub(super) fn pending_lifetimes_are_ordered(&self) -> bool {
+        self.rejected.as_ref().is_none_or(|r| {
+            let selected = r.selected.record_version();
+            selected.generation == self.generation
+                && selected.version > 0
+                && self.opening.as_ref().is_none_or(|o| r.selected < o.version)
+        })
+    }
+
     pub(super) fn merge_rejection(&mut self, installed: Option<RejectedProposal>) -> Result<()> {
         if let Some(mut installed) = installed {
             if let Some(other) = &self.rejected {
-                if other.application != installed.application || other.signer != installed.signer {
+                if other.selected != installed.selected
+                    || other.application != installed.application
+                    || other.signer != installed.signer
+                {
                     return Err(PaykitError::corrupt());
                 }
                 if other.withdrawal == Withdrawal::Finished {
@@ -75,9 +90,11 @@ impl OriginalApproval {
     }
 
     pub(in crate::allowances) fn withdrawal_owed(&self) -> bool {
-        self.rejected
-            .as_ref()
-            .is_some_and(|r| r.withdrawal == Withdrawal::Owed)
+        self.opening.is_none()
+            && self
+                .rejected
+                .as_ref()
+                .is_some_and(|r| r.withdrawal == Withdrawal::Owed)
     }
 }
 
@@ -112,6 +129,7 @@ impl Paykit {
             return Ok(Vec::new());
         }
         approval.rejected = Some(RejectedProposal {
+            selected: selected.version.into(),
             signer: self.app.cert().signing_key(),
             application: application::prepared_application(
                 self.identity(),

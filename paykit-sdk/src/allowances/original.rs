@@ -116,14 +116,13 @@ impl OriginalApproval {
             }
             _ => false,
         };
-        if !matches_approval {
+        if !matches_approval || !self.pending_lifetimes_are_ordered() {
             return Err(PaykitError::corrupt());
         }
         if let Some(o) = &self.opening {
-            if self.rejected.is_some()
-                || o.current_revision
-                    .as_deref()
-                    .is_some_and(|v| ApplicationRef::parse(v).is_err())
+            if o.current_revision
+                .as_deref()
+                .is_some_and(|v| ApplicationRef::parse(v).is_err())
                 || o.version.record_version().is_none()
                 || o.selected.proof.is_none()
                 || o.seals.len() != 3
@@ -187,11 +186,6 @@ impl OriginalApproval {
         {
             return Err(PaykitError::corrupt());
         }
-        if (self.rejected.is_some() || newer.rejected.is_some())
-            && (self.opening.is_some() || newer.opening.is_some())
-        {
-            return Err(PaykitError::corrupt());
-        }
         self.merge_rejection(newer.rejected)?;
         match (&mut self.opening, newer.opening) {
             (Some(a), Some(mut b)) => {
@@ -204,6 +198,9 @@ impl OriginalApproval {
             }
             (None, b) => self.opening = b,
             _ => (),
+        }
+        if !self.pending_lifetimes_are_ordered() {
+            return Err(PaykitError::corrupt());
         }
         Ok(())
     }
@@ -387,6 +384,9 @@ impl Paykit {
                 seals: application::seals(operations)?,
                 applied: None,
             });
+        }
+        if !approval.pending_lifetimes_are_ordered() {
+            return Err(unconfirmed());
         }
         tx.put(&at, &approval)?;
         Ok(())

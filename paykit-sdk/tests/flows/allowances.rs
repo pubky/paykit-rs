@@ -4919,6 +4919,7 @@ enum RejectedWithdrawal {
     Fresh,
     Blocked,
     Recreated,
+    RecreatedAccepted,
     LateAcceptance,
 }
 
@@ -4963,6 +4964,52 @@ async fn withdraw_after_rejection(trigger: RejectedWithdrawal) {
         .is_none());
     assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
 
+    if matches!(trigger, RejectedWithdrawal::RecreatedAccepted) {
+        Box::pin(records_proposal(
+            &mut payer,
+            original.proposal(),
+            &offer.allowance_id,
+        ))
+        .await;
+        Box::pin(records_proposal(
+            &mut shop,
+            original.proposal(),
+            &offer.allowance_id,
+        ))
+        .await;
+        let answer = Box::pin(shop.accept_allowance(&at_shop)).await.unwrap();
+        let received = Box::pin(payer.receive(None)).await.unwrap();
+        assert!(
+            received
+                .report
+                .events
+                .iter()
+                .any(|e| matches!(e, AppEvent::MessageReceived { msg_id, .. } if msg_id == &answer)),
+            "{received:?}"
+        );
+        Box::pin(payer.receive(None)).await.unwrap();
+        let accepted = Box::pin(payer.allowance(&offer.record)).await.unwrap();
+        assert_eq!(accepted.status, AllowanceStatus::Accepted);
+        assert_eq!(
+            payer
+                .app()
+                .records_of("allowance_ledgers")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
+        drop(payer);
+        let mut restored = Box::pin(restore_pending_wallet(&w, store, &backup)).await;
+        Box::pin(read_restored_records(&mut restored)).await;
+        let record = Box::pin(raw(&restored, &offer.record)).await;
+        let accepted = AllowanceRecord::read(&record, &w.alice_id()).unwrap();
+        assert_eq!(accepted.proposal.hash(), original.proposal().hash());
+        assert_eq!(accepted.response.unwrap().message().msg_id, answer);
+        assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
+        return;
+    }
     let mut restored = match trigger {
         RejectedWithdrawal::LateAcceptance => {
             // Both answers are authentic; the second signed answer arrives after the guarded delete.
@@ -5099,6 +5146,14 @@ async fn test_original_rejection_withdrawal_waits_when_delivery_is_unknown_or_bl
 #[tokio::test]
 async fn test_original_rejection_withdrawal_preserves_a_recreated_proposal() {
     Box::pin(withdraw_after_rejection(RejectedWithdrawal::Recreated)).await;
+}
+
+#[tokio::test]
+async fn test_original_rejection_withdrawal_preserves_the_new_lifetimes_acceptance() {
+    Box::pin(withdraw_after_rejection(
+        RejectedWithdrawal::RecreatedAccepted,
+    ))
+    .await;
 }
 
 #[tokio::test]
