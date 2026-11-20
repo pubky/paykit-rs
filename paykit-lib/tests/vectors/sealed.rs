@@ -5293,28 +5293,45 @@ fn settlement_marks(keys: &Keys) -> Value {
             .to_bytes()
         })
         .collect();
-    let values: [(&str, String); 7] = [
-        ("a bucket with no mark", raw_bucket(&[])),
-        ("marks out of order", raw_bucket(&[high, low].concat())),
+    let values = [
+        ("a bucket with no mark", raw_bucket(&[]), "no mark"),
+        (
+            "marks out of order",
+            raw_bucket(&[high, low].concat()),
+            "not in ascending order",
+        ),
         (
             "a settlement twice",
             raw_bucket(&[twice[0].to_bytes(), twice[1].to_bytes()].concat()),
+            "a settlement named twice",
         ),
         (
             "a length that isn't a whole number of marks",
             raw_bucket(&[&low[..], &high[..20]].concat()),
+            "not a whole number of marks",
         ),
-        ("a mark of kind 0", raw_bucket(&with_kind(0))),
-        ("a mark of kind 4", raw_bucket(&with_kind(4))),
-        ("9,001 marks", raw_bucket(&over)),
+        (
+            "a mark of kind 0",
+            raw_bucket(&with_kind(0)),
+            "a mark of an unknown kind",
+        ),
+        (
+            "a mark of kind 4",
+            raw_bucket(&with_kind(4)),
+            "a mark of an unknown kind",
+        ),
+        ("9,001 marks", raw_bucket(&over), "more than 9,000 marks"),
     ];
     let mut refused: Vec<Value> = values
         .iter()
-        .map(|(name, value)| {
-            let error = bucket_at(&nk, value.as_bytes())
-                .expect_err(name)
-                .to_string();
-            json!({ "name": name, "reason": quoted(&error), "value": value })
+        .map(|(name, value, rule)| {
+            let error = bucket_at(&nk, value.as_bytes()).expect_err(name);
+            assert_eq!(
+                error,
+                paykit_lib::Error::Invalid(format!("Paykit wire 5.7: settlements: marks: {rule}")),
+                "{name}"
+            );
+            json!({ "name": name, "reason": quoted(&error.to_string()), "value": value })
         })
         .collect();
     let unrequested = credited_mark(keys, &credited()[2]);
@@ -5322,15 +5339,19 @@ fn settlement_marks(keys: &Keys) -> Value {
     assert_eq!(Collection::Settlements.policy_label(&other), None);
     let other_key = naming_record_key(&nk, unrequested.0, &other);
     let value = raw_bucket(&unrequested.1.to_bytes()).into_bytes();
-    let error = SettlementBucket::bind(&value, unrequested.0, &nk, &other_key)
-        .unwrap_err()
-        .to_string();
+    let error = SettlementBucket::bind(&value, unrequested.0, &nk, &other_key).unwrap_err();
+    assert_eq!(
+        error,
+        paykit_lib::Error::Invalid(
+            "Paykit wire 5.7: the record isn't at the key of its bucket".into()
+        )
+    );
     refused.push(json!({
         "bucket": unrequested.0,
         "name": "the payment without a request's bucket under payee_activity's policy",
         "policy_hash": b64(&other.hash().unwrap()),
         "read_scope": other.read_scope,
-        "reason": quoted(&error),
+        "reason": quoted(&error.to_string()),
         "record_key": b64(&other_key),
         "value": String::from_utf8(value).unwrap(),
         "write_scopes": other.write_scopes,
