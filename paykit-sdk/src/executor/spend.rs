@@ -23,7 +23,7 @@ use crate::marks::{DropMark, MarkFamily};
 use crate::pay::Dispatch;
 use crate::records::KeptMessage;
 use crate::state::key;
-use crate::stored::StoredNote;
+use crate::stored::BoundNote;
 use crate::{AllowanceRole, AllowanceStatus, Paykit, Refusal, Result};
 
 /// The original grant the atomic opening claim and ledger write were conditioned on.
@@ -169,6 +169,7 @@ impl AllowanceReservation {
                 &crate::PayOptions::default(),
                 Some(ids),
                 &pricing,
+                &mut None,
                 &mut Vec::new(),
             ))
             .await?;
@@ -513,12 +514,12 @@ impl Paykit {
             }
         }
         let notes = key::stored_notes_of(peer);
-        for (rest, note) in self.local_scan::<StoredNote>(&notes).await? {
-            if !note.placed {
-                let stored = note.bound(&format!("{notes}{rest}"), &self.identity())?;
-                if named_allowance(stored.body()) == Some(id) && holds(stored.body().kind()) {
-                    return Ok(true);
-                }
+        for (_, BoundNote { note, message }) in self.local_scan(&notes).await? {
+            if !note.placed
+                && named_allowance(message.body()) == Some(id)
+                && holds(message.body().kind())
+            {
+                return Ok(true);
             }
         }
         for info in self.app.parked_entries().await? {

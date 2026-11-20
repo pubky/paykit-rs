@@ -122,7 +122,7 @@ use crate::paykit::Paykit;
 use crate::protocol::{MissedItemMark, QueuedAsk};
 use crate::receive::{Fail, QueuedAnswer};
 use crate::records::{list_target, KeptMessage};
-use crate::stored::StoredNote;
+use crate::stored::{BoundNote, StoredNote};
 
 /// The schema version of Paykit's local records.
 pub(crate) const LOCAL_VERSION: u32 = 1;
@@ -225,7 +225,7 @@ impl Paykit {
 
     /// Every value under protocol prefix `prefix`, with the key's rest after the prefix, each
     /// read whole and bound to its own key as [`Paykit::local_get`] reads one.
-    pub(crate) async fn local_scan<T: Stored>(&self, prefix: &str) -> Result<Vec<(String, T)>> {
+    pub(crate) async fn local_scan<T: BoundRead>(&self, prefix: &str) -> Result<Vec<(String, T)>> {
         let held = self
             .app
             .protocol_scan(crate::protocol::BACKUP_NAME, prefix.as_bytes())
@@ -386,13 +386,24 @@ pub(crate) trait Stored: sealed::Sealed + DeserializeOwned {
     fn bind(&self, key: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()>;
 }
 
-/// The value `bytes` read at `key`, bound to it ([`Stored::bind`]).
-fn bound<T: Stored>(key: &[u8], bytes: &[u8], binder: &Binder<'_>) -> Result<T> {
+/// A typed read of a state family at its physical key.
+pub(crate) trait BoundRead: sealed::Sealed + Sized {
+    fn read_at(key: &str, family: &StateKey, bytes: &[u8], binder: &Binder<'_>) -> Result<Self>;
+}
+
+impl<T: Stored> BoundRead for T {
+    fn read_at(key: &str, family: &StateKey, bytes: &[u8], binder: &Binder<'_>) -> Result<Self> {
+        let value = T::read_bytes(bytes, binder)?;
+        value.bind(key, family, binder)?;
+        Ok(value)
+    }
+}
+
+/// Read and bind a value using the physical key returned by the store.
+pub(crate) fn bound<T: BoundRead>(key: &[u8], bytes: &[u8], binder: &Binder<'_>) -> Result<T> {
     let text = std::str::from_utf8(key).map_err(|_| PaykitError::corrupt())?;
     let family = StateKey::parse(key).ok_or_else(PaykitError::corrupt)?;
-    let value = T::read_bytes(bytes, binder)?;
-    value.bind(text, &family, binder)?;
-    Ok(value)
+    T::read_at(text, &family, bytes, binder)
 }
 
 /// The value at `key`, read through the receive context and bound to it as
@@ -417,7 +428,7 @@ pub(crate) fn cx_get<T: Stored>(
 
 /// Every value under `prefix`, read through the receive context, with its full key, each
 /// bound to its own key as [`cx_get`] binds one.
-pub(crate) fn cx_scan<T: Stored>(
+pub(crate) fn cx_scan<T: BoundRead>(
     cx: &ReceiveContext<'_>,
     prefix: &str,
 ) -> std::result::Result<Vec<(String, T)>, Fail> {
@@ -460,7 +471,7 @@ pub(crate) fn view_scan<T: Stored>(view: &LocalView<'_>, prefix: &str) -> Result
 }
 
 /// Read the same protocol namespace with the key and certificate available to its caller.
-pub(crate) fn bound_view_scan<T: Stored>(
+pub(crate) fn bound_view_scan<T: BoundRead>(
     view: &LocalView<'_>,
     prefix: &str,
     binder: &Binder<'_>,
@@ -1097,8 +1108,18 @@ impl sealed::Sealed for StoredNote {}
 /// A stored entry's note: of the sender and `msg_id` its key names, its message verified as
 /// theirs ([`StoredNote::bound`]).
 impl Stored for StoredNote {
-    fn bind(&self, key: &str, _: &StateKey, binder: &Binder<'_>) -> Result<()> {
-        self.bound(key, &binder.own).map(|_| ())
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        self.bound(family, &binder.own).map(|_| ())
+    }
+}
+
+impl sealed::Sealed for BoundNote {}
+
+impl BoundRead for BoundNote {
+    fn read_at(_: &str, family: &StateKey, bytes: &[u8], binder: &Binder<'_>) -> Result<Self> {
+        let note = StoredNote::read_bytes(bytes, binder)?;
+        let message = note.bound(family, binder.identity())?;
+        Ok(Self { note, message })
     }
 }
 

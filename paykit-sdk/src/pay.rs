@@ -195,7 +195,7 @@ impl PayOptions {
         self
     }
 
-    /// Select the signed rate details of this Billing Period (Paykit spec 8.2).
+    /// Select the signed details supplying this Billing Period’s destination, rates, or both (Paykit spec 8.2).
     #[must_use]
     pub fn with_period_details(mut self, msg_id: impl Into<String>) -> Self {
         self.period_details = Some(msg_id.into());
@@ -531,6 +531,22 @@ impl Held {
 /// A `payment_lists` record a payment selected from, with the version of the write whose
 /// content it is ([`Paykit::lists_read_of`]).
 pub(crate) type ListRead = (PaymentListRecord, RecordVersion);
+
+/// The identifiers that both the request and any funding Allowance permit.
+pub(crate) fn accepted_request_endpoints(
+    request: &PaymentRequest,
+    allowance_endpoints: Option<&[PaymentEndpointIdentifier]>,
+) -> Option<Vec<PaymentEndpointIdentifier>> {
+    match &request.accepted_payment_endpoint_identifiers {
+        Some(ids) => Some(
+            ids.iter()
+                .filter(|id| allowance_endpoints.is_none_or(|allowed| allowed.contains(id)))
+                .cloned()
+                .collect(),
+        ),
+        None => allowance_endpoints.map(<[_]>::to_vec),
+    }
+}
 
 /// What one attempt needs beyond its journal entry.
 pub(crate) struct Plan {
@@ -1257,6 +1273,7 @@ impl Paykit {
                 &options,
                 accepted.as_deref(),
                 &pricing,
+                &mut None,
                 public_failures,
             )
             .await?;
@@ -1347,91 +1364,84 @@ impl Paykit {
         options: &PayOptions,
         accepted: Option<&[PaymentEndpointIdentifier]>,
         pricing: &Pricing<'_>,
+        identity: &mut Option<PeerIdentity>,
         public_failures: &mut Vec<PublicAppFailure>,
     ) -> Result<Chosen> {
-        let accepted_ids: Option<Vec<_>> =
-            match (&body.accepted_payment_endpoint_identifiers, accepted) {
-                (Some(ids), accepted) => Some(
-                    ids.iter()
-                        .filter(|id| accepted.is_none_or(|allowed| allowed.contains(id)))
-                        .cloned()
-                        .collect(),
-                ),
-                (None, Some(ids)) => Some(ids.to_vec()),
-                (None, None) => None,
-            };
+        let accepted_ids = accepted_request_endpoints(body, accepted);
         let accepted = accepted_ids.as_deref();
-        Ok(match &body.destination {
-            RequestDestination::Endpoints(endpoints) => {
-                let allowed =
-                    |id: &PaymentEndpointIdentifier| accepted.is_none_or(|ids| ids.contains(id));
-                // The request's endpoints the payment may use, by identifier.
-                let gathered: Vec<Choice> = endpoints
-                    .iter()
-                    .filter(|(id, _)| {
-                        allowed(id) && options.endpoint.as_ref().is_none_or(|want| want == *id)
-                    })
-                    .map(|(id, payload)| {
-                        let destination = Destination::new(
-                            stored.message().from.app_id,
-                            id,
-                            payload,
-                            DestinationSource::Request,
-                            None,
-                            false,
-                        );
-                        let carrier = Carrier::Message(Box::new(stored.clone()));
-                        Choice::new(id, payload, destination, carrier, None)
-                    })
-                    .collect();
-                if gathered.is_empty() {
-                    return Err(Refusal::NoDestination(
-                        "Paykit spec 8.1: the request has no such endpoint".into(),
-                    )
-                    .into());
-                }
-                let identity = if matches!(&pricing.rates, Rates::Period(details) if !details.is_empty())
-                {
-                    Some(
-                        self.payee_identity(
-                            payee,
-                            Need::FreshCopy,
-                            pricing.by,
-                            options.unconfirmed_identity_confirmed,
-                        )
-                        .await??,
-                    )
-                } else {
-                    None
-                };
-                self.choose(payee, gathered, pricing, options, identity.as_ref())?
-                    .ok_or_else(|| unsupported("the request's endpoints"))?
-            }
-            // The request's accepted identifiers restrict a destination from the payee's lists
-            // as they do its own endpoints (Paykit wire 4.5).
-            RequestDestination::RequiredApp(app) => {
-                self.list_destination(
-                    payee,
-                    Some(*app),
-                    accepted,
-                    pricing,
-                    options,
-                    public_failures,
+        let endpoints = match (&body.destination, stored.body()) {
+            (_, Body::PaymentPeriodDetails(details)) => Some(
+                details
+                    .payment_endpoints
+                    .as_ref()
+                    .ok_or_else(PaykitError::corrupt)?,
+            ),
+            (RequestDestination::Endpoints(endpoints), _) => Some(endpoints),
+            _ => None,
+        };
+        if let Some(endpoints) = endpoints {
+            let allowed =
+                |id: &PaymentEndpointIdentifier| accepted.is_none_or(|ids| ids.contains(id));
+            // The request's endpoints the payment may use, by identifier.
+            let gathered: Vec<Choice> = endpoints
+                .iter()
+                .filter(|(id, _)| {
+                    allowed(id) && options.endpoint.as_ref().is_none_or(|want| want == *id)
+                })
+                .map(|(id, payload)| {
+                    let destination = Destination::new(
+                        stored.message().from.app_id,
+                        id,
+                        payload,
+                        DestinationSource::Request,
+                        None,
+                        false,
+                    );
+                    let carrier = Carrier::Message(Box::new(stored.clone()));
+                    Choice::new(id, payload, destination, carrier, None)
+                })
+                .collect();
+            let Some(first) = gathered.first() else {
+                return Err(Refusal::NoDestination(
+                    "Paykit spec 8.1: the request has no such endpoint".into(),
                 )
-                .await?
+                .into());
+            };
+            let period_destination = matches!(stored.body(), Body::PaymentPeriodDetails(_));
+            let period_rates =
+                matches!(&pricing.rates, Rates::Period(details) if !details.is_empty());
+            if identity.is_none() && (period_destination || period_rates) {
+                *identity = Some(
+                    self.payee_identity(
+                        payee,
+                        Need::FreshCopy,
+                        pricing.by,
+                        options.unconfirmed_identity_confirmed,
+                    )
+                    .await??,
+                );
             }
-            RequestDestination::Any => {
-                self.list_destination(
-                    payee,
-                    options.list_app,
-                    accepted,
-                    pricing,
-                    options,
-                    public_failures,
+            // All endpoints in this message have the same sender. Skip its offer before
+            // choosing a price if its certificate no longer counts (Paykit spec 4, 8.2).
+            if let Some(peer) = identity.as_ref().filter(|_| period_destination) {
+                crate::destination::current(
+                    &peer.doc,
+                    &stored.message().from.app_id,
+                    &first.carrier,
+                    self.now(),
                 )
-                .await?
+                .map_err(Refusal::NoDestination)?;
             }
-        })
+            return self
+                .choose(payee, gathered, pricing, options, identity.as_ref())?
+                .ok_or_else(|| unsupported("the signed endpoints"));
+        }
+        let app = match &body.destination {
+            RequestDestination::RequiredApp(app) => Some(*app),
+            _ => options.list_app,
+        };
+        self.list_destination(payee, app, accepted, pricing, options, public_failures)
+            .await
     }
 
     /// Pay without a request (Paykit spec 8.4): to the payee's Private Payment List, or its
@@ -2278,7 +2288,7 @@ impl Paykit {
                 continue;
             };
             let (amount, price, by_hand) =
-                match self.price_choice(&choice.destination, pricing, options, identity) {
+                match self.price_choice(&choice, pricing, options, identity) {
                     Ok(Taken::Pay(amount, price)) => (amount, price, false),
                     Ok(Taken::ByHand(amount)) => (amount, None, true),
                     Ok(Taken::Unusable(why)) => {
@@ -2346,11 +2356,12 @@ impl Paykit {
     /// [`Refusal::PricedByRate`] carries the quote when this payment lacks its authorization.
     fn price_choice(
         &self,
-        destination: &Destination,
+        choice: &Choice,
         pricing: &Pricing<'_>,
         options: &PayOptions,
         identity: Option<&PeerIdentity>,
     ) -> Result<Taken> {
+        let destination = &choice.destination;
         let Some(request) = pricing.request else {
             return Ok(Taken::Pay(pricing.requested.clone(), None));
         };
@@ -2365,7 +2376,10 @@ impl Paykit {
         let (rate, amount) = match priced {
             Priced::Plain(_)
                 if matches!(pricing.rates, Rates::Period(_))
-                    && options.selected_period_rate().is_some() =>
+                    && options.selected_period_rate().is_some_and(|id| {
+                        !matches!(&choice.carrier, Carrier::Message(signed)
+                            if matches!(signed.body(), Body::PaymentPeriodDetails(_)) && signed.message().msg_id == id)
+                    }) =>
             {
                 return Ok(Taken::Unusable(
                     "Paykit spec 8.2: the selected period rate does not price this endpoint",
@@ -2659,6 +2673,7 @@ impl Paykit {
         if entry.request_hash()?.is_none() {
             return Ok(Ok(false));
         }
+        entry.selected_period_details(&self.identity())?;
         let endpoint_id = entry.destination.endpoint_id()?;
         let requested = entry.amount.amount()?;
         let paid = entry.call_amount()?;
@@ -2765,6 +2780,7 @@ impl Paykit {
         crate::paykit::check_orphan_window(&self.config, self.rail.as_ref())?;
         // The carrier is journaled with the entry, for the checks before any repeat.
         entry.keep_carrier(&carrier);
+        entry.selected_period_details(&self.identity())?;
         // The own identity.json, read again and confirmed, before any write: no attempt
         // without a copy revalidated in the last 60 s (Paykit spec 4, Switch spec 12.6).
         self.own_identity_confirmed(true).await?;
@@ -3792,7 +3808,7 @@ impl Paykit {
                 let proof = self.own_copy(proof)?;
                 if activity::names_details_not_held(&record, &proof) {
                     let details = entry
-                        .selected_rate_details(&self.identity())?
+                        .selected_period_details(&self.identity())?
                         .ok_or_else(PaykitError::corrupt)?;
                     changed |= activity::place(&mut record, Role::PeriodDetails, details);
                     if activity::names_details_not_held(&record, &proof) {
@@ -3971,7 +3987,7 @@ impl Paykit {
         let mut refs: Vec<[u8; 32]> = request_hash.into_iter().collect();
         refs.extend(
             entry
-                .selected_rate_details(&self.identity())?
+                .selected_period_details(&self.identity())?
                 .map(|signed| signed.hash()),
         );
         Ok((proof, refs))

@@ -10,7 +10,12 @@ use pubky_switch_client::{
     transport::BoxFuture,
 };
 use pubky_switch_harness::{parties::Asking, Backend, World};
-use std::{collections::BTreeMap, error::Error, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    io::{self, Write},
+    sync::Arc,
+};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -56,7 +61,7 @@ async fn receive(wallet: &mut Paykit) -> Result<()> {
     Err("wallet did not complete its feed".into())
 }
 
-pub(super) async fn print_wallet() -> Result<()> {
+pub(super) async fn print_wallet(seller_only: bool) -> Result<()> {
     let world = World::start(Backend::Scripted)?.ok_or("missing wallet world")?;
     let rail = Arc::new(FakeRail::with_clock(world.clock().clone()));
     let payer_store = Arc::new(MemoryStore::new());
@@ -68,12 +73,13 @@ pub(super) async fn print_wallet() -> Result<()> {
         payer_store.clone(),
     ))
     .await?;
+    let seller_store = Arc::new(MemoryStore::new());
     let (mut seller, _) = Box::pin(enrolled(
         &world,
         "seller",
         AppScopes::new().request(),
         rail,
-        Arc::new(MemoryStore::new()),
+        seller_store.clone(),
     ))
     .await?;
     Box::pin(receive(&mut payer)).await?;
@@ -120,29 +126,44 @@ pub(super) async fn print_wallet() -> Result<()> {
     }) {
         return Err("payer did not hold the original signed receipt".into());
     }
-    let backup = payer.backup().await?.to_bytes()?;
-    println!("{}", STANDARD.encode(payer.app_id()));
-    println!("{}", STANDARD.encode(payer.identity()));
-    println!("{}", STANDARD.encode(request.payee));
-    println!("{}", STANDARD.encode(request.request_hash));
-    println!("{attempt}");
-    println!("{receipt}");
-    println!("{}", STANDARD.encode(backup));
-    // Hand the language process the unchanged test store of the original device as well.
-    // It can distinguish an ordinary reopen from restoring the backup before its first read.
-    let app_id = payer.app_id();
-    drop(payer);
-    print_store(app_id, &payer_store)?;
+    if seller_only {
+        let app = seller.app_id();
+        drop(seller);
+        let mut output = io::stdout().lock();
+        writeln!(output, "{}", STANDARD.encode(app))?;
+        write_store(&mut output, app, &seller_store)?;
+    } else {
+        let backup = payer.backup().await?.to_bytes()?;
+        let app = payer.app_id();
+        let mut output = io::stdout().lock();
+        writeln!(output, "{}", STANDARD.encode(app))?;
+        writeln!(output, "{}", STANDARD.encode(payer.identity()))?;
+        writeln!(output, "{}", STANDARD.encode(request.payee))?;
+        writeln!(output, "{}", STANDARD.encode(request.request_hash))?;
+        writeln!(output, "{attempt}")?;
+        writeln!(output, "{receipt}")?;
+        writeln!(output, "{}", STANDARD.encode(backup))?;
+        // Hand the language process the unchanged test store of the original device as well.
+        // It can distinguish an ordinary reopen from restoring the backup before its first read.
+        drop(payer);
+        write_store(&mut output, app, &payer_store)?;
+    }
     world.close().await?;
     Ok(())
 }
 
-fn print_store(app_id: [u8; 16], store: &MemoryStore) -> Result<()> {
-    let namespace = client_namespace(&app_id);
-    println!("{namespace}");
+fn write_store(output: &mut impl Write, app: [u8; 16], store: &MemoryStore) -> Result<()> {
+    let namespace = client_namespace(&app);
+    writeln!(output, "{namespace}")?;
     for (key, value) in store.scan(&namespace, b"", None, u32::MAX)? {
-        println!("{} {}", STANDARD.encode(key), STANDARD.encode(value));
+        writeln!(
+            output,
+            "{} {}",
+            STANDARD.encode(key),
+            STANDARD.encode(value)
+        )?;
     }
+    output.flush()?;
     Ok(())
 }
 
@@ -202,13 +223,16 @@ pub(super) async fn print_notice(cleared: bool) -> Result<()> {
         duty = clearance.ok_or("missing clearance for the original generation")?;
     }
     let app_id = payer.app_id();
-    println!("{}", STANDARD.encode(app_id));
-    println!("{}", notice.generation);
-    println!("{}", notice.first_seen_ms);
-    println!("{}", notice.service_time_ms);
-    println!("{}", STANDARD.encode(duty.to_bytes()));
     drop(payer);
-    print_store(app_id, &store)?;
+    {
+        let mut output = io::stdout().lock();
+        writeln!(output, "{}", STANDARD.encode(app_id))?;
+        writeln!(output, "{}", notice.generation)?;
+        writeln!(output, "{}", notice.first_seen_ms)?;
+        writeln!(output, "{}", notice.service_time_ms)?;
+        writeln!(output, "{}", STANDARD.encode(duty.to_bytes()))?;
+        write_store(&mut output, app_id, &store)?;
+    }
     world.close().await?;
     Ok(())
 }

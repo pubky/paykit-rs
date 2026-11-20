@@ -3669,7 +3669,9 @@ mod receive_tests {
             at.as_bytes(),
             &value
         ));
-        assert!(crate::stored::writes_request(&note, &alice.id(), &request.hash()).unwrap());
+        let bound: crate::stored::BoundNote =
+            state::bound(at.as_bytes(), &value, &state::Binder::unblinded(alice.id())).unwrap();
+        assert!(bound.writes_request(&request.hash()));
         let other = key::stored_note(&bob.id(), "123e4567-e89b-42d3-a456-426614174000");
         let by_other = key::stored_note(&[8; 32], &msg_id);
         for at in [other, by_other] {

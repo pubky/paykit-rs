@@ -122,6 +122,7 @@ pub trait WalletStore: Send + Sync {
 
 /// A blocking enrollment call holds this session until its physical operation returns.
 pub(crate) struct WalletStoreSession {
+    runtime: tokio::runtime::Handle,
     pub(crate) ownership: Arc<LeaseOwner>,
 }
 
@@ -145,15 +146,17 @@ impl LeaseOwner {
         let result = self
             .host
             .release(self.namespace.clone(), self.token.to_vec());
-        {
-            let mut failed = FAILED_RELEASES.lock().unwrap_or_else(|e| e.into_inner());
-            failed.retain(|previous| !Arc::ptr_eq(previous, self));
-            if result.is_err() {
-                failed.push(self.clone());
-            }
-        }
-        self.result.send_replace(Some(result.clone()));
+        self.record(result.clone());
         result
+    }
+
+    fn record(self: &Arc<Self>, result: Result<(), StorageError>) {
+        let mut failed = FAILED_RELEASES.lock().unwrap_or_else(|e| e.into_inner());
+        failed.retain(|previous| !Arc::ptr_eq(previous, self));
+        if result.is_err() {
+            failed.push(self.clone());
+        }
+        self.result.send_replace(Some(result));
     }
 
     fn retry_failed(namespace: &str) {
@@ -168,16 +171,20 @@ impl LeaseOwner {
             let _ = owner.release();
         }
     }
-    pub(crate) async fn finish(self: &Arc<Self>) -> Result<(), crate::WalletError> {
+    pub(crate) async fn first_release(&self) -> Result<(), StorageError> {
         let mut released = self.result.subscribe();
-        let first = released
+        let result = released
             .wait_for(Option::is_some)
             .await
-            .map_err(|_| StoreError::Unknown)?
+            .map_err(|_| StorageError::Unknown)?
             .as_ref()
             .cloned()
-            .ok_or(StoreError::Unknown)?;
-        if first.is_err() {
+            .ok_or(StorageError::Unknown)?;
+        result
+    }
+
+    pub(crate) async fn finish(self: &Arc<Self>) -> Result<(), crate::WalletError> {
+        if self.first_release().await.is_err() {
             let owner = self.clone();
             tokio::task::spawn_blocking(move || owner.release())
                 .await
@@ -192,6 +199,7 @@ impl WalletStoreSession {
         host: Arc<dyn WalletStore>,
         namespace: String,
     ) -> Result<Arc<Self>, StoreError> {
+        let runtime = tokio::runtime::Handle::current();
         let token = pubky_switch_core::enc::random_bytes().map_err(|_| StoreError::Unavailable)?;
         tokio::task::spawn_blocking(move || {
             LeaseOwner::retry_failed(&namespace);
@@ -206,7 +214,10 @@ impl WalletStoreSession {
                 .host
                 .acquire(owner.namespace.clone(), owner.token.to_vec())
             {
-                Ok(true) => Ok(Arc::new(Self { ownership: owner })),
+                Ok(true) => Ok(Arc::new(Self {
+                    runtime,
+                    ownership: owner,
+                })),
                 Ok(false) => Err(StoreError::InUse),
                 Err(StorageError::Unknown) => {
                     // The physical writer may already belong to this token. An idempotent
@@ -315,9 +326,33 @@ impl StateStore for WalletStoreSession {
         Ok(CommitOutcome::NotOwner)
     }
 }
+// A foreign release can wait for device I/O. Keep the exact physical fence until
+// the last in-flight store operation is gone, then release on the blocking pool.
+struct FinalRelease(Option<Arc<LeaseOwner>>);
+
+impl FinalRelease {
+    fn run(mut self) {
+        if let Some(owner) = &self.0 {
+            let _ = owner.release();
+        }
+        self.0 = None;
+    }
+}
+
+impl Drop for FinalRelease {
+    fn drop(&mut self) {
+        // A runtime that shuts down before starting its job cannot confirm release.
+        // The next open or shutdown can retry the same token on its own live runtime.
+        if let Some(owner) = &self.0 {
+            owner.record(Err(StorageError::Unknown));
+        }
+    }
+}
+
 impl Drop for WalletStoreSession {
     fn drop(&mut self) {
-        let _ = self.ownership.release();
+        let release = FinalRelease(Some(self.ownership.clone()));
+        self.runtime.spawn_blocking(move || release.run());
     }
 }
 impl From<uniffi::UnexpectedUniFFICallbackError> for StorageError {

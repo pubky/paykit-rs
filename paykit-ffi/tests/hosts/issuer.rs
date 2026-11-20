@@ -12,7 +12,8 @@ mod signer;
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
     match std::env::args().nth(1).as_deref() {
-        Some("paid-wallet") => return backup::print_wallet().await,
+        Some("paid-wallet") => return backup::print_wallet(false).await,
+        Some("seller-wallet") => return backup::print_wallet(true).await,
         Some("notice-wallet") => return backup::print_notice(false).await,
         Some("cleared-wallet") => return backup::print_notice(true).await,
         _ => {}
