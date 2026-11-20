@@ -221,7 +221,7 @@ async fn payment(
     let mut signer = Box::pin(signer::serving(world, "shop")).await?;
     let scopes = AppScopes::new().request().build()?;
     let names = scopes.scopes.iter().map(String::as_str).collect::<Vec<_>>();
-    let asking = Asking::for_scopes(world.app_keys(&shop, "till")?, &names)?;
+    let asking = Asking::for_scopes(world.app_keys(&shop, "wallet")?, &names)?;
     let review = signer.review(asking.request.signed(), &asking.auth)?;
     let approved = Box::pin(signer.approve(review)).await?;
     let mut seller = Box::pin(Paykit::join(
