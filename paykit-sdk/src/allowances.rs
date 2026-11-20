@@ -140,9 +140,11 @@ pub struct AllowanceView {
     pub status: AllowanceStatus,
     /// The executor app the record's current grant names, if it holds one that verifies.
     pub executor_app_id: Option<[u8; 16]>,
-    /// Whether this app holds current consent. A clean restore preserves it. A missed
-    /// item or a restore without a clean verdict requires confirmation (Paykit spec 8.3). This version adds no Allowance
-    /// to the list: it accepts none and writes no grant.
+    /// Whether this app holds current consent. The first executor grant records the
+    /// consent authorized through [`Paykit::propose_executable_allowance`] or
+    /// [`Paykit::accept_executable_allowance`]. A clean restore preserves it. A missed
+    /// item or a restore without a clean verdict requires confirmation through
+    /// [`Paykit::confirm_allowance_executor`] (Paykit spec 8.3).
     pub consented: bool,
     /// Whether the counterparty is on the identity's deny list, as the app last read it
     /// (Paykit spec 8.1, "Blocked counterparties"): nothing new from it is taken, its
@@ -3062,8 +3064,9 @@ impl Paykit {
 
     /// The later write of an Allowance's proposal, acceptance or rejection kept to write, a
     /// stored entry's (`se/`) or an answer kept before its record (`pr/`), with `locals` in
-    /// the commit or batch that places it: the one write both paths share. A proposal may
-    /// open the record, an answer needs it held.
+    /// the commit or batch that places it: the one write both paths share. An answer with
+    /// no permanent record is handled by the pending-proposal flow. Only the original
+    /// acceptance can create the permanent record.
     ///
     /// - An answer never takes the response while a different one its inbox accepted
     ///   before it, by `order`, is still kept to write ([`answered_before`]): it conflicts
@@ -3080,9 +3083,10 @@ impl Paykit {
     ///   [`crate::KEPT_MESSAGE_MS`] have passed since its acceptance (Paykit spec 8.1).
     /// - One the record reflects already, or that makes the Allowance conflicted, is done:
     ///   the conflict is kept as its stop (`cf/`) in the commit of `locals`.
-    /// - Any other acceptance that would take the record's response ([`would_accept`]) isn't
-    ///   written now ([`Placed::Not`]): this version makes no Allowance accepted (Paykit spec
-    ///   8.3.1). It stays kept, and is given up past its window with the notice.
+    /// - An acceptance that would fill an existing permanent record's empty response
+    ///   ([`would_accept`]) isn't written now ([`Placed::Not`]). The first acceptance belongs
+    ///   to the original conditional batch (Paykit spec 8.3.1). It stays kept, and is given
+    ///   up past its window with the notice.
     /// - A failure of the app's own store, or a switch that doesn't answer, is the call's
     ///   error, never a message not written.
     async fn place_allowance_later(
