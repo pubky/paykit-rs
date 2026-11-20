@@ -2091,6 +2091,14 @@ impl ActivityRecord {
             later.reassociations.starts_with(&self.reassociations),
             "Paykit wire 5.3: a later write changes or drops a reassociation seen",
         )?;
+        // A different deletion can replace this marker. Its absence would make a
+        // payer record with permanently lost history payable again (Paykit wire 5).
+        ensure(
+            self.side != ActivitySide::Payer
+                || self.lost_to_delete.is_none()
+                || later.lost_to_delete.is_some(),
+            "Paykit wire 5: a later payer write drops the deletion restriction",
+        )?;
         ensure(
             !self.manual_only || later.manual_only,
             "Paykit wire 5.3: a later write drops the manual_only seen",

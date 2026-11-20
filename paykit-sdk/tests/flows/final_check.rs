@@ -1652,6 +1652,60 @@ async fn test_acceptance_queued_once_the_call_is_made() {
         .is_some());
 }
 
+#[tokio::test]
+async fn test_fence_holds_a_marked_one_time_request_before_the_first_method_call() {
+    use paykit_lib::records::{ActivityRecord, ActivitySide};
+
+    let w = World::new();
+    let (store, app_id, request) = with_a_request(&w).await;
+    let mut other = w.wallet("other-payer").await;
+    other.receive(None).await.unwrap();
+    let target = crate::outcome_record::payer_record(&request);
+    let key = other.app().record_key(&target).unwrap();
+    store.on_paying(Box::new(move || {
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(async move {
+                    let current = other.app_mut().read_record(&target).await.unwrap().unwrap();
+                    let mut record = ActivityRecord::bind(
+                        current.content.value().unwrap(),
+                        &other.identity(),
+                        ActivitySide::Payer,
+                        other.app().naming_key(),
+                        &key,
+                        None,
+                    )
+                    .unwrap();
+                    record.lost_to_delete = Some([73; 32]);
+                    other
+                        .app_mut()
+                        .put_record(&target, &record.to_json().unwrap(), Vec::new())
+                        .await
+                        .unwrap();
+                });
+        })
+        .join()
+        .unwrap();
+    }));
+    let mut wallet = w
+        .load_on_clock(&w.alice, store, app_id, Arc::clone(&w.clock))
+        .await;
+    w.rail.next(Behaviour::Refuse);
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Pending { .. }), "{outcome:?}");
+    assert!(w.rail.all_pay_calls().is_empty());
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        paykit_sdk::RequestStatus::MayBePaid
+    );
+}
+
 // ---------------------------------------------------------------------------------------
 // The pre-dispatch budget and the floor of `orphan_after`
 

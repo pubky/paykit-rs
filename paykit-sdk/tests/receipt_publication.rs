@@ -5,6 +5,8 @@
 mod marked;
 #[path = "receipt_publication/older_backup.rs"]
 mod older_backup;
+#[path = "receipt_publication/payer_history.rs"]
+mod payer_history;
 
 use std::collections::BTreeMap;
 use std::error::Error;
