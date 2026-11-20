@@ -723,13 +723,20 @@ fn keep_earlier_acceptance_for_report(
 ) -> std::result::Result<(), Fail> {
     if matches!(q.body(), Body::AllowanceAcceptance(_)) {
         let key = key::original_allowance(&cx.record_key(target)?);
-        if let Some(original) = state::cx_get::<OriginalAllowance>(cx, &key)? {
-            if original
+        let report = if let Some(original) = state::cx_get::<OriginalAllowance>(cx, &key)? {
+            original
                 .awaits_loss_report(q, position.generation)
                 .map_err(|_| Fail::corrupt())?
-            {
-                keep_answer(cx, target, q, position, true, None)?;
-            }
+        } else {
+            let id = named_allowance(q.body()).ok_or_else(Fail::corrupt)?;
+            let pending = allowance_record_target(Collection::AllowanceProposals, &q.sender(), id);
+            let key = cx.record_key(&pending)?;
+            cx.record(&pending)?.and_then(|held| replies::original_for(&held, &pending, &key, &cx.identity(), q))
+                .is_some_and(|held| matches!(held.proposal().body(), Body::AllowanceProposal(p) if p.proposer_role == ProposerRole::Allower && p.allower_generation < position.generation)
+                    && held.proposal().sender() == cx.identity() && held.proposal().cert().app_id() == cx.app_id())
+        };
+        if report {
+            keep_answer(cx, target, q, position, true, None)?;
         }
     }
     Ok(())

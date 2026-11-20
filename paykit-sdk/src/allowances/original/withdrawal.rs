@@ -309,7 +309,9 @@ impl Paykit {
     pub(in crate::allowances) async fn report_fenced_acceptance(
         &mut self,
         record: &[u8; 32],
+        target: &pubky_switch_client::app::RecordTarget,
         reply: &StoredMessage,
+        evidence: &KeptMessage,
     ) -> Result<()> {
         if self.app.own_identity().body().recovery_from.is_none()
             || !matches!(reply.body(), Body::AllowanceAcceptance(_))
@@ -317,15 +319,63 @@ impl Paykit {
             return Ok(());
         }
         let at = key::original_allowance(record);
-        let Some(mut original) = self.local_get::<OriginalAllowance>(&at).await? else {
-            return Ok(());
-        };
-        if !original.awaits_loss_report(reply, self.app.own_identity().generation())?
-            || !self.fenced_own_proposal(&original.decision.stored(&original.peer)?)
-        {
-            return Ok(());
-        }
         let mut tx = Tx::default();
+        if let Some(mut original) = self.local_get::<OriginalAllowance>(&at).await? {
+            if !original.awaits_loss_report(reply, self.app.own_identity().generation())?
+                || !self.fenced_own_proposal(&original.decision.stored(&original.peer)?)
+            {
+                return Ok(());
+            }
+            original.reported_after_loss = Some(reply.hash());
+            tx.put(&at, &original)?;
+        } else {
+            // The live signed P identifies the permanent refusal even if this backup
+            // predates the app's create. Retain the reported disposition on every copy of Q.
+            let pubky_switch_client::app::RecordRead::Fresh(live) =
+                self.app.read_record_fresh(target).await?
+            else {
+                return Ok(());
+            };
+            let Some(pending) = replies::original_for(
+                &live,
+                target,
+                &self.app.record_key(target)?,
+                &self.identity(),
+                reply,
+            ) else {
+                return Ok(());
+            };
+            if !self.fenced_own_proposal(pending.proposal()) {
+                return Ok(());
+            }
+            let held_key = key::kept_reply(&reply.sender(), record, &reply.message().msg_id);
+            let stored_key = key::stored_note(&reply.sender(), &reply.message().msg_id);
+            let mut held = self.local_get::<KeptMessage>(&held_key).await?;
+            let mut stored = self
+                .local_get::<crate::stored::StoredNote>(&stored_key)
+                .await?;
+            let active = stored.as_mut().filter(|note| !note.placed);
+            if held.is_none() && active.is_none() {
+                return Ok(());
+            }
+            let mut reported = evidence.loss_reported;
+            for q in held.iter_mut().chain(active.map(|note| &mut note.message)) {
+                if q.stored(&self.identity())?.hash() != reply.hash() {
+                    return Err(PaykitError::corrupt());
+                }
+                reported |= q.loss_reported;
+                q.loss_reported = true;
+            }
+            if let Some(q) = held {
+                tx.put(&held_key, &q)?;
+            }
+            if let Some(note) = stored.filter(|note| !note.placed) {
+                tx.put(&stored_key, &note)?;
+            }
+            if reported {
+                return self.local_commit(tx).await;
+            }
+        }
         let notice = crate::stored::given_up_notice(
             reply,
             self.service_time().unwrap_or(0),
@@ -335,8 +385,6 @@ impl Paykit {
             &key::message_notice(&reply.sender(), &reply.message().msg_id),
             &notice,
         )?;
-        original.reported_after_loss = Some(reply.hash());
-        tx.put(&at, &original)?;
         self.local_commit(tx).await
     }
 

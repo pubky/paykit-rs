@@ -1371,7 +1371,7 @@ impl Paykit {
         let key = self.app.record_key(&target)?;
         let own = self.identity();
         let at = key::pending_conflict(&key);
-        Box::pin(self.report_fenced_acceptance(record, message)).await?;
+        Box::pin(self.report_fenced_acceptance(record, &target, message, evidence)).await?;
         let end = self
             .local_get::<PendingRetirement>(&key::pending_retirement(&key))
             .await?;

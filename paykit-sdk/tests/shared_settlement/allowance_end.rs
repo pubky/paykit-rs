@@ -155,6 +155,12 @@ async fn test_enrolled_payer_holds_a_missing_proposal_after_loss() -> TestResult
 }
 
 #[tokio::test]
+async fn test_enrolled_payer_reports_loss_with_the_live_proposal_but_no_original_create(
+) -> TestResult {
+    Box::pin(terminal_after_loss(RecoveredProposal::MissingCreate)).await
+}
+
+#[tokio::test]
 async fn test_enrolled_payer_retains_a_new_pending_lifetime_after_loss() -> TestResult {
     Box::pin(terminal_after_loss(RecoveredProposal::Recreated)).await
 }
@@ -175,6 +181,7 @@ async fn test_enrolled_payer_keeps_the_recovered_proposal_while_the_seller_is_de
 enum RecoveredProposal {
     Original,
     Missing,
+    MissingCreate,
     Recreated,
     Interrupted,
     Denied,
@@ -259,6 +266,32 @@ async fn withdraw_recovered_proposal(w: &World, case: RecoveredProposal) -> Test
     assert!(original.authenticated && original_op.proof.is_some());
     assert_eq!(created_at.generation, original_generation);
     assert_eq!(original.writer, payer.app_id());
+    if case == RecoveredProposal::MissingCreate {
+        // The same app imports its older backup while G1 can still authenticate P.
+        // Its new store learns P from the service without the original create receipt.
+        drop(payer);
+        payer = Box::pin(Paykit::restore(
+            w.app_env(Arc::new(MemoryStore::new())),
+            Default::default(),
+            &before_proposal,
+            rail.clone(),
+            Arc::new(TestTimer),
+        ))
+        .await?;
+        Box::pin(finish_restored_withdrawal(&mut payer)).await?;
+        let (known, source, _) = payer
+            .app_mut()
+            .read_record_application(&target)
+            .await?
+            .ok_or("older backup could not read the original live P")?;
+        assert!(known.authenticated);
+        assert_eq!(source, created_at);
+        assert!(payer
+            .app()
+            .protocol_scan("paykit", b"ao/")
+            .await?
+            .is_empty());
+    }
     let next = "https://replacement.buyer.allowance.test";
     w.lose_switch("https://buyer.allowance.test");
     w.add_switch(next, &[&w.identity("buyer")?]).await?;
@@ -292,8 +325,16 @@ async fn withdraw_recovered_proposal(w: &World, case: RecoveredProposal) -> Test
     shop.app_mut().identity_of(&payer.identity(), true).await?;
     let selection = if case != RecoveredProposal::Missing {
         let restored = payer.app_mut().read_record_fresh(&target).await?;
-        let pubky_switch_client::app::RecordRead::Fresh(live) = restored else {
-            return Err("replacement did not return the live pending proposal".into());
+        let live = match restored {
+            pubky_switch_client::app::RecordRead::Fresh(live) => live,
+            pubky_switch_client::app::RecordRead::Kept { reason, record } => {
+                return Err(format!(
+                    "replacement pending read: {reason:?}, cached {}",
+                    record.is_some()
+                )
+                .into())
+            }
+            _ => return Err("unrecognized pending read".into()),
         };
         assert_eq!(live.content, original.content);
         let selection = payer.app().record_condition(&pending_key).await?;
@@ -401,6 +442,54 @@ async fn withdraw_recovered_proposal(w: &World, case: RecoveredProposal) -> Test
         .events
         .iter()
         .any(|e| matches!(e, AppEvent::MessageReceived {msg_id,..} if msg_id == &answer)));
+    if case == RecoveredProposal::MissingCreate {
+        let notices = payer.notices().await?;
+        let notice = notices
+            .iter()
+            .find(|n| {
+                n.kind == NoticeKind::AllowanceAcceptanceBeforeLoss
+                    && n.msg_id.as_deref() == Some(answer.as_str())
+            })
+            .ok_or("missing permanent-refusal notice")?;
+        payer.acknowledge_notice(&notice.id).await?;
+        Box::pin(payer.receive(None)).await?;
+        Box::pin(payer.flush()).await?;
+        assert!(payer.notices().await?.iter().all(|n| n.id != notice.id));
+        let (_, installed, member) = payer
+            .app_mut()
+            .read_record_application(&target)
+            .await?
+            .ok_or("original was deleted without authority")?;
+        assert_eq!(installed.item_hash, created_at.item_hash);
+        assert_eq!(member, original_op);
+        assert!(payer
+            .app()
+            .protocol_scan("paykit", b"ao/")
+            .await?
+            .is_empty());
+        assert!(payer
+            .app()
+            .sent_to(&peer, 0, u64::MAX)
+            .await?
+            .iter()
+            .all(|sent| sent.kind != "paykit.allowance_end"));
+        assert!(payer.app().shared_record(&offer.record).await?.is_none());
+        assert!(payer
+            .app()
+            .records_of("allowance_ledgers")
+            .await?
+            .is_empty());
+        assert!(payer
+            .resume_allowance_executor(&offer.record)
+            .await
+            .is_err());
+        assert_eq!(
+            shop.allowance(&mirror).await?.status,
+            AllowanceStatus::Accepted
+        );
+        assert!(rail.all_executions().is_empty());
+        return Ok(());
+    }
     if case == RecoveredProposal::Missing {
         assert!(payer
             .app_mut()
