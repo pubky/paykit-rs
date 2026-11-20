@@ -15,9 +15,9 @@ fn get(store: &OpfsStore, ns: &str, key: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// A store whose file `a` holds `k = value-1` at generation 1 and file `b` holds
-/// `k = value-2` at generation 2, closed.
-async fn two_commits(name: &str) {
-    let store = OpfsStore::open(name, WrappingKey::Origin).await.unwrap();
+/// `k = value-2` at generation 2, under `wrapping`, closed.
+pub async fn two_commits(name: &str, wrapping: &WrappingKey) {
+    let store = OpfsStore::open(name, wrapping.clone()).await.unwrap();
     store.commit(put("ns", b"k", b"value-1")).unwrap();
     store.commit(put("ns", b"k", b"value-2")).unwrap();
     drop(store);
@@ -139,7 +139,7 @@ async fn test_store_opfs_lease_keeps_the_store_open() {
 #[wasm_bindgen_test]
 async fn test_store_opfs_damaged_newest_file_falls_back() {
     let name = opfs::fresh_name("damaged");
-    two_commits(&name).await;
+    two_commits(&name, &WrappingKey::Origin).await;
     opfs::damage_file(&name, "b", PAYLOAD_AT + 2).await;
 
     // The newest file fails its tag, so the store opens at the older one.
@@ -159,7 +159,7 @@ async fn test_store_opfs_damaged_newest_file_falls_back() {
 #[wasm_bindgen_test]
 async fn test_store_opfs_both_files_damaged_is_corrupt() {
     let name = opfs::fresh_name("corrupt");
-    two_commits(&name).await;
+    two_commits(&name, &WrappingKey::Origin).await;
     opfs::damage_file(&name, "a", PAYLOAD_AT + 2).await;
     opfs::damage_file(&name, "b", PAYLOAD_AT + 2).await;
     let a = opfs::read_file(&name, "a").await;
