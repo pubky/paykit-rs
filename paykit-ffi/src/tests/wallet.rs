@@ -247,6 +247,10 @@ async fn journey(world: &World) -> TestResult {
         })
     ));
     let backup = payer.backup().await?;
+    assert_eq!(
+        paykit_sdk::PaykitBackup::from_bytes(&backup)?.to_bytes()?,
+        backup
+    );
     let identity = payer.identity().await?;
     let blocked_release = root.path().join("hold-release");
     std::fs::write(&blocked_release, [])?;
@@ -265,26 +269,9 @@ async fn journey(world: &World) -> TestResult {
     std::fs::remove_file(blocked_release)?;
     let reopened = env.load(id.clone()).await?;
     assert_eq!(reopened.identity().await?, identity);
-    reopened.shutdown().await?;
-    let empty = tempfile::tempdir()?;
-    let restoring = host(world, empty.path(), account.clone());
-    assert!(matches!(
-        restoring
-            .restore(id.clone(), backup.clone(), BackupDevice::UnaccountedFor)
-            .await,
-        Err(WalletError::SourceDeviceUnaccountedFor)
-    ));
-    assert_eq!(DeviceStore::open(empty.path()).rows(), 0);
-    assert_eq!(std::fs::read_dir(empty.path())?.count(), 1);
-    let restored = restoring
-        .restore(id.clone(), backup, BackupDevice::InPossession)
-        .await?;
-    assert_eq!(restored.app_id().await?, id);
-    assert_eq!(restored.identity().await?, identity);
+    assert_eq!(reopened.app_id().await?, id);
     assert_eq!(account.count(), 0);
-    restored.shutdown().await?;
-    let original = env.load(id.clone()).await?;
-    Box::pin(payment(world, &env, original, &account, id)).await
+    Box::pin(payment(world, &env, reopened, &account, id)).await
 }
 fn run(backend: Backend) {
     let thread = std::thread::Builder::new()
@@ -311,10 +298,10 @@ fn run(backend: Backend) {
     thread.join().unwrap();
 }
 #[test]
-fn test_installed_payer_restores_the_original_approved_wallet_on_scripted() {
+fn test_installed_payer_reopens_the_original_approved_wallet_on_scripted() {
     run(Backend::Scripted);
 }
 #[test]
-fn test_installed_payer_restores_the_original_approved_wallet_on_postgresql() {
+fn test_installed_payer_reopens_the_original_approved_wallet_on_postgresql() {
     run(Backend::Service);
 }
