@@ -5950,8 +5950,7 @@ async fn test_allowances_expired_pending_evidence_survives_reload_until_exact_de
     let earlier = wallet.backup().await.unwrap();
     let app_id = wallet.app_id();
     drop(wallet);
-    let mut wallet =
-        Box::pin(w.load_on_clock(&w.alice, base.clone(), app_id, w.clock.clone())).await;
+    let wallet = Box::pin(w.load_on_clock(&w.alice, base.clone(), app_id, w.clock.clone())).await;
     assert_eq!(
         wallet.app().protocol_scan("paykit", b"ax/").await.unwrap(),
         holds
