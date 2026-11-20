@@ -3,6 +3,10 @@
 use super::*;
 use paykit_sdk::{MessageDelivery, Refusal, RequestStatus, SentRequest};
 use pubky_switch_client::app::AppEvent;
+use pubky_switch_client::client::{Credentials, SwitchClient};
+use pubky_switch_client::transport::{Request, Response};
+use pubky_switch_core::enc::unb64_array;
+use std::sync::Mutex;
 
 #[tokio::test]
 async fn test_sibling_wallet_reads_invitations_without_granting_request_scope() -> TestResult {
@@ -114,9 +118,18 @@ async fn delivered_requests(world: &World, restore_creator: bool) -> TestResult 
     assert!(payer_only.app().queued_messages("paykit").await?.is_empty());
     drop(payer_only);
 
-    // The first append applied but its answer was lost. Flush retries the same request
-    // and envelope, even though its single-use invitation has already been redeemed.
-    // Its success also proves that the refused app did not spend this invitation.
+    // Observe the actual sealed request and answer without changing either. The sender
+    // loses that answer, so its original signed request stays queued.
+    let appends = Arc::new(Mutex::new(Vec::<(Request, Response)>::new()));
+    let observed = Arc::clone(&appends);
+    world.distort(move |request, response| {
+        if request.method == "POST" && request.path_and_query.contains("/inbox?") {
+            observed
+                .lock()
+                .unwrap()
+                .push((request.clone(), response.clone()));
+        }
+    });
     world.lose_answer("POST", "/inbox");
     let first = Box::pin(seller.send_request(
         receiver.identity(),
@@ -125,6 +138,72 @@ async fn delivered_requests(world: &World, restore_creator: bool) -> TestResult 
     .await?;
     assert!(matches!(first.delivery, MessageDelivery::Queued { .. }));
     assert_eq!(world.faults_left(), 0);
+    let (sent, answer) = appends.lock().unwrap()[0].clone();
+    assert_eq!(
+        sent.header("Switch-Invite-Code"),
+        Some(first_code.code.as_str())
+    );
+    assert!((200..300).contains(&answer.status));
+    let apps_version = sent
+        .path_and_query
+        .split_once('?')
+        .and_then(|(_, query)| query.strip_prefix("apps_version="))
+        .ok_or("append has no directory version")?
+        .parse()?;
+    let inbox = receiver.app().own_identity().inbox();
+    let retrying_sender = SwitchClient::new(
+        &inbox.url,
+        receiver.identity(),
+        Credentials::App {
+            identity: seller.identity(),
+            keys: world.app_keys(&world.identity("shop")?, "labelled-seller")?,
+            cert: seller.app().cert().clone(),
+        },
+        Some(inbox.service_key),
+        world.transport(),
+        world.clock().clone(),
+    )?;
+    // The public request API signs a different HTTP header around the exact same sealed
+    // envelope. This is a retry, not a new payment request or a newly sealed message.
+    let retried = retrying_sender
+        .append(sent.body.clone(), apps_version, Some(&second_code.code))
+        .await?;
+    let first_answer: serde_json::Value = serde_json::from_slice(&answer.body)?;
+    assert_eq!(
+        retried.entry_id,
+        unb64_array::<16>(
+            first_answer["entry_id"]
+                .as_str()
+                .ok_or("entry ID missing")?
+        )?
+    );
+    assert_eq!(
+        retried.accepted_at,
+        pubky_switch_core::time::parse_rfc3339(
+            first_answer["accepted_at"]
+                .as_str()
+                .ok_or("acceptance time missing")?
+        )?
+    );
+    {
+        let observed = appends.lock().unwrap();
+        assert_eq!(observed.len(), 2);
+        assert_eq!(observed[1].0.body, sent.body);
+        assert_eq!(
+            observed[1].0.header("Switch-Invite-Code"),
+            Some(second_code.code.as_str())
+        );
+        assert_eq!(observed[1].1.body, answer.body);
+    }
+    let registered = receiver.app_mut().allow_list().await?.invite_codes;
+    let unused = registered
+        .iter()
+        .find(|code| code.code_hash == second_code.code_hash)
+        .ok_or("second invitation disappeared")?;
+    assert_eq!(unused.max_uses, 1);
+    assert_eq!(unused.uses, 0);
+    // Flush still uses the original queued request. The second single-use code remains
+    // available for the next distinct request, proving that the retry did not spend it.
     seller.flush().await?;
     assert!(matches!(
         seller.message_delivery(&first.msg_id).await?,
