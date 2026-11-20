@@ -103,6 +103,12 @@ web-sys = { version = "0.3.107", features = [
 
 [dev-dependencies]
 serde_json.workspace = true
+# `tests/vectors/` compiles paykit-lib's own vector tests, which need paykit-lib's writers
+# without their rules and pubky-switch-core's sealing with a fixed nonce. Both features are for
+# tests only: under resolver 2, a dev-dependency's features are on only when a target that
+# needs them, such as this crate's tests, is built.
+paykit-lib = { workspace = true, features = ["test-vectors"] }
+pubky-switch-core = { workspace = true, features = ["test-vectors"] }
 
 # The `switch-enroll` example (`rig/switch_enroll.rs`): the native program the browser rig runs to
 # enrol test identities on a running Switch service and approve their apps with the real signer,
