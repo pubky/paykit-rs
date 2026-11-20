@@ -156,7 +156,14 @@ private final class ReceiptReader: WalletHomeserver, PaymentMethod, @unchecked S
         MethodDeclaration(idempotent: true, idempotencyRetentionMs: nil, history: true, historyRetentionMs: nil, historySurvivesRestore: true, longestCompletionMs: 3_600_000)
     }
     func selectEndpoints(candidates: [EndpointCandidate], amount: Amount?) throws -> SelectedEndpoints {
-        SelectedEndpoints(payable: candidates.map(\.id), failures: [])
+        var payable: [UInt32] = []
+        var failures: [EndpointFailure] = []
+        for candidate in candidates.reversed() {
+            if candidate.identifier == "btc-lightning-bolt12" {
+                failures.append(EndpointFailure(id: candidate.id, error: .Unavailable(reason: "route unavailable")))
+            } else { payable.append(candidate.id) }
+        }
+        return SelectedEndpoints(payable: payable, failures: failures)
     }
     func transfer(endpoint: String, payload: String, amount: Amount) -> MethodTransfer {
         try! MethodTransfer(amount: amount, maxFee: nil)
@@ -206,6 +213,16 @@ private func recoverReceipt(_ issuer: String) async throws {
     precondition(journal.count == 1 && journal[0].receipt?.messageId == receipts.first?.messageId)
     let entry = journal[0]
     let periodUsage = AllowancePeriodUsage(amount: entry.amount.value, count: 1)
+    let selection = try method.selectEndpoints(candidates: [
+        EndpointCandidate(id: 6, identifier: "btc-onchain", payload: "address"),
+        EndpointCandidate(id: 2, identifier: "btc-lightning-bolt12", payload: "offer"),
+        EndpointCandidate(id: 9, identifier: entry.endpoint, payload: "invoice"),
+    ], amount: entry.amount)
+    precondition(selection.payable == [9, 6] && selection.failures.count == 1)
+    let failure = selection.failures[0]
+    guard case let .Unavailable(reason) = failure.error else { preconditionFailure("wrong endpoint failure") }
+    precondition(failure.id == 2 && reason == "route unavailable")
+    precondition(failure.error.localizedDescription == "MethodError(<redacted>)")
     let descriptions: [(Any, String)] = [
         (entry, "PaymentEntry"), (receipts[0], "Receipt"), (id, "RequestId"), (entry.amount, "Amount"),
         (BillingPeriod(startsAt: 1, endsAt: 2), "BillingPeriod"),
@@ -213,6 +230,8 @@ private func recoverReceipt(_ issuer: String) async throws {
         (MethodDispatch(attemptId: entry.attemptId, amount: entry.amount, outcome: .pending), "MethodDispatch"),
         (periodUsage, "AllowancePeriodUsage"),
         (AllowanceUsage(lifetime: entry.amount.value, periods: [periodUsage], reserved: 0, spent: 1, released: 0), "AllowanceUsage"),
+        (selection, "SelectedEndpoints"), (failure, "EndpointFailure"), (failure.error, "MethodError"),
+        (method.declaration(), "MethodDeclaration"),
         (WalletError.Operation(kind: .client, detail: "operation failed", serviceCode: nil, keptBatch: Data([1])), "WalletError"),
     ]
     for (value, name) in descriptions {
