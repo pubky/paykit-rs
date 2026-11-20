@@ -38,7 +38,7 @@ use crate::activity::{ActivityTarget, Role};
 use crate::app_records::PublicAppFailure;
 use crate::error::{PaykitError, Refusal, Result};
 use crate::journal::{JournalEntry, KeptAmount, KeptPeriod, Stage};
-use crate::pay::{BlockedPayment, Chosen, PayOptions, PayOutcome, PayResult, Plan, Pricing};
+use crate::pay::{BlockedPayment, Chosen, PayOptions, PayResult, Plan, Pricing};
 use crate::paykit::Paykit;
 use crate::receipts::{period_request_target, received_receipt, ReceivedReceipt};
 use crate::records::{conflict, KeptMessage};
@@ -815,8 +815,24 @@ fn bare_period_record(request: &RequestRef, period: &PeriodRef) -> ActivityRecor
     record
 }
 
-fn policy_withheld(record: &ActivityRecord) -> bool {
-    record.manual_only || record.allowance_id.is_some()
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PeriodPayer {
+    User,
+    Policy,
+    Executor,
+}
+
+fn automatic_period_held(
+    record: &ActivityRecord,
+    period: &PeriodRef,
+    funding: Option<&paykit_lib::AllowanceId>,
+) -> bool {
+    record.manual_only
+        || if record.billing_period.is_some() {
+            record.allowance_id.is_some()
+        } else {
+            record.allowance_for(period.start_secs()) != funding
+        }
 }
 
 pub(crate) fn automatic_window_ended(
@@ -830,7 +846,7 @@ pub(crate) fn automatic_window_ended(
 /// The physical write checked by an app paying under its policy, and whether it held
 /// the payee's signed stop that crosses this first dispatch (Paykit spec 8.1, 8.2).
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct PolicyPeriodWrite {
+pub(crate) struct AutomaticPeriodWrite {
     condition: Condition,
     pub(crate) crossed_stop: bool,
 }
@@ -838,12 +854,14 @@ pub(crate) struct PolicyPeriodWrite {
 impl Paykit {
     /// Read a record used to authorize an automatic period payment from its current
     /// physical application. Applying the read can itself reveal a restricted write.
-    pub(crate) async fn policy_period_condition(
+    pub(crate) async fn automatic_period_condition(
         &mut self,
         target: &ActivityTarget,
-        period: Option<PeriodRef>,
+        period: PeriodRef,
+        parent: bool,
+        funding: Option<&paykit_lib::AllowanceId>,
         crossing_payee: Option<[u8; 32]>,
-    ) -> Result<Option<PolicyPeriodWrite>> {
+    ) -> Result<Option<AutomaticPeriodWrite>> {
         let Ok(RecordRead::Fresh(held)) = self.app.read_record_fresh(&target.record_target()).await
         else {
             return Ok(None);
@@ -854,13 +872,13 @@ impl Paykit {
         let Ok(record) = self.checked_period_activity(target, &held) else {
             return Ok(None);
         };
-        if record.billing_period != period
-            || policy_withheld(&record)
+        if record.billing_period != (!parent).then_some(period)
+            || automatic_period_held(&record, &period, funding)
             || payment_ended(&record, crossing_payee)
         {
             return Ok(None);
         }
-        if period.is_none()
+        if parent
             && (request_of(&record).is_none_or(|(_, request)| !request.is_recurring())
                 || !accepted(&record)
                 || !held.authenticated
@@ -875,7 +893,7 @@ impl Paykit {
         {
             return Ok(None);
         }
-        Ok(Some(PolicyPeriodWrite {
+        Ok(Some(AutomaticPeriodWrite {
             condition: self.app.record_condition(&held.key).await?,
             crossed_stop: record.cancellation.is_some(),
         }))
@@ -927,7 +945,7 @@ impl Paykit {
         period: &PeriodRef,
         options: PayOptions,
     ) -> PayResult {
-        self.pay_selected_period(request, period, Initiator::User, options)
+        self.pay_selected_period(request, period, PeriodPayer::User, options)
             .await
     }
 
@@ -963,35 +981,68 @@ impl Paykit {
             },
             PeriodPrice::AtRate(quote) => PayOptions::default().with_rate_authorized(quote.clone()),
         };
-        self.pay_selected_period(request, period, Initiator::Automatic, options)
+        self.pay_selected_period(request, period, PeriodPayer::Policy, options)
             .await
+    }
+
+    /// Pay one Billing Period under the Allowance named by the accepted subscription
+    /// for this occurrence. Its executor reserves the amount and opens the period's
+    /// claim in the same batch (Paykit spec 8.2, 8.3). A payment requiring currency
+    /// conversion is ineligible. A later period requiring a destination from period details
+    /// returns [`Refusal::NoDestination`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Paykit::pay_period_automatically`] and [`Paykit::pay_under_allowance`].
+    /// An unfunded subscription, an ineligible period or an unverified grant cannot spend.
+    pub async fn pay_period_under_allowance(
+        &mut self,
+        request: &RequestRef,
+        period: &PeriodRef,
+    ) -> PayResult {
+        self.pay_selected_period(
+            request,
+            period,
+            PeriodPayer::Executor,
+            PayOptions::default(),
+        )
+        .await
     }
 
     async fn pay_selected_period(
         &mut self,
         request: &RequestRef,
         period: &PeriodRef,
-        by: Initiator,
+        payer: PeriodPayer,
         options: PayOptions,
     ) -> PayResult {
         let mut public_failures = Vec::new();
-        let outcome =
-            Box::pin(self.pay_period_inner(request, period, by, options, &mut public_failures))
-                .await;
+        let plan = Box::pin(self.plan_period_payment(
+            request,
+            period,
+            payer,
+            options,
+            &mut public_failures,
+        ))
+        .await;
+        let outcome = match plan {
+            Ok(plan) => Box::pin(self.execute(plan)).await,
+            Err(error) => Err(error),
+        };
         PayResult {
             outcome,
             public_failures,
         }
     }
 
-    async fn pay_period_inner(
+    async fn plan_period_payment(
         &mut self,
         request: &RequestRef,
         period: &PeriodRef,
-        by: Initiator,
+        payer: PeriodPayer,
         options: PayOptions,
         public_failures: &mut Vec<PublicAppFailure>,
-    ) -> Result<PayOutcome> {
+    ) -> Result<Plan> {
         self.refresh_own()?;
         if options.quote_only {
             self.require_first_read()?;
@@ -1002,7 +1053,12 @@ impl Paykit {
             self.records_known().await?;
         }
         self.require_pay()?;
-        let automatic = by == Initiator::Automatic;
+        let automatic = payer != PeriodPayer::User;
+        let by = if automatic {
+            Initiator::Automatic
+        } else {
+            Initiator::User
+        };
         self.app
             .may_attempt(automatic)
             .map_err(crate::pay::not_now)?;
@@ -1050,8 +1106,20 @@ impl Paykit {
         if held_period.as_ref().is_some_and(ActivityRecord::shows_paid) {
             return Err(Refusal::AlreadyPaid.into());
         }
+        let funding_id = if payer == PeriodPayer::Executor {
+            Some(
+                record
+                    .allowance_for(period.start_secs())
+                    .ok_or(Refusal::ManualOnly)?,
+            )
+        } else {
+            None
+        };
         if automatic
-            && (policy_withheld(&record) || held_period.as_ref().is_some_and(policy_withheld))
+            && (automatic_period_held(&record, &period, funding_id)
+                || held_period
+                    .as_ref()
+                    .is_some_and(|held| automatic_period_held(held, &period, funding_id)))
         {
             return Err(Refusal::ManualOnly.into());
         }
@@ -1136,7 +1204,7 @@ impl Paykit {
         let obligation =
             self.obligation(&request.payee, &request.request_hash, period.start_secs());
         let restored = self.restored_attempts(&obligation).await?;
-        let step = self
+        let claim = self
             .payable_claim(
                 &obligation,
                 &stored,
@@ -1146,8 +1214,8 @@ impl Paykit {
                 &options,
                 by,
             )
-            .await?
-            .map_or(0, |claim| claim.step);
+            .await?;
+        let step = claim.as_ref().map_or(0, |c| c.step);
         if self.deadline_passed(deadline) {
             return Err(self.past_deadline(&target, None).await?);
         }
@@ -1175,8 +1243,23 @@ impl Paykit {
         }
         // The claim was read just before: the service time it verified is current.
         let mut conditions = vec![self.not_before(&period, &options)?];
+        let funding = if let Some(id) = funding_id {
+            let key = self
+                .app
+                .record_key(&crate::allowances::allowance_target(&request.payee, id))?;
+            let reservation = Box::pin(self.allowance_reservation(&key, &request.payee)).await?;
+            reservation.request(&record, claim.as_ref(), Some(period.start_secs()))?;
+            Some(reservation)
+        } else {
+            None
+        };
         let pricing =
             self.period_pricing(request, period, &body, held_period.as_ref(), by, &options)?;
+        let pricing = if funding.is_some() {
+            pricing.under_allowance()
+        } else {
+            pricing
+        };
         let Chosen {
             destination,
             carrier,
@@ -1191,7 +1274,7 @@ impl Paykit {
                 &stored,
                 &body,
                 &options,
-                body.accepted_payment_endpoint_identifiers.as_deref(),
+                funding.as_ref().and_then(|under| under.endpoints()),
                 &pricing,
                 public_failures,
             )
@@ -1266,7 +1349,7 @@ impl Paykit {
             failed_on_claim: false,
             billing_period: Some(KeptPeriod::of(&period)),
         };
-        Box::pin(self.execute(Plan {
+        Ok(Plan {
             entry,
             record: target,
             carrier,
@@ -1274,15 +1357,14 @@ impl Paykit {
             reserve,
             create: None,
             on_record: true,
-            allowance: None,
+            allowance: funding,
             by,
             unconfirmed: options.unconfirmed_identity_confirmed,
             blocked_confirmed: options.blocked_confirmed,
             end_hold,
             conditions,
             record_writes,
-        }))
-        .await
+        })
     }
 
     /// Select the eligible signed rate sources from this occurrence's bounded period record.

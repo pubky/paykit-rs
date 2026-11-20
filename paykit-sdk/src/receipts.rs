@@ -44,7 +44,10 @@ pub(crate) fn receipt_binding(
             _ => return ReceiptBinding::MissingRequest,
         },
     };
-    if crate::periods::request_for_payment(parent, record, &binding).is_some() {
+    if crate::periods::request_for_payment(parent, record, &binding)
+        .and_then(|(_, request)| displayed_receipt(record, Some(request)))
+        .is_some()
+    {
         ReceiptBinding::Verified
     } else {
         ReceiptBinding::Invalid
@@ -233,18 +236,26 @@ pub(crate) fn period_request_target(
     })
 }
 
-/// The receipt to display for a bound activity (Paykit wire 4.11, 5.3).
-/// A payee credits the payment its signed receipt confirms. A payer may hold
-/// the payee's receipt before it has the signed proof. Reading the activity
-/// checks both messages' signatures, roles, attempt, occurrence and proof hash.
-pub(crate) fn displayed_receipt(record: &ActivityRecord) -> Option<&StoredMessage> {
+/// The receipt for a bound activity (Paykit spec 3.4, Paykit wire 4.11 and 5.3).
+/// A period keeps its signed request in the parent. Check its selling scope there
+/// before using the receipt. A payee also needs the proof to credit the payment.
+pub(crate) fn displayed_receipt<'a>(
+    record: &'a ActivityRecord,
+    period_request: Option<&PaymentRequest>,
+) -> Option<&'a StoredMessage> {
     let receipt = record.receipt.as_ref()?;
     if record.side == ActivitySide::Payee && !record.shows_paid() {
         return None;
     }
-    if record.request.is_some() {
-        crate::periods::request_for_payment(record, record, &record.binding().ok()?)?;
-    }
+    let binding = record.binding().ok()?;
+    let request = match binding {
+        RecordBinding::Unrequested => return Some(receipt),
+        RecordBinding::Request { .. } => {
+            crate::periods::request_for_payment(record, record, &binding)?.1
+        }
+        RecordBinding::Period { .. } => period_request?,
+    };
+    receipt.check_payee_sender(request).ok()?;
     Some(receipt)
 }
 
@@ -257,10 +268,7 @@ pub(crate) fn received_receipt(
     record: &ActivityRecord,
     request: Option<&PaymentRequest>,
 ) -> Option<ReceivedReceipt> {
-    let stored = displayed_receipt(record)?;
-    if request.is_some_and(|request| stored.check_payee_sender(request).is_err()) {
-        return None;
-    }
+    let stored = displayed_receipt(record, request)?;
     let Body::PaymentReceipt(PaymentReceipt {
         attempt_id,
         billing_period,
