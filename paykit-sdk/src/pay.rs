@@ -611,6 +611,7 @@ pub(crate) struct Pricing<'a> {
     period: Option<PeriodRef>,
     rates: Rates<'a>,
     by: Initiator,
+    under_allowance: bool,
 }
 
 /// The signed sources of prices for the endpoints of a payment (Paykit wire 4.4, 4.9).
@@ -629,6 +630,7 @@ impl<'a> Pricing<'a> {
             period: None,
             rates: Rates::None,
             by: Initiator::User,
+            under_allowance: false,
         }
     }
 
@@ -650,7 +652,13 @@ impl<'a> Pricing<'a> {
             period,
             rates,
             by,
+            under_allowance: false,
         }
+    }
+
+    pub(crate) fn under_allowance(mut self) -> Self {
+        self.under_allowance = true;
+        self
     }
 
     pub(crate) fn with_period_rates(mut self, details: Vec<&'a StoredMessage>) -> Self {
@@ -1192,7 +1200,7 @@ impl Paykit {
         }
         let allowance = if let Some(key) = allowance {
             let reservation = Box::pin(self.allowance_reservation(&key, &request.payee)).await?;
-            reservation.request(&record, claim.as_ref())?;
+            reservation.request(&record, claim.as_ref(), None)?;
             if blocked
                 || self.floor_holds(&stored).await?
                 || self.held(&record_key, &record).await?
@@ -2375,6 +2383,11 @@ impl Paykit {
             }
             Priced::ByHand(amount) => return Ok(Taken::ByHand(amount)),
             Priced::Unusable(why) => return Ok(Taken::Unusable(why)),
+            Priced::ByRate { .. } if pricing.under_allowance => {
+                return Ok(Taken::Unusable(
+                    "Paykit spec 8.3: an Allowance cannot pay at a rate",
+                ));
+            }
             Priced::ByRate { rate, amount } => (rate, amount),
         };
         let source = details.map_or(RateSource::Request, |signed| RateSource::PeriodDetails {
@@ -3481,7 +3494,9 @@ impl Paykit {
                 return Ok(PayOutcome::PaidOutcomeUnwritten { attempt_id });
             }
         }
-        match self.write_outcome(entry, paid, false).await {
+        // Recording an Allowance outcome also authenticates the current ledger. Keep
+        // that future off the wallet stack when resuming an interrupted dispatch.
+        match Box::pin(self.write_outcome(entry, paid, false)).await {
             Ok(Written::Done) => {}
             Ok(Written::Held) => return Ok(PayOutcome::RecordHeld { attempt_id }),
             Ok(Written::Divergent(record)) => {
@@ -4421,12 +4436,9 @@ impl Paykit {
             return Ok(false);
         };
         let target = ActivityTarget::payer(natural);
-        if let Some(period) = entry
-            .period()?
-            .filter(|_| !entry.user_started && entry.allowance.is_none())
-        {
+        if let Some(period) = entry.period()?.filter(|_| !entry.user_started) {
             return Ok(
-                Box::pin(self.policy_period_conditions(entry, &target, period, None))
+                Box::pin(self.automatic_period_conditions(entry, &target, period, None))
                     .await?
                     .is_none(),
             );
@@ -4707,7 +4719,7 @@ impl Paykit {
         // A seller's cancellation arrived between the two reads. Confirm the new
         // parent, unchanged occurrence, deny list and independent holds together.
         if judged.deny == confirmed.deny
-            && matches!((&judged.policy_period, &confirmed.policy_period),
+            && matches!((&judged.period, &confirmed.period),
             (Some(before), Some(after)) if !before[0].crossed_stop && after[0].crossed_stop && before[1] == after[1])
         {
             let latest = Box::pin(self.shared_collect(entry, kind, false, crossing_payee)).await?;
@@ -4716,23 +4728,40 @@ impl Paykit {
         Ok(true)
     }
 
-    /// An unfunded period started by policy must still be authorized by both current
+    /// An automatic period payment must still be authorized by both current
     /// records at resume and immediately before the rail call (Paykit spec 8.2, 8.3).
-    async fn policy_period_conditions(
+    async fn automatic_period_conditions(
         &mut self,
         entry: &JournalEntry,
         parent: &ActivityTarget,
         period: PeriodRef,
         crossing_payee: Option<[u8; 32]>,
-    ) -> Result<Option<Box<[crate::periods::PolicyPeriodWrite; 2]>>> {
+    ) -> Result<Option<Box<[crate::periods::AutomaticPeriodWrite; 2]>>> {
         let occurrence = ActivityTarget::payer(entry.natural_key.clone());
-        let Some(parent) =
-            Box::pin(self.policy_period_condition(parent, None, crossing_payee)).await?
+        let funding = entry
+            .allowance
+            .as_ref()
+            .map(crate::executor::JournalAllowance::id)
+            .transpose()?;
+        let Some(parent) = Box::pin(self.automatic_period_condition(
+            parent,
+            period,
+            true,
+            funding.as_ref(),
+            crossing_payee,
+        ))
+        .await?
         else {
             return Ok(None);
         };
-        let Some(current) =
-            Box::pin(self.policy_period_condition(&occurrence, Some(period), None)).await?
+        let Some(current) = Box::pin(self.automatic_period_condition(
+            &occurrence,
+            period,
+            false,
+            funding.as_ref(),
+            None,
+        ))
+        .await?
         else {
             return Ok(None);
         };
@@ -4770,16 +4799,13 @@ impl Paykit {
                 deny,
                 record: None,
                 floor: None,
-                policy_period: None,
+                period: None,
             }));
         };
         let target = ActivityTarget::payer(natural);
-        if let Some(period) = entry
-            .period()?
-            .filter(|_| !entry.user_started && entry.allowance.is_none())
-        {
+        if let Some(period) = entry.period()?.filter(|_| !entry.user_started) {
             let Some(conditions) =
-                Box::pin(self.policy_period_conditions(entry, &target, period, crossing_payee))
+                Box::pin(self.automatic_period_conditions(entry, &target, period, crossing_payee))
                     .await?
             else {
                 return Ok(None);
@@ -4788,7 +4814,7 @@ impl Paykit {
                 deny,
                 record: None,
                 floor: None,
-                policy_period: Some(conditions),
+                period: Some(conditions),
             }));
         }
         let (record, stamp) = match self.fresh_request_stamped(&target).await {
@@ -4816,7 +4842,7 @@ impl Paykit {
                 deny,
                 record: Some(stamp),
                 floor: None,
-                policy_period: None,
+                period: None,
             }));
         }
         let stored = stored.clone();
@@ -4830,7 +4856,7 @@ impl Paykit {
             deny,
             record: Some(stamp),
             floor: Some(floor.as_ref().map(WriteStamp::of)),
-            policy_period: None,
+            period: None,
         }))
     }
 
@@ -5314,7 +5340,7 @@ struct SharedState {
     deny: Vec<[u8; 32]>,
     record: Option<WriteStamp>,
     floor: Option<Option<WriteStamp>>,
-    policy_period: Option<Box<[crate::periods::PolicyPeriodWrite; 2]>>,
+    period: Option<Box<[crate::periods::AutomaticPeriodWrite; 2]>>,
 }
 
 #[cfg(test)]

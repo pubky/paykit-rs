@@ -302,7 +302,17 @@ a request by hand with `Paykit::pay_request`.
 ## Scheduling a Billing Period
 
 The host schedules payments and records the user's recurring-payment policy. Accepting a
-subscription schedules no payment. For a current period outside an Allowance, choose how
+subscription schedules no payment. To fund it from an Allowance, its approving payer wallet
+calls `accept_subscription_under_allowance` with the request and its permanent Allowance
+handle. For each eligible occurrence, call `pay_period_under_allowance` with that request
+and its exact Billing Period. The wallet checks the pinned Allowance, available budget and
+payment method before it pays. A rate-priced endpoint requires a different funding decision.
+If a later period requires its own destination, the call returns `NoDestination` and leaves
+that period unpaid.
+After interruption, call `resume_payments`. Read the seller's receipt with
+`ReceiptsOf::Period` for the same request and period.
+
+For a current period outside an Allowance, choose how
 the host may use the endpoint before calling `pay_period_automatically`.
 
 - Use `PeriodPrice::RequestedAmount` when the host authorizes an eligible endpoint that
