@@ -1112,12 +1112,31 @@ async fn test_funded_subscription_checks_the_deny_list_and_refuses_a_rate_priced
 #[tokio::test]
 async fn test_funded_period_requiring_its_own_destination_leaves_the_subscription_endpoint_unused()
 {
+    Box::pin(funded_period_with_older_payable_destination(false)).await;
+}
+
+#[tokio::test]
+async fn test_funded_period_skips_a_newer_permitted_endpoint_that_requires_a_rate() {
+    Box::pin(funded_period_with_older_payable_destination(true)).await;
+}
+
+async fn funded_period_with_older_payable_destination(priced: bool) {
     use paykit_lib::periods::{AnchoredRule, PeriodRef, Recurrence, Unit};
     use paykit_sdk::Refusal;
 
     let mut terms = terms();
     let endpoint = crate::common::endpoint("btc-lightning-bolt11");
-    terms.allowed_payment_endpoint_identifiers = Some(vec![endpoint.clone()]);
+    let newer = crate::common::endpoint(if priced {
+        "eur-sepa-iban"
+    } else {
+        "btc-lightning-bolt12"
+    });
+    let identifiers = if priced {
+        vec![endpoint.clone(), newer.clone()]
+    } else {
+        vec![endpoint.clone()]
+    };
+    terms.allowed_payment_endpoint_identifiers = Some(identifiers.clone());
     let (world, mut payer, mut shop, key) =
         Box::pin(first_grant_in(crate::common::store(), terms)).await;
     world.rail.set_history_payer(payer.identity());
@@ -1129,14 +1148,27 @@ async fn test_funded_period_requiring_its_own_destination_leaves_the_subscriptio
     )
     .unwrap();
     let next = PeriodRef::from(schedule.periods(2).unwrap()[1]);
-    let req = Box::pin(request_from(
-        &mut shop,
-        payer.identity(),
-        draft("10", start)
-            .with_recurrence(schedule)
-            .with_per_period_endpoints(),
-    ))
-    .await;
+    let mut request = draft("10", start)
+        .with_recurrence(schedule)
+        .with_per_period_endpoints();
+    if priced {
+        world.rail.set_endpoint_identifiers(identifiers.clone());
+        world.rail.set_fraction_digits(newer.clone(), Some(2));
+        request = request
+            .with_conversion(paykit_lib::bodies::Conversion::PerPeriod)
+            .with_accepted_endpoint_identifiers(identifiers);
+        request.destination = paykit_lib::bodies::RequestDestination::RequiredApp(shop.app_id());
+        Box::pin(shop.set_list_endpoints(std::collections::BTreeMap::from([(
+            endpoint.clone(),
+            paykit_lib::PaymentEndpointPayload::new("lnbc1first").unwrap(),
+        )])))
+        .await
+        .unwrap();
+        Box::pin(shop.publish_list_to(payer.identity()))
+            .await
+            .unwrap();
+    }
+    let req = Box::pin(request_from(&mut shop, payer.identity(), request)).await;
     Box::pin(payer.receive(None)).await.unwrap();
     Box::pin(payer.accept_subscription_under_allowance(&req, &key))
         .await
@@ -1183,18 +1215,31 @@ async fn test_funded_period_requiring_its_own_destination_leaves_the_subscriptio
     .await
     .unwrap();
     world.clock.advance_ms(1_000);
-    Box::pin(shop.send_period_details(
-        &sale.record,
-        paykit_lib::bodies::PeriodDetails {
-            billing_period: next,
-            payment_endpoints: Some(std::collections::BTreeMap::from([(
-                crate::common::endpoint("btc-lightning-bolt12"),
-                paykit_lib::PaymentEndpointPayload::new("lno1next").unwrap(),
-            )])),
-            rates: None,
-            expires_at: next.ends_at,
-        },
-    ))
+    Box::pin(
+        shop.send_period_details(
+            &sale.record,
+            paykit_lib::bodies::PeriodDetails {
+                billing_period: next,
+                payment_endpoints: Some(std::collections::BTreeMap::from([(
+                    newer,
+                    paykit_lib::PaymentEndpointPayload::new(if priced {
+                        "DE00next"
+                    } else {
+                        "lno1next"
+                    })
+                    .unwrap(),
+                )])),
+                rates: priced.then(|| {
+                    vec![paykit_lib::Rate::new(
+                        paykit_lib::Asset::new("eur").unwrap(),
+                        paykit_lib::Decimal::new("2").unwrap(),
+                    )
+                    .unwrap()]
+                }),
+                expires_at: next.ends_at,
+            },
+        ),
+    )
     .await
     .unwrap();
     Box::pin(payer.receive(None)).await.unwrap();
@@ -1262,6 +1307,15 @@ async fn test_funded_period_requiring_its_own_destination_leaves_the_subscriptio
 
 #[tokio::test]
 async fn test_executor_incorporates_an_unfunded_period_paid_at_an_authorized_rate() {
+    Box::pin(reconcile_receipted_period(false)).await;
+}
+
+#[tokio::test]
+async fn test_executor_recovers_a_receipted_fixed_rate_period_with_its_signed_destination() {
+    Box::pin(reconcile_receipted_period(true)).await;
+}
+
+async fn reconcile_receipted_period(later: bool) {
     use paykit_lib::bodies::Conversion;
     use paykit_lib::periods::{AnchoredRule, PeriodRef, Recurrence, Unit};
     use paykit_lib::{Asset, Decimal, Rate};
@@ -1276,15 +1330,51 @@ async fn test_executor_incorporates_an_unfunded_period_paid_at_an_authorized_rat
         None,
     )
     .unwrap();
-    let period = PeriodRef::from(schedule.first().unwrap());
+    let period = PeriodRef::from(schedule.periods(2).unwrap()[usize::from(later)]);
     let rate = Rate::new(Asset::new("btc").unwrap(), Decimal::new("2").unwrap()).unwrap();
-    let subscription = draft("10", start)
+    let mut subscription = draft("10", start)
         .with_conversion(Conversion::Fixed(vec![rate]))
         .with_recurrence(schedule)
         .with_period_deadline_s(3600);
+    if later {
+        subscription.destination =
+            paykit_lib::bodies::RequestDestination::RequiredApp(shop.app_id());
+        subscription.per_period_endpoints = true;
+        subscription.accepted_endpoint_identifiers =
+            Some(vec![crate::common::endpoint("btc-lightning-bolt11")]);
+    }
     let req = Box::pin(request_from(&mut shop, payer.identity(), subscription)).await;
     Box::pin(payer.receive(None)).await.unwrap();
     Box::pin(payer.accept_subscription(&req)).await.unwrap();
+    let selected = if later {
+        Box::pin(shop.receive(None)).await.unwrap();
+        let sale = shop
+            .payee_activity()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|a| a.request_hash == Some(req.request_hash))
+            .unwrap();
+        world.clock.set_ms(period.starts_at + 1000);
+        let sent = Box::pin(shop.send_period_details(
+            &sale.record,
+            paykit_lib::bodies::PeriodDetails {
+                billing_period: period,
+                payment_endpoints: Some(std::collections::BTreeMap::from([(
+                    crate::common::endpoint("btc-lightning-bolt11"),
+                    paykit_lib::PaymentEndpointPayload::new("lnbc1later").unwrap(),
+                )])),
+                rates: None,
+                expires_at: period.ends_at,
+            },
+        ))
+        .await
+        .unwrap();
+        Box::pin(payer.receive(None)).await.unwrap();
+        Some(sent.msg_id)
+    } else {
+        None
+    };
     let shown =
         Box::pin(payer.pay_period_automatically(&req, &period, PeriodPrice::RequestedAmount))
             .await
@@ -1316,6 +1406,26 @@ async fn test_executor_incorporates_an_unfunded_period_paid_at_an_authorized_rat
         .iter()
         .find(|p| p.billing_period == period)
         .unwrap();
+    if let Some(id) = selected {
+        let held = shop
+            .app()
+            .shared_record(&occurrence.record)
+            .await
+            .unwrap()
+            .unwrap();
+        let record = paykit_lib::records::ActivityRecord::read(
+            held.content.value().unwrap(),
+            &shop.identity(),
+            paykit_lib::records::ActivitySide::Payee,
+        )
+        .unwrap();
+        let details = record.period_details.unwrap();
+        assert_eq!(details.message().msg_id, id);
+        assert_eq!(
+            record.proof.unwrap().message().refs,
+            [req.request_hash, details.hash()]
+        );
+    }
     let receipt = Box::pin(shop.confirm_payment(&occurrence.record))
         .await
         .unwrap()

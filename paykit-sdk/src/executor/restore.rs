@@ -103,14 +103,50 @@ fn receipted_period_amount(
     let Some(receipt) = crate::receipts::displayed_receipt(activity) else {
         return false;
     };
-    if receipt.message().refs != [proof.hash(), request.hash()]
-        || paid.billing_period.is_none()
-        || proof.message().refs != [request.hash()]
-    {
+    let Some(period) = paid.billing_period else {
+        return false;
+    };
+    if receipt.message().refs != [proof.hash(), request.hash()] {
         return false;
     }
-    // Period details can price only a different asset. A proof naming those details
-    // needs their original transfer evidence and does not reach this comparison.
+    let request_hash = request.hash();
+    let Ok(later_destination) = crate::periods::needs_period_destination(request_body, period)
+    else {
+        return false;
+    };
+    match (later_destination, proof.message().refs.as_slice()) {
+        (false, [original]) if *original == request_hash => (),
+        (true, [original, detail]) if *original == request_hash => {
+            let Some(selected) = activity.period_details.as_ref() else {
+                return false;
+            };
+            let Body::PaymentPeriodDetails(details) = selected.body() else {
+                return false;
+            };
+            if selected.hash() != *detail
+                || selected.message().refs != [request_hash]
+                || selected.sender() != request.sender()
+                || selected.check_payee_sender(request_body).is_err()
+                || details.check_against(request_body).is_err()
+                || details.billing_period != period
+                || details.rates.is_some()
+                || paid.list_version.is_some()
+                || selected.cert().app_id() != paid.payment_app_id
+                || !crate::periods::destination_app_permitted(request_body, paid.payment_app_id)
+                || request_body
+                    .accepted_payment_endpoint_identifiers
+                    .as_ref()
+                    .is_some_and(|ids| !ids.contains(&paid.payment_endpoint_identifier))
+                || !details.payment_endpoints.as_ref().is_some_and(|endpoints| {
+                    endpoints.contains_key(&paid.payment_endpoint_identifier)
+                })
+            {
+                return false;
+            }
+        }
+        _ => return false,
+    }
+    // A destination-only detail leaves the signed request's fixed or plain price intact.
     let rates = crate::conversion::fixed_rates(request_body.conversion.as_ref());
     let price = |digits| {
         matches!(paykit_lib::amount_for_endpoint(&request_body.amount, rates,

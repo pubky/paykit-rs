@@ -2085,6 +2085,54 @@ async fn test_period_payments_held_rate_lasts_beyond_the_details_intake_window()
 }
 
 #[tokio::test]
+async fn test_period_payments_selected_destination_outlasts_the_details_intake_window() {
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut payer = w.wallet("wallet").await;
+    let start = START_MS;
+    let schedule = Recurrence::new(
+        AnchoredRule::new(start, 1, Unit::Minute).unwrap(),
+        start,
+        None,
+    )
+    .unwrap();
+    let period = PeriodRef::from(schedule.periods(2).unwrap()[1]);
+    let draft = monthly_requiring(shop.app_id())
+        .with_recurrence(schedule)
+        .with_per_period_endpoints()
+        .with_conversion(paykit_lib::bodies::Conversion::PerPeriod);
+    let (request, sale) = Box::pin(subscribed_to(&w, &mut shop, &mut payer, draft)).await;
+    w.clock.set_ms(period.starts_at);
+    let offered = details(period, "lnbc1held", start + HOUR_MS);
+    let sent = shop
+        .send_period_details(&sale, offered.clone())
+        .await
+        .unwrap();
+    payer.receive(None).await.unwrap();
+    w.clock.advance_ms(16 * 60_000);
+    assert!(shop.send_period_details(&sale, offered).await.is_err());
+    let paid = Box::pin(by_user(
+        &mut payer,
+        &request,
+        period,
+        PayOptions::default().with_period_details(&sent.msg_id),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(w.rail.paid_amount(&paid.attempt_id()), Some(btc("1")));
+    assert_eq!(w.rail.pay_calls(&paid.attempt_id()), 1);
+    let held = Box::pin(period_record(&w, &payer, &request, period))
+        .await
+        .unwrap();
+    let selected = held.period_details.as_ref().unwrap();
+    assert_eq!(selected.message().msg_id, sent.msg_id);
+    assert_eq!(
+        held.proof.unwrap().message().refs,
+        [request.request_hash, selected.hash()]
+    );
+}
+
+#[tokio::test]
 async fn test_period_payments_priced_terms_allow_requested_asset_without_details() {
     let w = World::new();
     let mut shop = w.shop().await;

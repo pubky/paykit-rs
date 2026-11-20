@@ -2276,7 +2276,7 @@ impl Paykit {
                 continue;
             };
             let (amount, price, by_hand) =
-                match self.price_choice(&choice.destination, pricing, options, identity) {
+                match self.price_choice(&choice, pricing, options, identity) {
                     Ok(Taken::Pay(amount, price)) => (amount, price, false),
                     Ok(Taken::ByHand(amount)) => (amount, None, true),
                     Ok(Taken::Unusable(why)) => {
@@ -2344,11 +2344,12 @@ impl Paykit {
     /// [`Refusal::PricedByRate`] carries the quote when this payment lacks its authorization.
     fn price_choice(
         &self,
-        destination: &Destination,
+        choice: &Choice,
         pricing: &Pricing<'_>,
         options: &PayOptions,
         identity: Option<&PeerIdentity>,
     ) -> Result<Taken> {
+        let destination = &choice.destination;
         let Some(request) = pricing.request else {
             return Ok(Taken::Pay(pricing.requested.clone(), None));
         };
@@ -2363,7 +2364,10 @@ impl Paykit {
         let (rate, amount) = match priced {
             Priced::Plain(_)
                 if matches!(pricing.rates, Rates::Period(_))
-                    && options.selected_period_rate().is_some() =>
+                    && options.selected_period_rate().is_some_and(|id| {
+                        !matches!(&choice.carrier, Carrier::Message(signed)
+                            if matches!(signed.body(), Body::PaymentPeriodDetails(_)) && signed.message().msg_id == id)
+                    }) =>
             {
                 return Ok(Taken::Unusable(
                     "Paykit spec 8.2: the selected period rate does not price this endpoint",
