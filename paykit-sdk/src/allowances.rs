@@ -875,11 +875,10 @@ fn stored_entry(
         );
         return Ok(());
     }
-    Err(Fail::Store(
-        pubky_switch_client::app::StoreFailure::of_entry(
-            pubky_switch_client::error::StoreError::Corrupt,
-        ),
-    ))
+    Err(Fail::Defer {
+        reason: "Allowance record unresolved",
+        custody: pubky_switch_client::app::DeferCustody::Immediate,
+    })
 }
 
 /// Write `record` with `stored` placed, in the step, unless it reflects it already. A

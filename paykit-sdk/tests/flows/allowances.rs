@@ -5674,6 +5674,44 @@ async fn accepted_then_unreadable(
     (shop, phone, tool, theirs, mine, target, good)
 }
 
+#[tokio::test]
+async fn test_allowances_unreadable_record_parks_the_original_proposal_on_first_read() {
+    use pubky_switch_client::app::ParkReason;
+
+    let w = World::new();
+    let (shop, mut wallet, _, theirs, _, _, _) = Box::pin(accepted_then_unreadable(&w)).await;
+    let id = shop.allowance(&theirs).await.unwrap().allowance_id;
+    let accepted_at = w.clock.now_ms();
+    let proposal = competing_proposal(&w, &shop, &wallet, &id);
+    let report = wallet.receive(None).await.unwrap().report;
+    let entries = wallet.app_mut().parked_entries().await.unwrap();
+    let entry = entries.iter().find(|e| e.hash == proposal.hash()).unwrap();
+    assert_eq!(entry.reason, ParkReason::ProtocolDeferred);
+    assert!(report.cursor.seq >= entry.seq);
+    let deferred = |stored_id| AppEvent::ProtocolDeferred {
+        seq: entry.seq,
+        stored_id,
+        protocol: "paykit".into(),
+        reason: "Allowance record unresolved",
+    };
+    assert!(report.events.contains(&deferred(None)), "{report:?}");
+    let kept = wallet
+        .app_mut()
+        .parked_entry(entry.stored_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(kept.accepted_at_ms, accepted_at);
+    assert!(kept.sender_verified);
+    assert_eq!(kept.sender, w.bob_id());
+    assert_eq!(&kept.plaintext, proposal.plaintext());
+    let retry = wallet.receive(None).await.unwrap().report;
+    assert!(
+        retry.events.contains(&deferred(Some(entry.stored_id))),
+        "{retry:?}"
+    );
+}
+
 /// `signer`'s app `app` sends alice's wallet an end of the Allowance `mine` names, with
 /// `refs`.
 async fn end_with_refs(

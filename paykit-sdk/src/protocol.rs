@@ -1573,6 +1573,7 @@ impl Protocol for PaykitProtocol {
             Err(Fail::AwaitAdmissionWithCustody(custody)) => {
                 Outcome::AwaitAdmissionWithCustody(custody)
             }
+            Err(Fail::Defer { reason, custody }) => Outcome::Defer { reason, custody },
             Err(Fail::Drop(reason)) => Outcome::Drop { reason },
             Err(Fail::Store(failure)) => Outcome::Retry(failure),
             // A record value waits for its scope key: the client stores the entry and passes

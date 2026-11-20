@@ -64,6 +64,46 @@ pub async fn finish_listing(wallet: &mut Paykit) {
     panic!("the test wallet's listing did not finish");
 }
 
+/// Enroll a wallet with its own identity, Switch and signer, using the given app store.
+pub async fn enrolled_wallet(
+    world: &pubky_switch_harness::World,
+    name: &str,
+    scopes: RequestedScopes,
+    config: PaykitConfig,
+    rail: &Arc<FakeRail>,
+    storage: Arc<dyn StateStore>,
+) -> Result<Paykit, Box<dyn std::error::Error>> {
+    use pubky_switch_harness::parties::Asking;
+    use pubky_switch_signer::{Protocols, Signer};
+
+    let identity = world.identity(name)?;
+    let origin = format!("https://{name}.public.test");
+    world.add_switch(&origin, &[&identity]).await?;
+    let mut env = world.signer_env(&identity, store())?;
+    env.protocols = Protocols::new(vec![Arc::new(paykit_lib::signer::PaykitProtocol)])?;
+    let mut signer = Box::pin(Signer::create(env, world.keyring(&identity)?, &origin)).await?;
+    signer.resume().await?;
+    let names = scopes.scopes.iter().map(String::as_str).collect::<Vec<_>>();
+    let asking = Asking::for_scopes(world.app_keys(&identity, name)?, &names)?;
+    let review = signer.review(asking.request.signed(), &asking.auth)?;
+    let approved = Box::pin(signer.approve(review)).await?;
+    signer.claim_delivered(&approved.request).await?;
+    world.advance_ms(1_000);
+    let timer = Arc::new(TestTimer {
+        clock: world.clock().clone(),
+    });
+    let mut app = Box::pin(Paykit::join(
+        world.app_env(storage),
+        config,
+        asking.join_request(identity.public(), &approved)?,
+        rail.clone(),
+        timer,
+    ))
+    .await?;
+    finish_listing(&mut app).await;
+    Ok(app)
+}
+
 /// Read the accepted message and check that its effect is reported exactly once in that read.
 pub async fn receive_message(wallet: &mut Paykit, msg_id: &str) {
     for _ in 0..8 {
@@ -586,6 +626,8 @@ pub struct ListsStore {
     flagged_unknown: std::sync::atomic::AtomicBool,
     unknown: std::sync::atomic::AtomicBool,
     deny_fails: std::sync::atomic::AtomicBool,
+    pub missing_list_reads: std::sync::atomic::AtomicUsize,
+    pub failed_deny_reads: std::sync::atomic::AtomicUsize,
     pending_unblocks_unreadable: std::sync::atomic::AtomicBool,
 }
 
@@ -639,6 +681,8 @@ impl StateStore for ListsStore {
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
         if self.unknown.load(std::sync::atomic::Ordering::SeqCst) && key == b"lc/lists_at" {
+            self.missing_list_reads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             return Ok(None);
         }
         if key == b"p/paykit/bf"
@@ -650,6 +694,8 @@ impl StateStore for ListsStore {
         }
         if self.deny_fails.load(std::sync::atomic::Ordering::SeqCst) && key.starts_with(b"lc/deny/")
         {
+            self.failed_deny_reads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             return Err(pubky_switch_client::error::StoreError::Unavailable);
         }
         if self.flagged.lock().unwrap().iter().any(|k| k == key) {

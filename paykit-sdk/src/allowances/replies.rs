@@ -538,9 +538,7 @@ pub(super) fn before_retirement(
     match end.compare(None, Some(position), |a, b| cx.received_order(a, b)) {
         Some(Ordering::Less) => Ok(true),
         Some(Ordering::Greater) => Ok(false),
-        _ => Err(Fail::Store(StoreFailure::unavailable(
-            pubky_switch_client::error::StoreError::Unavailable,
-        ))),
+        _ => Err(Fail::wait_for("proposal deletion order unknown")),
     }
 }
 
