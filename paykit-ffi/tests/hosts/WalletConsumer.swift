@@ -208,7 +208,36 @@ private func walletRows(_ issuer: String, _ mode: String) throws -> [String] {
     return values
 }
 
-private func recoverReceipt(_ issuer: String) async throws {
+private func resumeRefusal(_ issuer: String, left: Bool, request: RequestId) async throws {
+    let values = try walletRows(issuer, left ? "departed-wallet" : "wallet-awaiting-identity")
+    let store = EnrollmentStore()
+    store.reopen(namespace: values[1], entries: values.dropFirst(2))
+    let method = ReceiptReader()
+    let host = try WalletHost(store: store, homeserver: method, method: method, endpointIdentifiers: ["btc-lightning-bolt11"])
+    let wallet = try await host.load(appId: Data(base64Encoded: values[0])!)
+    if !left {
+        do {
+            _ = try await wallet.requestReceipts(id: request)
+            preconditionFailure("read receipts before the restored records were listed")
+        } catch let WalletError.Refused(refusal) {
+            guard case .notNow = refusal.kind() else { preconditionFailure("unexpected receipt refusal") }
+        }
+    }
+    do {
+        _ = try await wallet.resumePayments()
+        preconditionFailure("resumed a held wallet")
+    } catch let WalletError.Refused(refusal) {
+        precondition(!left)
+        guard case .identityUnavailable = refusal.kind() else { preconditionFailure("unexpected resume refusal") }
+        precondition(refusal.attemptedFailure() == nil)
+    } catch let WalletError.Operation(kind, _, _, _, refusal) {
+        guard left, kind == .client, case .left? = refusal else { preconditionFailure("unexpected Switch refusal") }
+    }
+    precondition(method.transferCount == 0)
+    try await wallet.shutdown()
+}
+
+private func recoverReceipt(_ issuer: String) async throws -> RequestId {
     let values = try walletRows(issuer, "paid-wallet")
     precondition(values.count > 7)
     func bytes(_ i: Int) -> Data { Data(base64Encoded: values[i])! }
@@ -247,7 +276,7 @@ private func recoverReceipt(_ issuer: String) async throws {
         (AllowanceUsage(lifetime: entry.amount.value, periods: [periodUsage], reserved: 0, spent: 1, released: 0), "AllowanceUsage"),
         (selection, "SelectedEndpoints"), (failure, "EndpointFailure"), (failure.error, "MethodError"),
         (method.declaration(), "MethodDeclaration"),
-        (WalletError.Operation(kind: .client, detail: "operation failed", serviceCode: nil, keptBatch: Data([1])), "WalletError"),
+        (WalletError.Operation(kind: .client, detail: "operation failed", serviceCode: nil, keptBatch: Data([1]), switchRefusal: nil), "WalletError"),
         (WalletError.UnknownMethod, "WalletError"),
     ]
     for (value, name) in descriptions {
@@ -300,6 +329,7 @@ private func recoverReceipt(_ issuer: String) async throws {
     precondition(sellerIdentity.count == 32 && original.finishSiblingRead(values[6]),
                  "seller wallet could not progress while the last payer handle was released")
     try await second.shutdown()
+    return id
 }
 
 @main
@@ -392,6 +422,7 @@ private enum WalletConsumer {
             try await host().acceptApproval(reference: reference, identity: identity, claim: Data([1]))
             preconditionFailure("replaced the stored approval")
         } catch WalletError.EnrollmentConflict {}
-        try await recoverReceipt(issuer)
+        let request = try await recoverReceipt(issuer)
+        for left in [false, true] { try await resumeRefusal(issuer, left: left, request: request) }
     }
 }

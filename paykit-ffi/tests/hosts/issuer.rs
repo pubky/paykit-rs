@@ -14,6 +14,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     match std::env::args().nth(1).as_deref() {
         Some("paid-wallet") => return backup::print_wallet(false).await,
         Some("seller-wallet") => return backup::print_wallet(true).await,
+        Some("wallet-awaiting-identity") => return backup::print_resume_refusal(false).await,
+        Some("departed-wallet") => return backup::print_resume_refusal(true).await,
         _ => {}
     }
     let signed: SignedDoc = serde_json::from_reader(std::io::stdin())?;

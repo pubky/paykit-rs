@@ -61,6 +61,54 @@ async fn receive(wallet: &mut Paykit) -> Result<()> {
     Err("wallet did not complete its feed".into())
 }
 
+/// An installed wallet whose next resume must report the original Paykit or Switch refusal.
+pub(super) async fn print_resume_refusal(left: bool) -> Result<()> {
+    let world = super::service::start()?;
+    let rail = Arc::new(FakeRail::with_clock(world.clock().clone()));
+    let source = Arc::new(MemoryStore::new());
+    let mut payer = Box::pin(enrolled(
+        &world,
+        "payer",
+        AppScopes::new().pay(),
+        rail.clone(),
+        source.clone(),
+    ))
+    .await?;
+    Box::pin(receive(&mut payer)).await?;
+    let app = payer.app_id();
+    let installed = if left {
+        Box::pin(
+            payer
+                .app_mut()
+                .leave(pubky_switch_client::app::LeaveMode::TwoStep),
+        )
+        .await?;
+        drop(payer);
+        source
+    } else {
+        let backup = payer.backup().await?;
+        drop(payer);
+        let installed = Arc::new(MemoryStore::new());
+        let restored = Box::pin(Paykit::restore(
+            world.app_env(installed.clone()),
+            Default::default(),
+            &backup,
+            rail,
+            Arc::new(WalletTimer),
+        ))
+        .await?;
+        drop(restored);
+        installed
+    };
+    {
+        let mut output = io::stdout().lock();
+        writeln!(output, "{}", STANDARD.encode(app))?;
+        write_store(&mut output, app, &installed)?;
+    }
+    world.close().await?;
+    Ok(())
+}
+
 pub(super) async fn print_wallet(seller_only: bool) -> Result<()> {
     let world = super::service::start()?;
     let rail = Arc::new(FakeRail::with_clock(world.clock().clone()));

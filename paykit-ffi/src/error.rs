@@ -64,6 +64,8 @@ pub enum WalletError {
         service_code: Option<String>,
         /// The retained Switch batch ID, when available for later reconciliation.
         kept_batch: Option<Vec<u8>>,
+        /// The Switch refusal, also when it stopped a retained or pending operation.
+        switch_refusal: Option<crate::SwitchRefusal>,
     },
 }
 impl WalletError {
@@ -151,11 +153,23 @@ impl From<PaykitError> for WalletError {
             PaykitError::Homeserver(_) => WalletFailureKind::Homeserver,
             _ => WalletFailureKind::Other,
         };
+        let client = match &e {
+            PaykitError::Client(error) | PaykitError::PublicEndpointChangePending(error) => {
+                Some(error)
+            }
+            _ => None,
+        };
         Self::Operation {
             kind,
             detail: e.to_string(),
-            service_code: e.code().map(|code| code.as_str().into()),
-            kept_batch: e.kept_batch().map(Vec::from),
+            service_code: client
+                .and_then(AppError::code)
+                .map(|code| code.as_str().into()),
+            kept_batch: client.and_then(AppError::kept_batch).map(Vec::from),
+            switch_refusal: client.and_then(|error| match error.unkept() {
+                AppError::Refused(refusal) => Some(refusal.into()),
+                _ => None,
+            }),
         }
     }
 }
