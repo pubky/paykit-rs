@@ -3,6 +3,7 @@
 use super::*;
 use paykit_lib::records::{ActivityRecord, ActivitySide};
 use pubky_switch_client::app::{Collection as SwitchCollection, RecordTarget};
+use std::sync::Mutex;
 
 #[tokio::test]
 async fn test_settlement_credit_after_a_record_quota_refusal_keeps_one_receipt() -> TestResult {
@@ -66,7 +67,23 @@ async fn confirm_after_quota(world: &World) -> TestResult {
     wallets.till.cancel_sent_request(&unused_key, None).await?;
     let number = settlement_bucket(&tag);
     let key = SettlementBucket::record_key(number, wallets.till.app().naming_key())?;
+    let caller = pubky_switch_core::enc::zbase32_encode(&wallets.labelled.app_id());
+    let ops_path = format!("/v1/{}/ops", identity.key().id());
+    let quota_answers = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&quota_answers);
+    // The trace abbreviates the budget name. Read it from this wallet's actual answer.
+    world.distort(move |request, answer| {
+        if request.origin == origin
+            && request.method == "POST"
+            && request.path_and_query == ops_path
+            && request.header(pubky_switch_core::http::header::APP) == Some(caller.as_str())
+            && answer.status == 429
+        {
+            observed.lock().unwrap().push(answer.body.clone());
+        }
+    });
     let start = world.trace().lines.len();
+    let checks_before_quota = wallets.rail.proof_checks().len();
     let refused = wallets
         .labelled
         .confirm_payment(&losing_key)
@@ -79,7 +96,7 @@ async fn confirm_after_quota(world: &World) -> TestResult {
     let trace = world.trace();
     let mut refusals = trace.lines[start..].iter().filter(|line| {
         line.call == Some("ops")
-            && line.label.starts_with("{shop/labelled-till} POST ")
+            && line.label == "{shop/labelled-till} POST /v1/{shop}/ops"
             && line.facts.get("status").map(String::as_str) == Some("429")
     });
     let refusal = refusals
@@ -91,10 +108,17 @@ async fn confirm_after_quota(world: &World) -> TestResult {
         refusal.facts.get("body.code").map(String::as_str),
         Some("text quota_exceeded")
     );
-    assert_eq!(
-        refusal.facts.get("body.current.limit").map(String::as_str),
-        Some("text record_keys")
-    );
+    let answers = std::mem::take(&mut *quota_answers.lock().unwrap());
+    let [answer] = answers.as_slice() else {
+        return Err("expected one quota answer from the merchant service".into());
+    };
+    let body: serde_json::Value = serde_json::from_slice(answer)?;
+    assert_eq!(body["code"], "quota_exceeded");
+    assert_eq!(body["current"]["limit"], "record_keys");
+    let method_checks = wallets.rail.proof_checks();
+    let [accepted_check] = &method_checks[checks_before_quota..] else {
+        return Err("expected one verified proof before the quota refusal".into());
+    };
 
     assert!(wallets.labelled.app().shared_record(&key).await?.is_none());
 
@@ -115,6 +139,7 @@ async fn confirm_after_quota(world: &World) -> TestResult {
         &wallets.rail,
     ))
     .await?;
+    assert_eq!(wallets.rail.proof_checks().last(), Some(accepted_check));
 
     assert!(wallets
         .labelled
