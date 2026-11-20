@@ -586,7 +586,7 @@ async fn test_wallets_status_shows_the_records_cancellation_over_a_kept_open_att
 }
 
 #[tokio::test]
-async fn test_wallets_receipt_settles_a_claim_the_app_never_read() {
+async fn test_wallets_receipt_reads_an_unseen_claim_and_waits_for_its_proof() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -603,9 +603,8 @@ async fn test_wallets_receipt_settles_a_claim_the_app_never_read() {
     };
     let obligation = wallet.payments().await.unwrap()[0].obligation;
 
-    // A wallet joined since holds the request record but no view of its claim. The payee's
-    // receipt makes its receive step read the claim from the switch, and settle the open
-    // attempt by evidence in the cursor's batch (Switch spec 10.2 row 3).
+    // The new wallet must fetch the claim itself. Its view identifies the foreign
+    // attempt, but the payer record does not hold the proof the receipt names.
     let mut tablet = w.wallet("tablet").await;
     assert!(tablet
         .app()
@@ -613,7 +612,7 @@ async fn test_wallets_receipt_settles_a_claim_the_app_never_read() {
         .await
         .unwrap()
         .is_none());
-    w.inject(
+    let receipt = w.inject(
         &w.bob,
         "shop",
         &w.alice,
@@ -631,17 +630,17 @@ async fn test_wallets_receipt_settles_a_claim_the_app_never_read() {
     );
     tablet.receive(None).await.unwrap();
     let claim = tablet
-        .app_mut()
-        .read_claim(&obligation)
+        .app()
+        .claim_evidence(&obligation)
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(claim.view.step, 1);
     assert_eq!(
-        claim.view.status,
-        pubky_switch_core::claims::ClaimStatus::Settled
+        claim.view.attempt(&attempt_id.to_bytes()).unwrap().outcome,
+        pubky_switch_core::claims::Outcome::Open
     );
-    assert_eq!(
-        claim.view.attempts[0].outcome,
-        pubky_switch_core::claims::Outcome::Done
-    );
+    let kept = tablet.app().protocol_scan("paykit", b"pr/").await.unwrap();
+    assert_eq!(kept.len(), 1);
+    assert!(kept[0].0.ends_with(receipt.as_bytes()));
 }
