@@ -83,6 +83,7 @@
 //! | `ae/<record key>/<msg_id>` | a counterparty's `allowance_end`, kept as the stop until the Allowance record holds an end or a rejection; every distinct end is kept, each under its `msg_id` and with the feed `seq` that orders it, until the record shows which one names what it holds (`allowances.rs`, Paykit spec 8.3) | |
 //! | `lv/<record key>` | the approving app's pending or verified first executor grant | |
 //! | `ac/<record key>` | the consent list: an Allowance this app may pay under, or removed from it for good (`allowances.rs`, Paykit spec 8.3); a restore marks every entry to confirm again | |
+//! | `ax/<record key>` | one signed input whose conflict check outlived placement, its pending record version when applicable, and whether further candidates remain unresolved (Paykit spec 8.1, 8.3.1) | |
 //! | `cf/<record key>` | a second, different proposal or response of an Allowance, with the feed `seq` its entry was read at, kept as the stop until the Allowance record holds `conflicted` (`allowances.rs`, Paykit spec 8.3) | |
 //! | `mc` | set by a `missed` item: every entry of the consent list is to be confirmed again, as after a restore; nothing is consented while it is set, and the next receive marks each entry so and clears it (`allowances.rs`) | |
 //! | `en/<msg_id>` | the executor app an `executor_notice` is wrapped to, kept with the batch that queues it | |
@@ -1049,6 +1050,17 @@ impl Stored for KeptMessage {
     }
 }
 
+impl sealed::Sealed for crate::allowances::ConflictEvidence {}
+
+impl Stored for crate::allowances::ConflictEvidence {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let StateKey::AllowanceEvidence(record) = family else {
+            return corrupt();
+        };
+        self.bind(record, binder)
+    }
+}
+
 impl sealed::Sealed for crate::allowances::PendingConflict {}
 
 impl Stored for crate::allowances::PendingConflict {
@@ -1828,6 +1840,13 @@ pub(crate) mod key {
         format!("{ALLOWANCE_ENDS}{}/", b64(record_key))
     }
 
+    /// One bounded conflict hold per physical Allowance or pending proposal record.
+    pub(crate) const ALLOWANCE_EVIDENCE: &str = "ax/";
+
+    pub(crate) fn allowance_evidence(record: &[u8; 32]) -> String {
+        format!("{ALLOWANCE_EVIDENCE}{}", b64(record))
+    }
+
     pub(crate) const PENDING_CONFLICTS: &str = "pc/";
 
     pub(crate) const PENDING_REPLIES: &str = "ap/";
@@ -2365,6 +2384,8 @@ pub(crate) enum StateKey {
     ExecutorCheckpoint([u8; 32]),
     /// `pc/<record key>`: a conflict kept for one pending Allowance lifetime.
     PendingConflict([u8; 32]),
+    /// A bounded unresolved conflict at a permanent or pending Allowance key.
+    AllowanceEvidence([u8; 32]),
     /// An original reply prepared for this canonical Allowance key.
     PendingReply {
         record: [u8; 32],
@@ -2560,6 +2581,7 @@ impl StateKey {
                     }
                     "ac" => Self::Consent(b64_32(rest)?),
                     "lv" => Self::ExecutorCheckpoint(b64_32(rest)?),
+                    "ax" => Self::AllowanceEvidence(b64_32(rest)?),
                     "pc" => Self::PendingConflict(b64_32(rest)?),
                     "ap" => {
                         let (record, reply) = rest.split_once('/')?;
@@ -3672,6 +3694,10 @@ mod tests {
             (
                 key::original_approval(&pubky),
                 StateKey::OriginalApproval(pubky),
+            ),
+            (
+                key::allowance_evidence(&pubky),
+                StateKey::AllowanceEvidence(pubky),
             ),
             (key::conflict(&pubky), StateKey::Conflict(pubky)),
             (key::notice_target(id), StateKey::NoticeTarget(id.into())),

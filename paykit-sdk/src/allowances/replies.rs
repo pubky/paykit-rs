@@ -143,6 +143,10 @@ pub(crate) fn holds_delivery(
     let blind = |input: &[u8]| delivery.blind(input);
     let binder = Binder::new(delivery.local().identity(), delivery.cert(), &blind);
     let key = binder.record_key(&target)?;
+    let permanent = binder.record_key(&super::allowance_target(&message.to, id))?;
+    if super::evidence::holds_delivery(delivery, &key, &permanent)? {
+        return Ok(true);
+    }
     if state::delivery_get::<PendingConflict>(delivery, &key::pending_conflict(&key))?.is_some() {
         return Ok(true);
     }
@@ -158,7 +162,6 @@ pub(crate) fn holds_delivery(
     }) {
         return Ok(true);
     }
-    let permanent = binder.record_key(&super::allowance_target(&message.to, id))?;
     let rejects = |held: &KeptMessage| -> Result<bool> {
         let r = held.stored(binder.identity())?;
         Ok(matches!(r.body(), Body::AllowanceRejection(_))
@@ -542,7 +545,7 @@ pub(super) fn before_retirement(
     }
 }
 
-enum SecondProposal {
+pub(super) enum SecondProposal {
     Undecided,
     Reflected,
     Keep(Box<PendingConflict>),
@@ -550,7 +553,7 @@ enum SecondProposal {
 
 /// A second proposal must belong to the same signed parties, ID and physical
 /// key as the selected original. A repeat never replaces either proposal.
-fn second_proposal(
+pub(super) fn second_proposal(
     own: &[u8; 32],
     held: &SharedRecord,
     target: &pubky_switch_client::app::RecordTarget,
@@ -610,7 +613,12 @@ pub(super) fn observe_second(
     )
     .map_err(|_| Fail::corrupt())?
     {
-        SecondProposal::Undecided => super::stored_entry(cx, message),
+        SecondProposal::Undecided => super::stored_entry(
+            cx,
+            message,
+            position,
+            Some((target, Some(held.version.into()))),
+        ),
         SecondProposal::Reflected => Ok(()),
         SecondProposal::Keep(stop) => {
             receive::keep_local(cx, receive::local(&at, &*stop)?);
@@ -787,6 +795,15 @@ pub(crate) fn lifetime_ended(
         reopened: None,
     };
     let mut writes = vec![state::local_put(&at, &end).map_err(view_failure)?];
+    let evidence = key::allowance_evidence(&record.key);
+    if state::cx_get::<super::ConflictEvidence>(cx, &evidence)
+        .map_err(step_failure)?
+        .is_some_and(|held| held.retired_by(&end))
+    {
+        writes.push(LocalWrite::Delete {
+            key: evidence.into_bytes(),
+        });
+    }
     let stop = state::cx_get::<PendingConflict>(cx, &key::pending_conflict(&record.key))
         .map_err(step_failure)?;
     if let Some(stop) = stop.filter(|stop| stop.source() < version) {
@@ -910,7 +927,16 @@ impl Paykit {
             position,
         )?;
         match step {
-            SecondProposal::Undecided => Ok(Some(Placed::Not)),
+            SecondProposal::Undecided => Ok(Some(
+                Box::pin(self.expire_allowance_placement(
+                    &key,
+                    Some(held.version.into()),
+                    message,
+                    evidence,
+                    Vec::new(),
+                ))
+                .await?,
+            )),
             SecondProposal::Reflected => Ok(Some(Placed::Done)),
             SecondProposal::Keep(stop) => {
                 self.local_put(&at, &*stop).await?;
@@ -1396,7 +1422,10 @@ impl Paykit {
 pub(crate) fn restore_conflicts(
     restoring: &pubky_switch_client::app::RestoreContext<'_>,
     binder: &Binder<'_>,
-    mut imported: BTreeMap<[u8; 32], PendingConflict>,
+    (mut imported, mut unresolved): (
+        BTreeMap<[u8; 32], PendingConflict>,
+        BTreeMap<[u8; 32], super::ConflictEvidence>,
+    ),
     mut prepared: BTreeMap<([u8; 32], [u8; 32]), super::PreparedPendingReply>,
     mut retirements: BTreeMap<[u8; 32], PendingRetirement>,
     mut replies: BTreeMap<String, KeptMessage>,
@@ -1414,19 +1443,52 @@ pub(crate) fn restore_conflicts(
             retirements.insert(key, receipt);
         }
     }
+    unresolved.retain(|key, held| !retirements.get(key).is_some_and(|end| held.retired_by(end)));
+    for (at, bytes) in restoring.previous_local_scan(key::ALLOWANCE_EVIDENCE.as_bytes())? {
+        let held = state::restored::<super::ConflictEvidence>(&at, &bytes, binder)?;
+        let Some(StateKey::AllowanceEvidence(key)) = StateKey::parse(&at) else {
+            return Err(PaykitError::corrupt());
+        };
+        if retirements
+            .get(&key)
+            .is_some_and(|end| held.retired_by(end))
+        {
+            continue;
+        }
+        if let Some(current) = unresolved.get_mut(&key) {
+            current.merge(&held, binder.identity())?;
+        } else {
+            unresolved.insert(key, held);
+        }
+    }
+    for (record, held) in unresolved {
+        writes.push(state::local_put(&key::allowance_evidence(&record), &held)?);
+    }
     // A backup can predate both messages. Preserve the installation's verified
     // pair, including while its permanent record is still unreadable. The
     // restored greatest deletion and a current permanent read settle it normally.
-    let mut matched_ends = BTreeMap::new();
+    let mut retained = BTreeMap::new();
     for (at, value) in restoring.previous_local_scan(key::ALLOWANCE_ENDS.as_bytes())? {
         let held = state::restored::<KeptMessage>(&at, &value, binder)?;
         if held.ended_acceptance.is_some() {
-            matched_ends.insert(at, value);
+            retained.insert(at, value);
         }
     }
-    writes.retain(|w| !matches!(w, LocalWrite::Put { key, .. } if matched_ends.contains_key(key)));
+    for (at, bytes) in restoring.previous_local_scan(key::CONFLICTS.as_bytes())? {
+        state::restored::<KeptMessage>(&at, &bytes, binder)?;
+        retained.insert(at, bytes);
+    }
+    for (at, value) in restoring.previous_local_scan(key::NOTICES.as_bytes())? {
+        if matches!(StateKey::parse(&at), Some(StateKey::MessageNotice { .. })) {
+            let notice = state::restored::<crate::notices::KeptNotice>(&at, &value, binder)?;
+            if notice.kind == crate::NoticeKind::AllowancePlacementExpired {
+                retained.insert(at, value);
+            }
+        }
+    }
+    writes.retain(|w| !matches!(w, LocalWrite::Put { key, .. } if retained.contains_key(key)));
     writes.extend(
-        matched_ends
+        retained
             .into_iter()
             .map(|(key, value)| LocalWrite::Put { key, value }),
     );

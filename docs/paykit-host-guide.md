@@ -281,6 +281,7 @@ first grant; automatic spending remains unavailable.
 | `AllowanceStatus::Rejected` | The recipient rejected the proposal. |
 | `AllowanceStatus::Ended` | Show that the Allowance stopped or was withdrawn. |
 | `AllowanceStatus::Conflicted` | Show that the competing proposals or replies prevent further use. |
+| `AllowanceStatus::AwaitingConflictCheck` | The wallet retained possible conflict evidence after placement expired. Keep this Allowance on hold while the wallet checks its record. |
 
 ## Scheduling a Billing Period
 
@@ -339,6 +340,7 @@ service. Acknowledging the deletion notice leaves the credit restriction in forc
 | `NoticeKind::PaidAfterFailed` | Show that a verified receipt arrived for an attempt previously shown as failed. |
 | `NoticeKind::HeldWithoutPay` | Show that the open attempt needs a wallet with `paykit_pay`. |
 | `NoticeKind::MessageGivenUp` | Show the message or request whose effect or delivery was given up. Acknowledgment can also retire the stored entry. |
+| `NoticeKind::AllowancePlacementExpired` | Ordinary placement expired. The wallet still holds evidence of a possible Allowance conflict. Acknowledge the notice after showing it. The hold survives acknowledgment and restart. |
 | `NoticeKind::PossiblyDelivered` | Reconcile the original message with its recipient using its ID and signed hash. Acknowledging the notice records that the host has seen it. It authorizes no send or replacement. |
 | `NoticeKind::BlockedMessagesLost` | Show the affected counterparty and acceptance-time range. Consult the payment method for payments that may have been among the lost messages. |
 | `NoticeKind::SettlementBucketFull` | Show that the payee cannot add a mark to this bucket. A warning from a bucket read has no payer. Explain that issuing a receipt without a mark can let another till credit the same settlement again. |

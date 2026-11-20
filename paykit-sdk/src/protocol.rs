@@ -570,6 +570,7 @@ pub(crate) fn restore_paykit_layer(
     // A repeated import on this installation preserves notices the host has already seen,
     // and unresolved ones first observed since the backup (Paykit spec 7.2).
     let mut delivery_notices = std::collections::BTreeMap::new();
+    let mut unresolved = std::collections::BTreeMap::new();
     let mut pending_conflicts = std::collections::BTreeMap::new();
     let mut original_approvals = std::collections::BTreeMap::new();
     let mut prepared_replies = std::collections::BTreeMap::new();
@@ -860,6 +861,13 @@ pub(crate) fn restore_paykit_layer(
                     state::restored::<crate::allowances::PendingRetirement>(&key, &value, &binder)
                         .map_err(|_| unread())?;
                 retirements.insert(record, end);
+                continue;
+            }
+            StateKey::AllowanceEvidence(record) => {
+                let held =
+                    state::restored::<crate::allowances::ConflictEvidence>(&key, &value, &binder)
+                        .map_err(|_| unread())?;
+                unresolved.insert(record, held);
                 continue;
             }
             StateKey::PendingConflict(record) => {
@@ -1166,7 +1174,7 @@ pub(crate) fn restore_paykit_layer(
     crate::allowances::restore_conflicts(
         restoring,
         &binder,
-        pending_conflicts,
+        (pending_conflicts, unresolved),
         prepared_replies,
         retirements,
         sourced_replies,
