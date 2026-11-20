@@ -374,21 +374,23 @@ impl Paykit {
         }
     }
 
-    /// Whether the payee's kept switch lookup has answered, polled once without waiting
-    /// (the payment fence, [`Paykit::payment_fence`]). An answer is kept, for the next check
-    /// to take: taking it is an await.
-    pub(crate) fn kept_lookup_answered(&mut self, payee: &[u8; 32]) -> bool {
+    /// Inspect an arrived switch answer without waiting or taking it. The owner still
+    /// finishes that exact answer through the client before acting on it (Paykit spec 7.2).
+    pub(crate) fn inspect_ready_lookup<T>(
+        &mut self,
+        payee: &[u8; 32],
+        inspect: impl FnOnce(&SwitchAnswer) -> T,
+    ) -> Option<T> {
         use std::task::Waker;
-        let Some(kept) = self.lookups.get_mut(payee) else {
-            return false;
-        };
+        let kept = self.lookups.get_mut(payee)?;
         let mut cx = Context::from_waker(Waker::noop());
         match Pin::new(&mut kept.switch).poll(&mut cx) {
             Poll::Ready(answer) => {
+                let result = inspect(&answer);
                 kept.switch = PendingLookup::new(std::future::ready(answer));
-                true
+                Some(result)
             }
-            Poll::Pending => false,
+            Poll::Pending => None,
         }
     }
 
