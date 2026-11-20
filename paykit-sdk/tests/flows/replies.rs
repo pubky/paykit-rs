@@ -2380,6 +2380,14 @@ async fn test_replies_dropped_before_their_record_hold_an_unidentified_ask_after
 
 async fn dropped_before_record_after_unblock(restore: bool) {
     let w = World::new();
+    let (wallet, shop, accepted, request) = Box::pin(pay_before_recording(&w)).await;
+    Box::pin(check_dropped_replies(
+        w, wallet, shop, accepted, request, restore,
+    ))
+    .await;
+}
+
+async fn pay_before_recording(w: &World) -> (Paykit, Paykit, u64, SignedMessage) {
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w
         .join_with(
@@ -2394,9 +2402,20 @@ async fn dropped_before_record_after_unblock(restore: bool) {
             store(),
         )
         .await;
-    let payer = w.alice_id();
     let accepted = w.clock.now_ms();
-    let request = paid_before_recorded(&w, &mut wallet, &mut shop).await;
+    let request = paid_before_recorded(w, &mut wallet, &mut shop).await;
+    (wallet, shop, accepted, request)
+}
+
+async fn check_dropped_replies(
+    w: World,
+    mut wallet: Paykit,
+    mut shop: Paykit,
+    accepted: u64,
+    request: SignedMessage,
+    restore: bool,
+) {
+    let payer = w.alice_id();
     w.clock.advance_ms(1);
     unmatched_replies(&w, &shop, paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER);
     // Process the drop, then block before the SDK first tries to ask.
