@@ -66,6 +66,22 @@ impl NativeWallet {
     }
 }
 impl WalletHost {
+    pub(crate) async fn open_wallet(
+        &self,
+        id: [u8; 16],
+        open: impl AsyncFnOnce(AppEnv) -> Result<Paykit, WalletError>,
+    ) -> Result<Arc<NativeWallet>, WalletError> {
+        let (env, owner) = self.session_env(id).await?;
+        match open(env).await {
+            Ok(app) => Ok(NativeWallet::opened(app, Some(owner))),
+            Err(error) => {
+                // The failed SDK open has dropped its store. Wait for the physical
+                // writer to release before a host can act on the failure and retry.
+                owner.finish().await?;
+                Err(error)
+            }
+        }
+    }
     pub(crate) async fn session_env(
         &self,
         id: [u8; 16],
@@ -101,10 +117,7 @@ impl WalletHost {
     /// Open the existing wallet under its original App ID and exclusive storage lease.
     pub async fn load(&self, app_id: Vec<u8>) -> Result<Arc<NativeWallet>, WalletError> {
         let id = fixed(app_id, "app id")?;
-        let (env, owner) = self.session_env(id).await?;
-        Ok(NativeWallet::opened(
-            self.load_app(env, id).await?,
-            Some(owner),
-        ))
+        self.open_wallet(id, async |env| Ok(self.load_app(env, id).await?))
+            .await
     }
 }

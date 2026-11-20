@@ -110,10 +110,13 @@ impl WalletEnrollment {
         let owner = store.ownership.clone();
         let result = operation(&store).await;
         drop(store);
-        // A completed approval remains committed if releasing its reference fails.
-        // A subsequent opener retries that exact token. Explicit shutdown of an
-        // installed wallet separately confirms release of its writer.
-        let _ = owner.first_release().await;
+        if result.is_err() {
+            owner.finish().await?;
+        } else {
+            // A completed enrollment step remains committed if releasing its
+            // reference fails. A subsequent opener retries that exact token.
+            let _ = owner.first_release().await;
+        }
         result
     }
 }
@@ -317,17 +320,17 @@ impl WalletHost {
                     .await?
                     .ok_or(WalletError::EnrollmentUnavailable)?;
                 let id = state.id();
-                let (env, owner) = self.session_env(id).await?;
-                let app = match state {
-                    EnrollmentState::Pending { .. } => {
-                        return Err(WalletError::EnrollmentUnavailable)
-                    }
+                match state {
+                    EnrollmentState::Pending { .. } => Err(WalletError::EnrollmentUnavailable),
                     EnrollmentState::Joined { identity, .. } => {
-                        let app = self.load_app(env, id).await?;
-                        if app.identity() != identity {
-                            return Err(WalletError::EnrollmentConflict);
-                        }
-                        app
+                        self.open_wallet(id, async |env| {
+                            let app = self.load_app(env, id).await?;
+                            if app.identity() != identity {
+                                return Err(WalletError::EnrollmentConflict);
+                            }
+                            Ok(app)
+                        })
+                        .await
                     }
                     EnrollmentState::Approved {
                         keys,
@@ -337,42 +340,44 @@ impl WalletHost {
                     } => {
                         let (request, approval, certificate) =
                             request.verify_approval(&keys, &identity, &claim)?;
-                        let app = match self.load_app(env.clone(), id).await {
+                        self.open_wallet(id, async move |env| {
+                            let app = match self.load_app(env.clone(), id).await {
+                                Ok(app)
+                                    if app.identity() == identity
+                                        && app.app().cert().hash() == certificate =>
+                                {
+                                    app
+                                }
+                                Ok(_) => return Err(WalletError::EnrollmentConflict),
+                                Err(PaykitError::Client(AppError::Refused(Refusal::NotJoined))) => {
+                                    Paykit::join(
+                                        env,
+                                        Default::default(),
+                                        JoinRequest {
+                                            identity,
+                                            keys,
+                                            request,
+                                            approval,
+                                        },
+                                        self.rail.clone(),
+                                        self.timer.clone(),
+                                    )
+                                    .await?
+                                }
+                                Err(error) => return Err(error.into()),
+                            };
+                            EnrollmentState::Joined {
+                                app_id: id,
+                                identity,
+                                claim_hash: enc::hash(&claim),
+                            }
+                            .save(store)
+                            .await?;
                             Ok(app)
-                                if app.identity() == identity
-                                    && app.app().cert().hash() == certificate =>
-                            {
-                                app
-                            }
-                            Ok(_) => return Err(WalletError::EnrollmentConflict),
-                            Err(PaykitError::Client(AppError::Refused(Refusal::NotJoined))) => {
-                                Paykit::join(
-                                    env,
-                                    Default::default(),
-                                    JoinRequest {
-                                        identity,
-                                        keys,
-                                        request,
-                                        approval,
-                                    },
-                                    self.rail.clone(),
-                                    self.timer.clone(),
-                                )
-                                .await?
-                            }
-                            Err(error) => return Err(error.into()),
-                        };
-                        EnrollmentState::Joined {
-                            app_id: id,
-                            identity,
-                            claim_hash: enc::hash(&claim),
-                        }
-                        .save(store)
-                        .await?;
-                        app
+                        })
+                        .await
                     }
-                };
-                Ok(crate::NativeWallet::opened(app, Some(owner)))
+                }
             })
             .await
     }

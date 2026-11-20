@@ -50,6 +50,9 @@ pub enum WalletError {
         /// The payment method's classified failure.
         failure: crate::MethodError,
     },
+    /// The native payment method returned a failure this binding cannot classify.
+    #[error("unknown payment method failure")]
+    UnknownMethod,
     /// A Paykit or Switch operation failed.
     #[error("wallet operation failed: {detail}")]
     Operation {
@@ -139,9 +142,7 @@ impl From<PaykitError> for WalletError {
                         paykit_sdk::RailError::InvalidSelection(r) => {
                             crate::MethodError::InvalidSelection { reason: r.clone() }
                         }
-                        _ => crate::MethodError::Unavailable {
-                            reason: "unknown payment method failure".into(),
-                        },
+                        _ => return Self::UnknownMethod,
                     },
                 }
             }
