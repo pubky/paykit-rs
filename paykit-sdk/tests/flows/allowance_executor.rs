@@ -329,6 +329,208 @@ async fn test_first_grant_restores_its_complete_original_after_reconciliation() 
     assert!(restored.allowance(&key).await.unwrap().consented);
 }
 
+async fn restore_grant_proof_order(installed_verified: bool, different_pending_value: bool) {
+    use crate::common::store;
+    use paykit_sdk::{Paykit, PaykitBackup, PaykitConfig, Rail};
+    use std::sync::Arc;
+
+    let world = World::new();
+    let installed = store();
+    let mut payer = Box::pin(world.join_with(
+        &world.alice,
+        "wallet",
+        AppScopes::new().allowance_execute().build().unwrap(),
+        PaykitConfig::default(),
+        installed.clone(),
+    ))
+    .await;
+    let mut shop = Box::pin(world.join(
+        &world.bob,
+        "shop",
+        AppScopes::new().allowance().request().build().unwrap(),
+    ))
+    .await;
+    payer.app_mut().invite(&shop.identity()).await.unwrap();
+    shop.app_mut().invite(&payer.identity()).await.unwrap();
+    let proposal = Box::pin(payer.propose_executable_allowance(
+        shop.identity(),
+        terms(),
+        UserConfirmed::new(),
+    ))
+    .await
+    .unwrap();
+    shop.receive(None).await.unwrap();
+    let offer = shop.allowances().await.unwrap().pop().unwrap();
+    shop.accept_allowance(&offer.record).await.unwrap();
+    payer.receive(None).await.unwrap();
+    let key = proposal.record;
+    let ungranted = payer.app().shared_record(&key).await.unwrap().unwrap();
+    let other_hash = pubky_switch_core::enc::hash(ungranted.content.value().unwrap());
+    world
+        .alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+            path: "/ops".into(),
+        });
+    assert!(Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .is_err());
+    payer.receive(None).await.unwrap();
+    let at = format!("lv/{}", pubky_switch_core::enc::b64(&key));
+    let checkpoint = |bytes: &[u8]| serde_json::from_slice::<serde_json::Value>(bytes).unwrap();
+    let awaiting = payer
+        .app()
+        .protocol_get("paykit", at.as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        checkpoint(&awaiting)["d"][0]["grant"]["kind"],
+        "awaiting_proof"
+    );
+    let mut pending_backup = payer.backup().await.unwrap();
+    Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .unwrap();
+    let verified = payer
+        .app()
+        .protocol_get("paykit", at.as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(checkpoint(&verified)["d"][0]["grant"]["kind"], "verified");
+    let verified_backup = payer.backup().await.unwrap();
+    let grant = payer.app().shared_record(&key).await.unwrap().unwrap();
+    let (_, revision) = applied_put(payer.app(), key, grant.version).await;
+    let writes = world.record_writes(&world.alice, &key);
+    drop(payer);
+
+    if different_pending_value {
+        // The backup's pending marker names another current-format Allowance value.
+        let backup = serde_json::from_slice(&pending_backup.to_bytes().unwrap()).unwrap();
+        let mut layer = crate::restore::layer_of(&backup);
+        let (_, row) = layer
+            .iter_mut()
+            .find(|(k, _)| k.as_slice() == at.as_bytes())
+            .unwrap();
+        row["d"][0]["grant"]["value_hash"] = pubky_switch_core::enc::b64(&other_hash).into();
+        pending_backup = PaykitBackup::from_bytes(
+            &serde_json::to_vec(&crate::restore::with_layer(&backup, layer)).unwrap(),
+        )
+        .unwrap();
+    }
+    let (storage, selected) = if installed_verified {
+        (installed, pending_backup)
+    } else {
+        let storage = store();
+        let pending = Box::pin(Paykit::restore(
+            world.env(&world.alice, storage.clone()),
+            PaykitConfig::default(),
+            &pending_backup,
+            Arc::clone(&world.rail) as Arc<dyn Rail>,
+            world.timer(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            checkpoint(
+                &pending
+                    .app()
+                    .protocol_get("paykit", at.as_bytes())
+                    .await
+                    .unwrap()
+                    .unwrap()
+            )["d"][0]["grant"]["kind"],
+            "awaiting_proof"
+        );
+        drop(pending);
+        (storage, verified_backup)
+    };
+    let mut restored = Box::pin(Paykit::restore(
+        world.env(&world.alice, storage),
+        PaykitConfig::default(),
+        &selected,
+        Arc::clone(&world.rail) as Arc<dyn Rail>,
+        world.timer(),
+    ))
+    .await
+    .unwrap();
+    let history = checkpoint(
+        &restored
+            .app()
+            .protocol_get("paykit", at.as_bytes())
+            .await
+            .unwrap()
+            .unwrap(),
+    );
+    assert_eq!(history["d"].as_array().unwrap().len(), 2);
+    Box::pin(crate::common::finish_listing(&mut restored)).await;
+    assert!(Box::pin(restored.resume_allowance_executor(&key))
+        .await
+        .is_err());
+    let mut complete = false;
+    for _ in 0..8 {
+        match Box::pin(restored.reconcile()).await {
+            Ok(report) => {
+                assert!(!report.payer_skipped);
+                complete = true;
+                break;
+            }
+            Err(paykit_sdk::PaykitError::Refused(paykit_sdk::Refusal::NotNow(reason))) => {
+                assert!(reason.contains("Call reconcile again"), "{reason}");
+            }
+            Err(error) => panic!("{error}"),
+        }
+    }
+    assert!(complete);
+    Box::pin(restored.end_reconcile(UserConfirmed::new()))
+        .await
+        .unwrap();
+    if different_pending_value {
+        assert!(Box::pin(restored.resume_allowance_executor(&key))
+            .await
+            .is_err());
+        assert!(
+            Box::pin(restored.confirm_allowance_executor(&key, UserConfirmed::new()))
+                .await
+                .is_err()
+        );
+    } else {
+        Box::pin(restored.resume_allowance_executor(&key))
+            .await
+            .unwrap();
+        Box::pin(restored.confirm_allowance_executor(&key, UserConfirmed::new()))
+            .await
+            .unwrap();
+        assert!(restored.allowance(&key).await.unwrap().consented);
+    }
+    assert_eq!(world.record_writes(&world.alice, &key), writes);
+    let current = restored.app().shared_record(&key).await.unwrap().unwrap();
+    assert_eq!(current.version, grant.version);
+    assert_eq!(
+        applied_put(restored.app(), key, current.version).await.1,
+        revision
+    );
+    assert!(world.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_first_grant_restore_matches_an_older_pending_proof() {
+    Box::pin(restore_grant_proof_order(true, false)).await;
+}
+
+#[tokio::test]
+async fn test_first_grant_restore_matches_a_newer_verified_proof() {
+    Box::pin(restore_grant_proof_order(false, false)).await;
+}
+
+#[tokio::test]
+async fn test_first_grant_restore_holds_a_different_pending_value() {
+    for installed_verified in [true, false] {
+        Box::pin(restore_grant_proof_order(installed_verified, true)).await;
+    }
+}
+
 #[tokio::test]
 async fn test_payer_requires_combined_confirmation_before_proposing_or_accepting() {
     let world = World::new();
