@@ -1079,6 +1079,8 @@ impl Paykit {
         if ends.is_empty() {
             return Ok(false);
         }
+        // Each end is already admitted. Promoting one releases its counted slot
+        // for the former exempt end of this same sender and record.
         if ends.iter().all(|(_, end)| end.ended_acceptance.is_none()) {
             ends.sort_by_key(|(_, end)| end.order().ok());
             for (suffix, mut end) in ends {
@@ -1414,6 +1416,22 @@ pub(crate) fn restore_conflicts(
             retirements.insert(key, receipt);
         }
     }
+    // A backup can predate both messages. Preserve the installation's verified
+    // pair, including while its permanent record is still unreadable. The
+    // restored greatest deletion and a current permanent read settle it normally.
+    let mut matched_ends = BTreeMap::new();
+    for (at, value) in restoring.previous_local_scan(key::ALLOWANCE_ENDS.as_bytes())? {
+        let held = state::restored::<KeptMessage>(&at, &value, binder)?;
+        if held.ended_acceptance.is_some() {
+            matched_ends.insert(at, value);
+        }
+    }
+    writes.retain(|w| !matches!(w, LocalWrite::Put { key, .. } if matched_ends.contains_key(key)));
+    writes.extend(
+        matched_ends
+            .into_iter()
+            .map(|(key, value)| LocalWrite::Put { key, value }),
+    );
     let retired = |key: &[u8; 32], source: SeenVersion| {
         retirements.get(key).is_some_and(|r| r.retires(source))
     };

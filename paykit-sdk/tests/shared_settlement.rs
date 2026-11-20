@@ -1,6 +1,9 @@
 //! Billing Period payments and receipts across independently enrolled wallets.
 #![recursion_limit = "256"]
 
+#[path = "shared_settlement/allowance_end.rs"]
+mod allowance_end;
+
 #[path = "shared_settlement/period_policy.rs"]
 mod period_policy;
 

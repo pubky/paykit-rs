@@ -1219,16 +1219,17 @@ fn keep_end(
     }
     let stop = key::allowance_end(&record_key, &stored.message().msg_id);
     if state::cx_get::<KeptMessage>(cx, &stop)?.is_none() {
-        // A second end of the Allowance counts under the bounds whatever the record holds
-        // (`receive::make_room_for_stop`).
-        if evidence.ended_acceptance.is_none()
-            && (!ends.is_empty() || (bounded && !keeps_stored_message(cx, &sender, &record_key)?))
+        // A newly matched end takes the exemption. Its predecessor may now
+        // count even when the sender already has a full pool.
+        if evidence.ended_acceptance.is_some() && !ends.is_empty() {
+            receive::make_room_for_stop(cx, &sender, receive::StopAdmission::Matched(record_key))?;
+        } else if !ends.is_empty() || (bounded && !keeps_stored_message(cx, &sender, &record_key)?)
         {
             let order = (
                 stored.accepted_at().ok_or_else(Fail::corrupt)?,
                 position.seq,
             );
-            receive::make_room_for_stop(cx, &sender, order)?;
+            receive::make_room_for_stop(cx, &sender, receive::StopAdmission::Counted(order))?;
         }
         receive::keep_local(cx, receive::local(&stop, &evidence)?);
     }
