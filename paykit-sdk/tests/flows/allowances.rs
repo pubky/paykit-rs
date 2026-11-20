@@ -5131,10 +5131,14 @@ async fn withdraw_after_rejection(trigger: RejectedWithdrawal) {
                 );
                 return;
             }
-            RejectedWithdrawal::Fresh
-            | RejectedWithdrawal::ServiceChange {
+            RejectedWithdrawal::Fresh => return,
+            RejectedWithdrawal::ServiceChange {
                 keep_key: false, ..
-            } => return,
+            } => {
+                let original = Box::pin(original_approval(&restored, &offer.record)).await;
+                assert_eq!(original["rejected"]["withdrawal"], "Owed");
+                return;
+            }
             _ => {
                 Box::pin(restored.unblock(&w.bob_id())).await.unwrap();
                 w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
