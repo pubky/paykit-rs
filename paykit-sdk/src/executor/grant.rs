@@ -37,12 +37,12 @@ impl Paykit {
 
     /// Complete this app's previously authorized first grant after the original reply,
     /// including after reopening. An independent later hold requires its own confirmation.
-    /// A repeated call requires the same app's current grant and unchanged original ledger.
+    /// A repeated call requires the same app's current grant and the original or reconciled ledger.
     ///
     /// # Errors
     ///
     /// The original approval, its complete service application, or current authority is
-    /// unavailable, the ledger has changed, a later user decision is owed, or accessing
+    /// unavailable, the ledger cannot be reconciled, a later user decision is owed, or accessing
     /// the store or service failed.
     pub async fn resume_allowance_executor(&mut self, record: &[u8; 32]) -> Result<()> {
         Box::pin(self.apply_executor_grant(record, None)).await
@@ -51,8 +51,8 @@ impl Paykit {
     /// Confirm this app's previously approved execution again after a consent hold.
     /// The host shows the counterparty, terms and executor. An earlier approval of
     /// automatic execution by this app is required (Paykit spec 8.3).
-    /// Repeating a grant requires this app's current first grant and the unchanged
-    /// original ledger. This does not authorize continuation after spending.
+    /// If the ledger has changed, its application and this wallet's complete method history
+    /// must establish the amount already spent under the same grant.
     ///
     /// # Errors
     ///
@@ -101,8 +101,10 @@ impl Paykit {
             let (fresh, _) = self.current_executor_record(&allow).await?;
             let ledger = ledger_target(&view.counterparty, &view.allowance_id);
             let (current_ledger, _) = self.current_executor_record(&ledger).await?;
-            if current_ledger.revision != opening.ledger.revision
-                || fresh.revision != accepted.grant.revision
+            let original_ledger = current_ledger.revision == opening.ledger.revision
+                && accepted.application.revision == opening.ledger.revision;
+            if fresh.revision != accepted.grant.revision
+                || (!original_ledger && Box::pin(self.reconcile_allowance(record)).await?.is_none())
                 || view.status != AllowanceStatus::Accepted
                 || view.blocked != Some(false)
                 || self
@@ -239,6 +241,7 @@ impl Paykit {
         let checkpoint = ExecutorCheckpoint {
             counterparty: view.counterparty,
             allowance_id: view.allowance_id.as_str().into(),
+            later: None,
             grant: GrantEvidence::AwaitingProof {
                 value_hash: hash(&value),
             },

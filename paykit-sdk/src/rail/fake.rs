@@ -18,8 +18,8 @@ use pubky_switch_client::transport::BoxFuture;
 use serde_json::{Map, Value};
 
 use super::{
-    CandidateId, EndpointSelection, PaymentEndpointCandidate, ProofCheck, Rail, RailDeclaration,
-    RailError, RailOutcome, RailPaid, RailPayment, Transfer,
+    AllowanceDispatch, CandidateId, EndpointSelection, PaymentEndpointCandidate, ProofCheck, Rail,
+    RailDeclaration, RailError, RailOutcome, RailPaid, RailPayment, Transfer,
 };
 
 /// A choice of candidates in place of the fake rail's own.
@@ -63,6 +63,8 @@ struct Paid {
 #[derive(Default)]
 struct Inner {
     payments: BTreeMap<AttemptId, Paid>,
+    history_payer: Option<[u8; 32]>,
+    lost_dispatch: bool,
     executions: BTreeMap<AttemptId, u64>,
     next: VecDeque<Behaviour>,
     counter: u64,
@@ -129,6 +131,12 @@ impl FakeRail {
 
     fn now(&self) -> Option<u64> {
         self.clock.as_ref().map(|c| c.now_ms())
+    }
+
+    /// Bind this rail instance to one payer for account-wide enumeration after restore.
+    /// The test wallet routes all of that payer's manual and automatic dispatches here.
+    pub fn set_history_payer(&self, payer: [u8; 32]) {
+        self.lock().history_payer = Some(payer);
     }
 
     /// Queue what the next new payment does.
@@ -476,6 +484,7 @@ impl Rail for FakeRail {
                     let amount = Self::fixed_amount(payment.payload.as_str(), &payment.amount)
                         .flatten()
                         .unwrap_or(payment.amount.clone());
+                    inner.lost_dispatch |= inner.payments.contains_key(&key);
                     inner.payments.insert(
                         key,
                         Paid {
@@ -511,6 +520,32 @@ impl Rail for FakeRail {
         };
         drop(inner);
         Box::pin(async move { Ok(answer) })
+    }
+
+    fn allowance_history(
+        &self,
+        payer: [u8; 32],
+    ) -> BoxFuture<'_, Result<Option<Vec<AllowanceDispatch>>, RailError>> {
+        let declaration = self.declaration();
+        let inner = self.lock();
+        let complete = inner.history_payer == Some(payer)
+            && declaration.history
+            && declaration.history_survives_restore
+            && declaration.history_retention_ms.is_none()
+            && inner.forgotten.is_empty()
+            && !inner.lost_dispatch;
+        let history = complete.then(|| {
+            inner
+                .payments
+                .iter()
+                .map(|(id, p)| AllowanceDispatch {
+                    attempt_id: *id,
+                    amount: p.amount.clone(),
+                    outcome: p.outcome.clone(),
+                })
+                .collect()
+        });
+        Box::pin(async move { Ok(history) })
     }
 
     fn verify(&self, check: ProofCheck) -> BoxFuture<'_, Result<Option<u64>, RailError>> {
