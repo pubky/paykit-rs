@@ -128,8 +128,9 @@ jobs:
           cargo install --locked --root ~/pubky-switch-bin
           --git https://github.com/pubky/pubky-switch --rev "$REV" --bin pubky-switch pubky-switch
 
-  # The network test targets (fetch_transport, switch_flow) against a real Switch service on a
-  # fresh database, behind the TLS and CORS rig (rig/switch-rig.mjs). See rig/test.sh.
+  # The network test targets (fetch_transport, switch_flow, transport_faults, switch_faults,
+  # switch_http) against a real Switch service on a fresh database, behind the TLS and CORS rig
+  # (rig/switch-rig.mjs). See rig/test.sh.
   switch-tests:
     name: Switch tests (${{ matrix.engine }})
     needs: switch-service

@@ -8,9 +8,9 @@
 //
 // `test.sh --switch` starts it; the service listens on 127.0.0.1:<upstream> in plain HTTP with
 // the origin https://localhost:<listen>. PAYKIT_BROWSER_RIG_TOKEN is a random token of the run,
-// 32 lower-case hex digits, that POST /rig/world requires; the rig exits with an error without
-// one. It comes in the environment, not as an argument, so that the process list does not
-// show it.
+// 32 lower-case hex digits, that POST /rig/world and /rig/fault require; the rig exits with an
+// error without one. It comes in the environment, not as an argument, so that the process list
+// does not show it.
 //
 // - At start it makes a self-signed certificate for localhost (DNS:localhost, IP:127.0.0.1,
 //   IP:::1) with openssl in a temporary folder, reads it, and removes the folder. It then
@@ -25,7 +25,10 @@
 //   access-control-allow-origin; a request from any other origin, or with none, gets no CORS
 //   headers, so a browser hides the answer from any other page. Every answer has
 //   vary: origin.
-// - It answers every OPTIONS request itself, as a CORS preflight (the service answers none).
+// - It answers every OPTIONS request itself, as a CORS preflight, and forwards none to the
+//   service, with access-control-max-age: 600. A preflight whose query has max_age=none gets
+//   no access-control-max-age, and one with max_age=0 gets 0, on any path. The query of a
+//   forwarded request reaches the service unchanged.
 // - It serves the routes under /rig/ itself and never forwards them; a bad parameter gets a 400
 //   with a fixed text:
 //   GET /rig/health                   200 "ok", once the rig serves.
@@ -44,9 +47,31 @@
 //   GET /rig/status?code=C            status C (200..299 or 400..599), body "status C".
 //   GET /rig/redirect?tag=T           302 to /rig/echo?tag=T.
 //   GET /rig/slow?ms=M                200 "slow" after M ms, at most 30000.
+//   GET /rig/hang?tag=T[&stage=headers]
+//                                     reads the request and never answers; with stage=headers
+//                                     it sends the head of a 200 application/octet-stream
+//                                     answer with content-length: 1024, and then no body. The
+//                                     rig destroys the connection after 60 s.
+//   GET /rig/cacheable?tag=T          200 with cache-control: public, max-age=60, body the
+//                                     number of requests to this route with tag=T so far,
+//                                     this one included, in decimal.
 //   GET /rig/count?tag=T              200 JSON {"requests": the requests so far whose query
 //                                     has tag=T, on any route but this one, preflights
-//                                     included}.
+//                                     included; "preflights": the OPTIONS requests among
+//                                     them; "closed_early": the others whose connection the
+//                                     client closed before the rig finished its answer (the
+//                                     rig's own destroys, as on /rig/hang, do not count);
+//                                     "open": the others still in progress}.
+//   GET /rig/hits?path=P[&method=M]   200 JSON {"preflights": the OPTIONS requests so far to
+//                                     the forwarded raw path P, without its query, of any
+//                                     method; and among the other requests to P, with method
+//                                     M when given: "forwarded": those the rig sent on to the
+//                                     service, a lost or held one included once it is sent;
+//                                     "refused": those a "refuse" fault kept from the service;
+//                                     "open": those still in progress, sent on or not}. A
+//                                     held request whose client closes its connection before
+//                                     the hold ends is neither forwarded nor refused. P starts
+//                                     with / and has at most 512 bytes.
 //   POST /rig/world?token=<token>     body {"identities": [name, ...], "apps": [{"identity",
 //                                     "app"}, ...]}, names matching ^[a-z][a-z0-9-]{0,31}$: runs
 //                                     `<enroll-bin> --switch-url http://127.0.0.1:<upstream>
@@ -62,22 +87,70 @@
 //                                     that does not know the token, can start the enrol
 //                                     program, not even without CORS. The token is compared in
 //                                     constant time.
+//   POST /rig/fault?token=<token>     body {"method": "GET", "POST", "PUT" or "DELETE",
+//                                     "path": a raw path without query, starting with / and of
+//                                     at most 512 bytes, "kind": "lose", "refuse" or "hold",
+//                                     "ms" in 1..30000 for "hold" only, and optionally "after"
+//                                     in 0..16, 0 when left out}: arms that one fault, replacing
+//                                     any armed one, and answers 200 JSON {"armed": true}. Only
+//                                     a request that is the first its connection carries can
+//                                     fire the fault or count toward "after": the forwarded
+//                                     requests, not OPTIONS, with that method and path, each
+//                                     first on its connection, go through unchanged until
+//                                     "after" of them have; the next one fires the fault and
+//                                     disarms it. A matching request on a connection that
+//                                     carried a request before goes through unchanged and is
+//                                     not counted. The rig first reads the body of the
+//                                     request the fault fires on whole, at most 16 MiB (a 413
+//                                     above that), then: "lose" forwards it, reads the
+//                                     service's whole answer, and destroys the browser's
+//                                     connection without a byte; "refuse" destroys the
+//                                     browser's connection and forwards nothing; "hold"
+//                                     forwards it after ms, or never when the client closes
+//                                     its connection first. While a fault is armed, the rig
+//                                     closes each browser connection after its answer, the
+//                                     arming one included. When it is armed, the rig closes
+//                                     the idle connections at once, and each busy one fully,
+//                                     reading nothing more from it, once its answer in
+//                                     progress has ended, without cutting that answer. A
+//                                     browser may send a request again on its own when a
+//                                     connection it reused closes without a byte of the
+//                                     answer, which would hide the fault or have the service
+//                                     apply the request twice. Firing only on the first
+//                                     request of a connection is meant to avoid that, and
+//                                     the rig counts any such resend: a later forwarded
+//                                     request with the same method, raw request target,
+//                                     Switch request headers (ALLOW_HEADERS below) in order
+//                                     and body as the one the fault fired on, whose body it
+//                                     reads whole to compare it, is forwarded unchanged and
+//                                     counted in "resent".
+//   GET /rig/fault?token=<token>      200 JSON {"armed": whether a fault is armed, "fired": the
+//                                     faults fired since the rig started, "resent": the
+//                                     resends of the request the last fault fired on, since
+//                                     it was armed}.
+//   DELETE /rig/fault?token=<token>   disarms the fault; 200 JSON {"armed": false}.
+//                                     POST and DELETE both forget the request the last fault
+//                                     fired on, and set "resent" to 0. /rig/fault checks the
+//                                     Origin header and the token as POST /rig/world does,
+//                                     with the same 403s.
 // - It forwards every other request to the service as received: the method, the raw request
 //   target, the raw headers in their order except the hop-by-hop ones, and the body. It passes
 //   the status and the raw response headers back the same way, and the body. When the service
 //   cannot be reached or breaks off, it destroys the browser's connection rather than make up an
 //   answer.
-// - It logs one line per request: the method, the path without the query, and the status.
-//   It never logs header values, bodies or the token.
+// - It logs one line per request: the method, the path without the query, and the status,
+//   one line per fired fault: the kind, the method and the path without the query, and one
+//   line per resend of a faulted request: the method and the path without the query. It
+//   never logs header values, bodies or the token.
 
 import { execFile, execFileSync } from "node:child_process";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Readable, pipeline } from "node:stream";
+import { Readable, finished, pipeline } from "node:stream";
 import { parseArgs } from "node:util";
 
 // The request headers a Switch request carries (RECEIVED_HEADERS of pubky_switch_core::http,
@@ -109,7 +182,6 @@ const EXPOSE = ["access-control-expose-headers", EXPOSE_HEADERS.join(", ")];
 const PREFLIGHT_HEADERS = [
   ["access-control-allow-methods", "GET, POST, PUT, DELETE"],
   ["access-control-allow-headers", ALLOW_HEADERS.join(", ")],
-  ["access-control-max-age", "600"],
 ];
 // Headers that belong to one connection, not to the message (RFC 9110 7.6.1).
 const HOP_BY_HOP = new Set([
@@ -147,18 +219,33 @@ const MAX_APPS = 16;
 // so a slow enrolment fails with the rig's answer rather than the client's timeout.
 const ENROLL_TIMEOUT_MS = 45_000;
 const ENROLL_MAX_OUTPUT = 4 * 1024 * 1024;
+const HANG_CAP_MS = 60_000;
+const MAX_HITS_PATH = 512;
+const MAX_FAULT_BODY = 1024;
+const FAULT_METHODS = ["GET", "POST", "PUT", "DELETE"];
+const FAULT_KINDS = ["lose", "refuse", "hold"];
+const FAULT_ERROR =
+  `need {"method": GET, POST, PUT or DELETE, "path": a raw path starting with / of at most ` +
+  `${MAX_HITS_PATH} bytes, "kind": lose, refuse or hold, "ms" in 1..30000 for hold only, and ` +
+  'optionally "after" in 0..16}';
+// The most matching requests a fault lets through before it fires.
+const MAX_FAULT_AFTER = 16;
 
-// The rig's routes: path -> [method or null for any, handler].
+// The rig's routes: path -> [methods, or null for any, handler].
 const ROUTES = {
-  "/rig/health": ["GET", health],
+  "/rig/health": [["GET"], health],
   "/rig/echo": [null, echo],
-  "/rig/bytes": ["GET", bytes],
-  "/rig/truncated": ["GET", truncated],
-  "/rig/status": ["GET", status],
-  "/rig/redirect": ["GET", redirect],
-  "/rig/slow": ["GET", slow],
-  "/rig/count": ["GET", count],
-  "/rig/world": ["POST", world],
+  "/rig/bytes": [["GET"], bytes],
+  "/rig/truncated": [["GET"], truncated],
+  "/rig/status": [["GET"], status],
+  "/rig/redirect": [["GET"], redirect],
+  "/rig/slow": [["GET"], slow],
+  "/rig/hang": [["GET"], hang],
+  "/rig/cacheable": [["GET"], cacheable],
+  "/rig/count": [["GET"], count],
+  "/rig/hits": [["GET"], hits],
+  "/rig/world": [["POST"], world],
+  "/rig/fault": [["GET", "POST", "DELETE"], fault],
 };
 
 function log(line) {
@@ -192,9 +279,10 @@ try {
 const listenPort = port(options.listen, "listen");
 const upstreamPort = port(options.upstream, "upstream");
 const enrollBin = options["enroll-bin"];
-// The run's token for /rig/world, which test.sh makes and builds into the network tests.
-const worldToken = process.env.PAYKIT_BROWSER_RIG_TOKEN ?? "";
-if (!/^[0-9a-f]{32}$/.test(worldToken)) {
+// The run's token for /rig/world and /rig/fault, which test.sh makes and builds into the
+// network tests.
+const runToken = process.env.PAYKIT_BROWSER_RIG_TOKEN ?? "";
+if (!/^[0-9a-f]{32}$/.test(runToken)) {
   fail("PAYKIT_BROWSER_RIG_TOKEN must be the run's token, 32 lower-case hex digits");
 }
 const origin = `https://localhost:${listenPort}`;
@@ -203,8 +291,31 @@ const switchUrl = `http://127.0.0.1:${upstreamPort}`;
 // A fresh connection per forwarded request: a kept-alive connection the service closes while
 // idle could break the next request on it.
 const upstreamAgent = new http.Agent({ keepAlive: false });
-// The requests seen per value of their `tag` query parameter.
+// The requests seen per value of their `tag` query parameter: {requests, preflights,
+// closed_early, open}.
 const tagCounts = new Map();
+// /rig/cacheable's requests per tag.
+const cacheableCounts = new Map();
+// The requests seen per raw path the rig forwards: {preflights, methods: method ->
+// {forwarded, refused, open}}.
+const pathHits = new Map();
+// Answers the rig destroyed itself, so that their close does not count as the client's.
+const cutByRig = new WeakSet();
+// The browser connections that carried a request already: no fault fires on them.
+const usedConnections = new WeakSet();
+// The answers in progress, whose connections close after them once a fault is armed.
+const inFlight = new Set();
+// The servers, one per loopback address.
+const servers = [];
+// The armed fault, or null, and the faults fired so far.
+let armedFault = null;
+let faultsFired = 0;
+// The request the last fault fired on, {method, target, digest} (see fingerprint), or null;
+// the resends of it seen since; and a count of the arms and disarms, so that a fingerprint
+// taken after the fault was replaced is dropped.
+let faultedRequest = null;
+let faultResends = 0;
+let faultEpoch = 0;
 // Running enrol programs, stopped when the rig stops.
 const enrollChildren = new Set();
 
@@ -250,6 +361,22 @@ function endToEndHeaders(raw) {
     for (const token of value.split(",")) dropped.add(token.trim().toLowerCase());
   }
   return pairs.filter(([name]) => !dropped.has(name.toLowerCase()));
+}
+
+// Destroys the browser's connection, as the rig's own doing rather than the client's.
+function cut(res) {
+  cutByRig.add(res);
+  res.destroy();
+}
+
+function plain(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+// The entry of `key` in `map`, made with `make` when missing.
+function entry(map, key, make) {
+  if (!map.has(key)) map.set(key, make());
+  return map.get(key);
 }
 
 function answer(res, code, type, body, headers = []) {
@@ -332,7 +459,7 @@ function truncated(req, res, query) {
   if (length === undefined) return text(res, 400, "need length in 17..9999999999");
   const head = [["content-type", "application/octet-stream"], ["content-length", String(length)]];
   res.writeHead(200, [...head, ...corsHeaders(req)].flat());
-  res.write(Buffer.alloc(16), () => res.destroy());
+  res.write(Buffer.alloc(16), () => cut(res));
 }
 
 function status(req, res, query) {
@@ -358,11 +485,67 @@ function slow(req, res, query) {
   res.on("close", () => clearTimeout(timer));
 }
 
+// An answer that never comes, or whose body never comes, until the rig's cap.
+function hang(req, res, query) {
+  req.resume();
+  const stage = query.get("stage");
+  if (query.get("tag") === null || (stage !== null && stage !== "headers")) {
+    return text(res, 400, "need tag, and stage=headers or nothing");
+  }
+  if (stage === "headers") {
+    const head = [["content-type", "application/octet-stream"], ["content-length", "1024"]];
+    res.writeHead(200, [...head, ...corsHeaders(req)].flat());
+    res.flushHeaders();
+  }
+  const timer = setTimeout(() => cut(res), HANG_CAP_MS);
+  res.on("close", () => clearTimeout(timer));
+}
+
+function cacheable(req, res, query) {
+  req.resume();
+  const tag = query.get("tag");
+  if (tag === null) return text(res, 400, "need tag");
+  const served = (cacheableCounts.get(tag) ?? 0) + 1;
+  cacheableCounts.set(tag, served);
+  text(res, 200, String(served), [["cache-control", "public, max-age=60"]]);
+}
+
+function newTagCount() {
+  return { requests: 0, preflights: 0, closed_early: 0, open: 0 };
+}
+
 function count(req, res, query) {
   req.resume();
   const tag = query.get("tag");
   if (tag === null) return text(res, 400, "need tag");
-  json(res, { requests: tagCounts.get(tag) ?? 0 });
+  json(res, tagCounts.get(tag) ?? newTagCount());
+}
+
+// Whether `path` may name a forwarded raw path in /rig/hits and /rig/fault.
+function validPath(path) {
+  return typeof path === "string" && path.startsWith("/") && Buffer.byteLength(path) <= MAX_HITS_PATH;
+}
+
+function hits(req, res, query) {
+  req.resume();
+  const path = query.get("path");
+  const method = query.get("method");
+  if (!validPath(path) || (method !== null && !/^[A-Z]{1,16}$/.test(method))) {
+    return text(
+      res,
+      400,
+      `need a path starting with / of at most ${MAX_HITS_PATH} bytes, and an upper-case method or nothing`,
+    );
+  }
+  const seen = pathHits.get(path);
+  const total = { preflights: seen?.preflights ?? 0, forwarded: 0, refused: 0, open: 0 };
+  for (const [name, counts] of seen?.methods ?? []) {
+    if (method !== null && name !== method) continue;
+    total.forwarded += counts.forwarded;
+    total.refused += counts.refused;
+    total.open += counts.open;
+  }
+  json(res, total);
 }
 
 // The identities and apps of a /rig/world request, or a fixed error text.
@@ -373,7 +556,6 @@ function parseWorld(body) {
   } catch {
     return { error: "the body is not JSON" };
   }
-  const plain = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
   if (!plain(request) || Object.keys(request).some((key) => key !== "identities" && key !== "apps")) {
     return { error: 'need an object with "identities" and "apps" only' };
   }
@@ -408,25 +590,33 @@ function parseWorld(body) {
 }
 
 // Whether `query` carries the run's token, compared in constant time.
-function hasWorldToken(query) {
+function hasRunToken(query) {
   const given = Buffer.from(query.get("token") ?? "", "utf8");
-  const expected = Buffer.from(worldToken, "utf8");
+  const expected = Buffer.from(runToken, "utf8");
   return given.length === expected.length && timingSafeEqual(given, expected);
+}
+
+// Answers 403 and returns true for a request from another page, or without the run's token.
+// A page of another origin can send a POST without CORS, and any local program can send
+// one: the routes that change the rig refuse them before reading anything.
+function refuseOutsider(req, res, query, route) {
+  if (req.headers.origin !== undefined && !fromPage(req)) {
+    req.resume();
+    text(res, 403, `the rig serves ${route} to the test page only`);
+    return true;
+  }
+  if (!hasRunToken(query)) {
+    req.resume();
+    text(res, 403, `the rig serves ${route} to this run's tests only`);
+    return true;
+  }
+  return false;
 }
 
 // Enrols the identities and approves the apps with the native enrol program, under a fresh
 // seed prefix, and answers with the JSON object it prints.
 async function world(req, res, query) {
-  // A page of another origin can send a POST without CORS, and any local program can send
-  // one: refuse them before reading anything.
-  if (req.headers.origin !== undefined && !fromPage(req)) {
-    req.resume();
-    return text(res, 403, "the rig serves /rig/world to the test page only");
-  }
-  if (!hasWorldToken(query)) {
-    req.resume();
-    return text(res, 403, "the rig serves /rig/world to this run's tests only");
-  }
+  if (refuseOutsider(req, res, query, "/rig/world")) return;
   const body = await readBody(req, MAX_WORLD_BODY);
   if (body === null) return text(res, 413, "body too large");
   const parsed = parseWorld(body);
@@ -477,23 +667,180 @@ async function world(req, res, query) {
   });
 }
 
+// The fault a /rig/fault body describes, or null when it is not one.
+function parseFault(body) {
+  let request;
+  try {
+    request = JSON.parse(body.toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (!plain(request)) return null;
+  const { method, path, kind, ms, after = 0 } = request;
+  const keys = Object.keys(request)
+    .filter((key) => key !== "after")
+    .sort()
+    .join(" ");
+  const valid =
+    keys === (kind === "hold" ? "kind method ms path" : "kind method path") &&
+    Number.isInteger(after) &&
+    after >= 0 &&
+    after <= MAX_FAULT_AFTER &&
+    FAULT_METHODS.includes(method) &&
+    FAULT_KINDS.includes(kind) &&
+    validPath(path) &&
+    (kind !== "hold" || (Number.isInteger(ms) && ms >= 1 && ms <= MAX_SLOW_MS));
+  if (!valid) return null;
+  return { method, path, kind, ms, after };
+}
+
+// Arms `fault`, or disarms with null, and forgets the request the last fault fired on.
+function setFault(fault) {
+  armedFault = fault;
+  faultEpoch += 1;
+  faultedRequest = null;
+  faultResends = 0;
+}
+
+// Arms, reports or disarms the one fault for forwarded requests.
+async function fault(req, res, query) {
+  if (refuseOutsider(req, res, query, "/rig/fault")) return;
+  if (req.method === "GET") {
+    req.resume();
+    return json(res, { armed: armedFault !== null, fired: faultsFired, resent: faultResends });
+  }
+  if (req.method === "DELETE") {
+    req.resume();
+    setFault(null);
+    return json(res, { armed: false });
+  }
+  const body = await readBody(req, MAX_FAULT_BODY);
+  if (body === null) return text(res, 413, "body too large");
+  const parsed = parseFault(body);
+  if (parsed === null) return text(res, 400, FAULT_ERROR);
+  setFault(parsed);
+  // The connections open now close, so the browser's next requests come on new ones, the
+  // first request of which can fire the fault (see the header): the busy ones, this one
+  // included, close after their answers, the idle ones now.
+  for (const busy of inFlight) closeAfterAnswer(busy);
+  for (const server of servers) server.closeIdleConnections();
+  json(res, { armed: true });
+}
+
+// Makes the browser's connection of `res`, an answer in progress, close once the answer has
+// ended, without cutting it: before the head is sent, the head says connection: close, and
+// Node closes the connection after the answer; after, once the answer's last byte is handed
+// to the connection, the rig stops reading from it, so that no request the browser sends on
+// it later is parsed, then ends it and destroys it once that byte is written. A connection
+// whose answer is already finished is idle, and closeIdleConnections closes it.
+function closeAfterAnswer(res) {
+  if (!res.headersSent) {
+    res.shouldKeepAlive = false;
+    return;
+  }
+  const socket = res.socket;
+  if (!socket || socket.destroyed) return;
+  const close = () => {
+    socket.pause();
+    socket.end(() => socket.destroy());
+  };
+  if (res.writableFinished) return close();
+  res.once("finish", close);
+}
+
 function serveRig(req, res, path, query) {
   if (!Object.hasOwn(ROUTES, path)) {
     req.resume();
     return text(res, 404, "no such rig route");
   }
-  const [method, handler] = ROUTES[path];
-  if (method !== null && req.method !== method) {
+  const [methods, handler] = ROUTES[path];
+  if (methods !== null && !methods.includes(req.method)) {
     req.resume();
-    return text(res, 405, "method not allowed", [["allow", method]]);
+    return text(res, 405, "method not allowed", [["allow", methods.join(", ")]]);
   }
   Promise.resolve(handler(req, res, query)).catch((error) => {
     log(`${req.method} ${path}: ${error.message}`);
-    res.destroy();
+    cut(res);
   });
 }
 
-function forward(req, res) {
+// The armed fault when it matches this forwarded request, the first its connection carries
+// (`firstOnConnection`), and let its "after" matching requests through already, disarmed;
+// otherwise null.
+function takeFault(req, path, firstOnConnection) {
+  const armed = armedFault;
+  if (armed === null || !firstOnConnection) return null;
+  if (req.method !== armed.method || path !== armed.path) return null;
+  if (armed.after > 0) {
+    armed.after -= 1;
+    return null;
+  }
+  armedFault = null;
+  faultsFired += 1;
+  log(`fault ${armed.kind} ${req.method} ${path}`);
+  return armed;
+}
+
+// The fingerprint of a forwarded request, to recognize a browser's own resend of it: a
+// SHA-256 of its method, raw request target, Switch request headers in order and body, the
+// body read whole first. A Switch request's signature covers its timestamp and its body's
+// hash (Switch wire 7.1), so two requests the client signed apart differ. Returns {digest,
+// body}, or null when the body is longer than MAX_ECHO_BODY. The digest is only compared,
+// never logged or answered.
+async function fingerprint(req) {
+  const body = await readBody(req, MAX_ECHO_BODY);
+  if (body === null) return null;
+  const switchHeaders = rawPairs(req.rawHeaders).filter(([name]) =>
+    ALLOW_HEADERS.includes(name.toLowerCase()),
+  );
+  const hash = createHash("sha256");
+  hash.update(JSON.stringify([req.method, req.url, switchHeaders]));
+  hash.update(body);
+  return { digest: hash.digest(), body };
+}
+
+// Forwards a request to the service under its armed fault, if any. `methodHits` counts the
+// request when it is sent on, or when the fault refuses it. The request the fault fires on,
+// and any later one with its method and raw target, are read whole first and fingerprinted,
+// so that a resend of the faulted request is counted (see the header).
+function forwardWithFault(req, res, path, methodHits, firstOnConnection) {
+  const armed = takeFault(req, path, firstOnConnection);
+  const maybeResend =
+    armed === null && faultedRequest?.method === req.method && faultedRequest.target === req.url;
+  if (armed === null && !maybeResend) return forward(req, res, methodHits);
+  if (armed?.kind === "refuse") methodHits.refused += 1;
+  const epoch = faultEpoch;
+  fingerprint(req).then(
+    (print) => {
+      if (res.destroyed) return;
+      if (print === null) return text(res, 413, "body too large");
+      if (armed === null) {
+        if (epoch === faultEpoch && faultedRequest?.digest.equals(print.digest)) {
+          faultResends += 1;
+          log(`resend ${req.method} ${path}`);
+        }
+        return forward(req, res, methodHits, false, print.body);
+      }
+      if (epoch === faultEpoch) {
+        faultedRequest = { method: req.method, target: req.url, digest: print.digest };
+      }
+      if (armed.kind === "refuse") return cut(res);
+      if (armed.kind === "lose") return forward(req, res, methodHits, true, print.body);
+      const timer = setTimeout(() => forward(req, res, methodHits, false, print.body), armed.ms);
+      res.on("close", () => clearTimeout(timer));
+    },
+    () => {
+      if (!res.destroyed) cut(res);
+    },
+  );
+}
+
+// Sends the request on to the service, counted in `methodHits.forwarded`, with `body` when the
+// rig read it already, or else streaming it from the browser. With `lose`, the service's
+// whole answer is read, so that it has acted, and the browser's connection is destroyed
+// without a byte of it.
+function forward(req, res, methodHits, lose = false, body = undefined) {
+  methodHits.forwarded += 1;
   const upstream = http.request({
     host: "127.0.0.1",
     port: upstreamPort,
@@ -503,23 +850,55 @@ function forward(req, res) {
     setHost: false,
     agent: upstreamAgent,
   });
+  // The browser may close its connection before the service answers: a dropped call, a call
+  // past its deadline, a held long poll it gives up. Then the service's request is stopped
+  // and nothing is written to the closed answer, which would throw outside any handler. When
+  // the service's answer breaks off first, the rig closes the browser's connection itself.
+  let clientClosed = false;
+  let upstreamBroke = false;
+  res.on("close", () => {
+    if (res.writableFinished) return;
+    clientClosed = !upstreamBroke;
+    upstream.destroy();
+  });
   upstream.on("response", (reply) => {
+    if (res.destroyed) {
+      reply.resume();
+      return;
+    }
+    if (lose) {
+      reply.resume();
+      return finished(reply, () => cut(res));
+    }
     const head = [...endToEndHeaders(reply.rawHeaders), ...corsHeaders(req)];
     res.writeHead(reply.statusCode, reply.statusMessage, head.flat());
+    reply.once("error", () => {
+      upstreamBroke = !clientClosed;
+    });
     pipeline(reply, res, (error) => {
-      if (error) {
-        log(`upstream answer broke off: ${error.message}`);
-        res.destroy();
-      }
+      // After the browser closed first, the error is the rig's own stop of the answer.
+      if (!error || clientClosed) return;
+      log(`upstream answer broke off: ${error.message}`);
+      cut(res);
     });
   });
   upstream.on("error", (error) => {
+    // After the browser closed first, the error is the rig's own stop of the request.
+    if (res.destroyed) return;
     log(`upstream: ${error.message}`);
-    res.destroy();
+    cut(res);
   });
+  if (body !== undefined) return upstream.end(body);
   pipeline(req, upstream, (error) => {
     if (error) upstream.destroy();
   });
+}
+
+// The CORS headers of a preflight, with the access-control-max-age its query asks for.
+function preflightHeaders(query) {
+  const maxAge = ["none", "0"].includes(query.get("max_age")) ? query.get("max_age") : "600";
+  if (maxAge === "none") return PREFLIGHT_HEADERS;
+  return [...PREFLIGHT_HEADERS, ["access-control-max-age", maxAge]];
 }
 
 function handle(req, res) {
@@ -527,24 +906,52 @@ function handle(req, res) {
   const queryStart = target.indexOf("?");
   const path = queryStart < 0 ? target : target.slice(0, queryStart);
   const query = new URLSearchParams(queryStart < 0 ? "" : target.slice(queryStart + 1));
+  inFlight.add(res);
   res.on("close", () => {
+    inFlight.delete(res);
     const code = res.headersSent ? res.statusCode : "no answer";
     log(`${req.method} ${path} ${code}${res.writableFinished ? "" : " (connection closed early)"}`);
   });
 
-  if (path !== "/rig/count") {
-    for (const tag of new Set(query.getAll("tag"))) {
-      tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
-    }
-  }
+  // While a fault is armed, no connection is kept for a next request, and a fault fires only
+  // on the first request of a connection (see the header).
+  if (armedFault !== null) res.shouldKeepAlive = false;
+  const firstOnConnection = !usedConnections.has(req.socket);
+  usedConnections.add(req.socket);
+
+  // Decided on the raw path, so no spelling of a /rig/ path reaches the service.
+  const forRig = path === "/rig" || path.startsWith("/rig/");
+  const tags = path === "/rig/count" ? [] : [...new Set(query.getAll("tag"))];
+  const counts = tags.map((tag) => entry(tagCounts, tag, newTagCount));
+  for (const tagCount of counts) tagCount.requests += 1;
+  const pathHit = forRig
+    ? null
+    : entry(pathHits, path, () => ({ preflights: 0, methods: new Map() }));
   if (req.method === "OPTIONS") {
+    for (const tagCount of counts) tagCount.preflights += 1;
+    if (pathHit !== null) pathHit.preflights += 1;
     req.resume();
-    res.writeHead(204, corsHeaders(req, PREFLIGHT_HEADERS).flat());
+    res.writeHead(204, corsHeaders(req, preflightHeaders(query)).flat());
     return res.end();
   }
-  // Decided on the raw path, so no spelling of a /rig/ path reaches the service.
-  if (path === "/rig" || path.startsWith("/rig/")) return serveRig(req, res, path, query);
-  forward(req, res);
+
+  // Every other request is open until its connection closes: early when the client closes it
+  // before the answer is finished, unless the rig destroyed it itself.
+  const open = [...counts];
+  let methodHits = null;
+  if (pathHit !== null) {
+    methodHits = entry(pathHit.methods, req.method, () => ({ forwarded: 0, refused: 0, open: 0 }));
+    open.push(methodHits);
+  }
+  for (const counter of open) counter.open += 1;
+  res.on("close", () => {
+    for (const counter of open) counter.open -= 1;
+    if (res.writableFinished || cutByRig.has(res)) return;
+    for (const tagCount of counts) tagCount.closed_early += 1;
+  });
+
+  if (forRig) return serveRig(req, res, path, query);
+  forwardWithFault(req, res, path, methodHits, firstOnConnection);
 }
 
 // One server per loopback address, with the same certificate and handler.
@@ -559,6 +966,7 @@ function serve(tls, address) {
     server.listen(listenPort, address, () => {
       server.off("error", reject);
       server.on("error", (error) => fail(`serving on ${address}: ${error.message}`));
+      servers.push(server);
       resolve(server);
     });
   });

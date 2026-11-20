@@ -82,6 +82,10 @@ target feature) is refused at compile time.
   request sent before the payer admitted the payee, which waits for admission and is
   delivered once the payer invites the payee; and a request to an identity that never
   enrolled, which stays queued.
+- `FetchTransport`, and the SDK on it, when the network misbehaves: a server that does not
+  answer, a dropped call, cacheable answers, CORS preflights, long polls and the browser's
+  connection limit, and lost or refused payment batches against the real service (see
+  [When the network misbehaves](#when-the-network-misbehaves)).
 
 The network tests have these limits:
 
@@ -153,8 +157,9 @@ measure its own call paths.
 
 ## Tests
 
-There are seven test targets. Two of them, `tests/fetch_transport/` and `tests/switch_flow/`,
-are network targets: they need a real Switch service, and run only as
+There are ten test targets. Five of them, `tests/fetch_transport/`, `tests/switch_flow/`,
+`tests/transport_faults/`, `tests/switch_faults/` and `tests/switch_http/`, are network
+targets: they need a real Switch service, and run only as
 [Run the network tests](#run-the-network-tests) describes. The others need no network, no
 database and no service.
 
@@ -246,7 +251,7 @@ over TLS and CORS, so they run only in a browser. They check that:
 The tests in `tests/switch_flow/` run the network flow described above, so they also run only
 in a browser. Each test asks the rig for a world of its own, and joins its apps through
 `FetchTransport` (`tests/switch_flow/switch_world.rs`, on the rig helpers in
-`tests/switch_rig/`, shared with `tests/fetch_transport/`). They follow the
+`tests/switch_rig/`, shared with the other network targets). They follow the
 SDK's native flow tests (`paykit-sdk/tests/flows/one_time.rs`), with the real service's
 answers in place of a scripted switch's. They check that:
 
@@ -265,6 +270,65 @@ answers in place of a scripted switch's. They check that:
 - a request to an identity that never enrolled stays `MessageDelivery::Queued`, since no
   `identity.json` can be read for it, and the payee's app records it;
 - the rig refuses `POST /rig/world` with a 403 without the run's token, and with a wrong one.
+
+The tests in `tests/transport_faults/` send through `FetchTransport` to the rig's fault
+routes, so they run only in a browser. The counts the engines differ on are printed, not
+asserted (see [When the network misbehaves](#when-the-network-misbehaves)). They check that:
+
+- a server that never answers ends an ordinary, a bulk and a long-poll call at the deadline
+  of its timeout class with `TransportError::Timeout`, and so does a server that sends the
+  head of its answer and then no body, for an ordinary and a bulk call; each time, the rig
+  sees the browser close the connection;
+- dropping the future `send` returned, before the head of the answer arrives or while the
+  body is awaited, closes the connection, and the same transport then reads a whole answer;
+- two calls to the same URL, whose answer says `cache-control: public, max-age=60`, both
+  reach the rig, since the transport asks for `cache: "no-store"`;
+- each call with a Switch header reaches the rig once, also on a path the rig forwards to
+  the service, where each call reaches the service once; a URL not used before is always
+  preflighted, also when only its query is new; and with `access-control-max-age: 0` every
+  call is preflighted.
+
+The tests in `tests/switch_faults/` pay a one-time Payment Request through the real service
+while the rig faults the payer's operation batches (`POST /v1/{id}/ops`), and hold a public
+identity read, so they also run only in a browser. They use the world of `tests/switch_flow/`, and follow the SDK's native
+flow tests (`paykit-sdk/tests/flows/one_time.rs` and `unrequested.rs`), whose scripted switch
+fails the same batches. They check that:
+
+- when the answer to the payer's first batch, which records the attempt, is lost after the
+  service applied it, or the batch is refused before it reaches the service, the call fails
+  with the batch kept as sent and nothing paid; the next flush sends the same batch, and it
+  is applied; a second payment is refused while the first is in progress
+  (`Refusal::PaymentInProgress`), a resume writes `failed`, and the next payment pays once,
+  with one execution on the rail, and the payee receives its Payment Proof;
+- when the answer to the batch that writes the outcome is lost after the rail paid, the call
+  reports `PayOutcome::PaidOutcomeUnwritten`, not an error, and a resume finishes the
+  payment without paying again, with one execution on the rail;
+- each batch reaches the rig as often as the flow sends it, and the rig sends it on to the
+  service each time but when it refuses it;
+- when the rig holds the payer's public identity read (`hold`) for 400 ms, the read returns
+  the published `identity.json` no earlier than the hold; when it holds the read past a 1 s
+  transport deadline, the read ends with `TransportError::Timeout` at the deadline, the
+  rig sees the browser close the connection, with nothing left open, and the read never
+  reaches the service.
+
+The tests in `tests/switch_http/` check how the real service's long poll and caching behave
+over `fetch`, with apps joined through `FetchTransport`, so they also run only in a browser.
+They check that:
+
+- a wait on the feed (Switch wire 7.4.4) wakes after a counterparty's message is sent, in
+  less than half of its wait, and the next receive applies that message;
+- the client cuts a wait asked for longer than the service's maximum, 25 s, to 25 s; and a
+  long poll's deadline is its wait plus `long_timeout_ms`: with a 2 s `long_timeout_ms`, a
+  4 s wait on a quiet feed returns empty once its wait has passed, not before and not cut,
+  while a bulk call beside it times out;
+- beside 4 held long polls, an ordinary call to the same origin completes, and a call that
+  waits for a connection completes once a held poll ends or is dropped; the number of held
+  polls at which a call starts to wait is printed;
+- held polls that the app drops, or that the transport's deadline ends, while the service
+  holds them, leave the rig and the service answering, also after the service's wait has
+  passed;
+- two public reads of an identity's `identity.json`, which the service answers with
+  `max-age=60`, both reach the service.
 
 ### Run the tests natively
 
@@ -326,18 +390,47 @@ test rig code only, never for production. On the local machine, the run starts:
   `http://[::1]` on any port. It serves the routes under `/rig/` itself and never forwards
   them.
 
-The routes under `/rig/` are fixed routes for the transport tests, and `POST /rig/world`. For
-each test world, `/rig/world` runs the native `switch-enroll` example (`rig/switch_enroll.rs`)
-once, with a fresh seed prefix. It requires the run's token in its query
-(`/rig/world?token=<token>`), compared in constant time: `test.sh` makes a fresh random token
-for each run, gives it to the rig in its environment and to the test build in
+The routes under `/rig/` are fixed routes for the transport tests, fault routes, and
+`POST /rig/world`. The header comment of `rig/switch-rig.mjs` describes each route. The fault
+routes are these:
+
+- `/rig/hang` reads the request and never answers, or sends the head of an answer and then
+  no body.
+- `/rig/cacheable` answers with `cache-control: public, max-age=60`, and counts its requests.
+- `/rig/count` reports the requests that carry a given tag: how many there were, how many
+  were preflights, how many the client closed early and how many are still open.
+- `/rig/hits` reports, for one path the rig forwards to the service, and one method or all:
+  `preflights`, the preflights for the path; `forwarded`, the requests the rig sent on to
+  the service; `refused`, those a `refuse` fault kept from it; and `open`, those still in
+  progress. A held request the client gives up before its hold ends is neither forwarded
+  nor refused.
+- `/rig/fault` arms one fault for the next forwarded request with a given method and exact
+  path: the rig loses the service's answer (`lose`), forwards nothing (`refuse`), or
+  forwards the request after a delay (`hold`). The fault fires only on a request that is the
+  first its connection carries. With the optional `after`, from 0 (the default) to 16, the
+  fault lets that many matching requests through first; only matching requests that are
+  first on their connection count toward it. While a fault is armed, the rig keeps no
+  browser connection alive: it closes the idle ones when the fault is armed, and each one in
+  use, both ways, once its answer ends. `GET /rig/fault` reports whether a fault is armed,
+  how many fired, and `resent`: how many later requests repeated the one the last fault
+  fired on, with the same method, target, Switch request headers and body, as a browser's
+  own resend would. Arming or disarming a fault sets `resent` back to 0.
+
+The rig answers every CORS preflight itself and forwards none to the service, with
+`access-control-max-age: 600`. A request whose query has `max_age=none` or `max_age=0`, on
+any path, gets a preflight answer with no `access-control-max-age` or with 0.
+
+For each test world, `POST /rig/world` runs the native `switch-enroll` example
+(`rig/switch_enroll.rs`) once, with a fresh seed prefix. It requires the run's token in its
+query (`/rig/world?token=<token>`), compared in constant time: `test.sh` makes a fresh random
+token for each run, gives it to the rig in its environment and to the test build in
 `PAYKIT_BROWSER_RIG_TOKEN`, so a page or program that does not know the token cannot make the
 rig enrol. A request without that token, or with an `Origin` other than the test page's, gets
-a 403 instead. The example enrolls the identities and approves their apps with the real
-signer, which does not build for wasm32, and returns each identity's latest `identity.json`
-and each app's request and approval. The browser test rebuilds the keys from the seed prefix,
-loads the documents into an in-memory `TestHomeserver`, and joins each app with
-`Paykit::join`.
+a 403 instead. `/rig/fault` checks the token and the `Origin` the same way. The example
+enrolls the identities and approves their apps with the real signer, which does not build for
+wasm32, and returns each identity's latest `identity.json` and each app's request and
+approval. The browser test rebuilds the keys from the seed prefix, loads the documents into an
+in-memory `TestHomeserver`, and joins each app with `Paykit::join`.
 
 The run passes the rig's origin to the test build in `PAYKIT_BROWSER_RIG_ORIGIN`, and the
 token in `PAYKIT_BROWSER_RIG_TOKEN`. The runner
@@ -382,7 +475,7 @@ paykit-browser/rig/test.sh --switch all both
 ```
 
 The engine, context and `cargo test` arguments work as without `--switch`. Without `--test`,
-the run runs the two network targets. Unless `PAYKIT_BROWSER_ENROLL_BIN` is set, it builds the
+the run runs the five network targets. Unless `PAYKIT_BROWSER_ENROLL_BIN` is set, it builds the
 `switch-enroll` example natively first. `test.sh` reads these variables:
 
 | Variable | What it sets | Default |
@@ -406,6 +499,139 @@ in `rig/package-lock.json`. The WebKit build is Playwright's build of the WebKit
 Safari itself. `chrome` is the Google Chrome installed on the machine, driven through
 Playwright's Chromium support. `all` runs the three Playwright builds.
 
+## When the network misbehaves
+
+The targets `tests/transport_faults/`, `tests/switch_faults/` and `tests/switch_http/` show
+how `FetchTransport`, and the SDK on it, behave when an answer does not come, comes late or
+is lost, and when long polls hold the browser's connections. The rig makes the faults (see
+[Run the network tests](#run-the-network-tests)).
+
+### What the tests prove
+
+[Tests](#tests) lists each check. In short:
+
+- A server that never answers, or sends the head of its answer and then no body, ends an
+  ordinary, bulk or long-poll call at the deadline of its timeout class with
+  `TransportError::Timeout`, and the browser closes the connection.
+- Dropping the future `send` returned, before the head of the answer or during the body,
+  closes the connection, and the same transport then completes a call.
+- An answer marked `public, max-age=60` reaches the rig on every call, and so does the
+  service's public identity read: the transport asks for `cache: "no-store"`.
+- Each call reaches the rig once. A URL not used before always costs a preflight, also when
+  only its query is new. An `access-control-max-age: 0` preflight is never reused. No
+  preflight reaches the service, by the rig's design: the rig answers every preflight itself.
+- A wait on the feed wakes once a counterparty's message arrives, and returns empty when its
+  wait passes with nothing to show. The client asks for at most the service's maximum wait,
+  25 s, and a long poll's deadline is its wait plus `long_timeout_ms`, so a
+  `long_timeout_ms` shorter than the wait does not cut it.
+- Beside 4 held long polls, an ordinary call to the same origin completes, and a call that
+  waits for a connection completes once a held poll ends or is dropped.
+- Held polls that the app drops, or that pass their deadline, while the service holds them,
+  leave the rig and the service answering.
+- A payment whose batch is lost or refused pays once: see [Payment faults](#payment-faults).
+- A call the rig holds completes no earlier than the hold, and one held past the transport's
+  deadline ends with `TransportError::Timeout` at the deadline: the browser closes the
+  connection, and the call never reaches the service.
+
+### Measured numbers
+
+The numbers below were measured on one macOS machine, with Playwright's Chromium
+151.0.7922.34, Firefox 153.0 and WebKit 26.5. A page and a dedicated worker gave the same
+numbers. The tests print them in the run log; they assert only what
+[What the tests prove](#what-the-tests-prove) lists.
+
+Deadlines and dropped calls:
+
+- A call to a server that never answers, or that stops after the head, ended with `Timeout`
+  2 to 12 ms after its deadline, and the rig saw the browser close the connection within
+  26 ms of that.
+- After a call was dropped, before the head or during the body, the rig saw the connection
+  close within 67 ms.
+- A public identity read that the rig held for 400 ms took 411 to 437 ms. One held past a
+  1 s deadline ended with `Timeout` 3 to 59 ms after the deadline, with nothing left open at
+  the rig.
+
+Caching:
+
+- An answer with `cache-control: public, max-age=60` reached the rig on every call through
+  the transport, in every engine. As a control, a plain `fetch` in the browser's default
+  cache mode was served from Firefox's cache; Chromium and WebKit fetched it again.
+- The service's public identity read answers with
+  `cache-control: public, max-age=60, must-revalidate`, and every read reached the service.
+  It is a plain `GET` with no Switch header, so it needs no preflight.
+
+CORS preflights, as calls / preflights counted at the rig. Every call carries a Switch header,
+so the browser preflights it unless it reuses a preflight it holds. `max-age` is the
+`access-control-max-age` of the rig's preflight answer. A forwarded path is one the rig sends
+on to the service.
+
+| Calls | Chromium | Firefox | WebKit |
+| --- | --- | --- | --- |
+| Same URL twice, `max-age` 600 | 2 / 2 | 2 / 2 | 2 / 1 |
+| Same URL twice, no `max-age` | 2 / 2 | 2 / 2 | 2 / 1 |
+| Same URL three times, `max-age` 0 | 3 / 3 | 3 / 3 | 3 / 3 |
+| Three different paths, `max-age` 600 | 3 / 3 | 3 / 3 | 3 / 3 |
+| Same path, a new query each time (like the feed's `after=`), `max-age` 600 | 3 / 3 | 3 / 3 | 3 / 3 |
+| Forwarded path, same URL twice, `max-age` 0 | 2 / 2 | 2 / 2 | 2 / 2 |
+| Forwarded path, same URL twice, `max-age` 600 | 2 / 2 | 2 / 2 | 2 / 1 |
+| Forwarded path, same URL twice, no `max-age` | 2 / 2 | 2 / 2 | 2 / 1 |
+| Control: plain `fetch` in the default cache mode, same URL twice, `max-age` 600 | 2 / 1 | 2 / 1 | 2 / 1 |
+
+Chromium and Firefox never reused a preflight for the transport's `cache: "no-store"`
+requests, whatever `access-control-max-age` said; WebKit reused it for the same URL. A new
+URL, including a new query, cost a preflight in every engine, so each page of a feed read
+with a new `after=` waits for a preflight first.
+
+Long polls:
+
+- A 10 s wait woke about 0.2 to 0.6 s after a counterparty's message, sent about 1 s into
+  the wait.
+- With `long_timeout_ms` at 2 s, a 4 s wait completed after 4.02 to 4.07 s, while a bulk call
+  beside it timed out after 2.00 to 2.01 s.
+
+Connection limit, with the rig on HTTP/1.1. Each held long poll keeps a connection of its
+own:
+
+| Held long polls | An ordinary call to the same origin |
+| --- | --- |
+| 1 to 5 | completes in 2 to 14 ms |
+| 6 | waits; once the first held poll is dropped, it completes within 11 ms |
+
+The limit was 6 connections to one origin in Chromium, Firefox and WebKit, in a page and in a
+dedicated worker.
+
+### Payment faults
+
+`tests/switch_faults/` faults the payer's operation batches while it pays a one-time Payment
+Request through the real service. In every case below the rail executes one payment.
+
+- The answer to the batch that records the attempt is lost after the service applied it, or
+  the batch is refused before it reaches the service. The call fails with the batch kept as
+  sent. The next flush sends it again, and the service applies it once. Paying again is
+  refused while the payment is in progress, a resume writes it `failed`, and the next
+  payment pays once.
+- The answer to the batch that writes the outcome is lost. The call reports
+  `PayOutcome::PaidOutcomeUnwritten`, and a resume finishes the payment without paying again.
+
+A refused connection and a lost answer look the same to a browser's `fetch`: both are
+`TransportError::Other`. So the client keeps a refused batch as sent, though the service never
+saw it. The native case of a connection that fails before anything was sent, which the client
+knows sent nothing (`TransportError::Connect`), cannot happen through `fetch`.
+
+A browser may send a request again on its own when a connection it reused closes without a
+byte of the answer, which would hide the fault. So a fault fires only on the first request of
+a connection, and while one is armed the rig keeps no browser connection alive. That makes a
+resend unlikely, not impossible, so each test also checks that the browser did not resend the
+faulted request: the rig's `resent` count is 0 after the call. The service's batch IDs make
+such a resend safe.
+
+### Limits
+
+- The rig speaks HTTP/1.1 only. HTTP/2, which carries many requests on one connection and
+  has no limit of 6 connections, is not tested.
+- Playwright's WebKit build is not Safari.
+- All timings come from one local machine and vary from run to run.
+
 ## Continuous integration
 
 The `Browser` workflow (`.github/workflows/browser.yml`) runs on the same pushes and pull
@@ -428,6 +654,13 @@ toolchain only when the cache has no binary for the commit. Its `switch-tests` j
 once per engine (`chromium`, `firefox`, `webkit`), as three jobs, with a PostgreSQL 17 service
 at its default settings. Each restores the binary, runs `rig/test.sh --switch` in a page and
 then in a dedicated worker, and keeps the service and rig logs as an artifact when it fails.
+
+`rig/test.sh --switch` runs all five network targets, so these jobs also run
+`transport_faults`, `switch_faults` and `switch_http`. Measured on a local machine, per engine
+and context, `transport_faults` takes about 4 s, `switch_faults` about 6 s (about 10 s in
+Firefox) and `switch_http` about 15 to 17 s: about 26 to 32 s per context, so about 50 to 65 s
+per engine job, plus the time to build their three test binaries. A CI runner's times may
+differ.
 
 The clippy settings in `rig/wasm-clippy/clippy.toml` reject `now` and `elapsed` of
 `std::time::Instant` and of `std::time::SystemTime`, which compile for `wasm32-unknown-unknown`

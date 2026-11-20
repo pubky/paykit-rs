@@ -27,6 +27,8 @@
 
 mod delivery;
 mod one_time;
+mod rig_world;
+#[allow(dead_code)]
 #[path = "../switch_rig/mod.rs"]
 mod switch_rig;
 mod switch_world;
@@ -37,13 +39,8 @@ mod world;
 
 use paykit_sdk::Paykit;
 
-use switch_world::SwitchWorld;
+use switch_world::{SwitchWorld, PAYEE, PAYER};
 use world::{draft, stored_request, DAY_MS};
-
-/// The payer's identity.
-pub const PAYER: &str = "payer";
-/// The payee's identity.
-pub const PAYEE: &str = "payee";
 
 /// A new world on the service, with the payer's wallet and the payee's shop joined. The
 /// wallet has not invited the payee yet.

@@ -12,6 +12,7 @@
 
 #![cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 
+#[allow(dead_code)]
 #[path = "../switch_rig/mod.rs"]
 mod switch_rig;
 
@@ -23,7 +24,9 @@ use pubky_switch_core::enc::b64;
 use serde_json::Value;
 use wasm_bindgen_test::wasm_bindgen_test;
 
-use switch_rig::{config, origin, port, request, transport};
+use switch_rig::{
+    config, fresh_tag, origin, port, request, rig_bytes, tag_count, transport, transport_with,
+};
 
 /// A loopback port nothing listens on, as `rig/test.sh --switch` checked on `127.0.0.1` and
 /// `::1` and set at compile time in `PAYKIT_BROWSER_RIG_CLOSED_PORT`: 18449 unless that
@@ -42,40 +45,6 @@ fn closed_port() -> u16 {
         })
         .parse()
         .expect("PAYKIT_BROWSER_RIG_CLOSED_PORT is a port number")
-}
-
-/// The bytes `/rig/bytes?n=<n>&seed=<seed>` answers: byte `i` is `(i * 31 + seed) mod 256`.
-fn rig_bytes(n: usize, seed: u8) -> Vec<u8> {
-    (0..n)
-        .map(|i| ((i * 31 + usize::from(seed)) % 256) as u8)
-        .collect()
-}
-
-/// A tag no other request to this rig has used: `name`, the wall clock and a random number.
-/// One rig serves every engine and context of a run, so a tag must differ between them too.
-/// It holds only letters, digits and `-`, so it goes into a query as it is.
-fn fresh_tag(name: &str) -> String {
-    let now = js_sys::Date::now() as u64;
-    let random = (js_sys::Math::random() * f64::from(u32::MAX)) as u32;
-    format!("{name}-{now}-{random:08x}")
-}
-
-/// The requests the rig has seen whose query has `tag`, preflights included, read from
-/// `/rig/count` through [`transport`].
-///
-/// # Panics
-///
-/// When the rig does not answer, or answers something other than its count.
-async fn count(tag: &str) -> u64 {
-    let response = transport()
-        .send(request("GET", &format!("/rig/count?tag={tag}")))
-        .await
-        .expect("the rig answers /rig/count");
-    assert_eq!(response.status, 200, "/rig/count");
-    let value: Value = serde_json::from_slice(&response.body).expect("/rig/count answers JSON");
-    value["requests"]
-        .as_u64()
-        .expect("/rig/count answers its requests")
 }
 
 /// The request `/rig/echo` received, from its answer.
@@ -124,7 +93,7 @@ async fn assert_refused_unsent(transport: &FetchTransport, request: Request, tag
         matches!(error, TransportError::Refused(_)),
         "{url}: {error:?}"
     );
-    assert_eq!(count(tag).await, 0, "{url} reached the rig");
+    assert_eq!(tag_count(tag).await.requests, 0, "{url} reached the rig");
 }
 
 /// A `GET` returns the status, the headers the rig exposes and the exact body, with a
@@ -228,7 +197,7 @@ async fn test_fetch_redirect_is_an_error_and_not_followed() {
         .await
         .unwrap_err();
     assert!(matches!(error, TransportError::Other(_)), "{error:?}");
-    assert_eq!(count(&tag).await, 1);
+    assert_eq!(tag_count(&tag).await.requests, 1);
 }
 
 /// An answer body over `max_response_bytes` is `TooLarge` with that limit, counted as it
@@ -236,9 +205,7 @@ async fn test_fetch_redirect_is_an_error_and_not_followed() {
 #[wasm_bindgen_test]
 async fn test_fetch_body_over_the_limit_is_too_large() {
     let limit = 1_000;
-    let mut small = config();
-    small.max_response_bytes = limit;
-    let transport = FetchTransport::allowing_localhost_for_loopback_tests(small);
+    let transport = transport_with(|config| config.max_response_bytes = limit);
     for chunked in ["", "&chunked=1"] {
         let over = format!("/rig/bytes?n=5000&seed=3{chunked}");
         let error = transport.send(request("GET", &over)).await.unwrap_err();
@@ -261,9 +228,7 @@ async fn test_fetch_body_shorter_than_announced_is_other() {
         (u64::MAX, 3_000_000_000),
         (100, 1_000),
     ] {
-        let mut limited = config();
-        limited.max_response_bytes = limit;
-        let transport = FetchTransport::allowing_localhost_for_loopback_tests(limited);
+        let transport = transport_with(|config| config.max_response_bytes = limit);
         let path = format!("/rig/truncated?length={length}");
         let error = transport.send(request("GET", &path)).await.unwrap_err();
         assert!(
@@ -278,9 +243,7 @@ async fn test_fetch_body_shorter_than_announced_is_other() {
 #[wasm_bindgen_test]
 async fn test_fetch_head_answer_is_not_held_to_its_announced_length() {
     let limit = 10;
-    let mut small = config();
-    small.max_response_bytes = limit;
-    let response = FetchTransport::allowing_localhost_for_loopback_tests(small)
+    let response = transport_with(|config| config.max_response_bytes = limit)
         .send(request("HEAD", "/rig/echo"))
         .await
         .unwrap();
@@ -343,11 +306,9 @@ async fn test_fetch_refused_origins_send_nothing() {
 #[wasm_bindgen_test]
 async fn test_fetch_unreachable_origin_is_other() {
     let closed_port = closed_port();
-    let mut closed = config();
-    closed.extra_ports.push(closed_port);
     let mut unreachable = request("GET", "/rig/health");
     unreachable.origin = format!("https://localhost:{closed_port}");
-    let error = FetchTransport::allowing_localhost_for_loopback_tests(closed)
+    let error = transport_with(|config| config.extra_ports.push(closed_port))
         .send(unreachable)
         .await
         .unwrap_err();
@@ -358,9 +319,7 @@ async fn test_fetch_unreachable_origin_is_other() {
 /// slow answer comes.
 #[wasm_bindgen_test]
 async fn test_fetch_call_past_its_timeout_is_timeout() {
-    let mut short = config();
-    short.request_timeout_ms = 300;
-    let transport = FetchTransport::allowing_localhost_for_loopback_tests(short);
+    let transport = transport_with(|config| config.request_timeout_ms = 300);
     let started = js_sys::Date::now();
     let error = transport
         .send(request("GET", "/rig/slow?ms=3000"))
