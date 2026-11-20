@@ -80,8 +80,11 @@ impl WalletStore for DeviceStore {
             return Err(StorageError::Unavailable);
         }
         let mut locks = self.leases.lock().unwrap();
-        if locks.get(&namespace).is_some_and(|(id, _)| id == &owner) {
-            locks.remove(&namespace);
+        if let Some((id, file)) = locks.get(&namespace) {
+            if id == &owner {
+                file.unlock().map_err(|_| StorageError::Unavailable)?;
+                locks.remove(&namespace);
+            }
         }
         Ok(())
     }
@@ -148,6 +151,9 @@ fn test_device_store_fences_a_second_process_and_a_reopened_writer() {
     );
     assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed; 0 failed"));
 
+    // A child starting while the host unlocks can briefly inherit the open file
+    // description. A successful release must free the physical lock immediately.
+    let inherited = original.leases.lock().unwrap()[&ns].1.try_clone().unwrap();
     original.release(ns.clone(), old.clone()).unwrap();
     let reopened = DeviceStore::open(&other_path);
     assert!(reopened.acquire(ns.clone(), new.clone()).unwrap());
@@ -156,4 +162,5 @@ fn test_device_store_fences_a_second_process_and_a_reopened_writer() {
     assert!(reopened.commit_if(ns.clone(), new.clone(), put(2)).unwrap());
     assert_eq!(original.get(ns.clone(), vec![1]).unwrap(), Some(vec![2]));
     reopened.release(ns, new).unwrap();
+    drop(inherited);
 }
