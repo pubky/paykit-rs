@@ -16,7 +16,7 @@
 
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::natural_key;
-use paykit_lib::kinds::Kind;
+use paykit_lib::kinds::{check_sender_for_request, may_send, Kind, Side};
 use paykit_lib::records::{ActivityRecord, ActivitySide, PaymentListRecord, StoredMessage};
 use paykit_lib::Label;
 use pubky_switch_client::app::{
@@ -31,7 +31,7 @@ use pubky_switch_core::sig::SignedDoc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::activity::{self, ActivityTarget, Role};
+use crate::activity::{self, ActivityTarget, Role, SideTag};
 use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
 use crate::receive::Settlement;
@@ -69,7 +69,7 @@ pub(crate) struct KeptMessage {
     /// carries none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     seq: Option<u64>,
-    /// The feed generation of a pooled reply. Its sequence alone cannot
+    /// The feed generation of a pooled reply or retained cancellation. Its sequence alone cannot
     /// order entries on opposite sides of a provider loss.
     #[serde(skip_serializing_if = "Option::is_none")]
     generation: Option<u64>,
@@ -89,14 +89,17 @@ pub(crate) struct KeptMessage {
 /// inbox gives each entry as it accepts it, whoever sent it (Switch spec 8.3), never by its
 /// `msg_id`, which its sender chooses, nor by the store that keeps it. A stored entry keeps
 /// the `seq` it was read at when the client tries it again, so a message keeps its position
-/// whichever store keeps it and however often it is taken. Pending Allowance replies retain
-/// their complete feed position and use the client's feed order across generations.
+/// whichever store keeps it and however often it is taken. Pending Allowance replies and payment-request
+/// cancellations retain their complete feed position to compare across generations.
 pub(crate) type KeptOrder = (u64, u64);
+
+/// The authenticated acceptance time and original position of a received message.
+pub(crate) type ReceivedAt = (u64, pubky_switch_client::app::FeedPosition);
 
 /// Compare inbox acceptance times, using the verified feed order to break a tie.
 pub(crate) fn compare_received(
-    a: (u64, pubky_switch_client::app::FeedPosition),
-    b: (u64, pubky_switch_client::app::FeedPosition),
+    a: ReceivedAt,
+    b: ReceivedAt,
     order: impl Fn(
         pubky_switch_client::app::FeedPosition,
         pubky_switch_client::app::FeedPosition,
@@ -229,6 +232,14 @@ impl KeptMessage {
             generation: self.generation?,
             seq: self.seq?,
         })
+    }
+
+    /// The verified intake time and original feed position used to compare received messages.
+    pub(crate) fn received_at(&self) -> Result<ReceivedAt> {
+        Ok((
+            self.order()?.0,
+            self.position().ok_or_else(PaykitError::corrupt)?,
+        ))
     }
 
     /// The feed `seq` its entry was read at, for a message ordered among others
@@ -509,6 +520,26 @@ impl Paykit {
         Ok(self.app.sign_message(message)?)
     }
 
+    /// Sign a payee follow-up under the authenticated sale's policy (Paykit spec 3.4).
+    pub(crate) fn sign_for_sale(
+        &self,
+        sale: &ActivityTarget,
+        to: [u8; 32],
+        kind: Kind,
+        refs: Vec<[u8; 32]>,
+        body: Map<String, Value>,
+    ) -> Result<SignedMessage> {
+        if !may_send(
+            kind,
+            Side::Payee,
+            self.app.cert().scopes(),
+            sale.label().as_ref(),
+        ) {
+            return Err(Refusal::Label("the selling scope does not cover this sale".into()).into());
+        }
+        self.sign(to, kind, refs, body)
+    }
+
     /// The stored copy of a message this app signed, as its own records hold it: its
     /// acceptance time isn't known yet (Paykit wire 5.2).
     pub(crate) fn own_copy(&self, signed: &SignedMessage) -> Result<StoredMessage> {
@@ -541,6 +572,7 @@ impl Paykit {
     ) -> Result<String> {
         let msg_id = signed.msg_id().to_owned();
         let stored = self.own_copy(&signed)?;
+        refuse_unless_may_send(self.app.cert().scopes(), &stored, target)?;
         let write = self
             .placed_write(target, signed.to(), role, stored, conditions)
             .await?;
@@ -654,6 +686,36 @@ pub(crate) fn bind_activity(
         &natural,
     );
     (record_key(&target)? == *key).then_some(record)
+}
+
+/// The sending side of Paykit spec 3.4: an app holding `scopes` sends `stored`, its own
+/// message going into the record at `target`, only if it may send it about that record's
+/// request ([`paykit_lib::kinds::may_send`]). A payee record sits under its request's label's
+/// policy, or the fixed one for an unlabelled request or none, so the record's label is the
+/// request's. So an app holding only labelled selling scopes signs and queues no period
+/// details, receipt or cancellation about another label's request or an unlabelled one.
+///
+/// # Errors
+///
+/// [`Refusal::Label`], with nothing written or queued.
+pub(crate) fn refuse_unless_may_send(
+    scopes: &[String],
+    stored: &StoredMessage,
+    target: &ActivityTarget,
+) -> Result<()> {
+    let side = match target.side {
+        SideTag::Payer => Side::Payer,
+        SideTag::Payee => Side::Payee,
+    };
+    check_sender_for_request(stored.message(), side, scopes, target.label().as_ref()).map_err(
+        |_| {
+            Refusal::Label(
+                "the certificate holds neither paykit_request nor the label of the request this message is about"
+                    .into(),
+            )
+            .into()
+        },
+    )
 }
 
 /// Bind a `payment_lists` value held at `key` (Paykit wire 5.4): `key` is the one derived
@@ -939,5 +1001,120 @@ mod own_message_tests {
         let outcome = body(pay, "write_outcome");
         assert!(outcome.contains(".outcome_record(entry, &target, paid, proof.as_ref()"));
         assert!(body(pay, "place_acceptance").contains("if !entry.acceptance_released {"));
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::testkit::{object, Party};
+
+    /// Bob's payee app `app`, holding `selling` and the scopes it requires.
+    fn payee(app: &str, selling: &str) -> Party {
+        Party::new(
+            "bob",
+            app,
+            &[selling, "paykit_settlements", "paykit_contacts"],
+        )
+    }
+
+    #[test]
+    fn test_records_send_refused_about_a_request_outside_the_labels() {
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let shop1 = Label::parse("shop1").unwrap();
+        let in_shop1 = ActivityTarget::payee(vec![1], Some(&shop1));
+        let unlabelled = ActivityTarget::payee(vec![1], None);
+        for (kind, refs, body) in [
+            (
+                "paykit.payment_period_details",
+                vec![[7; 32]],
+                json!({
+                    "billing_period": {
+                        "starts_at": "2026-02-28T00:00:00.000Z",
+                        "ends_at": "2026-03-31T00:00:00.000Z"
+                    },
+                    "expires_at": "2026-03-01T00:00:00.000Z",
+                    "payment_endpoints": { "btc-lightning-bolt11": "lnbc1period" }
+                }),
+            ),
+            (
+                "paykit.payment_receipt",
+                vec![[3; 32], [7; 32]],
+                json!({ "attempt_id": "DgCVYQKL1eyDacZvG6YhZg" }),
+            ),
+            (
+                "paykit.payment_request_cancellation",
+                vec![[7; 32]],
+                json!({ "reason": null }),
+            ),
+        ] {
+            for (app, selling, target, sends) in [
+                ("shop2", "paykit_request:shop2", &in_shop1, false),
+                ("shop2", "paykit_request:shop2", &unlabelled, false),
+                ("shop1", "paykit_request:shop1", &unlabelled, false),
+                ("shop1", "paykit_request:shop1", &in_shop1, true),
+                ("shop", "paykit_request", &in_shop1, true),
+                ("shop", "paykit_request", &unlabelled, true),
+            ] {
+                let sender = payee(app, selling);
+                let stored = sender.message(&alice, kind, refs.clone(), object(body.clone()));
+                let result = refuse_unless_may_send(sender.cert.scopes(), &stored, target);
+                assert_eq!(result.is_ok(), sends, "{kind} from {selling}");
+                if let Err(error) = result {
+                    assert!(
+                        matches!(error.refusal(), Some(Refusal::Label(_))),
+                        "{error:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod send_tests {
+    use paykit_lib::bodies::RequestReply;
+    use paykit_lib::derive::natural_key;
+
+    use super::*;
+    use crate::testkit::Switches;
+
+    /// A labelled app reaching the write of its own cancellation about a request of another
+    /// label, or an unlabelled one, at a record target built here: refused before anything
+    /// is written or queued.
+    #[tokio::test]
+    async fn test_records_send_with_record_refuses_a_request_outside_the_labels() {
+        let w = Switches::new();
+        let mut shop2 = w.labelled("shop2", "shop2").await;
+        let alice = w.alice.identity().public();
+        let bob = w.bob.identity().public();
+        let shop1 = Label::parse("shop1").unwrap();
+        for label in [Some(&shop1), None] {
+            let target = ActivityTarget::payee(natural_key::request_record(&bob, &[7; 32]), label);
+            let body = RequestReply {
+                reason: None,
+                label: None,
+            }
+            .to_body()
+            .unwrap();
+            let signed = shop2
+                .sign(alice, Kind::PaymentRequestCancellation, vec![[7; 32]], body)
+                .unwrap();
+            let bob_tip = w.bob.switch().tip_seq();
+            let alice_tip = w.alice.switch().tip_seq();
+            let refused = shop2
+                .send_with_record(signed, &target, Role::Cancellation, Vec::new(), Vec::new())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(refused.refusal(), Some(Refusal::Label(_))),
+                "{label:?}: {refused:?}"
+            );
+            shop2.receive(None).await.unwrap();
+            assert_eq!(w.bob.switch().tip_seq(), bob_tip, "{label:?}: written");
+            assert_eq!(w.alice.switch().tip_seq(), alice_tip, "{label:?}: sent");
+        }
     }
 }

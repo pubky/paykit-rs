@@ -662,7 +662,13 @@ async fn test_provider_loss_disputed_delete_protects_its_cancellation_from_expir
     lists.flag(&w.bob_id());
     cancel(request.request_hash);
     wallet.receive(None).await.unwrap();
-    let stop = format!("kc/{}", pubky_switch_core::enc::b64(&record)).into_bytes();
+    let stop = format!(
+        "kc/{}/{}/{:020}",
+        pubky_switch_core::enc::b64(&record),
+        pubky_switch_core::enc::b64(&shop.app().cert().hash()),
+        wallet.app().own_identity().generation(),
+    )
+    .into_bytes();
     assert!(
         wallet
             .app()
@@ -1528,8 +1534,10 @@ async fn test_provider_loss_missing_record_epoch_holds_the_original_request_proo
     assert!(stopped.applied.contains(&stop_id), "{stopped:?}");
     assert_eq!(stopped.key_epochs_awaited, [sealed_at]);
     let stop_key = format!(
-        "kc/{}",
-        pubky_switch_core::enc::b64(&observer.app().record_key(&purchase_target).unwrap())
+        "kc/{}/{}/{:020}",
+        pubky_switch_core::enc::b64(&observer.app().record_key(&purchase_target).unwrap()),
+        pubky_switch_core::enc::b64(&seller.app().cert().hash()),
+        observer.app().own_identity().generation(),
     );
     assert!(observer
         .app()

@@ -3620,7 +3620,7 @@ async fn test_allowances_attempted_permanent_delete_preserves_the_accepted_histo
 
 /// The `allowances` record at `target` written by `app` to `value`, `None` for a delete,
 /// as a faulty own app could.
-async fn write_record(
+pub(super) async fn write_record(
     app: &mut Paykit,
     target: &pubky_switch_client::app::RecordTarget,
     value: Option<&[u8]>,
