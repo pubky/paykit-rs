@@ -1,4 +1,4 @@
-# Paykit enrollment for Kotlin and Swift
+# Paykit wallets for Kotlin and Swift
 
 `WalletEnrollment` prepares a payer application for the signer and keeps the selected approval on the device. Both languages use the same native implementation. The Kotlin package is `com.synonym.paykit.v2`. The Swift module is `PaykitV2`.
 
@@ -9,6 +9,14 @@ Use a host-owned, protected store with process-wide and cross-process writer exc
 3. Call `acceptApproval` with the user's selected identity and the original signed companion claim. It verifies the identity, the request, certificate and scope keys before committing the original result. An interrupted host reopens the same reference.
 
 Cancelling a Swift task or Kotlin coroutine stops its wait. A host commit already in progress retains ownership until it finishes. Reopen after that commit to observe its durable result.
+
+## Install and reopen the approved payer
+
+Create a `WalletHost` with the same protected store, the user's authenticated Homeserver session, the host's payment method and its supported Payment Endpoint Identifiers. The store also provides ordered key scans and conditional deletes for the installed Switch app. Call `completeEnrollment` with the original enrollment reference. If the process stops during installation, use the same reference again. After installation, `load` opens the same App ID and keys. Shut down the existing writer before opening another handle for the same physical store.
+
+`payments` reads the original attempts and their stored stages. `resumePayments` uses the SDK's paying order and the method's lookup of the original attempt ID, including after a lost result. The method must keep that same ID as its idempotency key. Return a definitive refusal only when submission was excluded. Persist a method outcome before returning it, and keep method callbacks independent of the wallet lock. `requestReceipts` reads the original seller's signed receipt references.
+
+Keep backups and their App IDs in protected storage. Before calling `restore`, ask whether the original device is in the user's possession or known to have been wiped. An unaccounted-for device requires revocation and a new enrollment (Switch spec 12.4). The SDK reads and reconciles the restored state under the original App ID. For a retained grant, `reconcileAllowance` reports usage only from the original authority and complete account-wide method history. An unknown result leaves spending held.
 
 ## Generate both languages
 

@@ -6,8 +6,8 @@ use pubky_switch_core::{
 };
 use pubky_switch_harness::{Backend, World};
 use std::error::Error;
-mod signer;
 mod backup;
+mod signer;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {

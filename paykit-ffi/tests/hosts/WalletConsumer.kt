@@ -14,6 +14,15 @@ private class EnrollmentStore : WalletStore {
     @Synchronized override fun get(namespace: String, key: ByteArray) =
         rows[key(namespace, key)]?.copyOf()
 
+    @Synchronized override fun scan(namespace: String, prefix: ByteArray, after: ByteArray?, limit: UInt): List<StoreEntry> =
+        rows.entries.asSequence()
+            .filter { it.key.first == namespace }
+            .map { StoreEntry(Base64.getDecoder().decode(it.key.second), it.value.copyOf()) }
+            .filter { it.key.size >= prefix.size && prefix.indices.all { i -> prefix[i] == it.key[i] } }
+            .filter { after == null || java.util.Arrays.compareUnsigned(it.key, after) > 0 }
+            .sortedWith { a, b -> java.util.Arrays.compareUnsigned(a.key, b.key) }
+            .take(limit.toLong().coerceAtMost(Int.MAX_VALUE.toLong()).toInt()).toList()
+
     @Synchronized override fun acquire(namespace: String, owner: ByteArray): Boolean =
         owners.putIfAbsent(namespace, owner.copyOf()) == null
 
@@ -23,9 +32,70 @@ private class EnrollmentStore : WalletStore {
 
     @Synchronized override fun commitIf(namespace: String, owner: ByteArray, writes: List<StoreWrite>): Boolean {
         if (owners[namespace]?.contentEquals(owner) != true) return false
-        val put = writes.single() as StoreWrite.Put
-        rows[key(namespace, put.key)] = put.value.copyOf()
+        for (write in writes) {
+            when (write) {
+                is StoreWrite.Put -> rows[key(namespace, write.key)] = write.value.copyOf()
+                is StoreWrite.Delete -> rows.remove(key(namespace, write.key))
+                is StoreWrite.DeletePrefix -> rows.keys.removeIf { (ns, encoded) ->
+                    val k = Base64.getDecoder().decode(encoded)
+                    ns == namespace && k.size >= write.prefix.size && write.prefix.indices.all { write.prefix[it] == k[it] }
+                }
+            }
+        }
         return true
+    }
+}
+
+private class ReceiptReader : WalletHomeserver, PaymentMethod {
+    var transfers = 0
+    override suspend fun get(identity: ByteArray, path: String): ByteArray? = null
+    override suspend fun put(identity: ByteArray, path: String, bytes: ByteArray) = error("unexpected public write")
+    override suspend fun delete(identity: ByteArray, path: String) = error("unexpected public delete")
+    override fun declaration() = MethodDeclaration(true, null, true, null, true, 3600000uL)
+    override fun selectEndpoints(candidates: List<EndpointCandidate>, amount: Amount?) =
+        SelectedEndpoints(candidates.map { it.id }, emptyList())
+    override fun transfer(endpoint: String, payload: String, amount: Amount) = MethodTransfer(amount, null)
+    override fun fractionDigits(endpoint: String): UInt? = 8u
+    override suspend fun pay(payment: MethodPayment): MethodOutcome {
+        transfers += 1
+        error("a receipted payment cannot be dispatched again")
+    }
+    override suspend fun payment(attemptId: String): MethodOutcome? = null
+    override suspend fun allowanceHistory(payer: ByteArray): List<MethodDispatch>? = null
+    override suspend fun verify(proof: MethodProof): ULong? = null
+    override fun settlementId(proofJson: ByteArray): ByteArray? = null
+}
+
+private suspend fun recoverReceipt(issuer: String) {
+    val producer = ProcessBuilder(issuer, "paid-wallet").start()
+    val values = producer.inputStream.bufferedReader().readLines()
+    check(producer.waitFor() == 0 && values.size == 7)
+    fun bytes(i: Int): ByteArray = Base64.getDecoder().decode(values[i])
+    val app = bytes(0)
+    val identity = bytes(1)
+    val request = RequestId(bytes(2), bytes(3))
+    val store = EnrollmentStore()
+    val method = ReceiptReader()
+    fun host() = WalletHost(store, method, method, listOf("btc-lightning-bolt11"))
+    host().use { device ->
+        try {
+            device.restore(app, bytes(6), BackupDevice.UNACCOUNTED_FOR).use { error("unaccounted source was restored") }
+        } catch (_: WalletException.SourceDeviceUnaccountedFor) {}
+        device.restore(app, bytes(6), BackupDevice.IN_POSSESSION).use { wallet ->
+            check(wallet.appId().contentEquals(app))
+            check(wallet.identity().contentEquals(identity))
+            wallet.shutdown()
+        }
+    }
+    host().use { device ->
+        device.load(app).use { wallet ->
+            val entry = wallet.payments().single()
+            check(entry.attemptId == values[4] && entry.amount.value == "7")
+            val receipt = wallet.requestReceipts(request).single()
+            check(receipt.attemptId == values[4] && receipt.messageId == values[5])
+            check(receipt.paymentReference == "checkout-7" && method.transfers == 0)
+            wallet.shutdown()
+        }
     }
 }
 
@@ -69,4 +139,5 @@ fun main() = runBlocking {
         host().use { it.acceptApproval(reference, identity, byteArrayOf(1)) }
         error("replaced the stored approval")
     } catch (_: WalletException.EnrollmentConflict) {}
+    recoverReceipt(checkNotNull(System.getenv("PAYKIT_TEST_ISSUER")))
 }

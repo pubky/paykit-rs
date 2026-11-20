@@ -42,6 +42,14 @@ private final class EnrollmentStore: WalletStore, @unchecked Sendable {
     func get(namespace: String, key: Data) throws -> Data? {
         lock.withLock { rows[namespace]?[key] }
     }
+    func scan(namespace: String, prefix: Data, after: Data?, limit: UInt32) throws -> [StoreEntry] {
+        lock.withLock {
+            (rows[namespace] ?? [:])
+                .filter { key, _ in key.starts(with: prefix) && (after.map { $0.lexicographicallyPrecedes(key) } ?? true) }
+                .sorted { $0.key.lexicographicallyPrecedes($1.key) }
+                .prefix(Int(limit)).map { StoreEntry(key: $0.key, value: $0.value) }
+        }
+    }
     func acquire(namespace: String, owner: Data) throws -> Bool {
         lock.withLock {
             guard owners[namespace] == nil else { return false }
@@ -67,14 +75,81 @@ private final class EnrollmentStore: WalletStore, @unchecked Sendable {
         gate.unlock()
         return lock.withLock {
             guard owners[namespace] == owner else { return false }
-            precondition(writes.count == 1)
-            let key: Data
-            let value: Data
-            switch writes[0] { case let .put(k, v): key = k; value = v }
-            rows[namespace, default: [:]][key] = value
+            for write in writes {
+                switch write {
+                case let .put(key, value): rows[namespace, default: [:]][key] = value
+                case let .delete(key): rows[namespace]?[key] = nil
+                case let .deletePrefix(prefix):
+                    rows[namespace] = rows[namespace]?.filter { !$0.key.starts(with: prefix) }
+                }
+            }
             return true
         }
     }
+}
+
+private final class ReceiptReader: WalletHomeserver, PaymentMethod, @unchecked Sendable {
+    private let lock = NSLock()
+    private var transfers = 0
+    var transferCount: Int { lock.withLock { transfers } }
+    func get(identity: Data, path: String) async throws -> Data? { nil }
+    func put(identity: Data, path: String, bytes: Data) async throws { preconditionFailure("unexpected public write") }
+    func delete(identity: Data, path: String) async throws { preconditionFailure("unexpected public delete") }
+    func declaration() -> MethodDeclaration {
+        MethodDeclaration(idempotent: true, idempotencyRetentionMs: nil, history: true, historyRetentionMs: nil, historySurvivesRestore: true, longestCompletionMs: 3_600_000)
+    }
+    func selectEndpoints(candidates: [EndpointCandidate], amount: Amount?) throws -> SelectedEndpoints {
+        SelectedEndpoints(payable: candidates.map(\.id), failures: [])
+    }
+    func transfer(endpoint: String, payload: String, amount: Amount) -> MethodTransfer {
+        try! MethodTransfer(amount: amount, maxFee: nil)
+    }
+    func fractionDigits(endpoint: String) -> UInt32? { 8 }
+    func pay(payment: MethodPayment) async throws -> MethodOutcome {
+        lock.withLock { transfers += 1 }
+        preconditionFailure("a receipted payment cannot be dispatched again")
+    }
+    func payment(attemptId: String) async throws -> MethodOutcome? { nil }
+    func allowanceHistory(payer: Data) async throws -> [MethodDispatch]? { nil }
+    func verify(proof: MethodProof) async throws -> UInt64? { nil }
+    func settlementId(proofJson: Data) -> Data? { nil }
+}
+
+private func recoverReceipt(_ issuer: String) async throws {
+    let producer = Process()
+    producer.executableURL = URL(fileURLWithPath: issuer)
+    producer.arguments = ["paid-wallet"]
+    let pipe = Pipe()
+    producer.standardOutput = pipe
+    try producer.run()
+    let output = pipe.fileHandleForReading.readDataToEndOfFile()
+    producer.waitUntilExit()
+    let values = String(decoding: output, as: UTF8.self).split(separator: "\n").map(String.init)
+    precondition(producer.terminationStatus == 0 && values.count == 7)
+    func bytes(_ i: Int) -> Data { Data(base64Encoded: values[i])! }
+    let app = bytes(0)
+    let store = EnrollmentStore()
+    let method = ReceiptReader()
+    func host() throws -> WalletHost {
+        try WalletHost(store: store, homeserver: method, method: method, endpointIdentifiers: ["btc-lightning-bolt11"])
+    }
+    let device = try host()
+    do {
+        _ = try await device.restore(appId: app, bytes: bytes(6), sourceDevice: .unaccountedFor)
+        preconditionFailure("unaccounted source was restored")
+    } catch WalletError.SourceDeviceUnaccountedFor {}
+    let restored = try await device.restore(appId: app, bytes: bytes(6), sourceDevice: .inPossession)
+    let restoredId = try await restored.appId()
+    let restoredIdentity = try await restored.identity()
+    precondition(restoredId == app && restoredIdentity == bytes(1))
+    try await restored.shutdown()
+    let wallet = try await host().load(appId: app)
+    let entries = try await wallet.payments()
+    precondition(entries.count == 1 && entries[0].attemptId == values[4] && entries[0].amount.value == "7")
+    let receipts = try await wallet.requestReceipts(id: RequestId(payee: bytes(2), requestHash: bytes(3)))
+    precondition(receipts.count == 1 && receipts[0].attemptId == values[4] && receipts[0].messageId == values[5])
+    precondition(receipts[0].paymentReference == "checkout-7" && method.transferCount == 0)
+    try await wallet.shutdown()
 }
 
 @main
@@ -167,5 +242,6 @@ private enum WalletConsumer {
             try await host().acceptApproval(reference: reference, identity: identity, claim: Data([1]))
             preconditionFailure("replaced the stored approval")
         } catch WalletError.EnrollmentConflict {}
+        try await recoverReceipt(issuer)
     }
 }
