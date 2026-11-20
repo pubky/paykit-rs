@@ -1819,10 +1819,10 @@ async fn test_one_time_cancellation_of_a_request_not_held_kept_as_stop_and_reply
     // Both apps can pay and sell. Bob cancels a request the recipient holds on neither side:
     // it keeps the cancellation as the stop and as a payer's reply, one of each.
     let w = World::new();
-    let till = w
+    let seller_wallet = w
         .join(
             &w.alice,
-            "till",
+            "seller-wallet",
             paykit_sdk::AppScopes::new()
                 .pay()
                 .request()
@@ -1830,8 +1830,8 @@ async fn test_one_time_cancellation_of_a_request_not_held_kept_as_stop_and_reply
                 .unwrap(),
         )
         .await;
-    let mut till = till;
-    till.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut seller_wallet = seller_wallet;
+    seller_wallet.app_mut().invite(&w.bob_id()).await.unwrap();
     let _shop = w
         .join(
             &w.bob,
@@ -1844,12 +1844,18 @@ async fn test_one_time_cancellation_of_a_request_not_held_kept_as_stop_and_reply
         )
         .await;
     let hash = [7; 32];
-    crate::common::finish_listing(&mut till).await;
-    let id = cancel_to(&w, &[till.app_id()], hash);
-    assert!(till.receive(None).await.unwrap().applied.contains(&id));
-    assert!(keeps_stop(&w, &till, hash).await);
+    crate::common::finish_listing(&mut seller_wallet).await;
+    let id = cancel_to(&w, &[seller_wallet.app_id()], hash);
+    assert!(seller_wallet
+        .receive(None)
+        .await
+        .unwrap()
+        .applied
+        .contains(&id));
+    assert!(keeps_stop(&w, &seller_wallet, hash).await);
     assert_eq!(
-        till.app()
+        seller_wallet
+            .app()
             .protocol_scan("paykit", b"pr/")
             .await
             .unwrap()
@@ -1857,7 +1863,8 @@ async fn test_one_time_cancellation_of_a_request_not_held_kept_as_stop_and_reply
         1
     );
     assert_eq!(
-        till.app()
+        seller_wallet
+            .app()
             .protocol_scan("paykit", b"kc/")
             .await
             .unwrap()
@@ -2239,10 +2246,10 @@ async fn test_one_time_no_response_over_a_record_sealed_at_a_key_not_held() {
 #[tokio::test]
 async fn test_one_time_payers_cancellation_before_its_record_placed_at_an_app_paying_and_requesting(
 ) {
-    // Bob's dual app holds `paykit_pay` and `paykit_request`. Bob's till sends alice a request and
+    // Bob's dual app holds `paykit_pay` and `paykit_request`. Bob's wallet sends alice a request and
     // writes its record; alice cancels it. The dual app reads the record and alice's cancellation
     // in one read: the payee's record shows alice's cancellation (Paykit spec 8.1, "Replies before
-    // their record"), the till never reading it.
+    // their record"), the seller wallet never reading it.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut dual = w
@@ -2256,14 +2263,19 @@ async fn test_one_time_payers_cancellation_before_its_record_placed_at_an_app_pa
                 .unwrap(),
         )
         .await;
-    let mut till = w
+    let mut seller_wallet = w
         .join(
             &w.bob,
-            "till",
+            "seller-wallet",
             paykit_sdk::AppScopes::new().request().build().unwrap(),
         )
         .await;
-    let request = request_from(&mut till, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let request = request_from(
+        &mut seller_wallet,
+        w.alice_id(),
+        draft("1", w.clock.now_ms()),
+    )
+    .await;
     wallet.receive(None).await.unwrap();
     wallet.cancel_request(&request, None).await.unwrap();
     wallet.flush().await.unwrap();
@@ -2561,8 +2573,12 @@ async fn test_one_time_credit_requires_the_fixed_endpoint_owner() {
         let w = World::new();
         let mut wallet = w.wallet("wallet").await;
         let mut shop = w.shop().await;
-        let mut till = w
-            .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        let mut seller_wallet = w
+            .join(
+                &w.bob,
+                "seller-wallet",
+                AppScopes::new().request().build().unwrap(),
+            )
             .await;
         let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
         wallet.receive(None).await.unwrap();
@@ -2587,7 +2603,7 @@ async fn test_one_time_credit_requires_the_fixed_endpoint_owner() {
             payment_app_id: if correct_owner {
                 shop.app_id()
             } else {
-                till.app_id()
+                seller_wallet.app_id()
             },
             list_version: None,
             amount: None,
@@ -2603,16 +2619,25 @@ async fn test_one_time_credit_requires_the_fixed_endpoint_owner() {
             &w.alice,
             "wallet",
             &w.bob,
-            &[till.app_id()],
+            &[seller_wallet.app_id()],
             "paykit.payment_proof",
             vec![request.request_hash],
             body,
         );
-        till.receive(None).await.unwrap();
-        let record = till.payee_activity().await.unwrap()[0].record;
-        let verified = till.verify_payment(&record).await.unwrap().is_some();
-        let confirmed = till.confirm_payment(&record).await.unwrap().is_some();
-        let credited = till.payee_activity().await.unwrap()[0].status == PayeeStatus::Receipted;
+        seller_wallet.receive(None).await.unwrap();
+        let record = seller_wallet.payee_activity().await.unwrap()[0].record;
+        let verified = seller_wallet
+            .verify_payment(&record)
+            .await
+            .unwrap()
+            .is_some();
+        let confirmed = seller_wallet
+            .confirm_payment(&record)
+            .await
+            .unwrap()
+            .is_some();
+        let credited =
+            seller_wallet.payee_activity().await.unwrap()[0].status == PayeeStatus::Receipted;
         let summary = wallet.receive(None).await.unwrap();
         let receipt = summary.report.events.iter().any(|event| matches!(event,
             pubky_switch_client::app::AppEvent::MessageReceived { kind, .. } if kind == "paykit.payment_receipt"));

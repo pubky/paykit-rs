@@ -1579,8 +1579,8 @@ async fn reconcile_receipted_period(example: PeriodPayment) {
         subscription = subscription.with_conversion(Conversion::Fixed(vec![rate]));
     }
     let mut subscriptions =
-        Box::pin(world.labelled_shop("subscription-till", "subscriptions")).await;
-    let mut shipping = Box::pin(world.labelled_shop("shipping-till", "shipping")).await;
+        Box::pin(world.labelled_shop("subscription-wallet", "subscriptions")).await;
+    let mut shipping = Box::pin(world.labelled_shop("shipping-wallet", "shipping")).await;
     if later {
         subscription.destination =
             paykit_lib::bodies::RequestDestination::RequiredApp(subscriptions.app_id());
@@ -1681,7 +1681,7 @@ async fn reconcile_receipted_period(example: PeriodPayment) {
             [req.request_hash, details.hash()]
         );
     }
-    // This wallet also has a genuine receipt from a different labelled till of the same seller.
+    // This wallet also has a genuine receipt from another of the seller's wallets with a labelled scope.
     let parcel = Box::pin(request_from(
         &mut shipping,
         payer.identity(),

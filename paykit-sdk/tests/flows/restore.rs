@@ -3174,9 +3174,9 @@ async fn test_local_state_restore_still_discards_unread_transient_values() {
 }
 
 /// Bob's shop sends alice a request and cancels it, and is backed up then; after the backup
-/// another own app of bob's, the till, writes the shop's request record as a value no reader
+/// another own app of bob's, the seller wallet, writes the shop's request record as a value no reader
 /// reads. Returns the request, the cancellation's `msg_id`, the record's value before, the
-/// till, and the backup.
+/// seller wallet, and the backup.
 async fn cancellation_over_a_record_left_unreadable(
     w: &World,
     shop: &mut Paykit,
@@ -3187,8 +3187,12 @@ async fn cancellation_over_a_record_left_unreadable(
     Paykit,
     PaykitBackup,
 ) {
-    let mut till = w
-        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+    let mut seller_wallet = w
+        .join(
+            &w.bob,
+            "seller-wallet",
+            AppScopes::new().request().build().unwrap(),
+        )
         .await;
     let mut wallet = w.wallet("wallet").await;
     let request = request_from(shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
@@ -3204,13 +3208,18 @@ async fn cancellation_over_a_record_left_unreadable(
     let cancellation = shop.cancel_sent_request(&record, None).await.unwrap();
     wallet.receive(None).await.unwrap();
     let backup = shop.backup().await.unwrap();
-    till.receive(None).await.unwrap();
+    seller_wallet.receive(None).await.unwrap();
     let target = crate::periods::payee_request_at(&request);
-    let held = till.app_mut().read_record(&target).await.unwrap().unwrap();
+    let held = seller_wallet
+        .app_mut()
+        .read_record(&target)
+        .await
+        .unwrap()
+        .unwrap();
     let good = held.content.value().unwrap().to_vec();
     let unreadable = serde_json::to_vec(&serde_json::json!({ "v": 99 })).unwrap();
-    crate::periods::writes_value(&mut till, &target, &unreadable).await;
-    (request, cancellation, good, till, backup)
+    crate::periods::writes_value(&mut seller_wallet, &target, &unreadable).await;
+    (request, cancellation, good, seller_wallet, backup)
 }
 
 #[tokio::test]
@@ -3218,7 +3227,7 @@ async fn test_restore_own_cancellation_in_a_record_left_unreadable_waits_until_i
     // Open records identify possibly delivered messages. A counterparty block does not extend the record scan.
     let w = World::new();
     let mut shop = w.shop().await;
-    let (request, cancellation, good, mut till, backup) =
+    let (request, cancellation, good, mut seller_wallet, backup) =
         cancellation_over_a_record_left_unreadable(&w, &mut shop).await;
     drop(shop);
     let mut shop = restored_unreceived(&w, &w.bob, &backup).await;
@@ -3235,7 +3244,7 @@ async fn test_restore_own_cancellation_in_a_record_left_unreadable_waits_until_i
     assert!(!crate::periods::queued(&shop, &cancellation).await);
     assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
     crate::periods::writes_value(
-        &mut till,
+        &mut seller_wallet,
         &crate::periods::payee_request_at(&request),
         &good,
     )
@@ -3260,7 +3269,7 @@ async fn test_restore_own_cancellation_in_a_record_unreadable_for_31_days_never_
     // (Paykit spec 7.2, "What a restore loses").
     let w = World::new();
     let mut shop = w.shop().await;
-    let (_, cancellation, _, _till, backup) =
+    let (_, cancellation, _, _seller_wallet, backup) =
         cancellation_over_a_record_left_unreadable(&w, &mut shop).await;
     drop(shop);
     let mut shop = restored_unreceived(&w, &w.bob, &backup).await;
@@ -3308,7 +3317,7 @@ async fn test_restore_own_unread_record_and_a_blocked_counterparty_both_wait() {
     unexpiring.proposal_expires_at_ms = None;
     let to_carol = shop.send_request(w.carol_id(), unexpiring).await.unwrap();
     carols.receive(None).await.unwrap();
-    let (request, cancellation, good, mut till, backup) =
+    let (request, cancellation, good, mut seller_wallet, backup) =
         cancellation_over_a_record_left_unreadable(&w, &mut shop).await;
     drop(shop);
     let mut shop = restored_unreceived(&w, &w.bob, &backup).await;
@@ -3327,7 +3336,7 @@ async fn test_restore_own_unread_record_and_a_blocked_counterparty_both_wait() {
     assert_eq!(w.alice.switch().entries_from(&w.bob_id()), alices);
     assert_eq!(w.carol.switch().entries_from(&w.bob_id()), carol_before);
     crate::periods::writes_value(
-        &mut till,
+        &mut seller_wallet,
         &crate::periods::payee_request_at(&request),
         &good,
     )
@@ -3381,8 +3390,12 @@ async fn test_restore_own_record_found_unreadable_25_days_after_the_restore_wait
                 .unwrap(),
         )
         .await;
-    let mut till = w
-        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+    let mut seller_wallet = w
+        .join(
+            &w.bob,
+            "seller-wallet",
+            AppScopes::new().request().build().unwrap(),
+        )
         .await;
     let mut carols = w
         .join(&w.carol, "wallet", AppScopes::new().pay().build().unwrap())
@@ -3405,14 +3418,14 @@ async fn test_restore_own_record_found_unreadable_25_days_after_the_restore_wait
         .is_none());
     let before = w.carol.switch().entries_from(&w.bob_id());
     w.clock.advance_ms(25 * pubky_switch_core::records::DAY_MS);
-    till.receive(None).await.unwrap();
+    seller_wallet.receive(None).await.unwrap();
     let nowhere = paykit_sdk::RequestRef {
         payee: w.bob_id(),
         request_hash: [7; 32],
     };
     let unreadable = serde_json::to_vec(&serde_json::json!({ "v": 99 })).unwrap();
     crate::periods::writes_value(
-        &mut till,
+        &mut seller_wallet,
         &crate::periods::payee_request_at(&nowhere),
         &unreadable,
     )

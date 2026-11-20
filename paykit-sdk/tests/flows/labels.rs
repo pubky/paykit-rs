@@ -98,15 +98,15 @@ fn selling(label: &str) -> paykit_sdk::RequestedScopes {
         .unwrap()
 }
 
-async fn renew_till(w: &World, till: &mut Paykit, label: &str) {
-    let old = till.app().cert().clone();
-    let renewed = crate::certificate::renew(w, till.app_id(), &selling(label), 1_000);
-    crate::certificate::store_bundle(w, till.app_id(), &renewed);
-    crate::certificate::list(w, till.app_id(), &old, &renewed);
+async fn renew_seller_wallet(w: &World, seller_wallet: &mut Paykit, label: &str) {
+    let old = seller_wallet.app().cert().clone();
+    let renewed = crate::certificate::renew(w, seller_wallet.app_id(), &selling(label), 1_000);
+    crate::certificate::store_bundle(w, seller_wallet.app_id(), &renewed);
+    crate::certificate::list(w, seller_wallet.app_id(), &old, &renewed);
     w.clock.advance_ms(1_000);
-    till.receive(None).await.unwrap();
-    assert_eq!(till.app().cert().app_id(), old.app_id());
-    assert_eq!(till.app().cert().hash(), renewed.hash(), "{label}");
+    seller_wallet.receive(None).await.unwrap();
+    assert_eq!(seller_wallet.app().cert().app_id(), old.app_id());
+    assert_eq!(seller_wallet.app().cert().hash(), renewed.hash(), "{label}");
 }
 
 fn sale(
@@ -133,10 +133,10 @@ fn sale(
     )
 }
 
-fn send_stop(w: &World, till: &str, app_id: [u8; 16], request: [u8; 32]) -> String {
+fn send_stop(w: &World, seller_wallet: &str, app_id: [u8; 16], request: [u8; 32]) -> String {
     w.inject(
         &w.alice,
-        till,
+        seller_wallet,
         &w.bob,
         &[app_id],
         "paykit.payment_request_cancellation",
@@ -189,12 +189,12 @@ async fn recorded_stop(
     signed
 }
 
-/// The original certificate decides each stop even if its till is later renewed with a
+/// The original certificate decides each stop even if the wallet later renews with a
 /// different selling label while the payer still waits for the request (Paykit spec 3.4).
 async fn early_stops_after_renewal(restore: bool) {
     let w = World::new();
     let _issuer = w.join(&w.alice, "issuer", selling("shop1")).await;
-    let mut till = w.join(&w.alice, "wallet", selling("shop1")).await;
+    let mut seller_wallet = w.join(&w.alice, "wallet", selling("shop1")).await;
     let storage = store();
     let mut payer = w
         .join_with(
@@ -210,8 +210,8 @@ async fn early_stops_after_renewal(restore: bool) {
     let request = sale(&w, &w.alice, &w.bob);
     let first = send_stop(&w, "wallet", app_id, request.hash());
     assert!(payer.receive(None).await.unwrap().applied.contains(&first));
-    let old = till.app().cert().clone();
-    renew_till(&w, &mut till, "shop2").await;
+    let old = seller_wallet.app().cert().clone();
+    renew_seller_wallet(&w, &mut seller_wallet, "shop2").await;
     let second = send_stop(&w, "wallet", app_id, request.hash());
     let got = payer.receive(None).await.unwrap();
     assert!(got.applied.contains(&second), "{got:?}");
@@ -260,12 +260,12 @@ async fn early_stops_after_renewal(restore: bool) {
 }
 
 #[tokio::test]
-async fn test_labels_cancellation_before_request_survives_till_renewal_and_reload() {
+async fn test_labels_cancellation_before_request_survives_seller_wallet_renewal_and_reload() {
     early_stops_after_renewal(false).await;
 }
 
 #[tokio::test]
-async fn test_labels_cancellation_before_request_survives_till_renewal_and_restore() {
+async fn test_labels_cancellation_before_request_survives_seller_wallet_renewal_and_restore() {
     early_stops_after_renewal(true).await;
 }
 
@@ -359,7 +359,7 @@ async fn test_labels_protected_cancellation_outlives_ordinary_bounds() {
 async fn test_labels_payment_proceeds_when_every_early_cancellation_is_excluded() {
     let w = World::new();
     let _issuer = w.join(&w.alice, "issuer", selling("shop1")).await;
-    let mut till = w.join(&w.alice, "wallet", selling("shop2")).await;
+    let mut seller_wallet = w.join(&w.alice, "wallet", selling("shop2")).await;
     let mut payer = w
         .join(
             &w.bob,
@@ -374,7 +374,7 @@ async fn test_labels_payment_proceeds_when_every_early_cancellation_is_excluded(
     let first = send_stop(&w, "wallet", app_id, request.hash());
     refuse_record_writes(&w, &mut payer, 1).await;
     assert!(payer.receive(None).await.unwrap().applied.contains(&first));
-    renew_till(&w, &mut till, "shop2").await;
+    renew_seller_wallet(&w, &mut seller_wallet, "shop2").await;
     refuse_record_writes(&w, &mut payer, 1).await;
     let equivalent = send_stop(&w, "wallet", app_id, request.hash());
     assert!(payer
@@ -384,7 +384,7 @@ async fn test_labels_payment_proceeds_when_every_early_cancellation_is_excluded(
         .applied
         .contains(&equivalent));
     assert_eq!(local_count(&payer, b"kc/").await, 1);
-    renew_till(&w, &mut till, "shop3").await;
+    renew_seller_wallet(&w, &mut seller_wallet, "shop3").await;
     payer
         .app_mut()
         .identity_of(&w.alice_id(), true)
@@ -601,7 +601,7 @@ async fn test_labels_stored_payer_reply_preserves_the_siblings_sale() {
             AppScopes::new().pay().request().build().unwrap(),
         )
         .await;
-    let mut till = w.shop().await;
+    let mut seller_wallet = w.shop().await;
     let mut wallet = w
         .join(
             &w.bob,
@@ -610,7 +610,12 @@ async fn test_labels_stored_payer_reply_preserves_the_siblings_sale() {
         )
         .await;
     wallet.app_mut().invite(&w.alice_id()).await.unwrap();
-    let request = request_from(&mut till, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let request = request_from(
+        &mut seller_wallet,
+        w.alice_id(),
+        draft("1", w.clock.now_ms()),
+    )
+    .await;
     let sale = crate::restore::payee_record(&request);
     let original = wallet.app_mut().read_record(&sale).await.unwrap().unwrap();
     let pending = w.inject(
@@ -625,14 +630,14 @@ async fn test_labels_stored_payer_reply_preserves_the_siblings_sale() {
     refuse_record_writes(&w, &mut wallet, 2).await;
     wallet.receive(None).await.unwrap();
     assert_eq!(local_count(&wallet, b"se/").await, 1);
-    crate::allowances::write_record(&mut till, &sale, None).await;
+    crate::allowances::write_record(&mut seller_wallet, &sale, None).await;
     wallet.app_mut().read_record(&sale).await.unwrap();
     let stop = send_stop(&w, "buyer", wallet.app_id(), request.request_hash);
     let read = wallet.receive(None).await.unwrap();
     assert!(read.applied.contains(&stop), "{read:?}");
     assert_eq!(local_count(&wallet, b"pr/").await, 1);
     assert_eq!(local_count(&wallet, b"kc/").await, 1);
-    crate::allowances::write_record(&mut till, &sale, original.content.value()).await;
+    crate::allowances::write_record(&mut seller_wallet, &sale, original.content.value()).await;
     crate::common::finish_listing(&mut wallet).await;
     let held = wallet.app_mut().read_record(&sale).await.unwrap().unwrap();
     let restored = paykit_lib::records::ActivityRecord::read(

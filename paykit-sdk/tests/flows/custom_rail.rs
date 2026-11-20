@@ -438,15 +438,16 @@ async fn test_payee_deletion_a_restored_custom_receipt_waits_for_its_payment_met
             &rail.settlement_id(&proof).unwrap(),
         ),
     );
-    let mut till = joined(
+    let mut seller_wallet = joined(
         &w,
         &w.bob,
-        "till",
+        "seller-wallet",
         AppScopes::new().request().build().unwrap(),
         &rail,
     )
     .await;
-    till.app_mut()
+    seller_wallet
+        .app_mut()
         .delete_record(&target, Vec::new())
         .await
         .unwrap();

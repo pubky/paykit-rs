@@ -170,7 +170,7 @@ async fn period_wallets(
         world,
         &mut shop_signer,
         "shop",
-        "period-till",
+        "period-wallet",
         AppScopes::new().request().manage_contacts().build()?,
         Arc::new(MemoryStore::new()),
         rail,
@@ -485,7 +485,7 @@ async fn settle_period(world: &World, how: PeriodPayment, inbox: ProofInbox) -> 
         world,
         &mut shop_signer,
         "shop",
-        "second-period-till",
+        "second-period-wallet",
         AppScopes::new().request().build()?,
         store.clone(),
         &rail,
@@ -934,7 +934,7 @@ async fn reconcile_fractional_periods(world: &World) -> TestResult {
         world,
         &mut merchant,
         "shop",
-        "period-till",
+        "period-wallet",
         AppScopes::new().request().manage_contacts().build()?,
         Arc::new(MemoryStore::new()),
         &rail,
@@ -1113,7 +1113,7 @@ async fn early_paid_period_after_loss(world: &World) -> TestResult {
         world,
         &mut merchant,
         "shop",
-        "period-till",
+        "period-wallet",
         AppScopes::new().request().manage_contacts().build()?,
         Arc::new(MemoryStore::new()),
         &rail,
@@ -1334,7 +1334,7 @@ async fn settle_required_period(world: &World, priced: bool) -> TestResult {
     let store = Arc::new(MemoryStore::new());
     let (mut buyer, mut shop, mut signer) =
         Box::pin(period_wallets(world, store.clone(), &rail)).await?;
-    let mut till = Box::pin(join(
+    let mut seller_wallet = Box::pin(join(
         world,
         &mut signer,
         "shop",
@@ -1344,7 +1344,7 @@ async fn settle_required_period(world: &World, priced: bool) -> TestResult {
         &rail,
     ))
     .await?;
-    till.app_mut().invite(&buyer.identity()).await?;
+    seller_wallet.app_mut().invite(&buyer.identity()).await?;
     let start = world.now_ms() / 1000 * 1000;
     let recurrence = Recurrence::new(AnchoredRule::new(start, 1, Unit::Minute)?, start, None)?;
     let period = PeriodRef::from(recurrence.periods(2)?[1]);
@@ -1354,7 +1354,7 @@ async fn settle_required_period(world: &World, priced: bool) -> TestResult {
             value: Decimal::new("1")?,
         },
         PaymentReference::new("period-destination")?,
-        RequestDestination::RequiredApp(till.app_id()),
+        RequestDestination::RequiredApp(seller_wallet.app_id()),
     )
     .with_recurrence(recurrence)
     .with_per_period_endpoints()
@@ -1369,14 +1369,14 @@ async fn settle_required_period(world: &World, priced: bool) -> TestResult {
     Box::pin(buyer.receive(None)).await?;
     Box::pin(buyer.accept_subscription(&request)).await?;
     Box::pin(shop.receive(None)).await?;
-    Box::pin(till.receive(None)).await?;
+    Box::pin(seller_wallet.receive(None)).await?;
     world.advance_ms(period.starts_at.saturating_sub(world.now_ms()));
-    let sale = till
+    let sale = seller_wallet
         .payee_activity()
         .await?
         .into_iter()
         .find(|sale| sale.request_hash == Some(request.request_hash))
-        .ok_or("till did not see the subscription")?;
+        .ok_or("seller wallet did not see the subscription")?;
     let endpoint = PaymentEndpointIdentifier::new("btc-lightning-bolt11")?;
     let offered = paykit_lib::bodies::PeriodDetails {
         billing_period: period,
@@ -1403,8 +1403,8 @@ async fn settle_required_period(world: &World, priced: bool) -> TestResult {
     ));
     assert!(buyer.payments().await?.is_empty());
     assert!(rail.all_executions().is_empty());
-    Box::pin(till.receive(None)).await?;
-    let details = Box::pin(till.send_period_details(&sale.record, offered)).await?;
+    Box::pin(seller_wallet.receive(None)).await?;
+    let details = Box::pin(seller_wallet.send_period_details(&sale.record, offered)).await?;
     Box::pin(buyer.receive(None)).await?;
     let mut options = PayOptions::default();
     if priced {
@@ -1415,7 +1415,7 @@ async fn settle_required_period(world: &World, priced: bool) -> TestResult {
         let Some(paykit_sdk::Refusal::PricedByRate { payment }) = quote.refusal() else {
             return Err(format!("expected a signed quote: {quote:?}").into());
         };
-        assert_eq!(payment.app_id, till.app_id());
+        assert_eq!(payment.app_id, seller_wallet.app_id());
         assert_eq!(
             payment.source,
             paykit_sdk::RateSource::PeriodDetails {
@@ -1474,8 +1474,8 @@ async fn settle_required_period(world: &World, priced: bool) -> TestResult {
         return Err("unexpected proof".into());
     };
     assert_eq!(chosen.message().msg_id, details.msg_id);
-    assert_eq!(chosen.cert().app_id(), till.app_id());
-    assert_eq!(body.payment_app_id, till.app_id());
+    assert_eq!(chosen.cert().app_id(), seller_wallet.app_id());
+    assert_eq!(body.payment_app_id, seller_wallet.app_id());
     assert_eq!(body.payment_endpoint_identifier, endpoint);
     assert_eq!(proof.message().refs, [request.request_hash, chosen.hash()]);
     assert_eq!(

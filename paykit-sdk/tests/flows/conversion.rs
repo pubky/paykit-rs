@@ -582,18 +582,18 @@ async fn test_conversion_endpoint_whose_unit_the_method_cant_name_unusable() {
     assert!(wallet.payments().await.unwrap().is_empty());
 }
 
-/// Bob's till and shop each send alice's `wallet` a list of one reusable endpoint: the till's
-/// on-chain one expiring in an hour, the shop's Lightning one in 30 days. Returns the shop.
-async fn two_lists(w: &World, wallet: &mut Paykit, till_expires: bool) -> Paykit {
-    let mut till = w
+/// Bob's shop offers Alice a reusable Lightning endpoint that expires in 30 days. His other
+/// wallet offers a reusable on-chain endpoint that can expire in an hour. Returns the shop.
+async fn two_lists(w: &World, wallet: &mut Paykit, seller_wallet_expires: bool) -> Paykit {
+    let mut seller_wallet = w
         .join(
             &w.bob,
-            "till",
+            "seller-wallet",
             paykit_sdk::AppScopes::new().request().build().unwrap(),
         )
         .await;
     let mut shop = w.shop().await;
-    till.app_mut().invite(&w.alice_id()).await.unwrap();
+    seller_wallet.app_mut().invite(&w.alice_id()).await.unwrap();
     let one = |id: &str, payload: &str| {
         let mut endpoints = std::collections::BTreeMap::new();
         endpoints.insert(
@@ -606,21 +606,21 @@ async fn two_lists(w: &World, wallet: &mut Paykit, till_expires: bool) -> Paykit
         endpoints
     };
     let now = w.clock.now_ms();
-    let expires_at = if till_expires {
+    let expires_at = if seller_wallet_expires {
         now + HOUR_MS
     } else {
         now + 30 * 24 * HOUR_MS
     };
     let body = paykit_lib::bodies::PrivatePaymentList {
         version: list_version(1, 1),
-        payment_endpoints: one("btc-bitcoin-p2wpkh", "bc1qtill"),
+        payment_endpoints: one("btc-bitcoin-p2wpkh", "bc1qwallet"),
         expires_at,
     }
     .to_body()
     .unwrap();
     w.inject(
         &w.bob,
-        "till",
+        "seller-wallet",
         &w.alice,
         &[wallet.app_id()],
         "paykit.private_payment_list",
@@ -664,8 +664,8 @@ async fn eth_priced_request(w: &World, shop: &mut Paykit, wallet: &mut Paykit) -
 
 #[tokio::test]
 async fn test_conversion_unusable_list_endpoints_beside_an_expired_list_ask_for_it() {
-    // The live list's endpoint is unusable under the terms, but the till's list has
-    // expired, and its current one may serve: the till is asked, and alice waits for it.
+    // The live list's endpoint is unusable under the terms, but the seller wallet's list has
+    // expired, and its current one may serve: the seller wallet is asked, and alice waits for it.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = two_lists(&w, &mut wallet, true).await;
@@ -687,7 +687,7 @@ async fn test_conversion_unusable_list_endpoints_beside_an_expired_list_ask_for_
 
 #[tokio::test]
 async fn test_conversion_unusable_list_endpoints_beside_a_used_up_list_ask_for_it() {
-    // The shop's list is used up: alice paid its single-use endpoint. The till's live list
+    // The shop's list is used up: alice paid its single-use endpoint. The seller wallet's live list
     // is unusable under the terms, but a newer list from the shop may serve: alice is told
     // she waits for a list, and bob is asked (Paykit spec 8.4).
     let w = World::new();
@@ -705,19 +705,19 @@ async fn test_conversion_unusable_list_endpoints_beside_a_used_up_list_ask_for_i
         .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
-    let mut till = w
+    let mut seller_wallet = w
         .join(
             &w.bob,
-            "till",
+            "seller-wallet",
             paykit_sdk::AppScopes::new().request().build().unwrap(),
         )
         .await;
-    till.app_mut().invite(&w.alice_id()).await.unwrap();
+    seller_wallet.app_mut().invite(&w.alice_id()).await.unwrap();
     let mut endpoints = std::collections::BTreeMap::new();
     endpoints.insert(
         endpoint("btc-lightning-bolt12"),
         paykit_lib::bodies::ListEndpoint {
-            payload: PaymentEndpointPayload::new("lno1till").unwrap(),
+            payload: PaymentEndpointPayload::new("lno1wallet").unwrap(),
             single_use: false,
         },
     );
@@ -730,7 +730,7 @@ async fn test_conversion_unusable_list_endpoints_beside_a_used_up_list_ask_for_i
     .unwrap();
     w.inject(
         &w.bob,
-        "till",
+        "seller-wallet",
         &w.alice,
         &[wallet.app_id()],
         "paykit.private_payment_list",

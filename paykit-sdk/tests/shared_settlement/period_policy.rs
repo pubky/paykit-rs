@@ -58,7 +58,7 @@ async fn subscription_through_cancellation(world: &World, restore: bool) -> Test
         world,
         &mut shop_signer,
         "shop",
-        "period-till",
+        "period-wallet",
         AppScopes::new().request().manage_contacts().build()?,
         Arc::new(MemoryStore::new()),
         &rail,

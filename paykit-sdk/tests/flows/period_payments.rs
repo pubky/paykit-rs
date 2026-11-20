@@ -494,29 +494,32 @@ async fn confirm_period_settlement(terms: SettlementTerms, after_start_ms: u64, 
     let mut second = w
         .join(
             &w.bob,
-            "till",
+            "seller-wallet",
             paykit_sdk::AppScopes::new().request().build().unwrap(),
         )
         .await;
     let mut issued = None;
-    for till in [&mut shop, &mut second] {
-        till.receive(None).await.unwrap();
-        let activity = till.payee_activity().await.unwrap();
+    for seller_wallet in [&mut shop, &mut second] {
+        seller_wallet.receive(None).await.unwrap();
+        let activity = seller_wallet.payee_activity().await.unwrap();
         let period = &activity[0].periods[0];
         assert_eq!(period.billing_period, january());
         assert!(period.paid);
         assert_eq!(
-            till.verify_payment(&period.record).await.unwrap(),
+            seller_wallet.verify_payment(&period.record).await.unwrap(),
             credited.then_some(paid_at)
         );
-        let receipt = till.confirm_payment(&period.record).await.unwrap();
+        let receipt = seller_wallet.confirm_payment(&period.record).await.unwrap();
         assert_eq!(receipt.is_some(), credited);
         if let Some(previous) = &issued {
             assert_eq!(receipt.as_ref(), Some(previous));
         }
         issued = receipt;
-        assert_eq!(till.confirm_payment(&period.record).await.unwrap(), issued);
-        let activity = till.payee_activity().await.unwrap();
+        assert_eq!(
+            seller_wallet.confirm_payment(&period.record).await.unwrap(),
+            issued
+        );
+        let activity = seller_wallet.payee_activity().await.unwrap();
         assert_eq!(activity[0].periods[0].credited, credited);
         assert_eq!(
             activity[0].periods[0].receipt.as_ref().map(|r| &r.msg_id),
@@ -3402,11 +3405,11 @@ async fn test_period_payments_required_app_is_checked_before_transfer() {
         for required_matches_details in [true, false] {
             let w = World::new();
             let mut shop = w.shop().await;
-            let till = w
-                .join(&w.bob, "till", paykit_sdk::AppScopes::new().request().build().unwrap())
+            let seller_wallet = w
+                .join(&w.bob, "seller-wallet", paykit_sdk::AppScopes::new().request().build().unwrap())
                 .await;
             let mut wallet = w.wallet("wallet").await;
-            let required = if required_matches_details { shop.app_id() } else { till.app_id() };
+            let required = if required_matches_details { shop.app_id() } else { seller_wallet.app_id() };
             let draft = monthly_requiring(required).with_per_period_endpoints();
             let (request, sale) = Box::pin(subscribed_to(&w, &mut shop, &mut wallet, draft)).await;
             w.clock.set_ms(february().starts_at);
@@ -3420,7 +3423,7 @@ async fn test_period_payments_required_app_is_checked_before_transfer() {
                 assert_eq!(executed.len(), 1);
                 wallet.payments().await.unwrap();
             } else {
-                assert!(executed.is_empty(), "required till but selected shop; outcome={outcome:?}; executions={executed:?}; payments={:?}", wallet.payments().await);
+                assert!(executed.is_empty(), "required seller wallet but selected shop; outcome={outcome:?}; executions={executed:?}; payments={:?}", wallet.payments().await);
             }
         }
     }).await;
@@ -3429,10 +3432,10 @@ async fn test_period_payments_required_app_is_checked_before_transfer() {
 async fn required_app_period(priced: bool, matching: bool, explicit: bool) {
     let w = World::new();
     let mut shop = w.shop().await;
-    let till = w
+    let seller_wallet = w
         .join(
             &w.bob,
-            "till",
+            "seller-wallet",
             paykit_sdk::AppScopes::new().request().build().unwrap(),
         )
         .await;
@@ -3440,7 +3443,7 @@ async fn required_app_period(priced: bool, matching: bool, explicit: bool) {
     let required = if matching {
         shop.app_id()
     } else {
-        till.app_id()
+        seller_wallet.app_id()
     };
     let amount = if priced {
         paykit_lib::PaymentAmount {
@@ -3550,10 +3553,10 @@ async fn test_period_payments_required_app_accepts_rates_from_another_app() {
     Box::pin(async {
         let w = World::new();
         let mut shop = w.shop().await;
-        let mut till = w
+        let mut seller_wallet = w
             .join(
                 &w.bob,
-                "till",
+                "seller-wallet",
                 paykit_sdk::AppScopes::new().request().build().unwrap(),
             )
             .await;
@@ -3564,7 +3567,7 @@ async fn test_period_payments_required_app_accepts_rates_from_another_app() {
                 value: paykit_lib::Decimal::new("10").unwrap(),
             },
             PaymentReference::new("required-list-app").unwrap(),
-            RequestDestination::RequiredApp(till.app_id()),
+            RequestDestination::RequiredApp(seller_wallet.app_id()),
         )
         .with_proposal_expires_at_ms(START_MS + DAY_MS)
         .with_recurrence(
@@ -3583,13 +3586,16 @@ async fn test_period_payments_required_app_accepts_rates_from_another_app() {
         endpoints.insert(
             endpoint("btc-lightning-bolt11"),
             paykit_lib::bodies::ListEndpoint {
-                payload: PaymentEndpointPayload::new("lnbc1till").unwrap(),
+                payload: PaymentEndpointPayload::new("lnbc1wallet").unwrap(),
                 single_use: false,
             },
         );
-        till.app_mut().invite(&w.alice_id()).await.unwrap();
+        seller_wallet.app_mut().invite(&w.alice_id()).await.unwrap();
         let listed = paykit_lib::bodies::PrivatePaymentList {
-            version: crate::common::list_version(till.app().own_identity().generation(), 1),
+            version: crate::common::list_version(
+                seller_wallet.app().own_identity().generation(),
+                1,
+            ),
             payment_endpoints: endpoints,
             expires_at: now + DAY_MS,
         }
@@ -3597,7 +3603,7 @@ async fn test_period_payments_required_app_accepts_rates_from_another_app() {
         .unwrap();
         w.inject(
             &w.bob,
-            "till",
+            "seller-wallet",
             &w.alice,
             &[wallet.app_id()],
             "paykit.private_payment_list",
@@ -3646,7 +3652,7 @@ async fn test_period_payments_required_app_accepts_rates_from_another_app() {
         let record = period_record(&w, &wallet, &request, february())
             .await
             .unwrap();
-        assert_eq!(proof_of(&record).1.payment_app_id, till.app_id());
+        assert_eq!(proof_of(&record).1.payment_app_id, seller_wallet.app_id());
         let selected = record.period_details.as_ref().unwrap();
         assert_eq!(selected.message().from.app_id, shop.app_id());
         assert_eq!(selected.message().msg_id, msg_id);
@@ -3660,16 +3666,16 @@ async fn test_period_payments_required_app_accepts_rates_from_another_app() {
 enum PeriodSenders {
     RequiredShop,
     BothCurrent,
-    TillRemoved,
+    SellerWalletRemoved,
 }
 
 async fn pay_with_two_destination_senders(senders: PeriodSenders) {
     let w = World::new();
     let mut shop = w.shop().await;
-    let mut till = w
+    let mut seller_wallet = w
         .join(
             &w.bob,
-            "till",
+            "seller-wallet",
             paykit_sdk::AppScopes::new().request().build().unwrap(),
         )
         .await;
@@ -3685,7 +3691,7 @@ async fn pay_with_two_destination_senders(senders: PeriodSenders) {
         draft.with_per_period_endpoints(),
     )
     .await;
-    till.receive(None).await.unwrap();
+    seller_wallet.receive(None).await.unwrap();
     w.clock.set_ms(february().starts_at);
     let expires = w.clock.now_ms() + DAY_MS;
     let older = shop
@@ -3694,15 +3700,15 @@ async fn pay_with_two_destination_senders(senders: PeriodSenders) {
         .unwrap()
         .msg_id;
     w.clock.advance_ms(1_000);
-    let newest = till
-        .send_period_details(&sale, details(february(), "lnbc1till", expires))
+    let newest = seller_wallet
+        .send_period_details(&sale, details(february(), "lnbc1wallet", expires))
         .await
         .unwrap()
         .msg_id;
     assert_ne!(older, newest);
     wallet.receive(None).await.unwrap();
 
-    if matches!(senders, PeriodSenders::TillRemoved) {
+    if matches!(senders, PeriodSenders::SellerWalletRemoved) {
         w.homeserver
             .remove(w.bob_id(), pubky_switch_core::records::IDENTITY_PATH);
         w.router.remove(w.bob.origin());
@@ -3718,7 +3724,7 @@ async fn pay_with_two_destination_senders(senders: PeriodSenders) {
         assert!(w.rail.all_executions().is_empty());
 
         w.router.add_switch(w.bob.origin(), w.bob.switch());
-        let removed = till.app_id();
+        let removed = seller_wallet.app_id();
         w.bob
             .next_doc(|doc| {
                 doc.apps.retain(|app| app.app_id != removed);
@@ -3752,8 +3758,8 @@ async fn pay_with_two_destination_senders(senders: PeriodSenders) {
         .await
         .unwrap();
     let (app_id, msg_id) = match senders {
-        PeriodSenders::BothCurrent => (till.app_id(), newest),
-        PeriodSenders::RequiredShop | PeriodSenders::TillRemoved => (shop.app_id(), older),
+        PeriodSenders::BothCurrent => (seller_wallet.app_id(), newest),
+        PeriodSenders::RequiredShop | PeriodSenders::SellerWalletRemoved => (shop.app_id(), older),
     };
     assert_eq!(wallet.payments().await.unwrap().len(), 1);
     assert_eq!(proof_of(&paid).1.payment_app_id, app_id);
@@ -3774,7 +3780,10 @@ async fn test_period_payments_required_app_selects_its_older_details() {
 #[tokio::test]
 async fn test_period_payments_selects_the_latest_current_destination_sender() {
     Box::pin(pay_with_two_destination_senders(PeriodSenders::BothCurrent)).await;
-    Box::pin(pay_with_two_destination_senders(PeriodSenders::TillRemoved)).await;
+    Box::pin(pay_with_two_destination_senders(
+        PeriodSenders::SellerWalletRemoved,
+    ))
+    .await;
 }
 
 #[tokio::test]

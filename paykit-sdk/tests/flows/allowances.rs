@@ -11363,14 +11363,14 @@ async fn pending_replies_across_loss(another_loss: bool, journey: ReplyJourney) 
     .await;
     wallet.app_mut().invite(&w.bob_id()).await.unwrap();
     let mut shop = Box::pin(shop(&w)).await;
-    let mut till = w
+    let mut seller_wallet = w
         .join(
             &w.bob,
-            "till",
+            "seller-wallet",
             AppScopes::new().request().allowance().build().unwrap(),
         )
         .await;
-    till.app_mut().invite(&w.alice_id()).await.unwrap();
+    seller_wallet.app_mut().invite(&w.alice_id()).await.unwrap();
     // The phone records and delivers P while the sibling wallet is offline. After the first
     // service loss the two recipients still have P and this wallet has no copy to upload.
     let mut phone = Box::pin(alice_app(
@@ -11390,7 +11390,7 @@ async fn pending_replies_across_loss(another_loss: bool, journey: ReplyJourney) 
     let id = original.allowance_id;
     let original_id = original.msg_id;
     drop(phone);
-    for app in [&mut shop, &mut till] {
+    for app in [&mut shop, &mut seller_wallet] {
         let read = app.receive(None).await.unwrap();
         assert!(read
             .report
@@ -11456,7 +11456,7 @@ async fn pending_replies_across_loss(another_loss: bool, journey: ReplyJourney) 
     let replacement = crate::provider_loss::declare_second_loss(&w);
     Box::pin(crate::provider_loss::follow_generation(&mut wallet)).await;
     let r = send(
-        &till,
+        &seller_wallet,
         &replacement,
         "paykit.allowance_rejection",
         wallet.app_id(),
@@ -11722,10 +11722,10 @@ async fn held_pending_replies(by: PendingReplyCase) {
 
     let w = World::new();
     let mut shop = Box::pin(shop(&w)).await;
-    let mut till = w
+    let mut seller_wallet = w
         .join(
             &w.bob,
-            "till",
+            "seller-wallet",
             AppScopes::new().request().allowance().build().unwrap(),
         )
         .await;
@@ -11770,13 +11770,13 @@ async fn held_pending_replies(by: PendingReplyCase) {
     let original_id = wallet.app_mut().queue_stored(p.plaintext()).await.unwrap();
     assert_eq!(original_id, p.message().msg_id);
     wallet.flush().await.unwrap();
-    for recipient in [&mut shop, &mut till] {
+    for recipient in [&mut shop, &mut seller_wallet] {
         let first = recipient.receive(None).await.unwrap();
         assert!(first.report.events.iter().any(|e| matches!(e,
             AppEvent::MessageReceived { kind, msg_id, .. }
                 if kind == "paykit.allowance_proposal" && msg_id == &original_id)));
     }
-    assert_ne!(shop.app_id(), till.app_id());
+    assert_ne!(shop.app_id(), seller_wallet.app_id());
     let early = if matches!(
         by,
         PendingReplyCase::Restore | PendingReplyCase::RestoreRetryable
@@ -11831,7 +11831,7 @@ async fn held_pending_replies(by: PendingReplyCase) {
         inject_with_id(
             &w,
             &w.bob,
-            "till",
+            "seller-wallet",
             &[wallet.app_id()],
             second_kind,
             vec![p.hash()],
@@ -11904,7 +11904,7 @@ async fn held_pending_replies(by: PendingReplyCase) {
         inject_with_id(
             &w,
             &w.bob,
-            "till",
+            "seller-wallet",
             &[wallet.app_id()],
             second_kind,
             vec![p.hash()],
@@ -11952,7 +11952,7 @@ async fn held_pending_replies(by: PendingReplyCase) {
         inject_with_id(
             &w,
             &w.bob,
-            "till",
+            "seller-wallet",
             &[wallet.app_id(), phone.app_id()],
             second_kind,
             vec![p.hash()],
@@ -12353,7 +12353,7 @@ async fn held_pending_replies(by: PendingReplyCase) {
             let second_q = "d6723437-48b0-45ca-9c7e-cdce3a9b788f";
             for (sender, kind, msg_id) in [
                 ("shop", first_kind, second_q),
-                ("till", second_kind, SORTS_FIRST),
+                ("seller-wallet", second_kind, SORTS_FIRST),
             ] {
                 inject_with_id(
                     &w,

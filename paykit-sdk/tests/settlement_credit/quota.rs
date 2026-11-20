@@ -23,13 +23,14 @@ async fn confirm_after_quota(world: &World) -> TestResult {
     world.add_switch_with(origin, &[&identity], limits).await?;
     let signer = Box::pin(signer_on(world, &identity, origin)).await?;
     let mut wallets = Box::pin(enrolled_merchant_wallets(world, Some(signer))).await?;
-    let merchant = wallets.till.identity();
+    let merchant = wallets.seller_wallet.identity();
     Box::pin(finish_seller_lookups(&mut wallets)).await?;
 
-    let [(transaction, tag)] = transactions_in_one_bucket(wallets.till.app().naming_key())?;
+    let [(transaction, tag)] =
+        transactions_in_one_bucket(wallets.seller_wallet.app().naming_key())?;
     wallets.rail.next(Behaviour::InTransaction(transaction));
     let (mut buyer, winner, winning_key) = Box::pin(paid_request(
-        &mut wallets.till,
+        &mut wallets.seller_wallet,
         wallets.buyer,
         "btc-bitcoin-p2wpkh",
         "bcrt1qqyqszqgpqyqszqgpqyqszqgpqyqszqgpvxat9t",
@@ -50,7 +51,7 @@ async fn confirm_after_quota(world: &World) -> TestResult {
     assert_eq!(wallets.rail.all_pay_calls(), executions);
 
     let unused = wallets
-        .till
+        .seller_wallet
         .send_request(
             buyer.identity(),
             invoice("btc-lightning-bolt11", "ln-unused")?,
@@ -63,10 +64,13 @@ async fn confirm_after_quota(world: &World) -> TestResult {
         SwitchCollection::new(collection.name(), collection.fixed_policy()),
         &natural_key::request_record(&merchant, &unused.request_hash),
     );
-    let unused_key = wallets.till.app().record_key(&unused_target)?;
-    wallets.till.cancel_sent_request(&unused_key, None).await?;
+    let unused_key = wallets.seller_wallet.app().record_key(&unused_target)?;
+    wallets
+        .seller_wallet
+        .cancel_sent_request(&unused_key, None)
+        .await?;
     let number = settlement_bucket(&tag);
-    let key = SettlementBucket::record_key(number, wallets.till.app().naming_key())?;
+    let key = SettlementBucket::record_key(number, wallets.seller_wallet.app().naming_key())?;
     let caller = pubky_switch_core::enc::zbase32_encode(&wallets.labelled.app_id());
     let ops_path = format!("/v1/{}/ops", identity.key().id());
     let quota_answers = Arc::new(Mutex::new(Vec::new()));
@@ -96,7 +100,7 @@ async fn confirm_after_quota(world: &World) -> TestResult {
     let trace = world.trace();
     let mut refusals = trace.lines[start..].iter().filter(|line| {
         line.call == Some("ops")
-            && line.label == "{shop/labelled-till} POST /v1/{shop}/ops"
+            && line.label == "{shop/labelled-wallet} POST /v1/{shop}/ops"
             && line.facts.get("status").map(String::as_str) == Some("429")
     });
     let refusal = refusals
@@ -124,12 +128,12 @@ async fn confirm_after_quota(world: &World) -> TestResult {
 
     // Removing the unrelated, cancelled invoice leaves room for the settlement mark.
     wallets
-        .till
+        .seller_wallet
         .app_mut()
         .delete_record(&unused_target, vec![])
         .await?;
     let receipt = wallets
-        .till
+        .seller_wallet
         .confirm_payment(&winning_key)
         .await?
         .ok_or("missing winning receipt")?;
@@ -150,12 +154,12 @@ async fn confirm_after_quota(world: &World) -> TestResult {
         .all(|m| m.kind != paykit_lib::Kind::PaymentReceipt.as_str()));
 
     let current = wallets
-        .till
+        .seller_wallet
         .app()
         .shared_record(&key)
         .await?
         .ok_or("missing settlement")?;
-    let naming = wallets.till.app().naming_key();
+    let naming = wallets.seller_wallet.app().naming_key();
     let bucket = SettlementBucket::bind(
         current.content.value().ok_or("unreadable settlement")?,
         number,
@@ -174,7 +178,7 @@ async fn confirm_after_quota(world: &World) -> TestResult {
             occurrence
         )]
     );
-    let stored = receipt_hash(&wallets.till, &winning_key, ActivitySide::Payee).await?;
+    let stored = receipt_hash(&wallets.seller_wallet, &winning_key, ActivitySide::Payee).await?;
     buyer.receive(None).await?;
     other.receive(None).await?;
     let received = buyer.receipts(ReceiptsOf::Request(winner)).await?;
