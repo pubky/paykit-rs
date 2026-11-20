@@ -1,7 +1,8 @@
-//! The approving app's retained first executor grant (Paykit spec 8.3).
+//! The restored executor's own previously accepted grant and complete ledger.
 
+use paykit_lib::allowances::{check_successor, Ledger};
 use paykit_lib::derive::natural_key;
-use paykit_lib::records::AllowanceRecord;
+use paykit_lib::records::{bind_ledger, AllowanceRecord};
 use paykit_lib::{AllowanceId, Body, Collection};
 use pubky_switch_client::app::{App, KeptOp, RecordTarget};
 use pubky_switch_core::enc::{hash, serde_b64};
@@ -13,7 +14,8 @@ use super::evidence::AppliedRecord;
 use crate::activity::switch_collection;
 use crate::allowances::allowance_target;
 
-/// The approving app keeps the signed first grant alongside its original acceptance.
+/// Signed originals the executor accepted before the backup. The grant names the initial
+/// ledger application. A later accepted checkpoint keeps its complete signed value.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExecutorCheckpoint {
@@ -21,6 +23,8 @@ pub(crate) struct ExecutorCheckpoint {
     pub(crate) counterparty: [u8; 32],
     pub(crate) allowance_id: String,
     pub(super) grant: GrantEvidence,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(super) later: Option<KeptOp>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,7 +41,7 @@ pub(super) enum GrantEvidence {
 }
 
 /// The installed and selected backups can retain different accepted writes. Preserve each
-/// independently bound grant until the original application can be established.
+/// independently bound history until their exact applications can be ordered.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ExecutorHistory(pub(crate) Vec<ExecutorCheckpoint>);
 
@@ -57,6 +61,9 @@ impl ExecutorHistory {
                 if binder.record_key(&target).ok().as_ref() != Some(record_key) {
                     return false;
                 }
+                let Ok(ledger) = binder.record_key(&ledger_target(&c.counterparty, &id)) else {
+                    return false;
+                };
                 let write = |kept: &KeptOp, key: &[u8; 32]| -> Option<()> {
                     let cert =
                         paykit_lib::scopes::verify_certificate(&kept.cert, binder.identity())
@@ -76,10 +83,14 @@ impl ExecutorHistory {
                     };
                     (put.key == *key && cert.app_id() == executor).then_some(())
                 };
-                match &c.grant {
-                    GrantEvidence::AwaitingProof { .. } => true,
+                let grant = match &c.grant {
+                    GrantEvidence::AwaitingProof { .. } => c.later.is_none(),
                     GrantEvidence::Verified { write: kept } => write(kept, record_key).is_some(),
-                }
+                };
+                grant
+                    && c.later
+                        .as_ref()
+                        .is_none_or(|kept| write(kept, &ledger).is_some())
             })
     }
 
@@ -98,38 +109,57 @@ impl ExecutorHistory {
         opening: &ApprovedOpening,
     ) -> Option<ExecutorCheckpoint> {
         let first = self.0.first()?;
-        let Some(verified) = self
-            .0
-            .iter()
-            .find(|source| matches!(source.grant, GrantEvidence::Verified { .. }))
-        else {
-            return self
-                .0
-                .iter()
-                .all(|source| source == first)
-                .then(|| first.clone());
-        };
-        let original = verified.accepted(app, key, opening)?;
-        let value_hash = hash(&original.grant.value);
+        let mut verified = Vec::new();
         for source in &self.0 {
-            if source.counterparty != verified.counterparty
-                || source.allowance_id != verified.allowance_id
+            if source.counterparty != first.counterparty
+                || source.allowance_id != first.allowance_id
             {
                 return None;
             }
-            match &source.grant {
-                // Restore may combine the applied-local marker and the later proof of
-                // that same signed original. A matching hash alone grants no authority.
-                GrantEvidence::AwaitingProof {
-                    value_hash: pending,
-                } if *pending == value_hash => {}
-                GrantEvidence::Verified { .. }
-                    if source.accepted(app, key, opening)?.grant.revision
-                        == original.grant.revision => {}
-                _ => return None,
+            if matches!(source.grant, GrantEvidence::Verified { .. }) {
+                verified.push((source, source.accepted(app, key, opening)?));
             }
         }
-        Some(verified.clone())
+        let Some((_, original)) = verified.first() else {
+            return self
+                .0
+                .iter()
+                .all(|source| source == first && source.later.is_none())
+                .then(|| first.clone());
+        };
+        // The applied-local marker can only match the authenticated original grant.
+        // Its backup contains no ledger write to order with the verified checkpoints.
+        let value_hash = hash(&original.grant.value);
+        if self.0.iter().any(|source| {
+            matches!(&source.grant, GrantEvidence::AwaitingProof { value_hash: pending }
+                if *pending != value_hash || source.later.is_some())
+        }) {
+            return None;
+        }
+        verified.sort_by_key(|(_, accepted)| accepted.application.revision);
+        for pair in verified.windows(2) {
+            let (_, a) = &pair[0];
+            let (_, b) = &pair[1];
+            let Body::AllowanceProposal(proposed) = a.record.proposal.body() else {
+                return None;
+            };
+            if a.grant.revision != b.grant.revision
+                || a.application.revision == b.application.revision && a.ledger != b.ledger
+                || (a.application.revision != b.application.revision
+                    && !b.application.follows(&a.application))
+                || check_successor(
+                    &proposed.terms,
+                    &a.ledger,
+                    a.application.at_ms,
+                    &b.ledger,
+                    b.application.at_ms,
+                )
+                .is_err()
+            {
+                return None;
+            }
+        }
+        verified.last().map(|(source, _)| (*source).clone())
     }
 }
 
@@ -140,8 +170,11 @@ pub(super) fn ledger_target(counterparty: &[u8; 32], id: &AllowanceId) -> Record
     )
 }
 
-pub(super) struct AcceptedGrant {
+pub(super) struct AcceptedLedger {
     pub(super) grant: AppliedRecord,
+    pub(super) record: AllowanceRecord,
+    pub(super) application: AppliedRecord,
+    pub(super) ledger: Ledger,
 }
 
 impl ExecutorCheckpoint {
@@ -150,7 +183,7 @@ impl ExecutorCheckpoint {
         app: &App,
         permanent_key: &[u8; 32],
         opening: &ApprovedOpening,
-    ) -> Option<AcceptedGrant> {
+    ) -> Option<AcceptedLedger> {
         let id = AllowanceId::parse(&self.allowance_id).ok()?;
         let target = allowance_target(&self.counterparty, &id);
         let ledger_target = ledger_target(&self.counterparty, &id);
@@ -210,6 +243,43 @@ impl ExecutorCheckpoint {
         {
             return None;
         }
-        Some(AcceptedGrant { grant })
+        let mut ledger = opening.zero.clone();
+        let mut application = initial.clone();
+        if let Some(held) = &self.later {
+            let newer = AppliedRecord::retained(app, &ledger_target, held)?;
+            if !newer.cert.holds_scope("paykit_allowance_execute")
+                || !newer
+                    .op
+                    .body()
+                    .conditions
+                    .contains(&Condition::RecordCurrent {
+                        key: *permanent_key,
+                        revision: grant.revision,
+                        deleted: false,
+                    })
+                || newer.op.body().app_id != Some(app.app_id())
+                || newer.revision.seq <= grant.revision.seq
+                || record.executor_at(&own, grant.version()).ok()? != Some(app.app_id())
+            {
+                return None;
+            }
+            let next = bind_ledger(&newer.value, app.naming_key(), &ledger_key, &record).ok()?;
+            check_successor(
+                &proposed.terms,
+                &ledger,
+                application.at_ms,
+                &next,
+                newer.at_ms,
+            )
+            .ok()?;
+            ledger = next;
+            application = newer;
+        }
+        Some(AcceptedLedger {
+            grant,
+            record,
+            application,
+            ledger,
+        })
     }
 }

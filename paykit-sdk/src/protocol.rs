@@ -627,6 +627,15 @@ pub(crate) fn restore_paykit_layer(
             .map_err(|_| "the installed executor history does not verify")?;
         executor_history.insert(key, row);
     }
+    let mut compactions = std::collections::BTreeMap::new();
+    for (key, value) in restoring
+        .previous_local_scan(key::LEDGER_COMPACTIONS.as_bytes())
+        .map_err(|_| "the installed ledger compactions cannot be read")?
+    {
+        let receipt = state::restored::<crate::executor::LedgerCompaction>(&key, &value, &binder)
+            .map_err(|_| "an installed ledger compaction does not verify")?;
+        compactions.insert(key, receipt);
+    }
     let mut open = std::collections::BTreeSet::new();
     let mut recordings = std::collections::BTreeSet::new();
     let mut receipt_batches = std::collections::BTreeMap::new();
@@ -876,6 +885,16 @@ pub(crate) fn restore_paykit_layer(
                     )
                 })?;
                 writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::LedgerCompaction { .. } => {
+                let receipt =
+                    state::restored::<crate::executor::LedgerCompaction>(&key, &value, &binder)
+                        .map_err(|_| unread())?;
+                if compactions.get(&key).is_some_and(|held| held != &receipt) {
+                    return Err("two different receipts for the same ledger compaction".into());
+                }
+                compactions.insert(key, receipt);
                 continue;
             }
             StateKey::ExecutorCheckpoint(_) => {
@@ -1254,6 +1273,12 @@ pub(crate) fn restore_paykit_layer(
             .writes()
             .map_err(|_| "the retained private list publications cannot be stored")?,
     );
+    for (key, receipt) in compactions {
+        writes.push(LocalWrite::Put {
+            key,
+            value: state::encode(&receipt).map_err(|_| "cannot encode a ledger compaction")?,
+        });
+    }
     for (key, history) in executor_history {
         let value =
             state::encode(&history).map_err(|_| "the executor history cannot be retained")?;

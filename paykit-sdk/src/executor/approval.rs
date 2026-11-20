@@ -4,7 +4,7 @@ use paykit_lib::allowances::Ledger;
 use paykit_lib::bodies::ProposerRole;
 use paykit_lib::records::{bind_ledger, AllowanceRecord, PendingAllowanceRecord};
 use paykit_lib::{Body, Collection};
-use pubky_switch_client::app::App;
+use pubky_switch_client::app::{App, KeptOp};
 use pubky_switch_core::ops::{Condition, RecordVersion};
 use pubky_switch_core::shared::ApplicationRef;
 
@@ -18,6 +18,8 @@ pub(super) struct ApprovedOpening {
     pub(super) record: AllowanceRecord,
     pub(super) permanent: AppliedRecord,
     pub(super) ledger: AppliedRecord,
+    pub(super) ledger_write: KeptOp,
+    pub(super) zero: Ledger,
     pending_key: [u8; 32],
     pub(super) deletion: ApplicationRef,
 }
@@ -61,7 +63,7 @@ impl ApprovedOpening {
         }
         let target = ledger_target(&source.counterparty, &id);
         let ledger = AppliedRecord::retained(app, &target, &source.ledger)?;
-        bind_ledger(
+        let zero = bind_ledger(
             &ledger.value,
             app.naming_key(),
             &app.record_key(&target).ok()?,
@@ -100,6 +102,8 @@ impl ApprovedOpening {
             record,
             permanent,
             ledger,
+            ledger_write: source.ledger,
+            zero,
             pending_key,
             deletion,
         })
