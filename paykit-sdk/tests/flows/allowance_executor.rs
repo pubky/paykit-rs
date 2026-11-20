@@ -1103,6 +1103,80 @@ async fn test_funded_period_requiring_its_own_destination_leaves_the_subscriptio
             .as_str(),
         "0"
     );
+    Box::pin(shop.receive(None)).await.unwrap();
+    let sale = shop
+        .payee_activity()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|sale| sale.request_hash == Some(req.request_hash))
+        .unwrap();
+    let signed = Box::pin(shop.send_period_details(
+        &sale.record,
+        paykit_lib::bodies::PeriodDetails {
+            billing_period: next,
+            payment_endpoints: Some(std::collections::BTreeMap::from([(
+                crate::common::endpoint("btc-lightning-bolt11"),
+                paykit_lib::PaymentEndpointPayload::new("lnbc1next").unwrap(),
+            )])),
+            rates: None,
+            expires_at: next.ends_at,
+        },
+    ))
+    .await
+    .unwrap();
+    Box::pin(payer.receive(None)).await.unwrap();
+    let paid = Box::pin(payer.pay_period_under_allowance(&req, &next))
+        .await
+        .outcome
+        .unwrap();
+    assert!(
+        matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
+        "{paid:?}"
+    );
+    assert_eq!(world.rail.pay_calls(&paid.attempt_id()), 1);
+    Box::pin(shop.receive(None)).await.unwrap();
+    let period = shop
+        .payee_activity()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|sale| sale.request_hash == Some(req.request_hash))
+        .unwrap()
+        .periods
+        .into_iter()
+        .find(|entry| entry.billing_period == next)
+        .unwrap();
+    assert!(period.paid);
+    let receipt = Box::pin(shop.confirm_payment(&period.record))
+        .await
+        .unwrap()
+        .unwrap();
+    Box::pin(payer.receive(None)).await.unwrap();
+    let received = payer
+        .receipts(paykit_sdk::ReceiptsOf::Period(req, next))
+        .await
+        .unwrap();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].msg_id, receipt);
+    let period = payer
+        .request(&req)
+        .await
+        .unwrap()
+        .periods
+        .into_iter()
+        .find(|p| p.billing_period == next)
+        .unwrap();
+    assert!(period.details.iter().any(|d| d.msg_id == signed.msg_id));
+    assert_eq!(
+        Box::pin(payer.reconcile_allowance(&key))
+            .await
+            .unwrap()
+            .unwrap()
+            .lifetime()
+            .as_str(),
+        "10"
+    );
 }
 
 #[tokio::test]
