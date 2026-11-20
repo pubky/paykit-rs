@@ -5,7 +5,9 @@ use std::sync::Arc;
 use paykit_lib::collections::Collection;
 use paykit_lib::recovery::{RecoveryCommitments, RECOVERY_UPLOAD_LABEL};
 use paykit_sdk::{AppScopes, PaykitConfig};
-use pubky_switch_client::app::{App, Collection as SwitchCollection, RecordTarget};
+use pubky_switch_client::app::{
+    App, Collection as SwitchCollection, RecordApplication, RecordTarget,
+};
 use pubky_switch_client::testing::{
     issue_cert, AppSpec, ProtocolSpec, ScriptedSwitch, TestProtocol,
 };
@@ -184,7 +186,12 @@ async fn reads_report(
         .put_record(&target, &payload, vec![])
         .await
         .unwrap();
-    let (record, applied, operation) = reader
+    let RecordApplication {
+        record,
+        application: applied,
+        evidence: operation,
+        ..
+    } = reader
         .app_mut()
         .read_record_application(&target)
         .await

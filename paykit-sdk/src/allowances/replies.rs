@@ -1241,7 +1241,7 @@ impl Paykit {
                 ),
                 |a, b| self.app.received_order(a, b),
             );
-            if earlier != Some(Ordering::Greater) {
+            if self.fenced_own_proposal(proposal) || earlier != Some(Ordering::Greater) {
                 return Ok(waiting());
             }
         }
@@ -1273,6 +1273,25 @@ impl Paykit {
         let mut writes = Vec::new();
         if accepting {
             if self.conflict_kept(&permanent_key).await? {
+                return Ok(waiting());
+            }
+            if self.fenced_own_proposal(proposal) {
+                if self.allowance_end_send_permitted(&peer).await? {
+                    if let Some(condition) =
+                        Box::pin(self.live_original_after_loss(&current, proposal, reply)).await?
+                    {
+                        if Box::pin(self.withdraw_fenced_pending(
+                            &current,
+                            &permanent_key,
+                            reply,
+                            condition,
+                        ))
+                        .await?
+                        {
+                            return Ok(PendingReply::Stopped);
+                        }
+                    }
+                }
                 return Ok(waiting());
             }
             let super::pending::Acceptance::Eligible { ledger } =
@@ -1352,6 +1371,7 @@ impl Paykit {
         let key = self.app.record_key(&target)?;
         let own = self.identity();
         let at = key::pending_conflict(&key);
+        Box::pin(self.report_fenced_acceptance(record, &target, message, evidence)).await?;
         let end = self
             .local_get::<PendingRetirement>(&key::pending_retirement(&key))
             .await?;
@@ -1396,6 +1416,10 @@ impl Paykit {
         } else {
             None
         };
+        let sole_acceptance = end.is_none()
+            && previous.is_none()
+            && matches!(message.body(), Body::AllowanceAcceptance(_))
+            && kept.iter().all(|a| a.message.hash() == message.hash());
         match PendingConflict::from_answers(
             pending.proposal(),
             &held,
@@ -1407,6 +1431,21 @@ impl Paykit {
             Opposed::Found(stop) => {
                 self.local_put(&at, &*stop).await?;
                 return stop.reply(&own, message);
+            }
+            _ if self.fenced_own_proposal(pending.proposal())
+                && matches!(message.body(), Body::AllowanceAcceptance(_)) =>
+            {
+                if sole_acceptance {
+                    return Box::pin(self.apply_pending_reply(
+                        &target,
+                        &held,
+                        pending.proposal(),
+                        message,
+                        evidence,
+                    ))
+                    .await;
+                }
+                return Ok(PendingReply::Waits(None));
             }
             Opposed::Unknown if matches!(message.body(), Body::AllowanceAcceptance(_)) => {
                 return Ok(PendingReply::Waits(None));
@@ -1497,7 +1536,12 @@ pub(crate) fn restore_conflicts(
     for (at, value) in restoring.previous_local_scan(key::NOTICES.as_bytes())? {
         if matches!(StateKey::parse(&at), Some(StateKey::MessageNotice { .. })) {
             let notice = state::restored::<crate::notices::KeptNotice>(&at, &value, binder)?;
-            if notice.kind == crate::NoticeKind::AllowancePlacementExpired {
+            if matches!(
+                notice.kind,
+                crate::NoticeKind::AllowancePlacementExpired
+                    | crate::NoticeKind::AllowanceAcceptanceBeforeLoss
+                    | crate::NoticeKind::AllowanceWithdrawalConfirmed
+            ) {
                 retained.insert(at, value);
             }
         }
@@ -1517,12 +1561,14 @@ pub(crate) fn restore_conflicts(
             return Err(PaykitError::corrupt());
         };
         let signed = kept.message.stored(&kept.peer)?;
-        if prepared.get(&(record, reply)).is_some_and(|older| {
-            older.application != kept.application
+        if let Some(older) = prepared.get(&(record, reply)) {
+            if older.application != kept.application
                 || older.source != kept.source
                 || older.seals != kept.seals
-        }) {
-            return Err(PaykitError::corrupt());
+                || older.fenced_reply(binder.identity())? != kept.fenced_reply(binder.identity())?
+            {
+                return Err(PaykitError::corrupt());
+            }
         }
         if matches!(signed.body(), Body::AllowanceEnd(_)) {
             let origin = key::end_origin(&signed.message().msg_id);
@@ -1532,7 +1578,7 @@ pub(crate) fn restore_conflicts(
                 .find(|(at, _)| at == origin.as_bytes())
                 .ok_or_else(PaykitError::corrupt)?;
             let end = state::restored::<super::EndOrigin>(origin.as_bytes(), &value, binder)?;
-            if !end.matches(signed.message(), signed.hash()) || end.cause != super::EndCause::User {
+            if !end.matches(signed.message(), signed.hash()) || end.cause != kept.end_cause() {
                 return Err(PaykitError::corrupt());
             }
             writes.push(LocalWrite::Put {
