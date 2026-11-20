@@ -4,15 +4,17 @@ use std::error::Error;
 use std::sync::Arc;
 
 use paykit_lib::{records::AllowanceRecord, Collection};
-use paykit_sdk::{AppScopes, Paykit, Rail, RequestedScopes};
+use paykit_sdk::{AppScopes, Paykit, PaykitBackup, Rail, RequestedScopes};
 use pubky_switch_client::app::{AppEnv, KeptOp, UserConfirmed};
 use pubky_switch_client::store::{Fault, FaultStore, MemoryStore, StateStore};
 use pubky_switch_client::transport::{BoxFuture, Request, Response, Transport, TransportError};
 use pubky_switch_harness::{parties::Asking, Backend, World};
 use pubky_switch_signer::{Protocols, Signer};
 
+mod payments;
+
 use super::{applied_put, terms, AllowanceRole, AllowanceStatus, Condition, Ledger};
-use crate::common::{finish_listing, TestTimer};
+use crate::common::{finish_listing, ListsStore, TestTimer};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -85,9 +87,11 @@ async fn join(
     .await?
 }
 
-async fn grant(world: &World, proposer: AllowanceRole) -> TestResult {
-    let storage = Arc::new(MemoryStore::new());
-    let rail = Arc::new(paykit_sdk::rail::FakeRail::new());
+async fn grant(world: &World, proposer: AllowanceRole, restore_after_payment: bool) -> TestResult {
+    let storage = Arc::new(ListsStore::default());
+    let rail = Arc::new(paykit_sdk::rail::FakeRail::with_clock(
+        world.clock().clone(),
+    ));
     let mut payer = Box::pin(join(
         world,
         "payer",
@@ -195,6 +199,24 @@ async fn grant(world: &World, proposer: AllowanceRole) -> TestResult {
     assert_eq!(original.body().batch, zero.body().batch);
     assert_eq!(original.body().batch.count, 3);
     assert_eq!(permanent_revision.seq + 1, ledger_revision.seq);
+    let pending = if restore_after_payment {
+        world.lose_answer("POST", "/ops");
+        assert!(Box::pin(payer.resume_allowance_executor(&key))
+            .await
+            .is_err());
+        Box::pin(payer.receive(None)).await?;
+        let at = format!("lv/{}", pubky_switch_core::enc::b64(&key));
+        let saved = payer
+            .app()
+            .protocol_get("paykit", at.as_bytes())
+            .await?
+            .unwrap();
+        let history: serde_json::Value = serde_json::from_slice(&saved)?;
+        assert_eq!(history["d"][0]["grant"]["kind"], "awaiting_proof");
+        Some(Box::pin(payer.backup()).await?)
+    } else {
+        None
+    };
     Box::pin(payer.resume_allowance_executor(&key)).await?;
     let granted = payer.app().shared_record(&key).await?.expect("first grant");
     let (write, _) = applied_put(payer.app(), key, granted.version).await;
@@ -208,7 +230,7 @@ async fn grant(world: &World, proposer: AllowanceRole) -> TestResult {
     let app_id = payer.app_id();
     drop(payer);
     let mut payer = Box::pin(Paykit::load(
-        app_env(world, storage),
+        app_env(world, storage.clone()),
         Default::default(),
         app_id,
         rail.clone(),
@@ -226,11 +248,26 @@ async fn grant(world: &World, proposer: AllowanceRole) -> TestResult {
         granted.version
     );
     assert!(rail.all_executions().is_empty());
+    if let Some(backup) = pending {
+        Box::pin(payments::payment_after_restore(
+            world, payer, seller, storage, rail, key, backup,
+        ))
+        .await?;
+    }
     Ok(())
 }
 
 #[tokio::test]
 async fn test_enrolled_wallet_first_grant_on_both_services() -> TestResult {
+    enrolled_wallets(false).await
+}
+
+#[tokio::test]
+async fn test_enrolled_allowance_payments_after_an_older_grant_backup() -> TestResult {
+    enrolled_wallets(true).await
+}
+
+async fn enrolled_wallets(restore_after_payment: bool) -> TestResult {
     tokio::task::LocalSet::new()
         .run_until(async {
             for backend in [Backend::Scripted, Backend::Service] {
@@ -238,7 +275,7 @@ async fn test_enrolled_wallet_first_grant_on_both_services() -> TestResult {
                     let Some(world) = World::start(backend)? else {
                         continue;
                     };
-                    let result = Box::pin(grant(&world, proposer)).await;
+                    let result = Box::pin(grant(&world, proposer, restore_after_payment)).await;
                     world.close().await?;
                     result?;
                 }

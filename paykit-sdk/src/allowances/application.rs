@@ -128,6 +128,9 @@ pub(super) struct ConfirmedReply {
 pub(super) struct AppliedApplications {
     pub(super) replies: BTreeMap<([u8; 32], [u8; 32]), ConfirmedReply>,
     pub(super) pending_creates: BTreeMap<([u8; 32], [u8; 32]), RecordVersion>,
+    /// Signed original creates whose service key is presently missing. These can
+    /// preserve an obligation across a deletion, but cannot authorize its delivery.
+    pub(super) undated_creates: BTreeMap<([u8; 32], [u8; 32]), KeptOp>,
 }
 
 pub(super) fn applied_applications(
@@ -155,11 +158,6 @@ pub(super) fn applied_applications(
         let OpKind::RecordPut(put) = &body.kind else {
             continue;
         };
-        // Single pending writes can have applied before an orderly change. The
-        // original acceptance remains in the generation the payer approved.
-        let Some(service) = doc.service_key_of(body.generation) else {
-            continue;
-        };
         if !(1..=3).contains(&body.batch.count)
             || (body.batch.count > 1 && body.generation != doc.generation())
             || !put
@@ -170,6 +168,27 @@ pub(super) fn applied_applications(
         {
             continue;
         }
+        let pending = put.policy == Collection::AllowanceProposals.fixed_policy();
+        let create = pending
+            && body.batch.count == 1
+            && put.expected_version == RecordVersion::NONE
+            && !put.value_sealed.looks_like_delete();
+        let commitment = prepared_member(
+            own,
+            app_id,
+            body.generation,
+            body.batch.count,
+            &body.conditions,
+            &body.kind,
+        )?;
+        let Some(service) = doc.service_key_of(body.generation) else {
+            if create {
+                applied
+                    .undated_creates
+                    .insert((put.key, commitment), member);
+            }
+            continue;
+        };
         let Ok(proof) = TransitionProof::verify(signed_proof, &service, &own) else {
             continue;
         };
@@ -179,26 +198,13 @@ pub(super) fn applied_applications(
         {
             continue;
         }
-        let commitment = prepared_member(
-            own,
-            app_id,
-            body.generation,
-            body.batch.count,
-            &body.conditions,
-            &body.kind,
-        )?;
         let Ok(revision) = proof.record_revision() else {
             continue;
         };
         let version = RecordVersion::new(revision.generation, revision.seq);
-        let pending = put.policy == Collection::AllowanceProposals.fixed_policy();
         let retirement =
             (pending && put.value_sealed.looks_like_delete()).then_some((put.key, version));
-        if body.batch.count == 1
-            && pending
-            && put.expected_version == RecordVersion::NONE
-            && !put.value_sealed.looks_like_delete()
-        {
+        if create {
             applied
                 .pending_creates
                 .insert((put.key, commitment), version);

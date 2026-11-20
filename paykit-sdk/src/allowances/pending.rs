@@ -430,19 +430,24 @@ impl Paykit {
                 withdrawals.push((record, approval));
             }
         }
-        if intents.is_empty() && approvals.is_empty() && withdrawals.is_empty() {
+        for (record, approval) in withdrawals {
+            let at = format!("{}{record}", key::ORIGINAL_APPROVALS);
+            self.withdraw_rejected_proposal(&at, approval).await?;
+        }
+        if intents.is_empty() && approvals.is_empty() {
             return Ok(());
         }
         let confirmed = self.confirmed_pending_applications().await?;
-        for (record, approval) in withdrawals {
-            let at = format!("{}{record}", key::ORIGINAL_APPROVALS);
-            self.withdraw_rejected_proposal(&at, approval, &confirmed)
-                .await?;
-        }
         for (record, mut approval) in approvals {
             let at = format!("{}{record}", key::ORIGINAL_APPROVALS);
-            self.capture_original_approval(&at, &mut approval, &confirmed)
-                .await?;
+            if self
+                .capture_original_approval(&at, &mut approval, &confirmed)
+                .await?
+                && allow_delivery
+                && approval.withdrawal_owed()
+            {
+                self.withdraw_rejected_proposal(&at, approval).await?;
+            }
         }
         for (at, intent) in intents {
             let msg = intent.message.stored(&intent.peer)?;

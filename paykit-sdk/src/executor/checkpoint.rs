@@ -19,6 +19,9 @@ use crate::allowances::allowance_target;
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExecutorCheckpoint {
+    /// Set by the restore transaction. A first-use grant or subsequent signed service
+    /// observations alone cannot clear the need for independent wallet history.
+    pub(crate) restored: bool,
     #[serde(with = "serde_b64")]
     pub(crate) counterparty: [u8; 32],
     pub(crate) allowance_id: String,

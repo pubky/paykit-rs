@@ -1663,7 +1663,7 @@ impl Paykit {
 
     /// Whether a `missed` item's mark (`mc`) is set. It holds only `true`: any other value
     /// is a corrupt store (`state::Stored`).
-    async fn consents_unconfirmed(&self) -> Result<bool> {
+    pub(crate) async fn consents_unconfirmed(&self) -> Result<bool> {
         Ok(self
             .local_get::<bool>(key::MISSED_CONSENTS)
             .await?
