@@ -58,6 +58,10 @@ An app republishes its record on the Homeserver at a renewal only once the servi
 
 ## Requests, pricing and payment evidence
 
+### Installed wallet payment method
+
+Pay one request through a generated binding and check the original attempt ID, endpoint, amount and reference at the host method. Interrupt the response after submission. Resume through a lookup of that same attempt and observe one transfer, the Payment Proof containing the method's original evidence and the receipt for that proof after the payee's own check. A lookup with an unknown outcome leaves the attempt open. Endpoint selection alone, a refusal before submission and an unverified proof must produce no credit. Exercise the same contract through each supported platform binding (Section 7.2, Installed wallet bindings).
+
 ### Pruning a listed period
 
 A reader that holds the version a write was built on ignores and flags a write that drops a listed period without a `claim_step` condition on that period's claim among the conditions its operation signed (wire 5.3).
