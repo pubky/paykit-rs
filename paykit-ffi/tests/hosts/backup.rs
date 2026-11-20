@@ -10,7 +10,12 @@ use pubky_switch_client::{
     transport::BoxFuture,
 };
 use pubky_switch_harness::{parties::Asking, Backend, World};
-use std::{collections::BTreeMap, error::Error, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    io::{self, Write},
+    sync::Arc,
+};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -124,33 +129,35 @@ pub(super) async fn print_wallet(seller_only: bool) -> Result<()> {
     if seller_only {
         let app = seller.app_id();
         drop(seller);
-        println!("{}", STANDARD.encode(app));
-        print_store(app, &seller_store)?;
-        world.close().await?;
-        return Ok(());
+        let mut output = io::stdout().lock();
+        writeln!(output, "{}", STANDARD.encode(app))?;
+        write_store(&mut output, app, &seller_store)?;
+    } else {
+        let backup = payer.backup().await?.to_bytes()?;
+        let app = payer.app_id();
+        let mut output = io::stdout().lock();
+        writeln!(output, "{}", STANDARD.encode(app))?;
+        writeln!(output, "{}", STANDARD.encode(payer.identity()))?;
+        writeln!(output, "{}", STANDARD.encode(request.payee))?;
+        writeln!(output, "{}", STANDARD.encode(request.request_hash))?;
+        writeln!(output, "{attempt}")?;
+        writeln!(output, "{receipt}")?;
+        writeln!(output, "{}", STANDARD.encode(backup))?;
+        // Hand the language process the unchanged test store of the original device as well.
+        // It can distinguish an ordinary reopen from restoring the backup before its first read.
+        drop(payer);
+        write_store(&mut output, app, &payer_store)?;
     }
-    let backup = payer.backup().await?.to_bytes()?;
-    println!("{}", STANDARD.encode(payer.app_id()));
-    println!("{}", STANDARD.encode(payer.identity()));
-    println!("{}", STANDARD.encode(request.payee));
-    println!("{}", STANDARD.encode(request.request_hash));
-    println!("{attempt}");
-    println!("{receipt}");
-    println!("{}", STANDARD.encode(backup));
-    // Hand the language process the unchanged test store of the original device as well.
-    // It can distinguish an ordinary reopen from restoring the backup before its first read.
-    let app = payer.app_id();
-    drop(payer);
-    print_store(app, &payer_store)?;
     world.close().await?;
     Ok(())
 }
 
-fn print_store(app: [u8; 16], store: &MemoryStore) -> Result<()> {
+fn write_store(output: &mut impl Write, app: [u8; 16], store: &MemoryStore) -> Result<()> {
     let namespace = client_namespace(&app);
-    println!("{namespace}");
+    writeln!(output, "{namespace}")?;
     for (key, value) in store.scan(&namespace, b"", None, u32::MAX)? {
-        println!("{} {}", STANDARD.encode(key), STANDARD.encode(value));
+        writeln!(output, "{} {}", STANDARD.encode(key), STANDARD.encode(value))?;
     }
+    output.flush()?;
     Ok(())
 }
