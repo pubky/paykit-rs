@@ -4,7 +4,7 @@ use super::*;
 use crate::common::{btc, draft, request_from};
 use paykit_sdk::{rail::FakeRail, PayOutcome, PayeeStatus, RequestRef};
 use pubky_switch_client::app::{
-    AppError, Collection as SwitchCollection, RecordRead, RecordTarget, Refusal,
+    AppError, AppEvent, Collection as SwitchCollection, RecordRead, RecordTarget, Refusal,
 };
 
 struct Wallets {
@@ -97,6 +97,33 @@ async fn pay(
     Ok((payer, request, outcome))
 }
 
+async fn received_proofs(seller: &mut Paykit) -> TestResult<Vec<String>> {
+    let mut proofs = Vec::new();
+    for _ in 0..8 {
+        let received = Box::pin(seller.receive(None)).await?;
+        assert!(!received.report.stopped);
+        proofs.extend(
+            received
+                .report
+                .events
+                .into_iter()
+                .filter_map(|event| match event {
+                    AppEvent::MessageReceived { kind, msg_id, .. }
+                        if kind == paykit_lib::kinds::Kind::PaymentProof.as_str() =>
+                    {
+                        Some(msg_id)
+                    }
+                    _ => None,
+                }),
+        );
+        if !received.report.more && received.records_unlisted.is_none() {
+            assert!(!seller.app().listing_owed().await?);
+            return Ok(proofs);
+        }
+    }
+    panic!("seller did not finish receiving the payment proofs");
+}
+
 async fn funded_ledger(world: &World, proposer: AllowanceRole) -> TestResult {
     let Wallets {
         payer,
@@ -111,11 +138,16 @@ async fn funded_ledger(world: &World, proposer: AllowanceRole) -> TestResult {
     let (mut payer, first, result) = Box::pin(pay(world, &mut seller, payer, key, "70")).await?;
     let PayOutcome::Paid {
         attempt_id: first_attempt,
+        proof_msg_id: Some(first_proof),
         ..
     } = result?
     else {
         panic!("expected the first payment");
     };
+    assert_eq!(
+        Box::pin(received_proofs(&mut seller)).await?,
+        [first_proof.as_str()]
+    );
     let usage = Box::pin(payer.reconcile_allowance(&key))
         .await?
         .expect("funded ledger");
@@ -178,9 +210,11 @@ async fn funded_ledger(world: &World, proposer: AllowanceRole) -> TestResult {
         "{refusal}"
     );
     assert_eq!(rail.all_pay_calls().values().sum::<u64>(), 1);
+    assert!(Box::pin(received_proofs(&mut seller)).await?.is_empty());
     let (mut payer, last, result) = Box::pin(pay(world, &mut seller, payer, key, "30")).await?;
     let PayOutcome::Paid {
         attempt_id: last_attempt,
+        proof_msg_id: Some(last_proof),
         ..
     } = result?
     else {
@@ -188,6 +222,7 @@ async fn funded_ledger(world: &World, proposer: AllowanceRole) -> TestResult {
     };
     assert_eq!(payer.app_id(), original);
     assert_ne!(first_attempt, last_attempt);
+    assert_ne!(first_proof, last_proof);
     assert_eq!(rail.all_executions().len(), 2);
     let usage = Box::pin(payer.reconcile_allowance(&key))
         .await?
@@ -201,7 +236,10 @@ async fn funded_ledger(world: &World, proposer: AllowanceRole) -> TestResult {
         ),
         ("100", 2, 0, 0)
     );
-    Box::pin(finish_listing(&mut seller)).await;
+    assert_eq!(
+        Box::pin(received_proofs(&mut seller)).await?,
+        [last_proof.as_str()]
+    );
     let sales = seller.payee_activity().await?;
     for (request, attempt, amount) in [(first, first_attempt, "70"), (last, last_attempt, "30")] {
         assert_eq!(rail.pay_calls(&attempt), 1);
