@@ -1006,8 +1006,8 @@ impl Paykit {
     /// Pay one Billing Period under the Allowance named by the accepted subscription
     /// for this occurrence. Its executor reserves the amount and opens the period's
     /// claim in the same batch (Paykit spec 8.2, 8.3). A payment requiring currency
-    /// conversion is ineligible. A later period requiring a destination from period details
-    /// returns [`Refusal::NoDestination`].
+    /// conversion is ineligible. For a later occurrence that needs its own destination, the
+    /// wallet uses eligible signed period details. Missing details return [`Refusal::NoDestination`].
     ///
     /// # Errors
     ///
