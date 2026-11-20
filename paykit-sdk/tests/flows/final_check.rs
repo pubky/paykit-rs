@@ -1464,6 +1464,37 @@ async fn test_fence_new_seller_document_during_paying_holds_even_when_the_shop_r
 }
 
 #[tokio::test]
+async fn test_fence_older_switch_answer_with_a_newer_homeserver_copy_holds_the_payment() {
+    let w = World::new();
+    let (_, _, request, mut wallet) = answered_during_paying(&w, |w| {
+        // The seller publishes a new signed document that still lists the shop. The
+        // switch answers the ongoing lookup with its previous signed version.
+        w.bob
+            .sign_next(|body| body.record_max_age = Some(86_400))
+            .unwrap();
+    })
+    .await;
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Pending { .. }), "{outcome:?}");
+    let attempts = wallet.payments().await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].stage, paykit_sdk::Stage::Attempted);
+    assert!(w.rail.all_pay_calls().is_empty());
+    let held = wallet
+        .app_mut()
+        .identity_of(&request.payee, false)
+        .await
+        .unwrap();
+    assert_eq!(held.doc.version(), w.bob.body().version);
+    assert!(held.homeserver_read_ms.is_some());
+    assert!(held.switch_read_ms.is_none());
+}
+
+#[tokio::test]
 async fn test_fence_unchanged_seller_then_unanswered_dispatch_stays_uncertain_on_reopen() {
     let w = World::new();
     let (store, app_id, request, mut wallet) = answered_during_paying(&w, |_| {}).await;

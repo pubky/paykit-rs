@@ -4880,16 +4880,19 @@ impl Paykit {
             {
                 return Ok(FinalCheck::Hold);
             }
-            if !self.kept_lookup_answered(&entry.payee) {
+            let confirmed_document =
+                self.inspect_ready_lookup(&entry.payee, |answer| answer.confirms(&payee.doc));
+            let Some(confirmed_document) = confirmed_document else {
                 // No await from these checks through to the call of the payment method.
                 return self.final_gates(entry, &payee, by, confirmed, kind);
-            }
+            };
             if !may_take_answer || entry.destination.source()? == DestinationSource::Public {
                 return Ok(FinalCheck::Hold);
             }
             match self.take_kept_lookup(&entry.payee).await? {
                 Ok(Some(answer))
-                    if answer.switch_copy == SwitchCopy::Read
+                    if confirmed_document
+                        && answer.switch_copy == SwitchCopy::Read
                         && answer.doc.signed() == payee.doc.signed() =>
                 {
                     payee = answer;
