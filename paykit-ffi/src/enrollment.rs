@@ -110,8 +110,11 @@ impl WalletEnrollment {
         let owner = store.ownership.clone();
         let result = operation(&store).await;
         drop(store);
-        let release = owner.finish().await;
-        result.and_then(|value| release.map(|()| value))
+        // A completed approval remains committed if releasing its reference fails.
+        // A subsequent opener retries that exact token. Explicit shutdown of an
+        // installed wallet separately confirms release of its writer.
+        let _ = owner.first_release().await;
+        result
     }
 }
 #[uniffi::export(async_runtime = "tokio")]

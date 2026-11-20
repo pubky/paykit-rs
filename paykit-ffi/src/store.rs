@@ -171,16 +171,20 @@ impl LeaseOwner {
             let _ = owner.release();
         }
     }
-    pub(crate) async fn finish(self: &Arc<Self>) -> Result<(), crate::WalletError> {
+    pub(crate) async fn first_release(&self) -> Result<(), StorageError> {
         let mut released = self.result.subscribe();
-        let first = released
+        let result = released
             .wait_for(Option::is_some)
             .await
-            .map_err(|_| StoreError::Unknown)?
+            .map_err(|_| StorageError::Unknown)?
             .as_ref()
             .cloned()
-            .ok_or(StoreError::Unknown)?;
-        if first.is_err() {
+            .ok_or(StorageError::Unknown)?;
+        result
+    }
+
+    pub(crate) async fn finish(self: &Arc<Self>) -> Result<(), crate::WalletError> {
+        if self.first_release().await.is_err() {
             let owner = self.clone();
             tokio::task::spawn_blocking(move || owner.release())
                 .await
