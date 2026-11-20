@@ -38,7 +38,7 @@ use crate::activity::{ActivityTarget, Role};
 use crate::app_records::PublicAppFailure;
 use crate::error::{PaykitError, Refusal, Result};
 use crate::journal::{JournalEntry, KeptAmount, KeptPeriod, Stage};
-use crate::pay::{BlockedPayment, Chosen, PayOptions, PayOutcome, PayResult, Plan, Pricing};
+use crate::pay::{BlockedPayment, Chosen, PayOptions, PayResult, Plan, Pricing};
 use crate::paykit::Paykit;
 use crate::receipts::{period_request_target, received_receipt, ReceivedReceipt};
 use crate::records::{conflict, KeptMessage};
@@ -1017,23 +1017,32 @@ impl Paykit {
         options: PayOptions,
     ) -> PayResult {
         let mut public_failures = Vec::new();
-        let outcome =
-            Box::pin(self.pay_period_inner(request, period, payer, options, &mut public_failures))
-                .await;
+        let plan = Box::pin(self.plan_period_payment(
+            request,
+            period,
+            payer,
+            options,
+            &mut public_failures,
+        ))
+        .await;
+        let outcome = match plan {
+            Ok(plan) => Box::pin(self.execute(plan)).await,
+            Err(error) => Err(error),
+        };
         PayResult {
             outcome,
             public_failures,
         }
     }
 
-    async fn pay_period_inner(
+    async fn plan_period_payment(
         &mut self,
         request: &RequestRef,
         period: &PeriodRef,
         payer: PeriodPayer,
         options: PayOptions,
         public_failures: &mut Vec<PublicAppFailure>,
-    ) -> Result<PayOutcome> {
+    ) -> Result<Plan> {
         self.refresh_own()?;
         if options.quote_only {
             self.require_first_read()?;
@@ -1340,7 +1349,7 @@ impl Paykit {
             failed_on_claim: false,
             billing_period: Some(KeptPeriod::of(&period)),
         };
-        Box::pin(self.execute(Plan {
+        Ok(Plan {
             entry,
             record: target,
             carrier,
@@ -1355,8 +1364,7 @@ impl Paykit {
             end_hold,
             conditions,
             record_writes,
-        }))
-        .await
+        })
     }
 
     /// Select the eligible signed rate sources from this occurrence's bounded period record.
