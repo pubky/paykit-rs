@@ -86,3 +86,5 @@ swiftc -swift-version 6 -parse-as-library -I "$OUT" -I "$OUT/swift" \
     -o "$OUT/wallet-consumer"
 DYLD_LIBRARY_PATH="$OUT:$LIB" "$OUT/wallet-consumer"
 ```
+
+To exercise a full checkout from the host, build the host library with `--features bindgen,test-wallet` and regenerate the bindings. Supply `-PcheckoutTest=true` to the Kotlin command. For the Swift 6 command, add `-D PAYKIT_CHECKOUT_TEST` and `paykit-ffi/tests/hosts/CheckoutConsumer.swift`. Both consumers enroll with a local shop, acknowledge a recovery notice across reopen, and cancel the payment call after the host method has durably charged it. The reopened wallet uses the original attempt to obtain the signed seller receipt.

@@ -192,12 +192,25 @@ async fn payment(
         ),
     ))
     .await?;
+    assert!(matches!(
+        sent.delivery,
+        paykit_sdk::MessageDelivery::Accepted { .. }
+    ));
     let request = sent.request.ok_or("missing signed request")?;
+    // A request held during the first listing reports its original ID when the wallet
+    // has applied it. The service accepting delivery precedes that receive.
+    let mut applied = false;
     for _ in 0..8 {
-        if !Box::pin(payer.receive()).await?.more {
+        if Box::pin(payer.receive())
+            .await?
+            .applied
+            .contains(&sent.msg_id)
+        {
+            applied = true;
             break;
         }
     }
+    assert!(applied);
     let views = payer.requests().await?;
     assert_eq!(views.len(), 1);
     assert_eq!(views[0].id.request_hash, request.request_hash);

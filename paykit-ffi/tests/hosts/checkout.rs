@@ -7,7 +7,10 @@ use paykit_lib::{
     PaymentReference,
 };
 use paykit_sdk::{AppScopes, Paykit, RequestDestination, RequestDraft, RequestRef};
-use pubky_switch_client::store::MemoryStore;
+use pubky_switch_client::{
+    store::MemoryStore,
+    transport::{BoxFuture, FirstSend, Request, Response, Transport, TransportError},
+};
 use pubky_switch_core::{
     records::{AppRequest, AuthRequest},
     sig::SignedDoc,
@@ -18,6 +21,29 @@ use std::{collections::BTreeMap, error::Error, sync::Arc};
 use tokio::sync::Mutex;
 
 use crate::fixture_signer as signer;
+
+// Poll the in-process service on its own task, as a remote service would be. The host
+// executor still runs the wallet and its actual protocol verifiers.
+struct CheckoutService(Arc<dyn Transport>);
+
+impl Transport for CheckoutService {
+    fn send(&self, request: Request) -> BoxFuture<'_, Result<Response, TransportError>> {
+        let service = self.0.clone();
+        Box::pin(async move {
+            tokio::spawn(async move { service.send(request).await })
+                .await
+                .expect("local checkout service stopped")
+        })
+    }
+
+    fn send_before<'a>(
+        &'a self,
+        request: Request,
+        first: &'a FirstSend,
+    ) -> BoxFuture<'a, Result<Response, TransportError>> {
+        self.0.send_before(request, first)
+    }
+}
 
 /// A local seller and independent approving signer, available with the test-wallet feature.
 #[derive(uniffi::Object)]
@@ -46,7 +72,7 @@ impl CheckoutFixture {
         });
         let host = Arc::new(WalletHost {
             clock: world.clock().clone(),
-            transport: world.transport(),
+            transport: Arc::new(CheckoutService(world.transport())),
             home: world.files().clone(),
             writer: world.files().clone(),
             store,
@@ -94,7 +120,6 @@ impl CheckoutFixture {
         let mut signer = self.signer.lock().await;
         let reviewed = signer.review(&document, &auth)?;
         let approved = Box::pin(signer.approve(reviewed)).await?;
-        signer.claim_delivered(&approved.request).await?;
         Ok(approved.claim)
     }
 }
