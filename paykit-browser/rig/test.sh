@@ -40,6 +40,14 @@
 # program that does not know it cannot make the rig enrol, nor arm, disarm or read its fault.
 # Every port must be free on both 127.0.0.1 and ::1, the addresses a browser may resolve
 # localhost to.
+#
+# PAYKIT_BROWSER_SKIP_KEYCHAIN_TESTS=1 is for local runs on macOS only (refused elsewhere), and
+# CI never sets it: WebKit runs then leave out the tests that store a CryptoKey in IndexedDB,
+# as Playwright's WebKit on macOS asks the user for Keychain access to store one and the test
+# waits for the answer (runner.mjs, "Environment"). Each test left out is printed, and the
+# summary counts them: such a run does not cover WebKit fully. 0 or unset runs every test. It
+# is reported apart from the store targets that runner.mjs excludes in an engine build with no
+# Origin Private File System (NO_OPFS there), which the summary lists as warnings.
 
 set -euo pipefail
 
@@ -73,6 +81,23 @@ case "${2:-both}" in
   *) usage ;;
 esac
 shift $(($# >= 2 ? 2 : 1))
+
+skip_keychain=${PAYKIT_BROWSER_SKIP_KEYCHAIN_TESTS:-0}
+case "$skip_keychain" in
+  0 | 1) export PAYKIT_BROWSER_SKIP_KEYCHAIN_TESTS=$skip_keychain ;;
+  *)
+    echo "error: PAYKIT_BROWSER_SKIP_KEYCHAIN_TESTS must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
+if [[ $skip_keychain == 1 && $(uname -s) != Darwin ]]; then
+  echo "error: PAYKIT_BROWSER_SKIP_KEYCHAIN_TESTS=1 is for macOS only" >&2
+  exit 2
+fi
+if [[ $skip_keychain == 1 && " ${engines[*]} " == *" webkit "* ]]; then
+  echo "PAYKIT_BROWSER_SKIP_KEYCHAIN_TESTS=1: WebKit runs leave out the tests that store a" \
+    "CryptoKey in IndexedDB; this is not full WebKit coverage"
+fi
 
 rig=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 root=$(cd "$rig/../.." && pwd)
@@ -392,6 +417,8 @@ skipped=()
 # Store targets not run in an engine build without the Origin Private File System, with the
 # reason (runner.mjs, NO_OPFS).
 excluded=()
+# Tests left out as they need Keychain access (PAYKIT_BROWSER_SKIP_KEYCHAIN_TESTS).
+not_run=()
 for engine in "${engines[@]}"; do
   ran=no
   failed_before=${#failed[@]}
@@ -418,6 +445,9 @@ for engine in "${engines[@]}"; do
     while IFS= read -r line; do
       excluded+=("$engine/$context: $line")
     done < <(sed -n 's/^\[runner\] EXCLUDED //p' "$log")
+    for test in $(sed -n 's/^\[runner\] NOT RUN \([^ ]*\): needs Keychain access.*/\1/p' "$log"); do
+      not_run+=("$test@$engine/$context")
+    done
   done
   if [[ $ran == no && ${#failed[@]} -eq $failed_before ]]; then
     echo "error: no test ran in $engine (${contexts[*]}); check the test name filter" >&2
@@ -440,9 +470,25 @@ if [[ $switch -eq 1 ]]; then
   kill -0 "$rig_pid" 2>/dev/null || failed+=("switch-rig.mjs exited during the tests")
 fi
 
+if [[ ${#not_run[@]} -gt 0 ]]; then
+  echo "not run, as they need Keychain access for Playwright's WebKit on macOS" \
+    "(PAYKIT_BROWSER_SKIP_KEYCHAIN_TESTS=1): ${#not_run[@]} tests"
+fi
+
 if [[ ${#failed[@]} -gt 0 ]]; then
   [[ $switch -eq 0 || -n "${PAYKIT_BROWSER_RIG_LOG_DIR:-}" ]] || tail_logs
   echo "failed: ${failed[*]}" >&2
   exit 1
 fi
-echo "all passed: ${engines[*]} x ${contexts[*]}"
+# What did not run is named in the summary line too, apart from the single-context skips,
+# which run in the other context.
+left_out=""
+[[ ${#excluded[@]} -eq 0 ]] ||
+  left_out="${#excluded[@]} target runs excluded in an engine build with no Origin Private File System"
+[[ ${#not_run[@]} -eq 0 ]] ||
+  left_out+="${left_out:+; }${#not_run[@]} tests not run as they need Keychain access"
+if [[ -n $left_out ]]; then
+  echo "all passed, except: $left_out: ${engines[*]} x ${contexts[*]}"
+else
+  echo "all passed: ${engines[*]} x ${contexts[*]}"
+fi
