@@ -635,6 +635,8 @@ pub struct Ledger {
     pub counterparty: [u8; 32],
     /// The Allowance.
     pub allowance_id: AllowanceId,
+    /// Hash of the original signed acceptance in the permanent Allowance record.
+    pub acceptance: [u8; 32],
     /// One entry per attempt under the Allowance.
     pub entries: Vec<LedgerEntry>,
     /// `totals.spent`: paid amounts of compacted entries; `None` for `""`, a ledger never
@@ -693,6 +695,7 @@ static LEDGER_SHAPE: Shape = Shape {
         ("v", Member::Leaf),
         ("counterparty", Member::Leaf),
         ("allowance_id", Member::Leaf),
+        ("acceptance", Member::Leaf),
         ("entries", Member::Array(&ENTRY_SHAPE)),
         ("totals", Member::Object(&TOTALS_SHAPE)),
     ],
@@ -705,6 +708,7 @@ struct LedgerOut<'a> {
     v: u64,
     counterparty: String,
     allowance_id: &'a str,
+    acceptance: String,
     entries: Vec<EntryOut>,
     totals: TotalsOut,
 }
@@ -736,20 +740,26 @@ struct FailedOut {
 
 impl Ledger {
     /// An empty ledger value for the Allowee `counterparty` and Allowance `allowance_id`
-    /// (Paykit wire 5.5). An empty value alone does not establish zero usage.
-    /// Allowance acceptance is unavailable in this revision. How acceptance establishes
-    /// the Allower's initial ledger and the executor's initial anchor remains unspecified
+    /// (Paykit wire 5.5). Use [`Ledger::initial_value`] for the acceptance batch.
+    /// Establishing a spending anchor also requires the verified write and grant
     /// (Paykit spec 8.3.1).
-    pub fn empty(counterparty: [u8; 32], allowance_id: AllowanceId) -> Self {
+    pub fn empty(counterparty: [u8; 32], allowance_id: AllowanceId, acceptance: [u8; 32]) -> Self {
         Self {
             counterparty,
             allowance_id,
+            acceptance,
             entries: Vec::new(),
             spent: None,
             count: 0,
             failed: Vec::new(),
             unknown: UnknownMembers::default(),
         }
+    }
+
+    fn same_allowance(&self, other: &Self) -> bool {
+        self.counterparty == other.counterparty
+            && self.allowance_id == other.allowance_id
+            && self.acceptance == other.acceptance
     }
 
     /// Read a ledger value (Paykit wire 5.5). Each `attempt_id` appears once among the
@@ -811,6 +821,7 @@ impl Ledger {
         let ledger = Self {
             counterparty: obj.req_pubky("counterparty")?,
             allowance_id: AllowanceId::parse(obj.req_str("allowance_id")?)?,
+            acceptance: obj.req_b64::<32>("acceptance")?,
             entries,
             spent,
             count,
@@ -842,6 +853,24 @@ impl Ledger {
             }
         }
         Ok(())
+    }
+
+    /// The exact initial ledger of the Allower's acceptance batch (Paykit wire 5.9).
+    ///
+    /// The acceptance is the hash of the recipient's original signed reply.
+    pub fn initial_value(
+        counterparty: &[u8; 32],
+        id: &AllowanceId,
+        acceptance: &[u8; 32],
+    ) -> Vec<u8> {
+        // The three encodings have restricted ASCII alphabets and require no JSON escaping.
+        format!(
+            r#"{{"v":1,"counterparty":"{}","allowance_id":"{}","acceptance":"{}"}}"#,
+            pubky_id(counterparty),
+            id.as_str(),
+            b64(acceptance),
+        )
+        .into_bytes()
     }
 
     /// Write the ledger value: every entry with its `outcome` (`null` while unknown);
@@ -881,6 +910,7 @@ impl Ledger {
             v: 1,
             counterparty: pubky_id(&self.counterparty),
             allowance_id: self.allowance_id.as_str(),
+            acceptance: b64(&self.acceptance),
             entries: self
                 .entries
                 .iter()
@@ -1340,6 +1370,7 @@ pub fn compact(terms: &AllowanceTerms, ledger: &Ledger, now: u64) -> Result<Opti
     Ok(Some(Ledger {
         counterparty: ledger.counterparty,
         allowance_id: ledger.allowance_id.clone(),
+        acceptance: ledger.acceptance,
         entries: kept,
         spent: Some(Decimal::from_scaled(spent)),
         count,
@@ -1382,8 +1413,7 @@ pub fn check_successor(
     held.check_valid(terms)?;
     newer.check_valid(terms)?;
     let refuse = |why: &str| invalid(format!("Paykit wire 5.5: a newer ledger version {why}"));
-    // One ledger, two versions: the same Allowance with the same counterparty.
-    if newer.counterparty != held.counterparty || newer.allowance_id != held.allowance_id {
+    if !newer.same_allowance(held) {
         return refuse("is another Allowance's ledger");
     }
     // Terms whose longest period can't be represented at the newer write's time make the
@@ -1599,7 +1629,7 @@ pub fn merge_for_repair(
 ) -> Result<Ledger> {
     kept.check_valid(terms)?;
     if let Some(shown) = shown {
-        if shown.counterparty != kept.counterparty || shown.allowance_id != kept.allowance_id {
+        if !shown.same_allowance(kept) {
             return invalid("Paykit wire 5.5: the ledger shown is another Allowance's");
         }
     }
@@ -1815,6 +1845,7 @@ mod tests {
             ..Ledger::empty(
                 [5; 32],
                 AllowanceId::parse("d0efffb7-191b-4709-b6c7-e343af5500b4").unwrap(),
+                [9; 32],
             )
         }
     }
@@ -2409,7 +2440,11 @@ mod tests {
             allowance_id: AllowanceId::parse("55de1f16-1a9e-4504-bc9c-57efc3a2b38c").unwrap(),
             ..empty.clone()
         };
-        for newer in [other_counterparty, other_allowance] {
+        let other_acceptance = Ledger {
+            acceptance: [7; 32],
+            ..empty.clone()
+        };
+        for newer in [other_counterparty, other_allowance, other_acceptance] {
             let error = check_successor(&terms, &empty, now, &newer, now).unwrap_err();
             assert!(error.to_string().contains("another Allowance"), "{error}");
         }
@@ -3087,7 +3122,11 @@ mod tests {
             shown_valid,
             ledger(journal.clone()),
             ledger(claims.clone()),
-            Ledger::empty(kept.counterparty, kept.allowance_id.clone()),
+            Ledger::empty(
+                kept.counterparty,
+                kept.allowance_id.clone(),
+                kept.acceptance,
+            ),
         ];
         let times = [
             IN_MONTH,
@@ -3142,7 +3181,11 @@ mod tests {
         assert_eq!(alone.failed, kept.failed);
         assert_eq!((alone.spent.clone(), alone.count), (None, 0));
         // A qualified empty checkpoint plus the journal and claim-derived entries.
-        let empty = Ledger::empty(kept.counterparty, kept.allowance_id.clone());
+        let empty = Ledger::empty(
+            kept.counterparty,
+            kept.allowance_id.clone(),
+            kept.acceptance,
+        );
         let fresh = merge_for_repair(&terms, &empty, None, &journal, &claims, t(IN_MONTH)).unwrap();
         assert_eq!(fresh.entries.len(), 3);
     }
@@ -3152,6 +3195,11 @@ mod tests {
         let terms = AllowanceTerms::from_json(&terms()).unwrap();
         let (kept, mut shown, journal, claims) = repair_inputs();
         shown.counterparty = [6; 32];
+        assert!(
+            merge_for_repair(&terms, &kept, Some(&shown), &journal, &claims, t(IN_MONTH)).is_err()
+        );
+        shown.counterparty = kept.counterparty;
+        shown.acceptance = [7; 32];
         assert!(
             merge_for_repair(&terms, &kept, Some(&shown), &journal, &claims, t(IN_MONTH)).is_err()
         );

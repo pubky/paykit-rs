@@ -4,6 +4,7 @@
 
 pub(crate) mod publications;
 
+use paykit_lib::allowances::Ledger;
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::{
     mark_settlement_tag, natural_key, occurrence_tag, request_hash, settlement_bucket,
@@ -12,9 +13,10 @@ use paykit_lib::derive::{
 use paykit_lib::identifiers::PaymentEndpointIdentifier;
 use paykit_lib::records::{
     bind_ledger, ActivityRecord, ActivitySide, AllowanceRecord, OccurrenceKind, PaymentListRecord,
-    PendingAllowanceRecord, SeenMerge, SettlementBucket, SettlementMark, MAX_SETTLEMENT_MARKS,
+    PendingAllowanceRecord, SeenMerge, SettlementBucket, SettlementMark, StoredMessage,
+    MAX_SETTLEMENT_MARKS,
 };
-use paykit_lib::scopes::{Label, PaykitScope, ScopeName, SETTLEMENTS};
+use paykit_lib::scopes::{holds, Label, PaykitScope, ScopeName, SETTLEMENTS};
 use pubky_switch_core::enc::b64;
 use pubky_switch_core::ident::{key_of_scope, NamingKey, Policy};
 use pubky_switch_core::records::AppCert;
@@ -56,7 +58,6 @@ pub(crate) fn check() {
 /// seen roles, the seen Allowance and attempted periods.
 fn check_activity_rules(keys: &Keys) {
     use paykit_lib::identifiers::AllowanceId;
-    use paykit_lib::records::StoredMessage;
     use pubky_switch_core::message::MessagePlaintext;
     use pubky_switch_core::ops::Condition;
 
@@ -221,6 +222,18 @@ fn check_bindings(keys: &Keys, v: &Value) {
     assert_eq!(allowance.terms_hash(), Some(terms));
     assert!(allowance.current_grant(&alice).is_none(), "no grant yet");
     assert_eq!(allowance.ledger_key(&nk).unwrap(), key(&accepted[2]));
+    let initial = &v["allowance_initial_ledger"];
+    assert_eq!(key(initial), allowance.ledger_key(&nk).unwrap());
+    let answer = allowance.response.as_ref().unwrap();
+    assert_eq!(answer.message().refs, vec![allowance.proposal.hash()]);
+    assert_eq!(b64(&answer.hash()), st(initial, "acceptance"));
+    let expected = format!(
+        r#"{{"v":1,"counterparty":"{BOB}","allowance_id":"{ALLOWANCE_ID}","acceptance":"{}"}}"#,
+        b64(&answer.hash())
+    );
+    assert_eq!(value(initial), expected.as_bytes());
+    let empty = bind_ledger(value(initial), &nk, &key(initial), &allowance).unwrap();
+    assert!(empty.entries.is_empty() && empty.spent.is_none() && empty.count == 0);
     let ledger = bind_ledger(value(&accepted[2]), &nk, &key(&accepted[2]), &allowance).unwrap();
     assert!(ledger.entries.is_empty());
     assert_eq!(
@@ -228,6 +241,83 @@ fn check_bindings(keys: &Keys, v: &Value) {
         value(&accepted[2]),
         "the ledger writes back"
     );
+
+    let usage = paykit("allowance_usage.json");
+    let later = &usage["cases"][1]["ledger"];
+    let counted = bind_ledger(
+        &serde_json::to_vec(later).unwrap(),
+        &nk,
+        &key(initial),
+        &allowance,
+    )
+    .unwrap();
+    assert!(!counted.entries.is_empty());
+    assert_eq!(counted.acceptance, answer.hash());
+    let round_trip =
+        bind_ledger(&counted.to_json().unwrap(), &nk, &key(initial), &allowance).unwrap();
+    assert_eq!(round_trip, counted);
+    let mirror = AllowanceRecord {
+        counterparty: alice,
+        ..allowance.clone()
+    };
+    let mirror_naming = keys.identity(&bob).naming_key();
+    let mirror_value = Ledger::initial_value(&alice, &mirror.allowance_id, &answer.hash());
+    let mirror_key = mirror.ledger_key(&mirror_naming).unwrap();
+    let error = bind_ledger(&mirror_value, &mirror_naming, &mirror_key, &mirror).unwrap_err();
+    assert!(error.to_string().contains("Allower's account"), "{error}");
+
+    let rejection = resigned(
+        keys,
+        "allowance_rejection",
+        Some(vec![allowance.proposal.hash()]),
+        |body| {
+            body.insert("allowance_id".into(), serde_json::json!(ALLOWANCE_ID));
+        },
+    );
+    let rejected_zero = Ledger::initial_value(&bob, &allowance.allowance_id, &rejection.hash());
+    for response in [None, Some(rejection)] {
+        let unanswered_or_rejected = AllowanceRecord {
+            response,
+            ..allowance.clone()
+        };
+        assert!(bind_ledger(&rejected_zero, &nk, &key(initial), &unanswered_or_rejected).is_err());
+    }
+
+    let offered = &initial["allower_proposal"];
+    let offer = AllowanceRecord::bind(
+        st(offered, "allowance").as_bytes(),
+        &bob,
+        &mirror_naming,
+        &b64n::<32>(st(offered, "allowance_key")),
+    )
+    .unwrap();
+    let reply = offer.response.as_ref().unwrap();
+    assert_eq!((offer.proposal.sender(), reply.sender()), (bob, alice));
+    assert_eq!(reply.message().refs, [offer.proposal.hash()]);
+    for (payer, seller) in [(answer, &allowance.proposal), (&offer.proposal, reply)] {
+        assert!(holds(payer.cert().scopes(), &PaykitScope::AllowanceExecute));
+        assert!(holds(seller.cert().scopes(), &PaykitScope::Allowance));
+        assert!(holds(seller.cert().scopes(), &PaykitScope::Contacts));
+    }
+    let zero = bind_ledger(value(offered), &mirror_naming, &key(offered), &offer).unwrap();
+    assert_eq!(zero, Ledger::empty(alice, offer.allowance_id, reply.hash()));
+    let identifiers = paykit("identifiers.json");
+    for (payer, ledger) in [(ALICE, initial), (BOB, offered)] {
+        let address = arr(&identifiers["record_keys"], "cases")
+            .iter()
+            .find(|case| {
+                case["identity"] == payer
+                    && case["collection"] == Collection::AllowanceLedgers.name()
+            })
+            .unwrap();
+        assert_eq!(key(ledger), key(address));
+    }
+
+    for case in arr(initial, "refused") {
+        let err = bind_ledger(st(case, "value").as_bytes(), &nk, &key(initial), &allowance)
+            .expect_err(st(case, "name"));
+        assert!(err.to_string().contains("acceptance"), "{err}");
+    }
 
     // The record with the grant history of documents.json binds, and its grant is current.
     let entry = &paykit("documents.json")["executor_grant_history_entry"];
@@ -444,7 +534,7 @@ fn check_labelled(keys: &Keys, l: &Value) {
 }
 
 /// A stored message of `messages.json`, by name, as its recipient stores it.
-fn stored_message(keys: &Keys, name: &str) -> paykit_lib::records::StoredMessage {
+pub(crate) fn stored_message(keys: &Keys, name: &str) -> paykit_lib::records::StoredMessage {
     let m = crate::common::message(name);
     stored_json(keys, &m)
 }
@@ -1364,6 +1454,10 @@ pub(crate) fn generate(keys: &Keys) {
             Place::Member("/allowance_proposals"),
             pending_proposals(keys),
         ),
+        (
+            Place::Member("/allowance_initial_ledger"),
+            initial_ledger(keys),
+        ),
         (Place::Member("/settlement_marks"), settlement_marks(keys)),
         (
             Place::Member("/private_list_publications"),
@@ -1397,6 +1491,19 @@ fn binding_value(keys: &Keys, case: &Value) -> String {
         return text
             .replace(st(held, "signature"), &b64(&list.plaintext().signature()))
             .replace(st(held, "json"), &b64(list.plaintext().json()));
+    }
+    if st(case, "collection") == "allowance_ledgers" {
+        // Use the original signed response independently of the ledger input.
+        let q = stored_message(keys, "allowance_acceptance").hash();
+        let mut record: Value = serde_json::from_str(&text).unwrap();
+        record["acceptance"] = serde_json::json!(b64(&q));
+        return String::from_utf8(
+            Ledger::from_map(record.as_object().unwrap())
+                .unwrap()
+                .to_json()
+                .unwrap(),
+        )
+        .unwrap();
     }
     if st(case, "collection") != "allowances" {
         return text;
@@ -1928,7 +2035,6 @@ fn record_with_request(keys: &Keys, request: Value, json: &str) -> (Vec<u8>, [u8
 
 #[test]
 fn test_stored_message_refuses_a_label_its_sender_does_not_hold() {
-    use paykit_lib::records::StoredMessage;
     let keys = Keys::from_seeds();
     let alice = pubky(ALICE);
     for (name, m, cert) in unauthorized_stored(&keys) {
@@ -2409,18 +2515,11 @@ fn conflicting_response_cases(
     });
     // executor_app_id only in an acceptance from the allower (Paykit wire 4.16), in a
     // conflicting acceptance too: here the proposer is the allower.
-    let allower_proposal = resigned(keys, "allowance_proposal", None, |b| {
-        b.insert("proposer_role".into(), serde_json::json!("allower"));
+    let (allower_proposal, original_acceptance) = allower_proposed_pair(keys);
+    let conflicting_acceptance = resign_with(keys, "allowance_acceptance", |m| {
+        m.msg_id = SECOND_RESPONSE.into();
+        m.refs = vec![allower_proposal.hash()];
     });
-    let from_allowee = |msg_id: &str, executor: bool| {
-        resign_with(keys, "allowance_acceptance", |m| {
-            m.msg_id = msg_id.into();
-            m.refs = vec![allower_proposal.hash()];
-            if !executor {
-                m.body.remove("executor_app_id");
-            }
-        })
-    };
     let mut refused = vec![
         (
             "a conflicting response naming another Allowance",
@@ -2454,9 +2553,9 @@ fn conflicting_response_cases(
         (
             "a conflicting acceptance from the allowee carrying executor_app_id",
             AllowanceRecord {
-                proposal: allower_proposal.clone(),
-                response: Some(from_allowee("250b9ef2-c357-4856-b8c0-863368e627b5", false)),
-                conflicted: Some(from_allowee(SECOND_RESPONSE, true)),
+                proposal: allower_proposal,
+                response: Some(original_acceptance),
+                conflicted: Some(conflicting_acceptance),
                 ..base.clone()
             },
         ),
@@ -2565,14 +2664,13 @@ fn signed_json_doc(doc: &pubky_switch_core::sig::SignedDoc) -> Value {
     serde_json::json!({ "body": doc.body, "sig": doc.sig })
 }
 
-/// The certificate of alice's wallet holding the executor's scopes, signed again by her
-/// identity key, so the wallet may take a grant.
-fn wallet_executor_cert(keys: &Keys) -> AppCert {
-    let scopes = crate::common::paykit_signed_scopes("executor").unwrap();
+/// A certificate signed by the app's identity with the scopes and permissions of an executor.
+fn executor_scoped_cert(keys: &Keys, app: &str) -> AppCert {
+    let scopes = &crate::common::EXECUTOR_SCOPES;
     let names: Vec<String> = scopes.iter().map(|s| (*s).to_owned()).collect();
     crate::common::reissued(
         keys,
-        "wallet",
+        app,
         scopes,
         &paykit_lib::scopes::permissions_for(&names),
     )
@@ -2611,7 +2709,7 @@ fn handed_on(keys: &Keys, base: &AllowanceRecord) -> AllowanceRecord {
     };
     let grants = vec![
         entry("executor", crate::common::executor_cert(keys), 1),
-        entry("wallet", wallet_executor_cert(keys), 3),
+        entry("wallet", executor_scoped_cert(keys, "wallet"), 3),
     ];
     let handoff = LedgerHandoff::sign(
         &keys.app("executor").keys,
@@ -2864,7 +2962,7 @@ fn test_ledger_handoff_counts_only_signed_by_the_previous_executor() {
     };
     let by_wallet = LedgerHandoff::sign(
         &keys.app("wallet").keys,
-        wallet_executor_cert(&keys).signed().clone(),
+        executor_scoped_cert(&keys, "wallet").signed().clone(),
         &alice,
         &base.counterparty,
         &base.allowance_id,
@@ -2955,7 +3053,7 @@ fn handed_back(
     let to_wallet = handed.ledger_handoff.clone().unwrap();
     let by_wallet = LedgerHandoff::sign(
         &keys.app("wallet").keys,
-        wallet_executor_cert(keys).signed().clone(),
+        executor_scoped_cert(keys, "wallet").signed().clone(),
         &alice,
         &handed.counterparty,
         &handed.allowance_id,
@@ -3093,7 +3191,7 @@ fn test_ledger_handoff_later_write_seen_after_skipped_versions_is_taken() {
     };
     let grant = ExecutorGrant::sign(
         &keys.app("wallet").keys,
-        wallet_executor_cert(&keys).signed().clone(),
+        executor_scoped_cert(&keys, "wallet").signed().clone(),
         &alice,
         &handed.counterparty,
         &handed.allowance_id,
@@ -3159,6 +3257,82 @@ fn crossing_proposal(keys: &Keys) -> paykit_lib::records::StoredMessage {
         m.to = pubky(BOB);
         m.body
             .insert("proposer_role".into(), serde_json::json!("allower"));
+    })
+}
+
+/// Bob offers an Allowance and Alice accepts it as Allowee. Only an acceptance from
+/// the Allower can name an executor (Paykit wire 4.16).
+fn allower_proposed_pair(keys: &Keys) -> (StoredMessage, StoredMessage) {
+    let proposal = resigned(keys, "allowance_proposal", None, |body| {
+        body.insert("proposer_role".into(), serde_json::json!("allower"));
+    });
+    let response = resign_with(keys, "allowance_acceptance", |m| {
+        m.msg_id = "250b9ef2-c357-4856-b8c0-863368e627b5".into();
+        m.refs = vec![proposal.hash()];
+        m.body.remove("executor_app_id");
+    });
+    (proposal, response)
+}
+
+fn initial_ledger(keys: &Keys) -> Value {
+    let own = pubky(ALICE);
+    let allowance = AllowanceRecord::read(&allowance_record_value(keys), &own).unwrap();
+    let acceptance = allowance.response.as_ref().unwrap().hash();
+    let naming = keys.identity(&own).naming_key();
+    let value = Ledger::initial_value(
+        &allowance.counterparty,
+        &allowance.allowance_id,
+        &acceptance,
+    );
+    let other = resign_with(keys, "allowance_acceptance", |m| {
+        m.msg_id = SECOND_RESPONSE.into()
+    });
+    assert_eq!(other.message().refs, [allowance.proposal.hash()]);
+    assert_ne!(other.hash(), acceptance);
+    let mut missing: Value = serde_json::from_slice(&value).unwrap();
+    missing.as_object_mut().unwrap().remove("acceptance");
+    let mut wrong_type = missing.clone();
+    wrong_type["acceptance"] = serde_json::json!(7);
+    let different = Ledger::initial_value(
+        &allowance.counterparty,
+        &allowance.allowance_id,
+        &other.hash(),
+    );
+    let (proposal, response) = allower_proposed_pair(keys);
+    let proposal = StoredMessage::new(
+        proposal.sender(),
+        executor_scoped_cert(keys, "shop").signed(),
+        proposal.plaintext().clone(),
+        proposal.accepted_at(),
+        &proposal.message().to,
+    )
+    .unwrap();
+    let responding_allowee = response.sender();
+    let original = response.hash();
+    let offer = AllowanceRecord {
+        counterparty: responding_allowee,
+        proposal,
+        response: Some(response),
+        ..allowance.clone()
+    };
+    let payer_naming = keys.identity(&offer.proposal.sender()).naming_key();
+    let offered = serde_json::json!({
+        "allowance": String::from_utf8(offer.to_json().unwrap()).unwrap(),
+        "allowance_key": b64(&offer.record_key(&payer_naming).unwrap()),
+        "record_key": b64(&offer.ledger_key(&payer_naming).unwrap()),
+        "value": String::from_utf8(Ledger::initial_value(&responding_allowee, &offer.allowance_id, &original)).unwrap(),
+    });
+    serde_json::json!({
+        "allower_proposal": offered,
+        "description": "Wire 5.9. Each Allower's initial permanent ledger names the original signed acceptance. Alice's executor accepts Bob's proposal. In allower_proposal, Bob's executor proposes and Alice accepts.",
+        "acceptance": b64(&acceptance),
+        "refused": [
+            {"name": "a ledger naming a second signed answer to the proposal", "value": String::from_utf8(different).unwrap()},
+            {"name": "a ledger missing the original acceptance hash", "value": serde_json::to_string(&missing).unwrap()},
+            {"name": "a ledger with a number in the acceptance field", "value": serde_json::to_string(&wrong_type).unwrap()},
+        ],
+        "record_key": b64(&allowance.ledger_key(&naming).unwrap()),
+        "value": String::from_utf8(value).unwrap(),
     })
 }
 
@@ -3918,7 +4092,6 @@ fn test_record_transitions_hold_records_built_in_code() {
 
 #[test]
 fn test_stored_message_from_received_is_its_plaintexts() {
-    use paykit_lib::records::StoredMessage;
     let keys = Keys::from_seeds();
     let request = stored_message(&keys, "payment_request");
     let other = stored_message(&keys, "payment_request_recurring");

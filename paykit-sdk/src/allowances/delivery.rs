@@ -50,7 +50,9 @@ pub(super) fn deletion_continues(generation: u64, recovery_from: Option<u64>) ->
 /// A two-reference end belongs to an accepted Allowance and uses its own delivery rule.
 pub(crate) fn pending_delivery(msg: &Message) -> bool {
     match Kind::from_kind(&msg.kind) {
-        Some(Kind::AllowanceProposal | Kind::AllowanceRejection) => true,
+        Some(Kind::AllowanceProposal | Kind::AllowanceAcceptance | Kind::AllowanceRejection) => {
+            true
+        }
         Some(Kind::AllowanceEnd) => msg.refs.len() == 1,
         _ => false,
     }
@@ -64,8 +66,7 @@ fn corrupt() -> StoreFailure {
 pub(crate) fn reply_is_applied(d: &DeliveryView<'_>) -> Result<bool, StoreFailure> {
     let msg = d.message();
     match Kind::from_kind(&msg.kind) {
-        Some(Kind::AllowanceAcceptance) => return Ok(false),
-        Some(Kind::AllowanceRejection) => (),
+        Some(Kind::AllowanceAcceptance | Kind::AllowanceRejection) => (),
         Some(Kind::AllowanceEnd) if msg.refs.len() == 1 => (),
         _ => return Ok(true),
     }
@@ -222,6 +223,11 @@ pub(crate) fn judge_append(
     }
     let supported = match kind {
         Some(Kind::AllowanceProposal) => pending.is_some_and(|r| r.proposal().hash() == d.hash()),
+        Some(Kind::AllowanceAcceptance) => permanent.is_some_and(|r| {
+            msg.refs.as_slice() == [r.proposal.hash()]
+                && r.response
+                    .is_some_and(|accepted| accepted.hash() == d.hash())
+        }),
         Some(Kind::AllowanceRejection) => {
             let [proposal] = msg.refs.as_slice() else {
                 return Ok(Hold);

@@ -21,8 +21,8 @@
 //!   paying ([`Paykit::pay_request`], [`Paykit::pay_without_request`],
 //!   [`Paykit::resume_payments`]), receiving ([`Paykit::receive`]), reconciliation
 //!   ([`Paykit::reconcile`]) and Allowances ([`Paykit::propose_allowance`],
-//!   [`Paykit::reject_allowance`], [`Paykit::end_allowance`], [`Paykit::allowances`];
-//!   accepting is unavailable in this version, [`Paykit::accept_allowance`]).
+//!   [`Paykit::accept_allowance`], [`Paykit::reject_allowance`], [`Paykit::end_allowance`],
+//!   [`Paykit::allowances`]).
 //! - [`Rail`]: the payment method's interface; `rail::FakeRail` for tests (feature
 //!   `test-support`).
 //! - [`Timer`]: the host's timer, which bounds the wait for a payee's switch.

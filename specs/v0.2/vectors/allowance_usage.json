@@ -23,6 +23,7 @@
       ],
       "claims": [],
       "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
         "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
         "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
         "entries": [],
@@ -88,6 +89,7 @@
         }
       ],
       "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
         "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
         "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
         "entries": [
@@ -184,6 +186,7 @@
         }
       ],
       "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
         "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
         "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
         "entries": [
@@ -297,6 +300,7 @@
         }
       ],
       "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
         "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
         "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
         "entries": [
@@ -388,6 +392,7 @@
       ],
       "claims": [],
       "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
         "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
         "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
         "entries": [
@@ -449,6 +454,7 @@
       ],
       "claims": [],
       "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
         "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
         "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
         "entries": [
@@ -531,6 +537,7 @@
         }
       ],
       "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
         "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
         "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
         "entries": [
@@ -616,6 +623,7 @@
         }
       ],
       "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
         "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
         "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
         "entries": [
@@ -684,6 +692,7 @@
         }
       ],
       "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
         "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
         "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
         "entries": [
@@ -724,6 +733,7 @@
   ],
   "compaction": {
     "after": {
+      "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
       "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
       "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
       "entries": [
@@ -758,6 +768,7 @@
       "v": 1
     },
     "before": {
+      "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
       "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
       "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
       "entries": [
@@ -815,6 +826,7 @@
         {
           "accepted": true,
           "held": {
+            "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
             "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
             "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
             "entries": [
@@ -836,6 +848,7 @@
           "held_time": "2026-01-31T13:00:00.000Z",
           "name": "monthly: compacted at February's end, written in March",
           "newer": {
+            "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
             "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
             "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
             "entries": [],
@@ -873,6 +886,7 @@
         {
           "accepted": false,
           "held": {
+            "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
             "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
             "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
             "entries": [
@@ -894,6 +908,7 @@
           "held_time": "2026-03-01T00:00:30.000Z",
           "name": "monthly: held from the newer write's time, judged in March alone",
           "newer": {
+            "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
             "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
             "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
             "entries": [],
@@ -931,6 +946,7 @@
         {
           "accepted": false,
           "held": {
+            "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
             "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
             "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
             "entries": [
@@ -952,6 +968,7 @@
           "held_time": "2026-03-05T00:00:00.000Z",
           "name": "monthly: held from after the newer write's time, judged at newer_time alone",
           "newer": {
+            "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
             "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
             "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
             "entries": [],
@@ -989,6 +1006,7 @@
         {
           "accepted": false,
           "held": {
+            "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
             "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
             "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
             "entries": [
@@ -1010,6 +1028,7 @@
           "held_time": "2026-02-02T00:00:00.000Z",
           "name": "monthly: no time from held_time to newer_time could compact the entry",
           "newer": {
+            "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
             "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
             "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
             "entries": [],
@@ -1047,6 +1066,7 @@
         {
           "accepted": true,
           "held": {
+            "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
             "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
             "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
             "entries": [
@@ -1068,6 +1088,7 @@
           "held_time": "2026-12-31T13:00:00.000Z",
           "name": "yearly: compacted at 2027's end, written in leap year 2028",
           "newer": {
+            "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
             "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
             "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
             "entries": [],
@@ -1105,6 +1126,7 @@
         {
           "accepted": false,
           "held": {
+            "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
             "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
             "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
             "entries": [
@@ -1126,6 +1148,7 @@
           "held_time": "2028-01-01T00:00:30.000Z",
           "name": "yearly: held from the newer write's time, judged in 2028 alone",
           "newer": {
+            "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
             "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
             "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
             "entries": [],
@@ -1207,6 +1230,7 @@
         "paid": false
       },
       "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
         "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
         "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
         "entries": [
@@ -1266,6 +1290,7 @@
         "paid": false
       },
       "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
         "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
         "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
         "entries": [
@@ -1319,6 +1344,7 @@
         "paid": false
       },
       "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
         "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
         "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
         "entries": [
@@ -1377,6 +1403,7 @@
         "paid": false
       },
       "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
         "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
         "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
         "entries": [
@@ -1435,6 +1462,7 @@
         "paid": false
       },
       "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
         "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
         "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
         "entries": [
@@ -1488,6 +1516,7 @@
         "paid": false
       },
       "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
         "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
         "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
         "entries": [
@@ -1547,6 +1576,7 @@
         "paid": false
       },
       "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
         "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
         "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
         "entries": [
@@ -1600,6 +1630,7 @@
         "paid": false
       },
       "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
         "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
         "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
         "entries": [
@@ -1653,6 +1684,7 @@
         "paid": true
       },
       "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
         "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
         "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
         "entries": [
@@ -1711,6 +1743,7 @@
         "paid": false
       },
       "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
         "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
         "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
         "entries": [
@@ -1764,6 +1797,7 @@
         "paid": false
       },
       "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
         "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
         "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
         "entries": [
@@ -1823,6 +1857,7 @@
         "paid": false
       },
       "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
         "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
         "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
         "entries": [],
@@ -1873,6 +1908,7 @@
         "paid": false
       },
       "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
         "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
         "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
         "entries": [],
@@ -1923,6 +1959,7 @@
         "paid": false
       },
       "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
         "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
         "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
         "entries": [],
@@ -1973,6 +2010,7 @@
         "paid": true
       },
       "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
         "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
         "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
         "entries": [],
@@ -2028,6 +2066,7 @@
         "paid": false
       },
       "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
         "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
         "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
         "entries": [],

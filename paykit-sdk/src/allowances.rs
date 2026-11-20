@@ -11,8 +11,7 @@
 //!   pending inventory. A matching first rejection or withdrawal closes the selected
 //!   pending version. A verified acceptance followed by a distinct rejection holds the
 //!   proposal while the acceptance awaits placement. The original recipient-signed
-//!   acceptance is required to open a permanent Allowance. New acceptance returns
-//!   [`Refusal::AllowanceAcceptanceUnavailable`], including after a restore.
+//!   acceptance opens a permanent Allowance together with the original ledger on the payer’s account.
 //! - **The stop:** a counterparty's `allowance_end` is kept in the app's own state in the
 //!   commit that passes its entry, with no write at the switch (`ae/`): at once for an
 //!   Allowance whose record the app holds, whatever the record's value, never waiting for
@@ -71,12 +70,15 @@ use crate::stored::{Placed, StoredNote};
 pub(crate) use delivery::{
     append_records, judge_append, pending_delivery, reply_is_applied, AppliedReply,
 };
+pub(crate) use original::{restore_originals, OriginalApproval};
 pub(crate) use pending::PreparedPendingReply;
 pub(crate) use replies::holds_delivery as pending_conflict_holds_delivery;
 pub(crate) use replies::{
     lifetime_ended, observe_reopened, restore_conflicts, PendingConflict, PendingRetirement,
 };
+mod application;
 mod delivery;
+mod original;
 mod pending;
 mod replies;
 
@@ -740,7 +742,7 @@ pub(crate) fn receive_effect(
                         return receive::note_peer(cx, &sender, stored);
                     }
                     replies::PendingReply::Stopped => {
-                        return receive::note_peer(cx, &sender, stored)
+                        return receive::note_peer(cx, &sender, stored);
                     }
                 }
             }
@@ -1531,7 +1533,9 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// Proposing requires both `paykit_allowance` and `paykit_contacts`.
+    /// A seller proposes with this method. The payer uses [`Self::propose_executable_allowance`]
+    /// to confirm its terms and automatic payment before signing P. Proposing requires both
+    /// `paykit_allowance` and `paykit_contacts`.
     /// [`Refusal::ScopeMissing`] identifies a missing scope. [`Refusal::NotNow`] is returned
     /// while sends to `to` are held because the deny list holds it, or the copy of
     /// the lists isn't known after a read tried now (Paykit spec 8.1, "Blocked counterparties"),
@@ -1545,20 +1549,58 @@ impl Paykit {
         role: AllowanceRole,
         terms: AllowanceTerms,
     ) -> Result<SentAllowance> {
-        Box::pin(self.propose_allowance_inner(to, role, terms)).await
+        Box::pin(self.propose_allowance_with_consent(to, role, terms, None)).await
     }
 
-    async fn propose_allowance_inner(
+    /// Propose these terms as payer and authorize this wallet as their first executor.
+    /// The host shows the counterparty, terms and automatic payments by this app once.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::propose_allowance`]. The payer must also hold execution authority.
+    pub async fn propose_executable_allowance(
+        &mut self,
+        to: [u8; 32],
+        terms: AllowanceTerms,
+        confirmed: crate::UserConfirmed,
+    ) -> Result<SentAllowance> {
+        Box::pin(self.propose_allowance_with_consent(
+            to,
+            AllowanceRole::Allower,
+            terms,
+            Some(confirmed),
+        ))
+        .await
+    }
+
+    fn require_payer_choice(&self, choice: Option<&crate::UserConfirmed>) -> Result<()> {
+        if !self.holds("paykit_allowance_execute") {
+            return Err(Refusal::ScopeMissing("paykit_allowance_execute".into()).into());
+        }
+        if choice.is_none() {
+            return Err(Refusal::Usage(
+                "confirm the Allowance terms and automatic payment by this wallet".into(),
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn propose_allowance_with_consent(
         &mut self,
         to: [u8; 32],
         role: AllowanceRole,
         terms: AllowanceTerms,
+        execution: Option<crate::UserConfirmed>,
     ) -> Result<SentAllowance> {
         self.refresh_own()?;
         let count = Box::pin(self.own_pending_count(&to)).await?;
         self.require_first_read()?;
         self.refresh_own()?;
         self.require_allowance_send(Kind::AllowanceProposal)?;
+        if role == AllowanceRole::Allower {
+            self.require_payer_choice(execution.as_ref())?;
+        }
         Box::pin(self.require_sends_allowed(&to)).await?;
         let count = count.ok_or_else(|| {
             Refusal::NotNow("the current pending proposals have not been read".into())
@@ -1609,11 +1651,23 @@ impl Paykit {
         }
         let mut tx = Tx::default();
         self.note_peer(&mut tx, &to)?;
+        let record_key = self.app.record_key(&permanent)?;
+        if role == AllowanceRole::Allower {
+            // Recorded with the signed proposal before it can reach the seller.
+            tx.put(
+                &key::original_approval(&record_key),
+                &OriginalApproval::new(
+                    to,
+                    record.proposal(),
+                    allower_generation,
+                    execution.is_some(),
+                ),
+            )?;
+        }
         let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
             .entry(write)
             .queue(signed)
             .locals(tx.into_writes());
-        let record_key = self.app.record_key(&permanent)?;
         let delivery = match Box::pin(self.submit(batch)).await {
             Ok(_) => Box::pin(self.delivered(&msg_id)).await?,
             Err(error) => match error.kept_batch() {
@@ -1745,22 +1799,40 @@ impl Paykit {
         Ok(())
     }
 
-    /// Allowance acceptance is unavailable in this revision. In either role, the SDK
-    /// refuses the call before it reads `record`, signs, writes or sends anything.
-    /// Paykit spec 8.3.1 leaves open how acceptance establishes the Allower's initial
-    /// ledger and the executor's initial anchor.
-    ///
-    /// The SDK holds every outgoing delivery of an Allowance acceptance. It keeps an
-    /// incoming acceptance unplaced if it would fill the record's empty `response`.
-    /// An acceptance after a different recorded response to the same proposal makes the
-    /// Allowance conflicted. If it crosses the proposer's withdrawal, the record
-    /// reflects only its `msg_id`.
+    /// Accept the recipient's selected proposal. The accepting wallet records the signed
+    /// pair and removes the exact pending proposal atomically. On the payer's account the
+    /// same batch creates the spending ledger at zero, bound to this acceptance.
     ///
     /// # Errors
     ///
-    /// Always [`Refusal::AllowanceAcceptanceUnavailable`].
+    /// A stale, stopped or conflicted proposal or an uncertain current record cannot be
+    /// accepted. A seller accepts using this method. The payer uses [`Self::accept_executable_allowance`].
+    /// Both approval and contacts scopes are required to send the signed reply.
     pub async fn accept_allowance(&mut self, record: &[u8; 32]) -> Result<String> {
-        Box::pin(self.answer_allowance(record, Kind::AllowanceAcceptance)).await
+        self.accept_allowance_with_consent(record, None).await
+    }
+
+    /// Accept the seller's displayed Allowance and authorize this wallet to execute it.
+    /// Show the counterparty, terms and automatic payments by this app before confirmation.
+    /// Returns the original response ID.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::accept_allowance`]. Only the payer can authorize automatic execution.
+    pub async fn accept_executable_allowance(
+        &mut self,
+        record: &[u8; 32],
+        confirmed: crate::UserConfirmed,
+    ) -> Result<String> {
+        Box::pin(self.accept_allowance_with_consent(record, Some(confirmed))).await
+    }
+
+    pub(crate) async fn accept_allowance_with_consent(
+        &mut self,
+        record: &[u8; 32],
+        execution: Option<crate::UserConfirmed>,
+    ) -> Result<String> {
+        Box::pin(self.answer_allowance(record, Kind::AllowanceAcceptance, execution)).await
     }
 
     /// Reject the Allowance proposed to this identity at `record` (Paykit spec 8.3, Paykit
@@ -1779,7 +1851,7 @@ impl Paykit {
     /// changed; [`Refusal::Usage`] for a proposal this identity sent or one answered already;
     /// as [`Paykit::propose_allowance`]. Never [`Refusal::Divergent`].
     pub async fn reject_allowance(&mut self, record: &[u8; 32]) -> Result<String> {
-        Box::pin(self.answer_allowance(record, Kind::AllowanceRejection)).await
+        Box::pin(self.answer_allowance(record, Kind::AllowanceRejection, None)).await
     }
 
     /// End the Allowance at `record` (Paykit spec 8.3 "Ending", Paykit wire 4.16): an
@@ -1801,17 +1873,17 @@ impl Paykit {
     /// 8.1, "Blocked counterparties"); [`Refusal::Usage`] for a proposal to this identity not
     /// yet answered, which is rejected instead; as [`Paykit::propose_allowance`].
     pub async fn end_allowance(&mut self, record: &[u8; 32]) -> Result<String> {
-        Box::pin(self.answer_allowance(record, Kind::AllowanceEnd)).await
+        Box::pin(self.answer_allowance(record, Kind::AllowanceEnd, None)).await
     }
 
-    /// Record and send this identity's rejection or end of the Allowance at `record`, `kind`,
-    /// built again from a fresh read after the record changed meanwhile. An acceptance
-    /// returns [`Refusal::AllowanceAcceptanceUnavailable`] before the first read
-    /// (Paykit spec 8.3.1).
-    async fn answer_allowance(&mut self, record: &[u8; 32], kind: Kind) -> Result<String> {
-        if kind == Kind::AllowanceAcceptance {
-            return Err(Refusal::AllowanceAcceptanceUnavailable.into());
-        }
+    /// Answer the current pending proposal, or record an end of the accepted Allowance
+    /// at the same stable host key (Paykit spec 8.3.1).
+    async fn answer_allowance(
+        &mut self,
+        record: &[u8; 32],
+        kind: Kind,
+        execution: Option<crate::UserConfirmed>,
+    ) -> Result<String> {
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
@@ -1827,7 +1899,7 @@ impl Paykit {
             return Ok(msg_id);
         }
         if let Some((selected, _)) = Box::pin(self.pending_by_allowance_key(record)).await? {
-            return Box::pin(self.answer_pending(&selected, kind)).await;
+            return Box::pin(self.answer_pending(&selected, kind, execution)).await;
         }
         let mut tries = 0;
         loop {
@@ -1843,7 +1915,7 @@ impl Paykit {
                 return Err(Refusal::AllowanceEnded.into());
             }
             if kind != Kind::AllowanceEnd {
-                return Err(Refusal::Usage("there is no pending proposal to reject".into()).into());
+                return Err(Refusal::Usage("there is no pending proposal to answer".into()).into());
             }
             let accepted = acceptance(&held).ok_or_else(|| {
                 if rejected(&held) {
@@ -2939,10 +3011,8 @@ impl Paykit {
                     Box::pin(self.keep_conflict_later(&record, &stored, evidence, locals)).await?;
                     return Ok(Placed::Done);
                 }
-                // Allowance acceptance is unavailable in this revision (Paykit spec 8.3.1).
-                // Keep a received acceptance unplaced if it would fill the empty `response`.
-                // How acceptance establishes the Allower's initial ledger and the
-                // executor's initial anchor is specified with its implementation.
+                // An existing permanent record cannot acquire its first response here.
+                // The first acceptance belongs to the original conditional batch.
                 Some(held) if would_accept(&held, &stored) => return Ok(Placed::Not),
                 // A proposal waits over a divergent record until the user confirms it, as at
                 // receive; a rejection goes.
@@ -3223,7 +3293,9 @@ mod tests {
         assert_eq!(code.matches(".queue(signed)").count(), 1);
         let pending = include_str!("allowances/pending.rs");
         assert!(!pending.contains(".put_record("));
-        assert_eq!(pending.matches(".record_op(").count(), 4);
+        // In addition to pending writes, the accepting account prepares its permanent
+        // Allowance and the payer prepares its original spending ledger.
+        assert_eq!(pending.matches(".record_op(").count(), 6);
         assert_eq!(
             pending.matches("self.submit(batch.queue(reply))").count(),
             1

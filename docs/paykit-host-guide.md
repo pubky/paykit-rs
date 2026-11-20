@@ -219,7 +219,11 @@ current store.
 The `record` returned by `propose_allowance`, `allowance` and `allowances`
 is the account’s permanent Allowance key. The pending proposal lives at its
 own ordinary key until answered or withdrawn. Pass the returned key to
-`reject_allowance`, `end_allowance` or `discard_pending_allowance`.
+`accept_allowance`, `accept_executable_allowance`, `reject_allowance`, `end_allowance` or `discard_pending_allowance`.
+The seller uses `propose_allowance` with `AllowanceRole::Allowee` or answers
+with `accept_allowance`. The payer uses `propose_executable_allowance` or
+`accept_executable_allowance` after the user confirms the counterparty, budget
+and automatic payments by this wallet.
 
 Before creating a proposal, the wallet checks the current proposals for that
 counterparty. Sent and received proposals have separate counts. A wallet that
@@ -231,8 +235,15 @@ A wallet with `paykit_allowance` can read another app’s pending record on its
 account. `PendingAllowanceRecord::read` and `bind` check the signed parties,
 proposal and physical key (Paykit wire 5.4). A verified current deletion ends
 that proposal’s lifetime. An unreadable or flagged value keeps the last
-qualified roles and holds further action. The SDK holds new acceptance and
-automatic payments.
+qualified roles and holds further action.
+
+On explicit acceptance, each party records the signed proposal and answer and
+removes its current pending proposal together. The payer’s write also creates
+the empty spending ledger bound to that answer. The payer wallet needs
+`paykit_allowance` to approve the original and `paykit_allowance_execute`
+to create the ledger. Every later ledger write needs the same execution scope.
+An unanswered write retains the original signed reply for retry. Automatic
+payment also requires the payer's explicit choice to use this wallet as executor.
 
 | Case | What to show or do |
 |---|---|
@@ -356,7 +367,6 @@ service. Acknowledging the deletion notice leaves the credit restriction in forc
 | `Refusal::Cancelled` | Show that the request has already been cancelled. |
 | `Refusal::AllowanceEnded` | Show the stop and close actions on this Allowance. |
 | `Refusal::AllowanceConflicted` | Show the conflict and close actions on this Allowance. |
-| `Refusal::AllowanceAcceptanceUnavailable` | Keep Allowance acceptance disabled for this SDK revision. |
 | `Refusal::CreditHistoryLost` | Show that credit is held because the prior credit history is unavailable. |
 | `Refusal::AlreadyPaid` | Show the existing paid state. |
 | `Refusal::BeingHandledByOtherWallet` | Show that another own wallet holds the attempt. |

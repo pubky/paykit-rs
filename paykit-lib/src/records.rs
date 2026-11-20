@@ -4329,8 +4329,8 @@ impl AllowanceRecord {
 /// The binding rule of an `allowance_ledgers` record (Paykit wire 5.5, Switch spec 8.2):
 /// read the ledger at `key`, and act on it only if the key is the one derived from its
 /// `counterparty` and `allowance_id` with the reader's naming key, and both equal those of
-/// the reader's `allowances` record for that Allowance, against which the ledger's checks
-/// then run.
+/// the Allower's accepted Allowance record. Its signed proposal names the Allowee,
+/// and the ledger names its original signed acceptance by hash.
 ///
 /// # Errors
 ///
@@ -4355,6 +4355,29 @@ pub fn bind_ledger(
         ledger.counterparty == allowance.counterparty
             && ledger.allowance_id == allowance.allowance_id,
         "Paykit wire 5.5: the ledger's counterparty or allowance_id isn't its Allowance record's",
+    )?;
+    allowance.check()?;
+    let Some(acceptance) = allowance
+        .response
+        .as_ref()
+        .filter(|response| matches!(response.body(), Body::AllowanceAcceptance(_)))
+    else {
+        return invalid("Paykit wire 5.5: a ledger requires the original signed acceptance");
+    };
+    let Body::AllowanceProposal(proposal) = allowance.proposal.body() else {
+        return invalid("Paykit wire 5.4: the Allowance record holds its signed proposal");
+    };
+    let allowee = match proposal.proposer_role {
+        ProposerRole::Allowee => allowance.proposal.sender(),
+        ProposerRole::Allower => allowance.proposal.message.to,
+    };
+    ensure(
+        ledger.counterparty == allowee,
+        "Paykit wire 5.9: only the Allower's account holds the ledger",
+    )?;
+    ensure(
+        ledger.acceptance == acceptance.hash(),
+        "Paykit wire 5.5: the ledger's acceptance must match its Allowance record's signed response",
     )?;
     Ok(ledger)
 }

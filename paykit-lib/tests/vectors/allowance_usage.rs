@@ -130,7 +130,7 @@ pub(crate) fn check() {
     assert!(compact(&terms, &other, now).is_err());
     check_successor_cases(&v);
     let failures = arr(&v, "failure_evidence");
-    assert_eq!(failures.len(), failure_cases().len());
+    assert_eq!(failures.len(), failure_cases(&v).len());
     for case in failures {
         check_failure_case(case);
     }
@@ -233,7 +233,15 @@ fn spelling_terms(limits: &Value) -> Value {
 /// The cases paykit-lib generates in `allowance_usage.json` (README "How the files were
 /// generated"), compared with the file, and written into the set by the
 /// regeneration driver (`regenerate.rs`).
-pub(crate) fn generate(_keys: &Keys) {
+pub(crate) fn generate(keys: &Keys) {
+    let mut inputs = paykit("allowance_usage.json");
+    let q = pubky_switch_core::enc::b64(
+        &crate::sealed::stored_message(keys, "allowance_acceptance").hash(),
+    );
+    for case in inputs["cases"].as_array_mut().unwrap() {
+        case["ledger"]["acceptance"] = json!(q);
+    }
+    inputs["compaction"]["before"]["acceptance"] = json!(q);
     let (accepted, refused) = spelling_cases();
     let accepted: Vec<Value> = accepted
         .iter()
@@ -263,8 +271,14 @@ pub(crate) fn generate(_keys: &Keys) {
             period_limit_members(),
         ),
     ];
-    cases.push((Place::Member("/failure_evidence"), json!(failure_cases())));
-    cases.push((Place::Member("/compaction/successors"), successor_cases()));
+    cases.push((
+        Place::Member("/failure_evidence"),
+        json!(failure_cases(&inputs)),
+    ));
+    cases.push((
+        Place::Member("/compaction/successors"),
+        successor_cases(&inputs),
+    ));
     for (index, name) in [
         (
             3,
@@ -281,15 +295,14 @@ pub(crate) fn generate(_keys: &Keys) {
     ] {
         cases.push((Place::At(format!("/cases/{index}/name")), json!(name)));
     }
-    cases.extend(computed());
+    cases.extend(computed(&inputs));
     generated("allowance_usage.json", &cases);
 }
 
 /// `compaction/successors`: a held ledger with one `done` entry, the version a compaction at
 /// `compacted_at` writes from it, and the verdict of a reader holding it from `held_time` on
 /// that version written at `newer_time`.
-fn successor_cases() -> Value {
-    let v = paykit("allowance_usage.json");
+fn successor_cases(v: &Value) -> Value {
     let c = &v["compaction"];
     let anchored = |unit: &str| {
         let mut terms = c["terms"].clone();
@@ -400,10 +413,9 @@ fn check_successor_cases(v: &Value) {
 }
 
 /// Counting evidence is an input to the pure library, not a shared wire member.
-fn failure_cases() -> Vec<Value> {
+fn failure_cases(v: &Value) -> Vec<Value> {
     use ClaimState::{Done, Failed, Open, Unknown};
     use EntryOutcome::{Done as Paid, Failed as FailedOutcome};
-    let v = paykit("allowance_usage.json");
     let mut terms = v["cases"][0]["terms"].clone();
     terms["period_limits"] = json!([]);
     terms["lifetime_amount_limit"] = json!("0.01");
@@ -614,10 +626,16 @@ fn check_failure_case(case: &Value) {
 
 /// Each case's usage and its candidates' verdicts, and the compaction's result, from their
 /// authored terms, ledgers, claims, times and amounts.
-fn computed() -> Vec<(Place<'static>, Value)> {
-    let v = paykit("allowance_usage.json");
-    let mut out = Vec::new();
-    for (i, case) in arr(&v, "cases").iter().enumerate() {
+fn computed(v: &Value) -> Vec<(Place<'static>, Value)> {
+    let mut out = vec![(
+        Place::At("/compaction/before".into()),
+        v["compaction"]["before"].clone(),
+    )];
+    for (i, case) in arr(v, "cases").iter().enumerate() {
+        out.push((
+            Place::At(format!("/cases/{i}/ledger")),
+            case["ledger"].clone(),
+        ));
         let terms = AllowanceTerms::from_json(&case["terms"]).unwrap();
         let u = usage(
             &terms,

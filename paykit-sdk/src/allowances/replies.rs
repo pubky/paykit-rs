@@ -127,7 +127,7 @@ impl PendingRetirement {
 enum Opposed {
     Found(Box<PendingConflict>),
     Rejected([u8; 32]),
-    Waiting,
+    Accepted([u8; 32]),
     Unknown,
 }
 
@@ -270,7 +270,13 @@ impl PendingConflict {
             .filter(|r| matches!(r.message.body(), Body::AllowanceRejection(_)))
             .collect();
         if rejections.is_empty() {
-            return Opposed::Waiting;
+            let source = q.source.map_or(held.version, SeenVersion::record_version);
+            if q.position
+                .is_some_and(|position| precedes_reply(source, position, &order))
+            {
+                return Opposed::Accepted(q.message.hash());
+            }
+            return Opposed::Unknown;
         }
         let Some(index) = earliest(&rejections) else {
             return Opposed::Unknown;
@@ -1057,9 +1063,9 @@ impl Paykit {
         Ok(app.shared_evidence().await?.ops.iter().find_map(expected))
     }
 
-    /// The first rejection closes only the selected, still-current pending application.
-    /// A failure to settle its conditional operation leaves the original answers in custody.
-    async fn delete_rejected_pending(
+    /// Apply the first eligible reply to the exact current proposal. A rejection deletes
+    /// that proposal. An acceptance also opens the permanent pair and the payer’s ledger.
+    async fn apply_pending_reply(
         &mut self,
         target: &pubky_switch_client::app::RecordTarget,
         selected: &SharedRecord,
@@ -1074,6 +1080,23 @@ impl Paykit {
         let permanent = super::allowance_target(&peer, id);
         let own = self.identity();
         let position = evidence.position().ok_or_else(PaykitError::corrupt)?;
+        let accepting = matches!(reply.body(), Body::AllowanceAcceptance(_));
+        let waiting = || {
+            if accepting {
+                PendingReply::Waits(Some(selected.version.into()))
+            } else {
+                PendingReply::Undecided
+            }
+        };
+        if accepting
+            && (self.pause_at(&selected.key).await?.paused
+                || crate::stored::past_window(
+                    reply.accepted_at().ok_or_else(PaykitError::corrupt)?,
+                    self.service_time(),
+                ))
+        {
+            return Ok(waiting());
+        }
         if evidence.pending_source.is_none() {
             // An answer may have arrived before the app first saw its pending record.
             // Bind the custody used by this retry before a competing write or a lost answer.
@@ -1094,7 +1117,7 @@ impl Paykit {
             };
             if let Some(mut held) = self.local_get::<KeptMessage>(&kept_key).await? {
                 if !bind(&mut held)? {
-                    return Ok(PendingReply::Undecided);
+                    return Ok(waiting());
                 }
                 writes.push(state::local_put(&kept_key, &held)?);
             }
@@ -1104,12 +1127,12 @@ impl Paykit {
                 .filter(|n| !n.placed)
             {
                 if !bind(&mut note.message)? {
-                    return Ok(PendingReply::Undecided);
+                    return Ok(waiting());
                 }
                 writes.push(state::local_put(&stored_key, &note)?);
             }
             if writes.is_empty() {
-                return Ok(PendingReply::Undecided);
+                return Ok(waiting());
             }
             self.app
                 .protocol_commit(crate::protocol::BACKUP_NAME, &writes)
@@ -1146,11 +1169,11 @@ impl Paykit {
                 |a, b| self.app.received_order(a, b),
             );
             if earlier != Some(Ordering::Greater) {
-                return Ok(PendingReply::Undecided);
+                return Ok(waiting());
             }
         }
         let RecordRead::Fresh(current) = self.app.read_record_fresh(target).await? else {
-            return Ok(PendingReply::Undecided);
+            return Ok(waiting());
         };
         if current.version != selected.version
             || current.content != selected.content
@@ -1163,34 +1186,69 @@ impl Paykit {
                 }
             )
         {
-            return Ok(PendingReply::Undecided);
+            return Ok(waiting());
         }
         let pending = self.selected_pending(&current)?.0;
         if self
             .competing_proposal_owed(&pending, &selected.key, &self.app.record_key(&permanent)?)
             .await?
         {
-            return Ok(PendingReply::Undecided);
+            return Ok(waiting());
         }
-        let conditions = vec![
-            Condition::RecordVersion {
-                key: selected.key,
-                version: selected.version,
-            },
-            Condition::RecordVersion {
-                key: self.app.record_key(&permanent)?,
+        let permanent_key = self.app.record_key(&permanent)?;
+        let mut conditions = vec![self.app.record_condition(&selected.key).await?];
+        let mut writes = Vec::new();
+        if accepting {
+            if self.conflict_kept(&permanent_key).await?
+                || self.allowance_stopped(&permanent_key).await?
+            {
+                return Ok(waiting());
+            }
+            let super::pending::Acceptance::Eligible { ledger } =
+                self.acceptance(proposal, reply, &peer, id).await?
+            else {
+                return Ok(waiting());
+            };
+            let Some(operations) = self
+                .acceptance_records(proposal, reply, &peer, id, ledger)
+                .await?
+            else {
+                return Ok(waiting());
+            };
+            writes = operations;
+        } else {
+            conditions.push(Condition::RecordVersion {
+                key: permanent_key,
                 version: RecordVersion::NONE,
-            },
-        ];
+            });
+        }
         let op = self.app.record_op(target, None, conditions).await?;
-        match crate::stored::submitted(
-            self.submit(OpBatch::for_protocol(crate::protocol::BACKUP_NAME).entry(op))
-                .await,
-        ) {
-            Ok(crate::stored::Placed::Done) => Ok(PendingReply::Stopped),
-            Ok(_) => Ok(PendingReply::Undecided),
+        writes.push(op);
+        let mut retained = state::Tx::default();
+        Box::pin(self.keep_original_selection(
+            selected,
+            proposal,
+            reply,
+            &mut writes,
+            None,
+            &mut retained,
+        ))
+        .await?;
+        self.local_commit(retained).await?;
+        let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME);
+        for write in writes {
+            batch = batch.entry(write);
+        }
+        match crate::stored::submitted(self.submit(batch).await) {
+            Ok(crate::stored::Placed::Done) => {
+                if accepting {
+                    Box::pin(self.applied_original_approval(&permanent_key)).await?;
+                }
+                Ok(PendingReply::Stopped)
+            }
+            Ok(_) => Ok(waiting()),
             Err(crate::error::PaykitError::Client(error)) if error.kept_batch().is_some() => {
-                Ok(PendingReply::Undecided)
+                Ok(waiting())
             }
             Err(error) => Err(error),
         }
@@ -1266,8 +1324,8 @@ impl Paykit {
                 return Ok(PendingReply::Waits(None));
             }
             Opposed::Unknown => return Ok(PendingReply::Undecided),
-            Opposed::Rejected(first) if first == message.hash() => {
-                return Box::pin(self.delete_rejected_pending(
+            Opposed::Rejected(first) | Opposed::Accepted(first) if first == message.hash() => {
+                return Box::pin(self.apply_pending_reply(
                     &target,
                     &held,
                     pending.proposal(),
@@ -1277,7 +1335,7 @@ impl Paykit {
                 .await;
             }
             Opposed::Rejected(_) => return Ok(PendingReply::Undecided),
-            Opposed::Waiting => (),
+            Opposed::Accepted(_) => (),
         }
         Ok(if matches!(message.body(), Body::AllowanceAcceptance(_)) {
             PendingReply::Waits(Some(held.version.into()))
@@ -1320,9 +1378,9 @@ pub(crate) fn restore_conflicts(
         };
         let signed = kept.message.stored(&kept.peer)?;
         if prepared.get(&(record, reply)).is_some_and(|older| {
-            older.delete != kept.delete
+            older.application != kept.application
                 || older.source != kept.source
-                || older.sealed_delete != kept.sealed_delete
+                || older.seals != kept.seals
         }) {
             return Err(PaykitError::corrupt());
         }
