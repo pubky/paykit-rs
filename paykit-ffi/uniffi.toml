@@ -1,0 +1,7 @@
+[bindings.kotlin]
+package_name = "com.synonym.paykit.v2"
+cdylib_name = "paykit_v2"
+
+[bindings.swift]
+module_name = "PaykitV2"
+ffi_module_name = "PaykitV2FFI"
