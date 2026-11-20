@@ -1309,6 +1309,12 @@ and no `send_before`.
   a dedicated worker, and Chrome hides `navigator.serviceWorker` in dedicated
   workers, but the page can create a `MessageChannel` and give one port to
   each.
+- Start-up on v0.2 (*measured (#603)*, local loopback, medians of three
+  runs): loading the harness bundle in a dedicated worker took 14 to 25 ms in
+  Chromium, which compiles lazily, 23 to 43 ms in WebKit, and 119 to 266 ms
+  in Firefox, and its pay step took 195 to 446 ms across engines. In Firefox
+  the size profile (D11) loads 2.2 times faster but pays about 18 percent
+  slower.
 - No API exists for callers outside the SDK's context: generated object
   handles sit under a Symbol key that structured clone drops.
 
@@ -1506,6 +1512,12 @@ rollout step 2 and Paykit decision 20's phased plan.
   nothing in WebKit; there, only a negative control (the same policy without
   `'wasm-unsafe-eval'` on page and worker fails with `CompileError`) shows
   the policy is enforced (*verified (#603)*).
+- `connect-src` governs the worker's `fetch`: without the Switch origin the
+  call fails and the Switch front counts no request, not even a preflight
+  (*verified (#603)*). A Switch call from the same origin sends no preflight
+  (*verified (#603)*). WebKit logs a console error for every 404 answer,
+  including the Switch's normal 404 for a record that does not exist yet
+  (*measured (#603)*).
 - Playwright's WebKit for Linux has no OPFS: no `navigator.storage` in a
   page and no `FileSystemSyncAccessHandle` in a dedicated worker. So CI on
   Linux runs no store test in WebKit. OPFS under Playwright also needs a
