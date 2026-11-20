@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@synonymdev/react-native-paykit": "file:tarballs/synonymdev-react-native-paykit.tgz",
-    "react": "19.2.0",
+    "react": "19.3.1",
     "react-native": "0.83.10"
   },
   "devDependencies": {
