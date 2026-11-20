@@ -476,8 +476,7 @@ fn transactions_in_one_bucket<const N: usize>(
 /// method settlement ID under Paykit wire 1.5.
 async fn two_transactions(world: &World) -> TestResult {
     let mut wallets = Box::pin(enrolled_tills(world)).await?;
-    // Each buyer finishes its ordinary lookup before paying. A new answer arriving
-    // at the last payment check would rightly hold the attempt before the rail call.
+    // Finish each buyer's authenticated seller lookup before the two tills compete.
     let seller = wallets.till.identity();
     for buyer in [&mut wallets.buyer, &mut wallets.other] {
         let identity = buyer.app_mut().identity_of(&seller, true).await?;
