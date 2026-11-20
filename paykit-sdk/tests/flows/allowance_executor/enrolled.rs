@@ -95,7 +95,20 @@ enum GrantFlow {
     UnansweredReservation,
 }
 
-async fn grant(world: &World, proposer: AllowanceRole, flow: GrantFlow) -> TestResult {
+struct GrantedWallets {
+    payer: Paykit,
+    seller: Paykit,
+    storage: Arc<ListsStore>,
+    rail: Arc<paykit_sdk::rail::FakeRail>,
+    key: [u8; 32],
+    pending: Option<PaykitBackup>,
+}
+
+async fn grant(
+    world: &World,
+    proposer: AllowanceRole,
+    flow: GrantFlow,
+) -> TestResult<GrantedWallets> {
     let storage = Arc::new(ListsStore::default());
     let rail = Arc::new(paykit_sdk::rail::FakeRail::with_clock(
         world.clock().clone(),
@@ -256,6 +269,26 @@ async fn grant(world: &World, proposer: AllowanceRole, flow: GrantFlow) -> TestR
         granted.version
     );
     assert!(rail.all_executions().is_empty());
+    Ok(GrantedWallets {
+        payer,
+        seller,
+        storage,
+        rail,
+        key,
+        pending,
+    })
+}
+
+// Finish enrollment before polling a payment so its Switch reads have the wallet stack.
+async fn run_grant_flow(world: &World, proposer: AllowanceRole, flow: GrantFlow) -> TestResult {
+    let GrantedWallets {
+        mut payer,
+        mut seller,
+        storage,
+        rail,
+        key,
+        pending,
+    } = Box::pin(grant(world, proposer, flow)).await?;
     if matches!(flow, GrantFlow::UnansweredReservation) {
         Box::pin(payments::unanswered_reservation(
             world, payer, seller, storage, rail, key,
@@ -339,7 +372,7 @@ async fn enrolled_on(backend: Backend, flow: GrantFlow) -> TestResult {
                 let Some(world) = World::start(backend)? else {
                     continue;
                 };
-                let result = Box::pin(grant(&world, proposer, flow)).await;
+                let result = Box::pin(run_grant_flow(&world, proposer, flow)).await;
                 world.close().await?;
                 result?;
             }
