@@ -3,9 +3,12 @@ use pubky_switch_core::{records::AuthRequest, sig::SignedDoc};
 use pubky_switch_harness::{Backend, World};
 use std::{error::Error, sync::Arc};
 
+mod method;
+mod refusal;
 #[path = "../../tests/hosts/signer.rs"]
 mod signer;
 mod storage;
+mod wallet;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -180,5 +183,26 @@ async fn test_enrollment_recovers_an_acquisition_applied_without_its_reply() -> 
         open().begin_enrollment(reference).await?.app_id,
         original.app_id
     );
+    Ok(())
+}
+
+#[test]
+fn test_last_store_release_after_the_opening_runtime_stops() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let host: Arc<dyn WalletStore> = Arc::new(storage::DeviceStore::open(root.path()));
+    let namespace = String::from("runtime-shutdown");
+    let open = || crate::WalletStoreSession::open(host.clone(), namespace.clone());
+    let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+    let store = runtime.block_on(open())?;
+    drop(runtime);
+    drop(store);
+
+    let replacement = tokio::runtime::Builder::new_current_thread().build()?;
+    replacement.block_on(async {
+        let store = open().await?;
+        let owner = store.ownership.clone();
+        drop(store);
+        owner.finish().await
+    })?;
     Ok(())
 }

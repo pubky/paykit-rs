@@ -36,11 +36,90 @@ private final class EnrollmentStore: WalletStore, @unchecked Sendable {
         gate.unlock()
     }
 
+    private let releaseGate = NSCondition()
+    private var gatedNamespace: String?
+    private var releasing = false
+
+    func holdRelease(_ namespace: String) {
+        releaseGate.lock()
+        gatedNamespace = namespace
+        releasing = false
+        releaseGate.unlock()
+    }
+
+    func waitForRelease() async -> Bool {
+        await Task.detached { self.waitForReleaseBlocking() }.value
+    }
+
+    private func waitForReleaseBlocking() -> Bool {
+        releaseGate.lock()
+        defer { releaseGate.unlock() }
+        let deadline = Date(timeIntervalSinceNow: 5)
+        while !releasing {
+            if !releaseGate.wait(until: deadline) { return false }
+        }
+        return true
+    }
+
+    func finishSiblingRead(_ namespace: String) -> Bool {
+        releaseGate.lock()
+        defer { releaseGate.unlock() }
+        let stillFenced = gatedNamespace == namespace && lock.withLock { owners[namespace] != nil }
+        gatedNamespace = nil
+        releaseGate.broadcast()
+        return stillFenced
+    }
+
+    private func waitBeforeRelease(_ namespace: String) {
+        releaseGate.lock()
+        defer { releaseGate.unlock() }
+        guard gatedNamespace == namespace else { return }
+        releasing = true
+        releaseGate.broadcast()
+        let deadline = Date(timeIntervalSinceNow: 5)
+        while gatedNamespace == namespace {
+            if !releaseGate.wait(until: deadline) {
+                gatedNamespace = nil
+                break
+            }
+        }
+    }
+
     private var owners: [String: Data] = [:]
     private var rows: [String: [Data: Data]] = [:]
+    private var failingRead: String?
+
+    func failNextRead(_ namespace: String) {
+        lock.withLock { failingRead = namespace }
+    }
+
+    func hasWriter(_ namespace: String) -> Bool {
+        lock.withLock { owners[namespace] != nil }
+    }
+
+    func reopen(namespace: String, entries: ArraySlice<String>) {
+        for entry in entries {
+            let fields = entry.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: false)
+            rows[namespace, default: [:]][Data(base64Encoded: String(fields[0]))!] = Data(base64Encoded: String(fields[1]))!
+        }
+    }
 
     func get(namespace: String, key: Data) throws -> Data? {
-        lock.withLock { rows[namespace]?[key] }
+        try lock.withLock {
+            if failingRead == namespace {
+                failingRead = nil
+                throw StorageError.Unavailable
+            }
+            return rows[namespace]?[key]
+        }
+    }
+    func scan(namespace: String, prefix: Data, after: Data?, limit: UInt32) throws -> [StoreEntry] {
+        lock.withLock {
+            (rows[namespace] ?? [:])
+                .filter { key, _ in key.starts(with: prefix) && (after.map { $0.lexicographicallyPrecedes(key) } ?? true) }
+                .sorted { $0.key.lexicographicallyPrecedes($1.key) }
+                .prefix(Int(limit)).map { StoreEntry(key: $0.key, value: $0.value) }
+        }
     }
     func acquire(namespace: String, owner: Data) throws -> Bool {
         lock.withLock {
@@ -50,6 +129,7 @@ private final class EnrollmentStore: WalletStore, @unchecked Sendable {
         }
     }
     func release(namespace: String, owner: Data) throws {
+        waitBeforeRelease(namespace)
         lock.withLock {
             if owners[namespace] == owner { owners[namespace] = nil }
         }
@@ -67,14 +147,189 @@ private final class EnrollmentStore: WalletStore, @unchecked Sendable {
         gate.unlock()
         return lock.withLock {
             guard owners[namespace] == owner else { return false }
-            precondition(writes.count == 1)
-            let key: Data
-            let value: Data
-            switch writes[0] { case let .put(k, v): key = k; value = v }
-            rows[namespace, default: [:]][key] = value
+            for write in writes {
+                switch write {
+                case let .put(key, value): rows[namespace, default: [:]][key] = value
+                case let .delete(key): rows[namespace]?[key] = nil
+                case let .deletePrefix(prefix):
+                    rows[namespace] = rows[namespace]?.filter { !$0.key.starts(with: prefix) }
+                }
+            }
             return true
         }
     }
+}
+
+private final class ReceiptReader: WalletHomeserver, PaymentMethod, @unchecked Sendable {
+    private let lock = NSLock()
+    private var transfers = 0
+    var transferCount: Int { lock.withLock { transfers } }
+    func get(identity: Data, path: String) async throws -> Data? { nil }
+    func put(identity: Data, path: String, bytes: Data) async throws { preconditionFailure("unexpected public write") }
+    func delete(identity: Data, path: String) async throws { preconditionFailure("unexpected public delete") }
+    func declaration() -> MethodDeclaration {
+        MethodDeclaration(idempotent: true, idempotencyRetentionMs: nil, history: true, historyRetentionMs: nil, historySurvivesRestore: true, longestCompletionMs: 3_600_000)
+    }
+    func selectEndpoints(candidates: [EndpointCandidate], amount: Amount?) throws -> SelectedEndpoints {
+        var payable: [UInt32] = []
+        var failures: [EndpointFailure] = []
+        for candidate in candidates.reversed() {
+            if candidate.identifier == "btc-lightning-bolt12" {
+                failures.append(EndpointFailure(id: candidate.id, error: .Unavailable(reason: "route unavailable")))
+            } else { payable.append(candidate.id) }
+        }
+        return SelectedEndpoints(payable: payable, failures: failures)
+    }
+    func transfer(endpoint: String, payload: String, amount: Amount) -> MethodTransfer {
+        try! MethodTransfer(amount: amount, maxFee: nil)
+    }
+    func fractionDigits(endpoint: String) -> UInt32? { 8 }
+    func pay(payment: MethodPayment) async throws -> MethodOutcome {
+        lock.withLock { transfers += 1 }
+        preconditionFailure("a receipted payment cannot be dispatched again")
+    }
+    func payment(attemptId: String) async throws -> MethodOutcome? { nil }
+    func allowanceHistory(payer: Data) async throws -> [MethodDispatch]? { nil }
+    func verify(proof: MethodProof) async throws -> UInt64? { nil }
+    func settlementId(proofJson: Data) -> Data? { nil }
+}
+
+private func walletRows(_ issuer: String, _ mode: String) throws -> [String] {
+    let producer = Process()
+    producer.executableURL = URL(fileURLWithPath: issuer)
+    producer.arguments = [mode]
+    let pipe = Pipe()
+    producer.standardOutput = pipe
+    try producer.run()
+    let output = pipe.fileHandleForReading.readDataToEndOfFile()
+    producer.waitUntilExit()
+    let values = String(decoding: output, as: UTF8.self).split(separator: "\n").map(String.init)
+    precondition(producer.terminationStatus == 0)
+    return values
+}
+
+private func resumeRefusal(_ issuer: String, left: Bool, request: RequestId) async throws {
+    let values = try walletRows(issuer, left ? "departed-wallet" : "wallet-awaiting-identity")
+    let store = EnrollmentStore()
+    store.reopen(namespace: values[1], entries: values.dropFirst(2))
+    let method = ReceiptReader()
+    let host = try WalletHost(store: store, homeserver: method, method: method, endpointIdentifiers: ["btc-lightning-bolt11"])
+    let wallet = try await host.load(appId: Data(base64Encoded: values[0])!)
+    if !left {
+        do {
+            _ = try await wallet.requestReceipts(id: request)
+            preconditionFailure("read receipts before the restored records were listed")
+        } catch let WalletError.Refused(refusal) {
+            guard case .notNow = refusal.kind() else { preconditionFailure("unexpected receipt refusal") }
+        }
+    }
+    do {
+        _ = try await wallet.resumePayments()
+        preconditionFailure("resumed a held wallet")
+    } catch let WalletError.Refused(refusal) {
+        precondition(!left)
+        guard case .identityUnavailable = refusal.kind() else { preconditionFailure("unexpected resume refusal") }
+        precondition(refusal.attemptedFailure() == nil)
+    } catch let WalletError.Operation(kind, _, _, _, refusal) {
+        guard left, kind == .client, case .left? = refusal?.kind() else { preconditionFailure("unexpected Switch refusal") }
+    }
+    precondition(method.transferCount == 0)
+    try await wallet.shutdown()
+}
+
+private func recoverReceipt(_ issuer: String) async throws -> RequestId {
+    let values = try walletRows(issuer, "paid-wallet")
+    precondition(values.count > 7)
+    func bytes(_ i: Int) -> Data { Data(base64Encoded: values[i])! }
+    let app = bytes(0)
+    let id = RequestId(payee: bytes(2), requestHash: bytes(3))
+    let method = ReceiptReader()
+    let original = EnrollmentStore()
+    original.reopen(namespace: values[6], entries: values.dropFirst(7))
+    let sameDevice = try WalletHost(store: original, homeserver: method, method: method, endpointIdentifiers: ["btc-lightning-bolt11"])
+    let reopened = try await sameDevice.load(appId: app)
+    let checkedId = try await reopened.appId()
+    let checkedIdentity = try await reopened.identity()
+    let backup = try await reopened.backup()
+    precondition(checkedId == app && checkedIdentity == bytes(1) && !backup.isEmpty)
+    let receipts = try await reopened.requestReceipts(id: id)
+    let journal = try await reopened.payments()
+    precondition(journal.count == 1 && journal[0].receipt?.messageId == receipts.first?.messageId)
+    let entry = journal[0]
+    let periodUsage = AllowancePeriodUsage(amount: entry.amount.value, count: 1)
+    let selection = try method.selectEndpoints(candidates: [
+        EndpointCandidate(id: 6, identifier: "btc-onchain", payload: "address"),
+        EndpointCandidate(id: 2, identifier: "btc-lightning-bolt12", payload: "offer"),
+        EndpointCandidate(id: 9, identifier: entry.endpoint, payload: "invoice"),
+    ], amount: entry.amount)
+    precondition(selection.payable == [9, 6] && selection.failures.count == 1)
+    let failure = selection.failures[0]
+    guard case let .Unavailable(reason) = failure.error else { preconditionFailure("wrong endpoint failure") }
+    precondition(failure.id == 2 && reason == "route unavailable")
+    precondition(failure.error.localizedDescription == "MethodError(<redacted>)")
+    let descriptions: [(Any, String)] = [
+        (entry, "PaymentEntry"), (receipts[0], "Receipt"), (id, "RequestId"), (entry.amount, "Amount"),
+        (BillingPeriod(startsAt: 1, endsAt: 2), "BillingPeriod"),
+        (PaymentOutcome.paid(attemptId: entry.attemptId, proofMessageId: nil), "PaymentOutcome"),
+        (MethodDispatch(attemptId: entry.attemptId, amount: entry.amount, outcome: .pending), "MethodDispatch"),
+        (periodUsage, "AllowancePeriodUsage"),
+        (AllowanceUsage(lifetime: entry.amount.value, periods: [periodUsage], reserved: 0, spent: 1, released: 0), "AllowanceUsage"),
+        (selection, "SelectedEndpoints"), (failure, "EndpointFailure"), (failure.error, "MethodError"),
+        (method.declaration(), "MethodDeclaration"),
+        (WalletError.Operation(kind: .client, detail: "operation failed", serviceCode: nil, keptBatch: Data([1]), switchRefusal: nil), "WalletError"),
+        (WalletError.UnknownMethod, "WalletError"),
+    ]
+    for (value, name) in descriptions {
+        let expected = "\(name)(<redacted>)"
+        precondition(String(describing: value) == expected && String(reflecting: value) == expected)
+        precondition(Mirror(reflecting: value).children.isEmpty)
+    }
+    precondition(journal[0].amount.value == "7" && journal[0].attemptId == values[4])
+    precondition(receipts.count == 1 && receipts[0].attemptId == values[4] && receipts[0].messageId == values[5])
+    precondition(receipts[0].paymentReference == "checkout-7" && method.transferCount == 0)
+    let seller = try walletRows(issuer, "seller-wallet")
+    precondition(seller.count > 2 && seller[1] != values[6])
+    original.reopen(namespace: seller[1], entries: seller.dropFirst(2))
+    let sellerId = Data(base64Encoded: seller[0])!
+    let second = try await sameDevice.load(appId: sellerId)
+    original.holdRelease(values[6])
+    let closing = Task { try await reopened.shutdown() }
+    let entered = await original.waitForRelease()
+    precondition(entered)
+    let siblingId = try await second.appId()
+    precondition(siblingId == sellerId && original.finishSiblingRead(values[6]),
+                 "seller wallet could not progress while payer release was gated")
+    try await closing.value
+
+    original.failNextRead(values[6])
+    original.holdRelease(values[6])
+    let failedOpen = Task {
+        do { _ = try await sameDevice.load(appId: app); preconditionFailure("failed read opened a wallet") }
+        catch WalletError.Storage(let error) {
+            guard case .Unavailable = error else { throw error }
+            precondition(!original.hasWriter(values[6]), "load returned before releasing the writer")
+        }
+    }
+    let failureReleasing = await original.waitForRelease()
+    precondition(failureReleasing)
+    do { _ = try await sameDevice.load(appId: app); preconditionFailure("opened during release") }
+    catch WalletError.Storage(let error) { guard case .InUse = error else { throw error } }
+    let independent = try await second.appId()
+    precondition(independent == sellerId && original.finishSiblingRead(values[6]))
+    try await failedOpen.value
+
+    var dropped: NativeWallet? = try await sameDevice.load(appId: app)
+    let reopenedId = try await dropped!.appId()
+    precondition(reopenedId == app)
+    original.holdRelease(values[6])
+    dropped = nil
+    let dropping = await original.waitForRelease()
+    precondition(dropping)
+    let sellerIdentity = try await second.identity()
+    precondition(sellerIdentity.count == 32 && original.finishSiblingRead(values[6]),
+                 "seller wallet could not progress while the last payer handle was released")
+    try await second.shutdown()
+    return id
 }
 
 @main
@@ -167,5 +422,7 @@ private enum WalletConsumer {
             try await host().acceptApproval(reference: reference, identity: identity, claim: Data([1]))
             preconditionFailure("replaced the stored approval")
         } catch WalletError.EnrollmentConflict {}
+        let request = try await recoverReceipt(issuer)
+        for left in [false, true] { try await resumeRefusal(issuer, left: left, request: request) }
     }
 }

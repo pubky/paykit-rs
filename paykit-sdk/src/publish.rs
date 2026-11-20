@@ -5,8 +5,6 @@
 //! and queues the signed message together. If the application is undecided, changes
 //! for that recipient wait while other recipients can proceed. An in-place restore
 //! retains outstanding originals from both stores and requires a fresh sharing choice.
-//! Development stores containing the earlier separate reservation fail validation. An
-//! unresolved reservation from that format cannot establish whether the batch was kept.
 
 pub(crate) mod answers;
 pub(crate) mod history;

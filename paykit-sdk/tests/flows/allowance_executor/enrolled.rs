@@ -12,6 +12,7 @@ use pubky_switch_harness::{parties::Asking, Backend, World};
 use pubky_switch_signer::{Protocols, Signer};
 
 mod payments;
+mod sibling;
 
 use super::{applied_put, terms, AllowanceRole, AllowanceStatus, Condition, Ledger};
 use crate::common::{finish_listing, ListsStore, TestTimer};
@@ -47,6 +48,12 @@ async fn join(
     storage: Arc<dyn StateStore>,
     rail: Arc<dyn Rail>,
 ) -> TestResult<Paykit> {
+    let signer = Box::pin(start_signer(world, name)).await?;
+    let (_, wallet) = Box::pin(join_app(world, name, name, signer, scopes, storage, rail)).await?;
+    Ok(wallet)
+}
+
+async fn start_signer(world: &World, name: &str) -> TestResult<Signer> {
     let identity = world.identity(name)?;
     let origin = format!("https://{name}.allowance.test");
     Box::pin(world.add_switch(&origin, &[&identity])).await?;
@@ -56,21 +63,32 @@ async fn join(
         env.transport = Arc::new(ServiceTask(env.transport));
     }
     let keys = world.keyring(&identity)?;
-    let origin_for_signer = origin.clone();
-    let mut signer = tokio::task::spawn_local(async move {
-        let mut signer = Box::pin(Signer::create(env, keys, &origin_for_signer)).await?;
+    tokio::task::spawn_local(async move {
+        let mut signer = Box::pin(Signer::create(env, keys, &origin)).await?;
         Box::pin(signer.resume()).await?;
         Ok::<_, Box<dyn Error>>(signer)
     })
-    .await??;
+    .await?
+}
+
+async fn join_app(
+    world: &World,
+    name: &str,
+    app_name: &str,
+    mut signer: Signer,
+    scopes: RequestedScopes,
+    storage: Arc<dyn StateStore>,
+    rail: Arc<dyn Rail>,
+) -> TestResult<(Signer, Paykit)> {
+    let identity = world.identity(name)?;
     let names = scopes.scopes.iter().map(String::as_str).collect::<Vec<_>>();
-    let asking = Asking::for_scopes(world.app_keys(&identity, name)?, &names)?;
+    let asking = Asking::for_scopes(world.app_keys(&identity, app_name)?, &names)?;
     let own = identity.public();
-    let request = tokio::task::spawn_local(async move {
+    let (signer, request) = tokio::task::spawn_local(async move {
         let reviewed = signer.review(asking.request.signed(), &asking.auth)?;
         let approved = Box::pin(signer.approve(reviewed)).await?;
         signer.claim_delivered(&approved.request).await?;
-        Ok::<_, Box<dyn Error>>(asking.join_request(own, &approved)?)
+        Ok::<_, Box<dyn Error>>((signer, asking.join_request(own, &approved)?))
     })
     .await??;
     world.advance_ms(1_000);
@@ -78,13 +96,14 @@ async fn join(
     let timer = Arc::new(TestTimer {
         clock: world.clock().clone(),
     });
-    tokio::task::spawn_local(async move {
+    let wallet = tokio::task::spawn_local(async move {
         let mut wallet =
             Box::pin(Paykit::join(env, Default::default(), request, rail, timer)).await?;
         Box::pin(finish_listing(&mut wallet)).await;
         Ok::<_, Box<dyn Error>>(wallet)
     })
-    .await?
+    .await??;
+    Ok((signer, wallet))
 }
 
 #[derive(Clone, Copy)]
@@ -92,9 +111,23 @@ enum GrantFlow {
     FirstGrant,
     OlderBackup([&'static str; 3]),
     LatePeriodProof,
+    UnansweredReservation,
 }
 
-async fn grant(world: &World, proposer: AllowanceRole, flow: GrantFlow) -> TestResult {
+struct GrantedWallets {
+    payer: Paykit,
+    seller: Paykit,
+    storage: Arc<ListsStore>,
+    rail: Arc<paykit_sdk::rail::FakeRail>,
+    key: [u8; 32],
+    pending: Option<PaykitBackup>,
+}
+
+async fn grant(
+    world: &World,
+    proposer: AllowanceRole,
+    flow: GrantFlow,
+) -> TestResult<GrantedWallets> {
     let storage = Arc::new(ListsStore::default());
     let rail = Arc::new(paykit_sdk::rail::FakeRail::with_clock(
         world.clock().clone(),
@@ -115,61 +148,7 @@ async fn grant(world: &World, proposer: AllowanceRole, flow: GrantFlow) -> TestR
         rail.clone(),
     ))
     .await?;
-    payer.app_mut().allow_connect(&seller.identity()).await?;
-    seller.app_mut().allow_connect(&payer.identity()).await?;
-    let proposal = match proposer {
-        AllowanceRole::Allower => {
-            Box::pin(payer.propose_executable_allowance(
-                seller.identity(),
-                terms(),
-                UserConfirmed::new(),
-            ))
-            .await?
-        }
-        AllowanceRole::Allowee => {
-            Box::pin(seller.propose_allowance(payer.identity(), proposer, terms())).await?
-        }
-        _ => unreachable!("the fixture selects Allower or Allowee"),
-    };
-    let (receiver, peer) = match proposer {
-        AllowanceRole::Allower => (&mut seller, payer.identity()),
-        AllowanceRole::Allowee => (&mut payer, seller.identity()),
-        _ => unreachable!("the fixture selects Allower or Allowee"),
-    };
-    Box::pin(finish_listing(receiver)).await;
-    let offer = receiver
-        .allowances()
-        .await?
-        .into_iter()
-        .find(|view| view.allowance_id == proposal.allowance_id && view.counterparty == peer)
-        .expect("received proposal");
-    let (key, seller_key) = match proposer {
-        AllowanceRole::Allower => (proposal.record, offer.record),
-        AllowanceRole::Allowee => (offer.record, proposal.record),
-        _ => unreachable!("the fixture selects Allower or Allowee"),
-    };
-    assert!(Box::pin(payer.resume_allowance_executor(&key))
-        .await
-        .is_err());
-    match proposer {
-        AllowanceRole::Allower => {
-            Box::pin(seller.accept_allowance(&seller_key)).await?;
-            Box::pin(finish_listing(&mut payer)).await;
-        }
-        AllowanceRole::Allowee => {
-            Box::pin(payer.accept_executable_allowance(&key, UserConfirmed::new())).await?;
-            Box::pin(finish_listing(&mut seller)).await;
-        }
-        _ => unreachable!("the fixture selects Allower or Allowee"),
-    }
-    assert_eq!(
-        payer.allowance(&key).await?.status,
-        AllowanceStatus::Accepted
-    );
-    assert_eq!(
-        seller.allowance(&seller_key).await?.status,
-        AllowanceStatus::Accepted
-    );
+    let (key, allowance_id) = Box::pin(accept(&mut payer, &mut seller, proposer)).await?;
     let permanent = payer
         .app()
         .shared_record(&key)
@@ -181,8 +160,7 @@ async fn grant(world: &World, proposer: AllowanceRole, flow: GrantFlow) -> TestR
         payer.app().naming_key(),
         &key,
     )?;
-    let natural =
-        paykit_lib::derive::natural_key::allowance(&seller.identity(), &proposal.allowance_id);
+    let natural = paykit_lib::derive::natural_key::allowance(&seller.identity(), &allowance_id);
     let ledger_key =
         Collection::AllowanceLedgers.record_key(payer.app().naming_key(), &natural, None)?;
     let ledger = payer
@@ -195,7 +173,7 @@ async fn grant(world: &World, proposer: AllowanceRole, flow: GrantFlow) -> TestR
         Some(
             Ledger::initial_value(
                 &seller.identity(),
-                &proposal.allowance_id,
+                &allowance_id,
                 &bound.response.as_ref().unwrap().hash()
             )
             .as_slice()
@@ -255,7 +233,32 @@ async fn grant(world: &World, proposer: AllowanceRole, flow: GrantFlow) -> TestR
         granted.version
     );
     assert!(rail.all_executions().is_empty());
-    if let GrantFlow::OlderBackup(amounts) = flow {
+    Ok(GrantedWallets {
+        payer,
+        seller,
+        storage,
+        rail,
+        key,
+        pending,
+    })
+}
+
+// Finish enrollment before polling a payment so its Switch reads have the wallet stack.
+async fn run_grant_flow(world: &World, proposer: AllowanceRole, flow: GrantFlow) -> TestResult {
+    let GrantedWallets {
+        mut payer,
+        mut seller,
+        storage,
+        rail,
+        key,
+        pending,
+    } = Box::pin(grant(world, proposer, flow)).await?;
+    if matches!(flow, GrantFlow::UnansweredReservation) {
+        Box::pin(payments::unanswered_reservation(
+            world, payer, seller, storage, rail, key,
+        ))
+        .await?;
+    } else if let GrantFlow::OlderBackup(amounts) = flow {
         Box::pin(payments::payment_after_restore(
             world,
             (payer, seller),
@@ -300,6 +303,16 @@ async fn test_enrolled_rounded_allowance_payments_after_an_older_grant_backup() 
 }
 
 #[tokio::test]
+async fn test_enrolled_unanswered_reservation_on_scripted_switch() -> TestResult {
+    enrolled_on(Backend::Scripted, GrantFlow::UnansweredReservation).await
+}
+
+#[tokio::test]
+async fn test_enrolled_unanswered_reservation_on_switch_service() -> TestResult {
+    enrolled_on(Backend::Service, GrantFlow::UnansweredReservation).await
+}
+
+#[tokio::test]
 async fn test_enrolled_late_period_proof_on_scripted_switch() -> TestResult {
     enrolled_on(Backend::Scripted, GrantFlow::LatePeriodProof).await
 }
@@ -323,13 +336,76 @@ async fn enrolled_on(backend: Backend, flow: GrantFlow) -> TestResult {
                 let Some(world) = World::start(backend)? else {
                     continue;
                 };
-                let result = Box::pin(grant(&world, proposer, flow)).await;
+                let result = Box::pin(run_grant_flow(&world, proposer, flow)).await;
                 world.close().await?;
                 result?;
             }
             Ok(())
         })
         .await
+}
+
+async fn accept(
+    payer: &mut Paykit,
+    seller: &mut Paykit,
+    proposer: AllowanceRole,
+) -> TestResult<([u8; 32], paykit_lib::identifiers::AllowanceId)> {
+    payer.app_mut().allow_connect(&seller.identity()).await?;
+    seller.app_mut().allow_connect(&payer.identity()).await?;
+    let proposal = match proposer {
+        AllowanceRole::Allower => {
+            Box::pin(payer.propose_executable_allowance(
+                seller.identity(),
+                terms(),
+                UserConfirmed::new(),
+            ))
+            .await?
+        }
+        AllowanceRole::Allowee => {
+            Box::pin(seller.propose_allowance(payer.identity(), proposer, terms())).await?
+        }
+        _ => unreachable!("the fixture selects Allower or Allowee"),
+    };
+    let (receiver, peer) = match proposer {
+        AllowanceRole::Allower => (&mut *seller, payer.identity()),
+        AllowanceRole::Allowee => (&mut *payer, seller.identity()),
+        _ => unreachable!("the fixture selects Allower or Allowee"),
+    };
+    Box::pin(finish_listing(receiver)).await;
+    let offer = receiver
+        .allowances()
+        .await?
+        .into_iter()
+        .find(|view| view.allowance_id == proposal.allowance_id && view.counterparty == peer)
+        .expect("received proposal");
+    let (key, seller_key) = match proposer {
+        AllowanceRole::Allower => (proposal.record, offer.record),
+        AllowanceRole::Allowee => (offer.record, proposal.record),
+        _ => unreachable!("the fixture selects Allower or Allowee"),
+    };
+    assert!(Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .is_err());
+    match proposer {
+        AllowanceRole::Allower => {
+            Box::pin(seller.accept_allowance(&seller_key)).await?;
+            Box::pin(finish_listing(payer)).await;
+        }
+        AllowanceRole::Allowee => {
+            Box::pin(payer.accept_executable_allowance(&key, UserConfirmed::new())).await?;
+            Box::pin(finish_listing(seller)).await;
+        }
+        _ => unreachable!("the fixture selects Allower or Allowee"),
+    }
+    assert_eq!(
+        payer.allowance(&key).await?.status,
+        AllowanceStatus::Accepted
+    );
+    assert_eq!(
+        seller.allowance(&seller_key).await?.status,
+        AllowanceStatus::Accepted
+    );
+    Ok((key, proposal.allowance_id))
 }
 
 struct IncomingAcceptance {
@@ -406,6 +482,26 @@ async fn incoming_acceptance(world: &World) -> TestResult<IncomingAcceptance> {
         keys,
         prepared,
     })
+}
+
+async fn finish_restore(payer: &mut Paykit) -> TestResult {
+    Box::pin(finish_listing(payer)).await;
+    let mut finished = false;
+    for _ in 0..8 {
+        match Box::pin(payer.reconcile()).await {
+            Ok(report) => {
+                assert!(!report.payer_skipped);
+                finished = true;
+                break;
+            }
+            Err(paykit_sdk::PaykitError::Refused(paykit_sdk::Refusal::NotNow(reason)))
+                if reason.contains("Call reconcile again") => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    assert!(finished);
+    Box::pin(payer.end_reconcile(UserConfirmed::new())).await?;
+    Ok(())
 }
 
 async fn original_bytes(payer: &Paykit, key: &[u8; 32]) -> TestResult<Vec<u8>> {
@@ -497,6 +593,9 @@ async fn grant_after_original_application(world: &World) -> TestResult {
         payer.app().shared_record(&keys[0]).await?.unwrap().version,
         payer.app().shared_record(&keys[1]).await?.unwrap().version,
     ];
+    // The service applied the original before this backup. The wallet still has the
+    // signed decision and prepared opening, but could not save the three results.
+    let before_capture = Box::pin(payer.backup()).await?.to_bytes()?;
     let id = payer.app_id();
     drop(payer);
     storage.refuse_puts_as_too_large(None);
@@ -538,7 +637,86 @@ async fn grant_after_original_application(world: &World) -> TestResult {
         before[1]
     );
     assert!(payer.allowance(&keys[0]).await?.consented);
-    assert!(rail.all_executions().is_empty());
+
+    // The legitimate first grant replaced the original permanent member. Restore both
+    // backups into empty stores against that same current grant and unchanged zero.
+    let after_capture = Box::pin(payer.backup()).await?.to_bytes()?;
+    rail.set_history_payer(payer.identity());
+    drop(payer);
+    for (backup, complete) in [(&before_capture, false), (&after_capture, true)] {
+        let mut restored = Box::pin(Paykit::restore(
+            app_env(world, Arc::new(MemoryStore::new())),
+            Default::default(),
+            &PaykitBackup::from_bytes(backup)?,
+            rail.clone(),
+            Arc::new(TestTimer {
+                clock: world.clock().clone(),
+            }),
+        ))
+        .await?;
+        assert_eq!(restored.app_id(), id);
+        Box::pin(finish_restore(&mut restored)).await?;
+        let local = Box::pin(original_bytes(&restored, &keys[0])).await?;
+        let view = restored.allowance(&keys[0]).await?;
+        assert_eq!(view.status, AllowanceStatus::Accepted);
+        assert_eq!(view.executor_app_id, Some(id));
+        let resumed = Box::pin(restored.resume_allowance_executor(&keys[0])).await;
+        if complete {
+            assert!(
+                view.consented,
+                "clean backup retains the completed grant's consent"
+            );
+            let approval: serde_json::Value = serde_json::from_slice(&local)?;
+            assert_eq!(
+                serde_json::from_value::<Vec<KeptOp>>(approval["d"]["opening"]["applied"].clone())?,
+                originals
+            );
+            resumed?;
+            assert!(restored.allowance(&keys[0]).await?.consented);
+        } else {
+            assert!(!view.consented, "incomplete backup has no grant consent");
+            assert!(resumed.is_err());
+            assert_eq!(local, prepared);
+            assert!(!restored
+                .app()
+                .shared_evidence()
+                .await?
+                .ops
+                .contains(&originals[0]));
+            let refusal =
+                Box::pin(restored.confirm_allowance_executor(&keys[0], UserConfirmed::new()))
+                    .await
+                    .unwrap_err();
+            assert!(
+                matches!(refusal.refusal(), Some(paykit_sdk::Refusal::NotNow(reason))
+                if reason.contains("original Allowance grant and ledger")),
+                "{refusal}"
+            );
+            assert!(Box::pin(restored.reconcile_allowance(&keys[0]))
+                .await?
+                .is_none());
+            assert!(!restored.allowance(&keys[0]).await?.consented);
+        }
+        assert_eq!(
+            restored
+                .app()
+                .shared_record(&keys[0])
+                .await?
+                .unwrap()
+                .version,
+            granted.version
+        );
+        assert_eq!(
+            restored
+                .app()
+                .shared_record(&keys[1])
+                .await?
+                .unwrap()
+                .version,
+            before[1]
+        );
+        assert!(rail.all_executions().is_empty());
+    }
     Ok(())
 }
 

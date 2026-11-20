@@ -2554,6 +2554,245 @@ async fn test_resume_copies_the_payers_later_payment_proof_once() {
 }
 
 #[tokio::test]
+async fn test_host_confirms_another_wallets_failure_after_the_executor_ended_before_dispatch() {
+    Box::pin(confirm_foreign_failure(ForeignFailure::BeforeDispatch)).await;
+}
+
+#[tokio::test]
+async fn test_host_recovers_the_confirmed_release_after_a_lost_reply() {
+    Box::pin(confirm_foreign_failure(ForeignFailure::LostRelease)).await;
+}
+
+#[tokio::test]
+async fn test_host_cannot_release_another_wallets_failure_after_dispatch() {
+    Box::pin(confirm_foreign_failure(ForeignFailure::AfterDispatch)).await;
+}
+
+#[derive(PartialEq)]
+enum ForeignFailure {
+    BeforeDispatch,
+    LostRelease,
+    AfterDispatch,
+}
+
+async fn confirm_foreign_failure(case: ForeignFailure) {
+    let storage = crate::common::store();
+    let (world, mut payer, mut shop, key) =
+        Box::pin(first_grant_in(storage.clone(), terms())).await;
+    world.rail.set_history_payer(payer.identity());
+    let original = payer.app().cert().clone();
+    world
+        .clock
+        .set_ms(original.expires_at() - paykit_sdk::PRE_DISPATCH_BUDGET_MS - 120_000);
+    let mut other = Box::pin(world.wallet("second wallet")).await;
+    let request = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("9", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    if case == ForeignFailure::AfterDispatch {
+        world.rail.next(paykit_sdk::rail::Behaviour::Hang);
+        Box::pin(payer.pay_under_allowance(&request, &key))
+            .await
+            .outcome
+            .unwrap();
+    } else {
+        world
+            .alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+                path: "/ops".into(),
+            });
+        let lost = Box::pin(payer.pay_under_allowance(&request, &key))
+            .await
+            .outcome
+            .unwrap_err();
+        assert!(lost.kept_batch().is_some(), "{lost:?}");
+    }
+    Box::pin(payer.receive(None)).await.unwrap();
+    let (held, _) = only_ledger(&payer).await;
+    let entry = &held.entries[0];
+    assert_eq!(
+        world.rail.executions(&entry.attempt_id),
+        u64::from(case == ForeignFailure::AfterDispatch)
+    );
+
+    assert!(
+        Box::pin(payer.reconcile_allowance(&key))
+            .await
+            .unwrap()
+            .is_some(),
+        "before certificate expiry"
+    );
+    world.clock.set_ms(original.expires_at() + 1);
+    Box::pin(other.receive(None)).await.unwrap();
+    Box::pin(other.resolve_attempt(
+        &entry.obligation,
+        entry.attempt_id,
+        paykit_sdk::Resolution::Failed,
+        UserConfirmed::new(),
+    ))
+    .await
+    .unwrap();
+    let scopes = AppScopes::new().allowance_execute().build().unwrap();
+    let id = payer.app_id();
+    let renewed = crate::certificate::renew(&world, id, &scopes, 0);
+    crate::certificate::list(&world, id, &original, &renewed);
+    Box::pin(payer.receive(None)).await.unwrap();
+    assert_eq!(
+        payer.app().cert().hash(),
+        renewed.hash(),
+        "the renewed certificate was taken"
+    );
+    world.clock.set_ms(world.clock.now_ms() + 1_000);
+    let next = crate::certificate::renew(&world, id, &scopes, 0);
+    crate::certificate::list(&world, id, &renewed, &next);
+    Box::pin(payer.receive(None)).await.unwrap();
+    assert_eq!(payer.app().cert().hash(), next.hash());
+    let shown = Box::pin(payer.reserved_by_other_apps(&key)).await.unwrap();
+    assert_eq!(shown.len(), 1);
+    assert_eq!(
+        (shown[0].attempt_id, shown[0].value.as_str()),
+        (entry.attempt_id, "9")
+    );
+    let premature =
+        Box::pin(payer.release_allowance_attempt(&key, entry.attempt_id, UserConfirmed::new()))
+            .await
+            .unwrap_err();
+    assert!(
+        matches!(premature.refusal(), Some(paykit_sdk::Refusal::Usage(_))),
+        "{premature:?}"
+    );
+
+    Box::pin(payer.resume_payments()).await.unwrap();
+    assert_eq!(
+        Box::pin(payer.reconcile_allowance(&key))
+            .await
+            .unwrap()
+            .unwrap()
+            .lifetime()
+            .as_str(),
+        "9"
+    );
+    let before_release = if case == ForeignFailure::BeforeDispatch {
+        Some(Box::pin(payer.backup()).await.unwrap())
+    } else {
+        None
+    };
+    if case == ForeignFailure::LostRelease {
+        world
+            .alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+                path: "/ops".into(),
+            });
+    }
+    let release =
+        Box::pin(payer.release_allowance_attempt(&key, entry.attempt_id, UserConfirmed::new()))
+            .await;
+    if case == ForeignFailure::AfterDispatch {
+        let refused = release.unwrap_err();
+        assert!(matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::Usage(_))
+        ));
+        assert_eq!(only_ledger(&payer).await.0.entries[0].outcome, None);
+        assert_eq!(world.rail.pay_calls(&entry.attempt_id), 1);
+        return;
+    } else if case == ForeignFailure::LostRelease {
+        let lost = release.unwrap_err();
+        assert!(lost.kept_batch().is_some(), "{lost:?}");
+    } else {
+        release.unwrap();
+    }
+    drop(payer);
+    let mut payer =
+        Box::pin(world.load_on_clock(&world.alice, storage, id, world.clock.clone())).await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    assert!(Box::pin(payer.reserved_by_other_apps(&key))
+        .await
+        .unwrap()
+        .is_empty());
+    let usage = Box::pin(payer.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((usage.lifetime().as_str(), usage.released()), ("0", 1));
+    let (_, revision) = only_ledger(&payer).await;
+    let repeated =
+        Box::pin(payer.release_allowance_attempt(&key, entry.attempt_id, UserConfirmed::new()))
+            .await
+            .unwrap_err();
+    assert!(matches!(
+        repeated.refusal(),
+        Some(paykit_sdk::Refusal::Usage(_))
+    ));
+    assert_eq!(only_ledger(&payer).await.1, revision);
+    assert!(world.rail.all_executions().is_empty());
+    if let Some(backup) = before_release {
+        drop(payer);
+        let mut restored = Box::pin(paykit_sdk::Paykit::restore(
+            world.env(&world.alice, crate::common::store()),
+            Default::default(),
+            &backup,
+            world.rail.clone(),
+            world.timer(),
+        ))
+        .await
+        .unwrap();
+        Box::pin(crate::common::finish_listing(&mut restored)).await;
+        // A foreign claim authorizes no copy of Failed. The old backup lacks the
+        // later confirmation and preparation that justified this specific release.
+        assert!(Box::pin(restored.reconcile_allowance(&key))
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(only_ledger(&restored).await.1, revision);
+    }
+}
+
+#[tokio::test]
+async fn test_host_can_show_the_ledger_alarm_after_reopening_the_wallet() {
+    let store = crate::common::store();
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant_in(store.clone(), terms())).await;
+    world.rail.set_history_payer(payer.identity());
+    let request = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("1", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    assert!(payer.ledger_alarm().is_none());
+    let alarm = payer
+        .app_mut()
+        .raise_rollback(
+            "paykit",
+            "the current service is missing the executor's accepted permanent ledger",
+        )
+        .await
+        .unwrap();
+    assert_eq!(payer.ledger_alarm().as_ref(), Some(&alarm));
+
+    let app_id = payer.app_id();
+    drop(payer);
+    let mut payer =
+        Box::pin(world.load_on_clock(&world.alice, store, app_id, world.clock.clone())).await;
+    assert_eq!(payer.ledger_alarm().as_ref(), Some(&alarm));
+    assert!(Box::pin(payer.pay_under_allowance(&request, &key))
+        .await
+        .outcome
+        .is_err());
+    assert!(Box::pin(payer.pay_request(&request, Default::default()))
+        .await
+        .outcome
+        .is_err());
+    assert!(world.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
 async fn test_allowance_counts_the_rounded_transfer_at_the_lifetime_limit_after_reopen() {
     let store = crate::common::store();
     let mut limits = terms();

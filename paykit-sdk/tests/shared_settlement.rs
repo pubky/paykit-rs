@@ -36,7 +36,7 @@ use paykit_sdk::{
     AppScopes, PayOptions, PayOutcome, Paykit, PeriodPrice, ReceiptsOf, RequestDraft, RequestRef,
     RequestedScopes, Timer,
 };
-use pubky_switch_client::app::SharedRecord;
+use pubky_switch_client::app::{Delivery, SharedRecord};
 use pubky_switch_client::store::MemoryStore;
 use pubky_switch_client::transport::BoxFuture;
 use pubky_switch_harness::{parties::Asking, Backend, World};
@@ -100,50 +100,44 @@ async fn join(
 
 #[tokio::test]
 async fn test_two_payee_wallets_reopen_the_same_manual_period_receipt() -> TestResult {
-    for backend in [Backend::Scripted, Backend::Service] {
-        let Some(world) = World::start(backend)? else {
-            continue;
-        };
-        let result = Box::pin(settle_period(&world, PeriodPayment::Manual)).await;
-        world.close().await?;
-        result?;
-    }
-    Ok(())
+    settle_on_both(PeriodPayment::Manual, ProofInbox::Available).await
 }
 
 #[tokio::test]
 async fn test_two_wallets_settle_a_period_at_its_signed_rate() -> TestResult {
-    for backend in [Backend::Scripted, Backend::Service] {
-        let Some(world) = World::start(backend)? else {
-            continue;
-        };
-        let result = Box::pin(settle_period(&world, PeriodPayment::ConfirmedRate)).await;
-        world.close().await?;
-        result?;
-    }
-    Ok(())
+    settle_on_both(PeriodPayment::ConfirmedRate, ProofInbox::Available).await
 }
 
 #[tokio::test]
 async fn test_two_wallets_settle_a_period_with_an_authorized_rate() -> TestResult {
+    settle_on_both(PeriodPayment::PolicyRate, ProofInbox::Available).await?;
+    settle_on_both(PeriodPayment::PolicyRequestedAmount, ProofInbox::Available).await
+}
+
+#[tokio::test]
+async fn test_two_wallets_settle_a_period_after_a_queued_proof() -> TestResult {
+    settle_on_both(PeriodPayment::PolicyRate, ProofInbox::UnavailableOnce).await
+}
+
+async fn settle_on_both(how: PeriodPayment, inbox: ProofInbox) -> TestResult {
     for backend in [Backend::Scripted, Backend::Service] {
         let Some(world) = World::start(backend)? else {
             continue;
         };
-        let result = Box::pin(settle_period(&world, PeriodPayment::PolicyRate)).await;
+        let result = Box::pin(settle_period(&world, how, inbox)).await;
         world.close().await?;
-        result?;
-        let Some(world) = World::start(backend)? else {
-            continue;
-        };
-        let result = Box::pin(settle_period(&world, PeriodPayment::PolicyRequestedAmount)).await;
-        world.close().await?;
-        result?;
+        result.map_err(|error| format!("{backend:?} {how:?}: {error}"))?;
     }
     Ok(())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum ProofInbox {
+    Available,
+    UnavailableOnce,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PeriodPayment {
     Manual,
     ConfirmedRate,
@@ -189,7 +183,7 @@ async fn period_wallets(
     Ok((buyer, shop, shop_signer))
 }
 
-async fn settle_period(world: &World, how: PeriodPayment) -> TestResult {
+async fn settle_period(world: &World, how: PeriodPayment, inbox: ProofInbox) -> TestResult {
     let priced = how != PeriodPayment::Manual;
     let mixed = matches!(
         how,
@@ -231,6 +225,9 @@ async fn settle_period(world: &World, how: PeriodPayment) -> TestResult {
     } else {
         None
     };
+    if inbox == ProofInbox::UnavailableOnce {
+        world.unreachable("POST", "/inbox");
+    }
     let payer_rail = Arc::clone(&rail);
     let shop_app = shop.app_id();
     let (mut buyer, payment, rate_source) = tokio::spawn(Box::pin(async move {
@@ -347,8 +344,13 @@ async fn settle_period(world: &World, how: PeriodPayment) -> TestResult {
     }))
     .await?;
     assert!(payment.public_failures.is_empty());
-    let PayOutcome::Paid { attempt_id, .. } = payment.outcome? else {
-        return Err("manual payment did not settle".into());
+    let PayOutcome::Paid {
+        attempt_id,
+        proof_msg_id: Some(proof_id),
+        ..
+    } = payment.outcome?
+    else {
+        return Err("expected a paid period with its proof message ID".into());
     };
     if mixed {
         let id = buyer.app_id();
@@ -363,20 +365,34 @@ async fn settle_period(world: &World, how: PeriodPayment) -> TestResult {
         .await?;
         assert_eq!(buyer.payments().await?.as_slice()[0].attempt_id, attempt_id);
     }
-    shop.receive(None).await?;
-    let period_record = shop
-        .payee_activity()
-        .await?
-        .into_iter()
-        .find(|activity| activity.request_hash == Some(request.request_hash))
-        .and_then(|activity| {
-            activity
-                .periods
-                .into_iter()
-                .find(|item| item.billing_period == period)
-        })
-        .ok_or("signed period proof unavailable")?;
-    assert!(period_record.paid);
+    let queued_hash = if inbox == ProofInbox::UnavailableOnce {
+        assert_eq!(world.faults_left(), 0);
+        assert!(matches!(
+            buyer.app().delivery(&proof_id).await?,
+            Some(Delivery::Queued { .. })
+        ));
+        let queued = buyer.app().queued_messages("paykit").await?;
+        let [proof] = queued.as_slice() else {
+            return Err("expected one queued period proof".into());
+        };
+        assert_eq!(proof.msg_id, proof_id);
+        assert_eq!(proof.kind, "paykit.payment_proof");
+        assert_eq!(proof.to, shop.identity());
+        let read = shop.receive(None).await?;
+        assert!(!read.applied.contains(&proof_id));
+        let before = sale_period(&shop, &request, period).await?;
+        assert!(!before.paid && !before.credited);
+        Some(proof.hash)
+    } else {
+        None
+    };
+    Box::pin(receive_settlement_message(&mut buyer, &mut shop, &proof_id)).await?;
+    let period_record = sale_period(&shop, &request, period).await?;
+    assert!(
+        period_record.paid,
+        "{:?} {how:?}: proof {proof_id}",
+        world.backend()
+    );
     assert!(!period_record.credited);
     let receipt = Box::pin(shop.confirm_payment(&period_record.record))
         .await?
@@ -386,20 +402,24 @@ async fn settle_period(world: &World, how: PeriodPayment) -> TestResult {
         .shared_record(&period_record.record)
         .await?
         .ok_or("missing shared credit")?;
+    let record = ActivityRecord::read(
+        issued
+            .content
+            .value()
+            .ok_or("missing period record value")?,
+        &shop.identity(),
+        ActivitySide::Payee,
+    )?;
+    let proof = record.proof.as_ref().ok_or("missing signed proof")?;
+    assert_eq!(proof.message().msg_id, proof_id);
+    if let Some(hash) = queued_hash {
+        assert_eq!(proof.hash(), hash);
+    }
     if let Some((id, expected)) = rate_source {
-        let record = paykit_lib::records::ActivityRecord::read(
-            issued
-                .content
-                .value()
-                .ok_or("missing period record value")?,
-            &shop.identity(),
-            paykit_lib::records::ActivitySide::Payee,
-        )?;
         let details = record
             .period_details
             .as_ref()
             .ok_or("missing signed rate")?;
-        let proof = record.proof.as_ref().ok_or("missing signed proof")?;
         let credit = record.receipt.as_ref().ok_or("missing signed receipt")?;
         assert_eq!(details.message().msg_id, id);
         assert_eq!(proof.message().refs, [request.request_hash, details.hash()]);
@@ -420,21 +440,10 @@ async fn settle_period(world: &World, how: PeriodPayment) -> TestResult {
                 value: Decimal::new("10")?
             })
         );
-        let activity = ActivityRecord::read(
-            issued
-                .content
-                .value()
-                .ok_or("missing period record value")?,
-            &shop.identity(),
-            ActivitySide::Payee,
-        )?;
-        assert_eq!(
-            activity.proof.ok_or("missing signed proof")?.message().refs,
-            [request.request_hash]
-        );
+        assert_eq!(proof.message().refs, [request.request_hash]);
     }
 
-    buyer.receive(None).await?;
+    Box::pin(receive_settlement_message(&mut shop, &mut buyer, &receipt)).await?;
     let received = buyer.receipts(ReceiptsOf::Period(request, period)).await?;
     assert_eq!(received.len(), 1);
     assert_eq!(received[0].attempt_id, attempt_id);
@@ -532,6 +541,44 @@ async fn settle_period(world: &World, how: PeriodPayment) -> TestResult {
     assert_eq!(rail.all_executions().values().copied().sum::<u64>(), 1);
     assert_eq!(rail.pay_calls(&attempt_id), 1);
     Ok(())
+}
+
+async fn receive_settlement_message(
+    sender: &mut Paykit,
+    recipient: &mut Paykit,
+    id: &str,
+) -> TestResult {
+    let mut delivery = sender.app().delivery(id).await?;
+    if matches!(delivery, Some(Delivery::Queued { .. })) {
+        sender.flush().await?;
+        delivery = sender.app().delivery(id).await?;
+    }
+    if !matches!(delivery, Some(Delivery::Accepted { .. })) {
+        return Err(format!("message {id} delivery: {delivery:?}").into());
+    }
+    let read = recipient.receive(None).await?;
+    if !read.applied.iter().any(|message| message == id) {
+        return Err(format!("expected accepted message {id} in {read:?}").into());
+    }
+    Ok(())
+}
+
+async fn sale_period(
+    shop: &Paykit,
+    request: &RequestRef,
+    period: PeriodRef,
+) -> TestResult<paykit_sdk::PeriodView> {
+    shop.payee_activity()
+        .await?
+        .into_iter()
+        .find(|activity| activity.request_hash == Some(request.request_hash))
+        .and_then(|activity| {
+            activity
+                .periods
+                .into_iter()
+                .find(|item| item.billing_period == period)
+        })
+        .ok_or_else(|| "missing merchant period".into())
 }
 
 async fn issue_period_rate(

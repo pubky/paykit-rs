@@ -1,4 +1,4 @@
-use crate::{StorageError, StoreWrite, WalletStore};
+use crate::{StorageError, StoreEntry, StoreWrite, WalletStore};
 use pubky_switch_core::enc::{b64, hash};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
@@ -22,6 +22,33 @@ impl DeviceStore {
         store.db().execute_batch("PRAGMA secure_delete=ON; CREATE TABLE IF NOT EXISTS wallet(ns TEXT,k BLOB,v BLOB,PRIMARY KEY(ns,k));").unwrap();
         store
     }
+    pub(super) fn hold_enrollment_completion(root: &Path, hold: bool) {
+        let db = Connection::open(root.join("wallet.sqlite")).unwrap();
+        if hold {
+            db.execute_batch(
+                "CREATE TRIGGER hold_completion BEFORE INSERT ON wallet
+                WHEN new.ns LIKE 'paykit-enrollment/%'
+                AND json_type(CAST(new.v AS TEXT), '$.Joined') = 'object'
+                BEGIN SELECT RAISE(ABORT, 'enrollment completion held'); END;",
+            )
+            .unwrap();
+        } else {
+            db.execute_batch("DROP TRIGGER hold_completion").unwrap();
+        }
+    }
+    /// Interrupt the native app's write after the enrollment has pinned its approval.
+    pub(super) fn hold_installation(root: &Path, hold: bool) {
+        let db = Connection::open(root.join("wallet.sqlite")).unwrap();
+        let statement = if hold {
+            "CREATE TRIGGER hold_app BEFORE INSERT ON wallet
+             WHEN new.ns NOT LIKE 'paykit-enrollment/%'
+             BEGIN SELECT RAISE(ABORT, 'app installation held'); END;"
+        } else {
+            "DROP TRIGGER hold_app"
+        };
+        db.execute_batch(statement).unwrap();
+    }
+
     fn db(&self) -> Connection {
         Connection::open(self.root.join("wallet.sqlite")).unwrap()
     }
@@ -44,12 +71,11 @@ impl DeviceStore {
         let mut db = self.db();
         let tx = db.transaction().map_err(|_| StorageError::Unavailable)?;
         for w in writes {
-            let StoreWrite::Put { key, value } = w;
-            tx.execute(
-                "INSERT OR REPLACE INTO wallet VALUES(?1,?2,?3)",
-                params![namespace, key, value],
-            )
-            .map_err(|_| StorageError::Unavailable)?;
+            match w {
+                StoreWrite::Put{key,value} => tx.execute("INSERT OR REPLACE INTO wallet VALUES(?1,?2,?3)",params![namespace,key,value]),
+                StoreWrite::Delete{key} => tx.execute("DELETE FROM wallet WHERE ns=?1 AND k=?2",params![namespace,key]),
+                StoreWrite::DeletePrefix{prefix} => tx.execute("DELETE FROM wallet WHERE ns=?1 AND (length(?2)=0 OR substr(k,1,length(?2))=?2)",params![namespace,prefix]),
+            }.map_err(|_|StorageError::Unavailable)?;
         }
         tx.commit().map_err(|_| StorageError::Unknown)
     }
@@ -63,6 +89,26 @@ impl WalletStore for DeviceStore {
                 |r| r.get(0),
             )
             .optional()
+            .map_err(|_| StorageError::Unavailable)
+    }
+    fn scan(
+        &self,
+        namespace: String,
+        prefix: Vec<u8>,
+        after: Option<Vec<u8>>,
+        limit: u32,
+    ) -> Result<Vec<StoreEntry>, StorageError> {
+        let db = self.db();
+        let mut q=db.prepare("SELECT k,v FROM wallet WHERE ns=?1 AND (?2 IS NULL OR k>?2) AND (length(?3)=0 OR substr(k,1,length(?3))=?3) ORDER BY k LIMIT ?4").unwrap();
+        let rows = q
+            .query_map(params![namespace, after, prefix, limit], |r| {
+                Ok(StoreEntry {
+                    key: r.get(0)?,
+                    value: r.get(1)?,
+                })
+            })
+            .map_err(|_| StorageError::Unavailable)?;
+        rows.collect::<Result<_, _>>()
             .map_err(|_| StorageError::Unavailable)
     }
     fn acquire(&self, namespace: String, owner: Vec<u8>) -> Result<bool, StorageError> {
@@ -80,8 +126,11 @@ impl WalletStore for DeviceStore {
             return Err(StorageError::Unavailable);
         }
         let mut locks = self.leases.lock().unwrap();
-        if locks.get(&namespace).is_some_and(|(id, _)| id == &owner) {
-            locks.remove(&namespace);
+        if let Some((id, file)) = locks.get(&namespace) {
+            if id == &owner {
+                file.unlock().map_err(|_| StorageError::Unavailable)?;
+                locks.remove(&namespace);
+            }
         }
         Ok(())
     }
@@ -148,6 +197,9 @@ fn test_device_store_fences_a_second_process_and_a_reopened_writer() {
     );
     assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed; 0 failed"));
 
+    // A child starting while the host unlocks can briefly inherit the open file
+    // description. A successful release must free the physical lock immediately.
+    let inherited = original.leases.lock().unwrap()[&ns].1.try_clone().unwrap();
     original.release(ns.clone(), old.clone()).unwrap();
     let reopened = DeviceStore::open(&other_path);
     assert!(reopened.acquire(ns.clone(), new.clone()).unwrap());
@@ -156,4 +208,5 @@ fn test_device_store_fences_a_second_process_and_a_reopened_writer() {
     assert!(reopened.commit_if(ns.clone(), new.clone(), put(2)).unwrap());
     assert_eq!(original.get(ns.clone(), vec![1]).unwrap(), Some(vec![2]));
     reopened.release(ns, new).unwrap();
+    drop(inherited);
 }
