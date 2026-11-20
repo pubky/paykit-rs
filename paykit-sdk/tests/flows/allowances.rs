@@ -5712,6 +5712,50 @@ async fn test_allowances_unreadable_record_parks_the_original_proposal_on_first_
     );
 }
 
+#[tokio::test]
+async fn test_allowances_unmatched_pending_proposal_keeps_the_original_replies() {
+    let w = World::new();
+    let _shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(paying_wallet(&w)).await;
+    let (original, id) = unrecorded_proposal(&w, &wallet);
+    let target = pending_target(&w.bob_id(), &id);
+    let key = wallet.app().record_key(&target).unwrap();
+    let permanent = wallet
+        .app()
+        .record_key(&allowances_target(&w.bob_id(), &id))
+        .unwrap();
+
+    let current = signed_pending_proposal(&wallet, w.bob_id(), &id, "allower");
+    assert_ne!(original.hash(), current.hash());
+    let value = PendingAllowanceRecord::new(&w.alice_id(), current)
+        .unwrap()
+        .to_json()
+        .unwrap();
+    Box::pin(write_record(&mut wallet, &target, Some(&value))).await;
+    Box::pin(read_listed_records(&mut wallet)).await;
+    assert_eq!(Box::pin(raw(&wallet, &key)).await, value);
+    let writes = w.record_writes(&w.alice, &key);
+    for (kind, msg_id) in [
+        ("paykit.allowance_acceptance", SENT_FIRST),
+        ("paykit.allowance_rejection", SENT_SECOND),
+    ] {
+        answers_with_id(&w, &wallet, kind, &original, &id, msg_id);
+        let read = wallet.receive(None).await.unwrap();
+        assert!(read.applied.iter().any(|id| id == msg_id), "{read:?}");
+        assert!(Box::pin(keeps(&wallet, b"pr/", msg_id)).await);
+        assert!(wallet.app_mut().parked_entries().await.unwrap().is_empty());
+    }
+    assert!(Box::pin(keeps(&wallet, b"pr/", SENT_FIRST)).await);
+    assert_eq!(w.record_writes(&w.alice, &key), writes);
+    assert_eq!(Box::pin(raw(&wallet, &key)).await, value);
+    assert!(wallet
+        .app()
+        .shared_record(&permanent)
+        .await
+        .unwrap()
+        .is_none());
+}
+
 /// `signer`'s app `app` sends alice's wallet an end of the Allowance `mine` names, with
 /// `refs`.
 async fn end_with_refs(
