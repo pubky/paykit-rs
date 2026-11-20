@@ -329,7 +329,14 @@ async fn test_first_grant_restores_its_complete_original_after_reconciliation() 
     assert!(restored.allowance(&key).await.unwrap().consented);
 }
 
-async fn restore_grant_proof_order(installed_verified: bool, different_pending_value: bool) {
+#[derive(Clone, Copy)]
+enum RestoredGrantEvidence {
+    Matching,
+    DifferentPendingValue,
+    UnrelatedVerifiedWrite,
+}
+
+async fn restore_grant_proof_order(installed_verified: bool, evidence: RestoredGrantEvidence) {
     use crate::common::store;
     use paykit_sdk::{Paykit, PaykitBackup, PaykitConfig, Rail};
     use std::sync::Arc;
@@ -366,6 +373,20 @@ async fn restore_grant_proof_order(installed_verified: bool, different_pending_v
     let key = proposal.record;
     let ungranted = payer.app().shared_record(&key).await.unwrap().unwrap();
     let other_hash = pubky_switch_core::enc::hash(ungranted.content.value().unwrap());
+    let original_write = payer
+        .app()
+        .shared_evidence()
+        .await
+        .unwrap()
+        .ops
+        .into_iter()
+        .find(|kept| {
+            let signed =
+                SignedOp::verify_with_cert(&kept.op, payer.app().cert(), &payer.identity())
+                    .unwrap();
+            matches!(&signed.body().kind, OpKind::RecordPut(put) if put.key == key)
+        })
+        .unwrap();
     world
         .alice
         .switch()
@@ -405,7 +426,7 @@ async fn restore_grant_proof_order(installed_verified: bool, different_pending_v
     let writes = world.record_writes(&world.alice, &key);
     drop(payer);
 
-    if different_pending_value {
+    if matches!(evidence, RestoredGrantEvidence::DifferentPendingValue) {
         // The backup's pending marker names another current-format Allowance value.
         let backup = serde_json::from_slice(&pending_backup.to_bytes().unwrap()).unwrap();
         let mut layer = crate::restore::layer_of(&backup);
@@ -419,7 +440,7 @@ async fn restore_grant_proof_order(installed_verified: bool, different_pending_v
         )
         .unwrap();
     }
-    let (storage, selected) = if installed_verified {
+    let (storage, mut selected) = if installed_verified {
         (installed, pending_backup)
     } else {
         let storage = store();
@@ -446,6 +467,22 @@ async fn restore_grant_proof_order(installed_verified: bool, different_pending_v
         drop(pending);
         (storage, verified_backup)
     };
+    if matches!(evidence, RestoredGrantEvidence::UnrelatedVerifiedWrite) {
+        // This signed original acceptance is genuine, but proves no executor grant.
+        let backup = serde_json::from_slice(&selected.to_bytes().unwrap()).unwrap();
+        let mut layer = crate::restore::layer_of(&backup);
+        let (_, row) = layer
+            .iter_mut()
+            .find(|(k, _)| k.as_slice() == at.as_bytes())
+            .unwrap();
+        let mut unrelated = row["d"][0].clone();
+        unrelated["grant"] = json!({ "kind": "verified", "write": original_write });
+        row["d"].as_array_mut().unwrap().push(unrelated);
+        selected = PaykitBackup::from_bytes(
+            &serde_json::to_vec(&crate::restore::with_layer(&backup, layer)).unwrap(),
+        )
+        .unwrap();
+    }
     let mut restored = Box::pin(Paykit::restore(
         world.env(&world.alice, storage),
         PaykitConfig::default(),
@@ -463,7 +500,12 @@ async fn restore_grant_proof_order(installed_verified: bool, different_pending_v
             .unwrap()
             .unwrap(),
     );
-    assert_eq!(history["d"].as_array().unwrap().len(), 2);
+    let expected = if matches!(evidence, RestoredGrantEvidence::UnrelatedVerifiedWrite) {
+        3
+    } else {
+        2
+    };
+    assert_eq!(history["d"].as_array().unwrap().len(), expected);
     Box::pin(crate::common::finish_listing(&mut restored)).await;
     assert!(Box::pin(restored.resume_allowance_executor(&key))
         .await
@@ -486,7 +528,7 @@ async fn restore_grant_proof_order(installed_verified: bool, different_pending_v
     Box::pin(restored.end_reconcile(UserConfirmed::new()))
         .await
         .unwrap();
-    if different_pending_value {
+    if !matches!(evidence, RestoredGrantEvidence::Matching) {
         assert!(Box::pin(restored.resume_allowance_executor(&key))
             .await
             .is_err());
@@ -516,18 +558,41 @@ async fn restore_grant_proof_order(installed_verified: bool, different_pending_v
 
 #[tokio::test]
 async fn test_first_grant_restore_matches_an_older_pending_proof() {
-    Box::pin(restore_grant_proof_order(true, false)).await;
+    Box::pin(restore_grant_proof_order(
+        true,
+        RestoredGrantEvidence::Matching,
+    ))
+    .await;
 }
 
 #[tokio::test]
 async fn test_first_grant_restore_matches_a_newer_verified_proof() {
-    Box::pin(restore_grant_proof_order(false, false)).await;
+    Box::pin(restore_grant_proof_order(
+        false,
+        RestoredGrantEvidence::Matching,
+    ))
+    .await;
 }
 
 #[tokio::test]
 async fn test_first_grant_restore_holds_a_different_pending_value() {
     for installed_verified in [true, false] {
-        Box::pin(restore_grant_proof_order(installed_verified, true)).await;
+        Box::pin(restore_grant_proof_order(
+            installed_verified,
+            RestoredGrantEvidence::DifferentPendingValue,
+        ))
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn test_first_grant_restore_holds_evidence_without_the_original_grant() {
+    for installed_verified in [true, false] {
+        Box::pin(restore_grant_proof_order(
+            installed_verified,
+            RestoredGrantEvidence::UnrelatedVerifiedWrite,
+        ))
+        .await;
     }
 }
 

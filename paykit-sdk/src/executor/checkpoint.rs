@@ -4,7 +4,7 @@ use paykit_lib::derive::natural_key;
 use paykit_lib::records::AllowanceRecord;
 use paykit_lib::{AllowanceId, Body, Collection};
 use pubky_switch_client::app::{App, KeptOp, RecordTarget};
-use pubky_switch_core::enc::serde_b64;
+use pubky_switch_core::enc::{hash, serde_b64};
 use pubky_switch_core::ops::Condition;
 use serde::{Deserialize, Serialize};
 
@@ -98,22 +98,38 @@ impl ExecutorHistory {
         opening: &ApprovedOpening,
     ) -> Option<ExecutorCheckpoint> {
         let first = self.0.first()?;
-        if self.0.len() == 1 {
-            return Some(first.clone());
-        }
-        let verified = self
+        let Some(verified) = self
             .0
             .iter()
-            .map(|source| Some((source, source.accepted(app, key, opening)?)))
-            .collect::<Option<Vec<_>>>()?;
-        let (_, original) = verified.first()?;
-        if verified
-            .iter()
-            .any(|(_, accepted)| accepted.grant.revision != original.grant.revision)
-        {
-            return None;
+            .find(|source| matches!(source.grant, GrantEvidence::Verified { .. }))
+        else {
+            return self
+                .0
+                .iter()
+                .all(|source| source == first)
+                .then(|| first.clone());
+        };
+        let original = verified.accepted(app, key, opening)?;
+        let value_hash = hash(&original.grant.value);
+        for source in &self.0 {
+            if source.counterparty != verified.counterparty
+                || source.allowance_id != verified.allowance_id
+            {
+                return None;
+            }
+            match &source.grant {
+                // Restore may combine the applied-local marker and the later proof of
+                // that same signed original. A matching hash alone grants no authority.
+                GrantEvidence::AwaitingProof {
+                    value_hash: pending,
+                } if *pending == value_hash => {}
+                GrantEvidence::Verified { .. }
+                    if source.accepted(app, key, opening)?.grant.revision
+                        == original.grant.revision => {}
+                _ => return None,
+            }
         }
-        verified.first().map(|(source, _)| (*source).clone())
+        Some(verified.clone())
     }
 }
 
