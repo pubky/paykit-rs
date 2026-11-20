@@ -284,6 +284,18 @@ pub(crate) enum EndCause {
     User,
     /// A withdrawal crossed an acceptance, so the app ended it itself.
     Automatic,
+    /// A restore or late acceptance found the closed original proposal.
+    RetiredProposal,
+}
+
+impl EndCause {
+    pub(crate) fn permits(self, has_acceptance: bool) -> bool {
+        match self {
+            Self::User => true,
+            Self::Automatic => has_acceptance,
+            Self::RetiredProposal => !has_acceptance,
+        }
+    }
 }
 
 /// The origin of one exact signed Allowance end (`end/<msg_id>`), recorded before
@@ -356,7 +368,7 @@ impl EndOrigin {
                 .iter()
                 .copied())
             || (accepted.is_none() && end.sender() != proposal.sender())
-            || (cause == EndCause::Automatic && accepted.is_none())
+            || !cause.permits(accepted.is_some())
         {
             return Err(PaykitError::corrupt());
         }
@@ -1715,7 +1727,8 @@ impl Paykit {
                     record.proposal(),
                     allower_generation,
                     execution.is_some(),
-                ),
+                )
+                .with_pending_create(self.identity(), self.app_id(), &write)?,
             )?;
         }
         let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
