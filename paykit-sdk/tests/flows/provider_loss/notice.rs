@@ -1,8 +1,10 @@
 //! A foreground payer keeps a signed own-account recovery notice across reopening.
 
-use std::{error::Error, sync::Arc};
+use std::{collections::BTreeMap, error::Error, sync::Arc};
 
-use paykit_sdk::{rail::FakeRail, AppScopes, PayOptions, Paykit, RequestRef, RequestStatus};
+use paykit_sdk::{
+    rail::FakeRail, AppScopes, PayOptions, PayOutcome, Paykit, RequestRef, RequestStatus,
+};
 use pubky_switch_client::app::{AppError, AppEvent, Refusal as ClientRefusal};
 use pubky_switch_client::error::StoreError;
 use pubky_switch_client::store::{Fault, FaultStore};
@@ -59,8 +61,34 @@ async fn payer_notice(world: &World) -> TestResult {
     assert_eq!(payer.request(&request).await?.status, RequestStatus::Open);
 
     let owner = world.identity("buyer")?;
-    Box::pin(world.restore_behind_mark("https://buyer.public.test", &owner)).await?;
-    Box::pin(reopen_held_payer(world, payer, &request, storage, &rail)).await?;
+    let origin = "https://buyer.public.test";
+    let generation = payer.app().own_identity().generation();
+    Box::pin(world.set_account_missing(origin, &owner, true)).await?;
+    let reopened = Box::pin(reopen_held_payer(world, payer, &request, storage, &rail)).await;
+    Box::pin(world.set_account_missing(origin, &owner, false)).await?;
+    let mut payer = reopened?;
+    assert!(payer.app().recovery_required().is_some());
+
+    let read = Box::pin(payer.receive(None)).await?;
+    assert!(!read.report.stopped);
+    assert_eq!(payer.app().own_identity().generation(), generation);
+    assert!(payer.app().recovery_required().is_none());
+    assert!(read.report.events.iter().any(|event| matches!(
+        event, AppEvent::RecoveryNoticeCleared { generation: cleared, .. } if *cleared == generation
+    )));
+    assert!(rail.all_pay_calls().is_empty());
+
+    let PayOutcome::Paid { attempt_id, .. } =
+        Box::pin(payer.pay_request(&request, PayOptions::default()))
+            .await
+            .outcome?
+    else {
+        return Err("the request did not pay after the recovery notice cleared".into());
+    };
+    Box::pin(payer.resume_payments()).await?;
+    let expected = BTreeMap::from([(attempt_id, 1)]);
+    assert_eq!(rail.all_pay_calls(), expected);
+    assert_eq!(rail.all_executions(), expected);
     Ok(())
 }
 
