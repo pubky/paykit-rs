@@ -46,7 +46,7 @@ use paykit_lib::{
 use pubky_switch_client::app::{
     claim_conflict, AppError, ClaimAttempt, ClaimOp, Initiator, KeptBatch, KeptBatchStatus,
     LocalWrite, ObligationDeadline, OpBatch, PeerIdentity, RecordContent, Refusal as ClientRefusal,
-    SharedRecord, SignedMessage, UserConfirmed, REVALIDATION_MS,
+    SharedRecord, SignedMessage, SwitchCopy, UserConfirmed, REVALIDATION_MS,
 };
 use pubky_switch_core::chain::TransitionProof;
 use pubky_switch_core::claims::{
@@ -3349,29 +3349,7 @@ impl Paykit {
         if matches!(kind, Dispatch::First { .. }) {
             self.set_stage(&mut entry, Stage::Paying).await?;
         }
-        // The commit and the checks were awaits, during which another payer app can block the
-        // payee, raise the block floor, or record a cancellation, a rejection or `manual_only`
-        // in the request record ([`Paykit::fresh_record_withholds`]): an automatic
-        // payment, a first dispatch or a repeat, reads the deny list, the record and the floor
-        // again now, from the switch, judges them, and reads them once more, holding unless
-        // the second reads show what the first did; a read that fails holds it too
-        // ([`Paykit::automatic_dispatch_held`], Paykit spec 8.1, 8.3, `crate::floor`). A payment
-        // by hand judges its local pauses and the deny copy's age, refreshing it when due
-        // and accepting only its bound consent ([`Paykit::dispatch_held`]). A first
-        // dispatch goes back to `Attempted`, known unsubmitted, as it does when the fence
-        // stops it; a repeat stays open.
-        if self.dispatch_held(&entry, by, kind).await.unwrap_or(true)
-            || Box::pin(self.period_recovery_held(&entry))
-                .await
-                .unwrap_or(true)
-        {
-            return self
-                .stopped_before_the_call(entry, kind, FinalCheck::Hold)
-                .await;
-        }
-        // Those reads were awaits too: the fence judges every other gate again, and nothing
-        // awaits after the second reads and the fence before the call.
-        match self.payment_fence(&entry, &payee, by, confirmed, kind)? {
+        match Box::pin(self.payment_fence(&entry, payee, by, confirmed, kind)).await? {
             FinalCheck::Pay => {}
             stopped => return self.stopped_before_the_call(entry, kind, stopped).await,
         }
@@ -4680,8 +4658,8 @@ impl Paykit {
 
     /// Whether `entry` is held from an automatic dispatch, a first dispatch or a repeat, as
     /// the switch holds the identity's state now. Every automatic dispatch makes this check,
-    /// and after it only the fence runs ([`Paykit::payment_fence`], with no await) before the
-    /// payment method's call ([`Paykit::dispatch`]).
+    /// including after taking a late seller lookup. The final local checks follow the
+    /// last read without waiting ([`Paykit::payment_fence`]).
     ///
     /// It reads three things from the switch, one after the other ([`Paykit::shared_collect`]):
     /// the deny list, the request record ([`Paykit::fresh_request_stamped`]) and the block
@@ -4880,37 +4858,47 @@ impl Paykit {
         }))
     }
 
-    /// The fence before the payment method's call, after a first dispatch's journal write of
-    /// `Paying` and an automatic payment's reads ([`Paykit::automatic_dispatch_held`]) (Paykit
-    /// spec 7.2): each is an await, during which a lookup's answer can come and a freshness
-    /// limit pass, so every
-    /// gate of the final payment check is judged again here, with no await of its own and
-    /// none after it before the payment method's call:
-    ///
-    /// - a switch lookup kept for the payee that has answered meanwhile, polled once without
-    ///   waiting: its answer may remove the destination's app or show equivocation, and
-    ///   taking it is an await, so it stops the payment and is kept for the next check;
-    /// - every gate of [`Paykit::final_gates`], on the clock now.
-    ///
-    /// The kept stop and the restore hold aren't judged again: Paykit's own state, which
-    /// only this app's own calls change (a receive, a placement, a confirmation), and none
-    /// can run while the payment holds the app. The deny list, the block floor and the
-    /// request record are the identity's, which another payer app can change meanwhile: an
-    /// automatic payment reads them again, from the switch, twice, just before this fence,
-    /// and holds unless the second reads show what the first did
-    /// ([`Paykit::automatic_dispatch_held`]).
-    fn payment_fence(
+    /// Recheck the payer's shared state after journaling `Paying` and immediately before
+    /// dispatch (Paykit spec 7.2, 8.1, 8.3). A first payment to a message-carried
+    /// destination can use a late switch confirmation of the exact signed seller identity
+    /// already checked. Taking it awaits storage, so read the payer's state again. A
+    /// public endpoint needs its app record checked too, and a repeat may already have paid.
+    async fn payment_fence(
         &mut self,
         entry: &JournalEntry,
-        payee: &PeerIdentity,
+        mut payee: PeerIdentity,
         by: Initiator,
         confirmed: Option<UserConfirmed>,
         kind: Dispatch,
     ) -> Result<FinalCheck> {
-        if self.kept_lookup_answered(&entry.payee) {
-            return Ok(FinalCheck::Hold);
+        let mut may_take_answer = matches!(kind, Dispatch::First { .. });
+        loop {
+            if self.dispatch_held(entry, by, kind).await.unwrap_or(true)
+                || Box::pin(self.period_recovery_held(entry))
+                    .await
+                    .unwrap_or(true)
+            {
+                return Ok(FinalCheck::Hold);
+            }
+            if !self.kept_lookup_answered(&entry.payee) {
+                // No await from these checks through to the call of the payment method.
+                return self.final_gates(entry, &payee, by, confirmed, kind);
+            }
+            if !may_take_answer || entry.destination.source()? == DestinationSource::Public {
+                return Ok(FinalCheck::Hold);
+            }
+            match self.take_kept_lookup(&entry.payee).await? {
+                Ok(Some(answer))
+                    if answer.switch_copy == SwitchCopy::Read
+                        && answer.doc.signed() == payee.doc.signed() =>
+                {
+                    payee = answer;
+                    may_take_answer = false;
+                }
+                Ok(_) => return Ok(FinalCheck::Hold),
+                Err(refusal) => return Ok(FinalCheck::Refused(refusal)),
+            }
         }
-        self.final_gates(entry, payee, by, confirmed, kind)
     }
 
     /// Whether a repeat made now completes, at the method's longest, before its attempt is
