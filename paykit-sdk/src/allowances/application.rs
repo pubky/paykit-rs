@@ -127,7 +127,8 @@ pub(super) struct ConfirmedReply {
 #[derive(Default)]
 pub(super) struct AppliedApplications {
     pub(super) replies: BTreeMap<([u8; 32], [u8; 32]), ConfirmedReply>,
-    pub(super) pending_creates: BTreeMap<([u8; 32], [u8; 32]), RecordVersion>,
+    pub(super) pending_creates:
+        BTreeMap<([u8; 32], [u8; 32]), (RecordVersion, pubky_switch_core::sig::SignedDoc)>,
     /// Signed original creates whose service key is presently missing. These can
     /// preserve an obligation across a deletion, but cannot authorize its delivery.
     pub(super) undated_creates: BTreeMap<([u8; 32], [u8; 32]), KeptOp>,
@@ -205,9 +206,12 @@ pub(super) fn applied_applications(
         let retirement =
             (pending && put.value_sealed.looks_like_delete()).then_some((put.key, version));
         if create {
-            applied
-                .pending_creates
-                .insert((put.key, commitment), version);
+            // A single create supplies a source receipt, never a batch ending in deletion.
+            applied.pending_creates.insert(
+                (put.key, commitment),
+                (version, member.proof.ok_or_else(PaykitError::corrupt)?),
+            );
+            continue;
         }
         batches
             .entry((
