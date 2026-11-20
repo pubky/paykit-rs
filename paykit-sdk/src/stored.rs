@@ -1196,6 +1196,20 @@ impl Paykit {
             }
             terms = Some(parent);
             record
+        } else if stored.message().refs.get(1).is_some() {
+            let key = self.activity_key(target)?;
+            conditions.push(self.app.record_condition(&key).await?);
+            let held = self.app.shared_record(&key).await?;
+            if crate::records::activity_base_changed(held.as_ref())
+                || crate::receive::waits_for_requested_record(&stored, held.as_ref())
+            {
+                return Ok(Placed::Not);
+            }
+            current = self.read_activity(target, held.as_ref());
+            let Some(record) = current.as_ref() else {
+                return Ok(Placed::Not);
+            };
+            record
         } else {
             record
         };
@@ -1259,10 +1273,14 @@ impl Paykit {
                     view: view.as_ref(),
                     service_time: self.service_time(),
                     journaled,
-                    first_receipt: found.first_receipt,
+                    on_record: found,
+                    own_app: self.app_id(),
                 })?,
                 FailureView::Refused | FailureView::ReadSwitch => ReceiptSettles::default(),
             };
+            if settles.waits_for_proof {
+                return Ok(Placed::Not);
+            }
             if let Some((op, deadline)) = settles.claim {
                 batch = batch
                     .op_if(op.kind(), conditions)
