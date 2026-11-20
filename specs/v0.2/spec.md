@@ -728,7 +728,7 @@ Questions 1 to 12 are deliberate trade-offs; 1 to 6, 8 and 9 are the switch's, g
 
 ## 18. Prototype and process
 
-The published SDK checks selling scopes on requests and routes payer replies by label. The parent-scope verification in Section 3.4 for payee cancellations, Period Details and original receipts is pending in the SDK and its executable vectors.
+The SDK checks selling scopes on requests and routes payer replies by label. For a payee's cancellation, Period Details or an original receipt, it checks the original signing certificate against the request under Section 3.4. A receipt for a payment without a request requires plain `paykit_request`. The `payee_label_senders` cases in `messages.json` cover six accepted and five refused messages. Wallet tests cover sibling tills and an early cancellation retained through reopen or restore.
 
 The reference prototype is shared separately, with its history (phase 1, the mechanisms the spec has since dropped: tickets, acks, leases and the claim lease; and the full lists of what phase 2 built and tested) and its full measurements.
 
