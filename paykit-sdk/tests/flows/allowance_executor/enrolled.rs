@@ -87,11 +87,14 @@ async fn join(
     .await?
 }
 
-async fn grant(
-    world: &World,
-    proposer: AllowanceRole,
-    restored_payments: Option<[&str; 3]>,
-) -> TestResult {
+#[derive(Clone, Copy)]
+enum GrantFlow {
+    FirstGrant,
+    OlderBackup([&'static str; 3]),
+    LatePeriodProof,
+}
+
+async fn grant(world: &World, proposer: AllowanceRole, flow: GrantFlow) -> TestResult {
     let storage = Arc::new(ListsStore::default());
     let rail = Arc::new(paykit_sdk::rail::FakeRail::with_clock(
         world.clock().clone(),
@@ -203,7 +206,7 @@ async fn grant(
     assert_eq!(original.body().batch, zero.body().batch);
     assert_eq!(original.body().batch.count, 3);
     assert_eq!(permanent_revision.seq + 1, ledger_revision.seq);
-    let pending = if restored_payments.is_some() {
+    let pending = if matches!(flow, GrantFlow::OlderBackup(_)) {
         world.lose_answer("POST", "/ops");
         assert!(Box::pin(payer.resume_allowance_executor(&key))
             .await
@@ -252,15 +255,24 @@ async fn grant(
         granted.version
     );
     assert!(rail.all_executions().is_empty());
-    if let (Some(backup), Some(amounts)) = (pending, restored_payments) {
+    if let GrantFlow::OlderBackup(amounts) = flow {
         Box::pin(payments::payment_after_restore(
             world,
             (payer, seller),
             storage,
             rail,
             key,
-            backup,
+            pending.expect("original grant backup"),
             amounts,
+        ))
+        .await?;
+    } else if matches!(flow, GrantFlow::LatePeriodProof) {
+        Box::pin(payments::late_period_proof(
+            world,
+            &mut payer,
+            &mut seller,
+            &rail,
+            &key,
         ))
         .await?;
     }
@@ -269,31 +281,51 @@ async fn grant(
 
 #[tokio::test]
 async fn test_enrolled_wallet_first_grant_on_both_services() -> TestResult {
-    enrolled_wallets(None).await
+    enrolled_wallets(GrantFlow::FirstGrant).await
 }
 
 #[tokio::test]
 async fn test_enrolled_allowance_payments_after_an_older_grant_backup() -> TestResult {
-    enrolled_wallets(Some(["70", "31", "30"])).await
+    enrolled_wallets(GrantFlow::OlderBackup(["70", "31", "30"])).await
 }
 
 #[tokio::test]
 async fn test_enrolled_rounded_allowance_payments_after_an_older_grant_backup() -> TestResult {
-    enrolled_wallets(Some(["69.9999999991", "30.000000001", "29.9999999991"])).await
+    enrolled_wallets(GrantFlow::OlderBackup([
+        "69.9999999991",
+        "30.000000001",
+        "29.9999999991",
+    ]))
+    .await
 }
 
-async fn enrolled_wallets(restored_payments: Option<[&str; 3]>) -> TestResult {
+#[tokio::test]
+async fn test_enrolled_late_period_proof_on_scripted_switch() -> TestResult {
+    enrolled_on(Backend::Scripted, GrantFlow::LatePeriodProof).await
+}
+
+#[tokio::test]
+async fn test_enrolled_late_period_proof_on_switch_service() -> TestResult {
+    enrolled_on(Backend::Service, GrantFlow::LatePeriodProof).await
+}
+
+async fn enrolled_wallets(flow: GrantFlow) -> TestResult {
+    for backend in [Backend::Scripted, Backend::Service] {
+        enrolled_on(backend, flow).await?;
+    }
+    Ok(())
+}
+
+async fn enrolled_on(backend: Backend, flow: GrantFlow) -> TestResult {
     tokio::task::LocalSet::new()
         .run_until(async {
-            for backend in [Backend::Scripted, Backend::Service] {
-                for proposer in [AllowanceRole::Allower, AllowanceRole::Allowee] {
-                    let Some(world) = World::start(backend)? else {
-                        continue;
-                    };
-                    let result = Box::pin(grant(&world, proposer, restored_payments)).await;
-                    world.close().await?;
-                    result?;
-                }
+            for proposer in [AllowanceRole::Allower, AllowanceRole::Allowee] {
+                let Some(world) = World::start(backend)? else {
+                    continue;
+                };
+                let result = Box::pin(grant(&world, proposer, flow)).await;
+                world.close().await?;
+                result?;
             }
             Ok(())
         })

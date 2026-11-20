@@ -84,7 +84,7 @@
 //! | `lv/<record key>` | the payer's pending or verified executor grant and its later accepted ledger | |
 //! | `lw/<record key>/<proposal hash>` | signed ledger predecessor and exact proposed value, staged before submission | |
 //! | `lb/<record key>/<proposal hash>` | native batch IDs committed before a ledger write leaves the wallet, retained across restore until resolved | |
-//! | `lx/<ledger key>/<application hash>` | the original applied writes and claim opening that account for compacted spending | |
+//! | `lx/<ledger key>/<application hash>` | the original applied writes that account for compacted spending and the opening for a reservation batch | |
 //! | `ac/<record key>` | the consent list: an Allowance this app may pay under, or removed from it for good (`allowances.rs`, Paykit spec 8.3); a restore marks every entry to confirm again | |
 //! | `ax/<record key>` | one signed input whose conflict check outlived placement, its pending record version when applicable, and whether further candidates remain unresolved (Paykit spec 8.1, 8.3.1) | |
 //! | `cf/<record key>` | a second, different proposal or response of an Allowance, with the feed `seq` its entry was read at, kept as the stop until the Allowance record holds `conflicted` (`allowances.rs`, Paykit spec 8.3) | |

@@ -64,6 +64,7 @@ struct Paid {
 struct Inner {
     payments: BTreeMap<AttemptId, Paid>,
     history_payer: Option<[u8; 32]>,
+    held_history_outcomes: BTreeMap<AttemptId, RailOutcome>,
     lost_dispatch: bool,
     executions: BTreeMap<AttemptId, u64>,
     next: VecDeque<Behaviour>,
@@ -137,6 +138,23 @@ impl FakeRail {
     /// The test wallet routes all of that payer's manual and automatic dispatches here.
     pub fn set_history_payer(&self, payer: [u8; 32]) {
         self.lock().history_payer = Some(payer);
+    }
+
+    /// Keep reporting the current outcome in the account inventory while the
+    /// payment and its individual proof can complete. Returns whether it was known.
+    pub fn hold_history_outcome(&self, key: &AttemptId) -> bool {
+        let mut inner = self.lock();
+        let Some(payment) = inner.payments.get(key) else {
+            return false;
+        };
+        let outcome = payment.outcome.clone();
+        inner.held_history_outcomes.insert(*key, outcome);
+        true
+    }
+
+    /// Resume reporting this payment's actual outcome in the account inventory.
+    pub fn refresh_history_outcome(&self, key: &AttemptId) {
+        self.lock().held_history_outcomes.remove(key);
     }
 
     /// Queue what the next new payment does.
@@ -546,7 +564,11 @@ impl Rail for FakeRail {
                 .map(|(id, p)| AllowanceDispatch {
                     attempt_id: *id,
                     amount: p.amount.clone(),
-                    outcome: p.outcome.clone(),
+                    outcome: inner
+                        .held_history_outcomes
+                        .get(id)
+                        .unwrap_or(&p.outcome)
+                        .clone(),
                 })
                 .collect()
         });

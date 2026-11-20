@@ -1,10 +1,11 @@
 //! The original application and opening claim of a reservation (Paykit spec 8.3).
 
-use paykit_lib::allowances::{ClaimState, LedgerEntry};
+use paykit_lib::allowances::{ClaimState, EntryOutcome, LedgerEntry};
 use paykit_lib::scopes::{certificate_in_force_at_write, verify_certificate};
+use paykit_lib::AttemptId;
 use pubky_switch_client::app::{App, KeptOp, RecordContent, RecordTarget, SharedRecord};
 use pubky_switch_core::chain::{check_attempt_proof, TransitionProof};
-use pubky_switch_core::claims::{ClaimType, Outcome};
+use pubky_switch_core::claims::{ClaimStatus, ClaimType, ClaimView, Outcome};
 use pubky_switch_core::ident::collection_id;
 use pubky_switch_core::ops::{
     check_permission, check_shape, Condition, OpKind, RecordVersion, SignedOp, Writer,
@@ -12,6 +13,7 @@ use pubky_switch_core::ops::{
 use pubky_switch_core::records::AppCert;
 use pubky_switch_core::sealed::RecordValue;
 use pubky_switch_core::shared::ApplicationRef;
+use std::collections::{HashMap, HashSet};
 
 use super::ReservationClaim;
 
@@ -28,9 +30,15 @@ impl AppliedOperation {
     }
 
     fn verify_original(app: &App, kept: &KeptOp) -> Option<Self> {
+        let cert = verify_certificate(&kept.cert, &app.identity()).ok()?;
+        Self::with_certificate(app, kept, cert)
+    }
+
+    fn with_certificate(app: &App, kept: &KeptOp, cert: AppCert) -> Option<Self> {
         let own = app.identity();
-        let cert = verify_certificate(&kept.cert, &own).ok()?;
         let op = SignedOp::verify_with_cert(&kept.op, &cert, &own).ok()?;
+        check_shape(op.body()).ok()?;
+        check_permission(&op.body().kind, Writer::App(&cert)).ok()?;
         let key = app.own_identity().service_key_of(op.body().generation)?;
         let proof = TransitionProof::verify(kept.proof.as_ref()?, &key, &own).ok()?;
         proof.check_binds(&op).ok()?;
@@ -47,8 +55,6 @@ impl AppliedOperation {
         let OpKind::RecordPut(put) = &body.kind else {
             return None;
         };
-        check_shape(body).ok()?;
-        check_permission(&body.kind, Writer::App(&self.cert)).ok()?;
         if put.key != app.record_key(target).ok()?
             || put.collection != collection_id(&target.collection.name, &app.identity())
             || put.policy != target.collection.policy
@@ -60,6 +66,147 @@ impl AppliedOperation {
         let value = sealed.open(&key, &app.identity(), &put.key).ok()?;
         let deleted = self.proof.body().state.get("deleted")?.as_bool()?;
         (deleted == matches!(value, RecordValue::Delete)).then_some(value)
+    }
+
+    /// A native claim entry can carry a more recent certificate for the same key.
+    /// The service-dated result must verify under a certificate eligible at that step.
+    fn outcome(
+        app: &App,
+        kept: &KeptOp,
+        certificates: &[AppCert],
+        obligation: &[u8; 32],
+        id: paykit_lib::AttemptId,
+        expected: EntryOutcome,
+    ) -> Option<Self> {
+        let header = SignedOp::peek(&kept.op).ok()?;
+        let body = header.body();
+        let writer = body.app_id?;
+        let OpKind::Claim(fields) = &body.kind else {
+            return None;
+        };
+        let claim = fields.check().ok()?;
+        let outcome = match expected {
+            EntryOutcome::Done if fields.kind == ClaimType::Done => Outcome::Done,
+            EntryOutcome::Failed if fields.kind == ClaimType::Failed => Outcome::Failed,
+            _ => return None,
+        };
+        if &claim.claim_key != obligation
+            || claim.attempt_id != id.to_bytes()
+            || body.generation != app.own_identity().generation()
+        {
+            return None;
+        }
+        let applied = Self::verify(app, kept).or_else(|| {
+            certificates
+                .iter()
+                .filter(|c| c.app_id() == writer && c.signed() != &kept.cert)
+                .find_map(|c| Self::with_certificate(app, kept, c.clone()))
+        })?;
+        let proof = applied.proof.body();
+        let view = ClaimView::from_value(&proof.state).ok()?;
+        let attempt = view.attempt(&claim.attempt_id)?;
+        (proof.step == claim.expected_step.checked_add(1)
+            && proof.step == Some(view.step)
+            && &view.claim_key == obligation
+            && !view.rebuilt
+            && !view.divergent
+            && !attempt.duplicate
+            && !attempt.possibly_duplicate
+            && attempt.owner == app.app_id()
+            && attempt.resolved_by == Some(writer)
+            && attempt.outcome == outcome
+            && (outcome != Outcome::Done || view.status == ClaimStatus::Settled))
+            .then_some(applied)
+    }
+}
+
+/// Certificates and terminal entries available after a fresh read of the relevant claims.
+pub(super) struct ClaimResults<'a> {
+    app: &'a App,
+    certificates: Vec<AppCert>,
+    entries: HashMap<AttemptId, Vec<&'a KeptOp>>,
+}
+
+impl<'a> ClaimResults<'a> {
+    pub(super) fn new(
+        app: &'a App,
+        ops: &'a [KeptOp],
+        signers: &super::checkpoint::ReservationSigners,
+        accepted: &super::checkpoint::AcceptedLedger,
+        current: &AppliedRecord,
+    ) -> Self {
+        let mut distinct = HashSet::new();
+        let certificates = signers
+            .certificates()
+            .chain([
+                accepted.grant.cert.signed(),
+                accepted.application.cert.signed(),
+                current.cert.signed(),
+            ])
+            .chain(ops.iter().map(|op| &op.cert))
+            .filter(|doc| distinct.insert(*doc))
+            .filter_map(|doc| verify_certificate(doc, &app.identity()).ok())
+            .collect();
+        let mut entries = HashMap::<_, Vec<_>>::new();
+        for op in ops {
+            let Ok(header) = SignedOp::peek(&op.op) else {
+                continue;
+            };
+            let OpKind::Claim(fields) = &header.body().kind else {
+                continue;
+            };
+            if !matches!(fields.kind, ClaimType::Done | ClaimType::Failed) {
+                continue;
+            }
+            if let Ok(claim) = fields.check() {
+                entries
+                    .entry(AttemptId::from_bytes(claim.attempt_id))
+                    .or_default()
+                    .push(op);
+            }
+        }
+        Self {
+            app,
+            certificates,
+            entries,
+        }
+    }
+
+    pub(super) fn confirms(
+        &self,
+        id: paykit_lib::AttemptId,
+        claim: ReservationClaim,
+        opened: u64,
+        before: Option<&AppliedRecord>,
+    ) -> bool {
+        let expected = match claim.state {
+            ClaimState::Open | ClaimState::Unknown => return true,
+            ClaimState::Done => EntryOutcome::Done,
+            ClaimState::Failed { .. } => EntryOutcome::Failed,
+        };
+        self.entries.get(&id).is_some_and(|entries| {
+            entries.iter().any(|op| {
+                let Some(result) = AppliedOperation::outcome(
+                    self.app,
+                    op,
+                    &self.certificates,
+                    &claim.obligation,
+                    id,
+                    expected,
+                ) else {
+                    return false;
+                };
+                let proof = result.proof.envelope();
+                let owner = result.cert.app_id() == self.app.app_id();
+                !matches!(claim.state, ClaimState::Failed { by_owner } if owner != by_owner)
+                    && opened < proof.seq
+                    && before.is_none_or(|copy| {
+                        proof.generation == copy.revision.generation
+                            && proof.seq < copy.revision.seq
+                            && proof.server_time <= copy.at_ms
+                    })
+            })
+        })
     }
 }
 
@@ -370,7 +517,7 @@ impl AppliedRecord {
         kept: &KeptOp,
         entry: &LedgerEntry,
         read: &pubky_switch_client::app::ClaimRead,
-    ) -> Option<ReservationClaim> {
+    ) -> Option<(ReservationClaim, u64)> {
         self.opening(app, kept, &entry.obligation, entry.attempt_id, read, None)
     }
 
@@ -392,29 +539,10 @@ impl AppliedRecord {
             read,
             Some((grant, entry.at)),
         )
+        .map(|(claim, _)| claim)
     }
 
-    /// A compacted failure retains its obligation, attempt and value. Its opening must
-    /// still belong to this executor and grant before the accepted ledger application.
-    pub(super) fn failed_opening(
-        &self,
-        app: &App,
-        kept: &KeptOp,
-        failed: &paykit_lib::allowances::CompactedFailed,
-        read: &pubky_switch_client::app::ClaimRead,
-        grant: &Condition,
-    ) -> Option<ReservationClaim> {
-        self.opening(
-            app,
-            kept,
-            &failed.obligation,
-            failed.attempt_id,
-            read,
-            Some((grant, 0)),
-        )
-    }
-
-    fn opening(
+    pub(super) fn opening(
         &self,
         app: &App,
         kept: &KeptOp,
@@ -422,8 +550,17 @@ impl AppliedRecord {
         id: paykit_lib::AttemptId,
         read: &pubky_switch_client::app::ClaimRead,
         accepted_under: Option<(&Condition, u64)>,
-    ) -> Option<ReservationClaim> {
-        let applied = AppliedOperation::verify(app, kept)?;
+    ) -> Option<(ReservationClaim, u64)> {
+        // The native upload inventory can attach a renewed certificate with the same
+        // signing key. The certificate of the accepted ledger also proves an opening
+        // only when it verifies that operation and was in force at its proved time.
+        let applied = AppliedOperation::verify(app, kept).or_else(|| {
+            let applied = AppliedOperation::with_certificate(app, kept, self.cert.clone())?;
+            (applied.op.body().generation == app.own_identity().generation()
+                && applied.op.body().batch == self.op.body().batch
+                && applied.proof.envelope().server_time == self.at_ms)
+                .then_some(applied)
+        })?;
         let b = applied.op.body();
         let OpKind::Claim(fields) = &b.kind else {
             return None;
@@ -467,10 +604,13 @@ impl AppliedRecord {
                 by_owner: opened.resolved_by == Some(writer),
             },
         };
-        Some(ReservationClaim {
-            obligation: claim.claim_key,
-            state,
-        })
+        Some((
+            ReservationClaim {
+                obligation: claim.claim_key,
+                state,
+            },
+            applied.proof.envelope().seq,
+        ))
     }
 
     pub(super) fn applied_outcome(
@@ -480,27 +620,23 @@ impl AppliedRecord {
         entry: &LedgerEntry,
         read: &pubky_switch_client::app::ClaimRead,
     ) -> Option<()> {
-        use paykit_lib::allowances::EntryOutcome;
-        let applied = AppliedOperation::verify(app, kept)?;
+        let applied = AppliedOperation::outcome(
+            app,
+            kept,
+            std::slice::from_ref(&self.cert),
+            &entry.obligation,
+            entry.attempt_id,
+            entry.outcome?,
+        )?;
         let b = applied.op.body();
-        let OpKind::Claim(fields) = &b.kind else {
-            return None;
-        };
-        let claim = fields.check().ok()?;
         let writer = self.op.body().app_id?;
-        let attempt = read.view.attempt(&claim.attempt_id)?;
+        let attempt = read.view.attempt(&entry.attempt_id.to_bytes())?;
         let matches = matches!(
-            (fields.kind, entry.outcome, attempt.outcome),
-            (ClaimType::Done, Some(EntryOutcome::Done), Outcome::Done)
-                | (
-                    ClaimType::Failed,
-                    Some(EntryOutcome::Failed),
-                    Outcome::Failed
-                )
+            (entry.outcome?, attempt.outcome),
+            (EntryOutcome::Done, Outcome::Done) | (EntryOutcome::Failed, Outcome::Failed)
         );
         (matches
-            && claim.claim_key == entry.obligation
-            && claim.attempt_id == entry.attempt_id.to_bytes()
+            && read.view.claim_key == entry.obligation
             && !read.view.divergent
             && !read.view.rebuilt
             && !attempt.duplicate

@@ -2,6 +2,109 @@
 
 use super::*;
 
+pub(super) async fn late_period_proof(
+    world: &World,
+    payer: &mut Paykit,
+    seller: &mut Paykit,
+    rail: &paykit_sdk::rail::FakeRail,
+    key: &[u8; 32],
+) -> TestResult {
+    use crate::common::{draft, request_from};
+    use paykit_lib::allowances::EntryOutcome;
+    use paykit_lib::periods::{AnchoredRule, PeriodRef, Recurrence, Unit};
+
+    rail.set_history_payer(payer.identity());
+    let start = world.now_ms() / 1_000 * 1_000;
+    let schedule = Recurrence::new(AnchoredRule::new(start, 1, Unit::Hour)?, start, None)?;
+    let periods = schedule.periods(2)?;
+    let period = PeriodRef::from(periods[0]);
+    let next = PeriodRef::from(periods[1]);
+    let request = Box::pin(request_from(
+        seller,
+        payer.identity(),
+        draft("7", start).with_recurrence(schedule),
+    ))
+    .await;
+    Box::pin(finish_listing(payer)).await;
+    Box::pin(payer.accept_subscription_under_allowance(&request, key)).await?;
+    rail.next(paykit_sdk::rail::Behaviour::Fail);
+    let failed = Box::pin(payer.pay_period_under_allowance(&request, &period))
+        .await
+        .outcome?;
+    let paykit_sdk::PayOutcome::Failed { attempt_id, .. } = failed else {
+        panic!("expected a reported failure, got {failed:?}");
+    };
+    assert_eq!(
+        super::super::only_ledger(payer).await.0.entries[0].outcome,
+        Some(EntryOutcome::Failed)
+    );
+    assert!(rail.hold_history_outcome(&attempt_id));
+    rail.complete_after_failure(&attempt_id);
+    Box::pin(payer.resume_payments()).await?;
+    let (ledger, revision) = super::super::only_ledger(payer).await;
+    let entry = &ledger.entries[0];
+    assert_eq!(
+        (entry.attempt_id, entry.outcome),
+        (attempt_id, Some(EntryOutcome::Done))
+    );
+    let claim = payer
+        .app_mut()
+        .read_claim(&entry.obligation)
+        .await?
+        .unwrap();
+    assert_eq!(
+        claim.view.attempt(&attempt_id.to_bytes()).unwrap().outcome,
+        pubky_switch_core::claims::Outcome::Failed
+    );
+    Box::pin(finish_listing(seller)).await;
+    let sales = seller.payee_activity().await?;
+    let sale = sales
+        .iter()
+        .find(|s| s.request_hash == Some(request.request_hash))
+        .unwrap();
+    let occurrence = sale
+        .periods
+        .iter()
+        .find(|p| p.billing_period == period)
+        .unwrap();
+    Box::pin(seller.confirm_payment(&occurrence.record))
+        .await?
+        .expect("seller receipt");
+    Box::pin(finish_listing(payer)).await;
+    let settled = payer
+        .app_mut()
+        .read_claim(&entry.obligation)
+        .await?
+        .unwrap();
+    assert_eq!(
+        settled
+            .view
+            .attempt(&attempt_id.to_bytes())
+            .unwrap()
+            .outcome,
+        pubky_switch_core::claims::Outcome::Done
+    );
+    let receipts = payer
+        .receipts(paykit_sdk::ReceiptsOf::Period(request, period))
+        .await?;
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].attempt_id, attempt_id);
+    assert!(payer
+        .receipts(paykit_sdk::ReceiptsOf::Period(request, next))
+        .await?
+        .is_empty());
+    assert_eq!(super::super::only_ledger(payer).await.1, revision);
+    let usage = Box::pin(payer.reconcile_allowance(key))
+        .await?
+        .expect("paid occurrence");
+    assert_eq!((usage.lifetime().as_str(), usage.spent()), ("7", 1));
+    assert_eq!(rail.pay_calls(&attempt_id), 1);
+    let history = rail.allowance_history(payer.identity()).await?.unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].outcome, paykit_sdk::rail::RailOutcome::Failed);
+    Ok(())
+}
+
 pub(super) async fn payment_after_restore(
     world: &World,
     wallets: (Paykit, Paykit),

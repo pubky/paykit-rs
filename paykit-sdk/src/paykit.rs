@@ -1188,6 +1188,7 @@ impl Paykit {
         // they build on request records the copy may lack, and stay kept meanwhile.
         if !Box::pin(self.payer_waits(keys)).await? {
             Box::pin(self.place_kept_cancellations()).await?;
+            Box::pin(self.record_ledger_outcomes()).await?;
         }
         // Ask for replies dropped for a bound and entries dropped unverified as soon as
         // the sender's holds and mark cadence allow. Forget the pairs a block's marks

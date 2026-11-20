@@ -73,6 +73,8 @@ mod periods;
 mod protocol;
 mod publish;
 pub mod rail;
+#[cfg(feature = "test-support")]
+pub use executor::with_early_ledger_compaction;
 mod receipt_delivery;
 mod receipts;
 mod receive;
