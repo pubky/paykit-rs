@@ -1164,25 +1164,12 @@ pub(crate) fn kept_message(
     kind: &str,
     body: serde_json::Value,
 ) -> serde_json::Value {
-    kept_message_with_refs(w, app, cert_app, to, kind, Vec::new(), body)
-}
-
-/// [`kept_message`], naming `refs`.
-pub(crate) fn kept_message_with_refs(
-    w: &World,
-    app: &str,
-    cert_app: &str,
-    to: &pubky_switch_client::testing::TestSigner,
-    kind: &str,
-    refs: Vec<[u8; 32]>,
-    body: serde_json::Value,
-) -> serde_json::Value {
     let plaintext = w.sign_as(
         &w.bob,
         app,
         to,
         kind,
-        refs,
+        Vec::new(),
         body.as_object().cloned().unwrap(),
     );
     let keys = w.bob.identity().app_keys(cert_app);
@@ -1341,6 +1328,60 @@ pub(crate) fn kept(value: serde_json::Value) -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn test_restore_kept_cancellation_binds_the_received_kind_and_request() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let (_, hash) = crate::periods::signed_request(&w);
+    crate::periods::inject_details(&w, &[wallet.app_id()], hash, crate::periods::january());
+    wallet.receive(None).await.unwrap();
+    let replies = wallet.app().protocol_scan("paykit", b"pr/").await.unwrap();
+    let [(_, details)] = replies.as_slice() else {
+        panic!("expected the shop's kept period details");
+    };
+    let stop = crate::one_time::receive_stop(&w, &mut wallet, hash).await;
+    let key = crate::one_time::stop_key(&w, &wallet, hash);
+    let backup = wallet.backup().await.unwrap();
+    let restored = restored_bare(&w, &backup).await;
+    assert_eq!(
+        restored
+            .app()
+            .protocol_get("paykit", &key)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(stop.as_slice())
+    );
+
+    let good = serde_json::from_slice(&backup.to_bytes().unwrap()).unwrap();
+    let layer = layer_of(&good);
+    let index = layer.iter().position(|(k, _)| *k == key).unwrap();
+    let details: serde_json::Value = serde_json::from_slice(details).unwrap();
+    for item in [&layer[index].1, &details] {
+        assert!(item["d"]["accepted_at"].is_u64());
+        assert!(item["d"]["seq"].is_u64());
+    }
+    let mut wrong_kind = layer.clone();
+    wrong_kind[index].1 = details;
+    refused_writing_nothing(
+        &w,
+        with_layer(&good, wrong_kind),
+        wallet.app_id(),
+        "period details at the cancellation key",
+    )
+    .await;
+    let mut wrong_record = layer;
+    wrong_record[index].0 = crate::one_time::stop_key(&w, &wallet, [7; 32]);
+    refused_writing_nothing(
+        &w,
+        with_layer(&good, wrong_record),
+        wallet.app_id(),
+        "cancellation under another request key",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
     let w = World::new();
     let (good, app_id) = backup_with_a_payment(&w).await;
@@ -1351,20 +1392,8 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
         .map(|(_, v)| v["d"].clone())
         .unwrap();
     let request = entry["request"].clone();
-    let request_hash: [u8; 32] =
-        pubky_switch_core::enc::unb64_array(entry["request_hash"].as_str().unwrap()).unwrap();
     let key_of = |prefix: &str| format!("{prefix}{}", pubky_switch_core::enc::b64(&[7u8; 32]));
-    // Of the right kind, verified, but kept under a key that isn't its record's: a payee's
-    // cancellation and a payee's list.
-    let cancellation = kept_message_with_refs(
-        &w,
-        "shop1",
-        "shop1",
-        &w.alice,
-        "paykit.payment_request_cancellation",
-        vec![request_hash],
-        serde_json::json!({ "reason": null }),
-    );
+    // A verified list held under a different record key.
     let list = kept_message(
         &w,
         "shop1",
@@ -1429,17 +1458,7 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
             "asked_at_ms": null, "queued": null, "epochs": epochs,
         })
     };
-    let cases: [(&str, String, serde_json::Value); 22] = [
-        (
-            "kept cancellation of another kind",
-            key_of("kc/"),
-            kept(request.clone()),
-        ),
-        (
-            "kept cancellation under another key",
-            key_of("kc/"),
-            kept(cancellation),
-        ),
+    let cases: [(&str, String, serde_json::Value); 20] = [
         (
             "held list of another kind",
             key_of("lh/"),
@@ -1636,7 +1655,9 @@ async fn test_restore_cursor_time_ahead_of_the_backup_is_clamped() {
 }
 
 /// Bob's shop's record of `request`.
-fn payee_record(request: &paykit_sdk::RequestRef) -> pubky_switch_client::app::RecordTarget {
+pub(super) fn payee_record(
+    request: &paykit_sdk::RequestRef,
+) -> pubky_switch_client::app::RecordTarget {
     use paykit_lib::collections::Collection;
     let collection = Collection::PayeeActivity;
     pubky_switch_client::app::RecordTarget::new(

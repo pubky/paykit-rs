@@ -5,7 +5,7 @@ use paykit_lib::derive::natural_key;
 use paykit_lib::records::{bind_ledger, AllowanceRecord};
 use paykit_lib::{AllowanceId, Body, Collection};
 use pubky_switch_client::app::{App, KeptOp, RecordTarget};
-use pubky_switch_core::enc::serde_b64;
+use pubky_switch_core::enc::{hash, serde_b64};
 use pubky_switch_core::ops::Condition;
 use serde::{Deserialize, Serialize};
 
@@ -108,16 +108,28 @@ impl ExecutorHistory {
         key: &[u8; 32],
         opening: &ApprovedOpening,
     ) -> Option<ExecutorCheckpoint> {
-        let mut rows = self.0.iter();
-        let first = rows.next()?;
-        if self.0.len() == 1 {
-            return Some(first.clone());
+        let first = self.0.first()?;
+        let mut verified = Vec::new();
+        for source in &self.0 {
+            if source.counterparty != first.counterparty || source.allowance_id != first.allowance_id {
+                return None;
+            }
+            if matches!(source.grant, GrantEvidence::Verified { .. }) {
+                verified.push((source, source.accepted(app, key, opening)?));
+            }
         }
-        let mut verified = self
-            .0
-            .iter()
-            .map(|source| Some((source, source.accepted(app, key, opening)?)))
-            .collect::<Option<Vec<_>>>()?;
+        let Some((_, original)) = verified.first() else {
+            return self.0.iter().all(|source| source == first && source.later.is_none()).then(|| first.clone());
+        };
+        // The applied-local marker can only match the authenticated original grant.
+        // Its backup contains no ledger write to order with the verified checkpoints.
+        let value_hash = hash(&original.grant.value);
+        if self.0.iter().any(|source| {
+            matches!(&source.grant, GrantEvidence::AwaitingProof { value_hash: pending }
+                if *pending != value_hash || source.later.is_some())
+        }) {
+            return None;
+        }
         verified.sort_by_key(|(_, accepted)| accepted.application.revision);
         for pair in verified.windows(2) {
             let (_, a) = &pair[0];

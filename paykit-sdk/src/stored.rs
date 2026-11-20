@@ -242,7 +242,7 @@ impl StoredNote {
 
 /// The request `stored` is, or names: a request's own hash, the first of a payer's reply's
 /// `refs`, the second of a receipt's.
-fn named_request(stored: &StoredMessage) -> Option<[u8; 32]> {
+pub(crate) fn named_request(stored: &StoredMessage) -> Option<[u8; 32]> {
     let refs = &stored.message().refs;
     match stored.body() {
         Body::PaymentRequest(_) => Some(stored.hash()),

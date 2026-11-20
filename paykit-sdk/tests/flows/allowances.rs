@@ -3620,7 +3620,7 @@ async fn test_allowances_attempted_permanent_delete_preserves_the_accepted_histo
 
 /// The `allowances` record at `target` written by `app` to `value`, `None` for a delete,
 /// as a faulty own app could.
-async fn write_record(
+pub(super) async fn write_record(
     app: &mut Paykit,
     target: &pubky_switch_client::app::RecordTarget,
     value: Option<&[u8]>,
@@ -12636,6 +12636,168 @@ async fn test_original_payer_reopens_the_selected_proposal_and_sends_the_same_pr
         Box::pin(taken(&mut shop, "paykit.allowance_acceptance")).await,
         1
     );
+}
+
+#[tokio::test]
+async fn test_original_payer_recovers_its_incoming_acceptance_after_the_batch_applies() {
+    for resume in [
+        ResumeOriginal::Load,
+        ResumeOriginal::Receive,
+        ResumeOriginal::Flush,
+    ] {
+        Box::pin(recover_incoming_acceptance(resume)).await;
+    }
+}
+
+enum ResumeOriginal {
+    Load,
+    Receive,
+    Flush,
+}
+
+async fn recover_incoming_acceptance(resume: ResumeOriginal) {
+    use pubky_switch_client::app::KeptOp;
+    use pubky_switch_client::store::{Fault, FaultStore};
+    use pubky_switch_core::{
+        ops::{OpKind, SignedOp},
+        records::AppCert,
+    };
+    use std::sync::Arc;
+
+    let w = World::new();
+    let disk = Arc::new(FaultStore::new(crate::common::store(), Fault::None));
+    let mut payer = Box::pin(alice_on(
+        &w,
+        "wallet",
+        AppScopes::new().allowance_execute().build().unwrap(),
+        disk.clone(),
+    ))
+    .await;
+    let mut seller = Box::pin(shop(&w)).await;
+    let offer = payer
+        .propose_executable_allowance(w.bob_id(), terms(), UserConfirmed::new())
+        .await
+        .unwrap();
+    seller.receive(None).await.unwrap();
+    let peer = seller.allowances().await.unwrap().pop().unwrap();
+    seller.accept_allowance(&peer.record).await.unwrap();
+
+    // Pause before native submission so the actual prepared approval sets the
+    // store limit. The next receive can apply the batch but cannot save its proof.
+    disk.refuse_puts_as_too_large(Some(b"opq/"));
+    let _ = payer.receive(None).await;
+    let at = format!("ao/{}", pubky_switch_core::enc::b64(&offer.record));
+    let prepared = payer
+        .app()
+        .protocol_get("paykit", at.as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    let approval = Box::pin(original_approval(&payer, &offer.record)).await;
+    assert!(approval["opening"].is_object() && approval["opening"]["applied"].is_null());
+    assert!(payer
+        .app()
+        .shared_record(&offer.record)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(payer
+        .app()
+        .protocol_scan("paykit", b"ap/")
+        .await
+        .unwrap()
+        .is_empty());
+    let id = payer.app_id();
+    drop(payer);
+    let load = || {
+        Paykit::load(
+            w.env(&w.alice, disk.clone()),
+            Default::default(),
+            id,
+            w.rail.clone(),
+            w.timer(),
+        )
+    };
+    let mut payer = Box::pin(load()).await.unwrap();
+    assert_eq!(
+        Box::pin(original_approval(&payer, &offer.record)).await,
+        approval
+    );
+    disk.refuse_puts_as_too_large_over(Some(b"p/paykit/ao/"), prepared.len());
+    let failure = payer.receive(None).await.unwrap_err();
+    assert!(matches!(
+        failure,
+        PaykitError::Client(pubky_switch_client::app::AppError::Store(
+            pubky_switch_client::error::StoreError::TooLarge { .. }
+        ))
+    ));
+    assert_eq!(
+        Box::pin(original_approval(&payer, &offer.record)).await,
+        approval
+    );
+    let mut applied = std::collections::BTreeMap::new();
+    for member in payer.app().shared_evidence().await.unwrap().ops {
+        let cert = AppCert::verify(&member.cert, &payer.identity()).unwrap();
+        let op = SignedOp::verify(
+            &member.op,
+            &cert.signing_key(),
+            &payer.identity(),
+            Some(&cert.app_id()),
+        )
+        .unwrap();
+        if op.body().batch.count != 3 || cert.app_id() != id {
+            continue;
+        }
+        let OpKind::RecordPut(put) = &op.body().kind else {
+            panic!("expected an original Allowance record operation");
+        };
+        assert!(member.proof.is_some());
+        assert!(applied.insert(put.key, member).is_none());
+    }
+    let keys = [
+        paykit_lib::Collection::Allowances,
+        paykit_lib::Collection::AllowanceLedgers,
+        paykit_lib::Collection::AllowanceProposals,
+    ]
+    .map(|family| {
+        family
+            .record_key(
+                payer.app().naming_key(),
+                &paykit_lib::derive::natural_key::allowance(&w.bob_id(), &offer.allowance_id),
+                None,
+            )
+            .unwrap()
+    });
+    let members = keys.map(|key| applied.remove(&key).unwrap());
+    assert!(applied.is_empty());
+    let ledger_key = keys[1];
+    assert_eq!(w.record_writes(&w.alice, &ledger_key), 1);
+    disk.refuse_puts_as_too_large(None);
+    match resume {
+        ResumeOriginal::Load => {
+            drop(payer);
+            payer = Box::pin(load()).await.unwrap();
+        }
+        ResumeOriginal::Receive => {
+            payer.receive(None).await.unwrap();
+        }
+        ResumeOriginal::Flush => {
+            payer.flush().await.unwrap();
+        }
+    }
+    let captured = Box::pin(original_approval(&payer, &offer.record)).await;
+    assert_eq!(captured["decision"], approval["decision"]);
+    assert_eq!(
+        serde_json::from_value::<[KeptOp; 3]>(captured["opening"]["applied"].clone()).unwrap(),
+        members
+    );
+    payer.receive(None).await.unwrap();
+    payer.flush().await.unwrap();
+    assert_eq!(
+        Box::pin(original_approval(&payer, &offer.record)).await,
+        captured
+    );
+    assert_eq!(w.record_writes(&w.alice, &ledger_key), 1);
 }
 
 #[tokio::test]

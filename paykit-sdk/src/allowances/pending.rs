@@ -394,10 +394,34 @@ impl Paykit {
         let intents = self
             .local_scan::<PreparedPendingReply>(key::PENDING_REPLIES)
             .await?;
-        if intents.is_empty() {
+        self.recover_pending_applications(intents).await
+    }
+
+    /// Reopen from the local store alone. An incoming acceptance has no outgoing
+    /// reply intent, but the payer still needs the applied batch before a grant.
+    pub(crate) async fn recover_original_approvals(&mut self) -> Result<()> {
+        self.recover_pending_applications(Vec::new()).await
+    }
+
+    async fn recover_pending_applications(
+        &mut self,
+        intents: Vec<(String, PreparedPendingReply)>,
+    ) -> Result<()> {
+        let approvals: Vec<_> = self
+            .local_scan::<super::OriginalApproval>(key::ORIGINAL_APPROVALS)
+            .await?
+            .into_iter()
+            .filter(|(_, approval)| approval.awaiting_application())
+            .collect();
+        if intents.is_empty() && approvals.is_empty() {
             return Ok(());
         }
         let confirmed = self.confirmed_pending_applications().await?;
+        for (record, mut approval) in approvals {
+            let at = format!("{}{record}", key::ORIGINAL_APPROVALS);
+            self.capture_original_approval(&at, &mut approval, &confirmed)
+                .await?;
+        }
         for (at, intent) in intents {
             let msg = intent.message.stored(&intent.peer)?;
             let id = super::named_allowance(msg.body()).ok_or_else(PaykitError::corrupt)?;
@@ -411,15 +435,14 @@ impl Paykit {
                 key: format!("{}{at}", key::PENDING_REPLIES).into_bytes(),
             }];
             let queued = if let Some(batch) = applied {
-                let members = &batch.members;
-                if members.len() == 3 {
-                    let canonical = self.app.record_key(&allowance_target(&intent.peer, id))?;
-                    let at = key::original_approval(&canonical);
-                    if let Some(mut approved) =
-                        self.local_get::<super::OriginalApproval>(&at).await?
+                if batch.members.len() == 3 {
+                    let approval = self.app.record_key(&allowance_target(&intent.peer, id))?;
+                    if !self
+                        .local_get::<super::OriginalApproval>(&key::original_approval(&approval))
+                        .await?
+                        .is_some_and(|a| a.retains_application(&intent.application, &batch.members))
                     {
-                        approved.applied(intent.application, members)?;
-                        writes.push(state::local_put(&at, &approved)?);
+                        continue;
                     }
                 }
                 // Queue first. A stop before the local release still leaves the identical

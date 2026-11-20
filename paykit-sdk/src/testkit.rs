@@ -183,3 +183,113 @@ impl Party {
 pub(crate) fn object(value: Value) -> Map<String, Value> {
     value.as_object().cloned().unwrap_or_default()
 }
+
+/// Two identities' switches, alice's and bob's, on one clock and Homeserver, for the unit
+/// tests that drive a whole app: the setup of the flow tests' world, cut to what they use.
+pub(crate) struct Switches {
+    pub(crate) clock: std::sync::Arc<pubky_switch_client::clock::TestClock>,
+    pub(crate) alice: pubky_switch_client::testing::TestSigner,
+    pub(crate) bob: pubky_switch_client::testing::TestSigner,
+    router: std::sync::Arc<pubky_switch_client::testing::Router>,
+}
+
+/// The host's timer, on the switches' clock.
+struct ClockTimer(std::sync::Arc<pubky_switch_client::clock::TestClock>);
+
+impl crate::Timer for ClockTimer {
+    fn sleep(&self, ms: u64) -> pubky_switch_client::transport::BoxFuture<'static, ()> {
+        self.0.advance_ms(ms);
+        Box::pin(async {})
+    }
+}
+
+impl Switches {
+    pub(crate) fn new() -> Self {
+        use pubky_switch_client::testing::{
+            ProtocolSpec, Router, Seeds, TestHomeserver, TestIdentity, TestSigner, START_MS,
+        };
+        use std::sync::Arc;
+        let seeds = Seeds::default();
+        let clock = Arc::new(pubky_switch_client::clock::TestClock::new(START_MS));
+        let homeserver = Arc::new(TestHomeserver::new());
+        let spec = ProtocolSpec {
+            keyed_scopes: [
+                "paykit_pay",
+                "paykit_request",
+                "paykit_settlements",
+                "paykit_allowance",
+                "paykit_allowance_execute",
+                "paykit_contacts",
+                "paykit_manage_contacts",
+            ]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
+            ..ProtocolSpec::default()
+        };
+        let signer = |name: &str, origin: &str| {
+            TestSigner::at(
+                TestIdentity::new(&seeds, name),
+                origin,
+                Arc::clone(&clock),
+                Arc::clone(&homeserver),
+                spec.clone(),
+            )
+        };
+        let alice = signer("alice", "https://alice-switch.example");
+        let bob = signer("bob", "https://bob-switch.example");
+        let router = Arc::new(Router::new());
+        router.add_switch(alice.origin(), alice.switch());
+        router.add_switch(bob.origin(), bob.switch());
+        Self {
+            clock,
+            alice,
+            bob,
+            router,
+        }
+    }
+
+    /// App `name` of `signer`, joined with `scopes` on a store of its own, its first read done.
+    pub(crate) async fn join(
+        &self,
+        signer: &pubky_switch_client::testing::TestSigner,
+        name: &str,
+        scopes: crate::RequestedScopes,
+    ) -> crate::Paykit {
+        use std::sync::Arc;
+        let keys = signer.identity().app_keys(name);
+        let names: Vec<&str> = scopes.scopes.iter().map(String::as_str).collect();
+        let spec = pubky_switch_client::testing::AppSpec::new(&names)
+            .with_permissions(&scopes.permissions);
+        let request = signer.approve(&keys, &spec).unwrap();
+        let store = Arc::new(pubky_switch_client::store::MemoryStore::new());
+        let env = signer.env_with(
+            store,
+            Arc::clone(&self.router) as Arc<dyn pubky_switch_client::transport::Transport>,
+        );
+        let rail = Arc::new(crate::rail::FakeRail::with_clock(
+            Arc::clone(&self.clock) as Arc<dyn pubky_switch_client::clock::Clock>
+        ));
+        let mut app = crate::Paykit::join(
+            env,
+            crate::PaykitConfig::default(),
+            request,
+            rail,
+            Arc::new(ClockTimer(Arc::clone(&self.clock))),
+        )
+        .await
+        .unwrap();
+        app.receive(None).await.unwrap();
+        app
+    }
+
+    /// Bob's app `name`, holding only `paykit_request:<label>`.
+    pub(crate) async fn labelled(&self, name: &str, label: &str) -> crate::Paykit {
+        let label = paykit_lib::Label::parse(label).unwrap();
+        let scopes = crate::AppScopes::new()
+            .request_label(&label)
+            .build()
+            .unwrap();
+        self.join(&self.bob, name, scopes).await
+    }
+}
