@@ -14,9 +14,9 @@ constraints that v0.2 should settle before its freeze are raised in
 A v0.1 spike ran most of the v0.1 SDK in Chrome, Firefox, and Playwright
 WebKit ([Evidence](#evidence)). That is evidence about the browser platform,
 not about v0.2. The v0.2 crates compile for the browser with build changes
-only, but the payment path would trap at run time (*inferred*, D8), and the
-Switch contracts they rely on were not designed for a browser. The rest is
-product, security, and API decisions.
+only, but the payment path trapped at run time until the draft #562 changed
+its clock (*verified (#562)*, D8), and the Switch contracts they rely on were
+not designed for a browser. The rest is product, security, and API decisions.
 [Summary of decisions](#summary-of-decisions) lists what this document
 proposes and who decides each item.
 
@@ -46,6 +46,11 @@ proposes and who decides each item.
     implements the Switch client's host traits at the v0.2 pin, or a
     standalone wasm32 probe of `std` run in Node.js.
   - *Verified (probe)*: a network check on 2026-11-19.
+  - *Verified (#N)*: a test in draft pull request #N of the browser stack ran
+    it on v0.2 in browsers
+    ([What ran on v0.2 in browsers](#what-ran-on-v02-in-browsers)).
+  - *Measured (#N)*: a figure or observation that pull request #N reports
+    from runs on one machine; no test asserts it.
   - *Read*: from source, a specification, or vendor documentation; not run.
   - *Inferred*: reasoned from read sources; not run.
   - *Untested*: an expectation.
@@ -228,7 +233,9 @@ ran with the spike's trailing-slash fix (`91b235e8`);
 
 ### What was checked on v0.2
 
-On `v02` and `sw` as cited, with rustc 1.96.0. Nothing ran in a browser.
+On `v02` and `sw` as cited, with rustc 1.96.0. None of these checks ran in a
+browser; for browser runs see
+[What ran on v0.2 in browsers](#what-ran-on-v02-in-browsers).
 
 | Check (*verified (v0.2 build)*) | Result |
 | --- | --- |
@@ -236,10 +243,10 @@ On `v02` and `sw` as cited, with rustc 1.96.0. Nothing ran in a browser.
 | `-p paykit-sdk`, with the 0.2 backend | Fails: `mio` (Tokio `net`) and `ring` 0.17.14's C build, from the client's default `http` feature (`sw:crates/pubky-switch-client/Cargo.toml:12-18`); `getrandom` 0.3 needs its backend |
 | `-p paykit-sdk`, `http` off, both `getrandom` backends | Passes, with no source change |
 | `-p paykit-lib --features signer`, same | Fails: the Switch workspace takes the client with default features (`sw:Cargo.toml:29`); passes with that line patched |
-| A standalone std-only probe (a cdylib, not the v0.2 crates) calling `Instant::now()`, `SystemTime::now()`, `std::thread::spawn` on wasm32, run in Node.js with no imports | Each traps: `RuntimeError: unreachable`. The v0.2 call sites (D8) are *inferred* to trap the same way; no v0.2 code ran |
-| A store holding a `FileSystemSyncAccessHandle`; a `Date.now()` clock | Compile; `JsValue` is `Send + Sync` without `atomics` |
-| A `fetch` transport awaiting `JsFuture` inside `BoxFuture` | Fails: `JsFuture` is not `Send` |
-| The same via `spawn_local`, returning a future that awaits a `oneshot` receiver | Compiles, with no `unsafe` |
+| A standalone std-only probe (a cdylib, not the v0.2 crates) calling `Instant::now()`, `SystemTime::now()`, `std::thread::spawn` on wasm32, run in Node.js with no imports | Each traps: `RuntimeError: unreachable`. The v0.2 call sites (D8) are *inferred* to trap the same way; no v0.2 code ran. The `pay.rs` calls later trapped in browsers (*verified (#562)*) |
+| A store holding a `FileSystemSyncAccessHandle`; a `Date.now()` clock | Compile; `JsValue` is `Send + Sync` without `atomics`. Both later ran in browsers (*verified (#559)*, *verified (#586)*) |
+| A `fetch` transport awaiting `JsFuture` inside `BoxFuture` | Fails: `JsFuture` is not `Send` (because of the `Rc` inside it, not `JsValue`, #586) |
+| The same via `spawn_local`, returning a future that awaits a `oneshot` receiver | Compiles, with no `unsafe`. Later ran in browsers as `send::run_local` (*verified (#559)*) |
 
 *Verified (probe)*, 2026-11-19: the production and staging pkarr records name
 `homeserver.pubky.app` and `homeserver.staging.pubky.app`. Both relays
@@ -249,18 +256,40 @@ request's `Origin` in `Access-Control-Allow-Origin` with
 `Access-Control-Allow-Origin: *`. The SDK fetches with `credentials: "omit"`
 (D5), so the credentials header has no effect.
 
+### What ran on v0.2 in browsers
+
+Draft pull requests #556 to #603 are stacked on `v0.2` and none merges
+before the freeze. Unless a row says otherwise, each ran in Chromium
+151.0.7922.34, Firefox 153.0, and Playwright WebKit 26.5 (Playwright 1.62.1),
+in a page and in a dedicated worker, on macOS arm64 locally and on Linux in
+CI. Playwright's WebKit is not Safari.
+
+| Pull request | What ran | Result |
+| --- | --- | --- |
+| #556 | `paykit-lib` and `paykit-sdk` built for wasm32 with the client's `http` feature off and both `getrandom` backends; 14 tests: a subset of the v0.2 vectors (keys, signatures, identifiers, encoding), randomness through both `getrandom` versions, sign and seal round trips | Pass (*verified*), also in installed Chrome 157 |
+| #559 | Host pieces (`JsClock`, `JsTimer`, `send::run_local`, a panic hook); a Payment Request flow through signer approval on the Switch client's in-memory scripted switches | Pass (*verified*) |
+| #562 | The pay and Payment Receipt flow, before and after a clock fix in `paykit-sdk` | Before: 5 of 6 tests trap in every engine and context. After: pass (*verified*) |
+| #573 | A `fetch` transport; two apps join, request, pay, and receipt against a real `pubky-switch` service on PostgreSQL, behind a local Node front that adds TLS and CORS; identities enrolled by a native program | Pass (*verified*) |
+| #579 | The transport and the SDK under hangs, dropped calls, and lost or refused batches; preflight counts and the connection limit | Pass (*verified*); preflight and connection figures *measured* |
+| #586 | A durable store on OPFS: torn writes, a real page reload, a payment resumed after the store reopens | Pass (*verified*); in CI, no store test runs in WebKit (D12) |
+| #591 | That store sealed under a data key wrapped by a WebCrypto key | Pass in Chromium and Firefox (*verified*); in WebKit, the tests that keep the wrapping key in IndexedDB run nowhere (D2) |
+| #603 | A test harness bundle served over HTTPS under a strict CSP: a page starts a dedicated module worker that runs two apps on sealed stores against a real `pubky-switch` service on another origin (join, request, pay, Payment Receipt), then reloads and reads the paid request and its receipt back from the stores in a new worker; CSP negative controls, a panic, and a module service worker that loads the bundle and runs one call | Pass (*verified*); WebKit used a host key kept in memory on macOS, and the memory store with no read-back on Linux in CI (D2); sizes and timings *measured* |
+
 ### What did not run
 
-- Any v0.2 code in a browser; any real Switch service (it has no CORS, D5);
-  approval by a signer, the main v0.2 path (D1). No wasm CI job exists on
-  `v0.2` or in pubky-switch.
+- Approval through an external signer app, the main v0.2 path (D1); the
+  stack's apps join with approvals made by a native program (#573). A real
+  Switch service ran only behind a local front that adds CORS, since the
+  service has none (D5). No wasm CI job exists on `v0.2` or in pubky-switch;
+  the draft #556 adds one on the stack.
 - An SDK or browser run against a real HTTPS Homeserver or the production
   pkarr relays. The probe only fetched relay records and read response headers
   (CORS, `Cache-Control`).
-- A service worker or shared worker; Safari itself; any mobile browser; real
-  freezing, discarding, sleep, and intensive throttling (freezes were a busy
-  loop); eviction, Safari's 7-day deletion, private windows; a CSP; the Paykit
-  Profile and the files its fields reference (such as `image_uri`).
+- A shared worker, or anything in a service worker beyond loading the bundle
+  and one call (#603, D9); Safari itself; any mobile browser; real freezing,
+  discarding, sleep, and intensive throttling (freezes were a busy loop);
+  eviction, Safari's 7-day deletion, private windows; Trusted Types; the
+  Paykit Profile and the files its fields reference (such as `image_uri`).
 
 ## What a browser changes
 
@@ -300,7 +329,7 @@ build must turn off ([Groundwork](#groundwork-on-the-v02-crates), `http` row).
 | `StateStore` (`store/mod.rs:84`) | Synchronous; guarantees 1 to 7 (`store/mod.rs:60-83`) | OPFS in a dedicated worker, or IndexedDB behind an async seam (D3) | Partly blocked: #537 items 1 and 3 |
 | `StoreHandle` (`store/handle.rs:9-59`) | Inline, or Tokio `spawn_blocking` | Inline only | Fits; no async-store mode |
 | Ownership (`store/mod.rs:116-143`) | No timeout or preemption | Web Lock plus the OPFS file lock (D4) | Open: #537 item 3 |
-| `Transport::send` (`transport/mod.rs:212-222`) | No redirects; switch origin rules (`sw:spec/wire-format.md:1593`) | `fetch` with `redirect: "manual"`, `credentials: "omit"`, reference timeouts (D5, D8) | Open: address check (#537 item 1) and CORS (item 2) |
+| `Transport::send` (`transport/mod.rs:212-222`) | No redirects; switch origin rules (`sw:spec/wire-format.md:1593`) | `fetch` with `redirect: "manual"`, `credentials: "omit"`, reference timeouts (D5, D8) | Open: address check (#537 item 1) and CORS (item 2). A `fetch` transport runs against a real service in the draft #573 |
 | `Transport::send_before` (`transport/mod.rs:223-229`) | First-handoff deadline at the last cancellable handoff | Not implemented at first (D8) | Open |
 | `Clock` (`clock.rs:7-10`) | Unix milliseconds | `Date.now()`; never `SystemClock`, which traps | Fits |
 | `HomeserverReader` (`app/identity.rs:180-191`) | On the host's Pubky client | `fetch` with `cache: "no-store"`, or the host's Pubky JavaScript client (D6, D10) | Fits; cache rule is a blocker |
@@ -308,7 +337,7 @@ build must turn off ([Groundwork](#groundwork-on-the-v02-crates), `http` row).
 | `PushRelay` (`app/push.rs:70-84`) | Relay URL, device token, push key | A Web Push relay; token is a `PushSubscription` (D7) | Open: no relay |
 | `Timer` (`v02:paykit-sdk/src/timer.rs:12-15`) | Bounds the payee switch lookup | `setTimeout` | Fits; throttled when hidden |
 | `Rail` (`v02:paykit-sdk/src/rail.rs:393`) | Six synchronous methods, three async | The wallet's payment method in JavaScript (D10) | Fits with a channel shim |
-| Randomness | `getrandom` 0.2 and 0.3 in the wasm build (0.4 only in dev and native dependencies) | `crypto.getRandomValues` via each browser backend | Fits (Groundwork) |
+| Randomness | `getrandom` 0.2 and 0.3 in the wasm build (0.4 only in dev and native dependencies) | `crypto.getRandomValues` via each browser backend | Fits (Groundwork; *verified (#556)*) |
 | Signer `SecretVault` (`sw:crates/pubky-switch-signer/src/key.rs:105`) | Synchronous; device-bound, not backed up (`sw:docs/signer-host-guide.md:11`) | Only for a web app as signer (D1) | Open: #537 item 4 |
 
 ## First integrator
@@ -887,7 +916,8 @@ writes.
   record of any age (pkarr bounds no packet's signed age), and see lookups;
   both default relays are Pubky's. `homeserver.pubky.app` and the default
   relays speak HTTP/1.1 only, and browsers open about 6 HTTP/1.1 connections
-  per host. The Switch spec asks for HTTP/2 and a persistent pkarr cache in
+  per host (6 per origin in all three engines, page and worker, *measured
+  (#579)*, D7). The Switch spec asks for HTTP/2 and a persistent pkarr cache in
   the Pubky client (`sw:spec/spec.md:1273`).
 - A browser reaches a Homeserver only with an ICANN domain, a public
   certificate, and CORS kept through any proxy (0.16.2 and 0.18.0 set no
@@ -901,23 +931,42 @@ writes.
   drop traffic, not read, alter, or replay it (`:1199`), so WebPKI trust
   changes nothing here.
 - **CORS.** Neither Switch spec mentions CORS, and the service has none (no
-  `cors` or `access-control` in the repository at the pin). `Switch-*`
-  request headers force a preflight on every call, cached 5 seconds unless
-  the server sets `Access-Control-Max-Age`. The client must read
+  `cors` or `access-control` in the repository at the pin). It sends no CORS
+  headers and answers `OPTIONS` with a signed `404`, so a browser always
+  needs something in front of it (*measured (#573)*). `Switch-*` request
+  headers force a preflight. With `cache: "no-store"`, Chromium and Firefox
+  sent one before every call whatever `Access-Control-Max-Age` said; WebKit
+  reused one only for the same URL; a new URL, including a new query such as
+  the feed's `after=`, cost one in every engine (*measured (#579)*, page and
+  worker alike). The client must read
   `Switch-Head`, `Switch-Server-Time`, and `Switch-Service-Signature`, hidden
-  unless exposed (#537 item 2). Cold preflights add a round trip to the
-  "about one round trip per action" target (`v02:specs/v0.2/spec.md:57`); not
-  measured.
+  unless exposed (#537 item 2). So every Switch call is two round trips in
+  Chromium and Firefox, and every new feed page is two in every engine,
+  against the "about one round trip per action" target
+  (`v02:specs/v0.2/spec.md:57`).
 - **Address check.** Switch origins need every resolved address checked as
   globally reachable and the connection made to it
   (`sw:spec/wire-format.md:1593`). `fetch` cannot do this (#537 item 1), and
   counterparty-signed records choose the host. The same rule for relay URLs
   binds the switch when it sends webhooks (`sw:spec/spec.md:712`), not the
-  browser.
+  browser. The draft #573's transport refuses `localhost`, single-label
+  names, and names under local-only suffixes such as `.local` and
+  `.internal`; a public name that resolves to a private address still gets
+  through. That policy, and a public constructor that lifts the `localhost`
+  refusal for loopback tests, are #573's decision 2.
 - An unreachable counterparty looks like an outage: browsers hide why `fetch`
   failed, and the host sees `PaykitError::Homeserver` or
   `PublicAppFailureReason::Homeserver`, both with retry advice
   (`v02:docs/paykit-host-guide.md:251`, `:260`), so it may retry forever.
+  A refused connection, a certificate or CORS failure, and a lost answer are
+  one opaque `TypeError`, so a transport must map a rejected `fetch` to an
+  unknown outcome, never to "never sent" (#573). A refused batch is then
+  kept as sent though the service never saw it, and the next flush applies
+  it once (*verified (#579)*); the client's never-sent exception cannot
+  arise through `fetch`. Chromium and
+  Firefox also resent a POST on their own when a reused connection closed
+  before any answer byte; the service's batch IDs kept it safe (*measured
+  (#579)*).
 - The public `identity.json` read is rate-limited per IPv4 address or IPv6 /64
   (`sw:spec/spec.md:546`), so users behind one NAT share it (*inferred*).
 
@@ -929,7 +978,9 @@ writes.
 - The browser `Transport` and `HomeserverReader` use `credentials: "omit"`,
   `redirect: "manual"`, and HTTPS only, and read bodies as a stream within the
   reference cap of 32 MiB (`transport/http.rs:59-61`, `:71`). pkarr
-  lookups bypass the HTTP cache (D6).
+  lookups bypass the HTTP cache (D6). The draft #573's Switch transport does
+  so, counting decoded bytes rather than trusting `content-length`
+  (*verified (#573)*); `fetch` merges repeated response headers into one.
 - Report "unreachable from a browser" as a distinct reason where the binding
   can tell ([Host-visible errors](#host-visible-errors)).
 - Ask the Pubky Switch maintainers for normative CORS on every service: answer
@@ -982,7 +1033,9 @@ on a production switch that serves it (N6).
 - The Switch's public `identity.json` read is
   `public, max-age=60, must-revalidate` by design
   (`sw:spec/wire-format.md:2305`). Authenticated answers verify only for the
-  exact request (`:1650`) and carry no validators.
+  exact request (`:1650`) and carry no validators. With `cache: "no-store"`,
+  that read reached the service on every call, and needs no preflight (a
+  plain GET with no Switch header) (*verified (#579)*).
 - A host service worker with a fetch handler sits in the path of the page and
   the dedicated workers it controls. The Cache API ignores HTTP caching
   headers and the request's cache mode, so a runtime-caching rule for these
@@ -1021,7 +1074,14 @@ the first lookup after a load? Fallback: the client rule alone.
   most 25 seconds (`sw:spec/wire-format.md:1921`). The cost does not grow with
   the number of contacts: one request every 25 seconds in the foreground, none
   in the background. A new message shows in under 1 second
-  (`v02:specs/v0.2/spec.md:623`, `:630`).
+  (`v02:specs/v0.2/spec.md:623`, `:630`). Against a local service, a 10-second
+  wait woke 0.2 to 0.6 seconds after a counterparty's message (*measured
+  (#579)*), and the long-poll deadline never cut a held poll (*verified
+  (#579)*).
+- Over HTTP/1.1 each held long poll holds one of 6 connections per origin.
+  With 6 held, every other call to that origin waited until one returned, in
+  all three engines, page and worker (*measured (#579)*; HTTP/2 not tested).
+  An app that polls several feeds on one origin keeps fewer than 6 held.
 - Switch spec 4.3 has a running app subscribe to the Homeserver
   `/events-stream` for its own and its counterparties' `identity.json`
   (`sw:spec/spec.md:292`). Neither the Switch client nor `paykit-sdk`
@@ -1085,26 +1145,33 @@ owner. Blocks: Web Push and its push measurements in the service worker run
 **Context.**
 
 - **Run-time traps.** `Instant::now()` and `SystemTime::now()` trap on wasm32
-  (std behavior verified by a standalone probe; v0.2 call sites *inferred*):
+  (std behavior verified by a standalone probe; v0.2 call sites *inferred*,
+  except where marked):
   - `paykit-sdk` calls `Instant::now()` before sending every attempt batch and
     before an idempotent repeat's claim read
     (`v02:paykit-sdk/src/pay.rs:2576`, `:3884`), so every payment attempt
-    would trap (#537 "cheaper now").
+    would trap (#537 "cheaper now"). *Verified (#562)*: 5 of 6 pay tests
+    failed in every engine and context with "time not implemented on this
+    platform", then a trap; the draft fixes it (below).
   - The Switch client's `FirstSend::new` (`transport/mod.rs:160`), reached
     when a batch has a first-send deadline, as Paykit's offline public payment
-    does (`v02:paykit-sdk/src/pay/offline.rs:279`).
+    does (`v02:paykit-sdk/src/pay/offline.rs:279`). Not fixed and not run in
+    the stack (#562, #573).
   - `SystemClock` (`clock.rs:71`).
 - **CI must run code.** At `7aa75fe4`, `paykit-lib` and `paykit-sdk` pass
   `cargo check` for wasm32 with build edits only
   ([What was checked on v0.2](#what-was-checked-on-v02)), yet the payment path
-  would trap (*inferred*: the std probe traps, and `paykit-sdk` itself did not
-  run). So a `cargo check` job would not catch this; the CI job must run code
-  in a browser (Groundwork, CI row).
+  trapped (*verified (#562)*). So a `cargo check` job would not catch this;
+  the CI job must run code in a browser (Groundwork, CI row).
 - **Clocks.** `Clock` is wall time, and `Date.now()` can be set back. A
   browser's monotonic source, `performance.now()`, behaves differently across
   sleep by engine. v0.2 discards an identity observation when the clock moves
   back (`v02:specs/v0.2/spec.md:169`; `IdentityRefresh::ClockMovedBack`,
-  `sw:docs/app-host-guide.md:21`).
+  `sw:docs/app-host-guide.md:21`). Browsers also coarsen `performance.now()`
+  (about 1 ms in WebKit, 100 us in Firefox, 100 ms or more with
+  fingerprinting resistance), so the pay path's monotonic terms that its
+  comments call "never short" can come out up to one step short on wasm32
+  (*read*, #562).
 - **First handoff.** `Transport::send_before` defaults to
   `FirstSendUnavailable`, leaving the request unsent
   (`transport/mod.rs:223-229`). Paykit needs it only to pay a manually
@@ -1139,6 +1206,10 @@ owner. Blocks: Web Push and its push measurements in the service worker run
   (`v02:paykit-sdk/src/rail.rs:492-499`). The host resolves it through
   `Rail::payment` and the journal.
 - *Verified (v0.1 spike)*: dropping the Rust future closed the connection.
+  The same holds on v0.2 for the draft #573's transport, before the response
+  head and during the body, and a call past its class deadline ends with
+  `Timeout` (*verified (#579)*). Deadlines ended 2 to 12 ms after the class
+  deadline (*measured (#579)*).
 
 **Proposal.**
 
@@ -1147,11 +1218,14 @@ owner. Blocks: Web Push and its push measurements in the service worker run
   both the wall clock and the monotonic clock
   (`v02:paykit-sdk/src/pay.rs:2572-2576`), so where an engine pauses
   `performance.now()` during sleep, the wall-clock count bounds the budget
-  (*inferred*). The release clock review confirms this per engine.
+  (*inferred*). The release clock review confirms this per engine. The
+  draft #562 uses `web-time` for the `pay.rs` calls, which changes no public
+  item and no native behavior; `web-time` or a host source is its decision.
 - The binding's `Transport` applies the `TimeoutClass` deadlines with
   `AbortSignal.timeout`, matching the reference defaults; the host may raise
   them. The `HomeserverReader` has its own deadline; the event stream's ends
-  at the headers.
+  at the headers. The draft #573 uses one `AbortController` per call, timed
+  by the SDK's `Timer`, with the native transport's deadlines.
 - Prefer per-request deadlines to aborting whole SDK calls: a request that
   fails inside the SDK lets cleanup run, and a dropped call may skip it.
   Record which Pubky release ships #725, and whether it exempts streams.
@@ -1235,7 +1309,12 @@ later" acceptable for the first release, given the first integrator's design?
 
 - Synchronous host traits can hold JavaScript handles. Each async method needs
   a small shim (`spawn_local` plus a `oneshot` receiver, no `unsafe`), not a
-  redesign ([What was checked on v0.2](#what-was-checked-on-v02)).
+  redesign ([What was checked on v0.2](#what-was-checked-on-v02)). The stack
+  runs the shim as `send::run_local` (*verified (#559)*), and a store that
+  keeps OPFS handles in a `Mutex` (*verified (#586)*). That store is
+  `Send + Sync` without
+  `unsafe` only because `wasm-bindgen` marks `JsValue` so on targets without
+  threads; relying on it is #586's decision 2.
 - A `MaybeSend` alias (`Send` on native, nothing on wasm) would remove the
   shim. It belongs in the Switch crates, where `BoxFuture` lives;
   `public_futures_are_send` (`v02:paykit-sdk/src/paykit.rs:1239`), which
@@ -1429,14 +1508,14 @@ target; `paykit-lib` already does no I/O and reads no clock
 
 | Item | Where | Owner | Change |
 | --- | --- | --- | --- |
-| `http` feature | `v02:Cargo.toml:22`; `sw:Cargo.toml:29`; `sw:crates/pubky-switch-client/Cargo.toml:12-18` | Paykit, Pubky Switch | The client's default `http` feature pulls in Tokio. Browser builds take `pubky-switch-client` with `default-features = false`; the Switch workspace does too, or `pubky-switch-signer` stops forcing `http`. This is the production plan's crate-split item (`v02:specs/v0.2/spec.md:995`) |
-| Randomness | `sw:Cargo.toml:36`, `:42`; `v02:Cargo.lock` | Paykit | `getrandom` 0.2 with `js`; 0.3 with `wasm_js`, version 0.3.4 or later (0.3.0 to 0.3.3 also need `--cfg getrandom_backend="wasm_js"`; *read* from source). 0.4 is not in the wasm build at `7aa75fe4` (only `tempfile` via the dev-only `pubky-switch-harness`, and `quinn-proto` and `rand` 0.10 via `reqwest`'s native-only path); add its `wasm_js` backend if it ever enters the browser tree. Matches "a getrandom backend per target" (`v02:specs/v0.2/spec.md:994`) |
-| `Instant::now()` | `v02:paykit-sdk/src/pay.rs:2576`, `:3884`; `sw:crates/pubky-switch-client/src/transport/mod.rs:160` | Paykit, Pubky Switch | A host monotonic source or `web-time` (D8) |
-| `SystemClock` | `sw:crates/pubky-switch-client/src/clock.rs:71` | Pubky Switch | Document "never on wasm" |
-| `Send` | `sw:crates/pubky-switch-client/src/transport/mod.rs:24` | Pubky Switch | `MaybeSend`, or the channel shim (D10) |
+| `http` feature | `v02:Cargo.toml:22`; `sw:Cargo.toml:29`; `sw:crates/pubky-switch-client/Cargo.toml:12-18` | Paykit, Pubky Switch | The client's default `http` feature pulls in Tokio. Browser builds take `pubky-switch-client` with `default-features = false`; the Switch workspace does too, or `pubky-switch-signer` stops forcing `http`. This is the production plan's crate-split item (`v02:specs/v0.2/spec.md:995`). The draft #556 does the Paykit half: native builds keep the client's features unchanged. The signer still cannot build for wasm32, so the stack's tests enrol through a native program (#573) |
+| Randomness | `sw:Cargo.toml:36`, `:42`; `v02:Cargo.lock` | Paykit | `getrandom` 0.2 with `js`; 0.3 with `wasm_js`, version 0.3.4 or later (0.3.0 to 0.3.3 also need `--cfg getrandom_backend="wasm_js"`; *read* from source). 0.4 is not in the wasm build at `7aa75fe4` (only `tempfile` via the dev-only `pubky-switch-harness`, and `quinn-proto` and `rand` 0.10 via `reqwest`'s native-only path); add its `wasm_js` backend if it ever enters the browser tree. Matches "a getrandom backend per target" (`v02:specs/v0.2/spec.md:994`). The draft #556 selects both backends in a new unpublished `paykit-browser` crate (*verified (#556)*) |
+| `Instant::now()` | `v02:paykit-sdk/src/pay.rs:2576`, `:3884`; `sw:crates/pubky-switch-client/src/transport/mod.rs:160` | Paykit, Pubky Switch | A host monotonic source or `web-time` (D8). The draft #562 moves `pay.rs` to `web_time::Instant`; `FirstSend` is unchanged upstream |
+| `SystemClock` | `sw:crates/pubky-switch-client/src/clock.rs:71` | Pubky Switch | Document "never on wasm". The draft #562's wasm32 lint refuses it in Paykit's crates |
+| `Send` | `sw:crates/pubky-switch-client/src/transport/mod.rs:24` | Pubky Switch | `MaybeSend`, or the channel shim (D10; the shim runs in the draft #559) |
 | `chrono` | `sw:Cargo.toml:37` | Paykit | Built without `clock`, so no `wasmbind`; CI fails if a crate enables `chrono/clock` |
-| Hash maps | `v02:paykit-sdk/src/periods.rs:369-375`; `v02:paykit-lib/src/allowances.rs:831`, `:1131`; `v02:paykit-sdk/src/paykit.rs:348`; Switch client not surveyed | Paykit | `std` maps are seeded predictably on wasm. Seed internally from `getrandom`, or use ordered maps where a counterparty chooses keys; public types keep `std` maps or move to `BTreeMap`. Which keys a counterparty controls is not yet checked |
-| CI | paykit-rs `v0.2`, pubky-switch | Paykit, Pubky Switch | A wasm32 job that runs the v0.2 vectors (`v02:specs/v0.2/vectors/`) in a headless browser, not only `cargo check` (D8), plus a guard against `std::time::Instant`, `SystemTime::now`, and Tokio in non-test code of browser crates |
+| Hash maps | `v02:paykit-sdk/src/periods.rs:369-375`; `v02:paykit-lib/src/allowances.rs:831`, `:1131`; `v02:paykit-sdk/src/paykit.rs:348`; the Switch client, surveyed in #559 | Paykit | `std` maps are seeded predictably on wasm. Seed internally from `getrandom`, or use ordered maps where a counterparty chooses keys; public types keep `std` maps or move to `BTreeMap`. *Measured (#559)*: fresh instances of each engine and context printed the same `HashMap` order and `RandomState` hash. #559 counts 11 maps in `paykit-lib`, `paykit-sdk`, and the stack's pinned Switch client keyed by values a counterparty chooses (message IDs, sender identities, App IDs from a peer's directory), such as the client feed's map keyed by sender identity and `msg_id` |
+| CI | paykit-rs `v0.2`, pubky-switch | Paykit, Pubky Switch | A wasm32 job that runs the v0.2 vectors (`v02:specs/v0.2/vectors/`) in a headless browser, not only `cargo check` (D8), plus a guard against `std::time::Instant`, `SystemTime::now`, and Tokio in non-test code of browser crates. The draft #556 adds a job per engine that runs a subset of the vectors, and a guard against native networking and TLS crates; #562 adds a lint on the std clocks that does not reach the Switch client; #573 adds jobs against a real service |
 
 **Proposal.**
 
@@ -1469,7 +1548,7 @@ implements a decision updates the passage it amends.
 | #537 "cheaper now": `MaybeSend` | Pubky Switch | `sw:crates/pubky-switch-client/src/transport/mod.rs:24` | D10 |
 | #537 "what already fits": keep `paykit-sdk` free of a Tokio runtime, Tokio and `http` optional in `pubky-switch-client`, and `Clock`, `Transport`, and the store supplied by the host. Bearer replacement is gone for Switch calls only; the `HomeserverWriter` bearer still needs one owner context (D4) | Paykit v0.2, Pubky Switch | None; keep as is | D3, D4, D10 |
 | #537 "can wait": `FirstSend`'s monotonic time (fine after the freeze; it is not API). Also a standard seed derivation (Pubky; D1) and a wasm32 CI job that runs code in a browser, since `cargo check` would not catch the `Instant::now()` traps (D8) | Pubky Switch; Pubky (derivation); Paykit v0.2 and Pubky Switch (CI) | `sw:crates/pubky-switch-client/src/transport/mod.rs:160`; `sw:spec/spec.md:95-96` | D1, D8 |
-| #537 "cheaper now": the two `Instant::now()` calls in `pay.rs` (before every attempt batch and before an idempotent repeat's claim read); every payment attempt would trap (*inferred*, D8) | Paykit v0.2 | `v02:paykit-sdk/src/pay.rs:2576`, `:3884` | D8 |
+| #537 "cheaper now": the two `Instant::now()` calls in `pay.rs` (before every attempt batch and before an idempotent repeat's claim read); every payment attempt trapped (*verified (#562)*, D8), and the draft #562 fixes it | Paykit v0.2 | `v02:paykit-sdk/src/pay.rs:2576`, `:3884` | D8 |
 | #537 "cheaper now": `pubky-switch-signer` forcing `http` | Pubky Switch | `sw:Cargo.toml:29` | Groundwork |
 | #537 item 7: a browser host in Paykit decision 20's mapping | Paykit v0.2 | `v02:specs/v0.2/spec.md:712` | N1 |
 | #537 item 6: browser installs as separate apps, not Paykit decision 18's one app across devices | Paykit v0.2 | `v02:specs/v0.2/spec.md:710` | D1, D3 |
