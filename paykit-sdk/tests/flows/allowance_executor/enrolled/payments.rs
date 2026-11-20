@@ -303,9 +303,15 @@ pub(super) async fn payment_after_restore(
             assert_eq!(rail.all_executions().len(), 1);
             rail.set_history_payer(identity);
         }
-        let result = Box::pin(payer.pay_under_allowance(&request, &key))
-            .await
-            .outcome;
+        // The payer drives its payment independently of the seller and restore checks.
+        let result;
+        (payer, result) = tokio::task::spawn_local(async move {
+            let result = Box::pin(payer.pay_under_allowance(&request, &key))
+                .await
+                .outcome;
+            (payer, result)
+        })
+        .await?;
         if index == 1 {
             let refusal = result.unwrap_err();
             assert!(refusal.to_string().contains("lifetime"), "{refusal}");
