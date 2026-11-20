@@ -45,9 +45,9 @@ use paykit_lib::records::{
 };
 use paykit_lib::{AttemptId, Body, ListVersion};
 use pubky_switch_client::app::{
-    AppError, ClaimFetch, ClaimOp, FeedPosition, KeptBatchStatus, LocalWrite, Need,
-    ObligationDeadline, ReceiveContext, RecordContent, RecordTarget, Refusal as ClientRefusal,
-    SharedRecord, StoreFailure, Unopened,
+    AdmissionCustody, AppError, ClaimFetch, ClaimOp, FeedPosition, KeptBatchStatus, LocalWrite,
+    Need, ObligationDeadline, ReceiveContext, RecordContent, RecordTarget,
+    Refusal as ClientRefusal, SharedRecord, StoreFailure, Unopened,
 };
 use pubky_switch_client::error::StoreError;
 use pubky_switch_core::claims::{Basis, ClaimStatus, ClaimView, Outcome, RECONCILIATION_MS};
@@ -83,6 +83,8 @@ pub(crate) enum Fail {
     Consume,
     /// Admission waits until the app can select any required eviction and retain its recovery state.
     AwaitAdmission,
+    /// The reply waits for ordinary admission while the payer takes custody of its signed stop.
+    AwaitAdmissionWithCustody(AdmissionCustody),
     /// The store failed, or holds data of the SDK's own that doesn't read: the entry is
     /// held, or parked, never consumed (Switch spec 8.2).
     Store(StoreFailure),
@@ -290,12 +292,30 @@ pub(crate) fn effect(
                 hold_while_unlisted(cx, RecordSide::Payee)?;
             }
             let admitted = admits_new_state(cx, &sender, &scopes, stored)?;
-            if owed || admitted {
-                keep_cancellation(cx, &payer_target, stored, position, owed)?;
+            if !owed && !admitted {
+                return Ok(());
             }
-            if reply && admitted {
-                keep_reply(cx, &payee_target, stored, position)?;
+            let writes = cancellation_writes(cx, &payer_target, stored, position, owed)?;
+            let ordinary = if reply && admitted {
+                keep_reply(cx, &payee_target, stored, position)
+            } else {
+                Ok(())
+            };
+            if owed && matches!(ordinary, Err(Fail::AwaitAdmission)) && !writes.is_empty() {
+                let mut custody = AdmissionCustody::default();
+                for write in writes {
+                    custody.try_push(write).map_err(|refusal| {
+                        Fail::Store(StoreFailure::of_entry(StoreError::Other(
+                            refusal.to_string(),
+                        )))
+                    })?;
+                }
+                return Err(Fail::AwaitAdmissionWithCustody(custody));
             }
+            for write in writes {
+                keep_local(cx, write);
+            }
+            ordinary?;
         }
         Body::PaymentReceipt(receipt) if pay => {
             receipt_effect(cx, stored, position, receipt.attempt_id, settlement)?;
@@ -1088,6 +1108,21 @@ fn keep_cancellation(
     position: FeedPosition,
     held: bool,
 ) -> Result<(), Fail> {
+    for write in cancellation_writes(cx, target, stored, position, held)? {
+        keep_local(cx, write);
+    }
+    Ok(())
+}
+
+/// The signed original to retain and exact keys of previously held copies it supersedes.
+/// An already covered input needs no custody writes, even if it still owes a reply.
+fn cancellation_writes(
+    cx: &mut ReceiveContext<'_>,
+    target: &ActivityTarget,
+    stored: &StoredMessage,
+    position: FeedPosition,
+    held: bool,
+) -> Result<Vec<LocalWrite>, Fail> {
     let record = cx.record_key(&target.record_target())?;
     let name = key::kept_cancellation(&record, &stored.cert().hash(), position.generation);
     let order = (stored.accepted_at().ok_or_else(Fail::corrupt)?, position);
@@ -1109,7 +1144,7 @@ fn keep_cancellation(
             continue;
         }
         if !comparison.is_gt() && covers_selling_scopes(&old, stored) {
-            return Ok(());
+            return Ok(Vec::new());
         }
         if !comparison.is_lt() && covers_selling_scopes(stored, &old) {
             superseded.push(key);
@@ -1118,18 +1153,34 @@ fn keep_cancellation(
     if !held && superseded.is_empty() {
         make_room_for_stop(cx, &stored.sender(), (order.0, position.seq))?;
     }
-    for old in superseded {
-        if old != name {
-            keep_local(
-                cx,
-                LocalWrite::Delete {
-                    key: old.into_bytes(),
-                },
-            );
-        }
+    let put = local(&name, &KeptMessage::taken_at(stored, position))?;
+    let reserved = pubky_switch_client::app::local_writes_bytes(std::slice::from_ref(&put));
+    let mut writes = vec![put];
+    for old in cancellation_keys_to_retire(superseded.iter().filter(|key| *key != &name), reserved)
+    {
+        writes.push(LocalWrite::Delete {
+            key: old.as_bytes().to_vec(),
+        });
     }
-    keep_local(cx, local(&name, &KeptMessage::taken_at(stored, position))?);
-    Ok(())
+    Ok(writes)
+}
+
+/// Keep the mandatory write first. Reclaim as many known redundant originals as fit,
+/// leaving room in an ordinary step for its cursor, admitted reply and recovery mark.
+/// Once the parent is readable, placement retires any remaining copies under this same limit.
+pub(crate) fn cancellation_keys_to_retire<'a>(
+    keys: impl Iterator<Item = &'a String>,
+    reserved: usize,
+) -> impl Iterator<Item = &'a String> {
+    use pubky_switch_client::app::{LOCAL_WRITE_OVERHEAD_BYTES, MAX_STEP_LOCAL_BYTES};
+    let mut remaining = (MAX_STEP_LOCAL_BYTES / 2).saturating_sub(reserved);
+    keys.take_while(move |key| {
+        let Some(rest) = remaining.checked_sub(key.len() + LOCAL_WRITE_OVERHEAD_BYTES) else {
+            return false;
+        };
+        remaining = rest;
+        true
+    })
 }
 
 /// Whether every parent label the second original can cancel is also covered by the first.

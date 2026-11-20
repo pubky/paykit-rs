@@ -416,8 +416,6 @@ async fn stops_across_loss(another_loss: bool) {
     let issuer = w.join(&w.bob, "issuer", selling("shop1")).await;
     payer.app_mut().invite(&w.bob_id()).await.unwrap();
     let request = sale(&w, &w.bob, &w.alice);
-    let first = crate::provider_loss::declare_loss(&w);
-    Box::pin(crate::provider_loss::follow_generation(&mut payer)).await;
     let send = |service: &ScriptedSwitch, target, hash| {
         let stop = w.sign_as(
             &w.bob,
@@ -434,6 +432,32 @@ async fn stops_across_loss(another_loss: bool) {
             .unwrap()
             .msg_id
     };
+    let purchase = RequestRef {
+        payee: w.bob_id(),
+        request_hash: request.hash(),
+    };
+    // A sibling's authenticated record already contains an earlier stop. This wallet
+    // receives the two later originals before that shared value returns after loss.
+    let earlier = if another_loss {
+        let mut sibling = w.wallet("other-payer").await;
+        sibling.app_mut().invite(&w.bob_id()).await.unwrap();
+        w.deliver(&w.bob, "issuer", &w.alice, &[sibling.app_id()], &request);
+        sibling.receive(None).await.unwrap();
+        let id = send(w.alice.switch(), sibling.app_id(), request.hash());
+        sibling.receive(None).await.unwrap();
+        let value = crate::outcome_record::record_value(&mut sibling, &purchase)
+            .await
+            .unwrap();
+        let stop = paykit_lib::records::StoredMessage::read(&value["cancellation"], &w.alice_id())
+            .unwrap();
+        assert_eq!(stop.message().msg_id, id);
+        w.clock.advance_ms(1);
+        Some(value)
+    } else {
+        None
+    };
+    let first = crate::provider_loss::declare_loss(&w);
+    Box::pin(crate::provider_loss::follow_generation(&mut payer)).await;
     for _ in 0..24 {
         send(&first, payer.app_id(), [42; 32]);
     }
@@ -443,10 +467,6 @@ async fn stops_across_loss(another_loss: bool) {
     Box::pin(crate::provider_loss::follow_generation(&mut payer)).await;
     let new = send(&second, payer.app_id(), request.hash());
     assert!(payer.receive(None).await.unwrap().applied.contains(&new));
-    let purchase = RequestRef {
-        payee: w.bob_id(),
-        request_hash: request.hash(),
-    };
     let key = payer
         .app()
         .record_key(&crate::outcome_record::payer_record(&purchase))
@@ -498,12 +518,15 @@ async fn stops_across_loss(another_loss: bool) {
         .unwrap();
     if another_loss {
         assert!(value["cancellation"].is_null());
-        let error = payer.request(&purchase).await.unwrap_err();
-        assert!(
-            matches!(error.refusal(),Some(Refusal::NotNow(reason)) if reason.contains("order of the request's cancellations")),
-            "{error}"
-        );
-
+        for error in [
+            payer.request(&purchase).await.unwrap_err(),
+            payer.requests().await.unwrap_err(),
+        ] {
+            assert!(
+                matches!(error.refusal(),Some(Refusal::NotNow(reason)) if reason.contains("order of the request's cancellations")),
+                "{error}"
+            );
+        }
         assert_eq!(
             payer
                 .app()
@@ -517,6 +540,35 @@ async fn stops_across_loss(another_loss: bool) {
             .await
             .outcome
             .is_err());
+        let earlier = earlier.unwrap();
+        let bytes = serde_json::to_vec(&earlier).unwrap();
+        crate::allowances::write_record(
+            &mut payer,
+            &crate::outcome_record::payer_record(&purchase),
+            Some(&bytes),
+        )
+        .await;
+        let stop =
+            paykit_lib::records::StoredMessage::read(&earlier["cancellation"], &w.alice_id())
+                .unwrap();
+        assert!(stop.accepted_at().unwrap() < at_old);
+        assert_eq!(
+            payer.request(&purchase).await.unwrap().status,
+            paykit_sdk::RequestStatus::Cancelled
+        );
+        let all = payer.requests().await.unwrap();
+        assert_eq!(
+            all.iter().find(|v| v.request == purchase).unwrap().status,
+            paykit_sdk::RequestStatus::Cancelled
+        );
+        assert_eq!(
+            payer
+                .app()
+                .protocol_scan("paykit", prefix.as_bytes())
+                .await
+                .unwrap(),
+            originals
+        );
     } else {
         let signed =
             paykit_lib::records::StoredMessage::read(&value["cancellation"], &w.alice_id())

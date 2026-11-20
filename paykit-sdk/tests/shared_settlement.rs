@@ -1,6 +1,8 @@
 //! Billing Period payments and receipts across independently enrolled wallets.
 #![recursion_limit = "256"]
 
+#[path = "shared_settlement/cancellation_admission.rs"]
+mod cancellation_admission;
 #[path = "shared_settlement/period_policy.rs"]
 mod period_policy;
 #[path = "shared_settlement/selling_scope.rs"]

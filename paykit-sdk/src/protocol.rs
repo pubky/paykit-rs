@@ -1559,6 +1559,9 @@ impl Protocol for PaykitProtocol {
             Err(Fail::Need(needs)) => Outcome::Need(needs),
             Err(Fail::Consume) => Outcome::Consume,
             Err(Fail::AwaitAdmission) => Outcome::AwaitAdmission,
+            Err(Fail::AwaitAdmissionWithCustody(custody)) => {
+                Outcome::AwaitAdmissionWithCustody(custody)
+            }
             Err(Fail::Drop(reason)) => Outcome::Drop { reason },
             Err(Fail::Store(failure)) => Outcome::Retry(failure),
             // A record value waits for its scope key: the client stores the entry and passes

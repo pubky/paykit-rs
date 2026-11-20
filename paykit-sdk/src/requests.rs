@@ -1700,8 +1700,9 @@ impl Paykit {
     }
 
     /// Place the cancellation kept for the request record at `target`, if one stops it, and
-    /// drop every kept copy, in one batch: the record then holds a cancellation, one per role
-    /// (Paykit spec 6). Copies none of which stops the request, those its label doesn't let
+    /// retire its kept copies: once placed, the record holds a cancellation, one per role
+    /// (Paykit spec 6). Further reads retire any keys past the batch's local limit. Copies
+    /// none of which stops the request, those its label doesn't let
     /// cancel it once it reads ([`Paykit::kept_stop_message`]), are dropped and nothing is
     /// placed. Returns whether a cancellation was placed.
     async fn place_kept_cancellation(&mut self, target: &ActivityTarget) -> Result<bool> {
@@ -1714,7 +1715,7 @@ impl Paykit {
             return Ok(false);
         }
         let mut tx = Tx::default();
-        for key in copies.keys() {
+        for key in crate::receive::cancellation_keys_to_retire(copies.keys(), 0) {
             tx.delete(key);
         }
         if record
@@ -1993,7 +1994,9 @@ impl Paykit {
             )
         };
         let target = ActivityTarget::payer(natural_key::request_record(&payee, &hash));
-        let stopped = self.kept_stop(&target).await?;
+        // Once the bound record contains the cancellation, its view no longer needs to
+        // order any remaining local copies from before the record was readable.
+        let stopped = !cancelled(record) && self.kept_stop(&target).await?;
         if live(&status) && stopped {
             status = RequestStatus::Cancelled;
         }
