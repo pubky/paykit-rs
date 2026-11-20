@@ -17,6 +17,8 @@ use std::{error::Error, path::Path, sync::Arc};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
+mod notice;
+
 struct Home(Arc<pubky_switch_client::testing::TestHomeserver>);
 #[async_trait::async_trait]
 impl WalletHomeserver for Home {
@@ -55,7 +57,12 @@ async fn enrolled_payer(
     world: &World,
     root: &Path,
     account: Arc<Account>,
-) -> TestResult<(Arc<WalletHost>, Arc<NativeWallet>, Vec<u8>)> {
+) -> TestResult<(
+    Arc<WalletHost>,
+    Arc<NativeWallet>,
+    Vec<u8>,
+    pubky_switch_signer::Signer,
+)> {
     let id = world.identity("buyer")?.public();
     let mut buyer = Box::pin(signer::serving(world, "buyer")).await?;
     let mut other = Box::pin(signer::serving(world, "other-buyer")).await?;
@@ -132,7 +139,7 @@ async fn enrolled_payer(
         .accept_approval(reference.clone(), id.into(), approved.claim)
         .await?;
     let wallet = Box::pin(current.complete_enrollment(reference)).await?;
-    Ok((current, wallet, original.app_id))
+    Ok((current, wallet, original.app_id, buyer))
 }
 async fn receive(wallet: &mut Paykit) -> TestResult {
     for _ in 0..8 {
@@ -234,7 +241,7 @@ async fn payment(
 async fn journey(world: &World) -> TestResult {
     let root = tempfile::tempdir()?;
     let account = Arc::new(Account::open(root.path()));
-    let (env, payer, id) = Box::pin(enrolled_payer(world, root.path(), account.clone())).await?;
+    let (env, payer, id, _) = Box::pin(enrolled_payer(world, root.path(), account.clone())).await?;
     assert!(matches!(
         env.load(vec![13; 16]).await,
         Err(WalletError::NotJoined)
@@ -286,7 +293,7 @@ async fn journey(world: &World) -> TestResult {
     let original = env.load(id.clone()).await?;
     Box::pin(payment(world, &env, original, &account, id)).await
 }
-fn run(backend: Backend) {
+fn run(backend: Backend, journey: impl AsyncFn(&World) -> TestResult + Send + 'static) {
     let thread = std::thread::Builder::new()
         .stack_size(1_835_008)
         .spawn(move || {
@@ -312,9 +319,9 @@ fn run(backend: Backend) {
 }
 #[test]
 fn test_installed_payer_restores_the_original_approved_wallet_on_scripted() {
-    run(Backend::Scripted);
+    run(Backend::Scripted, journey);
 }
 #[test]
 fn test_installed_payer_restores_the_original_approved_wallet_on_postgresql() {
-    run(Backend::Service);
+    run(Backend::Service, journey);
 }

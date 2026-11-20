@@ -18,6 +18,12 @@ Create a `WalletHost` with the same protected store, the user's authenticated Ho
 
 Keep backups and their App IDs in protected storage. Before calling `restore`, ask whether the original device is in the user's possession or known to have been wiped. An unaccounted-for device requires revocation and a new enrollment (Switch spec 12.4). The SDK reads and reconciles the restored state under the original App ID. For a retained grant, `reconcileAllowance` reports usage only from the original authority and complete account-wide method history. An unknown result leaves spending held.
 
+## Receive and acknowledge
+
+Call `receive` on startup and after a feed wake. It returns one bounded report. Use `more` to decide when to read another page. If `stopped` is set, inspect the reported event. Persist or show each duty before acknowledging its ID with `acknowledgeEvents`. This acknowledges the processed prefix for Paykit. Each other protocol in a shared app remains responsible for its own duties.
+
+After an interruption, `unacknowledgedEvents` lists surviving Paykit duties in order. After a failed receive, keep those events and wait for a successful receive before acknowledging through the last duty in that report. `recoveryRequired` returns the current signed service notice across reopen even after acknowledging delivery. A clearance event names the generation that was held. The receive cursor can already be in the next generation.
+
 ## Generate both languages
 
 From the workspace root, build the generator and native library from this same checkout. Set `OUT` to a scratch directory. The commands below use the standard Cargo target directory. Substitute your configured target directory when it differs.

@@ -506,7 +506,7 @@ BackupRefusal from app::BackupRefusal {
 }
 
 /// Why a verified Switch notice holds the installation (Switch spec 12.6).
-#[derive(uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum RecoveryReason {
     /// Account state is behind its signed service head or generation.
     Behind,
@@ -517,7 +517,7 @@ pub enum RecoveryReason {
 }
 
 /// The current installation's verified recovery notice, retained by Switch through reopen.
-#[derive(uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct WalletRecoveryNotice {
     /// Generation of the affected installation.
     pub generation: u64,
