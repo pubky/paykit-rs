@@ -7,15 +7,26 @@ use std::sync::Mutex;
 
 #[tokio::test]
 async fn test_settlement_credit_after_a_record_quota_refusal_keeps_one_receipt() -> TestResult {
+    quota_case(false).await
+}
+
+#[tokio::test]
+async fn test_a_failed_bucket_notice_reports_the_warning_and_keeps_the_original_receipt(
+) -> TestResult {
+    quota_case(true).await
+}
+
+async fn quota_case(fail_notice: bool) -> TestResult {
     let Some(world) = World::start(Backend::Service)? else {
         return Ok(());
     };
-    let result = Box::pin(confirm_after_quota(&world)).await;
+    let result = Box::pin(confirm_after_quota(&world, fail_notice)).await;
     world.close().await?;
     result
 }
 
-async fn confirm_after_quota(world: &World) -> TestResult {
+async fn confirm_after_quota(world: &World, fail_notice: bool) -> TestResult {
+    use pubky_switch_client::store::{Fault, FaultStore};
     // Two paid requests and a cancelled invoice occupy the merchant's three record slots.
     let origin = "https://shop.payment.test";
     let identity = world.identity("shop")?;
@@ -86,6 +97,21 @@ async fn confirm_after_quota(world: &World) -> TestResult {
             observed.lock().unwrap().push(answer.body.clone());
         }
     });
+    if fail_notice {
+        let app_id = wallets.labelled.app_id();
+        drop(wallets.labelled);
+        let store = Arc::new(FaultStore::new(wallets.labelled_store.clone(), Fault::None));
+        wallets.labelled = Box::pin(Paykit::load(
+            world.app_env(store.clone()),
+            Default::default(),
+            app_id,
+            wallets.rail.clone(),
+            Arc::new(TestTimer),
+        ))
+        .await?;
+        wallets.labelled.receive(None).await?;
+        store.fail_put_once(b"p/paykit/nt/settlement/");
+    }
     let start = world.trace().lines.len();
     let checks_before_quota = wallets.rail.proof_checks().len();
     let refused = wallets
@@ -122,6 +148,25 @@ async fn confirm_after_quota(world: &World) -> TestResult {
     let original = refused
         .kept_batch()
         .ok_or("missing original merchant batch")?;
+    if fail_notice {
+        assert!(
+            matches!(&refused, paykit_sdk::PaykitError::SettlementNoticeUnavailable {
+            bucket, submission, storage,
+        } if *bucket == number && submission.kept_batch() == Some(original)
+            && matches!(storage.as_ref(), paykit_sdk::PaykitError::Client(
+                pubky_switch_client::app::AppError::Store(pubky_switch_client::StoreError::Unavailable))))
+        );
+        let app_id = wallets.labelled.app_id();
+        drop(wallets.labelled);
+        wallets.labelled = Box::pin(Paykit::load(
+            world.app_env(wallets.labelled_store.clone()),
+            Default::default(),
+            app_id,
+            wallets.rail.clone(),
+            Arc::new(TestTimer),
+        ))
+        .await?;
+    }
     assert!(matches!(
         wallets.labelled.app().kept_batch(original).await?,
         Some(KeptBatchStatus::Kept { wire_batch_id, sent_at_ms: Some(_) }) if wire_batch_id == original
@@ -144,21 +189,28 @@ async fn confirm_after_quota(world: &World) -> TestResult {
     assert_eq!(receipt.to, other.identity());
     assert!(marker.ends_with(receipt.msg_id.as_bytes()));
 
+    let original_receipt = receipt.msg_id.clone();
     let warnings = wallets.labelled.notices().await?;
-    let [warning] = warnings.as_slice() else {
-        return Err(format!(
-            "expected one settlement bucket warning, found {}",
-            warnings.len()
-        )
-        .into());
+    let warning_id = if fail_notice {
+        assert!(warnings.is_empty());
+        None
+    } else {
+        let [warning] = warnings.as_slice() else {
+            return Err(format!(
+                "expected one settlement bucket warning, found {}",
+                warnings.len()
+            )
+            .into());
+        };
+        assert_eq!(warning.kind, paykit_sdk::NoticeKind::SettlementBucketFull);
+        assert_eq!(
+            warning.settlement,
+            Some(paykit_sdk::SettlementSubject::Bucket(number))
+        );
+        assert_eq!(warning.counterparty, Some(other.identity()));
+        wallets.labelled.acknowledge_notice(&warning.id).await?;
+        Some(warning.id.clone())
     };
-    assert_eq!(warning.kind, paykit_sdk::NoticeKind::SettlementBucketFull);
-    assert_eq!(
-        warning.settlement,
-        Some(paykit_sdk::SettlementSubject::Bucket(number))
-    );
-    assert_eq!(warning.counterparty, Some(other.identity()));
-    wallets.labelled.acknowledge_notice(&warning.id).await?;
     let method_checks = wallets.rail.proof_checks();
     let [accepted_check] = &method_checks[checks_before_quota..] else {
         return Err("expected one verified proof before the quota refusal".into());
@@ -172,6 +224,33 @@ async fn confirm_after_quota(world: &World) -> TestResult {
         .app_mut()
         .delete_record(&unused_target, vec![])
         .await?;
+    if fail_notice {
+        // The same original marked batch can now finish with its intended receipt.
+        wallets.labelled.receive(None).await?;
+        assert!(matches!(
+            wallets.labelled.app().kept_batch(original).await?,
+            Some(KeptBatchStatus::Applied { .. })
+        ));
+        assert_eq!(
+            wallets.labelled.confirm_payment(&losing_key).await?,
+            Some(original_receipt.clone())
+        );
+        let signed = receipt_hash(&wallets.labelled, &losing_key, ActivitySide::Payee).await?;
+        wallets.labelled.flush().await?;
+        other.receive(None).await?;
+        let receipts = other.receipts(ReceiptsOf::Request(loser)).await?;
+        let [received] = receipts.as_slice() else {
+            return Err("expected the original merchant receipt".into());
+        };
+        assert_eq!(received.msg_id, original_receipt);
+        assert_eq!(
+            receipt_hash(&other, &received.record, ActivitySide::Payer).await?,
+            signed
+        );
+        assert_eq!(wallets.rail.all_pay_calls(), executions);
+        assert_eq!(wallets.rail.all_executions(), executions);
+        return Ok(());
+    }
     let receipt = wallets
         .seller_wallet
         .confirm_payment(&winning_key)
@@ -190,7 +269,7 @@ async fn confirm_after_quota(world: &World) -> TestResult {
         .notices()
         .await?
         .iter()
-        .all(|notice| notice.id != warning.id));
+        .all(|notice| Some(&notice.id) != warning_id.as_ref()));
 
     assert!(wallets
         .labelled

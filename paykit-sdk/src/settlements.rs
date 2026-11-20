@@ -235,10 +235,16 @@ impl Paykit {
             // The receipt updates its checked live occurrence. Only the new bucket
             // needs another record slot (Paykit wire 5.7, Switch wire 6.4 and 9.3).
             if creates_bucket && refused_record_key(cause) {
-                // A failed notice write must still return the original pending batch ID.
-                let _ = self
+                if let Err(storage) = self
                     .raise_settlement_notice(SettlementSubject::Bucket(write.number), write.payer)
-                    .await;
+                    .await
+                {
+                    return Err(crate::PaykitError::SettlementNoticeUnavailable {
+                        bucket: write.number,
+                        submission: Box::new(error),
+                        storage: Box::new(storage),
+                    });
+                }
             }
         } else if matches!(&error, AppError::Switch(answer)
             if matches!(answer.code(), Some(ErrorCode::QuotaExceeded | ErrorCode::TooLarge)))

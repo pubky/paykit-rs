@@ -128,7 +128,9 @@ impl From<PaykitError> for WalletError {
             PaykitError::Client(AppError::Protocol(failure)) => {
                 return failure.error().clone().into()
             }
-            PaykitError::Client(_) => WalletFailureKind::Client,
+            PaykitError::Client(_) | PaykitError::SettlementNoticeUnavailable { .. } => {
+                WalletFailureKind::Client
+            }
             PaykitError::PublicEndpointChangePending(_) => {
                 WalletFailureKind::PublicEndpointChangePending
             }
@@ -156,6 +158,9 @@ impl From<PaykitError> for WalletError {
         let client = match &e {
             PaykitError::Client(error) | PaykitError::PublicEndpointChangePending(error) => {
                 Some(error)
+            }
+            PaykitError::SettlementNoticeUnavailable { submission, .. } => {
+                Some(submission.as_ref())
             }
             _ => None,
         };
