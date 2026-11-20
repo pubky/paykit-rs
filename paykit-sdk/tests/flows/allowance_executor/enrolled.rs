@@ -14,7 +14,7 @@ use pubky_switch_signer::{Protocols, Signer};
 mod payments;
 
 use super::{applied_put, terms, AllowanceRole, AllowanceStatus, Condition, Ledger};
-use crate::common::{finish_listing, TestTimer};
+use crate::common::{finish_listing, ListsStore, TestTimer};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -88,7 +88,7 @@ async fn join(
 }
 
 async fn grant(world: &World, proposer: AllowanceRole, restore_after_payment: bool) -> TestResult {
-    let storage = Arc::new(MemoryStore::new());
+    let storage = Arc::new(ListsStore::default());
     let rail = Arc::new(paykit_sdk::rail::FakeRail::with_clock(
         world.clock().clone(),
     ));

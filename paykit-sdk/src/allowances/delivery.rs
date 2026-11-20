@@ -155,9 +155,10 @@ pub(crate) fn judge_append(
     ) else {
         return Ok(Hold);
     };
-    if state::delivery_get::<KeptMessage>(d, &key::conflict(&a_key))
-        .map_err(view_failure)?
-        .is_some()
+    if super::evidence::holds_delivery(d, &p_key, &a_key).map_err(view_failure)?
+        || state::delivery_get::<KeptMessage>(d, &key::conflict(&a_key))
+            .map_err(view_failure)?
+            .is_some()
         || !state::bound_view_scan::<KeptMessage>(d.local(), &key::allowance_ends(&a_key), &binder)
             .map_err(view_failure)?
             .is_empty()

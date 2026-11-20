@@ -572,3 +572,5 @@ async fn test_spam_failed_refresh_of_a_stale_copy_defers_a_request() {
         RequestStatus::Open
     );
 }
+
+mod prerequisites;

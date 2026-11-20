@@ -45,8 +45,8 @@ use paykit_lib::records::{
 };
 use paykit_lib::{AttemptId, Body, ListVersion};
 use pubky_switch_client::app::{
-    AdmissionCustody, AppError, ClaimFetch, ClaimOp, FeedPosition, KeptBatchStatus, LocalWrite,
-    Need, ObligationDeadline, ReceiveContext, RecordContent, RecordTarget,
+    AdmissionCustody, AppError, ClaimFetch, ClaimOp, DeferCustody, FeedPosition, KeptBatchStatus,
+    LocalWrite, Need, ObligationDeadline, ReceiveContext, RecordContent, RecordTarget,
     Refusal as ClientRefusal, SharedRecord, StoreFailure, Unopened,
 };
 use pubky_switch_client::error::StoreError;
@@ -85,6 +85,11 @@ pub(crate) enum Fail {
     AwaitAdmission,
     /// The reply waits for ordinary admission while the payer takes custody of its signed stop.
     AwaitAdmissionWithCustody(AdmissionCustody),
+    /// The original delivery is still owed while Paykit waits for this prerequisite.
+    Defer {
+        reason: &'static str,
+        custody: DeferCustody,
+    },
     /// The store failed, or holds data of the SDK's own that doesn't read: the entry is
     /// held, or parked, never consumed (Switch spec 8.2).
     Store(StoreFailure),
@@ -98,6 +103,14 @@ pub(crate) enum Fail {
 }
 
 impl Fail {
+    /// Retry this entry on the feed until the client's bounded wait expires.
+    pub(crate) fn wait_for(reason: &'static str) -> Self {
+        Self::Defer {
+            reason,
+            custody: DeferCustody::AfterBoundedWait,
+        }
+    }
+
     /// Local data of the SDK's own that doesn't read: retrying on the feed can't mend it,
     /// so the entry is parked at once.
     pub(crate) fn corrupt() -> Self {
@@ -154,9 +167,7 @@ pub(crate) fn check_before_effect(cx: &ReceiveContext<'_>, sender: &[u8; 32]) ->
     // Switch took (Paykit wire 3.1): the entry is held, never consumed, and tried again at
     // later reads, once a certificate that passes replaces it.
     if paykit_lib::scopes::check_certificate(cx.cert()).is_err() {
-        return Err(Fail::Store(StoreFailure::unavailable(
-            StoreError::Unavailable,
-        )));
+        return Err(Fail::wait_for("Paykit certificate refused"));
     }
     let pay = cx
         .cert()
@@ -172,9 +183,7 @@ pub(crate) fn check_before_effect(cx: &ReceiveContext<'_>, sender: &[u8; 32]) ->
                 && !state::cx_get::<OwnBlockMark>(cx, &key::own_block(sender))?
                     .is_some_and(|mark| mark.blocked())))
     {
-        return Err(Fail::Store(StoreFailure::unavailable(
-            StoreError::Unavailable,
-        )));
+        return Err(Fail::wait_for("unblock floor pending"));
     }
     Ok(())
 }
@@ -413,11 +422,10 @@ pub(crate) fn note_cursor_time_at(cx: &mut ReceiveContext<'_>, at: u64) -> Resul
 /// create state, asked only of a message no held record matches. An app without `paykit_contacts`
 /// can't read the lists, and gates nothing. At one holding it, a message from a sender the
 /// user blocked or the service flagged is only counted, in the effect's batch; while the
-/// app's copy of the lists isn't known to be complete, the message waits on the feed
-/// ([`Fail::Store`], unavailable for now) until the lists are read. The copy isn't known to
-/// be complete when the client says so (`lists_as_of_ms: None`), or when the SDK's due read
-/// of the lists failed ([`key::LISTS_READ`] absent): a copy older than the refresh interval
-/// may miss a flag, and [`Paykit::refresh_lists_when_due`] reads the lists again before the
+/// app's copy of the lists isn't known to be complete, the message waits until the lists
+/// are read. The copy is incomplete when the client says so (`lists_as_of_ms: None`), or
+/// when the SDK's due read failed ([`key::LISTS_READ`] absent). A copy older than the
+/// refresh interval may miss a flag, and [`Paykit::refresh_lists_when_due`] runs before the
 /// next read of the feed. A failed store read holds the message too: it is never read as a
 /// clean sender. A block of `sender` this app wrote and the list doesn't show yet (`bk/`)
 /// counts at once, failing closed: the client's copy of the lists shows it only once the
@@ -454,13 +462,12 @@ pub(crate) fn admits_new_state_of(
     if !reads_lists(scopes) {
         return Ok(true);
     }
-    let unknown = || Fail::Store(StoreFailure::unavailable(StoreError::Unavailable));
     if state::cx_get::<u64>(cx, key::LISTS_READ)?.is_none() {
-        return Err(unknown());
+        return Err(Fail::wait_for("sender lists unknown"));
     }
     let standing = cx.sender_disposition(sender)?;
     if standing.lists_as_of_ms.is_none() {
-        return Err(unknown());
+        return Err(Fail::wait_for("sender lists unknown"));
     }
     let own_block = state::cx_get::<OwnBlockMark>(cx, &key::own_block(sender))?
         .is_some_and(|mark| mark.blocked());
@@ -499,7 +506,7 @@ fn mark_blocked(
     msg_id: &str,
     at: u64,
 ) -> Result<(), Fail> {
-    let held_entry = || Fail::Store(StoreFailure::unavailable(StoreError::Unavailable));
+    let held_entry = || Fail::wait_for("blocked sender mark pending");
     let msg_id = msg_id.to_owned();
     let family = MarkFamily::Blocked;
     let mark_key = family.key(sender);
@@ -821,13 +828,10 @@ pub(crate) fn held_or_unlisted_at(
 /// certificate than the one they were listed under, until Paykit has listed them. The rule
 /// is [`crate::hold::side_unlisted`], read per entry from the context's certificate and
 /// Paykit's state (`nl`, `ml`, `lc`), so an entry after a certificate or a `missed` item
-/// the same read took is held too. The entry is held as for a store unavailable for now
-/// (Paykit spec 17, question 27), and read again at a later read.
+/// the same read took is held too. The client retries the original entry on later reads.
 pub(crate) fn hold_while_unlisted(cx: &ReceiveContext<'_>, side: RecordSide) -> Result<(), Fail> {
     if side_may_lack(cx, side)? {
-        return Err(Fail::Store(StoreFailure::unavailable(
-            StoreError::Unavailable,
-        )));
+        return Err(Fail::wait_for("records not listed"));
     }
     Ok(())
 }
@@ -875,7 +879,7 @@ fn held_bound(
 }
 
 /// Hold `stored`'s entry unprocessed while the record it goes into is held but can't be read
-/// now, as for a store unavailable for now (Paykit spec 17, question 27): the client reads it
+/// now (Paykit spec 17, question 27): the client reads it
 /// again at later reads, and stores it locally after its bounded wait, so the feed goes on
 /// meanwhile. Only a message whose record key binds its sender is held so, a request in the
 /// payer's record of it: its counterparty is the record's by the key, and one record takes
@@ -887,7 +891,7 @@ fn hold_until_it_reads(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> R
     hold_entry_for(cx, stored, crate::notices::GivenUpOrigin::HeldUnread)
 }
 
-/// Hold `stored`'s entry unprocessed, as for a store unavailable for now, until
+/// Hold `stored`'s entry unprocessed until
 /// [`KEPT_MESSAGE_MS`] have passed since its acceptance on the highest service time
 /// verified; then give it up, the host told once ([`NoticeKind::MessageGivenUp`], from
 /// `origin`), and pass the entry, processed, nothing written.
@@ -898,9 +902,7 @@ pub(crate) fn hold_entry_for(
 ) -> Result<(), Fail> {
     let accepted_at = stored.accepted_at().ok_or_else(Fail::corrupt)?;
     if !crate::stored::past_window(accepted_at, cx.highest_service_time()) {
-        return Err(Fail::Store(StoreFailure::unavailable(
-            StoreError::Unavailable,
-        )));
+        return Err(Fail::wait_for("activity record unresolved"));
     }
     let notice = key::message_notice(&stored.sender(), &stored.message().msg_id);
     if state::cx_get::<KeptNotice>(cx, &notice)?.is_none() {
@@ -1507,13 +1509,9 @@ fn period_details_effect(
             hold_while_unlisted(cx, RecordSide::Payer)?;
             return Ok(());
         }
-        // No service time verified yet: the entry is held, as for a store unavailable for
-        // now, and read again at a later read, never taken with no effect on a time the
-        // app hasn't verified.
+        // The period window can be judged only on verified service time.
         crate::periods::Window::NoTime => {
-            return Err(Fail::Store(StoreFailure::unavailable(
-                StoreError::Unavailable,
-            )));
+            return Err(Fail::wait_for("service time unknown"));
         }
     }
     // The period record is of the request record's side, whose hold was judged above, and
