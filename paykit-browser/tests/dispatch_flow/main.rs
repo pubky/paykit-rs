@@ -31,6 +31,7 @@ mod delivery;
 mod dispatch_rig;
 mod dispatch_world;
 mod one_time;
+mod rig_world;
 // Only `DAY_MS`, `draft` and `stored_request` are used here; the scripted world goes unused.
 #[allow(dead_code)]
 #[path = "../world/mod.rs"]
@@ -38,13 +39,8 @@ mod world;
 
 use paykit_sdk::Paykit;
 
-use dispatch_world::DispatchWorld;
+use dispatch_world::{DispatchWorld, PAYEE, PAYER};
 use world::{draft, stored_request, DAY_MS};
-
-/// The payer's identity.
-pub const PAYER: &str = "payer";
-/// The payee's identity.
-pub const PAYEE: &str = "payee";
 
 /// A new world on the service, with the payer's wallet and the payee's shop joined. The
 /// wallet has not invited the payee yet.

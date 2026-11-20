@@ -44,7 +44,7 @@
 set -euo pipefail
 
 # The test targets that need the Dispatch service; they run only with --dispatch.
-network_targets=(fetch_transport dispatch_flow transport_faults)
+network_targets=(fetch_transport dispatch_flow transport_faults dispatch_faults dispatch_http)
 
 usage() {
   echo "usage: $0 [--dispatch] <chromium|firefox|webkit|chrome|all> [page|worker|both] [cargo test args...]" >&2
