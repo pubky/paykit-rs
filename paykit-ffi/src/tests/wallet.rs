@@ -70,6 +70,17 @@ async fn enrolled_payer(
     let reference = vec![11; 16];
     let prepare = || WalletEnrollment::new(Arc::new(DeviceStore::open(root)));
     let info = prepare().begin_enrollment(reference.clone()).await?;
+    // A pending signer decision needs only the enrollment store. Even a busy
+    // installed namespace must not replace that decision with a writer error.
+    let physical = DeviceStore::open(root);
+    let ns = pubky_switch_client::store::client_namespace(&info.app_id.clone().try_into().unwrap());
+    let owner = vec![23; 32];
+    assert!(physical.acquire(ns.clone(), owner.clone())?);
+    assert!(matches!(
+        Box::pin(host(world, root, account.clone()).complete_enrollment(reference.clone())).await,
+        Err(WalletError::EnrollmentUnavailable)
+    ));
+    physical.release(ns, owner)?;
     let auth = AuthRequest {
         client_id: "wallet.example".into(),
         client_key: [8; 32],
@@ -332,6 +343,14 @@ async fn journey(world: &World) -> TestResult {
     let identity = payer.identity().await?;
     let blocked_release = root.path().join("hold-release");
     std::fs::write(&blocked_release, [])?;
+    // The read failed with NotJoined, but its writer could not be released.
+    // The host must receive the storage failure. A later open retries that token.
+    assert!(matches!(
+        env.load(vec![13; 16]).await,
+        Err(WalletError::Storage {
+            failure: StorageError::Unavailable
+        })
+    ));
     assert!(matches!(
         payer.shutdown().await,
         Err(WalletError::Storage {
@@ -345,6 +364,10 @@ async fn journey(world: &World) -> TestResult {
         })
     ));
     std::fs::remove_file(blocked_release)?;
+    assert!(matches!(
+        other.load(vec![13; 16]).await,
+        Err(WalletError::NotJoined)
+    ));
     let reopened = env.load(id.clone()).await?;
     assert_eq!(reopened.identity().await?, identity);
     assert_eq!(reopened.app_id().await?, id);

@@ -89,6 +89,15 @@ final class EnrollmentStore: WalletStore, @unchecked Sendable {
     var untouched: Bool { lock.withLock { acquisitions == 0 && rows.isEmpty } }
     private var owners: [String: Data] = [:]
     private var rows: [String: [Data: Data]] = [:]
+    private var failingRead: String?
+
+    func failNextRead(_ namespace: String) {
+        lock.withLock { failingRead = namespace }
+    }
+
+    func hasWriter(_ namespace: String) -> Bool {
+        lock.withLock { owners[namespace] != nil }
+    }
 
     func reopen(namespace: String, entries: ArraySlice<String>) {
         for entry in entries {
@@ -98,7 +107,13 @@ final class EnrollmentStore: WalletStore, @unchecked Sendable {
     }
 
     func get(namespace: String, key: Data) throws -> Data? {
-        lock.withLock { rows[namespace]?[key] }
+        try lock.withLock {
+            if failingRead == namespace {
+                failingRead = nil
+                throw StorageError.Unavailable
+            }
+            return rows[namespace]?[key]
+        }
     }
     func scan(namespace: String, prefix: Data, after: Data?, limit: UInt32) throws -> [StoreEntry] {
         lock.withLock {
@@ -236,6 +251,7 @@ private func recoverReceipt(_ issuer: String) async throws {
         (selection, "SelectedEndpoints"), (failure, "EndpointFailure"), (failure.error, "MethodError"),
         (method.declaration(), "MethodDeclaration"),
         (WalletError.Operation(kind: .client, detail: "operation failed", serviceCode: nil, keptBatch: Data([1])), "WalletError"),
+        (WalletError.UnknownMethod, "WalletError"),
     ]
     for (value, name) in descriptions {
         let expected = "\(name)(<redacted>)"
@@ -258,6 +274,23 @@ private func recoverReceipt(_ issuer: String) async throws {
     precondition(siblingId == sellerId && original.finishSiblingRead(values[6]),
                  "seller wallet could not progress while payer release was gated")
     try await closing.value
+
+    original.failNextRead(values[6])
+    original.holdRelease(values[6])
+    let failedOpen = Task {
+        do { _ = try await sameDevice.load(appId: app); preconditionFailure("failed read opened a wallet") }
+        catch WalletError.Storage(let error) {
+            guard case .Unavailable = error else { throw error }
+            precondition(!original.hasWriter(values[6]), "load returned before releasing the writer")
+        }
+    }
+    let failureReleasing = await original.waitForRelease()
+    precondition(failureReleasing)
+    do { _ = try await sameDevice.load(appId: app); preconditionFailure("opened during release") }
+    catch WalletError.Storage(let error) { guard case .InUse = error else { throw error } }
+    let independent = try await second.appId()
+    precondition(independent == sellerId && original.finishSiblingRead(values[6]))
+    try await failedOpen.value
 
     var dropped: NativeWallet? = try await sameDevice.load(appId: app)
     let reopenedId = try await dropped!.appId()

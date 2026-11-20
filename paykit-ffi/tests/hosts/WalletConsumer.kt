@@ -2,7 +2,13 @@ package com.synonym.paykit.v2.tests
 
 import com.synonym.paykit.v2.*
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.util.Base64
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /** Enrollment needs only the store. A Homeserver or payment call here fails the test. */
 internal class EnrollmentStore : WalletStore {
@@ -25,11 +31,27 @@ internal class EnrollmentStore : WalletStore {
     private var acquisitions = 0
     private val owners = mutableMapOf<String, ByteArray>()
     private val rows = mutableMapOf<Pair<String, String>, ByteArray>()
+    private var failingRead: String? = null
+    @Volatile private var slowRelease: String? = null
+    val releasing = CountDownLatch(1)
+    val proceed = CountDownLatch(1)
+
+    @Synchronized fun failReadAndHoldRelease(namespace: String) {
+        failingRead = namespace
+        slowRelease = namespace
+    }
+
+    @Synchronized fun hasWriter(namespace: String) = owners.containsKey(namespace)
     private fun key(namespace: String, key: ByteArray) =
         namespace to Base64.getEncoder().encodeToString(key)
 
-    @Synchronized override fun get(namespace: String, key: ByteArray) =
-        rows[key(namespace, key)]?.copyOf()
+    @Synchronized override fun get(namespace: String, key: ByteArray): ByteArray? {
+        if (failingRead == namespace) {
+            failingRead = null
+            throw StorageException.Unavailable()
+        }
+        return rows[key(namespace, key)]?.copyOf()
+    }
 
     @Synchronized override fun scan(namespace: String, prefix: ByteArray, after: ByteArray?, limit: UInt): List<StoreEntry> =
         rows.entries.asSequence()
@@ -45,8 +67,15 @@ internal class EnrollmentStore : WalletStore {
         return owners.putIfAbsent(namespace, owner.copyOf()) == null
     }
 
-    @Synchronized override fun release(namespace: String, owner: ByteArray) {
-        if (owners[namespace]?.contentEquals(owner) == true) owners.remove(namespace)
+    override fun release(namespace: String, owner: ByteArray) {
+        if (slowRelease == namespace) {
+            releasing.countDown()
+            check(proceed.await(10, TimeUnit.SECONDS))
+            slowRelease = null
+        }
+        synchronized(this) {
+            if (owners[namespace]?.contentEquals(owner) == true) owners.remove(namespace)
+        }
     }
 
     @Synchronized override fun commitIf(namespace: String, owner: ByteArray, writes: List<StoreWrite>): Boolean {
@@ -98,7 +127,7 @@ internal open class ReceiptReader : WalletHomeserver, PaymentMethod {
 }
 
 private suspend fun recoverReceipt(issuer: String) {
-    val producer = ProcessBuilder(issuer, "paid-wallet").start()
+    val producer = ProcessBuilder(issuer, "paid-wallet").redirectError(ProcessBuilder.Redirect.INHERIT).start()
     val values = producer.inputStream.bufferedReader().readLines()
     check(producer.waitFor() == 0 && values.size > 7)
     fun bytes(i: Int): ByteArray = Base64.getDecoder().decode(values[i])
@@ -125,6 +154,8 @@ private suspend fun recoverReceipt(issuer: String) {
             check(unavailable.message == "MethodException(<redacted>)")
             val walletError = WalletException.Operation(WalletFailureKind.CLIENT, "operation failed", null, byteArrayOf(1))
             check(walletError.message == "WalletException(<redacted>)" && walletError.detail == "operation failed")
+            val unknown: WalletException = WalletException.UnknownMethod()
+            check(unknown is WalletException.UnknownMethod && unknown.toString() == "WalletException(<redacted>)")
             val descriptions: List<Pair<Any, String>> = listOf(
                 entry to "PaymentEntry", receipt to "Receipt", request to "RequestId", entry.amount to "Amount",
                 BillingPeriod(1uL, 2uL) to "BillingPeriod",
@@ -141,6 +172,31 @@ private suspend fun recoverReceipt(issuer: String) {
             check(receipt.attemptId == values[4] && receipt.messageId == values[5])
             check(receipt.paymentReference == "checkout-7" && method.transfers == 0)
             wallet.shutdown()
+        }
+        coroutineScope {
+            original.failReadAndHoldRelease(values[6])
+            val failed = async {
+                try {
+                    device.load(app).close()
+                    error("failed read opened a wallet")
+                } catch (error: WalletException.Storage) {
+                    check(error.failure is StorageException.Unavailable && !original.hasWriter(values[6]))
+                }
+            }
+            check(withContext(Dispatchers.IO) { original.releasing.await(5, TimeUnit.SECONDS) })
+            try {
+                device.load(app).close()
+                error("opened during release")
+            } catch (error: WalletException.Storage) {
+                check(error.failure is StorageException.InUse)
+            } finally {
+                original.proceed.countDown()
+            }
+            failed.await()
+            device.load(app).use { reopened ->
+                check(reopened.requestReceipts(request).single().messageId == values[5])
+                reopened.shutdown()
+            }
         }
     }
 }
@@ -208,7 +264,8 @@ fun main() = runBlocking {
         } catch (_: WalletException.EnrollmentConflict) { }
     }
     check(StoreWrite.Put(byteArrayOf(1), secret).toString() == "StoreWrite(<redacted>)")
-    val issuer = ProcessBuilder(checkNotNull(System.getenv("PAYKIT_TEST_ISSUER"))).start()
+    val issuer = ProcessBuilder(checkNotNull(System.getenv("PAYKIT_TEST_ISSUER")))
+        .redirectError(ProcessBuilder.Redirect.INHERIT).start()
     issuer.outputStream.use { it.write(original.signedRequest) }
     val response = issuer.inputStream.bufferedReader().readLines()
     check(issuer.waitFor() == 0 && response.size == 2)
