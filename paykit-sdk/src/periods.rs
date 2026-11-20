@@ -1130,30 +1130,6 @@ impl Paykit {
         {
             return Err(period_record_unread());
         }
-        let per_period_destination = body.per_period_endpoints
-            && body
-                .recurrence
-                .as_ref()
-                .ok_or_else(PaykitError::corrupt)?
-                .first()?
-                != billing;
-        let mut details = held_period
-            .as_ref()
-            .map_or_else(Vec::new, |held| valid_details(held, &body));
-        let destination = if per_period_destination {
-            if takes_details(&body, &billing, false, self.service_time())? != Window::Takes {
-                return Err(Refusal::NoDestination(
-                    "the Billing Period is outside the period details window".into(),
-                )
-                .into());
-            }
-            let selected = self.period_endpoint_details(&details, &body, &options)?;
-            // When the endpoint needs a period rate, the same signed details must carry both.
-            details = vec![selected];
-            selected
-        } else {
-            &stored
-        };
         // Divergent after a provider loss, or seen so: the request record pauses every period
         // of the request, its upload maybe holding a cancellation, and the period record its
         // own period. Paid by hand only once the user has seen that the payee may have
@@ -1261,6 +1237,33 @@ impl Paykit {
         } else {
             None
         };
+        let allowance_endpoints = funding.as_ref().and_then(|under| under.endpoints());
+        let per_period_destination = body.per_period_endpoints
+            && body
+                .recurrence
+                .as_ref()
+                .ok_or_else(PaykitError::corrupt)?
+                .first()?
+                != billing;
+        let mut details = held_period
+            .as_ref()
+            .map_or_else(Vec::new, |held| valid_details(held, &body));
+        let destination = if per_period_destination {
+            if takes_details(&body, &billing, false, self.service_time())? != Window::Takes {
+                return Err(Refusal::NoDestination(
+                    "the Billing Period is outside the period details window".into(),
+                )
+                .into());
+            }
+            let accepted = crate::pay::accepted_request_endpoints(&body, allowance_endpoints);
+            let selected =
+                self.period_endpoint_details(&details, &body, &options, accepted.as_deref())?;
+            // When the endpoint needs a period rate, the same signed details must carry both.
+            details = vec![selected];
+            selected
+        } else {
+            &stored
+        };
         let named_rate = if per_period_destination {
             None
         } else {
@@ -1286,7 +1289,7 @@ impl Paykit {
                 destination,
                 &body,
                 &options,
-                funding.as_ref().and_then(|under| under.endpoints()),
+                allowance_endpoints,
                 &pricing,
                 public_failures,
             )
@@ -1386,28 +1389,58 @@ impl Paykit {
         details: &[&'a StoredMessage],
         request: &PaymentRequest,
         options: &PayOptions,
+        accepted: Option<&[PaymentEndpointIdentifier]>,
     ) -> Result<&'a StoredMessage> {
         let named = options.selected_period_rate();
-        details.iter().copied().filter(|signed| {
-            let Body::PaymentPeriodDetails(body) = signed.body() else { return false };
-            let Some(endpoints) = &body.payment_endpoints else { return false };
-            let required = match &request.destination {
-                paykit_lib::bodies::RequestDestination::RequiredApp(app) => Some(*app),
-                _ => None,
+        let required_app = match &request.destination {
+            paykit_lib::bodies::RequestDestination::RequiredApp(app) => Some(*app),
+            _ => None,
+        };
+        let per_period_rates = matches!(
+            request.conversion,
+            Some(paykit_lib::bodies::Conversion::PerPeriod)
+        );
+        let now = self.now();
+        let service = self.service_time();
+        let carries_destination = |signed: &&StoredMessage| {
+            let Body::PaymentPeriodDetails(body) = signed.body() else {
+                return false;
             };
-            self.now() < body.expires_at
-                && required.is_none_or(|id| id == signed.cert().app_id())
-                && named.is_none_or(|id| id == signed.message().msg_id)
-                && endpoints.keys().any(|endpoint| {
-                    options.endpoint.as_ref().is_none_or(|want| endpoint == want)
-                        && request.accepted_payment_endpoint_identifiers.as_ref().is_none_or(|ids| ids.contains(endpoint))
-                        && (!matches!(request.conversion, Some(paykit_lib::bodies::Conversion::PerPeriod))
-                            || endpoint.asset_segment() == Some(request.amount.asset.as_str())
-                            || rates_current(signed, self.now(), self.service_time())
-                                && body.rates.as_deref().is_some_and(|rates| matches!(paykit_lib::rate_for_endpoint(rates, endpoint), Ok(Some(_)))))
-                })
-        }).max_by(|a,b| period_details_order(a.message(),b.message()))
-          .ok_or_else(|| Refusal::NoDestination("Paykit spec 8.2: no current signed details carry the required period destination".into()).into())
+            if now >= body.expires_at
+                || named.is_some_and(|id| id != signed.message().msg_id)
+                || required_app.is_some_and(|app| app != signed.cert().app_id())
+            {
+                return false;
+            }
+            let Some(endpoints) = &body.payment_endpoints else {
+                return false;
+            };
+            endpoints.keys().any(|endpoint| {
+                if options
+                    .endpoint
+                    .as_ref()
+                    .is_some_and(|chosen| chosen != endpoint)
+                    || accepted.is_some_and(|ids| !ids.contains(endpoint))
+                {
+                    return false;
+                }
+                if !per_period_rates
+                    || endpoint.asset_segment() == Some(request.amount.asset.as_str())
+                {
+                    return true;
+                }
+                let Some(rates) = &body.rates else {
+                    return false;
+                };
+                rates_current(signed, now, service)
+                    && matches!(paykit_lib::rate_for_endpoint(rates, endpoint), Ok(Some(_)))
+            })
+        };
+        details.iter().copied().filter(carries_destination)
+            .max_by(|a, b| period_details_order(a.message(), b.message()))
+            .ok_or_else(|| Refusal::NoDestination(
+                "Paykit spec 8.2: no current signed details carry an eligible period destination".into(),
+            ).into())
     }
 
     /// Select the eligible signed rate sources from this occurrence's bounded period record.

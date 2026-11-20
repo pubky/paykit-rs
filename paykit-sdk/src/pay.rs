@@ -533,6 +533,22 @@ impl Held {
 /// content it is ([`Paykit::lists_read_of`]).
 pub(crate) type ListRead = (PaymentListRecord, RecordVersion);
 
+/// The identifiers that both the request and any funding Allowance permit.
+pub(crate) fn accepted_request_endpoints(
+    request: &PaymentRequest,
+    allowance_endpoints: Option<&[PaymentEndpointIdentifier]>,
+) -> Option<Vec<PaymentEndpointIdentifier>> {
+    match &request.accepted_payment_endpoint_identifiers {
+        Some(ids) => Some(
+            ids.iter()
+                .filter(|id| allowance_endpoints.is_none_or(|allowed| allowed.contains(id)))
+                .cloned()
+                .collect(),
+        ),
+        None => allowance_endpoints.map(<[_]>::to_vec),
+    }
+}
+
 /// What one attempt needs beyond its journal entry.
 pub(crate) struct Plan {
     pub(crate) entry: JournalEntry,
@@ -1350,17 +1366,7 @@ impl Paykit {
         pricing: &Pricing<'_>,
         public_failures: &mut Vec<PublicAppFailure>,
     ) -> Result<Chosen> {
-        let accepted_ids: Option<Vec<_>> =
-            match (&body.accepted_payment_endpoint_identifiers, accepted) {
-                (Some(ids), accepted) => Some(
-                    ids.iter()
-                        .filter(|id| accepted.is_none_or(|allowed| allowed.contains(id)))
-                        .cloned()
-                        .collect(),
-                ),
-                (None, Some(ids)) => Some(ids.to_vec()),
-                (None, None) => None,
-            };
+        let accepted_ids = accepted_request_endpoints(body, accepted);
         let accepted = accepted_ids.as_deref();
         let endpoints = match (&body.destination, stored.body()) {
             (_, Body::PaymentPeriodDetails(details)) => Some(

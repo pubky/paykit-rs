@@ -1115,7 +1115,11 @@ async fn test_funded_period_requiring_its_own_destination_leaves_the_subscriptio
     use paykit_lib::periods::{AnchoredRule, PeriodRef, Recurrence, Unit};
     use paykit_sdk::Refusal;
 
-    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    let mut terms = terms();
+    let endpoint = crate::common::endpoint("btc-lightning-bolt11");
+    terms.allowed_payment_endpoint_identifiers = Some(vec![endpoint.clone()]);
+    let (world, mut payer, mut shop, key) =
+        Box::pin(first_grant_in(crate::common::store(), terms)).await;
     world.rail.set_history_payer(payer.identity());
     let start = world.clock.now_ms() / 1000 * 1000;
     let schedule = Recurrence::new(
@@ -1169,8 +1173,23 @@ async fn test_funded_period_requiring_its_own_destination_leaves_the_subscriptio
         paykit_lib::bodies::PeriodDetails {
             billing_period: next,
             payment_endpoints: Some(std::collections::BTreeMap::from([(
-                crate::common::endpoint("btc-lightning-bolt11"),
+                endpoint,
                 paykit_lib::PaymentEndpointPayload::new("lnbc1next").unwrap(),
+            )])),
+            rates: None,
+            expires_at: next.ends_at,
+        },
+    ))
+    .await
+    .unwrap();
+    world.clock.advance_ms(1_000);
+    Box::pin(shop.send_period_details(
+        &sale.record,
+        paykit_lib::bodies::PeriodDetails {
+            billing_period: next,
+            payment_endpoints: Some(std::collections::BTreeMap::from([(
+                crate::common::endpoint("btc-lightning-bolt12"),
+                paykit_lib::PaymentEndpointPayload::new("lno1next").unwrap(),
             )])),
             rates: None,
             expires_at: next.ends_at,
