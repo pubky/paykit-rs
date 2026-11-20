@@ -43,16 +43,17 @@ impl WalletHost {
         }
         let id = fixed(app_id, "app id")?;
         let backup = PaykitBackup::from_bytes(&bytes)?;
-        let (env, owner) = self.session_env(id).await?;
-        let app = Paykit::restore(
-            env,
-            Default::default(),
-            &backup,
-            self.rail.clone(),
-            self.timer.clone(),
-        )
-        .await?;
-        Ok(NativeWallet::opened(app, Some(owner)))
+        self.open_wallet(id, async |env| {
+            Ok(Paykit::restore(
+                env,
+                Default::default(),
+                &backup,
+                self.rail.clone(),
+                self.timer.clone(),
+            )
+            .await?)
+        })
+        .await
     }
 }
 
