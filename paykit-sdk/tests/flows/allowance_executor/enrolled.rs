@@ -484,6 +484,26 @@ async fn incoming_acceptance(world: &World) -> TestResult<IncomingAcceptance> {
     })
 }
 
+async fn finish_restore(payer: &mut Paykit) -> TestResult {
+    Box::pin(finish_listing(payer)).await;
+    let mut finished = false;
+    for _ in 0..8 {
+        match Box::pin(payer.reconcile()).await {
+            Ok(report) => {
+                assert!(!report.payer_skipped);
+                finished = true;
+                break;
+            }
+            Err(paykit_sdk::PaykitError::Refused(paykit_sdk::Refusal::NotNow(reason)))
+                if reason.contains("Call reconcile again") => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    assert!(finished);
+    Box::pin(payer.end_reconcile(UserConfirmed::new())).await?;
+    Ok(())
+}
+
 async fn original_bytes(payer: &Paykit, key: &[u8; 32]) -> TestResult<Vec<u8>> {
     let at = format!("ao/{}", pubky_switch_core::enc::b64(key));
     Ok(payer
@@ -573,6 +593,9 @@ async fn grant_after_original_application(world: &World) -> TestResult {
         payer.app().shared_record(&keys[0]).await?.unwrap().version,
         payer.app().shared_record(&keys[1]).await?.unwrap().version,
     ];
+    // The service applied the original before this backup. The wallet still has the
+    // signed decision and prepared opening, but could not save the three results.
+    let before_capture = Box::pin(payer.backup()).await?.to_bytes()?;
     let id = payer.app_id();
     drop(payer);
     storage.refuse_puts_as_too_large(None);
@@ -614,7 +637,86 @@ async fn grant_after_original_application(world: &World) -> TestResult {
         before[1]
     );
     assert!(payer.allowance(&keys[0]).await?.consented);
-    assert!(rail.all_executions().is_empty());
+
+    // The legitimate first grant replaced the original permanent member. Restore both
+    // backups into empty stores against that same current grant and unchanged zero.
+    let after_capture = Box::pin(payer.backup()).await?.to_bytes()?;
+    rail.set_history_payer(payer.identity());
+    drop(payer);
+    for (backup, complete) in [(&before_capture, false), (&after_capture, true)] {
+        let mut restored = Box::pin(Paykit::restore(
+            app_env(world, Arc::new(MemoryStore::new())),
+            Default::default(),
+            &PaykitBackup::from_bytes(backup)?,
+            rail.clone(),
+            Arc::new(TestTimer {
+                clock: world.clock().clone(),
+            }),
+        ))
+        .await?;
+        assert_eq!(restored.app_id(), id);
+        Box::pin(finish_restore(&mut restored)).await?;
+        let local = Box::pin(original_bytes(&restored, &keys[0])).await?;
+        let view = restored.allowance(&keys[0]).await?;
+        assert_eq!(view.status, AllowanceStatus::Accepted);
+        assert_eq!(view.executor_app_id, Some(id));
+        let resumed = Box::pin(restored.resume_allowance_executor(&keys[0])).await;
+        if complete {
+            assert!(
+                view.consented,
+                "clean backup retains the completed grant's consent"
+            );
+            let approval: serde_json::Value = serde_json::from_slice(&local)?;
+            assert_eq!(
+                serde_json::from_value::<Vec<KeptOp>>(approval["d"]["opening"]["applied"].clone())?,
+                originals
+            );
+            resumed?;
+            assert!(restored.allowance(&keys[0]).await?.consented);
+        } else {
+            assert!(!view.consented, "incomplete backup has no grant consent");
+            assert!(resumed.is_err());
+            assert_eq!(local, prepared);
+            assert!(!restored
+                .app()
+                .shared_evidence()
+                .await?
+                .ops
+                .contains(&originals[0]));
+            let refusal =
+                Box::pin(restored.confirm_allowance_executor(&keys[0], UserConfirmed::new()))
+                    .await
+                    .unwrap_err();
+            assert!(
+                matches!(refusal.refusal(), Some(paykit_sdk::Refusal::NotNow(reason))
+                if reason.contains("original Allowance grant and ledger")),
+                "{refusal}"
+            );
+            assert!(Box::pin(restored.reconcile_allowance(&keys[0]))
+                .await?
+                .is_none());
+            assert!(!restored.allowance(&keys[0]).await?.consented);
+        }
+        assert_eq!(
+            restored
+                .app()
+                .shared_record(&keys[0])
+                .await?
+                .unwrap()
+                .version,
+            granted.version
+        );
+        assert_eq!(
+            restored
+                .app()
+                .shared_record(&keys[1])
+                .await?
+                .unwrap()
+                .version,
+            before[1]
+        );
+        assert!(rail.all_executions().is_empty());
+    }
     Ok(())
 }
 

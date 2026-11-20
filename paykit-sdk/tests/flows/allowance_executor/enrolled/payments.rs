@@ -440,22 +440,7 @@ async fn restore_after_first_payment(
         }),
     ))
     .await?;
-    Box::pin(finish_listing(&mut payer)).await;
-    let mut finished = false;
-    for _ in 0..8 {
-        match Box::pin(payer.reconcile()).await {
-            Ok(report) => {
-                assert!(!report.payer_skipped);
-                finished = true;
-                break;
-            }
-            Err(paykit_sdk::PaykitError::Refused(paykit_sdk::Refusal::NotNow(reason)))
-                if reason.contains("Call reconcile again") => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    assert!(finished);
-    Box::pin(payer.end_reconcile(UserConfirmed::new())).await?;
+    Box::pin(super::finish_restore(&mut payer)).await?;
     let before = payer.allowance(key).await?;
     assert_eq!(before.status, AllowanceStatus::Accepted);
     assert_eq!(before.blocked, Some(false));
