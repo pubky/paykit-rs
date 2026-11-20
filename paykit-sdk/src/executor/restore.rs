@@ -24,7 +24,7 @@ use crate::{Paykit, Result};
 /// The SDK keeps the authenticated application it accepted. The spending batch must still
 /// condition on both current records and atomically open the new attempt and reservation.
 pub(super) struct ReconciledLedger {
-    pub(super) applied_proposal: Option<String>,
+    pub(super) applied_proposals: Vec<String>,
     pub(super) ledger: Ledger,
     pub(super) usage: Usage,
     pub(super) evidence: KeptOp,
@@ -298,7 +298,7 @@ impl Paykit {
         else {
             return Ok(None);
         };
-        if checked.applied_proposal.is_some()
+        if !checked.applied_proposals.is_empty()
             || history.0.len() > 1
             || (!checked.at_initial_ledger && checkpoint.later.as_ref() != Some(&checked.evidence))
         {
@@ -314,7 +314,7 @@ impl Paykit {
         checked: &ReconciledLedger,
     ) -> Result<()> {
         let mut tx = crate::state::Tx::default();
-        if let Some(suffix) = &checked.applied_proposal {
+        for suffix in &checked.applied_proposals {
             tx.delete(&format!("{}{suffix}", key::LEDGER_PROPOSALS));
             tx.delete(&format!("{}{suffix}", key::LEDGER_BATCHES));
         }
@@ -420,12 +420,16 @@ impl Paykit {
                 .await?;
             return Err(pubky_switch_client::app::AppError::Alarm(alarm).into());
         }
-        let applied_proposal =
-            match Box::pin(self.prepared_ledger(permanent_key, &current, &exact_grant)).await? {
-                super::preparation::Prepared::Waiting => return Ok(None),
-                super::preparation::Prepared::Clear => None,
-                super::preparation::Prepared::Applied { suffix } => Some(suffix),
-            };
+        let Some(applied_proposals) = Box::pin(self.prepared_ledger(
+            permanent_key,
+            &accepted.application,
+            &current,
+            &exact_grant,
+        ))
+        .await?
+        else {
+            return Ok(None);
+        };
         let mut compaction = None;
         let mut reads = HashMap::new();
         if current.revision != accepted.application.revision {
@@ -503,7 +507,7 @@ impl Paykit {
             LedgerRead::Applied(_) => return Ok(None),
         };
         let result = |usage, ledger, grant, compaction| ReconciledLedger {
-            applied_proposal,
+            applied_proposals,
             compaction,
             at_initial_ledger: current.revision == approval.ledger.revision,
             at,

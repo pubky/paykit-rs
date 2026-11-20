@@ -211,7 +211,7 @@ async fn test_first_grant_requires_the_accepted_record_and_repeats_once() {
 #[tokio::test]
 async fn test_unanswered_owner_resolution_advances_the_reserved_ledger_once() {
     use paykit_lib::allowances::EntryOutcome;
-    use paykit_sdk::{rail::Behaviour, PayOutcome, Resolution};
+    use paykit_sdk::Resolution;
     use pubky_switch_client::testing::Fault;
 
     let store = crate::common::store();
@@ -219,21 +219,10 @@ async fn test_unanswered_owner_resolution_advances_the_reserved_ledger_once() {
     let identity = payer.identity();
     let app_id = payer.app_id();
     world.rail.set_history_payer(identity);
-    let request = Box::pin(request_from(
-        &mut shop,
-        identity,
-        draft("7", world.clock.now_ms()),
+    let attempt_id = Box::pin(open_funded_request(
+        &world, &mut payer, &mut shop, &key, "7",
     ))
     .await;
-    Box::pin(payer.receive(None)).await.unwrap();
-    world.rail.next(Behaviour::Hang);
-    let pending = Box::pin(payer.pay_under_allowance(&request, &key))
-        .await
-        .outcome
-        .unwrap();
-    let PayOutcome::Pending { attempt_id, .. } = pending else {
-        panic!("{pending:?}");
-    };
     let ledger = payer
         .app()
         .records_of("allowance_ledgers")
@@ -262,7 +251,8 @@ async fn test_unanswered_owner_resolution_advances_the_reserved_ledger_once() {
     drop(payer);
 
     let mut reopened =
-        Box::pin(world.load_on_clock(&world.alice, store, app_id, world.clock.clone())).await;
+        Box::pin(world.load_on_clock(&world.alice, store.clone(), app_id, world.clock.clone()))
+            .await;
     Box::pin(crate::common::finish_listing(&mut reopened)).await;
     let usage = Box::pin(reopened.reconcile_allowance(&key))
         .await
@@ -282,17 +272,11 @@ async fn test_unanswered_owner_resolution_advances_the_reserved_ledger_once() {
             .outcome,
         Some(EntryOutcome::Failed)
     );
+    let (_, resolution) = applied_put(reopened.app(), ledger.key, applied.version).await;
+    let checkpoint = Box::pin(reopened.backup()).await.unwrap();
     drop(reopened);
-    let mut restored = Box::pin(paykit_sdk::Paykit::restore(
-        world.env(&world.alice, crate::common::store()),
-        Default::default(),
-        &backup,
-        world.rail.clone(),
-        world.timer(),
-    ))
-    .await
-    .unwrap();
-    Box::pin(crate::common::finish_listing(&mut restored)).await;
+    let older_store = crate::common::store();
+    let mut restored = Box::pin(restore_funded_wallet(&world, older_store.clone(), &backup)).await;
     assert_eq!(
         Box::pin(restored.reconcile_allowance(&key))
             .await
@@ -312,6 +296,142 @@ async fn test_unanswered_owner_resolution_advances_the_reserved_ledger_once() {
     );
     assert_eq!(world.record_writes(&world.alice, &ledger.key), writes + 1);
     assert_eq!(world.rail.pay_calls(&attempt_id), 1);
+    drop(restored);
+
+    // A second installation of the same executor continues from that signed resolution.
+    let mut second = Box::pin(restore_funded_wallet(
+        &world,
+        crate::common::store(),
+        &checkpoint,
+    ))
+    .await;
+    Box::pin(finish_restored_reconciliation(&mut second)).await;
+    Box::pin(second.confirm_allowance_executor(&key, UserConfirmed::new()))
+        .await
+        .unwrap();
+    let next_id = Box::pin(open_funded_request(
+        &world,
+        &mut second,
+        &mut shop,
+        &key,
+        "3",
+    ))
+    .await;
+    let successor = second
+        .app()
+        .shared_record(&ledger.key)
+        .await
+        .unwrap()
+        .unwrap();
+    let (signed, _) = applied_put(second.app(), ledger.key, successor.version).await;
+    assert!(signed
+        .body()
+        .conditions
+        .contains(&Condition::RecordCurrent {
+            key: ledger.key,
+            revision: resolution,
+            deleted: false,
+        }));
+    assert_eq!(world.record_writes(&world.alice, &ledger.key), writes + 2);
+
+    // The installed store still holds the signed resolution. The imported backup
+    // has the pending batch, and the service now holds its single direct successor.
+    let mut combined = Box::pin(restore_funded_wallet(&world, store, &backup)).await;
+    let counted = Box::pin(combined.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .expect("the installed resolution and the service's direct reservation both verify");
+    assert_eq!(
+        (
+            counted.lifetime().as_str(),
+            counted.spent(),
+            counted.reserved()
+        ),
+        ("10", 1, 1)
+    );
+    assert_eq!(
+        combined
+            .app()
+            .shared_record(&ledger.key)
+            .await
+            .unwrap()
+            .unwrap()
+            .version,
+        successor.version
+    );
+    assert_eq!(world.record_writes(&world.alice, &ledger.key), writes + 2);
+    assert_eq!(world.rail.pay_calls(&next_id), 1);
+    drop(combined);
+
+    // The other installed store accepted the same resolution, but is now missing
+    // two moves of the ledger. Knowing the old batch succeeded cannot fill that gap.
+    let next_ledger = Ledger::from_json(successor.content.value().unwrap()).unwrap();
+    let next_entry = next_ledger
+        .entries
+        .iter()
+        .find(|e| e.attempt_id == next_id)
+        .unwrap();
+    world.rail.settle(&next_id, false);
+    Box::pin(crate::common::finish_listing(&mut second)).await;
+    Box::pin(second.resolve_attempt(
+        &next_entry.obligation,
+        next_id,
+        Resolution::Failed,
+        UserConfirmed::new(),
+    ))
+    .await
+    .unwrap();
+    drop(second);
+    let mut gap = Box::pin(restore_funded_wallet(&world, older_store, &backup)).await;
+    assert!(Box::pin(gap.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(world.record_writes(&world.alice, &ledger.key), writes + 3);
+    assert_eq!(world.rail.pay_calls(&attempt_id), 1);
+}
+
+async fn restore_funded_wallet(
+    world: &World,
+    store: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+    backup: &paykit_sdk::PaykitBackup,
+) -> paykit_sdk::Paykit {
+    let mut wallet = Box::pin(paykit_sdk::Paykit::restore(
+        world.env(&world.alice, store),
+        Default::default(),
+        backup,
+        world.rail.clone(),
+        world.timer(),
+    ))
+    .await
+    .unwrap();
+    Box::pin(crate::common::finish_listing(&mut wallet)).await;
+    wallet
+}
+
+async fn open_funded_request(
+    world: &World,
+    payer: &mut paykit_sdk::Paykit,
+    shop: &mut paykit_sdk::Paykit,
+    key: &[u8; 32],
+    amount: &str,
+) -> paykit_lib::AttemptId {
+    let request = Box::pin(request_from(
+        shop,
+        payer.identity(),
+        draft(amount, world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    world.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let pending = Box::pin(payer.pay_under_allowance(&request, key))
+        .await
+        .outcome
+        .unwrap_or_else(|error| panic!("opening the {amount}-unit reservation: {error}"));
+    let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = pending else {
+        panic!("{pending:?}");
+    };
+    attempt_id
 }
 
 #[tokio::test]

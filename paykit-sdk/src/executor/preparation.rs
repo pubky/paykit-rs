@@ -118,21 +118,16 @@ impl super::restore::ReconciledLedger {
     }
 }
 
-pub(super) enum Prepared {
-    Clear,
-    Waiting,
-    Applied { suffix: String },
-}
-
 impl Paykit {
     /// Only a native definitive refusal in uninterrupted history, or the original
     /// verified applied operation, resolves a submitted preparation (Paykit spec 8.3).
     pub(super) async fn prepared_ledger(
         &mut self,
         record: &[u8; 32],
+        installed: &AppliedRecord,
         current: &AppliedRecord,
         grant: &Condition,
-    ) -> Result<Prepared> {
+    ) -> Result<Option<Vec<String>>> {
         let prefix = format!("{}{}/", key::LEDGER_PROPOSALS, b64(record));
         let proposals = self.local_scan::<LedgerProposal>(&prefix).await?;
         let mut markers: std::collections::HashMap<_, _> = self
@@ -140,7 +135,8 @@ impl Paykit {
             .await?
             .into_iter()
             .collect();
-        let mut applied = Prepared::Clear;
+        let mut applied = Vec::new();
+        let mut applied_batches = std::collections::HashSet::new();
         let mut discarded = state::Tx::default();
         for (digest, proposal) in proposals {
             let suffix = format!("{}/{}", b64(record), digest);
@@ -157,43 +153,43 @@ impl Paykit {
                     .is_none_or(|lost| revision.generation > lost);
                 for id in ids {
                     if !same_history {
-                        return Ok(Prepared::Waiting);
+                        return Ok(None);
                     }
-                    let status = self.app.kept_batch(id).await?;
-                    if matches!(status, Some(KeptBatchStatus::Kept { .. })) {
-                        return Ok(Prepared::Waiting);
-                    }
-                    if current.op.body().batch.id == id
-                        && current.op.body().app_id == Some(self.app_id())
-                        && current.op.body().conditions.contains(grant)
-                        && matches!(grant, Condition::RecordCurrent { revision: r, .. } if *r == revision)
-                        && current.revision.generation == revision.generation
-                        && current.value == proposal.result
+                    // An imported marker can name the installed wallet's accepted
+                    // application even after the service has advanced. The caller
+                    // verifies that continuation before committing this cleanup.
+                    if let Some(write) = [current, installed]
+                        .into_iter()
+                        .find(|w| w.op.body().batch.id == id)
                     {
                         let ledger = Ledger::from_json(&proposal.result)?;
                         let target = ledger_target(&ledger.counterparty, &ledger.allowance_id);
-                        if AppliedRecord::retained(&self.app, &target, &proposal.before)
-                            .is_none_or(|base| !current.follows(&base))
+                        if !applied_batches.insert(id)
+                            || write.op.body().app_id != Some(self.app_id())
+                            || !write.cert.holds_scope("paykit_allowance_execute")
+                            || !write.op.body().conditions.contains(grant)
+                            || !matches!(grant, Condition::RecordCurrent { revision: r, .. } if *r == revision)
+                            || write.revision.generation != revision.generation
+                            || write.value != proposal.result
+                            || AppliedRecord::retained(&self.app, &target, &proposal.before)
+                                .is_none_or(|base| !write.follows(&base))
                         {
-                            return Ok(Prepared::Waiting);
+                            return Ok(None);
                         }
                         matched = true;
                     } else if !matches!(
-                        status,
+                        self.app.kept_batch(id).await?,
                         Some(KeptBatchStatus::Dropped {
                             reason: KeptBatchDrop::Refused { .. } | KeptBatchDrop::Unsent,
                             ..
                         })
                     ) {
-                        return Ok(Prepared::Waiting);
+                        return Ok(None);
                     }
                 }
             }
             if matched {
-                if !matches!(applied, Prepared::Clear) {
-                    return Ok(Prepared::Waiting);
-                }
-                applied = Prepared::Applied { suffix };
+                applied.push(suffix);
             } else {
                 discarded.delete(&format!("{}{suffix}", key::LEDGER_PROPOSALS));
                 discarded.delete(&marker);
@@ -208,6 +204,6 @@ impl Paykit {
                 .protocol_commit(crate::protocol::BACKUP_NAME, &writes)
                 .await?;
         }
-        Ok(applied)
+        Ok(Some(applied))
     }
 }
