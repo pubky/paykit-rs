@@ -4980,11 +4980,9 @@ async fn withdraw_after_rejection(trigger: RejectedWithdrawal) {
         let answer = Box::pin(shop.accept_allowance(&at_shop)).await.unwrap();
         let received = Box::pin(payer.receive(None)).await.unwrap();
         assert!(
-            received
-                .report
-                .events
-                .iter()
-                .any(|e| matches!(e, AppEvent::MessageReceived { msg_id, .. } if msg_id == &answer)),
+            received.report.events.iter().any(
+                |e| matches!(e, AppEvent::MessageReceived { msg_id, .. } if msg_id == &answer)
+            ),
             "{received:?}"
         );
         Box::pin(payer.receive(None)).await.unwrap();
