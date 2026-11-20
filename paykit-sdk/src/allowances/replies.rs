@@ -1295,13 +1295,14 @@ impl Paykit {
         ))
         .await?;
         self.local_commit(retained).await?;
+        let track_application = accepting || !rejected.is_empty();
         let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME).locals(rejected);
         for write in writes {
             batch = batch.entry(write);
         }
         match crate::stored::submitted(self.submit(batch).await) {
             Ok(crate::stored::Placed::Done) => {
-                if accepting {
+                if track_application {
                     Box::pin(self.applied_original_approval(&permanent_key)).await?;
                 }
                 Ok(PendingReply::Stopped)

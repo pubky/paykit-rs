@@ -21,6 +21,14 @@ enum Withdrawal {
 pub(super) struct RejectedProposal {
     answer: KeptMessage,
     selected: SeenVersion,
+    /// If the original service key was missing at rejection, retain its signed
+    /// create and proof before the pending deletion replaces them.
+    #[serde(deserialize_with = "Option::deserialize")]
+    undated_create: Option<KeptOp>,
+    /// An in-place import while the historical key is unavailable may restore
+    /// the deletion without its proof, even on an uninterrupted service.
+    #[serde(deserialize_with = "Option::deserialize")]
+    deletion: Option<KeptOp>,
     #[serde(with = "serde_b64")]
     signer: [u8; 32],
     #[serde(with = "serde_b64")]
@@ -70,6 +78,10 @@ impl OriginalAllowance {
             let selected = r.selected.record_version();
             selected.generation == self.generation
                 && selected.version > 0
+                && r.deletion
+                    .iter()
+                    .chain(&r.undated_create)
+                    .all(|member| member.proof.is_some())
                 && self.opening.as_ref().is_none_or(|o| r.selected < o.version)
         })
     }
@@ -82,8 +94,14 @@ impl OriginalAllowance {
                     || other.application != installed.application
                     || other.signer != installed.signer
                     || other.answer.stored(&own)?.hash() != installed.answer.stored(&own)?.hash()
+                    || other.undated_create != installed.undated_create
                 {
                     return Err(PaykitError::corrupt());
+                }
+                match (&installed.deletion, &other.deletion) {
+                    (Some(a), Some(b)) if a != b => return Err(PaykitError::corrupt()),
+                    (None, Some(deletion)) => installed.deletion = Some(deletion.clone()),
+                    _ => {}
                 }
                 if other.withdrawal == Withdrawal::Finished {
                     installed.withdrawal = Withdrawal::Finished;
@@ -108,6 +126,34 @@ impl OriginalAllowance {
                 rejected.withdrawal = Withdrawal::Uncertain;
             }
         }
+    }
+
+    pub(super) fn needs_rejection_proof(&self) -> bool {
+        self.opening.is_none()
+            && self.rejected.as_ref().is_some_and(|r| {
+                r.deletion.is_none()
+                    && matches!(r.withdrawal, Withdrawal::Unrequested | Withdrawal::Owed)
+            })
+    }
+
+    pub(super) fn capture_rejection(
+        &mut self,
+        confirmed: &application::AppliedApplications,
+    ) -> bool {
+        let Some(rejected) = &mut self.rejected else {
+            return false;
+        };
+        let Some(result) = confirmed
+            .replies
+            .get(&(rejected.signer, rejected.application))
+        else {
+            return false;
+        };
+        let [deletion] = result.members.as_slice() else {
+            return false;
+        };
+        rejected.deletion = Some(deletion.clone());
+        true
     }
 
     pub(in crate::allowances) fn withdrawal_owed(&self) -> bool {
@@ -139,20 +185,30 @@ impl Paykit {
         };
         if approval.opening.is_some()
             || approval.rejected.is_some()
-            || !proposal_history_is_known(self.app.own_identity(), approval.generation)
+            || selected.version.generation != approval.generation
+            || !delivery::deletion_continues(
+                approval.generation,
+                self.app.own_identity().body().recovery_from,
+            )
             || approval.decision.stored(&approval.peer)?.hash() != proposal.hash()
-            || self
-                .confirmed_pending_applications()
-                .await?
-                .pending_creates
-                .get(&(selected.key, create))
-                != Some(&selected.version)
         {
             return Ok(Vec::new());
         }
+        let mut confirmed = self.confirmed_pending_applications().await?;
+        let source = (selected.key, create);
+        let undated_create = match (
+            confirmed.pending_creates.get(&source),
+            confirmed.undated_creates.remove(&source),
+        ) {
+            (Some(version), _) if *version == selected.version => None,
+            (None, Some(member)) => Some(member),
+            _ => return Ok(Vec::new()),
+        };
         let rejected = RejectedProposal {
             answer: KeptMessage::of(reply),
             selected: selected.version.into(),
+            undated_create,
+            deletion: None,
             signer: self.app.cert().signing_key(),
             application: application::prepared_application(
                 self.identity(),
@@ -192,7 +248,6 @@ impl Paykit {
         &'a mut self,
         at: &'a str,
         mut approval: OriginalAllowance,
-        confirmed: &'a application::AppliedApplications,
     ) -> pubky_switch_client::transport::BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let Some(rejected) = &mut approval.rejected else {
@@ -203,12 +258,6 @@ impl Paykit {
             {
                 return Ok(());
             }
-            let Some(result) = confirmed
-                .replies
-                .get(&(rejected.signer, rejected.application))
-            else {
-                return Ok(());
-            };
             let proposal = approval.decision.stored(&approval.peer)?;
             let id = named_allowance(proposal.body()).ok_or_else(PaykitError::corrupt)?;
             let pending =
@@ -216,16 +265,39 @@ impl Paykit {
             let permanent = allowance_target(&approval.peer, id);
             let key = self.app.record_key(&pending)?;
             let record = self.app.record_key(&permanent)?;
+            let Some(deletion) = &rejected.deletion else {
+                return Ok(());
+            };
+            let pending_read = self.app.read_record_fresh(&pending).await?;
+            let permanent_read = self.app.read_record_fresh(&permanent).await?;
+            if !proposal_history_is_known(self.app.own_identity(), approval.generation) {
+                return Ok(());
+            }
+            let members = std::iter::once(deletion)
+                .chain(&rejected.undated_create)
+                .cloned()
+                .collect();
+            let verified =
+                application::applied_applications(members, self.app.own_identity(), self.app_id())?;
+            let Some(result) = verified
+                .replies
+                .get(&(rejected.signer, rejected.application))
+            else {
+                return Ok(());
+            };
             if result.members.len() != 1
                 || result.pending_key != key
                 || SeenVersion::from(result.retirement) <= rejected.selected
             {
                 return Ok(());
             }
-            let pending_read = self.app.read_record_fresh(&pending).await?;
-            let permanent_read = self.app.read_record_fresh(&permanent).await?;
-            if !proposal_history_is_known(self.app.own_identity(), approval.generation) {
-                return Ok(());
+            if rejected.undated_create.is_some() {
+                let create = approval.create.ok_or_else(PaykitError::corrupt)?;
+                if verified.pending_creates.get(&(key, create))
+                    != Some(&rejected.selected.record_version())
+                {
+                    return Ok(());
+                }
             }
             let Some(retirement) = self
                 .local_get::<replies::PendingRetirement>(&key::pending_retirement(&key))
