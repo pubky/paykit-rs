@@ -7,7 +7,7 @@ use paykit_lib::app_record::PaykitMember;
 use paykit_sdk::rail::FakeRail;
 use paykit_sdk::{
     AppScopes, PayOptions, Paykit, PaykitBackup, PaykitConfig, PaykitError, PaymentMode, Refusal,
-    RequestedScopes, UnrequestedPayment,
+    UnrequestedPayment,
 };
 use pubky_switch_client::app::{AppError, HomeserverWriter, Publication, UserConfirmed};
 use pubky_switch_client::error::TransportError;
@@ -15,12 +15,11 @@ use pubky_switch_client::testing::TestHomeserver;
 use pubky_switch_client::transport::BoxFuture;
 use pubky_switch_core::records::{app_record_path, AppRecord};
 use pubky_switch_core::sig::SignedDoc;
-use pubky_switch_harness::{parties::Asking, Backend, World};
-use pubky_switch_signer::{Protocols, Signer};
+use pubky_switch_harness::{Backend, World};
 use serde::Deserialize;
 
 use super::{payload, publishing};
-use crate::common::{btc, endpoint, finish_listing, store, TestTimer};
+use crate::common::{btc, endpoint, enrolled_wallet, finish_listing, store, TestTimer};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -29,42 +28,6 @@ enum RestoredCopy {
     Missing,
     BeforeOffer,
     AcceptedOnly,
-}
-
-/// The two wallets have different identities, stores, keys and Homeserver writers.
-async fn join(
-    world: &World,
-    name: &str,
-    scopes: RequestedScopes,
-    config: PaykitConfig,
-    rail: &Arc<FakeRail>,
-) -> TestResult<Paykit> {
-    let identity = world.identity(name)?;
-    let origin = format!("https://{name}.public.test");
-    world.add_switch(&origin, &[&identity]).await?;
-    let mut env = world.signer_env(&identity, store())?;
-    env.protocols = Protocols::new(vec![Arc::new(paykit_lib::signer::PaykitProtocol)])?;
-    let mut signer = Box::pin(Signer::create(env, world.keyring(&identity)?, &origin)).await?;
-    signer.resume().await?;
-    let names = scopes.scopes.iter().map(String::as_str).collect::<Vec<_>>();
-    let asking = Asking::for_scopes(world.app_keys(&identity, name)?, &names)?;
-    let review = signer.review(asking.request.signed(), &asking.auth)?;
-    let approved = Box::pin(signer.approve(review)).await?;
-    signer.claim_delivered(&approved.request).await?;
-    world.advance_ms(1_000);
-    let timer = Arc::new(TestTimer {
-        clock: world.clock().clone(),
-    });
-    let mut app = Box::pin(Paykit::join(
-        world.app_env(store()),
-        config,
-        asking.join_request(identity.public(), &approved)?,
-        rail.clone(),
-        timer,
-    ))
-    .await?;
-    finish_listing(&mut app).await;
-    Ok(app)
 }
 
 /// The shop waits for this writer to return. The payer therefore reads the first durable
@@ -157,12 +120,13 @@ struct BackedUpRecords {
 async fn restore_shop(world: &World, copy: RestoredCopy) -> TestResult {
     let id = endpoint("btc-lightning-bolt12");
     let rail = Arc::new(FakeRail::with_clock(world.clock().clone()));
-    let mut shop = Box::pin(join(
+    let mut shop = Box::pin(enrolled_wallet(
         world,
         "seller",
         AppScopes::new().request().pay().build()?,
         publishing(),
         &rail,
+        store(),
     ))
     .await?;
     let identity = shop.identity();
@@ -202,12 +166,13 @@ async fn restore_shop(world: &World, copy: RestoredCopy) -> TestResult {
     } else {
         world.files().remove(identity, &path);
     }
-    let payer = Box::pin(join(
+    let payer = Box::pin(enrolled_wallet(
         world,
         "buyer",
         AppScopes::new().pay().build()?,
         PaykitConfig::default(),
         &rail,
+        store(),
     ))
     .await?;
     let observer = Arc::new(PayerAtFirstWrite {

@@ -318,6 +318,8 @@ impl Paykit {
             }
             if delivery::current(&pending, &key, &pending_read, true) != Some(None)
                 || delivery::current(&permanent, &record, &permanent_read, false) != Some(None)
+                || self.unresolved_allowance(&key).await?
+                || self.unresolved_allowance(&record).await?
                 || self.conflict_kept(&record).await?
                 || self.allowance_stopped(&record).await?
                 || self

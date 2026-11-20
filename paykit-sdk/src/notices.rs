@@ -63,6 +63,9 @@ pub enum NoticeKind {
     /// confirmed write lacks it: it was never sent, the request may be paid or accepted
     /// again, and the user may answer it again.
     MessageGivenUp,
+    /// Ordinary placement expired, but the wallet retained a hold on this Allowance
+    /// because the signed message could still establish a conflict.
+    AllowancePlacementExpired,
     /// An original outgoing message found after restore may have reached its recipient.
     /// Reconcile its outcome with the counterparty. Acknowledging it records that the host
     /// has seen it, without authorizing delivery or a replacement (Paykit spec 7.2).
@@ -94,6 +97,7 @@ impl NoticeKind {
             Self::PaidAfterFailed => "paid_after_failed",
             Self::HeldWithoutPay => "held_without_pay",
             Self::MessageGivenUp => "given_up",
+            Self::AllowancePlacementExpired => "allowance_placement_expired",
             Self::PossiblyDelivered => "possibly_delivered",
             Self::BlockedMessagesLost => "blocked_lost",
             Self::SettlementBucketFull => "settlement_bucket_full",
@@ -322,6 +326,8 @@ pub(crate) enum GivenUpOrigin {
     /// The receive step gave up an Allowance proposal or answer over a record value that
     /// doesn't read, past its window (`allowances.rs`): it was processed.
     ReceiveStep,
+    /// Placement expired with a separate durable Allowance conflict hold.
+    AllowanceConflict,
     /// This app's own rejection or payer's cancellation, recorded while sends to the payee
     /// were held (`ha/`), passed its replay window unsent, or was lost with a write of its
     /// request record that holds neither it nor any stop.
@@ -423,7 +429,11 @@ impl KeptNotice {
             GivenUpFrom::Origin(origin) => (None, Some(origin)),
         };
         Self {
-            kind: NoticeKind::MessageGivenUp,
+            kind: if origin == Some(GivenUpOrigin::AllowanceConflict) {
+                NoticeKind::AllowancePlacementExpired
+            } else {
+                NoticeKind::MessageGivenUp
+            },
             settlement: None,
             attempt_id: None,
             msg_id: Some(msg_id.to_owned()),
@@ -469,6 +479,7 @@ impl KeptNotice {
             || matches!(
                 kind,
                 NoticeKind::MessageGivenUp
+                    | NoticeKind::AllowancePlacementExpired
                     | NoticeKind::PossiblyDelivered
                     | NoticeKind::BlockedMessagesLost
                     | NoticeKind::DroppedMessagesLost
@@ -541,7 +552,12 @@ impl KeptNotice {
         // so a valid run keeps none acknowledged. It holds its entry's handle exactly when it
         // names no origin: one raised for a stored entry always has it, and one with no
         // entry stored (a key wait's, a kept reply's) names where it came from instead.
-        if self.kind != NoticeKind::MessageGivenUp
+        let expected = if self.origin == Some(GivenUpOrigin::AllowanceConflict) {
+            NoticeKind::AllowancePlacementExpired
+        } else {
+            NoticeKind::MessageGivenUp
+        };
+        if self.kind != expected
             || self.attempt_id.is_some()
             || self.msg_id.as_deref() != Some(msg_id)
             || self.counterparty.as_deref() != Some(&b64(sender))

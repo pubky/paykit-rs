@@ -177,20 +177,24 @@ async fn test_certificate_renewal_paykit_refuses_holds_entries_and_refuses_calls
         ),
         "{summary:?}"
     );
-    // Each read reports to the host: from the client's third try at the held entry, its
-    // `StoreFailing`.
-    let mut events = summary.report.events;
+    let mut report = summary.report;
     for _ in 0..pubky_switch_client::app::RETRY_EVENT_READS {
-        let summary = wallet.receive(None).await.unwrap();
-        assert!(summary.certificate_refused.is_some());
-        events.extend(summary.report.events);
-    }
-    assert!(
-        events
+        assert!(
+            report.events.iter().any(|event| matches!(
+                event,
+                AppEvent::ProtocolDeferred { protocol, reason: "Paykit certificate refused", .. }
+                    if protocol == "paykit"
+            )),
+            "{report:?}"
+        );
+        assert!(!report
+            .events
             .iter()
-            .any(|e| matches!(e, AppEvent::StoreFailing { .. })),
-        "{events:?}"
-    );
+            .any(|event| matches!(event, AppEvent::StoreFailing { .. })));
+        let next = wallet.receive(None).await.unwrap();
+        assert!(next.certificate_refused.is_some());
+        report = next.report;
+    }
     // The records aren't listed under it, and can't be: a call that only reads is refused
     // as not now.
     let unlisted = wallet.requests().await.unwrap_err();

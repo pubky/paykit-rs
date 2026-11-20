@@ -78,6 +78,8 @@ pub(crate) use replies::{
 };
 mod application;
 mod delivery;
+mod evidence;
+pub(crate) use evidence::ConflictEvidence;
 mod original;
 mod pending;
 mod replies;
@@ -116,6 +118,8 @@ pub enum AllowanceStatus {
     /// answered under it, for good (Paykit spec 8.3, "Conflicted"); the record holds the
     /// second message in `conflicted`, or this app keeps it as the stop, not yet there.
     Conflicted,
+    /// Ordinary placement expired while the record could still establish a conflict.
+    AwaitingConflictCheck,
 }
 
 /// An Allowance this identity holds a record of, as this app's copy shows it.
@@ -799,7 +803,7 @@ pub(crate) fn receive_effect(
                 Ok(())
             }
             Held::Record(record) => put_placed(cx, &target, *record, stored, position, scopes),
-            Held::Unreadable => stored_entry(cx, stored),
+            Held::Unreadable => stored_entry(cx, stored, position, Some((&target, None))),
         },
         _ => match held {
             // An answer before the app holds its proposal's record, such as one to a
@@ -815,7 +819,7 @@ pub(crate) fn receive_effect(
                 Ok(())
             }
             Held::Record(record) => put_placed(cx, &target, *record, stored, position, scopes),
-            Held::Unreadable => stored_entry(cx, stored),
+            Held::Unreadable => stored_entry(cx, stored, position, Some((&target, None))),
         },
     }
 }
@@ -857,13 +861,14 @@ fn keep_answer(
 /// own app stored, and not dropped at once. The entry is stored locally, the
 /// cursor passing it (Switch spec 8.2), and its step is tried again at each read, so the
 /// message goes into the record once the record reads. Once [`KEPT_MESSAGE_MS`] have passed
-/// since its acceptance it is given up, processed with the host's notice as its only write
-/// ([`crate::NoticeKind::MessageGivenUp`]), as an activity record's message is (Paykit spec
-/// 8.1, "Stored entries"). A value only waiting for its scope key holds the entry
+/// since acceptance, ordinary placement may end. Unresolved conflict evidence survives
+/// with its own host notice (Paykit spec 8.1, "Stored entries"). A value only waiting for its scope key holds the entry
 /// unprocessed before this ([`receive::held_or_unlisted_at`]).
 fn stored_entry(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
+    position: pubky_switch_client::app::FeedPosition,
+    unresolved: Option<(&RecordTarget, Option<crate::divergent::SeenVersion>)>,
 ) -> std::result::Result<(), Fail> {
     // Past its window on the highest service time verified (Paykit spec 8.1). A stored
     // message without its acceptance time is a corrupt store, never one past its window.
@@ -872,6 +877,10 @@ fn stored_entry(
         .highest_service_time()
         .is_some_and(|t| at.saturating_add(receive::KEPT_MESSAGE_MS) <= t);
     if over {
+        if let Some((target, source)) = unresolved {
+            let record = cx.record_key(target)?;
+            return evidence::retain(cx, stored, position, &record, source);
+        }
         let sender = stored.sender();
         let msg_id = &stored.message().msg_id;
         let notice = crate::notices::KeptNotice::given_up(
@@ -887,11 +896,10 @@ fn stored_entry(
         );
         return Ok(());
     }
-    Err(Fail::Store(
-        pubky_switch_client::app::StoreFailure::of_entry(
-            pubky_switch_client::error::StoreError::Corrupt,
-        ),
-    ))
+    Err(Fail::Defer {
+        reason: "Allowance record unresolved",
+        custody: pubky_switch_client::app::DeferCustody::Immediate,
+    })
 }
 
 /// Write `record` with `stored` placed, in the step, unless it reflects it already. A
@@ -972,7 +980,7 @@ fn put_placed(
         if let Some(held) = cx.record(target)? {
             if crate::divergent::step_write_waits(cx, &held, stored, seq, &|_| None)? {
                 return match stored.body() {
-                    Body::AllowanceProposal(_) => stored_entry(cx, stored),
+                    Body::AllowanceProposal(_) => stored_entry(cx, stored, position, None),
                     _ => keep_answer(cx, target, stored, position, false, None),
                 };
             }
@@ -1584,10 +1592,11 @@ impl Paykit {
         use pubky_switch_core::ops::{Condition, RecordVersion};
         let target = allowance_record_target(Collection::AllowanceProposals, peer, id);
         let key = self.app.record_key(&target)?;
-        if self
-            .local_get::<PendingConflict>(&key::pending_conflict(&key))
-            .await?
-            .is_some()
+        if self.unresolved_allowance(&key).await?
+            || self
+                .local_get::<PendingConflict>(&key::pending_conflict(&key))
+                .await?
+                .is_some()
         {
             return Ok(None);
         }
@@ -1849,6 +1858,9 @@ impl Paykit {
             };
             // Nothing is sent for a conflicted Allowance (Paykit spec 8.3, "Conflicted"), as
             // both parties already stop the Allowance on this conflict.
+            if self.unresolved_for_allowance(&owed.record, &held).await? {
+                continue;
+            }
             if self.past_replay_window(end)
                 || held.conflicted.is_some()
                 || Box::pin(self.conflict_kept(&owed.record)).await?
@@ -2042,6 +2054,9 @@ impl Paykit {
                 .await?
                 .ok_or(Refusal::NotFound)?;
             // Nothing is sent for a conflicted Allowance (Paykit spec 8.3, "Conflicted").
+            if self.unresolved_for_allowance(record, &held).await? {
+                return Err(Refusal::NotNow("Allowance conflict check pending".into()).into());
+            }
             if held.conflicted.is_some() || Box::pin(self.conflict_kept(record)).await? {
                 return Err(Refusal::AllowanceConflicted.into());
             }
@@ -2342,6 +2357,13 @@ impl Paykit {
             Box::pin(self.allowance_stopped(&record)).await?,
             Box::pin(self.conflict_kept(&record)).await?,
         );
+        let status = if status != AllowanceStatus::Conflicted
+            && self.unresolved_for_allowance(&record, held).await?
+        {
+            AllowanceStatus::AwaitingConflictCheck
+        } else {
+            status
+        };
         let mut view = Box::pin(self.proposal_view(record, &held.proposal, status)).await?;
         view.executor_app_id = held
             .current_grant(&self.identity())
@@ -2424,7 +2446,7 @@ impl Paykit {
                     ),
                     AllowanceStatus::Proposed | AllowanceStatus::Accepted
                 );
-                if open {
+                if open && !self.unresolved_for_allowance(&held.key, &record).await? {
                     out.push(record.counterparty);
                 }
             }
@@ -2460,7 +2482,11 @@ impl Paykit {
             return Ok(false);
         }
         match Box::pin(self.held_allowance(record)).await? {
-            Some(held) if held.end.is_none() && !rejected(&held) && held.conflicted.is_none() => {}
+            Some(held) if held.end.is_none() && !rejected(&held) && held.conflicted.is_none() => {
+                if self.unresolved_for_allowance(record, &held).await? {
+                    return Ok(false);
+                }
+            }
             _ => return Ok(false),
         }
         let Some(held) = self
@@ -2596,6 +2622,7 @@ impl Paykit {
         {
             return Ok(());
         }
+        Box::pin(self.resolve_allowance_evidence()).await?;
         Box::pin(self.place_pending_seconds()).await?;
         let own = self.identity();
         // Read bound to its key (`state::Stored`). The ends of one Allowance go in the order
@@ -2768,6 +2795,9 @@ impl Paykit {
             return self
                 .submit_with_record(target, &next, Vec::new(), locals, None)
                 .await;
+        }
+        if self.unresolved_for_allowance(&record, &held).await? {
+            return Ok(());
         }
         let conflicted = held.conflicted.is_some() || Box::pin(self.conflict_kept(&record)).await?;
         let mut next = held.clone();
@@ -3193,9 +3223,19 @@ impl Paykit {
                     }
                     Some(held)
                 }
-                None => None,
+                None => {
+                    return Box::pin(
+                        self.expire_allowance_placement(&record, None, &stored, evidence, locals),
+                    )
+                    .await
+                }
             },
-            Some(_) => None,
+            Some(_) => {
+                return Box::pin(
+                    self.expire_allowance_placement(&record, None, &stored, evidence, locals),
+                )
+                .await
+            }
         };
         let Some(next) = next else {
             return Ok(Placed::Not);
