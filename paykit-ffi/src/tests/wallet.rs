@@ -17,6 +17,8 @@ use std::{error::Error, path::Path, sync::Arc};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
+mod notice;
+
 struct Home(Arc<pubky_switch_client::testing::TestHomeserver>);
 #[async_trait::async_trait]
 impl WalletHomeserver for Home {
@@ -55,7 +57,12 @@ async fn enrolled_payer(
     world: &World,
     root: &Path,
     account: Arc<Account>,
-) -> TestResult<(Arc<WalletHost>, Arc<NativeWallet>, Vec<u8>)> {
+) -> TestResult<(
+    Arc<WalletHost>,
+    Arc<NativeWallet>,
+    Vec<u8>,
+    pubky_switch_signer::Signer,
+)> {
     let id = world.identity("buyer")?.public();
     let mut buyer = Box::pin(signer::serving(world, "buyer")).await?;
     let mut other = Box::pin(signer::serving(world, "other-buyer")).await?;
@@ -143,7 +150,7 @@ async fn enrolled_payer(
         .accept_approval(reference.clone(), id.into(), approved.claim)
         .await?;
     let wallet = Box::pin(current.complete_enrollment(reference)).await?;
-    Ok((current, wallet, original.app_id))
+    Ok((current, wallet, original.app_id, buyer))
 }
 async fn receive(wallet: &mut Paykit) -> TestResult {
     for _ in 0..8 {
@@ -210,6 +217,29 @@ async fn connect_after_earlier_batch(
     Ok(())
 }
 
+async fn received_message(wallet: &NativeWallet, expected: &str) -> TestResult<EntryReceipt> {
+    let mut receipt = None;
+    for _ in 0..8 {
+        let report = Box::pin(wallet.receive()).await?;
+        for event in report.events {
+            if let WalletEventData::MessageReceived {
+                msg_id,
+                receipt: seen,
+                ..
+            } = event.data
+            {
+                if msg_id == expected {
+                    assert!(receipt.replace(seen).is_none());
+                }
+            }
+        }
+        if !report.more {
+            return receipt.ok_or_else(|| "wallet did not receive the signed message".into());
+        }
+    }
+    Err("wallet did not finish its pages".into())
+}
+
 async fn payment(
     world: &World,
     host: &WalletHost,
@@ -234,11 +264,14 @@ async fn payment(
     .await?;
     signer.claim_delivered(&approved.request).await?;
     let buyer = world.identity("buyer")?.public();
-    {
+    let invitation = {
         let mut app = payer.lock().await?;
         Box::pin(receive(&mut app)).await?;
-        Box::pin(connect_after_earlier_batch(world, &mut app, shop.public())).await?;
-    }
+        assert!(!app.app().admits(&shop.public()).await?);
+        app.app_mut()
+            .register_invite_code(world.now_ms() + 3_600_000, 1)
+            .await?
+    };
     Box::pin(receive(&mut seller)).await?;
     seller.app_mut().allow_connect(&buyer).await?;
     let endpoint = PaymentEndpointIdentifier::new("btc-lightning-bolt11")?;
@@ -247,19 +280,33 @@ async fn payment(
         asset: Asset::new("btc")?,
         value: Decimal::new("7")?,
     };
-    let sent = Box::pin(seller.send_request(
-        buyer,
-        RequestDraft::new(
-            amount,
-            PaymentReference::new("checkout-7")?,
-            RequestDestination::Endpoints(BTreeMap::from([(endpoint, payload)])),
+    let sent = Box::pin(
+        seller.send_request(
+            buyer,
+            RequestDraft::new(
+                amount,
+                PaymentReference::new("checkout-7")?,
+                RequestDestination::Endpoints(BTreeMap::from([(endpoint, payload)])),
+            )
+            .with_invite_code(invitation.code),
         ),
-    ))
+    )
     .await?;
     let request = sent.request.ok_or("missing signed request")?;
+    let delivery = Box::pin(received_message(&payer, &sent.msg_id)).await?;
+    assert_eq!(
+        delivery.invite_code_hash.as_deref(),
+        Some(invitation.code_hash.as_slice())
+    );
+    assert_eq!(delivery.entry_id.len(), 16);
+    assert_eq!(delivery.read_at_ms, world.now_ms());
     {
         let mut original = payer.lock().await?;
-        Box::pin(receive(&mut original)).await?;
+        assert_eq!(
+            delivery.service_key,
+            original.app().own_identity().inbox().service_key
+        );
+        Box::pin(connect_after_earlier_batch(world, &mut original, shop.public())).await?;
         let mut paying = Box::pin(original.pay_request(&request, PayOptions::default()));
         tokio::select! { _ = account.entered.notified()=>{},_=&mut paying=>return Err("payment did not reach the interrupted method".into()) }
         assert_eq!(account.count(), 1);
@@ -287,10 +334,10 @@ async fn payment(
     let receipt = Box::pin(seller.confirm_payment(&activity.record))
         .await?
         .ok_or("missing seller receipt")?;
-    {
-        let mut original = restored.lock().await?;
-        Box::pin(receive(&mut original)).await?;
-    }
+    let ordinary = Box::pin(received_message(&restored, &receipt)).await?;
+    assert!(ordinary.invite_code_hash.is_none());
+    assert_ne!(ordinary.entry_id, delivery.entry_id);
+    assert_eq!(ordinary.service_key, delivery.service_key);
     let receipts = restored.request_receipts(request.into()).await?;
     assert!(receipts.iter().any(|r| r.message_id == receipt
         && &r.attempt_id == attempt
@@ -301,7 +348,7 @@ async fn payment(
 async fn journey(world: &World) -> TestResult {
     let root = tempfile::tempdir()?;
     let account = Arc::new(Account::open(root.path()));
-    let (env, payer, id) = Box::pin(enrolled_payer(world, root.path(), account.clone())).await?;
+    let (env, payer, id, _) = Box::pin(enrolled_payer(world, root.path(), account.clone())).await?;
     assert!(matches!(
         env.load(vec![13; 16]).await,
         Err(WalletError::NotJoined)
@@ -352,7 +399,7 @@ async fn journey(world: &World) -> TestResult {
     assert_eq!(account.count(), 0);
     Box::pin(payment(world, &env, reopened, &account, id)).await
 }
-fn run(backend: Backend) {
+fn run(backend: Backend, journey: impl AsyncFn(&World) -> TestResult + Send + 'static) {
     let thread = std::thread::Builder::new()
         .stack_size(1_835_008)
         .spawn(move || {
@@ -378,9 +425,9 @@ fn run(backend: Backend) {
 }
 #[test]
 fn test_installed_payer_reopens_the_original_approved_wallet_on_scripted() {
-    run(Backend::Scripted);
+    run(Backend::Scripted, journey);
 }
 #[test]
 fn test_installed_payer_reopens_the_original_approved_wallet_on_postgresql() {
-    run(Backend::Service);
+    run(Backend::Service, journey);
 }
