@@ -1112,10 +1112,33 @@ async fn test_funded_subscription_checks_the_deny_list_and_refuses_a_rate_priced
 #[tokio::test]
 async fn test_funded_period_requiring_its_own_destination_leaves_the_subscription_endpoint_unused()
 {
+    Box::pin(funded_period_with_older_payable_destination(false)).await;
+}
+
+#[tokio::test]
+async fn test_funded_period_skips_a_newer_permitted_endpoint_that_requires_a_rate() {
+    Box::pin(funded_period_with_older_payable_destination(true)).await;
+}
+
+async fn funded_period_with_older_payable_destination(priced: bool) {
     use paykit_lib::periods::{AnchoredRule, PeriodRef, Recurrence, Unit};
     use paykit_sdk::Refusal;
 
-    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    let mut terms = terms();
+    let endpoint = crate::common::endpoint("btc-lightning-bolt11");
+    let newer = crate::common::endpoint(if priced {
+        "eur-sepa-iban"
+    } else {
+        "btc-lightning-bolt12"
+    });
+    let identifiers = if priced {
+        vec![endpoint.clone(), newer.clone()]
+    } else {
+        vec![endpoint.clone()]
+    };
+    terms.allowed_payment_endpoint_identifiers = Some(identifiers.clone());
+    let (world, mut payer, mut shop, key) =
+        Box::pin(first_grant_in(crate::common::store(), terms)).await;
     world.rail.set_history_payer(payer.identity());
     let start = world.clock.now_ms() / 1000 * 1000;
     let schedule = Recurrence::new(
@@ -1125,14 +1148,27 @@ async fn test_funded_period_requiring_its_own_destination_leaves_the_subscriptio
     )
     .unwrap();
     let next = PeriodRef::from(schedule.periods(2).unwrap()[1]);
-    let req = Box::pin(request_from(
-        &mut shop,
-        payer.identity(),
-        draft("10", start)
-            .with_recurrence(schedule)
-            .with_per_period_endpoints(),
-    ))
-    .await;
+    let mut request = draft("10", start)
+        .with_recurrence(schedule)
+        .with_per_period_endpoints();
+    if priced {
+        world.rail.set_endpoint_identifiers(identifiers.clone());
+        world.rail.set_fraction_digits(newer.clone(), Some(2));
+        request = request
+            .with_conversion(paykit_lib::bodies::Conversion::PerPeriod)
+            .with_accepted_endpoint_identifiers(identifiers);
+        request.destination = paykit_lib::bodies::RequestDestination::RequiredApp(shop.app_id());
+        Box::pin(shop.set_list_endpoints(std::collections::BTreeMap::from([(
+            endpoint.clone(),
+            paykit_lib::PaymentEndpointPayload::new("lnbc1first").unwrap(),
+        )])))
+        .await
+        .unwrap();
+        Box::pin(shop.publish_list_to(payer.identity()))
+            .await
+            .unwrap();
+    }
+    let req = Box::pin(request_from(&mut shop, payer.identity(), request)).await;
     Box::pin(payer.receive(None)).await.unwrap();
     Box::pin(payer.accept_subscription_under_allowance(&req, &key))
         .await
@@ -1156,15 +1192,149 @@ async fn test_funded_period_requiring_its_own_destination_leaves_the_subscriptio
             .as_str(),
         "0"
     );
+    Box::pin(shop.receive(None)).await.unwrap();
+    let sale = shop
+        .payee_activity()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|sale| sale.request_hash == Some(req.request_hash))
+        .unwrap();
+    let signed = Box::pin(shop.send_period_details(
+        &sale.record,
+        paykit_lib::bodies::PeriodDetails {
+            billing_period: next,
+            payment_endpoints: Some(std::collections::BTreeMap::from([(
+                endpoint,
+                paykit_lib::PaymentEndpointPayload::new("lnbc1next").unwrap(),
+            )])),
+            rates: None,
+            expires_at: next.ends_at,
+        },
+    ))
+    .await
+    .unwrap();
+    world.clock.advance_ms(1_000);
+    Box::pin(
+        shop.send_period_details(
+            &sale.record,
+            paykit_lib::bodies::PeriodDetails {
+                billing_period: next,
+                payment_endpoints: Some(std::collections::BTreeMap::from([(
+                    newer,
+                    paykit_lib::PaymentEndpointPayload::new(if priced {
+                        "DE00next"
+                    } else {
+                        "lno1next"
+                    })
+                    .unwrap(),
+                )])),
+                rates: priced.then(|| {
+                    vec![paykit_lib::Rate::new(
+                        paykit_lib::Asset::new("eur").unwrap(),
+                        paykit_lib::Decimal::new("2").unwrap(),
+                    )
+                    .unwrap()]
+                }),
+                expires_at: next.ends_at,
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    Box::pin(payer.receive(None)).await.unwrap();
+    let paid = Box::pin(payer.pay_period_under_allowance(&req, &next))
+        .await
+        .outcome
+        .unwrap();
+    assert!(
+        matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
+        "{paid:?}"
+    );
+    assert_eq!(world.rail.pay_calls(&paid.attempt_id()), 1);
+    Box::pin(shop.receive(None)).await.unwrap();
+    let period = shop
+        .payee_activity()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|sale| sale.request_hash == Some(req.request_hash))
+        .unwrap()
+        .periods
+        .into_iter()
+        .find(|entry| entry.billing_period == next)
+        .unwrap();
+    assert!(period.paid);
+    let receipt = Box::pin(shop.confirm_payment(&period.record))
+        .await
+        .unwrap()
+        .unwrap();
+    Box::pin(payer.receive(None)).await.unwrap();
+    let received = payer
+        .receipts(paykit_sdk::ReceiptsOf::Period(req, next))
+        .await
+        .unwrap();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].msg_id, receipt);
+    let held = shop
+        .app()
+        .shared_record(&period.record)
+        .await
+        .unwrap()
+        .unwrap();
+    let credited = paykit_lib::records::ActivityRecord::read(
+        held.content.value().unwrap(),
+        &shop.identity(),
+        paykit_lib::records::ActivitySide::Payee,
+    )
+    .unwrap();
+    let selected = credited.period_details.unwrap();
+    assert_eq!(selected.message().msg_id, signed.msg_id);
+    assert_eq!(
+        credited.proof.unwrap().message().refs,
+        [req.request_hash, selected.hash()]
+    );
+    assert_eq!(
+        Box::pin(payer.reconcile_allowance(&key))
+            .await
+            .unwrap()
+            .unwrap()
+            .lifetime()
+            .as_str(),
+        "10"
+    );
 }
 
 #[tokio::test]
 async fn test_executor_incorporates_an_unfunded_period_paid_at_an_authorized_rate() {
+    Box::pin(reconcile_receipted_period(PeriodPayment::FirstFixed)).await;
+}
+
+#[tokio::test]
+async fn test_executor_recovers_a_receipted_fixed_rate_period_with_its_signed_destination() {
+    Box::pin(reconcile_receipted_period(PeriodPayment::LaterFixed)).await;
+}
+
+#[tokio::test]
+async fn test_pruned_same_asset_period_holds_without_its_signed_destination() {
+    Box::pin(reconcile_receipted_period(PeriodPayment::LaterRequested)).await;
+}
+
+#[derive(Clone, Copy)]
+enum PeriodPayment {
+    FirstFixed,
+    LaterFixed,
+    LaterRequested,
+}
+
+async fn reconcile_receipted_period(example: PeriodPayment) {
     use paykit_lib::bodies::Conversion;
     use paykit_lib::periods::{AnchoredRule, PeriodRef, Recurrence, Unit};
     use paykit_lib::{Asset, Decimal, Rate};
     use paykit_sdk::{PeriodPrice, ReceiptsOf, Refusal};
 
+    let later = !matches!(example, PeriodPayment::FirstFixed);
+    let same_asset = matches!(example, PeriodPayment::LaterRequested);
     let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
     world.rail.set_history_payer(payer.identity());
     let start = world.clock.now_ms() / 1000 * 1000;
@@ -1174,15 +1344,24 @@ async fn test_executor_incorporates_an_unfunded_period_paid_at_an_authorized_rat
         None,
     )
     .unwrap();
-    let period = PeriodRef::from(schedule.first().unwrap());
-    let rate = Rate::new(Asset::new("btc").unwrap(), Decimal::new("2").unwrap()).unwrap();
-    let subscription = draft("10", start)
-        .with_conversion(Conversion::Fixed(vec![rate]))
+    let period = PeriodRef::from(schedule.periods(2).unwrap()[usize::from(later)]);
+    let mut subscription = draft("10", start)
         .with_recurrence(schedule)
         .with_period_deadline_s(3600);
+    if !same_asset {
+        let rate = Rate::new(Asset::new("btc").unwrap(), Decimal::new("2").unwrap()).unwrap();
+        subscription = subscription.with_conversion(Conversion::Fixed(vec![rate]));
+    }
     let mut subscriptions =
         Box::pin(world.labelled_shop("subscription-till", "subscriptions")).await;
     let mut shipping = Box::pin(world.labelled_shop("shipping-till", "shipping")).await;
+    if later {
+        subscription.destination =
+            paykit_lib::bodies::RequestDestination::RequiredApp(subscriptions.app_id());
+        subscription.per_period_endpoints = true;
+        subscription.accepted_endpoint_identifiers =
+            Some(vec![crate::common::endpoint("btc-lightning-bolt11")]);
+    }
     let req = Box::pin(request_from(
         &mut subscriptions,
         payer.identity(),
@@ -1191,23 +1370,57 @@ async fn test_executor_incorporates_an_unfunded_period_paid_at_an_authorized_rat
     .await;
     Box::pin(crate::common::finish_listing(&mut payer)).await;
     Box::pin(payer.accept_subscription(&req)).await.unwrap();
-    let shown =
-        Box::pin(payer.pay_period_automatically(&req, &period, PeriodPrice::RequestedAmount))
+    let selected = if later {
+        Box::pin(crate::common::finish_listing(&mut subscriptions)).await;
+        let sale = subscriptions
+            .payee_activity()
             .await
-            .outcome
-            .unwrap_err();
-    let Some(Refusal::PricedByRate { payment, .. }) = shown.refusal() else {
-        panic!("{shown:?}")
-    };
-    let outcome =
-        Box::pin(payer.pay_period_automatically(&req, &period, PeriodPrice::AtRate(payment)))
-            .await
-            .outcome
+            .unwrap()
+            .into_iter()
+            .find(|a| a.request_hash == Some(req.request_hash))
             .unwrap();
+        world.clock.set_ms(period.starts_at + 1000);
+        let sent = Box::pin(subscriptions.send_period_details(
+            &sale.record,
+            paykit_lib::bodies::PeriodDetails {
+                billing_period: period,
+                payment_endpoints: Some(std::collections::BTreeMap::from([(
+                    crate::common::endpoint("btc-lightning-bolt11"),
+                    paykit_lib::PaymentEndpointPayload::new("lnbc1later").unwrap(),
+                )])),
+                rates: None,
+                expires_at: period.ends_at,
+            },
+        ))
+        .await
+        .unwrap();
+        Box::pin(crate::common::finish_listing(&mut payer)).await;
+        Some(sent.msg_id)
+    } else {
+        None
+    };
+    let shown;
+    let price = if same_asset {
+        PeriodPrice::RequestedAmount
+    } else {
+        shown =
+            Box::pin(payer.pay_period_automatically(&req, &period, PeriodPrice::RequestedAmount))
+                .await
+                .outcome
+                .unwrap_err();
+        let Some(Refusal::PricedByRate { payment, .. }) = shown.refusal() else {
+            panic!("{shown:?}")
+        };
+        PeriodPrice::AtRate(payment)
+    };
+    let outcome = Box::pin(payer.pay_period_automatically(&req, &period, price))
+        .await
+        .outcome
+        .unwrap();
     let attempt = outcome.attempt_id();
     assert_eq!(
         world.rail.paid_amount(&attempt).unwrap().value.as_str(),
-        "20"
+        if same_asset { "10" } else { "20" }
     );
     Box::pin(subscriptions.receive(None)).await.unwrap();
     let sale = subscriptions
@@ -1222,6 +1435,26 @@ async fn test_executor_incorporates_an_unfunded_period_paid_at_an_authorized_rat
         .iter()
         .find(|p| p.billing_period == period)
         .unwrap();
+    if let Some(id) = selected {
+        let held = subscriptions
+            .app()
+            .shared_record(&occurrence.record)
+            .await
+            .unwrap()
+            .unwrap();
+        let record = paykit_lib::records::ActivityRecord::read(
+            held.content.value().unwrap(),
+            &subscriptions.identity(),
+            paykit_lib::records::ActivitySide::Payee,
+        )
+        .unwrap();
+        let details = record.period_details.unwrap();
+        assert_eq!(details.message().msg_id, id);
+        assert_eq!(
+            record.proof.unwrap().message().refs,
+            [req.request_hash, details.hash()]
+        );
+    }
     // This wallet also has a genuine receipt from a different labelled till of the same seller.
     let parcel = Box::pin(request_from(
         &mut shipping,
@@ -1290,22 +1523,29 @@ async fn test_executor_incorporates_an_unfunded_period_paid_at_an_authorized_rat
         .await
         .unwrap()
         .is_empty());
-    assert!(Box::pin(payer.reconcile_allowance(&key))
-        .await
-        .unwrap()
-        .is_none());
-    let calls = world.rail.all_executions();
-    assert!(
-        Box::pin(payer.accept_subscription_under_allowance(&funded, &key))
+    if same_asset {
+        assert!(Box::pin(payer.reconcile_allowance(&key))
             .await
-            .is_err()
-    );
-    let refused = Box::pin(payer.pay_under_allowance(&next_payment, &key))
-        .await
-        .outcome
-        .unwrap_err();
-    assert!(refused.to_string().contains("wallet history"), "{refused}");
-    assert_eq!(world.rail.all_executions(), calls);
+            .unwrap()
+            .is_some());
+    } else {
+        assert!(Box::pin(payer.reconcile_allowance(&key))
+            .await
+            .unwrap()
+            .is_none());
+        let calls = world.rail.all_executions();
+        assert!(
+            Box::pin(payer.accept_subscription_under_allowance(&funded, &key))
+                .await
+                .is_err()
+        );
+        let refused = Box::pin(payer.pay_under_allowance(&next_payment, &key))
+            .await
+            .outcome
+            .unwrap_err();
+        assert!(refused.to_string().contains("wallet history"), "{refused}");
+        assert_eq!(world.rail.all_executions(), calls);
+    }
     let receipt = Box::pin(subscriptions.confirm_payment(&occurrence.record))
         .await
         .unwrap()
@@ -1319,6 +1559,47 @@ async fn test_executor_incorporates_an_unfunded_period_paid_at_an_authorized_rat
             .msg_id,
         receipt
     );
+    if same_asset {
+        // The proof, receipt and exact method amount survive. A partial activity copy
+        // lacks the separate signed destination selected by that proof.
+        use paykit_lib::records::{ActivityRecord, ActivitySide};
+        let target = super::periods::payer_period_at(&req, period);
+        let held = payer.app_mut().read_record(&target).await.unwrap().unwrap();
+        let original = held.content.value().unwrap();
+        let mut partial =
+            ActivityRecord::read(original, &payer.identity(), ActivitySide::Payer).unwrap();
+        let selected = partial.period_details.take().unwrap();
+        assert_eq!(
+            partial.proof.as_ref().unwrap().message().refs,
+            [req.request_hash, selected.hash()]
+        );
+        assert_eq!(partial.receipt.as_ref().unwrap().message().msg_id, receipt);
+        let calls = world.rail.all_executions();
+        payer
+            .app_mut()
+            .put_record(&target, &partial.to_json().unwrap(), Vec::new())
+            .await
+            .unwrap();
+        assert!(Box::pin(payer.reconcile_allowance(&key))
+            .await
+            .unwrap()
+            .is_none());
+        assert!(Box::pin(payer.pay_under_allowance(&next_payment, &key))
+            .await
+            .outcome
+            .is_err());
+        assert_eq!(world.rail.all_executions(), calls);
+        payer
+            .app_mut()
+            .put_record(&target, original, Vec::new())
+            .await
+            .unwrap();
+        assert!(Box::pin(payer.reconcile_allowance(&key))
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(world.rail.all_executions(), calls);
+    }
     Box::pin(payer.accept_subscription_under_allowance(&funded, &key))
         .await
         .unwrap();
