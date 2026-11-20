@@ -238,10 +238,10 @@ keeps the last qualified roles and holds further action. A verified current
 deletion ends that proposal’s lifetime.
 
 If the payer restores a backup made before withdrawing the proposal, the wallet
-cannot reopen the deleted proposal for spending. The backup alone cannot show
-whether the withdrawal was sent, so the wallet does not resend it on that
-basis. A seller who accepted the proposal may still see `Accepted` if the
-withdrawal never arrived.
+cannot reopen the deleted proposal for spending. Even if neither the restored
+wallet nor the service has a record of sending the withdrawal, it may have
+been sent. The wallet does not resend it on that basis. A seller who accepted
+the proposal may still see `Accepted` if the withdrawal never arrived.
 
 On explicit acceptance, each party records the signed proposal and answer and
 removes its current pending proposal together. The payer’s write also creates
