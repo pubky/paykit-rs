@@ -266,10 +266,23 @@ async fn withdraw_after_restore(w: &World, role: AllowanceRole) -> TestResult {
         ))
         .await?;
         Box::pin(finish_restored_withdrawal(&mut again)).await?;
-        let received = Box::pin(recipient.receive(None)).await?;
-        assert!(!received.report.events.iter().any(
-            |e| matches!(e, AppEvent::MessageReceived{kind,..} if kind == "paykit.allowance_end")
-        ));
+        let original_end = format!("end/{}", end.msg_id);
+        let origins = again.app().protocol_scan("paykit", b"end/").await?;
+        assert!(origins
+            .iter()
+            .all(|(key, _)| key == original_end.as_bytes()));
+        for remaining in (0..4).rev() {
+            let received = Box::pin(recipient.receive(None)).await?;
+            assert!(!received.report.events.iter().any(|e| match e {
+                AppEvent::MessageReceived { kind, .. } => kind == "paykit.allowance_end",
+                AppEvent::Duplicate { .. } => true,
+                _ => false,
+            }));
+            if !received.report.more {
+                break;
+            }
+            assert!(remaining > 0, "recipient still has unread entries");
+        }
     }
     assert!(rail.all_executions().is_empty());
     Ok(())
