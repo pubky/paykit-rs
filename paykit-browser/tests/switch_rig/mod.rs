@@ -7,7 +7,8 @@
 //! `https://localhost:<rig port>`, and passes that origin to the build in
 //! `PAYKIT_BROWSER_RIG_ORIGIN`. A network test target includes this module with
 //! `#[path = "../switch_rig/mod.rs"]`; every network target does: `fetch_transport`,
-//! `switch_flow`, `transport_faults`, `switch_faults` and `switch_http`.
+//! `switch_flow`, `transport_faults`, `switch_faults` and `switch_http`. So does the harness
+//! bundle in `rig/harness/`, which runs the same flow in a worker of a hosted page.
 
 pub mod wait;
 
@@ -16,18 +17,34 @@ use pubky_switch_client::transport::{Header, Request, Response, TimeoutClass, Tr
 use serde_json::Value;
 
 /// The rig's origin, `https://localhost:<rig port>`, as `rig/test.sh --switch` set it at
+/// compile time, or why it cannot be used: the build did not set it.
+pub fn try_origin() -> Result<&'static str, &'static str> {
+    option_env!("PAYKIT_BROWSER_RIG_ORIGIN").ok_or(
+        "PAYKIT_BROWSER_RIG_ORIGIN is not set: run the network tests with \
+         `paykit-browser/rig/test.sh --switch`",
+    )
+}
+
+/// The rig's origin, `https://localhost:<rig port>`, as `rig/test.sh --switch` set it at
 /// compile time.
 ///
 /// # Panics
 ///
 /// When the target was built without it: a network test never passes without its rig.
 pub fn origin() -> &'static str {
-    option_env!("PAYKIT_BROWSER_RIG_ORIGIN").unwrap_or_else(|| {
-        panic!(
-            "PAYKIT_BROWSER_RIG_ORIGIN is not set: run the network tests with \
-             `paykit-browser/rig/test.sh --switch`"
+    try_origin().unwrap_or_else(|reason| panic!("{reason}"))
+}
+
+/// The rig's port, from [`try_origin`], or why it cannot be read: the build set no origin, or
+/// one that is not `https://localhost:<port>`.
+pub fn try_port() -> Result<u16, &'static str> {
+    try_origin()?
+        .strip_prefix("https://localhost:")
+        .and_then(|port| port.parse().ok())
+        .ok_or(
+            "PAYKIT_BROWSER_RIG_ORIGIN must be https://localhost:<port>, as \
+             `rig/test.sh --switch` sets it",
         )
-    })
 }
 
 /// The rig's port, from [`origin`].
@@ -36,15 +53,16 @@ pub fn origin() -> &'static str {
 ///
 /// When the origin is not `https://localhost:<port>`.
 pub fn port() -> u16 {
-    origin()
-        .strip_prefix("https://localhost:")
-        .and_then(|port| port.parse().ok())
-        .unwrap_or_else(|| {
-            panic!(
-                "PAYKIT_BROWSER_RIG_ORIGIN must be https://localhost:<port>, as \
-                 `rig/test.sh --switch` sets it"
-            )
-        })
+    try_port().unwrap_or_else(|reason| panic!("{reason}"))
+}
+
+/// The token the rig requires for the routes that change it, as [`rig_token`] describes, or
+/// why it cannot be used: the build did not set it.
+pub fn try_rig_token() -> Result<&'static str, &'static str> {
+    option_env!("PAYKIT_BROWSER_RIG_TOKEN").ok_or(
+        "PAYKIT_BROWSER_RIG_TOKEN is not set: run the network tests with \
+         `paykit-browser/rig/test.sh --switch`",
+    )
 }
 
 /// The token the rig requires for the routes that change it (`POST /rig/world` and
@@ -56,12 +74,7 @@ pub fn port() -> u16 {
 ///
 /// When the target was built without it: a network test never passes without its rig.
 pub fn rig_token() -> &'static str {
-    option_env!("PAYKIT_BROWSER_RIG_TOKEN").unwrap_or_else(|| {
-        panic!(
-            "PAYKIT_BROWSER_RIG_TOKEN is not set: run the network tests with \
-             `paykit-browser/rig/test.sh --switch`"
-        )
-    })
+    try_rig_token().unwrap_or_else(|reason| panic!("{reason}"))
 }
 
 /// The default settings, with the rig's port allowed.

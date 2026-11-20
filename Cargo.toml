@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["paykit-lib", "paykit-sdk", "paykit-browser"]
+# `paykit-browser/rig/harness` is the browser rig's test harness bundle: empty on every target but
+# wasm32-unknown-unknown, with all its dependencies in a wasm32 target table, so native workspace
+# builds compile nothing of it and get none of the test-only features it turns on. A wasm32 build
+# with `--workspace` does unify those features into the graph of paykit-browser, so a wasm32 build
+# of the SDK selects `-p paykit-browser`, as CI and `paykit-browser/rig/check-wasm-deps.sh` do.
+members = ["paykit-lib", "paykit-sdk", "paykit-browser", "paykit-browser/rig/harness"]
 
 [workspace.package]
 version = "0.2.0-alpha.0"
