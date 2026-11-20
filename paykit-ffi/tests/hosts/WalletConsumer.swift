@@ -39,6 +39,13 @@ private final class EnrollmentStore: WalletStore, @unchecked Sendable {
     private var owners: [String: Data] = [:]
     private var rows: [String: [Data: Data]] = [:]
 
+    func reopen(namespace: String, entries: ArraySlice<String>) {
+        for entry in entries {
+            let fields = entry.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: false)
+            rows[namespace, default: [:]][Data(base64Encoded: String(fields[0]))!] = Data(base64Encoded: String(fields[1]))!
+        }
+    }
+
     func get(namespace: String, key: Data) throws -> Data? {
         lock.withLock { rows[namespace]?[key] }
     }
@@ -125,7 +132,7 @@ private func recoverReceipt(_ issuer: String) async throws {
     let output = pipe.fileHandleForReading.readDataToEndOfFile()
     producer.waitUntilExit()
     let values = String(decoding: output, as: UTF8.self).split(separator: "\n").map(String.init)
-    precondition(producer.terminationStatus == 0 && values.count == 7)
+    precondition(producer.terminationStatus == 0 && values.count > 8)
     func bytes(_ i: Int) -> Data { Data(base64Encoded: values[i])! }
     let app = bytes(0)
     let store = EnrollmentStore()
@@ -146,10 +153,25 @@ private func recoverReceipt(_ issuer: String) async throws {
     let wallet = try await host().load(appId: app)
     let entries = try await wallet.payments()
     precondition(entries.count == 1 && entries[0].attemptId == values[4] && entries[0].amount.value == "7")
-    let receipts = try await wallet.requestReceipts(id: RequestId(payee: bytes(2), requestHash: bytes(3)))
+    let id = RequestId(payee: bytes(2), requestHash: bytes(3))
+    precondition(entries[0].receipt == nil)
+    do {
+        _ = try await wallet.requestReceipts(id: id)
+        preconditionFailure("the restored wallet listed receipts before its first read")
+    } catch WalletError.Refused(let refusal) {
+        precondition(refusal.reason().contains("shared records"))
+    }
+    try await wallet.shutdown()
+    let original = EnrollmentStore()
+    original.reopen(namespace: values[7], entries: values.dropFirst(8))
+    let sameDevice = try WalletHost(store: original, homeserver: method, method: method, endpointIdentifiers: ["btc-lightning-bolt11"])
+    let reopened = try await sameDevice.load(appId: app)
+    let receipts = try await reopened.requestReceipts(id: id)
+    let journal = try await reopened.payments()
+    precondition(journal.count == 1 && journal[0].receipt?.messageId == receipts.first?.messageId)
     precondition(receipts.count == 1 && receipts[0].attemptId == values[4] && receipts[0].messageId == values[5])
     precondition(receipts[0].paymentReference == "checkout-7" && method.transferCount == 0)
-    try await wallet.shutdown()
+    try await reopened.shutdown()
 }
 
 @main
