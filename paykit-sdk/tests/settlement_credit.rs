@@ -476,6 +476,15 @@ fn transactions_in_one_bucket<const N: usize>(
 /// method settlement ID under Paykit wire 1.5.
 async fn two_transactions(world: &World) -> TestResult {
     let mut wallets = Box::pin(enrolled_tills(world)).await?;
+    // Finish each buyer's authenticated seller lookup before the two tills compete.
+    let seller = wallets.till.identity();
+    for buyer in [&mut wallets.buyer, &mut wallets.other] {
+        let identity = buyer.app_mut().identity_of(&seller, true).await?;
+        assert_eq!(
+            identity.switch_copy,
+            pubky_switch_client::app::SwitchCopy::Read
+        );
+    }
     let naming = wallets.till.app().naming_key();
     let [first, second] = transactions_in_one_bucket(naming)?;
     let number = settlement_bucket(&first.1);
