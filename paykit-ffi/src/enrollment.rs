@@ -96,16 +96,22 @@ impl WalletEnrollment {
     }
 }
 impl WalletEnrollment {
-    async fn enrollment_store(
+    async fn with_store<T>(
         &self,
         reference: Vec<u8>,
-    ) -> Result<Arc<WalletStoreSession>, WalletError> {
+        operation: impl AsyncFnOnce(&Arc<WalletStoreSession>) -> Result<T, WalletError>,
+    ) -> Result<T, WalletError> {
         let id = fixed::<16>(reference, "enrollment reference")?;
-        Ok(WalletStoreSession::open(
+        let store = WalletStoreSession::open(
             self.store.clone(),
             format!("paykit-enrollment/{}", enc::b64(&id)),
         )
-        .await?)
+        .await?;
+        let owner = store.ownership.clone();
+        let result = operation(&store).await;
+        drop(store);
+        let release = owner.finish().await;
+        result.and_then(|value| release.map(|()| value))
     }
 }
 #[uniffi::export(async_runtime = "tokio")]
@@ -116,23 +122,25 @@ impl WalletEnrollment {
         &self,
         reference: Vec<u8>,
     ) -> Result<EnrollmentInfo, WalletError> {
-        let store = self.enrollment_store(reference).await?;
-        let state = match EnrollmentState::read(&store).await? {
-            Some(state) => state,
-            None => {
-                let state = EnrollmentState::Pending {
-                    keys: AppKeys::generate().map_err(|_| WalletError::RandomUnavailable)?,
-                    request: None,
-                };
-                state.save(&store).await?;
-                state
-            }
-        };
-        let id = state.id();
-        Ok(EnrollmentInfo {
-            app_id: id.to_vec(),
-            app_record_path: app_record_path(&id),
+        self.with_store(reference, async |store| {
+            let state = match EnrollmentState::read(store).await? {
+                Some(state) => state,
+                None => {
+                    let state = EnrollmentState::Pending {
+                        keys: AppKeys::generate().map_err(|_| WalletError::RandomUnavailable)?,
+                        request: None,
+                    };
+                    state.save(store).await?;
+                    state
+                }
+            };
+            let id = state.id();
+            Ok(EnrollmentInfo {
+                app_id: id.to_vec(),
+                app_record_path: app_record_path(&id),
+            })
         })
+        .await
     }
     /// Sign the one-time payer request bound to the host's exact Pubky authentication request.
     pub async fn prepare_enrollment(
@@ -143,56 +151,59 @@ impl WalletEnrollment {
         capabilities: String,
         auth_secret: Vec<u8>,
     ) -> Result<EnrollmentRequest, WalletError> {
-        let store = self.enrollment_store(reference).await?;
-        let (keys, request) = match EnrollmentState::read(&store).await? {
-            Some(EnrollmentState::Pending { keys, request }) => (keys, request),
-            Some(EnrollmentState::Approved { keys, request, .. }) => (keys, Some(request)),
-            Some(EnrollmentState::Joined { .. }) | None => {
-                return Err(WalletError::EnrollmentUnavailable)
-            }
-        };
-        let auth = AuthRequest {
-            client_id,
-            client_key: fixed(client_key, "auth client key")?,
-            caps: capabilities,
-            secret: fixed(auth_secret, "auth secret")?,
-        };
-        let id = keys.app_id_bytes();
-        let signed = match request {
-            Some(prior) => {
-                let req = AppRequest::verify(&prior.signed).map_err(|_| StoreError::Corrupt)?;
-                if req.body().app_id != id {
-                    return Err(StoreError::Corrupt.into());
+        self.with_store(reference, async |store| {
+            let (keys, request) = match EnrollmentState::read(store).await? {
+                Some(EnrollmentState::Pending { keys, request }) => (keys, request),
+                Some(EnrollmentState::Approved { keys, request, .. }) => (keys, Some(request)),
+                Some(EnrollmentState::Joined { .. }) | None => {
+                    return Err(WalletError::EnrollmentUnavailable)
                 }
-                if !req.binds(&auth) || prior.secret != auth.secret {
-                    return Err(WalletError::EnrollmentConflict);
+            };
+            let auth = AuthRequest {
+                client_id,
+                client_key: fixed(client_key, "auth client key")?,
+                caps: capabilities,
+                secret: fixed(auth_secret, "auth secret")?,
+            };
+            let id = keys.app_id_bytes();
+            let signed = match request {
+                Some(prior) => {
+                    let req = AppRequest::verify(&prior.signed).map_err(|_| StoreError::Corrupt)?;
+                    if req.body().app_id != id {
+                        return Err(StoreError::Corrupt.into());
+                    }
+                    if !req.binds(&auth) || prior.secret != auth.secret {
+                        return Err(WalletError::EnrollmentConflict);
+                    }
+                    req
                 }
-                req
-            }
-            None => {
-                check_caps(&auth.caps, &id, &[])
-                    .map_err(|_| WalletError::invalid("capabilities"))?;
-                let body =
-                    AppRequestBody::new(&keys, AppScopes::new().pay().build()?.scopes, &auth);
-                let req = AppRequest::sign(&keys, body)
-                    .map_err(|_| WalletError::invalid("app request"))?;
-                EnrollmentState::Pending {
-                    keys,
-                    request: Some(PendingRequest {
-                        signed: req.signed().clone(),
-                        secret: auth.secret,
-                    }),
+                None => {
+                    check_caps(&auth.caps, &id, &[])
+                        .map_err(|_| WalletError::invalid("capabilities"))?;
+                    let body =
+                        AppRequestBody::new(&keys, AppScopes::new().pay().build()?.scopes, &auth);
+                    let req = AppRequest::sign(&keys, body)
+                        .map_err(|_| WalletError::invalid("app request"))?;
+                    EnrollmentState::Pending {
+                        keys,
+                        request: Some(PendingRequest {
+                            signed: req.signed().clone(),
+                            secret: auth.secret,
+                        }),
+                    }
+                    .save(store)
+                    .await?;
+                    req
                 }
-                .save(&store)
-                .await?;
-                req
-            }
-        };
-        Ok(EnrollmentRequest {
-            app_id: id.to_vec(),
-            request_hash: signed.hash().to_vec(),
-            signed_request: serde_json::to_vec(signed.signed()).map_err(|_| StoreError::Corrupt)?,
+            };
+            Ok(EnrollmentRequest {
+                app_id: id.to_vec(),
+                request_hash: signed.hash().to_vec(),
+                signed_request: serde_json::to_vec(signed.signed())
+                    .map_err(|_| StoreError::Corrupt)?,
+            })
         })
+        .await
     }
     /// Keep the selected identity's genuine companion and inner approval in protected
     /// storage before installation. Retrying an already verified approval is idempotent.
@@ -204,43 +215,45 @@ impl WalletEnrollment {
         claim: Vec<u8>,
     ) -> Result<(), WalletError> {
         let identity = fixed(identity, "identity")?;
-        let store = self.enrollment_store(reference).await?;
-        match EnrollmentState::read(&store).await? {
-            Some(EnrollmentState::Joined {
-                identity: original,
-                claim_hash,
-                ..
-            }) => {
-                if identity != original || enc::hash(&claim) != claim_hash {
-                    return Err(WalletError::EnrollmentConflict);
+        self.with_store(reference, async |store| {
+            match EnrollmentState::read(store).await? {
+                Some(EnrollmentState::Joined {
+                    identity: original,
+                    claim_hash,
+                    ..
+                }) => {
+                    if identity != original || enc::hash(&claim) != claim_hash {
+                        return Err(WalletError::EnrollmentConflict);
+                    }
                 }
-            }
-            Some(EnrollmentState::Approved {
-                identity: original,
-                claim: previous,
-                ..
-            }) => {
-                if identity != original || claim != previous {
-                    return Err(WalletError::EnrollmentConflict);
+                Some(EnrollmentState::Approved {
+                    identity: original,
+                    claim: previous,
+                    ..
+                }) => {
+                    if identity != original || claim != previous {
+                        return Err(WalletError::EnrollmentConflict);
+                    }
                 }
-            }
-            Some(EnrollmentState::Pending {
-                keys,
-                request: Some(request),
-            }) => {
-                request.verify_approval(&keys, &identity, &claim)?;
-                EnrollmentState::Approved {
+                Some(EnrollmentState::Pending {
                     keys,
-                    request,
-                    identity,
-                    claim,
+                    request: Some(request),
+                }) => {
+                    request.verify_approval(&keys, &identity, &claim)?;
+                    EnrollmentState::Approved {
+                        keys,
+                        request,
+                        identity,
+                        claim,
+                    }
+                    .save(store)
+                    .await?;
                 }
-                .save(&store)
-                .await?;
+                _ => return Err(WalletError::EnrollmentUnavailable),
             }
-            _ => return Err(WalletError::EnrollmentUnavailable),
-        }
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -295,63 +308,69 @@ impl WalletHost {
         let enrollment = WalletEnrollment {
             store: self.store.clone(),
         };
-        let store = enrollment.enrollment_store(reference).await?;
-        let state = EnrollmentState::read(&store)
-            .await?
-            .ok_or(WalletError::EnrollmentUnavailable)?;
-        let id = state.id();
-        let (env, owner) = self.session_env(id).await?;
-        let app = match state {
-            EnrollmentState::Pending { .. } => return Err(WalletError::EnrollmentUnavailable),
-            EnrollmentState::Joined { identity, .. } => {
-                let app = self.load_app(env, id).await?;
-                if app.identity() != identity {
-                    return Err(WalletError::EnrollmentConflict);
-                }
-                app
-            }
-            EnrollmentState::Approved {
-                keys,
-                request,
-                identity,
-                claim,
-            } => {
-                let (request, approval, certificate) =
-                    request.verify_approval(&keys, &identity, &claim)?;
-                let app = match self.load_app(env.clone(), id).await {
-                    Ok(app)
-                        if app.identity() == identity && app.app().cert().hash() == certificate =>
-                    {
+        enrollment
+            .with_store(reference, async |store| {
+                let state = EnrollmentState::read(store)
+                    .await?
+                    .ok_or(WalletError::EnrollmentUnavailable)?;
+                let id = state.id();
+                let (env, owner) = self.session_env(id).await?;
+                let app = match state {
+                    EnrollmentState::Pending { .. } => {
+                        return Err(WalletError::EnrollmentUnavailable)
+                    }
+                    EnrollmentState::Joined { identity, .. } => {
+                        let app = self.load_app(env, id).await?;
+                        if app.identity() != identity {
+                            return Err(WalletError::EnrollmentConflict);
+                        }
                         app
                     }
-                    Ok(_) => return Err(WalletError::EnrollmentConflict),
-                    Err(PaykitError::Client(AppError::Refused(Refusal::NotJoined))) => {
-                        Paykit::join(
-                            env,
-                            Default::default(),
-                            JoinRequest {
-                                identity,
-                                keys,
-                                request,
-                                approval,
-                            },
-                            self.rail.clone(),
-                            self.timer.clone(),
-                        )
-                        .await?
+                    EnrollmentState::Approved {
+                        keys,
+                        request,
+                        identity,
+                        claim,
+                    } => {
+                        let (request, approval, certificate) =
+                            request.verify_approval(&keys, &identity, &claim)?;
+                        let app = match self.load_app(env.clone(), id).await {
+                            Ok(app)
+                                if app.identity() == identity
+                                    && app.app().cert().hash() == certificate =>
+                            {
+                                app
+                            }
+                            Ok(_) => return Err(WalletError::EnrollmentConflict),
+                            Err(PaykitError::Client(AppError::Refused(Refusal::NotJoined))) => {
+                                Paykit::join(
+                                    env,
+                                    Default::default(),
+                                    JoinRequest {
+                                        identity,
+                                        keys,
+                                        request,
+                                        approval,
+                                    },
+                                    self.rail.clone(),
+                                    self.timer.clone(),
+                                )
+                                .await?
+                            }
+                            Err(error) => return Err(error.into()),
+                        };
+                        EnrollmentState::Joined {
+                            app_id: id,
+                            identity,
+                            claim_hash: enc::hash(&claim),
+                        }
+                        .save(store)
+                        .await?;
+                        app
                     }
-                    Err(error) => return Err(error.into()),
                 };
-                EnrollmentState::Joined {
-                    app_id: id,
-                    identity,
-                    claim_hash: enc::hash(&claim),
-                }
-                .save(&store)
-                .await?;
-                app
-            }
-        };
-        Ok(crate::NativeWallet::opened(app, Some(owner)))
+                Ok(crate::NativeWallet::opened(app, Some(owner)))
+            })
+            .await
     }
 }
