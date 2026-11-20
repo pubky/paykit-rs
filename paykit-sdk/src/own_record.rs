@@ -89,7 +89,8 @@ impl Paykit {
     }
 
     /// Publish `payload` as the app's public endpoint `endpoint`, replacing the one it held
-    /// there (module docs). The other public endpoints stay.
+    /// there (module docs). The other public endpoints stay only while the app is eligible
+    /// to publish and its existing offer has not reached its cutoff.
     ///
     /// # Errors
     ///
@@ -245,8 +246,9 @@ impl Paykit {
     /// than half of its lifetime is left. Returns where a record changed or renewed stands on
     /// the Homeserver, and `None` when the record held went to the client unchanged. A
     /// delivery that fails stays owed by the client, which sends it again at a later read; a
-    /// failure before the client kept the record leaves the record
-    /// held unchanged, so the next call finds it differs and puts it again.
+    /// definite failure before the client kept the record leaves the record
+    /// held unchanged, so the next call finds it differs and puts it again. An unknown
+    /// store result holds upkeep until the app is loaded again ([`Paykit::load`]).
     ///
     /// # Errors
     ///
