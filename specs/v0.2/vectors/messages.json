@@ -434,7 +434,7 @@
       }
     ]
   },
-  "description": "Every message kind as sent in v0.2 (Switch wire 4.5, wire 4): the exact JSON bytes, their BLAKE3 hash (refs, request hash), the sender app's signature over lp(\"pubky-switch/v1/msg\", recipient identity, JSON), and the signed plaintext layout sender app ID (16) | signature (64) | u32_be(JSON length) | JSON, before zero padding. payment_request_labelled is sent by bob's hosted app under its label, and alice's acceptance of it copies the label; label_rejections holds requests a payer drops for their label; multi_protocol_senders holds messages from apps whose certificates hold another protocol's scopes; cancellation_roles holds a cancellation between certificates of each pair of roles; conversion_terms holds the shop's period details and requests with their conversion terms changed, which a payer takes or drops; conversion_amounts holds the amount a payer pays to an endpoint under a request's or period details' rates; proof_members holds alice's proofs with an extra or missing member, which a payee drops; receipt_members holds bob's receipts with the payee's metadata and reference, which a payer takes or drops; list_versions holds the shop's Private Payment Lists with a malformed version, which a payer drops.",
+  "description": "Every message kind as sent in v0.2 (Switch wire 4.5, wire 4): the exact JSON bytes, their BLAKE3 hash (refs, request hash), the sender app's signature over lp(\"pubky-switch/v1/msg\", recipient identity, JSON), and the signed plaintext layout sender app ID (16) | signature (64) | u32_be(JSON length) | JSON, before zero padding. payment_request_labelled is sent by bob's hosted app under its label, and alice's acceptance of it copies the label; label_rejections holds requests a payer drops for their label; multi_protocol_senders holds messages from apps whose certificates hold another protocol's scopes; cancellation_roles holds a cancellation between certificates of each pair of roles; payee_label_senders holds the shop's period details, receipt and cancellation about a labelled request from each selling scope, which a payer takes or drops for that request's label; conversion_terms holds the shop's period details and requests with their conversion terms changed, which a payer takes or drops; conversion_amounts holds the amount a payer pays to an endpoint under a request's or period details' rates; proof_members holds alice's proofs with an extra or missing member, which a payee drops; receipt_members holds bob's receipts with the payee's metadata and reference, which a payer takes or drops; list_versions holds the shop's Private Payment Lists with a malformed version, which a payer drops.",
   "label_rejections": {
     "cases": [
       {
@@ -846,6 +846,160 @@
         "signature": "q_cbwc-j0Cf2jYlzasI-B1M-3rLK_ElvjVILaUNmeUXXsQy1YbeFmNcal__a6uAT3shMtAd6TPjWMxWrDmHhBw"
       }
     ]
+  },
+  "payee_label_senders": {
+    "accepted": [
+      {
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_period_details\",\"msg_id\":\"c2ea19d4-b378-439b-a8ee-9019b3360b21\",\"created_at\":\"2026-02-27T00:00:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"kK7BOw6xPgPZEaXyafAPTSjGFrHGNONYmMXrom3fGVc\"],\"body\":{\"billing_period\":{\"ends_at\":\"2026-03-31T00:00:00.000Z\",\"starts_at\":\"2026-02-28T00:00:00.000Z\"},\"expires_at\":\"2026-03-01T00:00:00.000Z\",\"payment_endpoints\":{\"btc-lightning-bolt11\":\"lnbc1pjexample0february0period\"},\"rates\":[{\"asset\":\"btc\",\"value\":\"0.00001234\"}]}}",
+        "name": "period details from paykit_request",
+        "request": "request_recurring",
+        "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
+        "sender_cert": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdCIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
+          "sig": "juYBfd9grUVWde-QAIyxN5eeFYRBs4eaIr_zSHV7vjMG1OjUvYcCJeLecW8i0gM4g9CIL5c78qCyqvEgu0oGDQ"
+        },
+        "sender_scope": "paykit_request",
+        "signature": "nAk-08fm6LOwjQgaNX2tC5MROtTm50drOhwn63__xs9kiSS8UASpbYecJjJYFgnu6VGyUxQOoqgzSGv26XW_CQ"
+      },
+      {
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_period_details\",\"msg_id\":\"c2ea19d4-b378-439b-a8ee-9019b3360b21\",\"created_at\":\"2026-02-27T00:00:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"kK7BOw6xPgPZEaXyafAPTSjGFrHGNONYmMXrom3fGVc\"],\"body\":{\"billing_period\":{\"ends_at\":\"2026-03-31T00:00:00.000Z\",\"starts_at\":\"2026-02-28T00:00:00.000Z\"},\"expires_at\":\"2026-03-01T00:00:00.000Z\",\"payment_endpoints\":{\"btc-lightning-bolt11\":\"lnbc1pjexample0february0period\"},\"rates\":[{\"asset\":\"btc\",\"value\":\"0.00001234\"}]}}",
+        "name": "period details from paykit_request:shop1",
+        "request": "request_recurring",
+        "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
+        "sender_cert": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMSIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
+          "sig": "Mp2zSxjG7lALld3BVwjpW9zAyNnM8DDyz_FyEt93agV7t5H5LESs7AYqiQpF8b4ldYOG4GuhMCK86mKTd8jjCQ"
+        },
+        "sender_scope": "paykit_request:shop1",
+        "signature": "nAk-08fm6LOwjQgaNX2tC5MROtTm50drOhwn63__xs9kiSS8UASpbYecJjJYFgnu6VGyUxQOoqgzSGv26XW_CQ"
+      },
+      {
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_receipt\",\"msg_id\":\"f447883c-ff13-4876-81d6-86f54a79abd8\",\"created_at\":\"2026-01-01T00:08:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"DbhWX6PJoSdFO6CrgTYTZICh48DaYhlMadmr_o__t3Q\",\"c7LOrtftWjK3Vl-U1Q8rk50EqD1nZgzTMXMcf-WFEuE\"],\"body\":{\"attempt_id\":\"DgCVYQKL1eyDacZvG6YhZg\"}}",
+        "name": "a receipt from paykit_request",
+        "request": "payment_request_labelled",
+        "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
+        "sender_cert": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdCIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
+          "sig": "juYBfd9grUVWde-QAIyxN5eeFYRBs4eaIr_zSHV7vjMG1OjUvYcCJeLecW8i0gM4g9CIL5c78qCyqvEgu0oGDQ"
+        },
+        "sender_scope": "paykit_request",
+        "signature": "9gmMa3x7SdasNWRg3b3KmP3CM9U1AStv0-l8J40nY6rxGBY1Ia8RNLp9AATzosJt8P957JzJdn-T2Smiy39nCw"
+      },
+      {
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_receipt\",\"msg_id\":\"f447883c-ff13-4876-81d6-86f54a79abd8\",\"created_at\":\"2026-01-01T00:08:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"DbhWX6PJoSdFO6CrgTYTZICh48DaYhlMadmr_o__t3Q\",\"c7LOrtftWjK3Vl-U1Q8rk50EqD1nZgzTMXMcf-WFEuE\"],\"body\":{\"attempt_id\":\"DgCVYQKL1eyDacZvG6YhZg\"}}",
+        "name": "a receipt from paykit_request:shop1",
+        "request": "payment_request_labelled",
+        "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
+        "sender_cert": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMSIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
+          "sig": "Mp2zSxjG7lALld3BVwjpW9zAyNnM8DDyz_FyEt93agV7t5H5LESs7AYqiQpF8b4ldYOG4GuhMCK86mKTd8jjCQ"
+        },
+        "sender_scope": "paykit_request:shop1",
+        "signature": "9gmMa3x7SdasNWRg3b3KmP3CM9U1AStv0-l8J40nY6rxGBY1Ia8RNLp9AATzosJt8P957JzJdn-T2Smiy39nCw"
+      },
+      {
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_request_cancellation\",\"msg_id\":\"d2c95fff-c3f8-42fb-9f8b-94057e391fc4\",\"created_at\":\"2026-02-10T00:00:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"c7LOrtftWjK3Vl-U1Q8rk50EqD1nZgzTMXMcf-WFEuE\"],\"body\":{\"reason\":\"subscription_ended\"}}",
+        "name": "a payee's cancellation from paykit_request",
+        "request": "payment_request_labelled",
+        "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
+        "sender_cert": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdCIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
+          "sig": "juYBfd9grUVWde-QAIyxN5eeFYRBs4eaIr_zSHV7vjMG1OjUvYcCJeLecW8i0gM4g9CIL5c78qCyqvEgu0oGDQ"
+        },
+        "sender_scope": "paykit_request",
+        "signature": "vY59jwkQiHSldlTLjxQVEoO_7-Rjd0XaeyjlkVqGNo8eIyvp71dekBe5MTsHJjPzVuKEz9cd3xsVL9ETPouvDg"
+      },
+      {
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_request_cancellation\",\"msg_id\":\"d2c95fff-c3f8-42fb-9f8b-94057e391fc4\",\"created_at\":\"2026-02-10T00:00:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"c7LOrtftWjK3Vl-U1Q8rk50EqD1nZgzTMXMcf-WFEuE\"],\"body\":{\"reason\":\"subscription_ended\"}}",
+        "name": "a payee's cancellation from paykit_request:shop1",
+        "request": "payment_request_labelled",
+        "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
+        "sender_cert": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMSIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
+          "sig": "Mp2zSxjG7lALld3BVwjpW9zAyNnM8DDyz_FyEt93agV7t5H5LESs7AYqiQpF8b4ldYOG4GuhMCK86mKTd8jjCQ"
+        },
+        "sender_scope": "paykit_request:shop1",
+        "signature": "vY59jwkQiHSldlTLjxQVEoO_7-Rjd0XaeyjlkVqGNo8eIyvp71dekBe5MTsHJjPzVuKEz9cd3xsVL9ETPouvDg"
+      }
+    ],
+    "description": "Spec 3.3, 3.4, wire 4.1 check 8, 4.8, 4.9, 4.11, 5.3: the shop's messages as messages.json signs them, with the refs changed to name request, presented with a certificate of the shop's keys holding sender_scope and the paykit_settlements and paykit_contacts it requires (sender_cert). request is payment_request_labelled for the receipt and the cancellation; request_recurring, messages.json's payment_request_recurring with label shop1 sent by the hosted app, or payment_request_recurring itself, unlabelled, for the period details; null for a receipt naming no request, which names payment_proof_unrequested. The receipt about a request confirms proof: messages.json's payment_proof naming payment_request_labelled and copying its label. Each passes check 10, and the details are valid against their request (wire 4.9). accepted are those the payer takes, from paykit_request and from the request's label. refused are those it drops: about a request, from another label or from a label about an unlabelled request, which pass check 8 and are dropped where the payer reads the request, a payer request record holding such a receipt or cancellation being invalid; and a receipt naming no request from a labelled scope, dropped at check 8. reason is paykit-lib's wording.",
+    "proof": {
+      "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"c8fc5427-bee0-47fc-87bd-9c948c32e152\",\"created_at\":\"2026-01-01T00:05:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[\"c7LOrtftWjK3Vl-U1Q8rk50EqD1nZgzTMXMcf-WFEuE\"],\"body\":{\"attempt_id\":\"DgCVYQKL1eyDacZvG6YhZg\",\"label\":\"shop1\",\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-lightning-bolt11\",\"proof\":{\"data\":\"8f2a5c6e0b1d4f3a9c7e2b6d0a4f8c1e3b5d7f9a2c4e6b8d0f1a3c5e7b9d2f4a\",\"type\":\"bitcoin-bolt11-preimage\"}}}",
+      "sender_app": "wejf37ngr7qizej3eoijn3hq4c",
+      "signature": "lvBI8n6p5XgzvW9ZjXqct2xvDeEYeII0ltbXkdiIDqXnOz16NIcObm5rjVZHAWZVxSZyHpd6C1IgWDLv8JB8Aw"
+    },
+    "refused": [
+      {
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_period_details\",\"msg_id\":\"c2ea19d4-b378-439b-a8ee-9019b3360b21\",\"created_at\":\"2026-02-27T00:00:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"kK7BOw6xPgPZEaXyafAPTSjGFrHGNONYmMXrom3fGVc\"],\"body\":{\"billing_period\":{\"ends_at\":\"2026-03-31T00:00:00.000Z\",\"starts_at\":\"2026-02-28T00:00:00.000Z\"},\"expires_at\":\"2026-03-01T00:00:00.000Z\",\"payment_endpoints\":{\"btc-lightning-bolt11\":\"lnbc1pjexample0february0period\"},\"rates\":[{\"asset\":\"btc\",\"value\":\"0.00001234\"}]}}",
+        "name": "period details from paykit_request:shop2",
+        "reason": "invalid: the sender's certificate holds neither paykit_request nor the label of the request the message names",
+        "request": "request_recurring",
+        "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
+        "sender_cert": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMiIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
+          "sig": "Qv5509LFwsCK_HqVl9DFJm9S23mA0i17siZUKwQtRZbru65_hB707rnXD9elzBxxsY9oa94dj8WjJrjTSV9PAw"
+        },
+        "sender_scope": "paykit_request:shop2",
+        "signature": "nAk-08fm6LOwjQgaNX2tC5MROtTm50drOhwn63__xs9kiSS8UASpbYecJjJYFgnu6VGyUxQOoqgzSGv26XW_CQ"
+      },
+      {
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_period_details\",\"msg_id\":\"c2ea19d4-b378-439b-a8ee-9019b3360b21\",\"created_at\":\"2026-02-27T00:00:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"c_ys4n4gUNKJa3D13sszDTpkj8rqdB206n-gIMVuzXY\"],\"body\":{\"billing_period\":{\"ends_at\":\"2026-03-31T00:00:00.000Z\",\"starts_at\":\"2026-02-28T00:00:00.000Z\"},\"expires_at\":\"2026-03-01T00:00:00.000Z\",\"payment_endpoints\":{\"btc-lightning-bolt11\":\"lnbc1pjexample0february0period\"},\"rates\":[{\"asset\":\"btc\",\"value\":\"0.00001234\"}]}}",
+        "name": "period details about an unlabelled request from paykit_request:shop1",
+        "reason": "invalid: the sender's certificate holds neither paykit_request nor the label of the request the message names",
+        "request": "payment_request_recurring",
+        "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
+        "sender_cert": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMSIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
+          "sig": "Mp2zSxjG7lALld3BVwjpW9zAyNnM8DDyz_FyEt93agV7t5H5LESs7AYqiQpF8b4ldYOG4GuhMCK86mKTd8jjCQ"
+        },
+        "sender_scope": "paykit_request:shop1",
+        "signature": "dMCkyqKlLy9Bs1Cd6O1Ms2FINV4BMeG3lWMeC-gCQ-2GKz7G_NZ5-VFbxAgUfJiMJ2MbkZijt3M4c_Wr9lHECQ"
+      },
+      {
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_receipt\",\"msg_id\":\"f447883c-ff13-4876-81d6-86f54a79abd8\",\"created_at\":\"2026-01-01T00:08:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"DbhWX6PJoSdFO6CrgTYTZICh48DaYhlMadmr_o__t3Q\",\"c7LOrtftWjK3Vl-U1Q8rk50EqD1nZgzTMXMcf-WFEuE\"],\"body\":{\"attempt_id\":\"DgCVYQKL1eyDacZvG6YhZg\"}}",
+        "name": "a receipt from paykit_request:shop2",
+        "reason": "invalid: the sender's certificate holds neither paykit_request nor the label of the request the message names",
+        "request": "payment_request_labelled",
+        "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
+        "sender_cert": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMiIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
+          "sig": "Qv5509LFwsCK_HqVl9DFJm9S23mA0i17siZUKwQtRZbru65_hB707rnXD9elzBxxsY9oa94dj8WjJrjTSV9PAw"
+        },
+        "sender_scope": "paykit_request:shop2",
+        "signature": "9gmMa3x7SdasNWRg3b3KmP3CM9U1AStv0-l8J40nY6rxGBY1Ia8RNLp9AATzosJt8P957JzJdn-T2Smiy39nCw"
+      },
+      {
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_request_cancellation\",\"msg_id\":\"d2c95fff-c3f8-42fb-9f8b-94057e391fc4\",\"created_at\":\"2026-02-10T00:00:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"c7LOrtftWjK3Vl-U1Q8rk50EqD1nZgzTMXMcf-WFEuE\"],\"body\":{\"reason\":\"subscription_ended\"}}",
+        "name": "a payee's cancellation from paykit_request:shop2",
+        "reason": "invalid: the sender's certificate holds neither paykit_request nor the label of the request the message names",
+        "request": "payment_request_labelled",
+        "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
+        "sender_cert": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMiIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
+          "sig": "Qv5509LFwsCK_HqVl9DFJm9S23mA0i17siZUKwQtRZbru65_hB707rnXD9elzBxxsY9oa94dj8WjJrjTSV9PAw"
+        },
+        "sender_scope": "paykit_request:shop2",
+        "signature": "vY59jwkQiHSldlTLjxQVEoO_7-Rjd0XaeyjlkVqGNo8eIyvp71dekBe5MTsHJjPzVuKEz9cd3xsVL9ETPouvDg"
+      },
+      {
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_receipt\",\"msg_id\":\"f447883c-ff13-4876-81d6-86f54a79abd8\",\"created_at\":\"2026-01-01T00:08:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"1ywIwYm3Jj7Sh5GgHP_rUatBFh1Oefxm2rS4fC6oEzk\"],\"body\":{\"attempt_id\":\"mAFdg5_0tVNjmrgiTUZW4g\"}}",
+        "name": "a receipt naming no request from paykit_request:shop1",
+        "reason": "invalid: a receipt naming no request needs paykit_request",
+        "request": null,
+        "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
+        "sender_cert": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMSIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
+          "sig": "Mp2zSxjG7lALld3BVwjpW9zAyNnM8DDyz_FyEt93agV7t5H5LESs7AYqiQpF8b4ldYOG4GuhMCK86mKTd8jjCQ"
+        },
+        "sender_scope": "paykit_request:shop1",
+        "signature": "KX_uLKURzVdkBpKqI03Vfd77PBzu_aIVE8qPEFELC9zwRHVS9dVkpw8DpvkJk1HfyK8FeFaWhKtWtU7jEQHGCQ"
+      }
+    ],
+    "request_recurring": {
+      "json": "{\"v\":1,\"kind\":\"paykit.payment_request\",\"msg_id\":\"e576f99f-c9fe-4a48-8eec-4108939ae375\",\"created_at\":\"2026-01-01T00:02:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"bsmb19473e1giheoizfxj14oja\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[],\"body\":{\"amount\":{\"asset\":\"usd\",\"value\":\"9.99\"},\"conversion\":{\"type\":\"per_period\"},\"label\":\"shop1\",\"payment_deadline\":{\"seconds\":86400,\"type\":\"period_start\"},\"payment_endpoints\":{\"btc-lightning-bolt11\":\"lnbc1pjexample0first0period\"},\"payment_reference\":\"subscription-5\",\"per_period_endpoints\":true,\"proposal_expires_at\":\"2026-01-08T00:00:00.000Z\",\"recurrence\":{\"anchor\":\"2026-01-31T00:00:00.000Z\",\"ends_at\":null,\"every\":1,\"starts_at\":\"2026-01-31T00:00:00.000Z\",\"unit\":\"month\"}}}",
+      "sender_app": "bsmb19473e1giheoizfxj14oja",
+      "signature": "WOp9BVWu4ghUWDobC6dwy17hFfOft6frLky-19v2qwIQt14zUl0EtTqUziRYp-nqSiOrHj7guB36ZgKofFHeDw"
+    }
   },
   "proof_members": {
     "description": "Wire 4.10: alice's proofs with one member added or removed and signed again by her wallet. amount is only in a proof of a payment without a request, whose refs are empty; billing_period, label, payment_reference and allowance_id are only in a proof of a request. A proof that refers to period details must name their Billing Period. A payee drops each at check 10. reason is paykit-lib's wording.",
