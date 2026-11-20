@@ -238,6 +238,9 @@ pub struct ReceiveSummary {
     /// acknowledge its duty events for Paykit up to the last one the report shows, and
     /// app-wide only once every other protocol each is for has handled it
     /// ([`Paykit::receive`]).
+    /// A received message's entry receipt identifies any invitation redeemed for that
+    /// delivery. This service observation does not authorize a payment or replace the
+    /// signed request and its seller-scope checks.
     pub report: ReceiveReport,
     /// The `msg_id`s of the messages received, each with its effect committed with the
     /// cursor move (Switch spec 8.2).
