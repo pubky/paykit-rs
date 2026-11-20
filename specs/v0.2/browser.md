@@ -1281,10 +1281,20 @@ and no `send_before`.
   hook does not run on allocation failure. In ubrn
   (uniffi-bindgen-react-native), the `wasm2` mode's `open()` installs its own
   panic hook, which only logs to the console. Panic text is unredacted.
+  On v0.2, in a dedicated worker in all three engines, an async call that
+  panicked never settles, and a page that replaces the worker after its
+  `error` event gets a working one (*verified (#603)*). The `error` event
+  carries only the engine's `RuntimeError` text, never the panic message,
+  which the stack's hook (#559) writes only to the worker's console, and the
+  instance keeps answering other calls (*measured (#603)*). The target's
+  panic strategy is already `abort`, so a `panic = "abort"` profile setting
+  changes nothing (#603).
 - **Loading in a service worker** (*read*): dynamic `import()` is not allowed.
   A classic service worker has no `import.meta` or static `import`, and
   `importScripts()` loads only scripts fetched at install. A module service
   worker (Chrome 91, Firefox 147, Safari 15) has no top-level `await`.
+  A module service worker loaded a v0.2 bundle and ran one call under a
+  strict CSP in all three engines (*verified (#603)*).
 - **Service worker lifetime** (*read*; Firefox from its source at
   `615217b20e60e956769e7876514f920c339e9a76`:
   `modules/libpref/init/all.js:119-124`;
@@ -1324,7 +1334,9 @@ and no `send_before`.
   makes (N1).
 - The wasm loader accepts a URL, bytes, a `Response`, or a compiled module,
   never relies on `import.meta.url`, and falls back to bytes when the server
-  does not send `Content-Type: application/wasm`.
+  does not send `Content-Type: application/wasm`. The `wasm-bindgen`
+  0.2.130 glue already falls back to bytes, with a console warning
+  (*measured (#603)*).
 
 **Decision needed (Owner: Paykit).** Is "dedicated worker, service worker
 later" acceptable for the first release, given the first integrator's design?
@@ -1410,7 +1422,20 @@ implement in Rust, and which cross to JavaScript?
 - The React Native package has `react` and `react-native` peers and no browser
   entry. v0.1 size, measured once: 5.36 MB raw, 2.03 MB gzip, plus 55 KB gzip
   of glue; v0.2's tree is smaller (no `pubky`, no `reqwest`). Wasm memory
-  never shrinks.
+  never shrinks. *Measured (#603)*: a v0.2 test harness bundle that links
+  the whole Payment Request flow, the sealed store, and the `fetch` transport
+  is 13.48 MB raw, 3.81 MB gzip, and 2.43 MB brotli at the default `release`
+  profile, and 5.29 MB raw, 2.01 MB gzip, and 1.50 MB brotli with a size
+  profile (`opt-level = "z"`, LTO, one codegen unit, stripped); its glue adds
+  about 8 KB gzip. How v0.1 was measured is unknown, so the figures are not
+  comparable.
+- Stack. wasm32's default stack is 1 MiB. The pay flow's debug test build
+  needs 1216 KiB (1152 KiB fails) and its release build 192 KiB, in all three
+  engines, page and worker, so the drafts give only their wasm32 test
+  binaries 2 MiB (*measured (#562)*; the same for the real-Switch flow,
+  #573). The hosted harness bundle, a `cdylib`, also starts at 1 MiB and sets
+  2 MiB itself (#603). A web app that links Paykit into its own module sets
+  its own stack size.
 - Master's npm workflow takes `vX.Y.Z` or `vX.Y.Z-rcN` tags matching
   `package.json` and sends only pre-releases to `next`
   (`m:.github/workflows/npm-publish.yml:41`, `:160-166`, `:195-199`), so a
@@ -1469,7 +1494,18 @@ rollout step 2 and Paykit decision 20's phased plan.
   worker loaded from a URL takes its own response's CSP, so these can sit on
   the SDK worker while the page stays strict; a `blob:` or `data:` worker
   inherits the page policy. The page's `worker-src` (falling back to
-  `child-src`, then `script-src`) must allow the worker's URL.
+  `child-src`, then `script-src`) must allow the worker's URL. In all three
+  engines, a worker loaded from a URL ignores the page's policy, so a worker
+  script served without a CSP header runs with no CSP at all: `new Function`
+  ran in it under a strict page (*verified (#603)*). The SDK worker's
+  response needs its own header.
+- CSP signals differ. WebKit fires no `securitypolicyviolation` event for a
+  blocked WebAssembly compile, nor for a blocked `fetch` in a worker; Firefox
+  reports its own `favicon.ico` request as a violation under
+  `default-src 'none'` (*measured (#603)*). So "no violation report" proves
+  nothing in WebKit; there, only a negative control (the same policy without
+  `'wasm-unsafe-eval'` on page and worker fails with `CompileError`) shows
+  the policy is enforced (*verified (#603)*).
 - Playwright's WebKit for Linux has no OPFS: no `navigator.storage` in a
   page and no `FileSystemSyncAccessHandle` in a dedicated worker. So CI on
   Linux runs no store test in WebKit. OPFS under Playwright also needs a
@@ -1618,12 +1654,20 @@ Gates on #537:
 1. **Groundwork** ([Groundwork on the v0.2 crates](#groundwork-on-the-v02-crates)).
    Exit: `paykit-lib` and `paykit-sdk` build for wasm32 with `http` off, and
    CI runs the v0.2 vectors and a smoke payment path in a headless browser.
+   Status: draft pull requests #556 (the build, a subset of the vectors in
+   three engines, CI) and #562 (the `pay.rs` clock and a payment path in
+   three engines); not merged. Open upstream: `FirstSend` and the signer's
+   `http` feature.
 2. **Toolchain.** A `wasm2` probe with v0.2 on a throwaway branch, then the
    bindings workstream's generator choice (D11). Exit: one UniFFI version
    every generator supports; Swift and Kotlin libraries loaded at run time;
    and the generated web binding loads and runs one call in a dedicated
    worker in Chrome, Firefox, and WebKit, under a CSP with
    `'wasm-unsafe-eval'` and no `'unsafe-eval'`, with no CSP violation report.
+   Status: no pull request; the generator is not chosen. Draft #603 loads a
+   hand-built test bundle, not a generated binding, and runs calls in a
+   dedicated module worker in the three engines under such a CSP, with a
+   negative control; WebKit gives no violation report to check (D12).
 3. **Browser binding.** Build the D10 binding, the reference store (D3), the
    ownership rules (D4), the browser transport (D5, D8), `no-store` reads
    (D6), and the page-to-worker API (D9). Then run an end-to-end test on HTTPS
@@ -1647,14 +1691,37 @@ Gates on #537:
    run in the test or marked untested. Its release notes name the paykit-rs
    revision, the Switch pin, and the Pubky client versions the test used for
    `HomeserverReader` and `HomeserverWriter`.
+
+   Status: draft pull requests cover parts, as Rust host pieces with no
+   generated binding: host pieces and a Payment Request flow (#559), paying
+   with a Payment Receipt (#562), the browser transport against a real
+   Switch service behind a local CORS front (#573), network faults (#579),
+   the reference store (#586) with sealing (#591), and a hosted flow on HTTPS
+   under a strict CSP: a page-owned dedicated worker pays against a real
+   Switch service on another origin and reads the result back after a page
+   reload (#603). None is merged. Not drafted: the ownership rules (D4),
+   `no-store` Homeserver reads (D6), and the page-to-worker API (D9); #603's
+   page-to-worker messages are a test harness. Limits found:
+   - Tests join with approvals from a native enrolment program, because the
+     signer does not build for wasm32; that choice is #573's decision 3.
+   - The service binary has no test clock and refuses timestamps more than
+     5 minutes off, so expiry and period flows run only on the in-memory
+     switches (#573).
+   - A real page reload is tested at the store level (#586) and as a
+     read-back of a finished payment from the sealed stores (#603). A
+     payment resume across a reload needs counterparties that outlive the
+     page, since the test world's switches, Homeserver, and rail live in
+     WebAssembly memory (#586).
+   - In WebKit, the hosted flow ran with a host key kept in memory on macOS,
+     and on the memory store with no read-back on Linux (#603).
 4. **Hardening.** A real Switch service with CORS, a real HTTPS Homeserver,
    Safari, mobile browsers, a persistent-profile cache test, a relay test of
    the D9 shape (a service-worker engine relaying to a page-owned dedicated
    worker), and the D2 security review of hand-written
-   browser code. Exit: the first stable release.
+   browser code. Exit: the first stable release. Status: no pull request.
 5. **Later.** An IndexedDB store on an async seam (D3), then the service
    worker run (D9) and Web Push (D7), which need it; and a SharedWorker owner
-   (D4).
+   (D4). Status: no pull request.
 
 **Decision needed (Owner: Paykit).** May a host ship the step 3 pre-release to
 users with real funds? Proposal: no, until step 4's security review is done.
@@ -1704,6 +1771,10 @@ These need a run, not more reading.
   D3, rollout step 3).
 - Cold-start join latency against production relays; preflights per user
   action; store cost for a backup-sized value; a wasm size budget.
+  Preflights per call were measured against a local service (#579, D5),
+  store cost up to 250 MiB of state (#586, #591, D3), and bundle sizes in
+  two profiles, which CI prints without a budget (#603, D11); none is a
+  budget yet.
 
 ## Changes from the v0.1 proposal (#437)
 
