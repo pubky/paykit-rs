@@ -1,4 +1,4 @@
-//! The paying wallet receives the seller's end before or after placing the acceptance.
+//! Enrolled payer and seller wallets follow the proposal's withdrawal and end rules.
 use super::*;
 use paykit_lib::allowances::AllowanceTerms;
 use paykit_sdk::{AllowanceStatus, NoticeKind};
@@ -17,19 +17,21 @@ async fn test_enrolled_allowance_ends_before_and_after_placing_the_original() ->
     Ok(())
 }
 
-async fn ends(w: &World) -> TestResult {
+async fn wallets(
+    w: &World,
+    store: Arc<MemoryStore>,
+    rail: &Arc<FakeRail>,
+) -> TestResult<(Paykit, Paykit)> {
     let mut buyer = Box::pin(setup_identity(w, "buyer", "https://buyer.allowance.test")).await?;
     let mut seller = Box::pin(setup_identity(w, "seller", "https://seller.allowance.test")).await?;
-    let rail = Arc::new(FakeRail::with_clock(w.clock().clone()));
-    let store = Arc::new(MemoryStore::new());
     let mut payer = Box::pin(join(
         w,
         &mut buyer,
         "buyer",
         "wallet",
         AppScopes::new().allowance_execute().build()?,
-        store.clone(),
-        &rail,
+        store,
+        rail,
     ))
     .await?;
     let mut shop = Box::pin(join(
@@ -39,16 +41,27 @@ async fn ends(w: &World) -> TestResult {
         "shop",
         AppScopes::new().allowance().request().build()?,
         Arc::new(MemoryStore::new()),
-        &rail,
+        rail,
     ))
     .await?;
     payer.app_mut().allow_connect(&shop.identity()).await?;
     shop.app_mut().allow_connect(&payer.identity()).await?;
-    let terms = AllowanceTerms::from_json(&serde_json::json!({
+    Ok((payer, shop))
+}
+
+fn terms() -> TestResult<AllowanceTerms> {
+    Ok(AllowanceTerms::from_json(&serde_json::json!({
         "asset": "btc", "per_payment_amount": {"minimum": "0.0001", "maximum": "0.01"},
         "period_limits": [], "lifetime_amount_limit": "0.1", "active_from": null,
         "expires_at": null, "allowed_payment_endpoint_identifiers": null
-    }))?;
+    }))?)
+}
+
+async fn ends(w: &World) -> TestResult {
+    let rail = Arc::new(FakeRail::with_clock(w.clock().clone()));
+    let store = Arc::new(MemoryStore::new());
+    let (mut payer, mut shop) = Box::pin(wallets(w, store.clone(), &rail)).await?;
+    let terms = terms()?;
     let mut offers = Vec::new();
     for placed in [false, true] {
         let offer = Box::pin(payer.propose_executable_allowance(
@@ -118,6 +131,98 @@ async fn ends(w: &World) -> TestResult {
         );
     }
     assert_eq!(payer.app().records_of("allowance_ledgers").await?.len(), 1);
+    assert!(rail.all_executions().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_enrolled_payer_withdraws_its_retired_proposal_after_restore() -> TestResult {
+    for backend in [Backend::Scripted, Backend::Service] {
+        let Some(world) = World::start(backend)? else {
+            continue;
+        };
+        let result = Box::pin(withdraw_after_restore(&world)).await;
+        world.close().await?;
+        result?;
+    }
+    Ok(())
+}
+
+async fn withdraw_after_restore(w: &World) -> TestResult {
+    let rail = Arc::new(FakeRail::with_clock(w.clock().clone()));
+    let store = Arc::new(MemoryStore::new());
+    let (mut payer, mut shop) = Box::pin(wallets(w, store.clone(), &rail)).await?;
+    let peer = shop.identity();
+    let offer =
+        Box::pin(payer.propose_executable_allowance(peer, terms()?, UserConfirmed::new())).await?;
+    let backup = payer.backup().await?;
+    Box::pin(shop.receive(None)).await?;
+    let at_shop = shop
+        .allowances()
+        .await?
+        .into_iter()
+        .find(|v| v.allowance_id == offer.allowance_id)
+        .ok_or("seller did not receive the original proposal")?;
+    let rejection = Box::pin(shop.reject_allowance(&at_shop.record)).await?;
+    let read = Box::pin(payer.receive(None)).await?;
+    assert!(read
+        .report
+        .events
+        .iter()
+        .any(|e| matches!(e, AppEvent::MessageReceived {msg_id,..} if msg_id == &rejection)));
+    let sent = payer.app().sent_to(&peer, 0, u64::MAX).await?;
+    assert!(!sent.iter().any(|m| m.kind == "paykit.allowance_end"));
+    let p = sent
+        .iter()
+        .find(|m| m.msg_id == offer.msg_id)
+        .ok_or("missing signed payer proposal")?;
+    let original = paykit_lib::records::StoredMessage::new(
+        payer.identity(),
+        payer.app().cert().signed(),
+        p.plaintext.clone(),
+        None,
+        &peer,
+    )?;
+    drop(payer);
+    let mut restored = Box::pin(Paykit::restore(
+        w.app_env(store),
+        Default::default(),
+        &backup,
+        rail.clone(),
+        Arc::new(TestTimer),
+    ))
+    .await?;
+    for _ in 0..4 {
+        let read = Box::pin(restored.receive(None)).await?;
+        if read.records_unlisted.is_none() && !restored.app().listing_owed().await? {
+            break;
+        }
+    }
+    Box::pin(restored.flush()).await?;
+    let sent = restored.app().sent_to(&peer, 0, u64::MAX).await?;
+    let mut ends = sent.iter().filter(|m| m.kind == "paykit.allowance_end");
+    let end = ends.next().ok_or("restored proposer owes a withdrawal")?;
+    assert!(ends.next().is_none());
+    let signed = paykit_lib::records::StoredMessage::new(
+        restored.identity(),
+        restored.app().cert().signed(),
+        end.plaintext.clone(),
+        None,
+        &peer,
+    )?;
+    assert_eq!(signed.message().refs.as_slice(), [original.hash()]);
+    let received = Box::pin(shop.receive(None)).await?;
+    assert!(received
+        .report
+        .events
+        .iter()
+        .any(|e| matches!(e, AppEvent::MessageReceived{msg_id,..} if msg_id == &end.msg_id)));
+    assert!(restored.app().shared_record(&offer.record).await?.is_none());
+    assert!(restored
+        .app()
+        .records_of("allowance_ledgers")
+        .await?
+        .is_empty());
     assert!(rail.all_executions().is_empty());
     Ok(())
 }
