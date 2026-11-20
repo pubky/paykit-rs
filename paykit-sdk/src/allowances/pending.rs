@@ -411,7 +411,7 @@ impl Paykit {
         let mut approvals = Vec::new();
         let mut withdrawals = Vec::new();
         for (record, approval) in self
-            .local_scan::<super::OriginalApproval>(key::ORIGINAL_APPROVALS)
+            .local_scan::<super::OriginalAllowance>(key::ORIGINAL_ALLOWANCES)
             .await?
         {
             if approval.awaiting_application() {
@@ -421,7 +421,7 @@ impl Paykit {
             }
         }
         for (record, approval) in withdrawals {
-            let at = format!("{}{record}", key::ORIGINAL_APPROVALS);
+            let at = format!("{}{record}", key::ORIGINAL_ALLOWANCES);
             self.withdraw_rejected_proposal(&at, approval).await?;
         }
         if intents.is_empty() && approvals.is_empty() {
@@ -429,7 +429,7 @@ impl Paykit {
         }
         let confirmed = self.confirmed_pending_applications().await?;
         for (record, mut approval) in approvals {
-            let at = format!("{}{record}", key::ORIGINAL_APPROVALS);
+            let at = format!("{}{record}", key::ORIGINAL_ALLOWANCES);
             if self
                 .capture_original_approval(&at, &mut approval, &confirmed)
                 .await?
@@ -455,7 +455,7 @@ impl Paykit {
                 if batch.members.len() == 3 {
                     let approval = self.app.record_key(&allowance_target(&intent.peer, id))?;
                     if !self
-                        .local_get::<super::OriginalApproval>(&key::original_approval(&approval))
+                        .local_get::<super::OriginalAllowance>(&key::original_allowance(&approval))
                         .await?
                         .is_some_and(|a| a.retains_application(&intent.application, &batch.members))
                     {

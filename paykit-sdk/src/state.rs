@@ -1515,10 +1515,10 @@ impl Stored for OwedEnd {
     }
 }
 
-impl sealed::Sealed for crate::allowances::OriginalApproval {}
-impl Stored for crate::allowances::OriginalApproval {
+impl sealed::Sealed for crate::allowances::OriginalAllowance {}
+impl Stored for crate::allowances::OriginalAllowance {
     fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
-        let StateKey::OriginalApproval(record) = family else {
+        let StateKey::OriginalAllowance(record) = family else {
             return corrupt();
         };
         self.check(record, binder)
@@ -1854,10 +1854,10 @@ pub(crate) mod key {
     pub(crate) const PENDING_CONFLICTS: &str = "pc/";
 
     pub(crate) const PENDING_REPLIES: &str = "ap/";
-    pub(crate) const ORIGINAL_APPROVALS: &str = "ao/";
+    pub(crate) const ORIGINAL_ALLOWANCES: &str = "ao/";
 
-    pub(crate) fn original_approval(record: &[u8; 32]) -> String {
-        format!("{ORIGINAL_APPROVALS}{}", b64(record))
+    pub(crate) fn original_allowance(record: &[u8; 32]) -> String {
+        format!("{ORIGINAL_ALLOWANCES}{}", b64(record))
     }
 
     pub(crate) const APPLIED_REPLIES: &str = "aq/";
@@ -2407,7 +2407,7 @@ pub(crate) enum StateKey {
     },
     /// A signed reply whose exact proposal deletion was applied.
     AppliedReply([u8; 32]),
-    OriginalApproval([u8; 32]),
+    OriginalAllowance([u8; 32]),
     /// The latest verified end of a conflict at the named pending key.
     PendingRetirement([u8; 32]),
     /// `cf/<record key>`: a conflicting proposal or response kept as the stop.
@@ -2610,7 +2610,7 @@ impl StateKey {
                             reply: b64_32(reply)?,
                         }
                     }
-                    "ao" => Self::OriginalApproval(b64_32(rest)?),
+                    "ao" => Self::OriginalAllowance(b64_32(rest)?),
                     "aq" => Self::AppliedReply(b64_32(rest)?),
                     "pce" => Self::PendingRetirement(b64_32(rest)?),
                     "cf" => Self::Conflict(b64_32(rest)?),
@@ -3723,8 +3723,8 @@ mod tests {
             ),
             (key::applied_reply(&pubky), StateKey::AppliedReply(pubky)),
             (
-                key::original_approval(&pubky),
-                StateKey::OriginalApproval(pubky),
+                key::original_allowance(&pubky),
+                StateKey::OriginalAllowance(pubky),
             ),
             (key::conflict(&pubky), StateKey::Conflict(pubky)),
             (key::notice_target(id), StateKey::NoticeTarget(id.into())),
