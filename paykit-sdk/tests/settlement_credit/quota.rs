@@ -93,6 +93,10 @@ async fn confirm_after_quota(world: &World) -> TestResult {
         .confirm_payment(&losing_key)
         .await
         .unwrap_err();
+    let kept = match refused.kept_batch() {
+        Some(id) => Some(wallets.labelled.app().kept_batch(id).await),
+        None => None,
+    };
     let trace = world.trace();
     let mut refusals = trace.lines[start..].iter().filter(|line| {
         line.call == Some("ops")
@@ -118,7 +122,7 @@ async fn confirm_after_quota(world: &World) -> TestResult {
     assert_eq!(
         refused.refusal(),
         Some(&paykit_sdk::Refusal::SettlementBucketFull { bucket: number }),
-        "after the merchant's signed record quota response: {refused:?}"
+        "after the merchant's signed record quota response: {refused:?}, original batch {kept:?}"
     );
     let method_checks = wallets.rail.proof_checks();
     let [accepted_check] = &method_checks[checks_before_quota..] else {
