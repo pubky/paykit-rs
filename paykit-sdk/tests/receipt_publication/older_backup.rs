@@ -287,7 +287,5 @@ async fn older_shop_backup(world: &World, sale: IssuedSale) -> TestResult {
     let paid = BTreeMap::from([(received[0].attempt_id, 1)]);
     assert_eq!(rail.all_pay_calls(), paid);
     assert_eq!(rail.all_executions(), paid);
-    println!("{:?}: cursor {held_cursor}, held deletion {}, receipt deletion {}, comparison {}, peer publication {}, original result {code}",
-        world.backend(), earlier.version.version, deleted.version.version, eager.version.version, complete.version.version);
     Ok(())
 }
