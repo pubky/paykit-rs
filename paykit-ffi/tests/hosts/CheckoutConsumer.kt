@@ -115,15 +115,42 @@ private suspend fun restoreCheckout(
                 error("the stale restore question was accepted")
             } catch (_: WalletException.Refused) {}
             check(wallet.restoreState().registrations == state.registrations)
+            suspend fun interruptConfirmation(failure: EnrollmentStore.AnswerFailure) {
+                destination.interruptAnswer(failure)
+                try {
+                    wallet.confirmRestoredRegistrations(state.registrations)
+                    error("registration answer unexpectedly reported a durable result")
+                } catch (error: WalletException.Storage) {
+                    if (failure == EnrollmentStore.AnswerFailure.UNAVAILABLE) check(error.failure is StorageException.Unavailable)
+                    else check(error.failure is StorageException.Unknown)
+                }
+            }
             if (action == "refuse") {
+                interruptConfirmation(EnrollmentStore.AnswerFailure.UNKNOWN_BEFORE_COMMIT)
                 try {
                     wallet.refuseRestoredRegistrations(state.registrations)
                     error("the unrecognized registration did not stop the wallet")
                 } catch (_: WalletException.Operation) {}
                 val alarm = wallet.restoreState().alarm as SwitchAlarm.Compromise
                 check(alarm.n == 1uL && method.calls.get() == 0)
+                try {
+                    wallet.confirmRestoredRegistrations(state.registrations)
+                    error("a stopped registration was confirmed")
+                } catch (_: WalletException.Operation) {}
+                check(wallet.restoreState().alarm == alarm)
             } else {
-                wallet.confirmRestoredRegistrations(state.registrations)
+                if (action == "confirm") {
+                    interruptConfirmation(EnrollmentStore.AnswerFailure.UNAVAILABLE)
+                    check(wallet.restoreState().registrations == state.registrations)
+                    interruptConfirmation(EnrollmentStore.AnswerFailure.UNKNOWN_BEFORE_COMMIT)
+                    // Retry the same answer on the same handle without an intervening read.
+                    interruptConfirmation(EnrollmentStore.AnswerFailure.UNKNOWN_AFTER_COMMIT)
+                    check(wallet.restoreState().registrations.isEmpty())
+                    try {
+                        wallet.confirmRestoredRegistrations(state.registrations)
+                        error("an already committed answer was confirmed again")
+                    } catch (_: WalletException.Refused) {}
+                } else wallet.confirmRestoredRegistrations(state.registrations)
                 wallet.finishReceive()
                 val report = wallet.reconcile()
                 check(!report.payerSkipped && wallet.restoreState().registrations.isEmpty())

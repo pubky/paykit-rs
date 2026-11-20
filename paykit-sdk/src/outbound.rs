@@ -80,6 +80,11 @@ impl Paykit {
     }
 
     async fn check_restore_question(&mut self, registrations: &[u64]) -> Result<()> {
+        // Compare the answer with the durable registrations even after a lost commit reply.
+        self.app.pending_duty_events().await?;
+        if let Some(alarm) = self.app.alarm() {
+            return Err(AppError::Alarm(alarm.clone()).into());
+        }
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;

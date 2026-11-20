@@ -60,8 +60,10 @@ impl WalletHost {
 impl NativeWallet {
     /// Inspect the installed state before or after a foreground read, including after reopening.
     pub async fn restore_state(&self) -> Result<WalletRestoreState, WalletError> {
-        let wallet = self.lock().await?;
-        let app = wallet.app();
+        let mut wallet = self.lock().await?;
+        let app = wallet.app_mut();
+        // This local inspection reloads after a failed commit without handing duties to the host.
+        app.pending_duty_events().await?;
         Ok(WalletRestoreState {
             reconciling: app.reconcile_mode(),
             cursor: app.restore_held_cursor().map(Into::into),
