@@ -195,7 +195,8 @@ pub enum RefusalKind {
     NotNow,
     /// A value the protocol or the host gave breaks a rule: the text names it.
     Usage,
-    /// The payer's activity record cannot yet be updated.
+    /// A payment action is held by its record. If the payer's payment history was lost to
+    /// deletion, the obligation stays held and the user cannot confirm another payment.
     RecordHeld,
     /// Paykit refused the app's certificate.
     CertificateRefused,
