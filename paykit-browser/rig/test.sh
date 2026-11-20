@@ -34,10 +34,11 @@
 #
 # The network tests read the origin, https://localhost:<rig port>, from
 # PAYKIT_BROWSER_RIG_ORIGIN, the closed port from PAYKIT_BROWSER_RIG_CLOSED_PORT, and the token
-# the rig requires for POST /rig/world from PAYKIT_BROWSER_RIG_TOKEN, at compile time; this
-# script sets them with --switch only. It makes a fresh random token for each run, and gives it
-# to the rig in its environment, so a page or program that does not know it cannot make the rig
-# enrol. Every port must be free on both 127.0.0.1 and ::1, the addresses a browser may resolve
+# the rig requires for POST /rig/world and for /rig/fault (GET, POST and DELETE) from
+# PAYKIT_BROWSER_RIG_TOKEN, at compile time; this script sets them with --switch only. It makes
+# a fresh random token for each run, and gives it to the rig in its environment, so a page or
+# program that does not know it cannot make the rig enrol, nor arm, disarm or read its fault.
+# Every port must be free on both 127.0.0.1 and ::1, the addresses a browser may resolve
 # localhost to.
 
 set -euo pipefail
