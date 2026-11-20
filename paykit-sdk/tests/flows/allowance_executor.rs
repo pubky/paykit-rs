@@ -11,7 +11,8 @@ use pubky_switch_core::ops::{Condition, OpKind, RecordVersion, SignedOp};
 use pubky_switch_core::shared::ApplicationRef;
 use serde_json::json;
 
-use crate::common::World;
+use crate::common::{draft, request_from, World};
+use pubky_switch_client::clock::Clock;
 
 async fn applied_put(
     app: &App,
@@ -200,6 +201,96 @@ async fn test_first_grant_requires_the_accepted_record_and_repeats_once() {
 }
 
 #[tokio::test]
+async fn test_original_grant_and_ledger_require_the_payers_complete_history() {
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    // This hand payment shares the wallet account but spends none of the Allowance.
+    Box::pin(hand_payment(&world, &mut payer, &mut shop, "0.4999999991")).await;
+    world.rail.set_history_payer(shop.identity());
+    assert!(Box::pin(payer.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .is_none());
+    world.rail.set_history_payer(payer.identity());
+    let usage = Box::pin(payer.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(usage.lifetime().as_str(), "0");
+    let before = payer.app().cert().clone();
+    let scopes = AppScopes::new().allowance_execute().build().unwrap();
+    let renewed = crate::certificate::renew(&world, payer.app_id(), &scopes, 1_000);
+    world.clock.advance_ms(1_001);
+    crate::certificate::list(&world, payer.app_id(), &before, &renewed);
+    Box::pin(payer.receive(None)).await.unwrap();
+    assert_eq!(payer.app().cert().hash(), renewed.hash());
+    assert_eq!(
+        Box::pin(payer.reconcile_allowance(&key))
+            .await
+            .unwrap()
+            .unwrap()
+            .lifetime()
+            .as_str(),
+        "0"
+    );
+
+    let mut second = Box::pin(world.join(
+        &world.alice,
+        "travel wallet",
+        AppScopes::new().pay().build().unwrap(),
+    ))
+    .await;
+    assert_ne!(second.app_id(), payer.app_id());
+    second.app_mut().invite(&shop.identity()).await.unwrap();
+    Box::pin(hand_payment(&world, &mut second, &mut shop, "3")).await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    assert_eq!(
+        Box::pin(payer.reconcile_allowance(&key))
+            .await
+            .unwrap()
+            .unwrap()
+            .lifetime()
+            .as_str(),
+        "0"
+    );
+    // A complete wallet scan also includes this dispatch made outside Paykit. No signed
+    // Paykit proof establishes why it was sent, so the reader withholds usage.
+    world
+        .rail
+        .pay_outside(
+            crate::common::endpoint("btc-lightning-bolt11"),
+            paykit_lib::PaymentEndpointPayload::new("ln-other").unwrap(),
+            crate::common::btc("2"),
+            paykit_lib::AttemptId::from_bytes([8; 16]),
+        )
+        .await
+        .unwrap();
+    assert!(Box::pin(payer.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .is_none());
+}
+
+async fn hand_payment(
+    world: &World,
+    payer: &mut paykit_sdk::Paykit,
+    shop: &mut paykit_sdk::Paykit,
+    amount: &str,
+) {
+    let request = Box::pin(request_from(
+        shop,
+        world.alice_id(),
+        draft(amount, world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    let paid = Box::pin(payer.pay_request(&request, paykit_sdk::PayOptions::default()))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, paykit_sdk::PayOutcome::Paid { .. }));
+}
+
+#[tokio::test]
 async fn test_first_grant_confirmation_refuses_a_rewritten_initial_ledger() {
     use pubky_switch_client::app::{Collection, OpBatch, RecordTarget};
 
@@ -332,8 +423,126 @@ async fn test_first_grant_restores_its_complete_original_after_reconciliation() 
 #[derive(Clone, Copy)]
 enum RestoredGrantEvidence {
     Matching,
+    LaterReservations,
     DifferentPendingValue,
     UnrelatedVerifiedWrite,
+}
+
+// Open two real claim/ledger batches as the enrolled executor, without dispatching
+// a payment. The second ledger no longer directly follows the original zero.
+async fn reserve_before_restore(
+    world: &World,
+    payer: &mut paykit_sdk::Paykit,
+    shop: &mut paykit_sdk::Paykit,
+    key: &[u8; 32],
+) {
+    use paykit_lib::allowances::LedgerEntry;
+    use pubky_switch_client::app::{
+        ClaimOp, Collection, ObligationDeadline, OpBatch, RecordTarget,
+    };
+
+    let view = payer.allowance(key).await.unwrap();
+    let natural =
+        paykit_lib::derive::natural_key::allowance(&view.counterparty, &view.allowance_id);
+    let collection = paykit_lib::Collection::AllowanceLedgers;
+    let target = RecordTarget::new(
+        Collection::new(collection.name(), collection.fixed_policy()),
+        &natural,
+    );
+    let ledger_key = payer.app().record_key(&target).unwrap();
+    let grant = payer.app().shared_record(key).await.unwrap().unwrap();
+    let (_, revision) = applied_put(payer.app(), *key, grant.version).await;
+    let grant = Condition::RecordCurrent {
+        key: *key,
+        revision,
+        deleted: false,
+    };
+    world.rail.set_history_payer(payer.identity());
+    for (amount, total, count) in [("40", "40", 1), ("30", "70", 2)] {
+        let at = world.clock.now_ms();
+        let request = Box::pin(request_from(shop, payer.identity(), draft(amount, at))).await;
+        Box::pin(payer.receive(None)).await.unwrap();
+        let obligation = paykit_lib::derive::request_obligation(
+            payer.app().naming_key(),
+            &request.payee,
+            &request.request_hash,
+            0,
+        );
+        let attempt = paykit_lib::AttemptId::generate().unwrap();
+        let claim = ClaimOp::attempt(obligation, 0, attempt.to_bytes(), 4200, None);
+        let current = payer
+            .app()
+            .shared_record(&ledger_key)
+            .await
+            .unwrap()
+            .unwrap();
+        let (_, revision) = applied_put(payer.app(), ledger_key, current.version).await;
+        let mut ledger = Ledger::from_json(current.content.value().unwrap()).unwrap();
+        let amount = crate::common::btc(amount);
+        ledger.entries.push(LedgerEntry {
+            obligation,
+            attempt_id: attempt,
+            value: amount.value,
+            asset: amount.asset,
+            at,
+            outcome: None,
+        });
+        let conditions = vec![
+            grant,
+            Condition::RecordCurrent {
+                key: ledger_key,
+                revision,
+                deleted: false,
+            },
+            Condition::ServerTimeIn {
+                start: Some(at),
+                end: Some(terms().entry_window_end(at).unwrap()),
+            },
+        ];
+        let write = payer
+            .app_mut()
+            .record_op(&target, Some(&ledger.to_json().unwrap()), conditions)
+            .await
+            .unwrap();
+        let batch = OpBatch::for_protocol("paykit")
+            .op_if(claim.kind(), vec![grant])
+            .obligation_deadline(obligation, ObligationDeadline::NoDeadline)
+            .entry(write);
+        Box::pin(payer.app_mut().submit_batch(batch)).await.unwrap();
+        Box::pin(assert_reserved_usage(world, payer, key, total, count)).await;
+    }
+}
+
+async fn assert_reserved_usage(
+    world: &World,
+    payer: &mut paykit_sdk::Paykit,
+    key: &[u8; 32],
+    total: &str,
+    count: u64,
+) {
+    let before = world.router.log().len();
+    let usage = Box::pin(payer.reconcile_allowance(key))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(usage.lifetime().as_str(), total);
+    assert_eq!(
+        (usage.reserved(), usage.spent(), usage.released()),
+        (count, 0, 0)
+    );
+    let requests = world.router.log();
+    let claims: Vec<_> = requests[before..]
+        .iter()
+        .filter(|r| r.starts_with("GET ") && r.contains("/claims/"))
+        .collect();
+    assert_eq!(claims.len() as u64, count);
+    assert_eq!(
+        claims
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        claims.len()
+    );
 }
 
 async fn restore_grant_proof_order(installed_verified: bool, evidence: RestoredGrantEvidence) {
@@ -420,6 +629,9 @@ async fn restore_grant_proof_order(installed_verified: bool, evidence: RestoredG
         .unwrap()
         .unwrap();
     assert_eq!(checkpoint(&verified)["d"][0]["grant"]["kind"], "verified");
+    if matches!(evidence, RestoredGrantEvidence::LaterReservations) {
+        Box::pin(reserve_before_restore(&world, &mut payer, &mut shop, &key)).await;
+    }
     let verified_backup = payer.backup().await.unwrap();
     let grant = payer.app().shared_record(&key).await.unwrap().unwrap();
     let (_, revision) = applied_put(payer.app(), key, grant.version).await;
@@ -528,7 +740,11 @@ async fn restore_grant_proof_order(installed_verified: bool, evidence: RestoredG
     Box::pin(restored.end_reconcile(UserConfirmed::new()))
         .await
         .unwrap();
-    if !matches!(evidence, RestoredGrantEvidence::Matching) {
+    if matches!(
+        evidence,
+        RestoredGrantEvidence::DifferentPendingValue
+            | RestoredGrantEvidence::UnrelatedVerifiedWrite
+    ) {
         assert!(Box::pin(restored.resume_allowance_executor(&key))
             .await
             .is_err());
@@ -538,13 +754,32 @@ async fn restore_grant_proof_order(installed_verified: bool, evidence: RestoredG
                 .is_err()
         );
     } else {
-        Box::pin(restored.resume_allowance_executor(&key))
-            .await
-            .unwrap();
+        if matches!(evidence, RestoredGrantEvidence::LaterReservations) {
+            // The backup predates both received requests. Confirm the existing Allowance
+            // after restoring it; the confirmed budget still includes both reservations.
+            let view = restored.allowance(&key).await.unwrap();
+            assert!(!view.consented);
+            assert!(Box::pin(restored.resume_allowance_executor(&key))
+                .await
+                .is_err());
+        } else {
+            Box::pin(restored.resume_allowance_executor(&key))
+                .await
+                .unwrap();
+        }
         Box::pin(restored.confirm_allowance_executor(&key, UserConfirmed::new()))
             .await
             .unwrap();
         assert!(restored.allowance(&key).await.unwrap().consented);
+        if matches!(evidence, RestoredGrantEvidence::LaterReservations) {
+            world.rail.set_history_payer(shop.identity());
+            assert!(Box::pin(restored.reconcile_allowance(&key))
+                .await
+                .unwrap()
+                .is_none());
+            world.rail.set_history_payer(restored.identity());
+            Box::pin(assert_reserved_usage(&world, &mut restored, &key, "70", 2)).await;
+        }
     }
     assert_eq!(world.record_writes(&world.alice, &key), writes);
     let current = restored.app().shared_record(&key).await.unwrap().unwrap();
@@ -554,6 +789,15 @@ async fn restore_grant_proof_order(installed_verified: bool, evidence: RestoredG
         revision
     );
     assert!(world.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_restore_of_an_older_pending_grant_keeps_later_reservations() {
+    Box::pin(restore_grant_proof_order(
+        true,
+        RestoredGrantEvidence::LaterReservations,
+    ))
+    .await;
 }
 
 #[tokio::test]

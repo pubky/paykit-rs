@@ -354,6 +354,319 @@ async fn test_allowances_proposal_binds_verified_remote_generation() {
     assert_eq!(record.proposal().message().to, w.alice_id());
 }
 
+#[derive(Clone, Copy)]
+enum AcceptanceGeneration {
+    OrderlyAdvance,
+    AtLoss,
+    BeforeLoss,
+}
+
+/// Keep the service's records and prior verification key through an orderly advance.
+async fn advance_allowance_generation(
+    w: &World,
+    payer: &mut Paykit,
+) -> std::sync::Arc<pubky_switch_client::testing::ScriptedSwitch> {
+    use crate::common::ALICE_ORIGIN;
+    use pubky_switch_core::records::{Inbox, ServiceKeyEntry};
+
+    let previous = payer.app().own_identity().clone();
+    let service = w.alice.switch().change_key_into([74; 32]);
+    w.router.add_switch(ALICE_ORIGIN, &service);
+    let doc = w
+        .alice
+        .sign_next(|body| {
+            body.service_keys.push(ServiceKeyEntry {
+                generation: previous.generation(),
+                key: previous.inbox().service_key,
+            });
+            body.generation += 1;
+            body.inbox = Inbox::new(ALICE_ORIGIN, service.service_key());
+        })
+        .unwrap();
+    service.deliver_identity(&doc).unwrap();
+    payer.app_mut().refresh_identity().await.unwrap();
+    Box::pin(crate::common::finish_listing(payer)).await;
+    assert!(payer.app().own_identity().body().recovery_from.is_none());
+    service
+}
+
+async fn acceptance_after_generation_change(change: AcceptanceGeneration, proposer: AllowanceRole) {
+    use paykit_lib::allowances::Ledger;
+    use pubky_switch_client::app::{Collection, RecordTarget};
+    use pubky_switch_core::ops::{OpKind, RecordVersion};
+
+    let w = World::new();
+    let mut payer = Box::pin(paying_wallet(&w)).await;
+    let mut seller = Box::pin(shop(&w)).await;
+    let original_generation = payer.app().own_identity().generation();
+    let offer = match proposer {
+        AllowanceRole::Allower => payer
+            .propose_executable_allowance(w.bob_id(), terms(), UserConfirmed::new())
+            .await
+            .unwrap(),
+        AllowanceRole::Allowee => seller
+            .propose_allowance(w.alice_id(), proposer, terms())
+            .await
+            .unwrap(),
+        _ => unreachable!("only the two proposal roles are exercised"),
+    };
+    payer.receive(None).await.unwrap();
+    seller.receive(None).await.unwrap();
+    let permanent = allowances_target(&w.bob_id(), &offer.allowance_id);
+    let public = payer.app().record_key(&permanent).unwrap();
+    let mirror = seller
+        .app()
+        .record_key(&allowances_target(&w.alice_id(), &offer.allowance_id))
+        .unwrap();
+    let selected = Box::pin(pending_at(&payer, &public)).await;
+    let paykit_lib::Body::AllowanceProposal(body) = selected.proposal().body() else {
+        panic!("proposal");
+    };
+    assert_eq!(body.allower_generation, original_generation);
+    let family = paykit_lib::Collection::AllowanceLedgers;
+    let ledger = RecordTarget::new(
+        Collection::new(family.name(), family.fixed_policy()),
+        &paykit_lib::derive::natural_key::allowance(&w.bob_id(), &offer.allowance_id),
+    );
+    let ledger_key = payer.app().record_key(&ledger).unwrap();
+
+    let service = match change {
+        AcceptanceGeneration::OrderlyAdvance => {
+            Box::pin(advance_allowance_generation(&w, &mut payer)).await
+        }
+        AcceptanceGeneration::AtLoss | AcceptanceGeneration::BeforeLoss => {
+            if matches!(change, AcceptanceGeneration::BeforeLoss) {
+                Box::pin(advance_allowance_generation(&w, &mut payer)).await;
+            }
+            let service = crate::provider_loss::declare_loss(&w);
+            Box::pin(crate::provider_loss::follow_loss(&mut payer)).await;
+            let lost = payer.app().own_identity().body().recovery_from.unwrap();
+            if matches!(change, AcceptanceGeneration::AtLoss) {
+                assert_eq!(original_generation, lost);
+            } else {
+                assert!(original_generation < lost);
+            }
+            service
+        }
+    };
+    assert!(original_generation < payer.app().own_identity().generation());
+    payer.app_mut().invite(&w.bob_id()).await.unwrap();
+    assert_eq!(
+        Box::pin(pending_at(&payer, &public))
+            .await
+            .proposal()
+            .hash(),
+        selected.proposal().hash()
+    );
+    assert_eq!(
+        payer.allowance(&public).await.unwrap().status,
+        AllowanceStatus::Proposed
+    );
+    let eligible = matches!(change, AcceptanceGeneration::OrderlyAdvance);
+    let acceptance = match proposer {
+        AllowanceRole::Allower => {
+            let acceptance = seller.accept_allowance(&mirror).await.unwrap();
+            assert_eq!(
+                seller.allowance(&mirror).await.unwrap().status,
+                AllowanceStatus::Accepted
+            );
+            if !eligible {
+                let delivery = seller.message_delivery(&acceptance).await.unwrap();
+                assert!(
+                    matches!(delivery, Some(paykit_sdk::MessageDelivery::Queued { .. })),
+                    "{delivery:?}"
+                );
+                // The old provider is unreachable while its routing copy is cached.
+                // Retry the same signed reply after the ordinary cache lifetime.
+                w.clock.advance_ms(pubky_switch_client::app::DOC_CACHE_MS);
+                seller.flush().await.unwrap();
+                let delivery = seller.message_delivery(&acceptance).await.unwrap();
+                assert!(
+                    matches!(delivery, Some(paykit_sdk::MessageDelivery::Accepted { .. })),
+                    "{delivery:?}"
+                );
+            }
+            Some(acceptance)
+        }
+        AllowanceRole::Allowee => {
+            let answer = payer
+                .accept_executable_allowance(&public, UserConfirmed::new())
+                .await;
+            if eligible {
+                Some(answer.unwrap())
+            } else {
+                assert!(
+                    matches!(answer.unwrap_err().refusal(), Some(Refusal::NotNow(why))
+                    if why == "the proposal predates the Allower's provider loss")
+                );
+                None
+            }
+        }
+        _ => unreachable!("only the two proposal roles are exercised"),
+    };
+    let wanted: Vec<_> = acceptance.as_deref().into_iter().collect();
+    let mut observed = Vec::new();
+    for _ in 0..3 {
+        let (recipient, sender) = if proposer == AllowanceRole::Allower {
+            (&mut payer, &mut seller)
+        } else {
+            (&mut seller, &mut payer)
+        };
+        observed.extend(Box::pin(received_originals(recipient, &wanted)).await);
+        sender.receive(None).await.unwrap();
+    }
+    if let Some(acceptance) = acceptance {
+        assert!(
+            observed.contains(&acceptance),
+            "the signed acceptance arrived"
+        );
+    }
+    let applied = service.applied();
+    let writes = |key| {
+        applied
+            .iter()
+            .filter(|op| matches!(&op.body().kind, OpKind::RecordPut(put) if put.key == key))
+            .count()
+    };
+    if !eligible {
+        assert_eq!(
+            payer.allowance(&public).await.unwrap().status,
+            AllowanceStatus::Proposed
+        );
+        assert_eq!(writes(public), 0);
+        assert_eq!(writes(ledger_key), 0);
+        assert!(payer.app().shared_record(&public).await.unwrap().is_none());
+        assert!(payer
+            .app()
+            .shared_record(&ledger_key)
+            .await
+            .unwrap()
+            .is_none());
+    } else {
+        assert_eq!(
+            payer.allowance(&public).await.unwrap().status,
+            AllowanceStatus::Accepted
+        );
+        assert_eq!(
+            seller.allowance(&mirror).await.unwrap().status,
+            AllowanceStatus::Accepted
+        );
+        assert_eq!(writes(public), 1);
+        assert_eq!(writes(ledger_key), 1);
+        let accepted = payer.app().shared_record(&public).await.unwrap().unwrap();
+        let accepted =
+            AllowanceRecord::read(accepted.content.value().unwrap(), &w.alice_id()).unwrap();
+        assert_eq!(accepted.proposal.hash(), selected.proposal().hash());
+        let q = accepted.response.as_ref().unwrap();
+        assert_eq!(q.message().refs, [selected.proposal().hash()]);
+        let (initial, _, evidence) = payer
+            .app_mut()
+            .read_record_application(&ledger)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(initial.authenticated && evidence.proof.is_some());
+        assert_eq!(
+            initial.content.value().unwrap(),
+            Ledger::initial_value(&w.bob_id(), &offer.allowance_id, &q.hash())
+        );
+        let signed = applied
+            .iter()
+            .find(|op| {
+                matches!(&op.body().kind,
+            OpKind::RecordPut(put) if put.key == ledger_key)
+            })
+            .unwrap();
+        let OpKind::RecordPut(put) = &signed.body().kind else {
+            unreachable!()
+        };
+        assert_eq!(put.expected_version, RecordVersion::NONE);
+        assert_eq!(
+            signed.body().generation,
+            payer.app().own_identity().generation()
+        );
+        assert_eq!(signed.body().batch.count, 3);
+    }
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_allowances_acceptance_generation_preserves_an_orderly_advance() {
+    for role in [AllowanceRole::Allower, AllowanceRole::Allowee] {
+        Box::pin(acceptance_after_generation_change(
+            AcceptanceGeneration::OrderlyAdvance,
+            role,
+        ))
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn test_allowances_acceptance_generation_refuses_the_lost_generation() {
+    for role in [AllowanceRole::Allower, AllowanceRole::Allowee] {
+        Box::pin(acceptance_after_generation_change(
+            AcceptanceGeneration::AtLoss,
+            role,
+        ))
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn test_allowances_acceptance_generation_refuses_an_earlier_generation() {
+    for role in [AllowanceRole::Allower, AllowanceRole::Allowee] {
+        Box::pin(acceptance_after_generation_change(
+            AcceptanceGeneration::BeforeLoss,
+            role,
+        ))
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn test_allowances_acceptance_generation_holds_a_future_peer_proposal() {
+    let w = World::new();
+    let _seller = Box::pin(shop(&w)).await;
+    let mut payer = Box::pin(paying_wallet(&w)).await;
+    let generation = payer.app().own_identity().generation();
+    let id = paykit_lib::AllowanceId::generate().unwrap();
+    // A counterparty can sign a structurally valid proposal with an unverified generation.
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[payer.app_id()],
+        "paykit.allowance_proposal",
+        Vec::new(),
+        json!({ "allowance_id": id.as_str(), "proposer_role": "allowee",
+            "allower_generation": generation + 1, "terms": terms().to_json().unwrap() })
+        .as_object()
+        .cloned()
+        .unwrap(),
+    );
+    payer.receive(None).await.unwrap();
+    let view = payer.allowances().await.unwrap().pop().unwrap();
+    assert_eq!(view.status, AllowanceStatus::Proposed);
+    let error = payer
+        .accept_executable_allowance(&view.record, UserConfirmed::new())
+        .await
+        .unwrap_err();
+    assert!(is_not_now(&error), "{error}");
+    assert_eq!(
+        payer.allowance(&view.record).await.unwrap().status,
+        AllowanceStatus::Proposed
+    );
+    assert_eq!(w.record_writes(&w.alice, &view.record), 0);
+    assert!(payer
+        .app()
+        .records_of("allowance_ledgers")
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(payer.app().own_identity().generation(), generation);
+    assert!(w.rail.all_executions().is_empty());
+}
+
 #[tokio::test]
 async fn test_allowances_proposal_viewed_on_both_sides() {
     let w = World::new();
