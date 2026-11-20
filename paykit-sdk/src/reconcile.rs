@@ -623,6 +623,7 @@ impl Paykit {
             carrier_record: None,
             attempt_proof: None,
             failed_by_method: false,
+            never_dispatched: false,
             request: Some(KeptMessage::of(stored)),
             record_held: false,
             transfer_bound: None,
@@ -784,6 +785,9 @@ impl Paykit {
                 Box::pin(self.executor_outcome(own, resolution == Resolution::Done, batch)).await?;
         }
         if let Some(entry) = entry.as_mut().filter(|e| e.open()) {
+            if resolution == Resolution::Failed {
+                entry.end_before_the_call();
+            }
             entry.stage = Stage::Finished;
             batch = batch.local(crate::pay::journal_write(entry)?);
         }
