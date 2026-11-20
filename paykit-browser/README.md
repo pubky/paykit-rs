@@ -11,8 +11,9 @@ it builds as an empty crate, so workspace-wide commands keep working.
 ## Host pieces
 
 On `wasm32-unknown-unknown` the crate holds these Rust items for a host written in Rust. Each
-works in a page and in a dedicated worker. None is exported to JavaScript. Other wasm32 targets,
-such as WASI, have no JavaScript host, and do not get them.
+works in a page and in a dedicated worker, except `store::OpfsStore`, which works only in a
+dedicated worker. None is exported to JavaScript. Other wasm32 targets, such as WASI, have no
+JavaScript host, and do not get them.
 
 - `clock::JsClock`: the Switch client's `Clock`, on `Date.now()`. It is the browser's wall
   clock, which can jump when the time is changed. Use it instead of the Switch client's
@@ -40,6 +41,65 @@ such as WASI, have no JavaScript host, and do not get them.
   `FetchTransport::allowing_localhost_for_loopback_tests` also allows those names, for tests
   against a service on the local machine only. The type's docs list what it does and what it
   cannot do.
+- `store::OpfsStore`: the Switch client's `StateStore` on the browser's Origin Private File
+  System. Not for production use yet: see [Durable store](#durable-store).
+
+## Durable store
+
+`store::OpfsStore` is the Switch client's `StateStore` on the browser's Origin Private File
+System (OPFS), so the SDK's state outlives the WebAssembly instance that wrote it. Its rustdoc
+covers names, the contract's guarantees, errors and failure handling.
+
+**Not for production use: it writes every value to disk in plaintext.** A deleted value is
+overwritten in both files within two commits. Whether a commit's `flush()` reaches the storage
+device before a power loss is up to the engine, and cannot be tested here. The browser may
+evict the origin's storage unless the origin was granted persistent storage
+(`navigator.storage.persist()`), which the store does not ask for; an evicted store opens
+again as a new, empty store, with no error.
+
+The store, the SDK and the Switch client run in the same dedicated worker: `StateStore` calls
+are synchronous, and only a dedicated worker has synchronous file handles. Open the store there
+once and hand it to the SDK.
+
+The store is a directory of two slot files. Each slot holds a whole snapshot: a header (magic,
+format version, generation, payload length), the payload, and a BLAKE3 tag over every byte
+before it. A commit writes the new state over the slot that is not current, cuts that file to
+the new length, flushes it, and only then makes it current.
+
+On open, the valid slot with the higher generation is current, and a torn or damaged slot next
+to it is ignored. If the damaged slot held the newest state, the store opens without the last
+commit that returned `Ok`. Files with no slot to trust fail the open with `OpenError::Corrupt`: two
+invalid slots, a damaged slot next to an empty one, a slot that passes its tag but does not
+decode, or two valid slots of one generation. Only a first commit that stopped part way, next to
+an empty file, opens as a new store; so does the file of a store's only commit if it later loses
+its end, as the two cannot be told apart. A slot of a newer format fails the open with
+`OpenError::NewerFormat`, even next to a valid one. Opening writes nothing. The tag detects torn
+and damaged writes, not tampering.
+
+A real page reload is tested at the store level only: the payment tests reopen the store in
+the same worker, as their in-memory test world would not survive a reload.
+
+### Measurements
+
+Measured on macOS arm64 with Playwright 1.62.1 (Chromium 151.0.7922.34, Firefox 153.0, WebKit
+26.5), release build, in a dedicated worker of a persistent context. A commit is one 64-byte
+put into a store of the given encoded state size; an open is the whole `OpfsStore::open`.
+Medians in milliseconds, over 21 runs (5 runs at 250 MiB):
+
+| Encoded state | Chromium commit | Chromium open | Firefox commit | Firefox open | WebKit commit | WebKit open |
+| --- | --- | --- | --- | --- | --- | --- |
+| 73.5 KiB | 0.38 | 0.66 | 1.30 | 3.90 | 0.20 | 0.62 |
+| 1 MiB | 1.57 | 2.45 | 16.5 | 34.3 | 2.22 | 4.46 |
+| 16 MiB | 19.6 | 33.5 | 267 | 527 | 36.1 | 66.8 |
+| 250 MiB | 300 | 516 | 4229 | 8409 | 570 | 1041 |
+
+Most of the time goes to the BLAKE3 tag (at 16 MiB: 13.8 ms in Chromium, 29.8 ms in WebKit,
+250 ms in Firefox; about 2 ms each for the write and the flush). An open hashes both slots.
+
+Paying one Payment Request with `Paykit::pay_request` makes 27 commits to the payer's store
+and writes about 1.25 MB, for a slot that grows from about 28 KB to about 65 KB. A snapshot
+rewrites the whole live state on every commit. A log would write roughly the batches
+themselves, about 192 KB, but it needs compaction and has more states to recover from.
 
 ## Target
 
@@ -50,7 +110,10 @@ target feature) is refused at compile time.
 
 - The `wasm32-unknown-unknown` dependency graph of `paykit-lib` and `paykit-sdk` builds.
 - The tests listed under [Tests](#tests) run in a page and in a dedicated worker, in Chromium,
-  Firefox and WebKit.
+  Firefox and WebKit. The store targets run in one of the two contexts only, and not in
+  Playwright's WebKit for Linux, which has no OPFS (see
+  [Run the tests in a browser](#run-the-tests-in-a-browser)): they run in WebKit on macOS
+  only.
 - The host pieces above are tested on their own. The no-network flows below give their apps
   `JsTimer` as their `Timer`, and start their test clock at `JsClock`'s reading. The network
   flow gives its apps `JsClock` as their clock and `JsTimer` as their `Timer`.
@@ -86,6 +149,8 @@ target feature) is refused at compile time.
   answer, a dropped call, cacheable answers, CORS preflights, long polls and the browser's
   connection limit, and lost or refused payment batches against the real service (see
   [When the network misbehaves](#when-the-network-misbehaves)).
+- `OpfsStore` runs on real OPFS files in a dedicated worker, across a page reload, and under a
+  payment that closes and opens it again part way (see [Tests](#tests)).
 
 The network tests have these limits:
 
@@ -157,11 +222,11 @@ measure its own call paths.
 
 ## Tests
 
-There are ten test targets. Five of them, `tests/fetch_transport/`, `tests/switch_flow/`,
-`tests/transport_faults/`, `tests/switch_faults/` and `tests/switch_http/`, are network
-targets: they need a real Switch service, and run only as
-[Run the network tests](#run-the-network-tests) describes. The others need no network, no
-database and no service.
+There are fourteen test targets, and the library has unit tests. Five of the targets,
+`tests/fetch_transport/`, `tests/switch_flow/`, `tests/transport_faults/`,
+`tests/switch_faults/` and `tests/switch_http/`, are network targets: they need a real Switch
+service, and run only as [Run the network tests](#run-the-network-tests) describes. The others
+need no network, no database and no service.
 
 The tests in `tests/conformance/` build for both the host and wasm32, with the same test
 bodies, so a browser result is compared with the native result by construction. They cover:
@@ -330,11 +395,20 @@ They check that:
 - two public reads of an identity's `identity.json`, which the service answers with
   `max-age=60`, both reach the service.
 
+The store's tests: the library's unit tests (`src/store/`) check its format and logic on
+in-memory files, natively and in browsers. `tests/store/` runs the `StateStore` contract cases
+on `MemoryStore` natively and on `OpfsStore` in a browser, and checks `OpfsStore` on its real
+files; its module docs list the cases. `tests/store_reload/` opens the store again after a
+page reload, `tests/store_page/` checks that a page cannot open it, and `tests/store_flow/`
+closes and opens the payer's store again part way through a payment.
+
 ### Run the tests natively
 
 ```sh
 cargo test -p paykit-browser
 ```
+
+This also runs the library's unit tests and `tests/store/` on `MemoryStore`.
 
 ### Run the tests in a browser
 
@@ -367,9 +441,22 @@ paykit-browser/rig/test.sh all both
 The first argument is the engine: `chromium`, `firefox`, `webkit`, `chrome` or `all`. The second
 is the context: `page`, `worker` (a dedicated worker) or `both`, which is the default. Further
 arguments go to `cargo test`, for example a test name filter. A test target with no test that
-matches the filter passes, but a run in which no test target runs a test fails. This runs
-every target except the network targets, and refuses a network target named with `--test`.
-`test.sh` picks the test targets itself: `--test` is the only `cargo` target option it takes.
+matches the filter passes, but an engine in which no test target runs a test, in any context,
+fails. This runs the library's unit tests and every target except the network targets, and
+refuses a network target named with `--test`. `test.sh` picks the test targets itself: `--test`
+is the only `cargo` target option it takes.
+
+The store targets run in one context only, with a browser profile on disk, and
+`tests/store_reload/` across a page reload: see "Target modes" in `rig/runner.mjs`. Given one
+context, `test.sh` still runs the targets of the other context, in their own context. After a
+store target, the runner removes whatever is left in its origin's OPFS, and fails a passing run
+that left anything, or whose leftovers it cannot remove: the tests remove what they create.
+
+Playwright's WebKit for Linux has no OPFS: no `navigator.storage` in a page, and no
+`FileSystemSyncAccessHandle` in a dedicated worker. There, the runner checks from a page of the
+test origin that `navigator.storage` is still missing, does not run the store target, and
+prints it as excluded; `test.sh` lists every excluded target at the end as a warning. If that
+engine gains OPFS, the run fails until its entry in `NO_OPFS` (`rig/runner.mjs`) is removed.
 
 To run one engine and context without `test.sh`, set `rig/runner.mjs` as Cargo's wasm32 runner
 as its header comment shows; that comment also lists the runner's environment variables and
@@ -643,7 +730,11 @@ wasm32 dependency graph contains a native networking or TLS crate such as `mio`,
 `tokio`.
 Its `browser-tests` job runs once per engine (`chromium`, `firefox`, `webkit`), as three jobs;
 each runs `rig/test.sh` in a page and then in a dedicated worker, with `wasm-bindgen-cli`
-installed at the version in `Cargo.lock`.
+installed at the version in `Cargo.lock`. Each store target runs in its one context there,
+except in the `webkit` job: Playwright's WebKit for Linux has no OPFS, so the runner excludes
+the store targets there, and the job shows a warning annotation for each.
+The runner stops a target whose name starts with `store` but has no mode, and a mode whose
+target does not exist, so a store target never runs without its mode.
 
 Its `switch-service` job reads the pinned `pubky-switch` commit from `Cargo.lock` with
 `rig/switch-pin.sh`, which fails unless every Switch crate there comes from that commit, and

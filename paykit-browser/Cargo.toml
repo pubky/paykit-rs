@@ -9,10 +9,9 @@ repository.workspace = true
 homepage.workspace = true
 publish = false
 
-# The tests live under `tests/`, so the same tests run natively and in a browser. A library test
-# binary would have no browser tests, and a browser run of it fails.
+# The library's unit tests, those of the store's format and logic in `src/store/`, run natively
+# and in a browser, as the tests under `tests/` do. The crate's docs hold no examples to run.
 [lib]
-test = false
 doctest = false
 
 [dependencies]
@@ -20,6 +19,9 @@ paykit-lib.workspace = true
 paykit-sdk = { path = "../paykit-sdk" }
 pubky-switch-core.workspace = true
 pubky-switch-client.workspace = true
+# The integrity tag of the store's files (`src/store/`). It is already in the graph through
+# pubky-switch-core.
+blake3 = "1.8.7"
 
 # Browser random number backends. A browser has no OS entropy source, so on wasm32-unknown-unknown
 # each getrandom major version in the graph refuses to build until its JavaScript backend is
@@ -46,10 +48,19 @@ js-sys = "0.3.107"
 wasm-bindgen = "0.2.130"
 wasm-bindgen-futures = "0.4.80"
 # The fetch transport (`src/fetch.rs`): the browser's `fetch`, its request, answer, header and
-# body stream types, `AbortController`, and the URL parser it checks the signed path with.
+# body stream types, `AbortController`, and the URL parser it checks the signed path with. The
+# store's files in the Origin Private File System (`src/store/opfs.rs`): stable APIs only.
 web-sys = { version = "0.3.107", features = [
   "AbortController",
   "AbortSignal",
+  "DedicatedWorkerGlobalScope",
+  "DomException",
+  "FileSystemDirectoryHandle",
+  "FileSystemFileHandle",
+  "FileSystemGetDirectoryOptions",
+  "FileSystemGetFileOptions",
+  "FileSystemReadWriteOptions",
+  "FileSystemSyncAccessHandle",
   "Headers",
   "ReadableStream",
   "ReadableStreamDefaultReader",
@@ -63,7 +74,10 @@ web-sys = { version = "0.3.107", features = [
   "RequestRedirect",
   "Response",
   "ResponseType",
+  "StorageManager",
   "Url",
+  "WorkerGlobalScope",
+  "WorkerNavigator",
 ] }
 
 [dev-dependencies]
@@ -100,3 +114,5 @@ wasm-bindgen-test = "0.3.80"
 # when a target that needs them, such as this crate's tests, is built.
 paykit-sdk = { path = "../paykit-sdk", features = ["test-support"] }
 pubky-switch-client = { workspace = true, features = ["test-support"] }
+# The tests remove the stores they create from the Origin Private File System.
+web-sys = { version = "0.3.107", features = ["FileSystemRemoveOptions"] }
