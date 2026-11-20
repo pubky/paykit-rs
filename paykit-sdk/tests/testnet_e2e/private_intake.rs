@@ -10,8 +10,8 @@ use std::{
 use async_trait::async_trait;
 use paykit_sdk::{
     load_encrypted_link_state, storage::StorageTransactionCallback, InMemoryStorage,
-    LinkedPeerState, PaykitSdk, PaykitSdkConfig, PrivateIntakeConfig, PrivateIntakeTransportState,
-    PubkyPublicKey, Result, StorageAdapter,
+    LinkedPeerState, PaykitSdk, PaykitSdkConfig, PrivateIntakeConfig, PrivateIntakeSupervisor,
+    PrivateIntakeTransportState, PubkyPublicKey, Result, StorageAdapter,
 };
 
 use crate::harness::{
@@ -128,6 +128,25 @@ async fn wait_for_buffered(
             .map_or(0, |state| state.buffered_packets.len());
         panic!("private intake should durably buffer expected packets: expected {count}, got {buffered}");
     }
+}
+
+async fn wait_for_caught_up(
+    supervisor: &PrivateIntakeSupervisor,
+    peer: &PubkyPublicKey,
+    expectation: &str,
+) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if supervisor.health().await.peers.get(peer)
+                == Some(&PrivateIntakeTransportState::CaughtUp)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect(expectation);
 }
 
 async fn advance_handshake_from_intake_after_restart(
@@ -600,18 +619,12 @@ async fn test_sign_out_and_stop_finish_with_healthy_private_intake_supervisor() 
         .start_private_intake(PrivateIntakeConfig::new(1).unwrap())
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if supervisor.health().await.peers.get(&pair.bob.public_key)
-                == Some(&PrivateIntakeTransportState::CaughtUp)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("private intake stream should become healthy");
+    wait_for_caught_up(
+        &supervisor,
+        &pair.bob.public_key,
+        "private intake stream should become healthy",
+    )
+    .await;
 
     tokio::time::timeout(Duration::from_secs(5), sdk.sign_out())
         .await
@@ -636,18 +649,12 @@ async fn test_new_link_re_resolves_running_private_intake_topology_immediately()
         .await
         .unwrap();
 
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if supervisor.health().await.peers.get(&pair.bob.public_key)
-                == Some(&PrivateIntakeTransportState::CaughtUp)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("initial private intake group should be running");
+    wait_for_caught_up(
+        &supervisor,
+        &pair.bob.public_key,
+        "initial private intake group should be running",
+    )
+    .await;
     let charlie = TestUser::sign_up_with_app(&pair._testnet, app_id("wallet")).await;
     sdk.initiate_link_with_peer(charlie.public_key.clone())
         .await
@@ -893,6 +900,190 @@ async fn test_buffered_receive_retention_refusal_keeps_packet_and_checkpoint() {
     assert_eq!(
         after.private_intake_peers[&pair.bob.public_key].buffered_packets,
         before.private_intake_peers[&pair.bob.public_key].buffered_packets
+    );
+    supervisor.stop().await;
+}
+
+/// Guards #435: a packet published while intake is connected must arrive
+/// through the live event stream. The healthy audit interval is maxed so the
+/// only audits in the test window are the startup audit and the first jittered
+/// in-stream audit, both of which finish before the packet is published. The
+/// group must still be `CaughtUp` at publish time; a failed subscribe would
+/// have moved it to `Stale` or `Unsupported`. Only stream delivery records an
+/// event cursor on the buffered packet, and that cursor must be newer than the
+/// last event intake handled before the publish. That baseline cursor must
+/// exist: the first subscribe has no cursor, so it replays Bob's Encrypted Link
+/// Handshake files under the private directory, and intake stores the cursor of
+/// those events. So the fetch was triggered by a stream event recorded after
+/// that point, not by an audit or by a replayed earlier event.
+#[tokio::test]
+async fn test_private_intake_buffers_new_packet_from_live_event_stream() {
+    let pair = linked_two_party().await;
+    let sdk = Arc::new(PaykitSdk::new(
+        pair.alice.storage.clone(),
+        TestnetSessionProvider::new(pair.alice.access.clone()),
+        pair.alice.adapter.clone(),
+        PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+    ));
+    let mut config = PrivateIntakeConfig::new(1).unwrap();
+    config.healthy_audit_interval = Duration::from_secs(60 * 60);
+    let supervisor = sdk.start_private_intake(config).await.unwrap();
+    wait_for_caught_up(
+        &supervisor,
+        &pair.bob.public_key,
+        "startup audit should catch up before the live packet is published",
+    )
+    .await;
+    // Outlast the first in-stream audit, which fires after at most five
+    // seconds of jitter.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    assert_eq!(
+        supervisor.health().await.peers.get(&pair.bob.public_key),
+        Some(&PrivateIntakeTransportState::CaughtUp),
+        "private intake stream must still be connected before the live packet is published"
+    );
+    let baseline_cursor = pair
+        .alice
+        .storage
+        .snapshot()
+        .unwrap()
+        .private_intake_cursors
+        .get(&pair.bob.public_key)
+        .cloned()
+        .expect("startup replay should have advanced the private intake cursor before the publish");
+
+    publish_private_lists(&pair.bob, &pair.alice, 1).await;
+
+    wait_for_buffered(&pair.alice.storage, &pair.bob.public_key, 1).await;
+    let state = pair.alice.storage.snapshot().unwrap();
+    let buffered = &state.private_intake_peers[&pair.bob.public_key].buffered_packets;
+    assert_eq!(buffered.len(), 1);
+    let source_cursor = buffered[0]
+        .source_cursor
+        .as_ref()
+        .expect("packet must arrive through the live event stream, not an audit");
+    assert_eq!(source_cursor.subscribed_user, pair.bob.public_key);
+    assert!(
+        source_cursor.event_id > baseline_cursor.event_id,
+        "packet must come from a stream event newer than the pre-publish cursor"
+    );
+    assert_eq!(source_cursor.homeserver, baseline_cursor.homeserver);
+    supervisor.stop().await;
+}
+
+/// Build a path under the private directory with the homeserver's maximum
+/// storage path length (pubky-common `MAX_STORAGE_PATH_TOTAL_LENGTH`), split
+/// into segments of at most `MAX_STORAGE_PATH_SEGMENT_LENGTH` bytes. Its PUT
+/// event is the largest event a homeserver can send for this directory.
+fn max_length_private_path() -> String {
+    use pubky_common::storage_path::{
+        MAX_STORAGE_PATH_SEGMENT_LENGTH as MAX_SEGMENT_BYTES,
+        MAX_STORAGE_PATH_TOTAL_LENGTH as MAX_STORAGE_PATH_BYTES,
+    };
+    let mut path = format!("{}/", paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX);
+    loop {
+        let remaining = MAX_STORAGE_PATH_BYTES - path.len();
+        if remaining <= MAX_SEGMENT_BYTES {
+            path.push_str(&"a".repeat(remaining));
+            break;
+        }
+        path.push_str(&"a".repeat(MAX_SEGMENT_BYTES));
+        path.push('/');
+    }
+    assert_eq!(path.len(), MAX_STORAGE_PATH_BYTES);
+    path
+}
+
+/// Guards the `max_event_bytes` floor: with the smallest accepted limit, the
+/// stream must deliver the largest event a homeserver can send under the
+/// private directory and stay connected. A limit below that event's size ends
+/// the stream on it, the stored cursor never moves past it, and every
+/// reconnect fails the same way, so new packets wait for audits.
+#[tokio::test]
+async fn test_private_intake_stream_survives_largest_private_event() {
+    let pair = linked_two_party().await;
+    let sdk = Arc::new(PaykitSdk::new(
+        pair.alice.storage.clone(),
+        TestnetSessionProvider::new(pair.alice.access.clone()),
+        pair.alice.adapter.clone(),
+        PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+    ));
+    let mut config = PrivateIntakeConfig::new(1).unwrap();
+    config.healthy_audit_interval = Duration::from_secs(60 * 60);
+    config.max_event_bytes = 2048;
+    let supervisor = sdk.start_private_intake(config).await.unwrap();
+    wait_for_caught_up(
+        &supervisor,
+        &pair.bob.public_key,
+        "startup audit should catch up before the largest event is published",
+    )
+    .await;
+    // Outlast the first in-stream audit, which fires after at most five
+    // seconds of jitter.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    assert_eq!(
+        supervisor.health().await.peers.get(&pair.bob.public_key),
+        Some(&PrivateIntakeTransportState::CaughtUp),
+        "private intake stream must still be connected before the largest event"
+    );
+    let intake_cursor = |storage: &InMemoryStorage| {
+        storage
+            .snapshot()
+            .unwrap()
+            .private_intake_cursors
+            .get(&pair.bob.public_key)
+            .cloned()
+    };
+    let baseline_cursor = intake_cursor(&pair.alice.storage)
+        .expect("startup replay should have advanced the private intake cursor");
+
+    pair.bob
+        .access
+        .session
+        .storage()
+        .put(max_length_private_path(), b"x".to_vec())
+        .await
+        .unwrap();
+
+    // The long-path event routes to Bob, finds his next expected slot absent,
+    // and advances the cursor. A stream that ended on the event never does.
+    let largest_event_cursor = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(cursor) = intake_cursor(&pair.alice.storage) {
+                if cursor.event_id > baseline_cursor.event_id {
+                    return cursor;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("private intake stream should deliver the largest private event");
+    assert_eq!(
+        supervisor.health().await.peers.get(&pair.bob.public_key),
+        Some(&PrivateIntakeTransportState::CaughtUp),
+        "private intake stream must stay connected after the largest event"
+    );
+
+    publish_private_lists(&pair.bob, &pair.alice, 1).await;
+
+    wait_for_buffered(&pair.alice.storage, &pair.bob.public_key, 1).await;
+    let state = pair.alice.storage.snapshot().unwrap();
+    let buffered = &state.private_intake_peers[&pair.bob.public_key].buffered_packets;
+    assert_eq!(buffered.len(), 1);
+    let source_cursor = buffered[0]
+        .source_cursor
+        .as_ref()
+        .expect("packet must arrive through the live event stream, not an audit");
+    assert_eq!(source_cursor.subscribed_user, pair.bob.public_key);
+    assert!(
+        source_cursor.event_id > largest_event_cursor.event_id,
+        "packet must come from a stream event after the largest event"
+    );
+    assert_ne!(
+        supervisor.health().await.peers.get(&pair.bob.public_key),
+        Some(&PrivateIntakeTransportState::Stale),
+        "private intake stream must not fall back to audits"
     );
     supervisor.stop().await;
 }
