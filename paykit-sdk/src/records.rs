@@ -82,6 +82,9 @@ pub(crate) struct KeptMessage {
     /// The signed answer a two-reference end matched before its permanent record was placed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) ended_acceptance: Option<Box<KeptMessage>>,
+    /// This held acceptance already reported its verified loss boundary to the host.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) loss_reported: bool,
 }
 
 /// The order the inbox accepted a kept message in (Paykit spec 8.1): by acceptance time,
@@ -148,6 +151,7 @@ impl KeptMessage {
             pending_source: None,
             pending_create: None,
             ended_acceptance: None,
+            loss_reported: false,
         }
     }
 
@@ -163,6 +167,7 @@ impl KeptMessage {
             pending_source: None,
             pending_create: None,
             ended_acceptance: None,
+            loss_reported: false,
         }
     }
 
@@ -207,6 +212,7 @@ impl KeptMessage {
             pending_source: None,
             pending_create: None,
             ended_acceptance: None,
+            loss_reported: false,
         }
     }
 
@@ -279,6 +285,12 @@ impl KeptMessage {
     /// 5.2). A kept message that no longer reads is a corrupt store.
     pub(crate) fn stored(&self, recipient: &[u8; 32]) -> Result<StoredMessage> {
         let message = self.verified(recipient)?;
+        if self.loss_reported
+            && (self.position().is_none()
+                || !matches!(message.body(), paykit_lib::Body::AllowanceAcceptance(_)))
+        {
+            return Err(PaykitError::corrupt());
+        }
         if let Some(accepted) = &self.ended_acceptance {
             if accepted.ended_acceptance.is_some()
                 || accepted.pending_source.is_none()
@@ -989,7 +1001,20 @@ mod own_message_tests {
         assert!(pending.contains("message: KeptMessage::of(&q)"));
         assert!(pending.contains("self.answer_writes(&pending, &q, delete)"));
         assert!(pending.contains("batch = batch.entry(operation)"));
-        assert!(pending.contains("self.submit(batch.queue(reply))"));
+        let (_, submission) = pending
+            .split_once("if is_fenced { batch } else { batch.queue(reply) }")
+            .unwrap();
+        assert!(submission.contains("self.submit(batch)"));
+        // The generated loss withdrawal is owed before submission. Its signed bytes
+        // may enter the outbox only after the exact applied deletion is protected.
+        assert!(pending.contains("self.prepare_loss_settlement("));
+        let recovery = body(
+            text("allowances/pending.rs"),
+            "recover_pending_applications",
+        );
+        let (_, capture) = recovery.split_once("self.capture_loss_deletion(").unwrap();
+        let (_, release) = capture.split_once("&[protected]").unwrap();
+        assert!(release.contains("self.app.queue_stored(msg.plaintext())"));
         let withdrawal = body(
             text("allowances/original/withdrawal.rs"),
             "withdraw_rejected_proposal<'a>",

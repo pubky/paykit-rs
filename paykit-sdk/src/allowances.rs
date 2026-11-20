@@ -292,6 +292,8 @@ pub(crate) enum EndCause {
     Automatic,
     /// A restore or late acceptance found the closed original proposal.
     RetiredProposal,
+    /// The original proposer withdrew its verified live write after a declared loss.
+    ProviderLoss,
 }
 
 impl EndCause {
@@ -299,7 +301,7 @@ impl EndCause {
         match self {
             Self::User => true,
             Self::Automatic => has_acceptance,
-            Self::RetiredProposal => !has_acceptance,
+            Self::RetiredProposal | Self::ProviderLoss => !has_acceptance,
         }
     }
 }
@@ -408,6 +410,18 @@ pub(crate) fn may_deliver_end(
     let Some(origin) = fact.filter(|origin| origin.matches(message, delivery.hash())) else {
         return Ok(false);
     };
+    if origin.cause == EndCause::ProviderLoss {
+        let Some(original) = state::delivery_get::<OriginalAllowance>(
+            delivery,
+            &key::original_allowance(&origin.record),
+        )?
+        else {
+            return Ok(false);
+        };
+        if !original.owes_loss_withdrawal(delivery.hash())? {
+            return Ok(false);
+        }
+    }
     if origin.cause == EndCause::User
         && delivery.origin() == DeliveryOrigin::Original
         && !delivery.resend()
@@ -710,6 +724,36 @@ pub(crate) fn holds_pending_answer(
     }))
 }
 
+/// The receive step can retire a reply before normal placement. A payer proposal
+/// from an earlier generation may still need a host notice once the SDK checks
+/// the signed loss boundary. Retaining Q here grants no right to change a record.
+fn keep_earlier_acceptance_for_report(
+    cx: &mut ReceiveContext<'_>,
+    target: &RecordTarget,
+    q: &StoredMessage,
+    position: pubky_switch_client::app::FeedPosition,
+) -> std::result::Result<(), Fail> {
+    if matches!(q.body(), Body::AllowanceAcceptance(_)) {
+        let key = key::original_allowance(&cx.record_key(target)?);
+        let report = if let Some(original) = state::cx_get::<OriginalAllowance>(cx, &key)? {
+            original
+                .awaits_loss_report(q, position.generation)
+                .map_err(|_| Fail::corrupt())?
+        } else {
+            let id = named_allowance(q.body()).ok_or_else(Fail::corrupt)?;
+            let pending = allowance_record_target(Collection::AllowanceProposals, &q.sender(), id);
+            let key = cx.record_key(&pending)?;
+            cx.record(&pending)?.and_then(|held| replies::original_for(&held, &pending, &key, &cx.identity(), q))
+                .is_some_and(|held| matches!(held.proposal().body(), Body::AllowanceProposal(p) if p.proposer_role == ProposerRole::Allower && p.allower_generation < position.generation)
+                    && held.proposal().sender() == cx.identity() && held.proposal().cert().app_id() == cx.app_id())
+        };
+        if report {
+            keep_answer(cx, target, q, position, true, None)?;
+        }
+    }
+    Ok(())
+}
+
 /// The receive step of a proposal, an acceptance, a rejection or an end that passed check
 /// 10, at an app holding `paykit_allowance` (module docs). The entry of a proposal or an answer is
 /// held while the record waits for its scope key or the copy of `allowances` isn't listed
@@ -746,6 +790,7 @@ pub(crate) fn receive_effect(
             }
         } else if is_allowance_response(stored.body()) {
             if replies::before_retirement(cx, &pending, position)? {
+                keep_earlier_acceptance_for_report(cx, &target, stored, position)?;
                 return receive::note_peer(cx, &sender, stored);
             }
             if let Some(held) = pending_record {
@@ -760,6 +805,7 @@ pub(crate) fn receive_effect(
                         return receive::note_peer(cx, &sender, stored);
                     }
                     replies::PendingReply::Stopped => {
+                        keep_earlier_acceptance_for_report(cx, &target, stored, position)?;
                         return receive::note_peer(cx, &sender, stored);
                     }
                 }
@@ -1173,6 +1219,43 @@ fn keep_end(
     let content = cx.record(target)?.map(|held| held.content);
     let mut evidence = KeptMessage::taken_at(stored, position);
     let record_key = cx.record_key(target)?;
+    if refs.len() == 2 && content.is_none() {
+        let pending =
+            allowance_record_target(Collection::AllowanceProposals, &sender, allowance_id);
+        let key = cx.record_key(&pending)?;
+        if let Some(mut original) =
+            state::cx_get::<OriginalAllowance>(cx, &key::original_allowance(&record_key))?
+        {
+            let writes = match cx.record(&pending)? {
+                Some(live)
+                    if live.content == RecordContent::Deleted
+                        && replies::qualified_at(&live, &pending, &key)
+                        && replies::precedes_reply(live.version, position, |a, b| {
+                            cx.received_order(a, b)
+                        }) =>
+                {
+                    original.finish_loss_return(stored, &record_key, live.version)
+                }
+                None => original.keep_loss_return(stored, &evidence, &record_key, |d| {
+                    cx.received_order(
+                        pubky_switch_client::app::FeedPosition {
+                            generation: d.generation,
+                            seq: d.version,
+                        },
+                        position,
+                    )
+                }),
+                _ => Ok(None),
+            }
+            .map_err(|_| Fail::corrupt())?;
+            if let Some(writes) = writes {
+                for write in writes {
+                    receive::keep_local(cx, write);
+                }
+                return receive::note_peer(cx, &sender, stored);
+            }
+        }
+    }
     let ends = state::cx_scan::<KeptMessage>(cx, &key::allowance_ends(&record_key))?;
     if refs.len() == 2
         && !receive::holds_record(content.as_ref())
@@ -1602,10 +1685,11 @@ impl Paykit {
             RecordRead::Fresh(_) => {
                 let applied = self.app.read_record_application(&target).await?;
                 Ok(applied
-                    .is_some_and(|(r, revision, _)| {
-                        revision == deletion
-                            && replies::qualified_at(&r, &target, &key)
-                            && r.content == pubky_switch_client::app::RecordContent::Deleted
+                    .is_some_and(|current| {
+                        current.application == deletion
+                            && replies::qualified_at(&current.record, &target, &key)
+                            && current.record.content
+                                == pubky_switch_client::app::RecordContent::Deleted
                     })
                     .then_some(Condition::RecordCurrent {
                         key,
@@ -1794,7 +1878,15 @@ impl Paykit {
             .queue(signed)
             .locals(tx.into_writes());
         let delivery = match Box::pin(self.submit(batch)).await {
-            Ok(_) => Box::pin(self.delivered(&msg_id)).await?,
+            Ok(submitted) => {
+                if role == AllowanceRole::Allower {
+                    let [proof] = submitted.proofs.as_slice() else {
+                        return Err(PaykitError::corrupt());
+                    };
+                    Box::pin(self.keep_original_create(&record_key, proof)).await?;
+                }
+                Box::pin(self.delivered(&msg_id)).await?
+            }
             Err(error) => match error.kept_batch() {
                 Some(batch_id) => MessageDelivery::Kept { batch_id },
                 None => return Err(error.into()),
@@ -1855,6 +1947,27 @@ impl Paykit {
             }
             Box::pin(self.queue_stored_again(end)).await?;
             Box::pin(self.local_delete(&mark)).await?;
+        }
+        // The reply placement phase can create a proved withdrawal. Deliver it
+        // here, after that read and its conditional write have finished.
+        for queued in self
+            .app
+            .queued_messages(crate::protocol::BACKUP_NAME)
+            .await?
+        {
+            if queued.kind == "paykit.allowance_end"
+                && queued.kept_batch.is_none()
+                && !queued.resend
+            {
+                let origin = self
+                    .local_get::<EndOrigin>(&key::end_origin(&queued.msg_id))
+                    .await?;
+                if origin.is_some_and(|o| {
+                    o.cause == EndCause::ProviderLoss && o.message_hash == queued.hash
+                }) {
+                    Box::pin(self.delivered(&queued.msg_id)).await?;
+                }
+            }
         }
         Ok(())
     }
@@ -2027,7 +2140,7 @@ impl Paykit {
             return Ok(msg_id);
         }
         if let Some((selected, _)) = Box::pin(self.pending_by_allowance_key(record)).await? {
-            return Box::pin(self.answer_pending(&selected, kind, execution)).await;
+            return Box::pin(self.answer_pending(&selected, kind, execution, None)).await;
         }
         let mut tries = 0;
         loop {
@@ -2641,6 +2754,17 @@ impl Paykit {
                             }
                             continue;
                         }
+                    }
+                    if end.message().refs.len() == 2
+                        && Box::pin(self.finish_held_loss_return(
+                            &end,
+                            &record,
+                            &evidence,
+                            Some(&stop),
+                        ))
+                        .await?
+                    {
+                        continue;
                     }
                     if let Some(source) = evidence
                         .ended_acceptance
@@ -3485,10 +3609,8 @@ mod tests {
         // In addition to pending writes, the accepting account prepares its permanent
         // Allowance and the payer prepares its original spending ledger.
         assert_eq!(pending.matches(".record_op(").count(), 6);
-        assert_eq!(
-            pending.matches("self.submit(batch.queue(reply))").count(),
-            1
-        );
+        assert_eq!(pending.matches("batch.queue(reply)").count(), 1);
+        assert!(pending.contains("if is_fenced { batch } else { batch.queue(reply) }"));
     }
 
     #[test]

@@ -8,7 +8,7 @@ use paykit_sdk::{
     AllowanceRole, AllowanceStatus, AppScopes, Paykit, PaykitError, Refusal, RequestedScopes,
     UserConfirmed,
 };
-use pubky_switch_client::app::{AppEvent, LocalWrite, OpBatch, OutgoingMessage};
+use pubky_switch_client::app::{AppEvent, LocalWrite, OpBatch, OutgoingMessage, RecordApplication};
 use pubky_switch_client::clock::Clock;
 use serde_json::{json, Value};
 
@@ -419,6 +419,14 @@ async fn acceptance_after_generation_change(change: AcceptanceGeneration, propos
         .record_key(&allowances_target(&w.alice_id(), &offer.allowance_id))
         .unwrap();
     let selected = Box::pin(pending_at(&payer, &public)).await;
+    let pending = pending_key(&payer, &w.bob_id(), &offer.allowance_id);
+    let original_version = payer
+        .app()
+        .shared_record(&pending)
+        .await
+        .unwrap()
+        .unwrap()
+        .version;
     let paykit_lib::Body::AllowanceProposal(body) = selected.proposal().body() else {
         panic!("proposal");
     };
@@ -529,10 +537,45 @@ async fn acceptance_after_generation_change(change: AcceptanceGeneration, propos
             .count()
     };
     if !eligible {
-        assert_eq!(
-            payer.allowance(&public).await.unwrap().status,
-            AllowanceStatus::Proposed
-        );
+        if proposer == AllowanceRole::Allower {
+            assert!(matches!(
+                payer.allowance(&public).await.unwrap_err().refusal(),
+                Some(Refusal::NotFound)
+            ));
+            assert_eq!(
+                seller.allowance(&mirror).await.unwrap().status,
+                AllowanceStatus::Ended
+            );
+            let deletions: Vec<_> = applied
+                .iter()
+                .filter_map(|op| match &op.body().kind {
+                    OpKind::RecordPut(put)
+                        if put.key == pending && put.value_sealed.looks_like_delete() =>
+                    {
+                        Some((op, put))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let [(op, deletion)] = deletions.as_slice() else {
+                panic!("expected one applied pending deletion");
+            };
+            let expected = match change {
+                AcceptanceGeneration::AtLoss => original_version,
+                AcceptanceGeneration::BeforeLoss => RecordVersion::new(original_generation, 1),
+                AcceptanceGeneration::OrderlyAdvance => unreachable!(),
+            };
+            assert_eq!(deletion.expected_version, expected);
+            assert!(op.body().conditions.iter().any(|condition| matches!(condition,
+                pubky_switch_core::ops::Condition::RecordCurrent { key, revision, deleted: false }
+                    if *key == pending && revision.generation == payer.app().own_identity().generation()
+            )));
+        } else {
+            assert_eq!(
+                payer.allowance(&public).await.unwrap().status,
+                AllowanceStatus::Proposed
+            );
+        }
         assert_eq!(writes(public), 0);
         assert_eq!(writes(ledger_key), 0);
         assert!(payer.app().shared_record(&public).await.unwrap().is_none());
@@ -559,7 +602,11 @@ async fn acceptance_after_generation_change(change: AcceptanceGeneration, propos
         assert_eq!(accepted.proposal.hash(), selected.proposal().hash());
         let q = accepted.response.as_ref().unwrap();
         assert_eq!(q.message().refs, [selected.proposal().hash()]);
-        let (initial, _, evidence) = payer
+        let RecordApplication {
+            record: initial,
+            evidence,
+            ..
+        } = payer
             .app_mut()
             .read_record_application(&ledger)
             .await
@@ -12903,6 +12950,200 @@ async fn test_applied_withdrawal_without_the_previous_service_key_stays_held() {
 }
 
 #[tokio::test]
+async fn test_loss_withdrawal_uses_the_service_that_applied_its_guarded_deletion() {
+    Box::pin(carried_loss_withdrawal(true)).await;
+}
+
+#[tokio::test]
+async fn test_loss_withdrawal_waits_for_the_service_key_of_its_selected_proposal() {
+    Box::pin(carried_loss_withdrawal(false)).await;
+}
+
+async fn carried_loss_withdrawal(keep_key: bool) {
+    use pubky_switch_client::app::RecordContent;
+    use pubky_switch_client::testing::{Fault, SWITCH_ORIGIN};
+    use pubky_switch_core::ops::{Condition, SignedOp};
+    use pubky_switch_core::records::{Inbox, ServiceKeyEntry};
+
+    let w = World::new();
+    let store = crate::common::store();
+    let mut payer = Box::pin(alice_on(
+        &w,
+        "wallet",
+        AppScopes::new().allowance_execute().build().unwrap(),
+        store.clone(),
+    ))
+    .await;
+    let mut seller = Box::pin(shop(&w)).await;
+    let offer =
+        Box::pin(payer.propose_executable_allowance(w.bob_id(), terms(), UserConfirmed::new()))
+            .await
+            .unwrap();
+    assert_eq!(
+        Box::pin(taken(&mut seller, "paykit.allowance_proposal")).await,
+        1
+    );
+    let mirror = seller.allowances().await.unwrap()[0].record;
+    let old = payer.app().own_identity().generation();
+    let target = pending_target(&w.bob_id(), &offer.allowance_id);
+    let pending = payer.app().record_key(&target).unwrap();
+    let RecordApplication {
+        application: original,
+        ..
+    } = payer
+        .app_mut()
+        .read_record_application(&target)
+        .await
+        .unwrap()
+        .unwrap();
+    let recovered = crate::provider_loss::declare_loss(&w);
+    Box::pin(crate::provider_loss::follow_loss(&mut payer)).await;
+    let prep = payer.app().own_identity().generation();
+    assert_eq!(payer.app().own_identity().body().recovery_from, Some(old));
+    payer.app_mut().invite(&w.bob_id()).await.unwrap();
+    let guard = payer.app().record_condition(&pending).await.unwrap();
+    assert!(
+        matches!(&guard, Condition::RecordCurrent {revision, deleted:false,..} if revision.generation == prep && revision.item_hash == original.item_hash)
+    );
+    crate::common::finish_listing(&mut payer).await;
+    seller
+        .app_mut()
+        .identity_of(&w.alice_id(), true)
+        .await
+        .unwrap();
+    let q = Box::pin(seller.accept_allowance(&mirror)).await.unwrap();
+    if !matches!(
+        seller.message_delivery(&q).await.unwrap(),
+        Some(paykit_sdk::MessageDelivery::Accepted { .. })
+    ) {
+        w.clock.advance_ms(pubky_switch_client::app::DOC_CACHE_MS);
+        Box::pin(seller.flush()).await.unwrap();
+    }
+    assert!(matches!(
+        seller.message_delivery(&q).await.unwrap(),
+        Some(paykit_sdk::MessageDelivery::Accepted { .. })
+    ));
+    let read = Box::pin(payer.app_mut().receive(None)).await.unwrap();
+    assert!(
+        read.events
+            .iter()
+            .any(|e| matches!(e, AppEvent::MessageReceived{msg_id,..} if msg_id == &q)),
+        "{read:?}"
+    );
+    recovered.fail_next(Fault::Unreachable {
+        path: "ops".into(),
+        after: 0,
+    });
+    Box::pin(payer.receive(None)).await.unwrap();
+    let (withdrawal, _) = Box::pin(prepared_answer(&payer)).await;
+    assert!(payer.app().delivery(&withdrawal).await.unwrap().is_none());
+    let app_id = payer.app_id();
+    drop(payer);
+
+    // An in-place service-key change preserves the selected upload and the chain.
+    let next = recovered.change_key_into([74; 32]);
+    w.router.add_switch(SWITCH_ORIGIN, &next);
+    let advance = w
+        .alice
+        .sign_next(|doc| {
+            if keep_key {
+                doc.service_keys.push(ServiceKeyEntry {
+                    generation: prep,
+                    key: recovered.service_key(),
+                });
+            }
+            doc.generation += 1;
+            doc.inbox = Inbox::new(SWITCH_ORIGIN, next.service_key());
+        })
+        .unwrap();
+    next.deliver_identity(&advance).unwrap();
+    let mut payer = Box::pin(Paykit::load(
+        w.env(&w.alice, store.clone()),
+        Default::default(),
+        app_id,
+        w.rail.clone(),
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    payer.app_mut().refresh_identity().await.unwrap();
+    for _ in 0..4 {
+        Box::pin(payer.receive(None)).await.unwrap();
+    }
+    let RecordApplication {
+        record: closed,
+        application: result,
+        evidence: deletion,
+        ..
+    } = payer
+        .app_mut()
+        .read_record_application(&target)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(closed.authenticated);
+    assert_eq!(closed.content, RecordContent::Deleted);
+    assert_eq!(result.generation, prep + 1);
+    let signed =
+        SignedOp::verify_with_cert(&deletion.op, payer.app().cert(), &w.alice_id()).unwrap();
+    assert_eq!(signed.body().generation, result.generation);
+    assert!(signed.body().conditions.contains(&guard));
+    assert!(deletion.proof.is_some());
+    if !keep_key {
+        assert!(Box::pin(received_originals(&mut seller, &[&withdrawal]))
+            .await
+            .is_empty());
+        assert_eq!(Box::pin(prepared_answer(&payer)).await.0, withdrawal);
+        let with_key = w
+            .alice
+            .sign_next(|doc| {
+                doc.service_keys.push(ServiceKeyEntry {
+                    generation: prep,
+                    key: recovered.service_key(),
+                })
+            })
+            .unwrap();
+        next.deliver_identity(&with_key).unwrap();
+        payer.app_mut().refresh_identity().await.unwrap();
+    }
+    Box::pin(payer.flush()).await.unwrap();
+    assert_eq!(
+        Box::pin(received_originals(&mut seller, &[&withdrawal])).await,
+        std::slice::from_ref(&withdrawal)
+    );
+    assert_eq!(
+        seller.allowance(&mirror).await.unwrap().status,
+        AllowanceStatus::Ended
+    );
+    drop(payer);
+    let mut payer = Box::pin(Paykit::load(
+        w.env(&w.alice, store),
+        Default::default(),
+        app_id,
+        w.rail.clone(),
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    Box::pin(payer.receive(None)).await.unwrap();
+    Box::pin(payer.flush()).await.unwrap();
+    assert!(Box::pin(received_originals(&mut seller, &[&withdrawal]))
+        .await
+        .is_empty());
+    assert!(payer
+        .notices()
+        .await
+        .unwrap()
+        .iter()
+        .any(|n| n.kind == paykit_sdk::NoticeKind::AllowanceWithdrawalConfirmed));
+    assert!(payer
+        .resume_allowance_executor(&offer.record)
+        .await
+        .is_err());
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
 async fn test_kept_rejection_delivers_after_a_service_key_change_preserves_its_selected_proposal() {
     Box::pin(kept_rejection_across_generations(false)).await;
 }
@@ -13911,7 +14152,9 @@ async fn test_original_payer_reopens_the_selected_proposal_and_sends_the_same_pr
     let (_, record) = Box::pin(proposed(&w, &mut shop, &mut payer)).await;
     let proposal = Box::pin(pending_at(&payer, &record)).await;
     let target = pending_target(&w.bob_id(), proposal.allowance_id());
-    let (_, _, selected) = payer
+    let RecordApplication {
+        evidence: selected, ..
+    } = payer
         .app_mut()
         .read_record_application(&target)
         .await
@@ -13966,7 +14209,9 @@ async fn test_original_payer_reopens_the_selected_proposal_and_sends_the_same_pr
             pubky_switch_client::app::Collection::new(family.name(), family.fixed_policy()),
             &paykit_lib::derive::natural_key::allowance(&w.bob_id(), proposal.allowance_id()),
         );
-        let (_, _, applied) = payer
+        let RecordApplication {
+            evidence: applied, ..
+        } = payer
             .app_mut()
             .read_record_application(&target)
             .await
@@ -14719,7 +14964,9 @@ async fn test_pending_unanswered_acceptance_after_restore_observes_the_original_
             &paykit_lib::derive::natural_key::allowance(&w.bob_id(), &view.allowance_id),
         )
     };
-    let (_, _, selected) = alice
+    let RecordApplication {
+        evidence: selected, ..
+    } = alice
         .app_mut()
         .read_record_application(&target(Collection::AllowanceProposals))
         .await
