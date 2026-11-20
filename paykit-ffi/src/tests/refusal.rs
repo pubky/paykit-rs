@@ -1,4 +1,4 @@
-use crate::{PaymentRefusal, RefusalKind, SwitchRefusal, WalletError, WalletFailureKind};
+use crate::{PaymentRefusal, RefusalKind, SwitchRefusalKind, WalletError, WalletFailureKind};
 use paykit_sdk::{PaykitError, Refusal};
 use pubky_switch_client::app::{AppError, Refusal as AppRefusal};
 
@@ -81,15 +81,15 @@ fn test_kept_switch_refusals_retain_the_original_batch_and_recovery_generation()
         );
         assert_eq!(kept_batch.as_deref(), Some([7; 16].as_slice()));
         assert!(matches!(
-            switch_refusal,
-            Some(SwitchRefusal::RecoveryRequired { generation: 13 })
+            switch_refusal.unwrap().kind(),
+            SwitchRefusalKind::RecoveryRequired { generation: 13 }
         ));
     }
     assert!(matches!(
         WalletError::from(AppError::Refused(AppRefusal::Gone)),
         WalletError::Operation {
-            switch_refusal: Some(SwitchRefusal::Gone),
+            switch_refusal: Some(refusal),
             ..
-        }
+        } if matches!(refusal.kind(), SwitchRefusalKind::Gone)
     ));
 }

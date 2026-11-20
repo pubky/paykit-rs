@@ -1,8 +1,20 @@
 use pubky_switch_client::app::{Refusal, WontDeliver};
 
 /// A Switch rule that refused the operation, including a refusal beneath a retained batch.
-#[derive(Clone, Debug, uniffi::Enum)]
-pub enum SwitchRefusal {
+#[derive(Debug, uniffi::Object)]
+pub struct SwitchRefusal(pub(crate) Refusal);
+
+#[uniffi::export]
+impl SwitchRefusal {
+    /// Read the rule and its original evidence.
+    pub fn kind(&self) -> SwitchRefusalKind {
+        (&self.0).into()
+    }
+}
+
+/// The Switch rule and the evidence required to act on it.
+#[derive(uniffi::Enum)]
+pub enum SwitchRefusalKind {
     /// The installation stopped on an alarm.
     Stopped,
     /// The installation left its identity or was removed.
@@ -60,7 +72,7 @@ pub enum SwitchRefusal {
     Unknown,
 }
 
-impl From<&Refusal> for SwitchRefusal {
+impl From<&Refusal> for SwitchRefusalKind {
     fn from(value: &Refusal) -> Self {
         match value {
             Refusal::Stopped => Self::Stopped,

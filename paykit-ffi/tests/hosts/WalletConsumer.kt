@@ -137,7 +137,8 @@ private suspend fun resumeRefusal(issuer: String, left: Boolean, request: Reques
                     check(refusal.attemptedFailure() == null)
                 }
             } catch (error: WalletException.Operation) {
-                check(left && error.kind == WalletFailureKind.CLIENT && error.switchRefusal is SwitchRefusal.Left)
+                check(left && error.kind == WalletFailureKind.CLIENT)
+                checkNotNull(error.switchRefusal).use { check(it.kind() is SwitchRefusalKind.Left) }
             }
             check(method.transfers == 0)
             wallet.shutdown()

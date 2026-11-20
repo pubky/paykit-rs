@@ -65,7 +65,7 @@ pub enum WalletError {
         /// The retained Switch batch ID, when available for later reconciliation.
         kept_batch: Option<Vec<u8>>,
         /// The Switch refusal, also when it stopped a retained or pending operation.
-        switch_refusal: Option<crate::SwitchRefusal>,
+        switch_refusal: Option<Arc<crate::SwitchRefusal>>,
     },
 }
 impl WalletError {
@@ -167,7 +167,7 @@ impl From<PaykitError> for WalletError {
                 .map(|code| code.as_str().into()),
             kept_batch: client.and_then(AppError::kept_batch).map(Vec::from),
             switch_refusal: client.and_then(|error| match error.unkept() {
-                AppError::Refused(refusal) => Some(refusal.into()),
+                AppError::Refused(refusal) => Some(Arc::new(crate::SwitchRefusal(refusal.clone()))),
                 _ => None,
             }),
         }

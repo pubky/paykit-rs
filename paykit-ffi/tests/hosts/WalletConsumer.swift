@@ -231,7 +231,7 @@ private func resumeRefusal(_ issuer: String, left: Bool, request: RequestId) asy
         guard case .identityUnavailable = refusal.kind() else { preconditionFailure("unexpected resume refusal") }
         precondition(refusal.attemptedFailure() == nil)
     } catch let WalletError.Operation(kind, _, _, _, refusal) {
-        guard left, kind == .client, case .left? = refusal else { preconditionFailure("unexpected Switch refusal") }
+        guard left, kind == .client, case .left? = refusal?.kind() else { preconditionFailure("unexpected Switch refusal") }
     }
     precondition(method.transferCount == 0)
     try await wallet.shutdown()
