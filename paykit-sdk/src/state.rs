@@ -1615,6 +1615,17 @@ impl Stored for crate::allowances::PreparedPendingReply {
         let id =
             crate::allowances::named_allowance(reply.body()).ok_or_else(PaykitError::corrupt)?;
         let target = crate::allowances::allowance_target(&self.peer, id);
+        if let Some(q) = &self.fenced_acceptance {
+            let q = q.stored(binder.identity())?;
+            if !matches!(reply.body(), Body::AllowanceEnd(_))
+                || !matches!(q.body(), Body::AllowanceAcceptance(a) if &a.allowance_id == id && a.executor_app_id.is_none())
+                || q.sender() != self.peer
+                || q.accepted_at().is_none()
+                || q.message().refs != reply.message().refs
+            {
+                return corrupt();
+            }
+        }
         if self.source.record_version().is_none()
             || reply.hash() != *hash
             || !self.seals.last().is_some_and(|s| s.looks_like_delete())

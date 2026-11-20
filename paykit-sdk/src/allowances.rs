@@ -292,6 +292,8 @@ pub(crate) enum EndCause {
     Automatic,
     /// A restore or late acceptance found the closed original proposal.
     RetiredProposal,
+    /// The original proposer withdrew its verified live write after a declared loss.
+    ProviderLoss,
 }
 
 impl EndCause {
@@ -299,7 +301,7 @@ impl EndCause {
         match self {
             Self::User => true,
             Self::Automatic => has_acceptance,
-            Self::RetiredProposal => !has_acceptance,
+            Self::RetiredProposal | Self::ProviderLoss => !has_acceptance,
         }
     }
 }
@@ -710,6 +712,29 @@ pub(crate) fn holds_pending_answer(
     }))
 }
 
+/// The receive step can retire a reply before normal placement. A payer proposal
+/// from an earlier generation may still need a host notice once the SDK checks
+/// the signed loss boundary. Retaining Q here grants no right to change a record.
+fn keep_earlier_acceptance_for_report(
+    cx: &mut ReceiveContext<'_>,
+    target: &RecordTarget,
+    q: &StoredMessage,
+    position: pubky_switch_client::app::FeedPosition,
+) -> std::result::Result<(), Fail> {
+    if matches!(q.body(), Body::AllowanceAcceptance(_)) {
+        let key = key::original_allowance(&cx.record_key(target)?);
+        if let Some(original) = state::cx_get::<OriginalAllowance>(cx, &key)? {
+            if original
+                .awaits_loss_report(q, position.generation)
+                .map_err(|_| Fail::corrupt())?
+            {
+                keep_answer(cx, target, q, position, true, None)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The receive step of a proposal, an acceptance, a rejection or an end that passed check
 /// 10, at an app holding `paykit_allowance` (module docs). The entry of a proposal or an answer is
 /// held while the record waits for its scope key or the copy of `allowances` isn't listed
@@ -746,6 +771,7 @@ pub(crate) fn receive_effect(
             }
         } else if is_allowance_response(stored.body()) {
             if replies::before_retirement(cx, &pending, position)? {
+                keep_earlier_acceptance_for_report(cx, &target, stored, position)?;
                 return receive::note_peer(cx, &sender, stored);
             }
             if let Some(held) = pending_record {
@@ -760,6 +786,7 @@ pub(crate) fn receive_effect(
                         return receive::note_peer(cx, &sender, stored);
                     }
                     replies::PendingReply::Stopped => {
+                        keep_earlier_acceptance_for_report(cx, &target, stored, position)?;
                         return receive::note_peer(cx, &sender, stored);
                     }
                 }
@@ -1794,7 +1821,15 @@ impl Paykit {
             .queue(signed)
             .locals(tx.into_writes());
         let delivery = match Box::pin(self.submit(batch)).await {
-            Ok(_) => Box::pin(self.delivered(&msg_id)).await?,
+            Ok(submitted) => {
+                if role == AllowanceRole::Allower {
+                    let [proof] = submitted.proofs.as_slice() else {
+                        return Err(PaykitError::corrupt());
+                    };
+                    Box::pin(self.keep_original_create(&record_key, proof)).await?;
+                }
+                Box::pin(self.delivered(&msg_id)).await?
+            }
             Err(error) => match error.kept_batch() {
                 Some(batch_id) => MessageDelivery::Kept { batch_id },
                 None => return Err(error.into()),
@@ -2027,7 +2062,7 @@ impl Paykit {
             return Ok(msg_id);
         }
         if let Some((selected, _)) = Box::pin(self.pending_by_allowance_key(record)).await? {
-            return Box::pin(self.answer_pending(&selected, kind, execution)).await;
+            return Box::pin(self.answer_pending(&selected, kind, execution, None)).await;
         }
         let mut tries = 0;
         loop {

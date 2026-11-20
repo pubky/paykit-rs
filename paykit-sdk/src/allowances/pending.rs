@@ -38,6 +38,25 @@ pub(crate) struct PreparedPendingReply {
     /// Only the Switch may carry an unanswered submission across a provider change.
     pub(crate) prepared_in: u64,
     pub(crate) seals: Vec<SealedValue>,
+    /// The received acceptance authorizing this generated pre-loss withdrawal.
+    pub(crate) fenced_acceptance: Option<KeptMessage>,
+}
+
+impl PreparedPendingReply {
+    pub(super) fn fenced_reply(&self, own: &[u8; 32]) -> Result<Option<[u8; 32]>> {
+        self.fenced_acceptance
+            .as_ref()
+            .map(|q| q.stored(own).map(|q| q.hash()))
+            .transpose()
+    }
+
+    pub(super) fn end_cause(&self) -> EndCause {
+        if self.fenced_acceptance.is_some() {
+            EndCause::ProviderLoss
+        } else {
+            EndCause::User
+        }
+    }
 }
 
 /// An unplaced signed proposal still belongs to the current pending lifetime
@@ -421,7 +440,9 @@ impl Paykit {
             .local_scan::<super::OriginalAllowance>(key::ORIGINAL_ALLOWANCES)
             .await?
         {
-            if approval.awaiting_application() {
+            if approval.awaiting_application()
+                || approval.awaiting_original_create(self.app.own_identity().generation())
+            {
                 approvals.push((record, approval));
             } else if allow_delivery && approval.withdrawal_owed() {
                 withdrawals.push((record, approval));
@@ -437,6 +458,10 @@ impl Paykit {
         let confirmed = self.confirmed_pending_applications().await?;
         for (record, mut approval) in approvals {
             let at = format!("{}{record}", key::ORIGINAL_ALLOWANCES);
+            if approval.awaiting_original_create(self.app.own_identity().generation()) {
+                self.recover_original_create(&at, &mut approval, &confirmed)
+                    .await?;
+            }
             if self
                 .capture_original_approval(&at, &mut approval, &confirmed)
                 .await?
@@ -626,6 +651,16 @@ impl Paykit {
         {
             return Err(not_current());
         }
+        if let Some(q) = &intent.fenced_acceptance {
+            let reply = q.stored(&self.identity())?;
+            if !self.allowance_end_send_permitted(&intent.peer).await?
+                || Box::pin(self.live_original_after_loss(&selected, pending.proposal(), &reply))
+                    .await?
+                    .is_none_or(|condition| !delete.0.contains(&condition))
+            {
+                return Err(not_current());
+            }
+        }
         let mut operations = self.answer_writes(&pending, &original, delete).await?;
         let mut retained = state::Tx::default();
         Box::pin(self.keep_original_selection(
@@ -749,6 +784,44 @@ impl Paykit {
         Ok(operations)
     }
 
+    /// Only the identical generated withdrawal may resume an already prepared decision.
+    pub(super) async fn withdraw_fenced_pending(
+        &mut self,
+        selected: &SharedRecord,
+        record: &[u8; 32],
+        acceptance: &StoredMessage,
+        condition: Condition,
+    ) -> Result<bool> {
+        let intents = self
+            .local_scan::<PreparedPendingReply>(&key::pending_replies(record))
+            .await?;
+        let id = match intents.as_slice() {
+            [] => Some(
+                Box::pin(self.answer_pending(
+                    selected,
+                    Kind::AllowanceEnd,
+                    None,
+                    Some((acceptance, condition)),
+                ))
+                .await?,
+            ),
+            [(_, intent)] if intent.fenced_reply(&self.identity())? == Some(acceptance.hash()) => {
+                Box::pin(self.resume_pending_answer(record, Kind::AllowanceEnd)).await?
+            }
+            _ => None,
+        };
+        let Some(id) = id else {
+            return Ok(false);
+        };
+        let Some(origin) = self.local_get::<EndOrigin>(&key::end_origin(&id)).await? else {
+            return Ok(false);
+        };
+        Ok(self
+            .local_get::<AppliedReply>(&key::applied_reply(&origin.message_hash))
+            .await?
+            .is_some())
+    }
+
     /// Open only the current pending value at the user's selected key, followed by its
     /// permanent record. The cached value supplies the natural key for the first read.
     pub(super) async fn answer_pending(
@@ -756,10 +829,17 @@ impl Paykit {
         selected: &SharedRecord,
         kind: Kind,
         execution: Option<crate::UserConfirmed>,
+        fenced: Option<(&StoredMessage, Condition)>,
     ) -> Result<String> {
         let own = self.identity();
         let (pending, permanent_key, delete) =
             Box::pin(self.checked_pending_answer(selected, kind)).await?;
+        if fenced
+            .as_ref()
+            .is_some_and(|(_, condition)| !delete.0.contains(condition))
+        {
+            return Err(not_current());
+        }
         let p = pending.proposal();
         let peer = pending.counterparty();
         let id = pending.allowance_id();
@@ -814,13 +894,24 @@ impl Paykit {
                 application,
                 source: selected.version.into(),
                 prepared_in: self.app.own_identity().generation(),
+                fenced_acceptance: fenced.as_ref().map(|(q, _)| KeptMessage::of(q)),
                 seals,
             },
         )?;
         if kind == Kind::AllowanceEnd {
             prepare.put(
                 &key::end_origin(&msg_id),
-                &EndOrigin::of(permanent_key, p, None, &q, EndCause::User)?,
+                &EndOrigin::of(
+                    permanent_key,
+                    p,
+                    None,
+                    &q,
+                    if fenced.is_some() {
+                        EndCause::ProviderLoss
+                    } else {
+                        EndCause::User
+                    },
+                )?,
             )?;
         }
         self.local_commit(prepare).await?;
@@ -853,6 +944,7 @@ impl Paykit {
                 // An acceptance also owns the exact sealed opening and its prior user
                 // choice. A later retry must always return to that signed answer.
                 if kind != Kind::AllowanceAcceptance
+                    && fenced.is_none()
                     && (matches!(error, AppError::Ahead { .. } | AppError::Refused(_))
                         || error.code() == Some(pubky_switch_core::http::ErrorCode::Conflict))
                 {
@@ -1108,7 +1200,7 @@ impl Paykit {
                     .await?
                     .pending_creates
                     .get(&(key, create.operation))
-                    .is_none_or(|version| {
+                    .is_none_or(|(version, _)| {
                         *version != selected.version
                             || !super::delivery::deletion_continues(
                                 version.generation,

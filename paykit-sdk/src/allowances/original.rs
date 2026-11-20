@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 mod withdrawal;
-use withdrawal::RejectedProposal;
+use withdrawal::{OriginalCreate, RejectedProposal};
 
 /// The same app's complete protected original, read again by its executor against the
 /// actual P, Q, selected proposal and all three signed service applications.
@@ -49,6 +49,10 @@ pub(crate) struct OriginalAllowance {
     /// Commitment to this app's original pending create, when it proposed.
     #[serde(deserialize_with = "Option::deserialize")]
     create: Option<[u8; 32]>,
+    /// The payer observed this signed original while its own service generation was current.
+    create_receipt: Option<OriginalCreate>,
+    /// The acceptance reported to the host under this proposal's signed loss boundary.
+    reported_after_loss: Option<[u8; 32]>,
     #[serde(deserialize_with = "Option::deserialize")]
     rejected: Option<RejectedProposal>,
     opening: Option<Opening>,
@@ -83,6 +87,8 @@ impl OriginalAllowance {
             confirmed_for_execution: confirmed,
             generation,
             create: None,
+            create_receipt: None,
+            reported_after_loss: None,
             rejected: None,
             opening: None,
         }
@@ -124,6 +130,22 @@ impl OriginalAllowance {
         };
         if !matches_choice || !self.pending_lifetimes_are_ordered() {
             return Err(PaykitError::corrupt());
+        }
+        if self.reported_after_loss.is_some()
+            && (!self.confirmed_for_execution || self.create.is_none())
+        {
+            return Err(PaykitError::corrupt());
+        }
+        if let Some(receipt) = &self.create_receipt {
+            if self.create.is_none() || !self.confirmed_for_execution {
+                return Err(PaykitError::corrupt());
+            }
+            let target = allowance_record_target(Collection::AllowanceProposals, &self.peer, id);
+            receipt.verify(
+                binder.identity(),
+                self.generation,
+                &binder.record_key(&target)?,
+            )?;
         }
         if let Some(rejected) = &self.rejected {
             rejected.check_answer(&decision)?;
@@ -194,6 +216,17 @@ impl OriginalAllowance {
                 != newer.decision.stored(&newer.peer)?.hash()
         {
             return Err(PaykitError::corrupt());
+        }
+        self.reported_after_loss = self.reported_after_loss.or(newer.reported_after_loss);
+        if let Some(receipt) = newer.create_receipt {
+            if self
+                .create_receipt
+                .as_ref()
+                .is_some_and(|known| !known.same_application(&receipt))
+            {
+                return Err(PaykitError::corrupt());
+            }
+            self.create_receipt = Some(receipt);
         }
         self.merge_rejection(newer.rejected)?;
         match (&mut self.opening, newer.opening) {
