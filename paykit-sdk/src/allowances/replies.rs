@@ -1296,6 +1296,12 @@ impl Paykit {
         }
         let op = self.app.record_op(target, None, conditions).await?;
         writes.push(op);
+        let rejected = if accepting {
+            Vec::new()
+        } else {
+            Box::pin(self.keep_proposal_rejection(&permanent_key, selected, proposal, &writes))
+                .await?
+        };
         let mut retained = state::Tx::default();
         Box::pin(self.keep_original_selection(
             selected,
@@ -1307,7 +1313,7 @@ impl Paykit {
         ))
         .await?;
         self.local_commit(retained).await?;
-        let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME);
+        let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME).locals(rejected);
         for write in writes {
             batch = batch.entry(write);
         }
@@ -1348,7 +1354,11 @@ impl Paykit {
                 self.app.received_order(a, b)
             }) {
                 Some(Ordering::Less) => return Ok(PendingReply::Stopped),
-                Some(Ordering::Greater) => (),
+                Some(Ordering::Greater) => {
+                    if matches!(message.body(), Body::AllowanceAcceptance(_)) {
+                        Box::pin(self.request_late_withdrawal(record, message)).await?;
+                    }
+                }
                 _ if evidence.pending_source.is_some()
                     && matches!(message.body(), Body::AllowanceAcceptance(_)) =>
                 {

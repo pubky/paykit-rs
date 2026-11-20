@@ -81,7 +81,8 @@
 //! | `dw/<record key>/<role>/<sender>/<msg_id>` | a received message, by its sender and `msg_id`, whose write over a divergent record waits for the user's confirmation, or for the messages kept over the record before it, to write into its record later, in the order its inbox accepted them (by acceptance time, then the feed `seq` its entry was read at, as the kept replies are, never by `msg_id`), a receipt over a payer record that doesn't read included, written once the record also reads, and one kept in `pr/` whose record read paused; never one from anyone but the counterparty of a record that reads; given up at its 30 days, also one that no longer points to its record (`divergent.rs`) | |
 //! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, with the entry's ID and message hash and the feed `seq` it was read at, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
 //! | `ae/<record key>/<msg_id>` | a counterparty's `allowance_end`, kept as the stop until the Allowance record holds an end or a rejection; every distinct end is kept, each under its `msg_id` and with the feed `seq` that orders it, until the record shows which one names what it holds (`allowances.rs`, Paykit spec 8.3) | |
-//! | `lv/<record key>` | the approving app's pending or verified first executor grant | |
+//! | `lv/<record key>` | the payer's pending or verified executor grant and its later accepted ledger | |
+//! | `lx/<ledger key>/<application hash>` | the original applied writes and claim opening that account for compacted spending | |
 //! | `ac/<record key>` | the consent list: an Allowance this app may pay under, or removed from it for good (`allowances.rs`, Paykit spec 8.3); a restore marks every entry to confirm again | |
 //! | `ax/<record key>` | one signed input whose conflict check outlived placement, its pending record version when applicable, and whether further candidates remain unresolved (Paykit spec 8.1, 8.3.1) | |
 //! | `cf/<record key>` | a second, different proposal or response of an Allowance, with the feed `seq` its entry was read at, kept as the stop until the Allowance record holds `conflicted` (`allowances.rs`, Paykit spec 8.3) | |
@@ -104,9 +105,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::activity::{ActivityTarget, KeptSide};
-use crate::allowances::{
-    allowance_target, ConsentEntry, EndCause, EndOrigin, NoticeTarget, OwedEnd,
-};
+use crate::allowances::{allowance_target, ConsentEntry, EndOrigin, NoticeTarget, OwedEnd};
 use crate::app_records::SeenRecords;
 use crate::error::{PaykitError, Result};
 use crate::hold::HeldAnswer;
@@ -1468,6 +1467,25 @@ impl Stored for crate::executor::ExecutorHistory {
     }
 }
 
+impl sealed::Sealed for crate::executor::LedgerCompaction {}
+
+impl Stored for crate::executor::LedgerCompaction {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let StateKey::LedgerCompaction {
+            ledger,
+            application,
+        } = family
+        else {
+            return corrupt();
+        };
+        let own = binder.cert.ok_or_else(PaykitError::corrupt)?;
+        if !self.bound(ledger, application, &binder.own, own.app_id()) {
+            return corrupt();
+        }
+        Ok(())
+    }
+}
+
 impl sealed::Sealed for ConsentEntry {}
 
 /// An entry of the consent list: of the Allowance record its key names, which its
@@ -1581,7 +1599,7 @@ impl sealed::Sealed for NoticeTarget {}
 impl sealed::Sealed for EndOrigin {}
 
 /// An exact own end's origin: the key names its ID, and its identity, app and canonical
-/// Allowance tuple belong to this app. An automatic crossing always names an acceptance.
+/// Allowance tuple belong to this app. A crossing names the acceptance; a withdrawal names only its proposal.
 /// Its hash and references must also match the signed message before they can be used as
 /// that message's evidence (Paykit spec 8.1, 8.3).
 impl Stored for EndOrigin {
@@ -1596,7 +1614,7 @@ impl Stored for EndOrigin {
             || self.own != binder.own
             || self.app_id != cert.app_id()
             || self.counterparty == self.own
-            || (self.cause == EndCause::Automatic && self.acceptance.is_none())
+            || !self.cause.permits(self.acceptance.is_some())
             || self.acceptance == Some(self.proposal)
             || binder.record_key(&allowance_target(&self.counterparty, &allowance_id))?
                 != self.record
@@ -1891,9 +1909,16 @@ pub(crate) mod key {
     /// The payer's pending or verified executor grants.
     pub(crate) const EXECUTOR_CHECKPOINTS: &str = "lv/";
 
-    /// The approving app's first grant for this Allowance.
+    /// The payer's grant and later accepted ledger for this Allowance.
     pub(crate) fn executor_checkpoint(record: &[u8; 32]) -> String {
         format!("{EXECUTOR_CHECKPOINTS}{}", b64(record))
+    }
+
+    /// Original applied ledger transitions retained for compacted spending.
+    pub(crate) const LEDGER_COMPACTIONS: &str = "lx/";
+
+    pub(crate) fn ledger_compactions(ledger: &[u8; 32]) -> String {
+        format!("{LEDGER_COMPACTIONS}{}/", b64(ledger))
     }
 
     /// The consent list's entry of the Allowance whose record is `record_key`.
@@ -2380,8 +2405,13 @@ pub(crate) enum StateKey {
     },
     /// `ac/<record key>`: an entry of the consent list.
     Consent([u8; 32]),
-    /// The approving app's pending or verified first grant.
+    /// An executor grant with the later ledger accepted by the payer.
     ExecutorCheckpoint([u8; 32]),
+    /// The original applied ledger writes on either side of a paid compaction.
+    LedgerCompaction {
+        ledger: [u8; 32],
+        application: [u8; 32],
+    },
     /// `pc/<record key>`: a conflict kept for one pending Allowance lifetime.
     PendingConflict([u8; 32]),
     /// A bounded unresolved conflict at a permanent or pending Allowance key.
@@ -2581,6 +2611,13 @@ impl StateKey {
                     }
                     "ac" => Self::Consent(b64_32(rest)?),
                     "lv" => Self::ExecutorCheckpoint(b64_32(rest)?),
+                    "lx" => {
+                        let (ledger, application) = rest.split_once('/')?;
+                        Self::LedgerCompaction {
+                            ledger: b64_32(ledger)?,
+                            application: b64_32(application)?,
+                        }
+                    }
                     "ax" => Self::AllowanceEvidence(b64_32(rest)?),
                     "pc" => Self::PendingConflict(b64_32(rest)?),
                     "ap" => {
@@ -3674,6 +3711,17 @@ mod tests {
             (
                 key::executor_checkpoint(&pubky),
                 StateKey::ExecutorCheckpoint(pubky),
+            ),
+            (
+                format!(
+                    "{}{}",
+                    key::ledger_compactions(&pubky),
+                    pubky_switch_core::enc::b64(&[4; 32])
+                ),
+                StateKey::LedgerCompaction {
+                    ledger: pubky,
+                    application: [4; 32],
+                },
             ),
             (
                 key::pending_conflict(&pubky),

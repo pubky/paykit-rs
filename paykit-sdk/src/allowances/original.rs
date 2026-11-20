@@ -19,6 +19,9 @@ use pubky_switch_core::shared::ApplicationRef;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+mod withdrawal;
+use withdrawal::RejectedProposal;
+
 /// The same app's complete protected original, read again by its executor against the
 /// actual P, Q, selected proposal and all three signed service applications.
 pub(crate) struct OriginalAllowanceApplication {
@@ -43,6 +46,11 @@ pub(crate) struct OriginalApproval {
     decision: KeptMessage,
     confirmed_for_execution: bool,
     generation: u64,
+    /// Commitment to this app's original pending create, when the payer proposed.
+    #[serde(deserialize_with = "Option::deserialize")]
+    create: Option<[u8; 32]>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    rejected: Option<RejectedProposal>,
     opening: Option<Opening>,
 }
 
@@ -74,6 +82,8 @@ impl OriginalApproval {
             decision: KeptMessage::of(signed),
             confirmed_for_execution: confirmed,
             generation,
+            create: None,
+            rejected: None,
             opening: None,
         }
     }
@@ -92,15 +102,21 @@ impl OriginalApproval {
         }
         let matches_approval = match decision.body() {
             Body::AllowanceProposal(p) => {
-                p.proposer_role == ProposerRole::Allower && p.allower_generation == self.generation
+                self.create.is_some()
+                    && p.proposer_role == ProposerRole::Allower
+                    && p.allower_generation == self.generation
             }
-            Body::AllowanceAcceptance(_) => self
-                .opening
-                .as_ref()
-                .is_some_and(|o| o.reply == decision.hash()),
+            Body::AllowanceAcceptance(_) => {
+                self.create.is_none()
+                    && self.rejected.is_none()
+                    && self
+                        .opening
+                        .as_ref()
+                        .is_some_and(|o| o.reply == decision.hash())
+            }
             _ => false,
         };
-        if !matches_approval {
+        if !matches_approval || !self.pending_lifetimes_are_ordered() {
             return Err(PaykitError::corrupt());
         }
         if let Some(o) = &self.opening {
@@ -163,12 +179,14 @@ impl OriginalApproval {
     fn merge(&mut self, newer: Self) -> Result<()> {
         if self.peer != newer.peer
             || self.generation != newer.generation
+            || self.create != newer.create
             || self.confirmed_for_execution != newer.confirmed_for_execution
             || self.decision.stored(&self.peer)?.hash()
                 != newer.decision.stored(&newer.peer)?.hash()
         {
             return Err(PaykitError::corrupt());
         }
+        self.merge_rejection(newer.rejected)?;
         match (&mut self.opening, newer.opening) {
             (Some(a), Some(mut b)) => {
                 let applied = b.applied.take();
@@ -181,6 +199,9 @@ impl OriginalApproval {
             (None, b) => self.opening = b,
             _ => (),
         }
+        if !self.pending_lifetimes_are_ordered() {
+            return Err(PaykitError::corrupt());
+        }
         Ok(())
     }
 }
@@ -191,11 +212,15 @@ pub(crate) fn restore_originals(
     mut kept: BTreeMap<[u8; 32], OriginalApproval>,
     writes: &mut Vec<LocalWrite>,
 ) -> Result<()> {
+    for value in kept.values_mut() {
+        value.hold_imported_withdrawal();
+    }
     for (at, v) in restoring.previous_local_scan(key::ORIGINAL_APPROVALS.as_bytes())? {
         let Some(StateKey::OriginalApproval(record)) = StateKey::parse(&at) else {
             return Err(PaykitError::corrupt());
         };
-        let saved = state::restored::<OriginalApproval>(&at, &v, binder)?;
+        let mut saved = state::restored::<OriginalApproval>(&at, &v, binder)?;
+        saved.request_installed_withdrawal();
         if let Some(value) = kept.get_mut(&record) {
             value.merge(saved)?;
         } else {
@@ -359,6 +384,9 @@ impl Paykit {
                 seals: application::seals(operations)?,
                 applied: None,
             });
+        }
+        if !approval.pending_lifetimes_are_ordered() {
+            return Err(unconfirmed());
         }
         tx.put(&at, &approval)?;
         Ok(())

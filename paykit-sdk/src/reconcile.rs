@@ -257,7 +257,7 @@ impl Paykit {
         .await
     }
 
-    async fn payer_records(&self) -> Result<Vec<ActivityRecord>> {
+    pub(crate) async fn payer_records(&self) -> Result<Vec<ActivityRecord>> {
         let own = self.identity();
         let mut out = Vec::new();
         for held in self

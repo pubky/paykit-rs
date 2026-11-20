@@ -3804,12 +3804,8 @@ impl Paykit {
         ))
     }
 
-    /// The proof (Paykit spec 7.2 step 4, Paykit wire 4.10), signed for the outcome's batch.
-    async fn outcome_proof(
-        &self,
-        entry: &JournalEntry,
-        target: &ActivityTarget,
-    ) -> Result<Option<PaidProof>> {
+    /// Fields and references of the original payer proof (Paykit wire 4.10).
+    fn payment_proof_fields(&self, entry: &JournalEntry) -> Result<(PaymentProof, Vec<[u8; 32]>)> {
         let request_hash = entry.request_hash()?;
         let proof = PaymentProof {
             attempt_id: entry.attempt()?,
@@ -3832,6 +3828,38 @@ impl Paykit {
                 .selected_rate_details(&self.identity())?
                 .map(|signed| signed.hash()),
         );
+        Ok((proof, refs))
+    }
+
+    /// Match the signed payer proof of a finished attempt to its protected journal.
+    pub(crate) fn journal_matches_paid_proof(
+        &self,
+        entry: &JournalEntry,
+        original: &StoredMessage,
+    ) -> Result<bool> {
+        if entry.rail_proof.is_none()
+            || entry.proof_msg_id.as_ref() != Some(&original.message().msg_id)
+        {
+            return Ok(false);
+        }
+        let (proof, refs) = self.payment_proof_fields(entry)?;
+        Ok(matches_paid_proof(
+            original,
+            self.identity(),
+            self.app_id(),
+            entry.payee,
+            &refs,
+            &proof,
+        ))
+    }
+
+    /// The proof (Paykit spec 7.2 step 4, Paykit wire 4.10), signed for the outcome's batch.
+    async fn outcome_proof(
+        &self,
+        entry: &JournalEntry,
+        target: &ActivityTarget,
+    ) -> Result<Option<PaidProof>> {
+        let (proof, refs) = self.payment_proof_fields(entry)?;
         if entry.billing_period.is_some() {
             if let Some(record) = self.held_activity(target).await? {
                 if let Some(original) = record.proof {

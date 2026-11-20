@@ -404,29 +404,41 @@ impl Paykit {
         let intents = self
             .local_scan::<PreparedPendingReply>(key::PENDING_REPLIES)
             .await?;
-        self.recover_pending_applications(intents).await
+        self.recover_pending_applications(intents, true).await
     }
 
     /// Reopen from the local store alone. An incoming acceptance has no outgoing
     /// reply intent, but the payer still needs the applied batch before a grant.
     pub(crate) async fn recover_original_approvals(&mut self) -> Result<()> {
-        self.recover_pending_applications(Vec::new()).await
+        self.recover_pending_applications(Vec::new(), false).await
     }
 
     async fn recover_pending_applications(
         &mut self,
         intents: Vec<(String, PreparedPendingReply)>,
+        allow_delivery: bool,
     ) -> Result<()> {
-        let approvals: Vec<_> = self
+        let mut approvals = Vec::new();
+        let mut withdrawals = Vec::new();
+        for (record, approval) in self
             .local_scan::<super::OriginalApproval>(key::ORIGINAL_APPROVALS)
             .await?
-            .into_iter()
-            .filter(|(_, approval)| approval.awaiting_application())
-            .collect();
-        if intents.is_empty() && approvals.is_empty() {
+        {
+            if approval.awaiting_application() {
+                approvals.push((record, approval));
+            } else if allow_delivery && approval.withdrawal_owed() {
+                withdrawals.push((record, approval));
+            }
+        }
+        if intents.is_empty() && approvals.is_empty() && withdrawals.is_empty() {
             return Ok(());
         }
         let confirmed = self.confirmed_pending_applications().await?;
+        for (record, approval) in withdrawals {
+            let at = format!("{}{record}", key::ORIGINAL_APPROVALS);
+            self.withdraw_rejected_proposal(&at, approval, &confirmed)
+                .await?;
+        }
         for (record, mut approval) in approvals {
             let at = format!("{}{record}", key::ORIGINAL_APPROVALS);
             self.capture_original_approval(&at, &mut approval, &confirmed)
