@@ -140,17 +140,17 @@ impl OriginalApproval {
     }
 
     pub(super) fn awaiting_application(&self) -> bool {
-        self.opening.as_ref().is_some_and(|o| o.applied.is_none())
+        self.opening.as_ref().is_some_and(|o| o.applied.is_none()) || self.needs_rejection_proof()
     }
 
-    /// Match the approving app's signing key and the commitment to its three
-    /// ordered operations, including the selected pending write's deletion guard.
+    /// Match this app's signing key and its commitment to the guarded deletion
+    /// or all three ordered acceptance operations.
     fn capture_application(
         &mut self,
         confirmed: &application::AppliedApplications,
     ) -> Result<bool> {
         let Some(opening) = &mut self.opening else {
-            return Ok(false);
+            return Ok(self.needs_rejection_proof() && self.capture_rejection(confirmed));
         };
         if opening.applied.is_some() {
             return Ok(false);
@@ -405,7 +405,8 @@ impl Paykit {
         Ok(true)
     }
 
-    /// Keep the payer's original three signed writes and their verified service proofs.
+    /// Preserve the verified deletion or the three acceptance writes. Only the
+    /// latter can supply an original approval to the executor.
     pub(super) async fn applied_original_approval(
         &mut self,
         record: &[u8; 32],
@@ -414,9 +415,6 @@ impl Paykit {
         let Some(mut approval) = self.local_get::<OriginalApproval>(&at).await? else {
             return Ok(None);
         };
-        if approval.opening.is_none() {
-            return Ok(None);
-        }
         if approval.awaiting_application() {
             let confirmed = self.confirmed_pending_applications().await?;
             if !self
@@ -426,7 +424,7 @@ impl Paykit {
                 return Ok(None);
             }
         }
-        Ok(Some(approval))
+        Ok(approval.opening.is_some().then_some(approval))
     }
     pub(crate) async fn original_allowance_application(
         &mut self,
