@@ -155,6 +155,11 @@ async fn test_enrolled_payer_recognizes_only_its_withdrawn_allowances_return() -
 }
 
 #[tokio::test]
+async fn test_enrolled_payer_keeps_the_matching_return_without_a_local_tombstone() -> TestResult {
+    Box::pin(terminal_after_loss(RecoveredProposal::Collected)).await
+}
+
+#[tokio::test]
 async fn test_enrolled_payer_holds_a_missing_proposal_after_loss() -> TestResult {
     Box::pin(terminal_after_loss(RecoveredProposal::Missing)).await
 }
@@ -185,6 +190,7 @@ async fn test_enrolled_payer_keeps_the_recovered_proposal_while_the_seller_is_de
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RecoveredProposal {
     Unrelated,
+    Collected,
     Original,
     Missing,
     MissingCreate,
@@ -206,6 +212,30 @@ async fn terminal_after_loss(case: RecoveredProposal) -> TestResult {
 }
 
 async fn withdraw_recovered_proposal(w: &World, case: RecoveredProposal) -> TestResult {
+    if let Some(withdrawn) = Box::pin(receive_fenced_acceptance(w, case)).await? {
+        Box::pin(receive_withdrawal_return(w, withdrawn)).await?;
+    }
+    Ok(())
+}
+
+struct Withdrawn {
+    case: RecoveredProposal,
+    rail: Arc<FakeRail>,
+    payer_store: Arc<MemoryStore>,
+    payer: Paykit,
+    shop: Paykit,
+    offer: paykit_sdk::SentAllowance,
+    pending_key: [u8; 32],
+    mirror: [u8; 32],
+    unrelated: Option<[u8; 32]>,
+    end: String,
+    answer: String,
+}
+
+async fn receive_fenced_acceptance(
+    w: &World,
+    case: RecoveredProposal,
+) -> TestResult<Option<Box<Withdrawn>>> {
     use pubky_switch_client::app::{Collection, RecordTarget};
     use pubky_switch_core::ops::Condition;
 
@@ -459,7 +489,7 @@ async fn withdraw_recovered_proposal(w: &World, case: RecoveredProposal) -> Test
             .await
             .is_err());
         assert!(rail.all_executions().is_empty());
-        return Ok(());
+        return Ok(None);
     }
     if case == RecoveredProposal::Interrupted {
         w.lose_answer("POST", "/ops");
@@ -516,7 +546,7 @@ async fn withdraw_recovered_proposal(w: &World, case: RecoveredProposal) -> Test
             AllowanceStatus::Accepted
         );
         assert!(rail.all_executions().is_empty());
-        return Ok(());
+        return Ok(None);
     }
     if case == RecoveredProposal::Missing {
         assert!(payer
@@ -555,7 +585,7 @@ async fn withdraw_recovered_proposal(w: &World, case: RecoveredProposal) -> Test
             .await
             .is_err());
         assert!(rail.all_executions().is_empty());
-        return Ok(());
+        return Ok(None);
     }
     assert!(payer
         .notices()
@@ -612,6 +642,37 @@ async fn withdraw_recovered_proposal(w: &World, case: RecoveredProposal) -> Test
         matches!(&op.body().kind, pubky_switch_core::ops::OpKind::RecordPut(put)
         if put.key == pending_key && put.expected_version == original.version)
     );
+    Ok(Some(Box::new(Withdrawn {
+        case,
+        rail,
+        payer_store,
+        payer,
+        shop,
+        offer,
+        pending_key,
+        mirror,
+        unrelated,
+        end,
+        answer,
+    })))
+}
+
+async fn receive_withdrawal_return(w: &World, withdrawn: Box<Withdrawn>) -> TestResult {
+    use pubky_switch_client::app::{Collection, RecordTarget};
+    let Withdrawn {
+        case,
+        rail,
+        mut payer_store,
+        mut payer,
+        mut shop,
+        offer,
+        pending_key,
+        mirror,
+        unrelated,
+        end,
+        answer,
+    } = *withdrawn;
+    let peer = shop.identity();
     let id = payer.app_id();
     drop(payer);
     payer = Box::pin(Paykit::load(
@@ -655,6 +716,10 @@ async fn withdraw_recovered_proposal(w: &World, case: RecoveredProposal) -> Test
             Some(&protected)
         );
     }
+    if case == RecoveredProposal::Collected {
+        // Put the applied deletion behind the backed-up cursor before the shop replies.
+        Box::pin(finish_restored_withdrawal(&mut payer)).await?;
+    }
     let read = Box::pin(shop.receive(None)).await?;
     assert!(
         read.report
@@ -694,11 +759,24 @@ async fn withdraw_recovered_proposal(w: &World, case: RecoveredProposal) -> Test
         &peer,
     )?;
     assert_eq!(signed.message().refs.as_slice(), [stored.proposal.hash()]);
-    let read = Box::pin(payer.receive(None)).await?;
-    assert!(read.report.events.iter().any(
-        |event| matches!(event, AppEvent::MessageReceived {msg_id,..}
-        if msg_id == &ended.message().msg_id)
-    ));
+    let returned_id = &ended.message().msg_id;
+    let protected_key = format!("ao/{}", pubky_switch_core::enc::b64(&offer.record));
+    if case == RecoveredProposal::Collected {
+        (payer, payer_store) = Box::pin(receive_return_without_tombstone(
+            w,
+            &mut payer,
+            &rail,
+            &pending_key,
+            &protected_key,
+            returned_id,
+        ))
+        .await?;
+    } else {
+        let read = Box::pin(payer.receive(None)).await?;
+        assert!(read.report.events.iter().any(
+            |event| matches!(event, AppEvent::MessageReceived {msg_id,..} if msg_id == returned_id)
+        ));
+    }
     let receipt = payer
         .notices()
         .await?
@@ -709,6 +787,17 @@ async fn withdraw_recovered_proposal(w: &World, case: RecoveredProposal) -> Test
         })
         .ok_or("the wallet did not recognize the seller's matching signed return")?;
     payer.acknowledge_notice(&receipt.id).await?;
+    if case == RecoveredProposal::Collected {
+        (payer, payer_store) = Box::pin(redeliver_return(
+            w,
+            &mut payer,
+            &mut shop,
+            &rail,
+            &protected_key,
+            returned_id,
+        ))
+        .await?;
+    }
     drop(payer);
     payer = Box::pin(Paykit::load(
         w.app_env(payer_store),
@@ -729,7 +818,7 @@ async fn withdraw_recovered_proposal(w: &World, case: RecoveredProposal) -> Test
             .iter()
             .filter(|m| m.kind == "paykit.allowance_end")
             .count(),
-        1
+        usize::from(case != RecoveredProposal::Collected)
     );
     assert!(payer
         .resume_allowance_executor(&offer.record)
@@ -755,6 +844,131 @@ async fn withdraw_recovered_proposal(w: &World, case: RecoveredProposal) -> Test
         .is_none());
     assert!(rail.all_executions().is_empty());
     Ok(())
+}
+
+async fn restore_without_cached_records(
+    w: &World,
+    payer: &mut Paykit,
+    rail: &Arc<FakeRail>,
+) -> TestResult<(Paykit, Arc<MemoryStore>)> {
+    let backup = payer.backup().await?;
+
+    let payer_store = Arc::new(MemoryStore::new());
+    let payer = Box::pin(Paykit::restore(
+        w.app_env(payer_store.clone()),
+        Default::default(),
+        &backup,
+        rail.clone(),
+        Arc::new(TestTimer),
+    ))
+    .await?;
+    Ok((payer, payer_store))
+}
+
+async fn receive_return_without_tombstone(
+    w: &World,
+    payer: &mut Paykit,
+    rail: &Arc<FakeRail>,
+    pending_key: &[u8; 32],
+    protected_key: &str,
+    returned_id: &str,
+) -> TestResult<(Paykit, Arc<MemoryStore>)> {
+    let id = payer.app_id();
+    // A fresh installation resumes at the backed-up cursor; its collection
+    // listing excludes deleted records. Its Paykit layer retains the proved D.
+    let (mut payer, payer_store) = Box::pin(restore_without_cached_records(w, payer, rail)).await?;
+    for _ in 0..8 {
+        assert!(payer.app().shared_record(pending_key).await?.is_none());
+        let read = Box::pin(payer.app_mut().receive(None)).await?;
+        if read
+            .events
+            .iter()
+            .any(|e| matches!(e, AppEvent::MessageReceived{msg_id,..} if msg_id==returned_id))
+        {
+            break;
+        }
+        assert!(read.more, "{read:?}");
+    }
+    let protected = payer
+        .app()
+        .protocol_get("paykit", protected_key.as_bytes())
+        .await?
+        .ok_or("missing original")?;
+    let held: serde_json::Value = serde_json::from_slice(&protected)?;
+    assert!(
+        held["d"]["settlement"]["returned"]["Received"].is_object(),
+        "the exact seller return should be protected before the fresh lifetime reads"
+    );
+    assert!(payer
+        .app()
+        .protocol_scan("paykit", b"ae/")
+        .await?
+        .is_empty());
+    assert!(payer
+        .notices()
+        .await?
+        .iter()
+        .all(|n| n.kind != NoticeKind::AllowanceWithdrawalConfirmed));
+    drop(payer);
+    payer = Box::pin(Paykit::load(
+        w.app_env(payer_store.clone()),
+        Default::default(),
+        id,
+        rail.clone(),
+        Arc::new(TestTimer),
+    ))
+    .await?;
+    assert_eq!(
+        payer
+            .app()
+            .protocol_get("paykit", protected_key.as_bytes())
+            .await?
+            .as_ref(),
+        Some(&protected)
+    );
+    Box::pin(finish_restored_withdrawal(&mut payer)).await?;
+    Ok((payer, payer_store))
+}
+
+async fn redeliver_return(
+    w: &World,
+    payer: &mut Paykit,
+    shop: &mut Paykit,
+    rail: &Arc<FakeRail>,
+    protected_key: &str,
+    returned_id: &str,
+) -> TestResult<(Paykit, Arc<MemoryStore>)> {
+    let terminal = payer
+        .app()
+        .protocol_get("paykit", protected_key.as_bytes())
+        .await?
+        .ok_or("missing retired original")?;
+    let (mut payer, payer_store) = Box::pin(restore_without_cached_records(w, payer, rail)).await?;
+    Box::pin(finish_restored_withdrawal(&mut payer)).await?;
+    assert!(matches!(
+        shop.app_mut().resend(returned_id).await?,
+        pubky_switch_client::app::Delivery::Accepted { .. }
+    ));
+    let repeat = Box::pin(payer.receive(None)).await?;
+    assert!(
+        matches!(
+            repeat.report.events.as_slice(),
+            [AppEvent::Duplicate {
+                conflicting: false,
+                ..
+            }]
+        ),
+        "{repeat:?}"
+    );
+    assert_eq!(
+        payer
+            .app()
+            .protocol_get("paykit", protected_key.as_bytes())
+            .await?
+            .as_ref(),
+        Some(&terminal)
+    );
+    Ok((payer, payer_store))
 }
 
 #[tokio::test]

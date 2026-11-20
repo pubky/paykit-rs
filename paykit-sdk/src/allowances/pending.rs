@@ -440,7 +440,9 @@ impl Paykit {
             .local_scan::<super::OriginalAllowance>(key::ORIGINAL_ALLOWANCES)
             .await?
         {
-            if approval.awaiting_application()
+            if let Some(kept) = approval.received_loss_return().filter(|_| allow_delivery) {
+                Box::pin(self.resume_loss_return(kept)).await?;
+            } else if approval.awaiting_application()
                 || approval.awaiting_original_create(self.app.own_identity().generation())
             {
                 approvals.push((record, approval));

@@ -21,7 +21,22 @@ pub(super) struct LossSettlement {
     application: [u8; 32],
     authority: SignedDoc,
     deletion: Option<ProvedDeletion>,
-    returned: Option<KeptMessage>,
+    returned: Option<LossReturn>,
+}
+
+/// The receive transaction takes custody before a fresh lifetime check can run.
+#[derive(Clone, Serialize, Deserialize)]
+enum LossReturn {
+    Received(KeptMessage),
+    Confirmed(KeptMessage),
+}
+
+impl LossReturn {
+    fn message(&self) -> &KeptMessage {
+        match self {
+            Self::Received(e) | Self::Confirmed(e) => e,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,8 +112,10 @@ impl LossSettlement {
             }
         }
         if let Some(returned) = &self.returned {
-            let end = returned.stored(&own)?;
+            let end = returned.message().stored(&own)?;
             if self.deletion.is_none()
+                || (matches!(returned, LossReturn::Received(_))
+                    && returned.message().position().is_none())
                 || end.accepted_at().is_none()
                 || !end_names_acceptance(&end, &q)
             {
@@ -129,7 +146,12 @@ impl OriginalAllowance {
                     return Err(PaykitError::corrupt());
                 }
                 value.deletion = value.deletion.or(imported.deletion);
-                value.returned = value.returned.or(imported.returned);
+                if value.returned.is_none()
+                    || (matches!(value.returned, Some(LossReturn::Received(_)))
+                        && matches!(imported.returned, Some(LossReturn::Confirmed(_))))
+                {
+                    value.returned = imported.returned;
+                }
             }
             self.settlement = Some(value);
         }
@@ -191,6 +213,44 @@ impl OriginalAllowance {
         )
     }
 
+    pub(in crate::allowances) fn received_loss_return(&self) -> Option<&KeptMessage> {
+        match self.settlement.as_ref()?.returned.as_ref()? {
+            LossReturn::Received(end) => Some(end),
+            LossReturn::Confirmed(_) => None,
+        }
+    }
+
+    /// Reserve just the seller's matching return in the original settlement.
+    /// Its local deletion may already be absent when the inbox accepts it.
+    pub(in crate::allowances) fn keep_loss_return(
+        &mut self,
+        end: &StoredMessage,
+        evidence: &KeptMessage,
+        record: &[u8; 32],
+        order: impl FnOnce(RecordVersion) -> Option<std::cmp::Ordering>,
+    ) -> Result<Option<Vec<LocalWrite>>> {
+        let Some(deletion) = self.return_retirement(end)? else {
+            return Ok(None);
+        };
+        if matches!(
+            order(deletion.record_version()),
+            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
+        ) {
+            return Ok(None);
+        }
+        let s = self.settlement.as_mut().ok_or_else(PaykitError::corrupt)?;
+        if let Some(previous) = &s.returned {
+            return Ok(
+                (previous.message().stored(&end.message().to)?.hash() == end.hash()).then(Vec::new),
+            );
+        }
+        s.returned = Some(LossReturn::Received(evidence.clone()));
+        Ok(Some(vec![state::local_put(
+            &key::original_allowance(record),
+            self,
+        )?]))
+    }
+
     /// Return the writes that retire this exact lifetime. The sender's retained
     /// message and the terminal host notice become durable together.
     pub(in crate::allowances) fn finish_loss_return(
@@ -211,9 +271,14 @@ impl OriginalAllowance {
             return Ok(None);
         }
         if let Some(previous) = &s.returned {
-            return Ok((previous.stored(&end.message().to)?.hash() == end.hash()).then(Vec::new));
+            if previous.message().stored(&end.message().to)?.hash() != end.hash() {
+                return Ok(None);
+            }
+            if matches!(previous, LossReturn::Confirmed(_)) {
+                return Ok(Some(Vec::new()));
+            }
         }
-        s.returned = Some(KeptMessage::of(end));
+        s.returned = Some(LossReturn::Confirmed(KeptMessage::of(end)));
         let notice = crate::notices::KeptNotice::withdrawal_confirmed(end)?;
         Ok(Some(vec![
             state::local_put(&key::original_allowance(record), self)?,
@@ -226,6 +291,18 @@ impl OriginalAllowance {
 }
 
 impl Paykit {
+    pub(in crate::allowances) async fn resume_loss_return(
+        &mut self,
+        kept: &KeptMessage,
+    ) -> Result<()> {
+        let end = kept.stored(&self.identity())?;
+        let id = named_allowance(end.body()).ok_or_else(PaykitError::corrupt)?;
+        let record = self.app.record_key(&allowance_target(&end.sender(), id))?;
+        self.finish_held_loss_return(&end, &record, kept, None)
+            .await?;
+        Ok(())
+    }
+
     /// A held return can precede recovery of the local delete proof. Recheck its
     /// actual pending and permanent keys before releasing that retained message.
     pub(in crate::allowances) async fn finish_held_loss_return(
@@ -233,7 +310,7 @@ impl Paykit {
         end: &StoredMessage,
         record: &[u8; 32],
         evidence: &KeptMessage,
-        stop: &str,
+        stop: Option<&str>,
     ) -> Result<bool> {
         let Some(mut original) = self
             .local_get::<OriginalAllowance>(&key::original_allowance(record))
@@ -280,9 +357,11 @@ impl Paykit {
         else {
             return Ok(false);
         };
-        writes.push(LocalWrite::Delete {
-            key: stop.as_bytes().to_vec(),
-        });
+        if let Some(stop) = stop {
+            writes.push(LocalWrite::Delete {
+                key: stop.as_bytes().to_vec(),
+            });
+        }
         self.app
             .protocol_commit(crate::protocol::BACKUP_NAME, &writes)
             .await?;

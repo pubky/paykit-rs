@@ -1223,23 +1223,36 @@ fn keep_end(
         let pending =
             allowance_record_target(Collection::AllowanceProposals, &sender, allowance_id);
         let key = cx.record_key(&pending)?;
-        if let Some(live) = cx.record(&pending)?.filter(|p| {
-            p.content == RecordContent::Deleted
-                && replies::precedes_reply(p.version, position, |a, b| cx.received_order(a, b))
-                && replies::qualified_at(p, &pending, &key)
-        }) {
-            if let Some(mut original) =
-                state::cx_get::<OriginalAllowance>(cx, &key::original_allowance(&record_key))?
-            {
-                if let Some(writes) = original
-                    .finish_loss_return(stored, &record_key, live.version)
-                    .map_err(|_| Fail::corrupt())?
+        if let Some(mut original) =
+            state::cx_get::<OriginalAllowance>(cx, &key::original_allowance(&record_key))?
+        {
+            let writes = match cx.record(&pending)? {
+                Some(live)
+                    if live.content == RecordContent::Deleted
+                        && replies::qualified_at(&live, &pending, &key)
+                        && replies::precedes_reply(live.version, position, |a, b| {
+                            cx.received_order(a, b)
+                        }) =>
                 {
-                    for write in writes {
-                        receive::keep_local(cx, write);
-                    }
-                    return receive::note_peer(cx, &sender, stored);
+                    original.finish_loss_return(stored, &record_key, live.version)
                 }
+                None => original.keep_loss_return(stored, &evidence, &record_key, |d| {
+                    cx.received_order(
+                        pubky_switch_client::app::FeedPosition {
+                            generation: d.generation,
+                            seq: d.version,
+                        },
+                        position,
+                    )
+                }),
+                _ => Ok(None),
+            }
+            .map_err(|_| Fail::corrupt())?;
+            if let Some(writes) = writes {
+                for write in writes {
+                    receive::keep_local(cx, write);
+                }
+                return receive::note_peer(cx, &sender, stored);
             }
         }
     }
@@ -2742,8 +2755,13 @@ impl Paykit {
                         }
                     }
                     if end.message().refs.len() == 2
-                        && Box::pin(self.finish_held_loss_return(&end, &record, &evidence, &stop))
-                            .await?
+                        && Box::pin(self.finish_held_loss_return(
+                            &end,
+                            &record,
+                            &evidence,
+                            Some(&stop),
+                        ))
+                        .await?
                     {
                         continue;
                     }
