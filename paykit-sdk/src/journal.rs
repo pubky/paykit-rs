@@ -325,6 +325,9 @@ pub(crate) struct JournalEntry {
     /// The user started the original attempt. Its occurrence's manual-only mark keeps an
     /// automatic attempt from repeating, but permits this user's idempotent repeat (§8.3).
     pub(crate) user_started: bool,
+    /// The original executor grant that authorized this attempt's reservation.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(crate) allowance: Option<crate::executor::JournalAllowance>,
     pub(crate) attempt_id: String,
     #[serde(with = "serde_b64")]
     pub(crate) obligation: [u8; 32],
