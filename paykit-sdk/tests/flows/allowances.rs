@@ -5986,6 +5986,67 @@ async fn test_allowances_expired_pending_evidence_survives_reload_until_exact_de
 }
 
 #[tokio::test]
+async fn test_allowances_discard_with_expired_evidence_requires_the_observed_lifetime() {
+    for (rewritten, repeat_original) in [(false, false), (true, false), (false, true)] {
+        let w = World::new();
+        let mut shop = Box::pin(shop(&w)).await;
+        let mut writer = Box::pin(wallet(&w)).await;
+        let (_, mine) = Box::pin(proposed(&w, &mut shop, &mut writer)).await;
+        let pending = Box::pin(pending_at(&writer, &mine)).await;
+        let id = pending.allowance_id().clone();
+        let base = crate::common::store();
+        let mut wallet = Box::pin(alice_on(
+            &w,
+            "phone",
+            AppScopes::new().pay().allowance().build().unwrap(),
+            base.clone(),
+        ))
+        .await;
+        Box::pin(read_listed_records(&mut wallet)).await;
+        let target = pending_target(&w.bob_id(), &id);
+        let key = wallet.app().record_key(&target).unwrap();
+        let bytes = Box::pin(raw(&wallet, &key)).await;
+        crate::divergent::set_divergent(&base, &wallet, &key, true);
+        if repeat_original {
+            let original = pending.proposal();
+            w.alice
+                .switch()
+                .send_plaintext(
+                    w.bob_id(),
+                    original.cert(),
+                    original.plaintext(),
+                    &[wallet.app_id()],
+                )
+                .unwrap();
+            wallet.receive(None).await.unwrap();
+        }
+        competing_proposal(&w, &shop, &wallet, &id);
+        wallet.receive(None).await.unwrap();
+        w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
+        wallet.app_mut().rotate().await.unwrap();
+        wallet.app_mut().flush_cursor().await.unwrap();
+        wallet.receive(None).await.unwrap();
+        assert_eq!(Box::pin(kept_under(&wallet, b"ax/")).await, 1);
+        if rewritten {
+            for _ in 0..2 {
+                Box::pin(write_record(&mut writer, &target, Some(&bytes))).await;
+            }
+        }
+        Box::pin(read_current_proposal(&mut wallet, &w.bob_id(), &id)).await;
+        let result = wallet.discard_pending_allowance(&mine).await;
+        if rewritten {
+            assert!(result.is_err());
+            assert_eq!(Box::pin(raw(&wallet, &key)).await, bytes);
+            assert_eq!(Box::pin(kept_under(&wallet, b"ax/")).await, 1);
+        } else {
+            result.unwrap();
+            assert!(Box::pin(held_deleted(&wallet, &key)).await);
+            assert_eq!(Box::pin(kept_under(&wallet, b"ax/")).await, 0);
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_allowances_unmatched_pending_proposal_keeps_the_original_replies() {
     let w = World::new();
     let _shop = Box::pin(shop(&w)).await;

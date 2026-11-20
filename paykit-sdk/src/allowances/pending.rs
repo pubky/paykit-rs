@@ -1170,7 +1170,9 @@ impl Paykit {
             .unwrap_or(false);
         if current.conflicted().is_none()
             && !local_conflict
-            && !self.unresolved_allowance(&held.key).await?
+            && !self
+                .may_discard_with_evidence(&target, &held, &current)
+                .await?
             && (current.proposal().sender() != *peer || !self.denied(peer).await?)
         {
             return Err(Refusal::Usage("only a conflicted proposal or a blocked counterparty's received proposal may be discarded".into()).into());

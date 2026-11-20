@@ -25,13 +25,19 @@ pub(crate) struct ConflictEvidence {
     message: KeptMessage,
     pending: Option<SeenVersion>,
     additional: bool,
+    /// Two distinct originals were observed at the selected pending version.
+    /// This proves a local discard is permitted even when the record holds our representative.
+    pending_pair: bool,
 }
 
 impl ConflictEvidence {
     pub(crate) fn bind(&self, record: &[u8; 32], binder: &Binder<'_>) -> Result<()> {
         let message = self.message.stored(binder.identity())?;
         self.message.received_at()?;
-        if self.message.pending_create.is_some() || self.message.ended_acceptance.is_some() {
+        if (self.pending_pair && (self.pending.is_none() || !self.additional))
+            || self.message.pending_create.is_some()
+            || self.message.ended_acceptance.is_some()
+        {
             return Err(PaykitError::corrupt());
         }
         let id = named_allowance(message.body()).ok_or_else(PaykitError::corrupt)?;
@@ -62,11 +68,14 @@ impl ConflictEvidence {
         if self.pending.is_some() != other.pending.is_some() {
             return Err(PaykitError::corrupt());
         }
-        self.additional |= other.additional
-            || self.pending != other.pending
-            || self.message.stored(own)?.hash() != other.message.stored(own)?.hash();
+        let distinct = self.message.stored(own)?.hash() != other.message.stored(own)?.hash();
+        self.additional |= other.additional || self.pending != other.pending || distinct;
+        if self.pending.is_some() && self.pending == other.pending {
+            self.pending_pair |= other.pending_pair || distinct;
+        }
         if other.pending > self.pending {
             self.pending = other.pending;
+            self.pending_pair = other.pending_pair;
             self.message = other.message.clone();
         }
         Ok(())
@@ -85,6 +94,7 @@ impl ConflictEvidence {
             message: evidence.clone(),
             pending,
             additional: false,
+            pending_pair: false,
         };
         let mut writes = Vec::new();
         if let Some(mut held) = existing {
@@ -264,6 +274,39 @@ impl Paykit {
         Ok(())
     }
 
+    /// A retained input alone cannot authorize deleting an unrelated live proposal.
+    pub(super) async fn may_discard_with_evidence(
+        &self,
+        target: &pubky_switch_client::app::RecordTarget,
+        held: &SharedRecord,
+        current: &paykit_lib::records::PendingAllowanceRecord,
+    ) -> Result<bool> {
+        let Some(evidence) = self
+            .local_get::<ConflictEvidence>(&key::allowance_evidence(&held.key))
+            .await?
+        else {
+            return Ok(false);
+        };
+        let Some(source) = evidence.pending else {
+            return Err(PaykitError::corrupt());
+        };
+        let candidate = evidence.message.stored(&self.identity())?;
+        Ok(
+            (evidence.pending_pair || candidate.hash() != current.proposal().hash())
+                && self.same_pending_lifetime(target, held, source).await?,
+        )
+    }
+
+    async fn same_pending_lifetime(
+        &self,
+        target: &pubky_switch_client::app::RecordTarget,
+        held: &SharedRecord,
+        source: SeenVersion,
+    ) -> Result<bool> {
+        let source = source.record_version();
+        Ok(held.version == source || self.pending_predecessor(target, held).await? == Some(source))
+    }
+
     async fn resolve_pending_evidence(
         &mut self,
         held: &SharedRecord,
@@ -281,11 +324,8 @@ impl Paykit {
         {
             return Ok(());
         }
-        let source = evidence
-            .pending
-            .ok_or_else(PaykitError::corrupt)?
-            .record_version();
-        if held.version != source && self.pending_predecessor(target, held).await? != Some(source) {
+        let source = evidence.pending.ok_or_else(PaykitError::corrupt)?;
+        if !self.same_pending_lifetime(target, held, source).await? {
             return Ok(());
         }
         if p.conflicted().is_some() {
@@ -293,7 +333,7 @@ impl Paykit {
         }
         // A later record holding the candidate as its only original cannot establish
         // what the unreadable earlier version held.
-        if held.version != source && p.proposal().hash() == message.hash() {
+        if held.version != source.record_version() && p.proposal().hash() == message.hash() {
             return Ok(());
         }
         let key = key::pending_conflict(record);
