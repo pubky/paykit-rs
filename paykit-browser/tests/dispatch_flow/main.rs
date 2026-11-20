@@ -26,6 +26,7 @@
 #![cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 
 mod delivery;
+#[allow(dead_code)]
 #[path = "../dispatch_rig/mod.rs"]
 mod dispatch_rig;
 mod dispatch_world;
