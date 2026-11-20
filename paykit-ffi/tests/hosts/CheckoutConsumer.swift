@@ -149,4 +149,5 @@ func driveCheckout() async throws {
     precondition(receipts.count == 1 && receipts[0].messageId == signed && receipts[0].attemptId == entries[0].attemptId)
     precondition(receipts[0].paymentReference == "checkout-7" && final[0].receipt?.messageId == signed && method.calls == 1)
     try await reopened.shutdown()
+    try await fixture.finish()
 }

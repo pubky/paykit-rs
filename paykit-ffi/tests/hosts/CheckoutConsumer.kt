@@ -129,6 +129,7 @@ private fun driveCheckout() = runBlocking {
                         payer.shutdown()
                     }
                 }
+                fixture.finish()
             }
         } finally {
             directory.deleteRecursively()

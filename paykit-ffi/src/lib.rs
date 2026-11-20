@@ -9,6 +9,9 @@ mod enrollment;
 mod environment;
 mod error;
 mod events;
+#[cfg(feature = "test-wallet")]
+#[path = "../tests/hosts/service.rs"]
+mod fixture_service;
 #[cfg(any(test, feature = "test-wallet"))]
 #[path = "../tests/hosts/signer.rs"]
 mod fixture_signer;

@@ -15,7 +15,7 @@ use pubky_switch_core::{
     records::{AppRequest, AuthRequest},
     sig::SignedDoc,
 };
-use pubky_switch_harness::{parties::Asking, Backend, World};
+use pubky_switch_harness::{parties::Asking, World};
 use pubky_switch_signer::Signer;
 use std::{collections::BTreeMap, error::Error, sync::Arc};
 use tokio::sync::Mutex;
@@ -48,7 +48,7 @@ impl Transport for CheckoutService {
 /// A local seller and independent approving signer, available with the test-wallet feature.
 #[derive(uniffi::Object)]
 pub struct CheckoutFixture {
-    world: World,
+    world: Mutex<Option<World>>,
     host: Arc<WalletHost>,
     signer: Mutex<Signer>,
     seller: Mutex<Paykit>,
@@ -61,7 +61,7 @@ impl CheckoutFixture {
         store: Arc<dyn WalletStore>,
         method: Arc<dyn PaymentMethod>,
     ) -> Result<Arc<Self>, Box<dyn Error>> {
-        let world = World::start(Backend::Scripted)?.ok_or("no scripted Switch")?;
+        let world = crate::fixture_service::start()?;
         let buyer = world.identity("buyer")?.public();
         let owner = world.identity("shop")?;
         let signer = Box::pin(signer::serving(&world, "buyer")).await?;
@@ -95,7 +95,7 @@ impl CheckoutFixture {
         issuer.claim_delivered(&approval.request).await?;
         Box::pin(seller.allow_connect(&buyer)).await?;
         Ok(Arc::new(Self {
-            world,
+            world: Mutex::new(Some(world)),
             host,
             signer: Mutex::new(signer),
             seller: Mutex::new(seller),
@@ -227,16 +227,30 @@ impl CheckoutFixture {
     /// Withhold or reattach the actual enrolled payer account at its provider for signed recovery notices.
     pub async fn set_account_missing(self: Arc<Self>, missing: bool) -> Result<(), WalletError> {
         harness(async move || {
-            let buyer = self
-                .world
+            let world = self.world.lock().await;
+            let world = world
+                .as_ref()
+                .ok_or(WalletError::invalid("test service closed"))?;
+            let buyer = world
                 .identity("buyer")
                 .map_err(|_| WalletError::invalid("test payer"))?;
-            Box::pin(
-                self.world
-                    .set_account_missing("https://buyer.payments.test", &buyer, missing),
-            )
-            .await
-            .map_err(|_| WalletError::invalid("test service account"))
+            Box::pin(world.set_account_missing("https://buyer.payments.test", &buyer, missing))
+                .await
+                .map_err(|_| WalletError::invalid("test service account"))
+        })
+        .await
+    }
+
+    /// Close both enrolled test services after the host shuts down its wallet.
+    pub async fn finish(self: Arc<Self>) -> Result<(), WalletError> {
+        harness(async move || {
+            if let Some(world) = self.world.lock().await.take() {
+                world
+                    .close()
+                    .await
+                    .map_err(|_| WalletError::invalid("test service shutdown"))?;
+            }
+            Ok(())
         })
         .await
     }
