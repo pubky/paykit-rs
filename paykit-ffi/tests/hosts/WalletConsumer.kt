@@ -13,6 +13,8 @@ internal class EnrollmentStore : WalletStore {
         }
     }
 
+    @Synchronized fun untouched() = rows.isEmpty() && acquisitions == 0
+    private var acquisitions = 0
     private val owners = mutableMapOf<String, ByteArray>()
     private val rows = mutableMapOf<Pair<String, String>, ByteArray>()
     private fun key(namespace: String, key: ByteArray) =
@@ -30,8 +32,10 @@ internal class EnrollmentStore : WalletStore {
             .sortedWith { a, b -> java.util.Arrays.compareUnsigned(a.key, b.key) }
             .take(limit.toLong().coerceAtMost(Int.MAX_VALUE.toLong()).toInt()).toList()
 
-    @Synchronized override fun acquire(namespace: String, owner: ByteArray): Boolean =
-        owners.putIfAbsent(namespace, owner.copyOf()) == null
+    @Synchronized override fun acquire(namespace: String, owner: ByteArray): Boolean {
+        acquisitions++
+        return owners.putIfAbsent(namespace, owner.copyOf()) == null
+    }
 
     @Synchronized override fun release(namespace: String, owner: ByteArray) {
         if (owners[namespace]?.contentEquals(owner) == true) owners.remove(namespace)

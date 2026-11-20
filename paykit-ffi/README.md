@@ -18,6 +18,15 @@ Create a `WalletHost` with the same protected store, the user's authenticated Ho
 
 Use `backup` to export the installed wallet’s SDK backup. Store its bytes and App ID together in protected storage. Use `load` to reopen the installed state on the same device. For a retained grant, `reconcileAllowance` reports usage only from the original authority and complete account-wide method history. An unknown result leaves spending held.
 
+## Restore the wallet from a protected backup
+
+Ask whether the source device is still in the user's possession or known to have been wiped. If its custody is unknown, have the signer revoke the old app and enroll a new one. For a device the user can account for, pass the original App ID, backup bytes and custody decision to `restore` (Switch spec §12.4). If a storage commit has an unknown result, use `load` on that store to learn what was installed.
+
+1. Run the normal foreground `receive`. Follow additional pages and handle its recovery or availability notices. `restoreState` reports the current cursor verdict, any questioned registrations and whether reconciliation continues. After interruption, load the same App ID and read this state again.
+2. Show the questioned registrations to the user and ask whether the original device ran after the backup. Call `confirmRestoredRegistrations` with the displayed numbers only if the user recognizes them. Otherwise, `refuseRestoredRegistrations` stops the app and requests revocation. Read the resulting alarm. If the question changed, show its current registrations before asking again.
+3. Call `reconcile` and show any doubtful attempts. If `payerSkipped` is set, the payer pass still needs the proper certificate and record coverage. An uncertain attempt may already have paid. Use `resolveConfirmedAttempt` for the exact obligation and attempt only after the user chooses its outcome. An absent receipt alone cannot establish failure.
+4. After the user reviews the results, call `endConfirmedReconciliation`. Reopen and check `restoreState` when interrupted. Each registered protocol must finish its own reconciliation. The SDK keeps its usual payment, record and certificate checks throughout.
+
 ## Receive and acknowledge
 
 Call `receive` on startup and after a feed wake. It returns one bounded report. Use `more` to decide when to read another page. If `stopped` is set, inspect the reported event. Persist or show each duty before acknowledging its ID with `acknowledgeEvents`. This acknowledges the processed prefix for Paykit. Each other protocol in a shared app remains responsible for its own duties.
