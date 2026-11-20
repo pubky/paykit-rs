@@ -307,8 +307,10 @@ calls `accept_subscription_under_allowance` with the request and its permanent A
 handle. For each eligible occurrence, call `pay_period_under_allowance` with that request
 and its exact Billing Period. The wallet checks the pinned Allowance, available budget and
 payment method before it pays. A rate-priced endpoint requires a different funding decision.
-If a later period requires its own destination, the call returns `NoDestination` and leaves
-that period unpaid.
+If a later period requires its own destination, the wallet waits for signed details for that
+occurrence from the selling app named by the request, if one is named. It selects the
+latest valid details with an endpoint the request and Allowance both permit. Until such
+details arrive, the call returns `NoDestination` and leaves the period unpaid.
 After interruption, call `resume_payments`. Read the seller's receipt with
 `ReceiptsOf::Period` for the same request and period.
 

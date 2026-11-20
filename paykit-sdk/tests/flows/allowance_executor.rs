@@ -1231,15 +1231,24 @@ async fn test_funded_period_requiring_its_own_destination_leaves_the_subscriptio
         .unwrap();
     assert_eq!(received.len(), 1);
     assert_eq!(received[0].msg_id, receipt);
-    let period = payer
-        .request(&req)
+    let held = shop
+        .app()
+        .shared_record(&period.record)
         .await
         .unwrap()
-        .periods
-        .into_iter()
-        .find(|p| p.billing_period == next)
         .unwrap();
-    assert!(period.details.iter().any(|d| d.msg_id == signed.msg_id));
+    let credited = paykit_lib::records::ActivityRecord::read(
+        held.content.value().unwrap(),
+        &shop.identity(),
+        paykit_lib::records::ActivitySide::Payee,
+    )
+    .unwrap();
+    let selected = credited.period_details.unwrap();
+    assert_eq!(selected.message().msg_id, signed.msg_id);
+    assert_eq!(
+        credited.proof.unwrap().message().refs,
+        [req.request_hash, selected.hash()]
+    );
     assert_eq!(
         Box::pin(payer.reconcile_allowance(&key))
             .await
