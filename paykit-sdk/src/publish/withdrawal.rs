@@ -6,6 +6,7 @@ use crate::state::{key, Tx};
 use crate::Paykit;
 use paykit_lib::bodies::PRIVATE_LIST_MAX_AGE_MS;
 use paykit_lib::records::ListPublicationRecord;
+use pubky_switch_client::app::RecordApplication;
 use pubky_switch_core::ops::Condition;
 use serde::{Deserialize, Serialize};
 
@@ -72,7 +73,12 @@ impl Paykit {
         prior: &ListReservation,
     ) -> Result<(ListPublicationRecord, Condition)> {
         let target = target(&self.app_id(), &prior.recipient, prior.generation);
-        let Some((held, application, _)) = self.app.read_record_application(&target).await? else {
+        let Some(RecordApplication {
+            record: held,
+            application,
+            ..
+        }) = self.app.read_record_application(&target).await?
+        else {
             return Err(counter_unavailable().into());
         };
         let current = self.publication_at(&held).await?;
