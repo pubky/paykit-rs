@@ -1,11 +1,14 @@
-use crate::{HostStore, WalletError, WalletStore};
+use crate::{WalletError, WalletStore, WalletStoreSession};
 use paykit_sdk::AppScopes;
 use pubky_switch_client::app::Protocol;
-use pubky_switch_client::store::{OwnedStoreHandle, StoreError, StoreHandle, WriteBatch};
+use pubky_switch_client::store::StoreError;
 use pubky_switch_core::{
     enc,
     keys::AppKeys,
-    records::{app_record_path, AppRequest, AppRequestBody, Approval, ApprovalClaim, AuthRequest},
+    records::{
+        app_record_path, check_caps, AppRequest, AppRequestBody, Approval, ApprovalClaim,
+        AuthRequest,
+    },
     sig::SignedDoc,
 };
 use serde::{Deserialize, Serialize};
@@ -53,23 +56,20 @@ impl EnrollmentState {
             Self::Pending { keys, .. } | Self::Approved { keys, .. } => keys.app_id_bytes(),
         }
     }
-    async fn read(store: &OwnedStoreHandle) -> Result<Option<Self>, WalletError> {
+    async fn read(store: &Arc<WalletStoreSession>) -> Result<Option<Self>, WalletError> {
         store
             .get(b"enrollment")
             .await?
             .map(|v| serde_json::from_slice(&v).map_err(|_| StoreError::Corrupt.into()))
             .transpose()
     }
-    async fn save(&self, store: &mut OwnedStoreHandle) -> Result<(), WalletError> {
-        let mut batch = WriteBatch::new();
-        batch
+    async fn save(&self, store: &Arc<WalletStoreSession>) -> Result<(), WalletError> {
+        Ok(store
             .put(
-                store.namespace(),
-                b"enrollment".to_vec(),
+                b"enrollment",
                 serde_json::to_vec(self).map_err(|_| StoreError::Corrupt)?,
             )
-            .map_err(StoreError::from)?;
-        Ok(store.commit(batch).await?)
+            .await?)
     }
 }
 pub(crate) fn fixed<const N: usize>(v: Vec<u8>, name: &str) -> Result<[u8; N], WalletError> {
@@ -79,25 +79,27 @@ pub(crate) fn fixed<const N: usize>(v: Vec<u8>, name: &str) -> Result<[u8; N], W
 /// all processes that can reach the same physical namespace.
 #[derive(uniffi::Object)]
 pub struct WalletEnrollment {
-    store: StoreHandle,
+    store: Arc<dyn WalletStore>,
 }
 #[uniffi::export]
 impl WalletEnrollment {
     /// Use the host's durable, fenced device store for enrollment and its original approval.
     #[uniffi::constructor]
     pub fn new(store: Arc<dyn WalletStore>) -> Arc<Self> {
-        Arc::new(Self {
-            store: StoreHandle::new(Arc::new(HostStore(store))),
-        })
+        Arc::new(Self { store })
     }
 }
 impl WalletEnrollment {
-    async fn enrollment_store(&self, reference: Vec<u8>) -> Result<OwnedStoreHandle, WalletError> {
+    async fn enrollment_store(
+        &self,
+        reference: Vec<u8>,
+    ) -> Result<Arc<WalletStoreSession>, WalletError> {
         let id = fixed::<16>(reference, "enrollment reference")?;
-        Ok(self
-            .store
-            .acquire(&format!("paykit-enrollment/{}", enc::b64(&id)))
-            .await?)
+        Ok(WalletStoreSession::open(
+            self.store.clone(),
+            format!("paykit-enrollment/{}", enc::b64(&id)),
+        )
+        .await?)
     }
 }
 #[uniffi::export(async_runtime = "tokio")]
@@ -108,7 +110,7 @@ impl WalletEnrollment {
         &self,
         reference: Vec<u8>,
     ) -> Result<EnrollmentInfo, WalletError> {
-        let mut store = self.enrollment_store(reference).await?;
+        let store = self.enrollment_store(reference).await?;
         let state = match EnrollmentState::read(&store).await? {
             Some(state) => state,
             None => {
@@ -116,7 +118,7 @@ impl WalletEnrollment {
                     keys: AppKeys::generate().map_err(|_| WalletError::RandomUnavailable)?,
                     request: None,
                 };
-                state.save(&mut store).await?;
+                state.save(&store).await?;
                 state
             }
         };
@@ -135,7 +137,7 @@ impl WalletEnrollment {
         capabilities: String,
         auth_secret: Vec<u8>,
     ) -> Result<EnrollmentRequest, WalletError> {
-        let mut store = self.enrollment_store(reference).await?;
+        let store = self.enrollment_store(reference).await?;
         let (keys, request) = match EnrollmentState::read(&store).await? {
             Some(EnrollmentState::Pending { keys, request }) => (keys, request),
             Some(EnrollmentState::Approved { keys, request, .. }) => (keys, Some(request)),
@@ -160,6 +162,10 @@ impl WalletEnrollment {
                 req
             }
             None => {
+                // The request is durable once signed. Only the app's own record and
+                // optional Switch backup path are requested here (Switch wire 3.9).
+                check_caps(&auth.caps, &id, &[])
+                    .map_err(|_| WalletError::invalid("capabilities"))?;
                 let body = AppRequestBody::new(
                     &keys,
                     AppScopes::new()
@@ -180,7 +186,7 @@ impl WalletEnrollment {
                         secret: auth.secret,
                     }),
                 }
-                .save(&mut store)
+                .save(&store)
                 .await?;
                 req
             }
@@ -201,7 +207,7 @@ impl WalletEnrollment {
         claim: Vec<u8>,
     ) -> Result<(), WalletError> {
         let identity = fixed(identity, "identity")?;
-        let mut store = self.enrollment_store(reference).await?;
+        let store = self.enrollment_store(reference).await?;
         match EnrollmentState::read(&store).await? {
             Some(EnrollmentState::Approved {
                 identity: original,
@@ -223,7 +229,7 @@ impl WalletEnrollment {
                     identity,
                     claim,
                 }
-                .save(&mut store)
+                .save(&store)
                 .await?;
             }
             _ => return Err(WalletError::EnrollmentUnavailable),
