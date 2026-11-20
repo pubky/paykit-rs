@@ -1207,7 +1207,10 @@ impl Paykit {
                 }
                 // Nothing is sent for a conflicted Allowance, nor under a counterparty's end
                 // kept as the stop, which the record doesn't show yet.
-                if Box::pin(self.conflict_kept(&record_held.key)).await?
+                if self
+                    .unresolved_for_allowance(&record_held.key, &record)
+                    .await?
+                    || Box::pin(self.conflict_kept(&record_held.key)).await?
                     || Box::pin(self.allowance_stopped(&record_held.key)).await?
                 {
                     continue;

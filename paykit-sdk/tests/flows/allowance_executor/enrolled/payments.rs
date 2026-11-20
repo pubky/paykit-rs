@@ -5,7 +5,7 @@ use super::*;
 pub(super) async fn payment_after_restore(
     world: &World,
     wallets: (Paykit, Paykit),
-    storage: Arc<MemoryStore>,
+    storage: Arc<ListsStore>,
     rail: Arc<paykit_sdk::rail::FakeRail>,
     key: [u8; 32],
     backup: PaykitBackup,
@@ -81,9 +81,41 @@ pub(super) async fn payment_after_restore(
             .into_iter()
             .find(|sale| sale.attempt_id == Some(attempt_id))
             .expect("seller received the proof");
+        let next_request = if amount == "70" {
+            Some(Box::pin(seller.send_request(identity, draft("2", world.now_ms()))).await?)
+        } else {
+            None
+        };
         let receipt = Box::pin(seller.confirm_payment(&sale.record))
             .await?
             .expect("seller receipt");
+        if let Some(next) = next_request {
+            storage.lists_unknown(true);
+            let waiting = Box::pin(payer.receive(None)).await?;
+            assert!(waiting.report.events.iter().any(|event| matches!(
+                event,
+                pubky_switch_client::app::AppEvent::ProtocolDeferred {
+                    reason: "sender lists unknown",
+                    ..
+                }
+            )));
+            assert_eq!(
+                waiting.applied.iter().filter(|id| *id == &receipt).count(),
+                1
+            );
+            assert!(!waiting.applied.contains(&next.msg_id));
+            storage.lists_unknown(false);
+            let resumed = Box::pin(payer.receive(None)).await?;
+            assert_eq!(
+                resumed
+                    .applied
+                    .iter()
+                    .filter(|id| *id == &next.msg_id)
+                    .count(),
+                1
+            );
+            assert!(!resumed.applied.contains(&receipt));
+        }
         Box::pin(finish_listing(&mut payer)).await;
         let receipts = payer
             .receipts(paykit_sdk::ReceiptsOf::Request(request))
@@ -138,7 +170,7 @@ pub(super) async fn payment_after_restore(
 
 async fn restore_after_first_payment(
     world: &World,
-    storage: Arc<MemoryStore>,
+    storage: Arc<dyn StateStore>,
     rail: Arc<paykit_sdk::rail::FakeRail>,
     key: &[u8; 32],
     backup: &PaykitBackup,

@@ -84,6 +84,7 @@
 //! | `lv/<record key>` | the payer's pending or verified executor grant and its later accepted ledger | |
 //! | `lx/<ledger key>/<application hash>` | the original applied writes and claim opening that account for compacted spending | |
 //! | `ac/<record key>` | the consent list: an Allowance this app may pay under, or removed from it for good (`allowances.rs`, Paykit spec 8.3); a restore marks every entry to confirm again | |
+//! | `ax/<record key>` | one signed input whose conflict check outlived placement, its pending record version when applicable, and whether further candidates remain unresolved (Paykit spec 8.1, 8.3.1) | |
 //! | `cf/<record key>` | a second, different proposal or response of an Allowance, with the feed `seq` its entry was read at, kept as the stop until the Allowance record holds `conflicted` (`allowances.rs`, Paykit spec 8.3) | |
 //! | `mc` | set by a `missed` item: every entry of the consent list is to be confirmed again, as after a restore; nothing is consented while it is set, and the next receive marks each entry so and clears it (`allowances.rs`) | |
 //! | `en/<msg_id>` | the executor app an `executor_notice` is wrapped to, kept with the batch that queues it | |
@@ -1048,6 +1049,17 @@ impl Stored for KeptMessage {
     }
 }
 
+impl sealed::Sealed for crate::allowances::ConflictEvidence {}
+
+impl Stored for crate::allowances::ConflictEvidence {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let StateKey::AllowanceEvidence(record) = family else {
+            return corrupt();
+        };
+        self.bind(record, binder)
+    }
+}
+
 impl sealed::Sealed for crate::allowances::PendingConflict {}
 
 impl Stored for crate::allowances::PendingConflict {
@@ -1515,10 +1527,10 @@ impl Stored for OwedEnd {
     }
 }
 
-impl sealed::Sealed for crate::allowances::OriginalApproval {}
-impl Stored for crate::allowances::OriginalApproval {
+impl sealed::Sealed for crate::allowances::OriginalAllowance {}
+impl Stored for crate::allowances::OriginalAllowance {
     fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
-        let StateKey::OriginalApproval(record) = family else {
+        let StateKey::OriginalAllowance(record) = family else {
             return corrupt();
         };
         self.check(record, binder)
@@ -1851,13 +1863,20 @@ pub(crate) mod key {
         format!("{ALLOWANCE_ENDS}{}/", b64(record_key))
     }
 
+    /// One bounded conflict hold per physical Allowance or pending proposal record.
+    pub(crate) const ALLOWANCE_EVIDENCE: &str = "ax/";
+
+    pub(crate) fn allowance_evidence(record: &[u8; 32]) -> String {
+        format!("{ALLOWANCE_EVIDENCE}{}", b64(record))
+    }
+
     pub(crate) const PENDING_CONFLICTS: &str = "pc/";
 
     pub(crate) const PENDING_REPLIES: &str = "ap/";
-    pub(crate) const ORIGINAL_APPROVALS: &str = "ao/";
+    pub(crate) const ORIGINAL_ALLOWANCES: &str = "ao/";
 
-    pub(crate) fn original_approval(record: &[u8; 32]) -> String {
-        format!("{ORIGINAL_APPROVALS}{}", b64(record))
+    pub(crate) fn original_allowance(record: &[u8; 32]) -> String {
+        format!("{ORIGINAL_ALLOWANCES}{}", b64(record))
     }
 
     pub(crate) const APPLIED_REPLIES: &str = "aq/";
@@ -2400,6 +2419,8 @@ pub(crate) enum StateKey {
     },
     /// `pc/<record key>`: a conflict kept for one pending Allowance lifetime.
     PendingConflict([u8; 32]),
+    /// A bounded unresolved conflict at a permanent or pending Allowance key.
+    AllowanceEvidence([u8; 32]),
     /// An original reply prepared for this canonical Allowance key.
     PendingReply {
         record: [u8; 32],
@@ -2407,7 +2428,7 @@ pub(crate) enum StateKey {
     },
     /// A signed reply whose exact proposal deletion was applied.
     AppliedReply([u8; 32]),
-    OriginalApproval([u8; 32]),
+    OriginalAllowance([u8; 32]),
     /// The latest verified end of a conflict at the named pending key.
     PendingRetirement([u8; 32]),
     /// `cf/<record key>`: a conflicting proposal or response kept as the stop.
@@ -2602,6 +2623,7 @@ impl StateKey {
                             application: b64_32(application)?,
                         }
                     }
+                    "ax" => Self::AllowanceEvidence(b64_32(rest)?),
                     "pc" => Self::PendingConflict(b64_32(rest)?),
                     "ap" => {
                         let (record, reply) = rest.split_once('/')?;
@@ -2610,7 +2632,7 @@ impl StateKey {
                             reply: b64_32(reply)?,
                         }
                     }
-                    "ao" => Self::OriginalApproval(b64_32(rest)?),
+                    "ao" => Self::OriginalAllowance(b64_32(rest)?),
                     "aq" => Self::AppliedReply(b64_32(rest)?),
                     "pce" => Self::PendingRetirement(b64_32(rest)?),
                     "cf" => Self::Conflict(b64_32(rest)?),
@@ -3723,8 +3745,12 @@ mod tests {
             ),
             (key::applied_reply(&pubky), StateKey::AppliedReply(pubky)),
             (
-                key::original_approval(&pubky),
-                StateKey::OriginalApproval(pubky),
+                key::original_allowance(&pubky),
+                StateKey::OriginalAllowance(pubky),
+            ),
+            (
+                key::allowance_evidence(&pubky),
+                StateKey::AllowanceEvidence(pubky),
             ),
             (key::conflict(&pubky), StateKey::Conflict(pubky)),
             (key::notice_target(id), StateKey::NoticeTarget(id.into())),

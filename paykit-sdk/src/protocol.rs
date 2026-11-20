@@ -570,6 +570,7 @@ pub(crate) fn restore_paykit_layer(
     // A repeated import on this installation preserves notices the host has already seen,
     // and unresolved ones first observed since the backup (Paykit spec 7.2).
     let mut delivery_notices = std::collections::BTreeMap::new();
+    let mut unresolved = std::collections::BTreeMap::new();
     let mut pending_conflicts = std::collections::BTreeMap::new();
     let mut original_approvals = std::collections::BTreeMap::new();
     let mut prepared_replies = std::collections::BTreeMap::new();
@@ -871,6 +872,13 @@ pub(crate) fn restore_paykit_layer(
                 retirements.insert(record, end);
                 continue;
             }
+            StateKey::AllowanceEvidence(record) => {
+                let held =
+                    state::restored::<crate::allowances::ConflictEvidence>(&key, &value, &binder)
+                        .map_err(|_| unread())?;
+                unresolved.insert(record, held);
+                continue;
+            }
             StateKey::PendingConflict(record) => {
                 let conflict =
                     state::restored::<crate::allowances::PendingConflict>(&key, &value, &binder)
@@ -936,9 +944,9 @@ pub(crate) fn restore_paykit_layer(
                 prepared_replies.insert((record, hash), reply);
                 continue;
             }
-            StateKey::OriginalApproval(record) => {
+            StateKey::OriginalAllowance(record) => {
                 let original =
-                    state::restored::<crate::allowances::OriginalApproval>(&key, &value, &binder)
+                    state::restored::<crate::allowances::OriginalAllowance>(&key, &value, &binder)
                         .map_err(|_| unread())?;
                 original_approvals.insert(record, original);
                 continue;
@@ -1185,7 +1193,7 @@ pub(crate) fn restore_paykit_layer(
     crate::allowances::restore_conflicts(
         restoring,
         &binder,
-        pending_conflicts,
+        (pending_conflicts, unresolved),
         prepared_replies,
         retirements,
         sourced_replies,
@@ -1626,6 +1634,7 @@ impl Protocol for PaykitProtocol {
             Err(Fail::AwaitAdmissionWithCustody(custody)) => {
                 Outcome::AwaitAdmissionWithCustody(custody)
             }
+            Err(Fail::Defer { reason, custody }) => Outcome::Defer { reason, custody },
             Err(Fail::Drop(reason)) => Outcome::Drop { reason },
             Err(Fail::Store(failure)) => Outcome::Retry(failure),
             // A record value waits for its scope key: the client stores the entry and passes

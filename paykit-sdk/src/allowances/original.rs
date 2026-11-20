@@ -1,5 +1,5 @@
-//! The approving payer app keeps the selected proposal and its exact original batch
-//! before a grant can use either (Paykit wire 5.9). The state stays with that app.
+//! Each proposing app keeps its signed proposal and original pending create (Paykit 8.3.1).
+//! Only the approving payer keeps the original application for its first grant (wire 5.9).
 
 use super::{
     allowance_record_target, allowance_target, application, named_allowance, Body, Paykit,
@@ -40,13 +40,13 @@ pub(crate) struct OriginalAllowanceApplication {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct OriginalApproval {
+pub(crate) struct OriginalAllowance {
     #[serde(with = "serde_b64")]
     peer: [u8; 32],
     decision: KeptMessage,
     confirmed_for_execution: bool,
     generation: u64,
-    /// Commitment to this app's original pending create, when the payer proposed.
+    /// Commitment to this app's original pending create, when it proposed.
     #[serde(deserialize_with = "Option::deserialize")]
     create: Option<[u8; 32]>,
     #[serde(deserialize_with = "Option::deserialize")]
@@ -70,7 +70,7 @@ struct Opening {
     applied: Option<[KeptOp; 3]>,
 }
 
-impl OriginalApproval {
+impl OriginalAllowance {
     pub(super) fn new(
         peer: [u8; 32],
         signed: &StoredMessage,
@@ -91,8 +91,7 @@ impl OriginalApproval {
     pub(crate) fn check(&self, record: &[u8; 32], binder: &Binder<'_>) -> Result<()> {
         let decision = self.decision.stored(&self.peer)?;
         let id = named_allowance(decision.body()).ok_or_else(PaykitError::corrupt)?;
-        if !self.confirmed_for_execution
-            || self.generation == 0
+        if self.generation == 0
             || decision.sender() != *binder.identity()
             || decision.accepted_at().is_some()
             || Some(decision.cert().app_id()) != binder.app_id()
@@ -100,14 +99,21 @@ impl OriginalApproval {
         {
             return Err(PaykitError::corrupt());
         }
-        let matches_approval = match decision.body() {
+        let matches_choice = match decision.body() {
             Body::AllowanceProposal(p) => {
                 self.create.is_some()
-                    && p.proposer_role == ProposerRole::Allower
-                    && p.allower_generation == self.generation
+                    && match p.proposer_role {
+                        ProposerRole::Allower => {
+                            self.confirmed_for_execution && p.allower_generation == self.generation
+                        }
+                        ProposerRole::Allowee => {
+                            !self.confirmed_for_execution && self.opening.is_none()
+                        }
+                    }
             }
             Body::AllowanceAcceptance(_) => {
-                self.create.is_none()
+                self.confirmed_for_execution
+                    && self.create.is_none()
                     && self.rejected.is_none()
                     && self
                         .opening
@@ -116,8 +122,11 @@ impl OriginalApproval {
             }
             _ => false,
         };
-        if !matches_approval || !self.pending_lifetimes_are_ordered() {
+        if !matches_choice || !self.pending_lifetimes_are_ordered() {
             return Err(PaykitError::corrupt());
+        }
+        if let Some(rejected) = &self.rejected {
+            rejected.check_answer(&decision)?;
         }
         if let Some(o) = &self.opening {
             if o.current_revision
@@ -209,17 +218,17 @@ impl OriginalApproval {
 pub(crate) fn restore_originals(
     restoring: &RestoreContext<'_>,
     binder: &Binder<'_>,
-    mut kept: BTreeMap<[u8; 32], OriginalApproval>,
+    mut kept: BTreeMap<[u8; 32], OriginalAllowance>,
     writes: &mut Vec<LocalWrite>,
 ) -> Result<()> {
     for value in kept.values_mut() {
         value.hold_imported_withdrawal();
     }
-    for (at, v) in restoring.previous_local_scan(key::ORIGINAL_APPROVALS.as_bytes())? {
-        let Some(StateKey::OriginalApproval(record)) = StateKey::parse(&at) else {
+    for (at, v) in restoring.previous_local_scan(key::ORIGINAL_ALLOWANCES.as_bytes())? {
+        let Some(StateKey::OriginalAllowance(record)) = StateKey::parse(&at) else {
             return Err(PaykitError::corrupt());
         };
-        let mut saved = state::restored::<OriginalApproval>(&at, &v, binder)?;
+        let mut saved = state::restored::<OriginalAllowance>(&at, &v, binder)?;
         saved.request_installed_withdrawal();
         if let Some(value) = kept.get_mut(&record) {
             value.merge(saved)?;
@@ -228,7 +237,7 @@ pub(crate) fn restore_originals(
         }
     }
     for (record, value) in kept {
-        writes.push(state::local_put(&key::original_approval(&record), &value)?);
+        writes.push(state::local_put(&key::original_allowance(&record), &value)?);
     }
     Ok(())
 }
@@ -263,16 +272,16 @@ impl Paykit {
         };
         let id = &p.allowance_id;
         let record = self.app.record_key(&allowance_target(&peer, id))?;
-        let at = key::original_approval(&record);
+        let at = key::original_allowance(&record);
         if decision.sender() != self.identity()
             || decision.cert().app_id() != self.app_id()
             || !self.holds("paykit_allowance_execute")
         {
             return Err(unconfirmed());
         }
-        let mut approval = match self.local_get::<OriginalApproval>(&at).await? {
+        let mut approval = match self.local_get::<OriginalAllowance>(&at).await? {
             Some(held) => held,
-            None if p.proposer_role == ProposerRole::Allowee => OriginalApproval::new(
+            None if p.proposer_role == ProposerRole::Allowee => OriginalAllowance::new(
                 peer,
                 decision,
                 p.allower_generation,
@@ -395,7 +404,7 @@ impl Paykit {
     pub(super) async fn capture_original_approval(
         &mut self,
         at: &str,
-        approval: &mut OriginalApproval,
+        approval: &mut OriginalAllowance,
         confirmed: &application::AppliedApplications,
     ) -> Result<bool> {
         if !approval.capture_application(confirmed)? {
@@ -410,9 +419,9 @@ impl Paykit {
     pub(super) async fn applied_original_approval(
         &mut self,
         record: &[u8; 32],
-    ) -> Result<Option<OriginalApproval>> {
-        let at = key::original_approval(record);
-        let Some(mut approval) = self.local_get::<OriginalApproval>(&at).await? else {
+    ) -> Result<Option<OriginalAllowance>> {
+        let at = key::original_allowance(record);
+        let Some(mut approval) = self.local_get::<OriginalAllowance>(&at).await? else {
             return Ok(None);
         };
         if approval.awaiting_application() {
