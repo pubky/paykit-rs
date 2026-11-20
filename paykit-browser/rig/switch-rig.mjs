@@ -850,21 +850,41 @@ function forward(req, res, methodHits, lose = false, body = undefined) {
     setHost: false,
     agent: upstreamAgent,
   });
+  // The browser may close its connection before the service answers: a dropped call, a call
+  // past its deadline, a held long poll it gives up. Then the service's request is stopped
+  // and nothing is written to the closed answer, which would throw outside any handler. When
+  // the service's answer breaks off first, the rig closes the browser's connection itself.
+  let clientClosed = false;
+  let upstreamBroke = false;
+  res.on("close", () => {
+    if (res.writableFinished) return;
+    clientClosed = !upstreamBroke;
+    upstream.destroy();
+  });
   upstream.on("response", (reply) => {
+    if (res.destroyed) {
+      reply.resume();
+      return;
+    }
     if (lose) {
       reply.resume();
       return finished(reply, () => cut(res));
     }
     const head = [...endToEndHeaders(reply.rawHeaders), ...corsHeaders(req)];
     res.writeHead(reply.statusCode, reply.statusMessage, head.flat());
+    reply.once("error", () => {
+      upstreamBroke = !clientClosed;
+    });
     pipeline(reply, res, (error) => {
-      if (error) {
-        log(`upstream answer broke off: ${error.message}`);
-        cut(res);
-      }
+      // After the browser closed first, the error is the rig's own stop of the answer.
+      if (!error || clientClosed) return;
+      log(`upstream answer broke off: ${error.message}`);
+      cut(res);
     });
   });
   upstream.on("error", (error) => {
+    // After the browser closed first, the error is the rig's own stop of the request.
+    if (res.destroyed) return;
     log(`upstream: ${error.message}`);
     cut(res);
   });
