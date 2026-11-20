@@ -5525,6 +5525,121 @@ async fn withdraw_after_rejection(trigger: RejectedWithdrawal) {
 }
 
 #[tokio::test]
+async fn test_seller_withdrawal_after_a_late_acceptance_uses_its_own_create() {
+    let w = World::new();
+    let mut payer = Box::pin(paying_wallet(&w)).await;
+    Box::pin(advance_allowance_generation(&w, &mut payer)).await;
+    let mut seller = Box::pin(shop(&w)).await;
+    let offer =
+        Box::pin(seller.propose_allowance(payer.identity(), AllowanceRole::Allowee, terms()))
+            .await
+            .unwrap();
+    let selected = Box::pin(pending_at(&seller, &offer.record)).await;
+    let original = selected.proposal();
+    let paykit_lib::Body::AllowanceProposal(p) = original.body() else {
+        panic!("expected signed proposal")
+    };
+    assert_eq!(
+        p.allower_generation,
+        payer.app().own_identity().generation()
+    );
+    assert_ne!(
+        p.allower_generation,
+        seller.app().own_identity().generation()
+    );
+    assert_eq!(
+        Box::pin(received_originals(&mut payer, &[&offer.msg_id])).await,
+        [offer.msg_id]
+    );
+    let payer_key = payer
+        .app()
+        .record_key(&allowances_target(&seller.identity(), &offer.allowance_id))
+        .unwrap();
+    let other =
+        Box::pin(seller.propose_allowance(payer.identity(), AllowanceRole::Allowee, terms()))
+            .await
+            .unwrap();
+    assert_eq!(
+        Box::pin(received_originals(&mut payer, &[&other.msg_id])).await,
+        [other.msg_id]
+    );
+    let other_key = payer
+        .app()
+        .record_key(&allowances_target(&seller.identity(), &other.allowance_id))
+        .unwrap();
+    let other_r = Box::pin(payer.reject_allowance(&other_key)).await.unwrap();
+    assert_eq!(
+        Box::pin(received_originals(&mut seller, &[&other_r])).await,
+        [other_r]
+    );
+    let r = Box::pin(payer.reject_allowance(&payer_key)).await.unwrap();
+    // The other rejection and the payer's deletion do not retire this copy.
+    assert!(Box::pin(original_approval(&seller, &offer.record)).await["rejected"].is_null());
+    assert_eq!(
+        Box::pin(pending_at(&seller, &offer.record))
+            .await
+            .proposal()
+            .hash(),
+        original.hash()
+    );
+    assert_eq!(Box::pin(received_originals(&mut seller, &[&r])).await, [r]);
+    let saved = Box::pin(original_approval(&seller, &offer.record)).await;
+    assert_eq!(
+        saved["generation"],
+        seller.app().own_identity().generation()
+    );
+    assert_eq!(saved["confirmed_for_execution"], false);
+    assert!(saved["opening"].is_null());
+    assert_eq!(saved["rejected"]["withdrawal"], "Unrequested");
+
+    // The payer opens a later copy. The original seller still has its own confirmed deletion.
+    Box::pin(records_proposal(&mut payer, original, &offer.allowance_id)).await;
+    let q = Box::pin(payer.accept_executable_allowance(&payer_key, UserConfirmed::new()))
+        .await
+        .unwrap();
+    assert_eq!(Box::pin(received_originals(&mut seller, &[&q])).await, [q]);
+    Box::pin(seller.flush()).await.unwrap();
+    let messages = seller
+        .app()
+        .sent_to(&payer.identity(), 0, u64::MAX)
+        .await
+        .unwrap();
+    let mut ends = messages.iter().filter(|m| m.kind == "paykit.allowance_end");
+    let end = ends
+        .next()
+        .expect("withdrawal of the original seller proposal");
+    assert!(ends.next().is_none());
+    let signed = StoredMessage::new(
+        seller.identity(),
+        seller.app().cert().signed(),
+        end.plaintext.clone(),
+        None,
+        &payer.identity(),
+    )
+    .unwrap();
+    assert_eq!(signed.message().refs.as_slice(), [original.hash()]);
+    assert_eq!(
+        Box::pin(received_originals(&mut payer, &[&end.msg_id]))
+            .await
+            .as_slice(),
+        std::slice::from_ref(&end.msg_id)
+    );
+    assert!(seller
+        .app()
+        .shared_record(&offer.record)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(seller
+        .app()
+        .records_of("allowance_ledgers")
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
 async fn test_original_rejection_withdrawal_with_the_previous_service_key() {
     for before_rejection in [false, true] {
         Box::pin(withdraw_after_rejection(

@@ -1275,8 +1275,14 @@ impl Paykit {
         let rejected = if accepting {
             Vec::new()
         } else {
-            Box::pin(self.keep_proposal_rejection(&permanent_key, selected, proposal, &writes))
-                .await?
+            Box::pin(self.keep_proposal_rejection(
+                &permanent_key,
+                selected,
+                proposal,
+                reply,
+                &writes,
+            ))
+            .await?
         };
         let mut retained = state::Tx::default();
         Box::pin(self.keep_original_selection(

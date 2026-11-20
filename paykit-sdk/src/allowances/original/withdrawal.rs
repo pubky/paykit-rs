@@ -1,4 +1,4 @@
-//! An original payer proposal retired by the rejection it received (Paykit spec 8.3.1).
+//! The proposer's original pending create and the rejection that retired it (Paykit spec 8.3.1).
 use super::*;
 use crate::allowances::{delivery, replies, AllowanceReply, AppliedReply, EndCause, EndOrigin};
 use paykit_lib::kinds::Kind;
@@ -19,6 +19,7 @@ enum Withdrawal {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RejectedProposal {
+    answer: KeptMessage,
     selected: SeenVersion,
     #[serde(with = "serde_b64")]
     signer: [u8; 32],
@@ -27,12 +28,24 @@ pub(super) struct RejectedProposal {
     withdrawal: Withdrawal,
 }
 
+impl RejectedProposal {
+    pub(super) fn check_answer(&self, proposal: &StoredMessage) -> Result<()> {
+        let answer = self.answer.stored(&proposal.sender())?;
+        if !matches!(answer.body(), Body::AllowanceRejection(_))
+            || !replies::answers(proposal, &answer)
+        {
+            return Err(PaykitError::corrupt());
+        }
+        Ok(())
+    }
+}
+
 fn proposal_history_is_known(doc: &IdentityDoc, generation: u64) -> bool {
     doc.service_key_of(generation).is_some()
         && delivery::deletion_continues(generation, doc.body().recovery_from)
 }
 
-impl OriginalApproval {
+impl OriginalAllowance {
     pub(in crate::allowances) fn with_pending_create(
         mut self,
         own: [u8; 32],
@@ -64,9 +77,11 @@ impl OriginalApproval {
     pub(super) fn merge_rejection(&mut self, installed: Option<RejectedProposal>) -> Result<()> {
         if let Some(mut installed) = installed {
             if let Some(other) = &self.rejected {
+                let own = self.decision.stored(&self.peer)?.sender();
                 if other.selected != installed.selected
                     || other.application != installed.application
                     || other.signer != installed.signer
+                    || other.answer.stored(&own)?.hash() != installed.answer.stored(&own)?.hash()
                 {
                     return Err(PaykitError::corrupt());
                 }
@@ -112,10 +127,11 @@ impl Paykit {
         permanent: &[u8; 32],
         selected: &SharedRecord,
         proposal: &StoredMessage,
+        reply: &StoredMessage,
         writes: &[application::RecordWrite],
     ) -> Result<Vec<LocalWrite>> {
-        let at = key::original_approval(permanent);
-        let Some(mut approval) = self.local_get::<OriginalApproval>(&at).await? else {
+        let at = key::original_allowance(permanent);
+        let Some(mut approval) = self.local_get::<OriginalAllowance>(&at).await? else {
             return Ok(Vec::new());
         };
         let Some(create) = approval.create else {
@@ -134,7 +150,8 @@ impl Paykit {
         {
             return Ok(Vec::new());
         }
-        approval.rejected = Some(RejectedProposal {
+        let rejected = RejectedProposal {
+            answer: KeptMessage::of(reply),
             selected: selected.version.into(),
             signer: self.app.cert().signing_key(),
             application: application::prepared_application(
@@ -144,7 +161,9 @@ impl Paykit {
                 writes,
             )?,
             withdrawal: Withdrawal::Unrequested,
-        });
+        };
+        rejected.check_answer(proposal)?;
+        approval.rejected = Some(rejected);
         Ok(vec![state::local_put(&at, &approval)?])
     }
 
@@ -153,8 +172,8 @@ impl Paykit {
         record: &[u8; 32],
         reply: &StoredMessage,
     ) -> Result<()> {
-        let at = key::original_approval(record);
-        let Some(mut approval) = self.local_get::<OriginalApproval>(&at).await? else {
+        let at = key::original_allowance(record);
+        let Some(mut approval) = self.local_get::<OriginalAllowance>(&at).await? else {
             return Ok(());
         };
         if !approval
@@ -172,7 +191,7 @@ impl Paykit {
     pub(in crate::allowances) fn withdraw_rejected_proposal<'a>(
         &'a mut self,
         at: &'a str,
-        mut approval: OriginalApproval,
+        mut approval: OriginalAllowance,
         confirmed: &'a application::AppliedApplications,
     ) -> pubky_switch_client::transport::BoxFuture<'a, Result<()>> {
         Box::pin(async move {

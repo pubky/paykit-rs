@@ -936,9 +936,9 @@ pub(crate) fn restore_paykit_layer(
                 prepared_replies.insert((record, hash), reply);
                 continue;
             }
-            StateKey::OriginalApproval(record) => {
+            StateKey::OriginalAllowance(record) => {
                 let original =
-                    state::restored::<crate::allowances::OriginalApproval>(&key, &value, &binder)
+                    state::restored::<crate::allowances::OriginalAllowance>(&key, &value, &binder)
                         .map_err(|_| unread())?;
                 original_approvals.insert(record, original);
                 continue;
