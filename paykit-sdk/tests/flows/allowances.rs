@@ -5703,6 +5703,75 @@ async fn test_seller_withdrawal_after_a_late_acceptance_uses_its_own_create() {
 }
 
 #[tokio::test]
+async fn test_owed_seller_withdrawal_keeps_expired_conflict_evidence_after_reopen() {
+    let w = World::new();
+    let store = crate::common::store();
+    let scopes = AppScopes::new().request().allowance().build().unwrap();
+    let mut seller = Box::pin(alice_on(&w, "seller", scopes.clone(), store.clone())).await;
+    let mut payer = Box::pin(shop(&w)).await;
+    let offer =
+        Box::pin(seller.propose_allowance(payer.identity(), AllowanceRole::Allowee, terms()))
+            .await
+            .unwrap();
+    let backup = seller.backup().await.unwrap();
+    Box::pin(crate::common::receive_message(&mut payer, &offer.msg_id)).await;
+    let theirs = payer.allowances().await.unwrap()[0].record;
+    let rejection = Box::pin(payer.reject_allowance(&theirs)).await.unwrap();
+    Box::pin(crate::common::receive_message(&mut seller, &rejection)).await;
+    assert_eq!(
+        Box::pin(original_approval(&seller, &offer.record)).await["rejected"]["withdrawal"],
+        "Unrequested"
+    );
+
+    let mut sibling = Box::pin(alice_app(&w, "tool", scopes)).await;
+    let target = allowances_target(&w.bob_id(), &offer.allowance_id);
+    Box::pin(write_record(&mut sibling, &target, Some(br#"{"v":99}"#))).await;
+    let key = seller.app().record_key(&target).unwrap();
+    drop(seller);
+    let mut seller = Box::pin(restore_pending_wallet(&w, store.clone(), &backup)).await;
+    Box::pin(read_restored_records(&mut seller)).await;
+    assert_eq!(
+        Box::pin(original_approval(&seller, &offer.record)).await["rejected"]["withdrawal"],
+        "Owed"
+    );
+
+    competing_proposal(&w, &payer, &seller, &offer.allowance_id);
+    Box::pin(seller.receive(None)).await.unwrap();
+    assert_eq!(seller.app_mut().parked_entries().await.unwrap().len(), 1);
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
+    seller.app_mut().rotate().await.unwrap();
+    seller.app_mut().flush_cursor().await.unwrap();
+    Box::pin(seller.receive(None)).await.unwrap();
+    let evidence = seller.app().protocol_scan("paykit", b"ax/").await.unwrap();
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].0, format!("ax/{}", b64_of(&key)).into_bytes());
+    let app = seller.app_id();
+    for reopen in [false, true] {
+        if reopen {
+            drop(seller);
+            seller = Box::pin(w.load_on_clock(&w.alice, store.clone(), app, w.clock.clone())).await;
+        }
+        Box::pin(seller.flush()).await.unwrap();
+        assert_eq!(
+            seller.app().protocol_scan("paykit", b"ax/").await.unwrap(),
+            evidence
+        );
+        assert_eq!(
+            Box::pin(original_approval(&seller, &offer.record)).await["rejected"]["withdrawal"],
+            "Owed"
+        );
+        assert!(seller
+            .app()
+            .sent_to(&w.bob_id(), 0, u64::MAX)
+            .await
+            .unwrap()
+            .iter()
+            .all(|message| message.kind != "paykit.allowance_end"));
+        assert_eq!(Box::pin(taken(&mut payer, "paykit.allowance_end")).await, 0);
+    }
+}
+
+#[tokio::test]
 async fn test_original_rejection_withdrawal_with_the_previous_service_key() {
     for before_rejection in [false, true] {
         Box::pin(withdraw_after_rejection(
