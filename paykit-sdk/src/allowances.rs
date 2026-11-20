@@ -65,7 +65,7 @@ use crate::receive::{self, Fail};
 use crate::records::{conflict, KeptMessage};
 use crate::requests::MessageDelivery;
 use crate::state::{self, key, Tx};
-use crate::stored::{Placed, StoredNote};
+use crate::stored::{BoundNote, Placed};
 
 pub(crate) use delivery::{
     append_records, judge_append, pending_delivery, reply_is_applied, AppliedReply,
@@ -1009,7 +1009,7 @@ fn step_answers_kept(
         .into_iter()
         .map(|(_, kept)| kept)
         .collect();
-    let notes = state::cx_scan::<StoredNote>(cx, &key::stored_notes_of(&sender))?;
+    let notes = state::cx_scan(cx, &key::stored_notes_of(&sender))?;
     let stop = state::cx_get::<KeptMessage>(cx, &key::conflict(&record))?;
     answers_kept(&own, named_allowance(stored.body()), before, notes, stop)
         .map_err(|_| Fail::corrupt())
@@ -1026,7 +1026,7 @@ fn answers_kept(
     own: &[u8; 32],
     allowance_id: Option<&AllowanceId>,
     before: Vec<KeptMessage>,
-    notes: Vec<(String, StoredNote)>,
+    notes: Vec<(String, BoundNote)>,
     stop: Option<KeptMessage>,
 ) -> Result<Vec<HeldAnswer>> {
     let mut kept = Vec::new();
@@ -1042,13 +1042,12 @@ fn answers_kept(
             kept.push(HeldAnswer::new(answer, &message)?);
         }
     }
-    for (note_key, note) in notes {
-        let answer = note.bound(&note_key, own)?;
+    for (_, BoundNote { note, message }) in notes {
         if !note.placed
-            && is_allowance_response(answer.body())
-            && named_allowance(answer.body()) == allowance_id
+            && is_allowance_response(message.body())
+            && named_allowance(message.body()) == allowance_id
         {
-            kept.push(HeldAnswer::new(answer, &note.message)?);
+            kept.push(HeldAnswer::new(message, &note.message)?);
         }
     }
     Ok(kept)
@@ -1417,27 +1416,11 @@ pub(crate) fn notice_effect(
 
 /// The `allowances` record the stored entry's message `note` is to be written into (`se/`,
 /// `stored.rs`): `None` for a note placed already, or for a message of no Allowance.
-///
-/// The note is bound to its key, `key`: a note naming another sender or `msg_id` than its
-/// key, or whose message isn't that one, is corrupt state.
-fn note_target(key: &[u8], note: &StoredNote, own: &[u8; 32]) -> Result<Option<RecordTarget>> {
-    let Some(crate::state::StateKey::StoredNote { sender, msg_id }) =
-        crate::state::StateKey::parse(key)
-    else {
-        return Err(PaykitError::corrupt());
-    };
-    let stored = note.message.stored(own)?;
-    if note.sender != sender
-        || note.msg_id != msg_id
-        || stored.sender() != sender
-        || stored.message().msg_id != msg_id
-    {
-        return Err(PaykitError::corrupt());
+fn note_target(bound: &BoundNote) -> Option<RecordTarget> {
+    if bound.note.placed {
+        return None;
     }
-    if note.placed {
-        return Ok(None);
-    }
-    Ok(named_allowance(stored.body()).map(|id| allowance_target(&stored.sender(), id)))
+    named_allowance(bound.message.body()).map(|id| allowance_target(&bound.message.sender(), id))
 }
 
 /// A first proposal is kept until its bounded admission and conditional create complete.
@@ -1467,10 +1450,8 @@ pub(crate) fn keeps_stored_message(
     {
         return Ok(true);
     }
-    for (name, note) in state::cx_scan::<StoredNote>(cx, key::STORED_NOTES)? {
-        if let Some(target) =
-            note_target(name.as_bytes(), &note, &own).map_err(|_| Fail::corrupt())?
-        {
+    for (_, note) in state::cx_scan(cx, key::STORED_NOTES)? {
+        if let Some(target) = note_target(&note) {
             if cx.record_key(&target)? == *record {
                 return Ok(true);
             }
@@ -1571,9 +1552,8 @@ impl Paykit {
         if keeps_proposal(self.local_scan::<KeptMessage>(&prefix).await?, &own)? {
             return Ok(true);
         }
-        for (rest, note) in Box::pin(self.local_scan::<StoredNote>(key::STORED_NOTES)).await? {
-            let key = format!("{}{rest}", key::STORED_NOTES);
-            if let Some(target) = note_target(key.as_bytes(), &note, &own)? {
+        for (_, note) in Box::pin(self.local_scan(key::STORED_NOTES)).await? {
+            if let Some(target) = note_target(&note) {
                 if self.app.record_key(&target)? == *record {
                     return Ok(true);
                 }
@@ -3081,11 +3061,7 @@ impl Paykit {
                 .map(|(_, kept)| kept)
                 .collect();
         let prefix = key::stored_notes_of(&sender);
-        let notes = Box::pin(self.local_scan::<StoredNote>(&prefix))
-            .await?
-            .into_iter()
-            .map(|(rest, note)| (format!("{prefix}{rest}"), note))
-            .collect();
+        let notes = Box::pin(self.local_scan(&prefix)).await?;
         let stop = Box::pin(self.local_get::<KeptMessage>(&key::conflict(record))).await?;
         answers_kept(&own, named_allowance(stored.body()), before, notes, stop)
     }
