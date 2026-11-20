@@ -70,6 +70,8 @@ impl From<app::ClaimAttempt> for ClaimAttempt {
 pub struct EntryReceipt {
     /// The inbox entry's ID.
     pub entry_id: Vec<u8>,
+    /// Hash of the invitation redeemed for this delivery, when one was used.
+    pub invite_code_hash: Option<Vec<u8>>,
     /// The pinned service key that verified the feed response.
     pub service_key: Vec<u8>,
     /// The time stamped on that response, in Unix milliseconds.
@@ -79,6 +81,7 @@ impl From<app::EntryReceipt> for EntryReceipt {
     fn from(v: app::EntryReceipt) -> Self {
         Self {
             entry_id: v.entry_id.into(),
+            invite_code_hash: v.invite_code_hash.map(Vec::from),
             service_key: v.service_key.into(),
             read_at_ms: v.read_at_ms,
         }
@@ -567,6 +570,8 @@ WalletEventData from app::AppEvent {
     } as (Source::Alarm(value)),
     /// The message and its effects were committed.
     MessageReceived {
+        /// The original verified feed observation, including any redeemed invitation.
+        receipt: EntryReceipt => receipt.into(),
         /// The entry's `seq`.
         seq: u64,
         /// The message kind.

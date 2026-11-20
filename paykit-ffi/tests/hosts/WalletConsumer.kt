@@ -183,7 +183,7 @@ private suspend fun recoverReceipt(issuer: String) {
 
 private suspend fun acknowledgeRecovery(issuer: String, cleared: Boolean) {
     val mode = if (cleared) "cleared-wallet" else "notice-wallet"
-    val producer = ProcessBuilder(issuer, mode).start()
+    val producer = ProcessBuilder(issuer, mode).redirectError(ProcessBuilder.Redirect.INHERIT).start()
     val values = producer.inputStream.bufferedReader().readLines()
     check(producer.waitFor() == 0 && values.size > 6)
     val app = Base64.getDecoder().decode(values[0])
@@ -195,6 +195,8 @@ private suspend fun acknowledgeRecovery(issuer: String, cleared: Boolean) {
         host.load(app).use { wallet ->
             val event = wallet.unacknowledgedEvents().single { it.id.contentEquals(duty) }
             check(event.owners == listOf("paykit"))
+            check(event.toString() == "WalletEvent(<redacted>)")
+            check(event.data.toString() == "WalletEventData(<redacted>)")
             if (cleared) {
                 check(wallet.recoveryRequired() == null)
                 check((event.data as WalletEventData.RecoveryNoticeCleared).generation == generation)

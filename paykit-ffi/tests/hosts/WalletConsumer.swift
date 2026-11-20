@@ -323,6 +323,11 @@ private func acknowledgeRecovery(_ issuer: String, cleared: Bool) async throws {
     let wallet = try await host.load(appId: app)
     let matching = try await wallet.unacknowledgedEvents().filter { $0.id == duty }
     precondition(matching.count == 1 && matching[0].owners == ["paykit"])
+    for (value, name) in [(matching[0] as Any, "WalletEvent"), (matching[0].data as Any, "WalletEventData")] {
+        precondition(String(describing: value) == "\(name)(<redacted>)")
+        precondition(String(reflecting: value) == "\(name)(<redacted>)")
+        precondition(Mirror(reflecting: value).children.isEmpty)
+    }
     let current = try await wallet.recoveryRequired()
     switch matching[0].data {
     case let .recoveryNoticeCleared(original):

@@ -161,6 +161,29 @@ async fn receive(wallet: &mut Paykit) -> TestResult {
     Err("wallet did not finish its pages".into())
 }
 
+async fn received_message(wallet: &NativeWallet, expected: &str) -> TestResult<EntryReceipt> {
+    let mut receipt = None;
+    for _ in 0..8 {
+        let report = Box::pin(wallet.receive()).await?;
+        for event in report.events {
+            if let WalletEventData::MessageReceived {
+                msg_id,
+                receipt: seen,
+                ..
+            } = event.data
+            {
+                if msg_id == expected {
+                    assert!(receipt.replace(seen).is_none());
+                }
+            }
+        }
+        if !report.more {
+            return receipt.ok_or_else(|| "wallet did not receive the signed message".into());
+        }
+    }
+    Err("wallet did not finish its pages".into())
+}
+
 async fn payment(
     world: &World,
     host: &WalletHost,
@@ -185,11 +208,13 @@ async fn payment(
     .await?;
     signer.claim_delivered(&approved.request).await?;
     let buyer = world.identity("buyer")?.public();
-    {
+    let invitation = {
         let mut app = payer.lock().await?;
         Box::pin(receive(&mut app)).await?;
-        app.app_mut().allow_connect(&shop.public()).await?;
-    }
+        app.app_mut()
+            .register_invite_code(world.now_ms() + 3_600_000, 1)
+            .await?
+    };
     Box::pin(receive(&mut seller)).await?;
     seller.app_mut().allow_connect(&buyer).await?;
     let endpoint = PaymentEndpointIdentifier::new("btc-lightning-bolt11")?;
@@ -198,19 +223,33 @@ async fn payment(
         asset: Asset::new("btc")?,
         value: Decimal::new("7")?,
     };
-    let sent = Box::pin(seller.send_request(
-        buyer,
-        RequestDraft::new(
-            amount,
-            PaymentReference::new("checkout-7")?,
-            RequestDestination::Endpoints(BTreeMap::from([(endpoint, payload)])),
+    let sent = Box::pin(
+        seller.send_request(
+            buyer,
+            RequestDraft::new(
+                amount,
+                PaymentReference::new("checkout-7")?,
+                RequestDestination::Endpoints(BTreeMap::from([(endpoint, payload)])),
+            )
+            .with_invite_code(invitation.code),
         ),
-    ))
+    )
     .await?;
     let request = sent.request.ok_or("missing signed request")?;
+    let delivery = Box::pin(received_message(&payer, &sent.msg_id)).await?;
+    assert_eq!(
+        delivery.invite_code_hash.as_deref(),
+        Some(invitation.code_hash.as_slice())
+    );
+    assert_eq!(delivery.entry_id.len(), 16);
+    assert_eq!(delivery.read_at_ms, world.now_ms());
     {
         let mut original = payer.lock().await?;
-        Box::pin(receive(&mut original)).await?;
+        assert_eq!(
+            delivery.service_key,
+            original.app().own_identity().inbox().service_key
+        );
+        original.app_mut().allow_connect(&shop.public()).await?;
         let mut paying = Box::pin(original.pay_request(&request, PayOptions::default()));
         tokio::select! { _ = account.entered.notified()=>{},_=&mut paying=>return Err("payment did not reach the interrupted method".into()) }
         assert_eq!(account.count(), 1);
@@ -238,10 +277,10 @@ async fn payment(
     let receipt = Box::pin(seller.confirm_payment(&activity.record))
         .await?
         .ok_or("missing seller receipt")?;
-    {
-        let mut original = restored.lock().await?;
-        Box::pin(receive(&mut original)).await?;
-    }
+    let ordinary = Box::pin(received_message(&restored, &receipt)).await?;
+    assert!(ordinary.invite_code_hash.is_none());
+    assert_ne!(ordinary.entry_id, delivery.entry_id);
+    assert_eq!(ordinary.service_key, delivery.service_key);
     let receipts = restored.request_receipts(request.into()).await?;
     assert!(receipts.iter().any(|r| r.message_id == receipt
         && &r.attempt_id == attempt
