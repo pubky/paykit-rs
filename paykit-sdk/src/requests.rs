@@ -411,7 +411,8 @@ pub enum RequestStatus {
     BeingPaidHere,
     /// "Being handled by your other wallet": another own app's attempt is open.
     BeingHandledByOtherWallet,
-    /// An `unknown` or orphaned attempt: "may be paid" (Paykit spec 7.1).
+    /// An `unknown` or orphaned attempt, or a one-time request whose payer record lost its
+    /// payment history to deletion (Paykit spec 6, 7.1).
     MayBePaid,
     /// SETTLED, or the record holds the proof of a payment: "Paid" only then.
     Paid,
@@ -471,8 +472,9 @@ pub struct RequestView {
     pub recurrence: Option<Recurrence>,
     /// What the user sees.
     pub status: RequestStatus,
-    /// The current hold to show before confirmation. None for an unheld or unrecorded
-    /// request; a later restore or missed item requires showing its new hold.
+    /// The current restore or missed-item hold to show before confirmation. A later restore
+    /// or missed item requires showing its new hold. A payer deletion marker makes payment
+    /// permanently unavailable and carries no confirmation.
     pub held: Option<crate::HeldRequest>,
     /// Its request record is paused after a view showed it divergent, or its latest view
     /// shows it divergent (Paykit spec 6): shown whatever the status
@@ -631,6 +633,13 @@ pub(crate) fn rejected(record: &ActivityRecord) -> bool {
 /// The record holds a cancellation from either side (Paykit spec 8.1).
 pub(crate) fn cancelled(record: &ActivityRecord) -> bool {
     record.cancellation.is_some()
+}
+
+/// A deleted payer record may have held the only proof of payment (Paykit spec 6).
+pub(crate) fn payment_history_lost() -> Refusal {
+    Refusal::RecordHeld(
+        "Paykit spec 6: a deleted activity record may have held the payment's proof".into(),
+    )
 }
 
 /// A payment stops for a proof, rejection or cancellation. An accepted attempt finishes
@@ -2020,7 +2029,7 @@ impl Paykit {
         // with a restore's hold, a block or a divergent record: none of them ends the request,
         // and the block floor holds an open one whatever its status shows.
         let open = live(&status);
-        let held = if self.held(&record_key, record).await? {
+        let held = if record.lost_to_delete.is_none() && self.held(&record_key, record).await? {
             if live(&status) {
                 status = RequestStatus::Held;
             }
@@ -2219,6 +2228,9 @@ impl Paykit {
         }
         if cancelled(record) {
             return Ok(RequestStatus::Cancelled);
+        }
+        if record.lost_to_delete.is_some() {
+            return Ok(RequestStatus::MayBePaid);
         }
         if let Some(view) = view {
             match view.status {

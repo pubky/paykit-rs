@@ -16,6 +16,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some("seller-wallet") => return backup::print_wallet(true).await,
         Some("wallet-awaiting-identity") => return backup::print_resume_refusal(false).await,
         Some("departed-wallet") => return backup::print_resume_refusal(true).await,
+        Some("notice-wallet") => return backup::print_notice(false).await,
+        Some("cleared-wallet") => return backup::print_notice(true).await,
         _ => {}
     }
     let signed: SignedDoc = serde_json::from_reader(std::io::stdin())?;
