@@ -8,7 +8,7 @@ use crate::allowances::{AllowanceReply, AppliedReply, EndCause, EndOrigin};
 use crate::error::{PaykitError, Refusal, Result};
 use crate::records::KeptMessage;
 use crate::state::{self, key};
-use crate::stored::{submitted, Placed, StoredNote};
+use crate::stored::{submitted, BoundNote, Placed, StoredNote};
 use paykit_lib::collections::Collection;
 use paykit_lib::kinds::Kind;
 use paykit_lib::records::PendingAllowanceRecord;
@@ -48,17 +48,10 @@ pub(super) fn awaits_competing_proposal(
     pending: &PendingAllowanceRecord,
     end: Option<&super::PendingRetirement>,
     kept: Vec<(String, KeptMessage)>,
-    notes: Vec<(String, StoredNote)>,
+    notes: Vec<(String, BoundNote)>,
 ) -> Result<bool> {
-    let messages = kept.into_iter().map(|(_, message)| message).chain(
-        notes
-            .into_iter()
-            .filter(|(_, note)| !note.placed)
-            .map(|(_, note)| note.message),
-    );
-    for held in messages {
-        let message = held.stored(own)?;
-        if message.sender() == *pending.counterparty()
+    let competes = |held: &KeptMessage, message: &StoredMessage| {
+        message.sender() == *pending.counterparty()
             && matches!(message.body(), paykit_lib::Body::AllowanceProposal(p) if &p.allowance_id == pending.allowance_id())
             && (held.pending_source.is_some() || message.hash() != pending.proposal().hash())
             && !end.is_some_and(|end| {
@@ -66,11 +59,15 @@ pub(super) fn awaits_competing_proposal(
                     (a.generation == b.generation).then(|| a.seq.cmp(&b.seq))
                 }) == Some(std::cmp::Ordering::Less)
             })
-        {
+    };
+    for (_, held) in kept {
+        if competes(&held, &held.stored(own)?) {
             return Ok(true);
         }
     }
-    Ok(false)
+    Ok(notes
+        .into_iter()
+        .any(|(_, bound)| !bound.note.placed && competes(&bound.note.message, &bound.message)))
 }
 
 pub(super) enum Acceptance {

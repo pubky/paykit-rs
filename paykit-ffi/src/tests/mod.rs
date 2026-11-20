@@ -183,3 +183,24 @@ async fn test_enrollment_recovers_an_acquisition_applied_without_its_reply() -> 
     );
     Ok(())
 }
+
+#[test]
+fn test_last_store_release_after_the_opening_runtime_stops() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let host: Arc<dyn WalletStore> = Arc::new(storage::DeviceStore::open(root.path()));
+    let namespace = String::from("runtime-shutdown");
+    let open = || crate::WalletStoreSession::open(host.clone(), namespace.clone());
+    let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+    let store = runtime.block_on(open())?;
+    drop(runtime);
+    drop(store);
+
+    let replacement = tokio::runtime::Builder::new_current_thread().build()?;
+    replacement.block_on(async {
+        let store = open().await?;
+        let owner = store.ownership.clone();
+        drop(store);
+        owner.finish().await
+    })?;
+    Ok(())
+}

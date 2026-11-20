@@ -1262,3 +1262,186 @@ async fn early_paid_period_after_loss(world: &World) -> TestResult {
     assert_eq!(rail.all_executions().values().sum::<u64>(), 2);
     Ok(())
 }
+
+#[tokio::test]
+async fn test_later_period_uses_the_required_apps_signed_destination_and_receipt() -> TestResult {
+    for backend in [Backend::Scripted, Backend::Service] {
+        for priced in [false, true] {
+            let Some(world) = World::start(backend)? else {
+                continue;
+            };
+            let result = Box::pin(settle_required_period(&world, priced)).await;
+            world.close().await?;
+            result?;
+        }
+    }
+    Ok(())
+}
+
+async fn settle_required_period(world: &World, priced: bool) -> TestResult {
+    use paykit_lib::periods::{AnchoredRule, Recurrence, Unit};
+
+    let rail = Arc::new(FakeRail::with_clock(world.clock().clone()));
+    let store = Arc::new(MemoryStore::new());
+    let (mut buyer, mut shop, mut signer) =
+        Box::pin(period_wallets(world, store.clone(), &rail)).await?;
+    let mut till = Box::pin(join(
+        world,
+        &mut signer,
+        "shop",
+        "destinations",
+        AppScopes::new().request().manage_contacts().build()?,
+        Arc::new(MemoryStore::new()),
+        &rail,
+    ))
+    .await?;
+    till.app_mut().invite(&buyer.identity()).await?;
+    let start = world.now_ms() / 1000 * 1000;
+    let recurrence = Recurrence::new(AnchoredRule::new(start, 1, Unit::Minute)?, start, None)?;
+    let period = PeriodRef::from(recurrence.periods(2)?[1]);
+    let mut draft = RequestDraft::new(
+        PaymentAmount {
+            asset: Asset::new(if priced { "usd" } else { "btc" })?,
+            value: Decimal::new("1")?,
+        },
+        PaymentReference::new("period-destination")?,
+        RequestDestination::RequiredApp(till.app_id()),
+    )
+    .with_recurrence(recurrence)
+    .with_per_period_endpoints()
+    .with_proposal_expires_at_ms(start + 600_000);
+    if priced {
+        draft = draft.with_conversion(paykit_lib::bodies::Conversion::PerPeriod);
+    }
+    let request = Box::pin(shop.send_request(buyer.identity(), draft))
+        .await?
+        .request
+        .ok_or("missing request")?;
+    Box::pin(buyer.receive(None)).await?;
+    Box::pin(buyer.accept_subscription(&request)).await?;
+    Box::pin(shop.receive(None)).await?;
+    Box::pin(till.receive(None)).await?;
+    world.advance_ms(period.starts_at.saturating_sub(world.now_ms()));
+    let sale = till
+        .payee_activity()
+        .await?
+        .into_iter()
+        .find(|sale| sale.request_hash == Some(request.request_hash))
+        .ok_or("till did not see the subscription")?;
+    let endpoint = PaymentEndpointIdentifier::new("btc-lightning-bolt11")?;
+    let offered = paykit_lib::bodies::PeriodDetails {
+        billing_period: period,
+        payment_endpoints: Some(BTreeMap::from([(
+            endpoint.clone(),
+            PaymentEndpointPayload::new("ln-signed-period")?,
+        )])),
+        rates: if priced {
+            Some(vec![paykit_lib::Rate::new(
+                Asset::new("btc")?,
+                Decimal::new("0.0001")?,
+            )?])
+        } else {
+            None
+        },
+        expires_at: period.ends_at + 600_000,
+    };
+    Box::pin(shop.send_period_details(&sale.record, offered.clone())).await?;
+    Box::pin(buyer.receive(None)).await?;
+    let wrong = Box::pin(buyer.pay_period(&request, &period, PayOptions::default())).await;
+    assert!(matches!(
+        wrong.outcome.unwrap_err().refusal(),
+        Some(paykit_sdk::Refusal::NoDestination(_))
+    ));
+    assert!(buyer.payments().await?.is_empty());
+    assert!(rail.all_executions().is_empty());
+    Box::pin(till.receive(None)).await?;
+    let details = Box::pin(till.send_period_details(&sale.record, offered)).await?;
+    Box::pin(buyer.receive(None)).await?;
+    let mut options = PayOptions::default();
+    if priced {
+        let quote = Box::pin(buyer.pay_period(&request, &period, options.clone()))
+            .await
+            .outcome
+            .unwrap_err();
+        let Some(paykit_sdk::Refusal::PricedByRate { payment }) = quote.refusal() else {
+            return Err(format!("expected a signed quote: {quote:?}").into());
+        };
+        assert_eq!(payment.app_id, till.app_id());
+        assert_eq!(
+            payment.source,
+            paykit_sdk::RateSource::PeriodDetails {
+                msg_id: details.msg_id.clone()
+            }
+        );
+        options = options.with_rate_authorized((**payment).clone());
+    }
+    let paid = Box::pin(buyer.pay_period(&request, &period, options))
+        .await
+        .outcome?;
+    let PayOutcome::Paid { attempt_id, .. } = paid else {
+        return Err("period payment did not settle".into());
+    };
+    let buyer_app = buyer.app_id();
+    drop(buyer);
+    let mut buyer = Box::pin(Paykit::load(
+        world.app_env(store),
+        Default::default(),
+        buyer_app,
+        rail.clone(),
+        Arc::new(TestTimer),
+    ))
+    .await?;
+    assert_eq!(buyer.payments().await?.as_slice()[0].attempt_id, attempt_id);
+    Box::pin(shop.receive(None)).await?;
+    let occurrence = shop
+        .payee_activity()
+        .await?
+        .into_iter()
+        .find(|s| s.request_hash == Some(request.request_hash))
+        .ok_or("missing sale")?
+        .periods
+        .into_iter()
+        .find(|p| p.billing_period == period)
+        .ok_or("missing period")?;
+    let receipt = Box::pin(shop.confirm_payment(&occurrence.record))
+        .await?
+        .ok_or("missing receipt")?;
+    let held = shop
+        .app()
+        .shared_record(&occurrence.record)
+        .await?
+        .ok_or("missing credited period")?;
+    let record = ActivityRecord::read(
+        held.content.value().ok_or("unreadable credit")?,
+        &shop.identity(),
+        ActivitySide::Payee,
+    )?;
+    let chosen = record
+        .period_details
+        .as_ref()
+        .ok_or("missing selected details")?;
+    let proof = record.proof.as_ref().ok_or("missing proof")?;
+    let Body::PaymentProof(body) = proof.body() else {
+        return Err("unexpected proof".into());
+    };
+    assert_eq!(chosen.message().msg_id, details.msg_id);
+    assert_eq!(chosen.cert().app_id(), till.app_id());
+    assert_eq!(body.payment_app_id, till.app_id());
+    assert_eq!(body.payment_endpoint_identifier, endpoint);
+    assert_eq!(proof.message().refs, [request.request_hash, chosen.hash()]);
+    assert_eq!(
+        record
+            .receipt
+            .as_ref()
+            .ok_or("missing signed receipt")?
+            .message()
+            .refs,
+        [proof.hash(), request.request_hash]
+    );
+    Box::pin(buyer.receive(None)).await?;
+    let received = buyer.receipts(ReceiptsOf::Period(request, period)).await?;
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].msg_id, receipt);
+    assert_eq!(rail.pay_calls(&attempt_id), 1);
+    Ok(())
+}

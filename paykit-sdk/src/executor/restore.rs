@@ -85,39 +85,133 @@ fn settled_after_accepted_payment(
             })
 }
 
-/// Once the original journal expires, the seller's signed receipt still identifies
-/// the completed occurrence. Accept its original fixed or plain amount only when every
-/// allowed endpoint precision produces the exact transfer in the wallet's history.
-fn receipted_period_amount(
-    activity: &ActivityRecord,
-    request: &StoredMessage,
-    proof: &StoredMessage,
-    transfer: &PaymentAmount,
-) -> bool {
-    let Body::PaymentRequest(request_body) = request.body() else {
-        return false;
-    };
-    let Body::PaymentProof(paid) = proof.body() else {
-        return false;
-    };
-    let Some(receipt) = crate::receipts::displayed_receipt(activity, Some(request_body)) else {
-        return false;
-    };
-    if receipt.message().refs != [proof.hash(), request.hash()]
-        || paid.billing_period.is_none()
-        || proof.message().refs != [request.hash()]
-    {
-        return false;
+/// The original request and payer proof agree on the destination and any Billing Period.
+/// Establish this before amount or Allowance attribution (Paykit wire 4.5, 4.9–4.10).
+struct RequestedPayment<'a> {
+    request: &'a StoredMessage,
+    body: &'a paykit_lib::bodies::PaymentRequest,
+    proof: &'a StoredMessage,
+    paid: &'a paykit_lib::bodies::PaymentProof,
+    detail_rates: Option<&'a [paykit_lib::Rate]>,
+}
+
+impl<'a> RequestedPayment<'a> {
+    fn bind(
+        activity: &'a ActivityRecord,
+        request: &'a StoredMessage,
+        proof: &'a StoredMessage,
+        occurrence: Option<paykit_lib::periods::PeriodRef>,
+    ) -> Option<Self> {
+        use paykit_lib::bodies::RequestDestination;
+
+        let Body::PaymentRequest(body) = request.body() else {
+            return None;
+        };
+        let Body::PaymentProof(paid) = proof.body() else {
+            return None;
+        };
+        let period = paid
+            .check_against(body)
+            .ok()?
+            .map(paykit_lib::periods::PeriodRef::from);
+        let request_hash = request.hash();
+        let endpoint = &paid.payment_endpoint_identifier;
+        if period != occurrence
+            || proof.message().refs.first() != Some(&request_hash)
+            || !crate::periods::destination_app_permitted(body, paid.payment_app_id)
+            || body
+                .accepted_payment_endpoint_identifiers
+                .as_ref()
+                .is_some_and(|ids| !ids.contains(endpoint))
+        {
+            return None;
+        }
+        let later = match period {
+            Some(period) => crate::periods::needs_period_destination(body, period).ok()?,
+            None => false,
+        };
+        let selected = match proof.message().refs.as_slice() {
+            [_] if !later => None,
+            [_, hash] if period.is_some() => {
+                let selected = activity.period_details.as_ref()?;
+                let Body::PaymentPeriodDetails(details) = selected.body() else {
+                    return None;
+                };
+                if selected.hash() != *hash
+                    || selected.message().refs != [request_hash]
+                    || selected.sender() != request.sender()
+                    || selected.check_payee_sender(body).is_err()
+                    || details.check_against(body).is_err()
+                    || Some(details.billing_period) != period
+                {
+                    return None;
+                }
+                if later {
+                    if paid.list_version.is_some()
+                        || selected.cert().app_id() != paid.payment_app_id
+                        || !details.payment_endpoints.as_ref()?.contains_key(endpoint)
+                    {
+                        return None;
+                    }
+                } else if details.rates.is_none() {
+                    return None;
+                }
+                Some(details)
+            }
+            _ => return None,
+        };
+        if let (false, RequestDestination::Endpoints(endpoints)) = (later, &body.destination) {
+            if paid.list_version.is_some()
+                || request.cert().app_id() != paid.payment_app_id
+                || !endpoints.contains_key(endpoint)
+            {
+                return None;
+            }
+        }
+        Some(Self {
+            request,
+            body,
+            proof,
+            paid,
+            detail_rates: selected.and_then(|d| d.rates.as_deref()),
+        })
     }
-    // Period details can price only a different asset. A proof naming those details
-    // needs their original transfer evidence and does not reach this comparison.
-    let rates = crate::conversion::fixed_rates(request_body.conversion.as_ref());
-    let price = |digits| {
-        matches!(paykit_lib::amount_for_endpoint(&request_body.amount, rates,
-        &paid.payment_endpoint_identifier, digits), Ok(EndpointAmount::ByRate{amount,..}
-        | EndpointAmount::RequestedAsset(amount)) if &amount == transfer)
-    };
-    price(0) && price(paykit_lib::amount::MAX_FRACTION_DIGITS as u32)
+
+    fn requested_amount(&self) -> Option<&'a PaymentAmount> {
+        if !self.body.is_recurring() {
+            return self.body.conversion.is_none().then_some(&self.body.amount);
+        }
+        let endpoint = &self.paid.payment_endpoint_identifier;
+        let rates = self
+            .detail_rates
+            .or_else(|| crate::conversion::fixed_rates(self.body.conversion.as_ref()));
+        (endpoint.asset_segment() == Some(self.body.amount.asset.as_str())
+            && rates.is_none_or(|rates| {
+                matches!(paykit_lib::rate_for_endpoint(rates, endpoint), Ok(None))
+            }))
+        .then_some(&self.body.amount)
+    }
+
+    /// A seller receipt can establish an expired journal's fixed or plain transfer
+    /// when every allowed endpoint precision produces the wallet's exact amount.
+    fn receipted_amount(&self, activity: &ActivityRecord, transfer: &PaymentAmount) -> bool {
+        if !self.body.is_recurring() || self.detail_rates.is_some() {
+            return false;
+        }
+        let Some(receipt) = crate::receipts::displayed_receipt(activity, Some(self.body)) else {
+            return false;
+        };
+        if receipt.message().refs != [self.proof.hash(), self.request.hash()] {
+            return false;
+        }
+        let rates = crate::conversion::fixed_rates(self.body.conversion.as_ref());
+        let price = |digits| {
+            matches!(paykit_lib::amount_for_endpoint(&self.body.amount, rates,
+                &self.paid.payment_endpoint_identifier, digits), Ok(EndpointAmount::ByRate{amount,..}
+                | EndpointAmount::RequestedAsset(amount)) if &amount == transfer)
+        };
+        price(0) && price(paykit_lib::amount::MAX_FRACTION_DIGITS as u32)
+    }
 }
 
 /// How this executor established the application it is about to incorporate.
@@ -572,46 +666,34 @@ impl Paykit {
                     return Ok(None);
                 }
                 let binding = activity.binding()?;
-                let request = match binding {
-                    RecordBinding::Request { .. } => {
-                        crate::periods::request_for_payment(activity, activity, &binding)
-                    }
-                    RecordBinding::Period { .. } => records.iter().find_map(|parent| {
-                        crate::periods::request_for_payment(parent, activity, &binding)
-                    }),
-                    RecordBinding::Unrequested => None,
+                let (request, occurrence) = match binding {
+                    RecordBinding::Request { .. } => (
+                        crate::periods::request_for_payment(activity, activity, &binding),
+                        None,
+                    ),
+                    RecordBinding::Period { billing_period, .. } => (
+                        records.iter().find_map(|parent| {
+                            crate::periods::request_for_payment(parent, activity, &binding)
+                        }),
+                        Some(billing_period),
+                    ),
+                    RecordBinding::Unrequested => (None, None),
                 };
-                let signed_amount = match (binding, request) {
-                    (RecordBinding::Unrequested, _) => paid.amount.as_ref(),
-                    (RecordBinding::Request { .. }, Some((_, body)))
-                        if body.conversion.is_none() =>
-                    {
-                        Some(&body.amount)
-                    }
-                    (RecordBinding::Period { .. }, Some((_, body)))
-                        if paid.payment_endpoint_identifier.asset_segment()
-                            == Some(body.amount.asset.as_str())
-                            && !crate::conversion::fixed_rates(body.conversion.as_ref())
-                                .is_some_and(|rates| {
-                                    !matches!(
-                                        paykit_lib::rate_for_endpoint(
-                                            rates,
-                                            &paid.payment_endpoint_identifier
-                                        ),
-                                        Ok(None)
-                                    )
-                                }) =>
-                    {
-                        // Period rates only price other assets (Paykit wire 4.9).
-                        Some(&body.amount)
-                    }
-                    _ => None,
+                let requested = request.and_then(|(original, _)| {
+                    RequestedPayment::bind(activity, original, proof, occurrence)
+                });
+                if binding != RecordBinding::Unrequested && requested.is_none() {
+                    return Ok(None);
+                }
+                let signed_amount = match &requested {
+                    Some(verified) => verified.requested_amount(),
+                    None => paid.amount.as_ref(),
                 };
-                let obligation = request.map(|(request, _)| {
+                let obligation = requested.as_ref().map(|payment| {
                     self.obligation(
                         &activity.counterparty,
-                        &request.hash(),
-                        paid.billing_period.map_or(0, |p| p.start_secs()),
+                        &payment.request.hash(),
+                        occurrence.map_or(0, |p| p.start_secs()),
                     )
                 });
                 let this_allowance = activity.counterparty == checkpoint.counterparty
@@ -626,9 +708,6 @@ impl Paykit {
                     if !this_allowance
                         || proof.cert().app_id() != self.app_id()
                         || obligation != Some(entry.obligation)
-                        || request.is_none_or(|(original, _)| {
-                            proof.message().refs.first() != Some(&original.hash())
-                        })
                         || signed_amount.is_none_or(|amount| amount.asset != entry.asset)
                     {
                         return Ok(None);
@@ -671,8 +750,8 @@ impl Paykit {
                             entry.paid_amount()?.as_ref() == Some(&dispatch.amount)
                                 && self.journal_matches_paid_proof(&entry, proof)?
                         }
-                        _ => request.is_some_and(|(original, _)| {
-                            receipted_period_amount(activity, original, proof, &dispatch.amount)
+                        _ => requested.as_ref().is_some_and(|verified| {
+                            verified.receipted_amount(activity, &dispatch.amount)
                         }),
                     };
                     if !amount_proven {
@@ -723,12 +802,116 @@ mod tests {
 
     #[test]
     fn test_journal_less_period_receipt_uses_the_original_requests_selling_scope() {
+        check_receipted_period(TestPeriod::FirstFixed, "subscriptions", None, true);
+    }
+
+    #[test]
+    fn test_journal_less_fixed_rate_period_with_a_signed_destination_checks_receipt_scope() {
+        check_receipted_period(TestPeriod::LaterFixed, "subscriptions", None, true);
+    }
+
+    #[test]
+    fn test_journal_less_later_destination_proof_matches_the_original_label_and_reference() {
+        check_receipted_period(
+            TestPeriod::LaterFixed,
+            "subscriptions",
+            Some("subscription-1"),
+            true,
+        );
+        check_receipted_period(
+            TestPeriod::LaterFixed,
+            "shipping",
+            Some("subscription-1"),
+            false,
+        );
+        check_receipted_period(
+            TestPeriod::LaterFixed,
+            "subscriptions",
+            Some("subscription-2"),
+            false,
+        );
+    }
+
+    #[test]
+    fn test_pruned_same_asset_period_needs_its_request_and_signed_destination() {
+        check_receipted_period(
+            TestPeriod::SameAsset,
+            "subscriptions",
+            Some("subscription-1"),
+            true,
+        );
+        check_receipted_period(
+            TestPeriod::SameAsset,
+            "shipping",
+            Some("subscription-1"),
+            false,
+        );
+        check_receipted_period(
+            TestPeriod::SameAsset,
+            "subscriptions",
+            Some("different"),
+            false,
+        );
+    }
+
+    #[test]
+    fn test_one_time_history_checks_the_proofs_original_request() {
+        use crate::testkit::{object, Party};
+        use paykit_lib::records::ActivitySide;
+        use serde_json::json;
+
+        let payer = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let shop = Party::new(
+            "bob",
+            "counter",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
+        let request = shop.message(
+            &payer,
+            "paykit.payment_request",
+            vec![],
+            object(json!({
+                "amount": {"asset": "btc", "value": "2"}, "proposal_expires_at": null,
+                "payment_reference": "order-2"
+            })),
+        );
+        let record = ActivityRecord::new(ActivitySide::Payer, shop.id());
+        for (reference, matches) in [("order-2", true), ("other-order", false)] {
+            let proof = payer.message(&shop, "paykit.payment_proof", vec![request.hash()], object(json!({
+                "attempt_id": AttemptId::from_bytes([2; 16]).to_text(),
+                "payment_reference": reference, "payment_endpoint_identifier": "btc-lightning-bolt11",
+                "payment_app_id": pubky_switch_core::enc::zbase32_encode(&shop.app_id()), "proof": {}
+            })));
+            assert_eq!(
+                RequestedPayment::bind(&record, &request, &proof, None)
+                    .and_then(|verified| verified.requested_amount())
+                    .is_some(),
+                matches
+            );
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum TestPeriod {
+        FirstFixed,
+        LaterFixed,
+        SameAsset,
+    }
+
+    fn check_receipted_period(
+        example: TestPeriod,
+        proof_label: &str,
+        payment_reference: Option<&str>,
+        proof_matches: bool,
+    ) {
         use crate::testkit::{object, Party, NOW};
-        use paykit_lib::bodies::PaymentReceipt;
+        use paykit_lib::bodies::{PaymentReceipt, PeriodDetails};
         use paykit_lib::periods::{AnchoredRule, PeriodRef, Recurrence, Unit};
         use paykit_lib::records::ActivitySide;
         use serde_json::json;
 
+        let later_destination = !matches!(example, TestPeriod::FirstFixed);
+        let same_asset = matches!(example, TestPeriod::SameAsset);
         let payer = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
         let shop = Party::new(
             "bob",
@@ -741,30 +924,63 @@ mod tests {
         );
         let schedule =
             Recurrence::new(AnchoredRule::new(NOW, 1, Unit::Hour).unwrap(), NOW, None).unwrap();
-        let period = PeriodRef::from(schedule.first().unwrap());
-        let request = shop.message(
-            &payer,
-            "paykit.payment_request",
-            vec![],
-            object(json!({
-                "amount": { "asset": "usd", "value": "1" },
-                "payment_reference": "subscription-1", "proposal_expires_at": null,
-                "label": "subscriptions", "recurrence": schedule.to_json(),
-                "conversion": { "type": "fixed", "rates": [{ "asset": "btc", "value": "2" }] }
-            })),
-        );
+        let period = PeriodRef::from(schedule.periods(2).unwrap()[usize::from(later_destination)]);
+        let mut subscription = object(json!({
+            "amount": { "asset": "usd", "value": "1" },
+            "payment_reference": "subscription-1", "proposal_expires_at": null,
+            "label": "subscriptions", "recurrence": schedule.to_json(),
+            "conversion": { "type": "fixed", "rates": [{ "asset": "btc", "value": "2" }] }
+        }));
+        if same_asset {
+            subscription.insert("amount".into(), json!({"asset":"btc", "value":"2"}));
+            subscription.remove("conversion");
+        }
+        if later_destination {
+            subscription.insert("per_period_endpoints".into(), json!(true));
+            subscription.insert(
+                "required_app_id".into(),
+                json!(pubky_switch_core::enc::zbase32_encode(&shop.app_id())),
+            );
+            subscription.insert(
+                "accepted_payment_endpoint_identifiers".into(),
+                json!(["btc-lightning-bolt11"]),
+            );
+        }
+        let request = shop.message(&payer, "paykit.payment_request", vec![], subscription);
+        let selected = later_destination.then(|| {
+            let details = PeriodDetails {
+                billing_period: period,
+                payment_endpoints: Some(std::collections::BTreeMap::from([(
+                    paykit_lib::PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+                    paykit_lib::PaymentEndpointPayload::new("lnbc1period").unwrap(),
+                )])),
+                rates: None,
+                expires_at: period.ends_at,
+            }
+            .to_body()
+            .unwrap();
+            shop.message(
+                &payer,
+                "paykit.payment_period_details",
+                vec![request.hash()],
+                details,
+            )
+        });
+        let mut references = vec![request.hash()];
+        if let Some(detail) = &selected {
+            references.push(detail.hash());
+        }
         let attempt = AttemptId::from_bytes([3; 16]);
-        let proof = payer.message(
-            &shop,
-            "paykit.payment_proof",
-            vec![request.hash()],
-            object(json!({
-                "attempt_id": attempt.to_text(), "billing_period": period.to_json(),
-                "payment_endpoint_identifier": "btc-lightning-bolt11",
-                "payment_app_id": pubky_switch_core::enc::zbase32_encode(&shop.app_id()),
-                "label": "subscriptions", "proof": {}
-            })),
-        );
+        let mut proof_body = object(json!({
+            "attempt_id": attempt.to_text(), "billing_period": period.to_json(),
+            "payment_endpoint_identifier": "btc-lightning-bolt11",
+            "payment_app_id": pubky_switch_core::enc::zbase32_encode(&shop.app_id()),
+            "label": proof_label, "proof": {}
+        }));
+        if let Some(reference) = payment_reference {
+            proof_body.insert("payment_reference".into(), json!(reference));
+        }
+        let proof = payer.message(&shop, "paykit.payment_proof", references, proof_body);
         let transfer = PaymentAmount {
             asset: Asset::new("btc").unwrap(),
             value: Decimal::new("2").unwrap(),
@@ -783,6 +999,23 @@ mod tests {
         activity.request_hash = Some(request.hash());
         activity.billing_period = Some(period);
         activity.proof = Some(proof.clone());
+        activity.period_details = selected;
+        if same_asset {
+            // After the journal is gone the method amount equals the signed nominal amount.
+            // Validate the request and selected carrier before that equality can classify it.
+            let Body::PaymentRequest(spec) = request.body() else {
+                unreachable!()
+            };
+            assert_eq!(spec.amount, transfer);
+            assert_eq!(
+                RequestedPayment::bind(&activity, &request, &proof, Some(period))
+                    .and_then(|payment| payment.requested_amount()),
+                proof_matches.then_some(&transfer)
+            );
+            let selected = activity.period_details.take();
+            assert!(RequestedPayment::bind(&activity, &request, &proof, Some(period)).is_none());
+            activity.period_details = selected;
+        }
         for (scope, allowed) in [
             ("paykit_request:subscriptions", true),
             ("paykit_request", true),
@@ -799,16 +1032,19 @@ mod tests {
                 vec![proof.hash(), request.hash()],
                 body.clone(),
             ));
+            if proof_matches {
+                assert_eq!(
+                    crate::receipts::receipt_binding(&activity, Some(&parent))
+                        == crate::receipts::ReceiptBinding::Verified,
+                    allowed,
+                    "{scope}"
+                );
+            }
             assert_eq!(
-                crate::receipts::receipt_binding(&activity, Some(&parent))
-                    == crate::receipts::ReceiptBinding::Verified,
-                allowed,
-                "{scope}"
-            );
-            assert_eq!(
-                receipted_period_amount(&activity, &request, &proof, &transfer),
-                allowed,
-                "{scope}"
+                RequestedPayment::bind(&activity, &request, &proof, Some(period))
+                    .is_some_and(|verified| verified.receipted_amount(&activity, &transfer)),
+                allowed && proof_matches,
+                "{scope}, {proof_label}, {payment_reference:?}"
             );
         }
     }

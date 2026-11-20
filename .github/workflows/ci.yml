@@ -45,13 +45,30 @@ jobs:
     name: Tests
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: switch
+          POSTGRES_PASSWORD: switch
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U switch -d postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      PUBKY_SWITCH_TEST_DATABASE_URL: postgres://switch:switch@127.0.0.1:5432/postgres
+      PUBKY_SWITCH_REQUIRE_DB: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo test --workspace --all-features
+      - run: cargo test --workspace --all-features -- --test-threads=6
 
   doc:
     name: Docs

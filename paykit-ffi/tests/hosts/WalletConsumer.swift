@@ -36,6 +36,55 @@ final class EnrollmentStore: WalletStore, @unchecked Sendable {
         gate.unlock()
     }
 
+    private let releaseGate = NSCondition()
+    private var gatedNamespace: String?
+    private var releasing = false
+
+    func holdRelease(_ namespace: String) {
+        releaseGate.lock()
+        gatedNamespace = namespace
+        releasing = false
+        releaseGate.unlock()
+    }
+
+    func waitForRelease() async -> Bool {
+        await Task.detached { self.waitForReleaseBlocking() }.value
+    }
+
+    private func waitForReleaseBlocking() -> Bool {
+        releaseGate.lock()
+        defer { releaseGate.unlock() }
+        let deadline = Date(timeIntervalSinceNow: 5)
+        while !releasing {
+            if !releaseGate.wait(until: deadline) { return false }
+        }
+        return true
+    }
+
+    func finishSiblingRead(_ namespace: String) -> Bool {
+        releaseGate.lock()
+        defer { releaseGate.unlock() }
+        let stillFenced = gatedNamespace == namespace && lock.withLock { owners[namespace] != nil }
+        gatedNamespace = nil
+        releaseGate.broadcast()
+        return stillFenced
+    }
+
+    private func waitBeforeRelease(_ namespace: String) {
+        releaseGate.lock()
+        defer { releaseGate.unlock() }
+        guard gatedNamespace == namespace else { return }
+        releasing = true
+        releaseGate.broadcast()
+        let deadline = Date(timeIntervalSinceNow: 5)
+        while gatedNamespace == namespace {
+            if !releaseGate.wait(until: deadline) {
+                gatedNamespace = nil
+                break
+            }
+        }
+    }
+
     private var owners: [String: Data] = [:]
     private var rows: [String: [Data: Data]] = [:]
 
@@ -65,6 +114,7 @@ final class EnrollmentStore: WalletStore, @unchecked Sendable {
         }
     }
     func release(namespace: String, owner: Data) throws {
+        waitBeforeRelease(namespace)
         lock.withLock {
             if owners[namespace] == owner { owners[namespace] = nil }
         }
@@ -122,17 +172,23 @@ class ReceiptReader: WalletHomeserver, PaymentMethod, @unchecked Sendable {
     func settlementId(proofJson: Data) -> Data? { nil }
 }
 
-private func recoverReceipt(_ issuer: String) async throws {
+private func walletRows(_ issuer: String, _ mode: String) throws -> [String] {
     let producer = Process()
     producer.executableURL = URL(fileURLWithPath: issuer)
-    producer.arguments = ["paid-wallet"]
+    producer.arguments = [mode]
     let pipe = Pipe()
     producer.standardOutput = pipe
     try producer.run()
     let output = pipe.fileHandleForReading.readDataToEndOfFile()
     producer.waitUntilExit()
     let values = String(decoding: output, as: UTF8.self).split(separator: "\n").map(String.init)
-    precondition(producer.terminationStatus == 0 && values.count > 8)
+    precondition(producer.terminationStatus == 0)
+    return values
+}
+
+private func recoverReceipt(_ issuer: String) async throws {
+    let values = try walletRows(issuer, "paid-wallet")
+    precondition(values.count > 8)
     func bytes(_ i: Int) -> Data { Data(base64Encoded: values[i])! }
     let app = bytes(0)
     let store = EnrollmentStore()
@@ -171,6 +227,72 @@ private func recoverReceipt(_ issuer: String) async throws {
     precondition(journal.count == 1 && journal[0].receipt?.messageId == receipts.first?.messageId)
     precondition(receipts.count == 1 && receipts[0].attemptId == values[4] && receipts[0].messageId == values[5])
     precondition(receipts[0].paymentReference == "checkout-7" && method.transferCount == 0)
+    let seller = try walletRows(issuer, "seller-wallet")
+    precondition(seller.count > 2 && seller[1] != values[7])
+    original.reopen(namespace: seller[1], entries: seller.dropFirst(2))
+    let sellerId = Data(base64Encoded: seller[0])!
+    let second = try await sameDevice.load(appId: sellerId)
+    original.holdRelease(values[7])
+    let closing = Task { try await reopened.shutdown() }
+    let entered = await original.waitForRelease()
+    precondition(entered)
+    let siblingId = try await second.appId()
+    precondition(siblingId == sellerId && original.finishSiblingRead(values[7]),
+                 "seller wallet could not progress while payer release was gated")
+    try await closing.value
+
+    var dropped: NativeWallet? = try await sameDevice.load(appId: app)
+    let reopenedId = try await dropped!.appId()
+    precondition(reopenedId == app)
+    original.holdRelease(values[7])
+    dropped = nil
+    let dropping = await original.waitForRelease()
+    precondition(dropping)
+    let sellerIdentity = try await second.identity()
+    precondition(sellerIdentity.count == 32 && original.finishSiblingRead(values[7]),
+                 "seller wallet could not progress while the last payer handle was released")
+    try await second.shutdown()
+}
+
+private func acknowledgeRecovery(_ issuer: String, cleared: Bool) async throws {
+    let producer = Process()
+    producer.executableURL = URL(fileURLWithPath: issuer)
+    producer.arguments = [cleared ? "cleared-wallet" : "notice-wallet"]
+    let output = Pipe()
+    producer.standardOutput = output
+    try producer.run()
+    let bytes = output.fileHandleForReading.readDataToEndOfFile()
+    producer.waitUntilExit()
+    let values = String(decoding: bytes, as: UTF8.self).split(separator: "\n").map(String.init)
+    precondition(producer.terminationStatus == 0 && values.count > 6)
+    let app = Data(base64Encoded: values[0])!
+    let generation = UInt64(values[1])!
+    let duty = Data(base64Encoded: values[4])!
+    let store = EnrollmentStore()
+    store.reopen(namespace: values[5], entries: values.dropFirst(6))
+    let method = ReceiptReader()
+    let host = try WalletHost(store: store, homeserver: method, method: method, endpointIdentifiers: ["btc-lightning-bolt11"])
+    let wallet = try await host.load(appId: app)
+    let matching = try await wallet.unacknowledgedEvents().filter { $0.id == duty }
+    precondition(matching.count == 1 && matching[0].owners == ["paykit"])
+    let current = try await wallet.recoveryRequired()
+    switch matching[0].data {
+    case let .recoveryNoticeCleared(original):
+        precondition(cleared && current == nil && original == generation)
+    case let .recoveryRequired(notice):
+        precondition(!cleared && notice == current && notice.generation == generation)
+        precondition(notice.reason == .behind && !notice.permanent)
+        precondition(notice.firstSeenMs == UInt64(values[2]) && notice.serviceTimeMs == UInt64(values[3]))
+    default:
+        preconditionFailure("unexpected recovery duty")
+    }
+    try await wallet.acknowledgeEvents(through: duty)
+    try await wallet.shutdown()
+    let reopened = try await host.load(appId: app)
+    let pending = try await reopened.unacknowledgedEvents()
+    let held = try await reopened.recoveryRequired()
+    precondition(!pending.contains { $0.id == duty } && held?.generation == (cleared ? nil : generation))
+    precondition(method.transferCount == 0)
     try await reopened.shutdown()
 }
 
@@ -268,5 +390,7 @@ private enum WalletConsumer {
             preconditionFailure("replaced the stored approval")
         } catch WalletError.EnrollmentConflict {}
         try await recoverReceipt(issuer)
+        try await acknowledgeRecovery(issuer, cleared: false)
+        try await acknowledgeRecovery(issuer, cleared: true)
     }
 }
