@@ -30,16 +30,43 @@ async fn recovered_receipt(backend: Backend) -> TestResult {
     Ok(())
 }
 
-async fn restore(w: &World, backup: &PaykitBackup, rail: &Arc<FakeRail>) -> TestResult<Paykit> {
-    let backup = PaykitBackup::from_bytes(&backup.to_bytes()?)?;
-    Ok(Box::pin(Paykit::restore(
-        w.app_env(Arc::new(MemoryStore::new())),
-        Default::default(),
-        &backup,
-        rail.clone(),
-        Arc::new(TestTimer),
+async fn payer_wallet(
+    w: &World,
+    signer: &mut Signer,
+    name: &str,
+    rail: &Arc<FakeRail>,
+) -> TestResult<Box<Paykit>> {
+    let scopes = AppScopes::new().pay().manage_contacts().build()?;
+    Ok(Box::new(
+        Box::pin(join(
+            w,
+            signer,
+            "payer",
+            name,
+            scopes,
+            Arc::new(MemoryStore::new()),
+            rail,
+        ))
+        .await?,
     ))
-    .await?)
+}
+
+async fn restore(
+    w: &World,
+    backup: &PaykitBackup,
+    rail: &Arc<FakeRail>,
+) -> TestResult<Box<Paykit>> {
+    let backup = PaykitBackup::from_bytes(&backup.to_bytes()?)?;
+    Ok(Box::new(
+        Box::pin(Paykit::restore(
+            w.app_env(Arc::new(MemoryStore::new())),
+            Default::default(),
+            &backup,
+            rail.clone(),
+            Arc::new(TestTimer),
+        ))
+        .await?,
+    ))
 }
 
 async fn authenticated_activity(
@@ -104,47 +131,21 @@ async fn receipt_after_loss(w: &World, remove_writer: bool) -> TestResult {
         "https://merchant.receipt.test",
     ))
     .await?;
-    let scopes = AppScopes::new().pay().manage_contacts().build()?;
-    let mut payer = Box::pin(join(
-        w,
-        &mut alice,
-        "payer",
-        "paying-wallet",
-        scopes.clone(),
-        Arc::new(MemoryStore::new()),
-        &rail,
-    ))
-    .await?;
-    let mut phone = Box::pin(join(
-        w,
-        &mut alice,
-        "payer",
-        "phone",
-        scopes.clone(),
-        Arc::new(MemoryStore::new()),
-        &rail,
-    ))
-    .await?;
-    let mut witness = Box::pin(join(
-        w,
-        &mut alice,
-        "payer",
-        "record-reader",
-        scopes,
-        Arc::new(MemoryStore::new()),
-        &rail,
-    ))
-    .await?;
-    let mut shop = Box::pin(join(
-        w,
-        &mut bob,
-        "merchant",
-        "shop",
-        AppScopes::new().request().manage_contacts().build()?,
-        Arc::new(MemoryStore::new()),
-        &rail,
-    ))
-    .await?;
+    let mut payer = Box::pin(payer_wallet(w, &mut alice, "paying-wallet", &rail)).await?;
+    let mut phone = Box::pin(payer_wallet(w, &mut alice, "phone", &rail)).await?;
+    let mut witness = Box::pin(payer_wallet(w, &mut alice, "record-reader", &rail)).await?;
+    let mut shop = Box::new(
+        Box::pin(join(
+            w,
+            &mut bob,
+            "merchant",
+            "shop",
+            AppScopes::new().request().manage_contacts().build()?,
+            Arc::new(MemoryStore::new()),
+            &rail,
+        ))
+        .await?,
+    );
     payer.app_mut().invite(&shop.identity()).await?;
     shop.app_mut().invite(&payer.identity()).await?;
     let draft = RequestDraft::new(
