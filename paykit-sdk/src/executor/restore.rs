@@ -8,7 +8,7 @@ use paykit_lib::allowances::{
 };
 use paykit_lib::records::{bind_ledger, ActivityRecord, RecordBinding, StoredMessage};
 use paykit_lib::{AllowanceId, Asset, Body, EndpointAmount, PaymentAmount};
-use pubky_switch_client::app::{KeptOp, KeptReason, RecordRead};
+use pubky_switch_client::app::{Alarm, KeptOp, KeptReason, RecordRead};
 use pubky_switch_core::ops::Condition;
 use pubky_switch_core::shared::ApplicationRef;
 
@@ -31,7 +31,7 @@ const MISSING_PAYMENT: &str =
 /// The SDK keeps the authenticated application it accepted. The spending batch must still
 /// condition on both current records and atomically open the new attempt and reservation.
 pub(super) struct ReconciledLedger {
-    pub(super) facts: HashMap<paykit_lib::AttemptId, paykit_lib::allowances::AttemptEvidence>,
+    pub(super) facts: super::outcomes::LedgerFacts,
     pub(super) signers: super::checkpoint::ReservationSigners,
     pub(super) applied_proposals: Vec<String>,
     pub(super) ledger: Ledger,
@@ -269,6 +269,20 @@ pub(super) fn ledger_change<'a>(
 }
 
 impl Paykit {
+    /// The Switch alarm that stopped this wallet after an Allowance ledger rollback
+    /// (Paykit spec 8.3, Switch spec 10.1). Show its reason until the signer resolves
+    /// the provider move or loss. The alarm survives reopening the wallet.
+    pub fn ledger_alarm(&self) -> Option<Alarm> {
+        self.app
+            .alarm()
+            .filter(|alarm| {
+                matches!(alarm, Alarm::ProtocolRollback { protocol, reason }
+                if protocol == crate::protocol::BACKUP_NAME
+                    && matches!(reason.as_str(), MISSING_LEDGER | EARLIER_LEDGER | MISSING_PAYMENT))
+            })
+            .cloned()
+    }
+
     /// Reconcile this app's accepted Allowance ledger following a restore (Paykit spec
     /// 8.3). Returns the verified usage, counting outstanding reservations in full. When
     /// the wallet lacks complete account history or the current signed grant, ledger and
@@ -699,7 +713,7 @@ impl Paykit {
                         entry.attempt_id,
                         super::ReservationClaim {
                             obligation: entry.obligation,
-                            state: ClaimState::Done,
+                            state: paykit_lib::allowances::ClaimState::Done,
                         },
                     );
                     settled_payments.push((*payment).clone());
@@ -734,7 +748,24 @@ impl Paykit {
                 }
             }
         }
-        let facts = Box::pin(self.allowance_outcomes(&ledger, &claims, &dispatched)).await?;
+        let facts = Box::pin(self.allowance_outcomes(
+            &ledger,
+            &proposed.terms.asset,
+            &exact_grant,
+            &claims,
+            &dispatched,
+        ))
+        .await?;
+        let mut counting = facts.signed.clone();
+        for entry in &ledger.entries {
+            if let Some(fact) = counting.get_mut(&entry.attempt_id) {
+                if entry.outcome.is_none()
+                    && fact.claim == Some(ClaimState::Failed { by_owner: false })
+                {
+                    fact.never_dispatched = false;
+                }
+            }
+        }
         let mut retired = if ledger.count == 0 {
             HashMap::new()
         } else {
@@ -760,7 +791,7 @@ impl Paykit {
             &ledger,
             &claims,
             &mut retired,
-            facts.clone(),
+            counting,
             at,
         )
         else {

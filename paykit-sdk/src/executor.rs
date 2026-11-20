@@ -9,6 +9,7 @@ mod ledger;
 #[cfg(feature = "test-support")]
 pub use ledger::with_early_ledger_compaction;
 mod outcomes;
+pub use outcomes::ReservedByOtherApp;
 mod preparation;
 pub(crate) use preparation::LedgerProposal;
 mod restore;
