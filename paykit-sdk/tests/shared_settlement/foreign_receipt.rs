@@ -6,7 +6,7 @@ use paykit_sdk::rail::Behaviour;
 use paykit_sdk::PaykitBackup;
 use pubky_switch_client::app::{Collection, RecordTarget};
 use pubky_switch_core::claims::{Basis, ClaimStatus, EntryKind, Outcome};
-use pubky_switch_core::ops::{OpKind, SignedOp};
+use pubky_switch_core::ops::{Condition, OpKind, SignedOp};
 
 #[tokio::test]
 async fn test_foreign_requested_receipt_recovered_on_scripted_switch() -> TestResult {
@@ -18,12 +18,23 @@ async fn test_foreign_requested_receipt_recovered_on_postgres() -> TestResult {
     Box::pin(recovered_receipt(Backend::Service)).await
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Recovery {
+    CurrentWriter,
+    RemovedWriter,
+    ReaderBackupAfterRemoval,
+}
+
 async fn recovered_receipt(backend: Backend) -> TestResult {
-    for remove_writer in [false, true] {
+    for recovery in [
+        Recovery::CurrentWriter,
+        Recovery::RemovedWriter,
+        Recovery::ReaderBackupAfterRemoval,
+    ] {
         let Some(world) = World::start(backend)? else {
             return Ok(());
         };
-        let result = Box::pin(receipt_after_loss(&world, remove_writer)).await;
+        let result = Box::pin(receipt_after_loss(&world, recovery)).await;
         world.close().await?;
         result?;
     }
@@ -120,7 +131,7 @@ async fn open(
     Ok(())
 }
 
-async fn receipt_after_loss(w: &World, remove_writer: bool) -> TestResult {
+async fn receipt_after_loss(w: &World, source: Recovery) -> TestResult {
     let origin = "https://payer.receipt.test";
     let recovery = "https://recovered.receipt.test";
     let rail = Arc::new(FakeRail::with_clock(w.clock().clone()));
@@ -209,7 +220,7 @@ async fn receipt_after_loss(w: &World, remove_writer: bool) -> TestResult {
         .ok_or("missing original sale")?
         .record;
     w.advance_ms(1000);
-    if remove_writer {
+    if source != Recovery::CurrentWriter {
         let doc = Box::pin(alice.revoke(
             owner,
             None,
@@ -295,9 +306,9 @@ async fn receipt_after_loss(w: &World, remove_writer: bool) -> TestResult {
     Box::pin(phone.receive(None)).await?;
     while Box::pin(phone.app_mut().list_collections()).await? {}
     open(&mut phone, &obligation, &attempt_id, owner).await?;
-    // A surviving reader can upload the signed write it actually observed. When the
-    // final writer has been revoked, try the older reader backup on a fresh installation.
-    if remove_writer {
+    // One reader is freshly restored from a backup taken before provider loss.
+    // The other two cases use the installed reader that saw the original signed write.
+    if source == Recovery::ReaderBackupAfterRemoval {
         drop(witness);
         let mut restored = Box::pin(restore(w, &proof_backup, &rail)).await?;
         Box::pin(restored.receive(None)).await?;
@@ -313,20 +324,7 @@ async fn receipt_after_loss(w: &World, remove_writer: bool) -> TestResult {
         .await?
         .ok_or("missing recovered payer record")?;
     assert!(!uploaded.flagged && !uploaded.not_taken && !uploaded.different_write_at_held_version);
-    assert_eq!(uploaded.doubtful, remove_writer);
-    if remove_writer {
-        // The replacement service cannot date this removed writer's record. Keep the
-        // genuine receipt and the unresolved attempt through subsequent reads.
-        Box::pin(phone.receive(None)).await?;
-        open(&mut phone, &obligation, &attempt_id, owner).await?;
-        assert_eq!(phone.app().protocol_scan("paykit", b"pr/").await?, kept);
-        assert!(phone
-            .receipts(ReceiptsOf::Request(request))
-            .await?
-            .is_empty());
-        assert_eq!(rail.executions(&attempt_id), 1);
-        return Ok(());
-    }
+    assert_eq!(uploaded.doubtful, source != Recovery::CurrentWriter);
     let recovered = ActivityRecord::read(
         uploaded
             .content
@@ -334,11 +332,42 @@ async fn receipt_after_loss(w: &World, remove_writer: bool) -> TestResult {
             .ok_or("unreadable recovered activity")?,
         &phone.identity(),
         ActivitySide::Payer,
-    )?
-    .proof
-    .ok_or("payer proof was not recovered")?;
-    assert_eq!(recovered.plaintext().encode(), proof.plaintext().encode());
+    )?;
+    assert_eq!(
+        recovered.request.as_ref().map(StoredMessage::hash),
+        Some(request.request_hash)
+    );
+    assert!(recovered.receipt.is_none());
+    if source == Recovery::ReaderBackupAfterRemoval {
+        assert!(recovered.proof.is_none());
+    } else {
+        let recovered_proof = recovered.proof.ok_or("missing recovered payer proof")?;
+        assert_eq!(
+            recovered_proof.plaintext().encode(),
+            proof.plaintext().encode()
+        );
+    }
+    if source != Recovery::CurrentWriter {
+        // The replacement service cannot date this removed writer's record. Keep the
+        // genuine receipt and the unresolved attempt through subsequent reads.
+        assert!(!uploaded.authenticated);
+        Box::pin(phone.receive(None)).await?;
+        open(&mut phone, &obligation, &attempt_id, owner).await?;
+        assert_eq!(phone.app().protocol_scan("paykit", b"pr/").await?, kept);
+        assert!(phone
+            .receipts(ReceiptsOf::Request(request))
+            .await?
+            .is_empty());
+        assert_eq!(rail.pay_calls(&attempt_id), 1);
+        assert_eq!(rail.executions(&attempt_id), 1);
+        return Ok(());
+    }
     let paid_record = phone.app().record_condition(&key).await?;
+    assert!(matches!(
+        &paid_record,
+        Condition::RecordCurrent { key: conditioned, revision, deleted: false }
+            if *conditioned == key && revision.generation == 2
+    ));
     open(&mut phone, &obligation, &attempt_id, owner).await?;
     Box::pin(phone.receive(None)).await?;
     Box::pin(phone.receive(None)).await?;
