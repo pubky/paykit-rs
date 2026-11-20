@@ -759,6 +759,15 @@ mod tests {
 
     #[test]
     fn test_journal_less_period_receipt_uses_the_original_requests_selling_scope() {
+        check_period_receipt_selling_scope(false);
+    }
+
+    #[test]
+    fn test_journal_less_fixed_rate_period_with_a_signed_destination_checks_receipt_scope() {
+        check_period_receipt_selling_scope(true);
+    }
+
+    fn check_period_receipt_selling_scope(later_destination: bool) {
         use crate::testkit::{object, Party, NOW};
         use paykit_lib::bodies::PaymentReceipt;
         use paykit_lib::periods::{AnchoredRule, PeriodRef, Recurrence, Unit};
@@ -777,23 +786,47 @@ mod tests {
         );
         let schedule =
             Recurrence::new(AnchoredRule::new(NOW, 1, Unit::Hour).unwrap(), NOW, None).unwrap();
-        let period = PeriodRef::from(schedule.first().unwrap());
-        let request = shop.message(
-            &payer,
-            "paykit.payment_request",
-            vec![],
-            object(json!({
-                "amount": { "asset": "usd", "value": "1" },
-                "payment_reference": "subscription-1", "proposal_expires_at": null,
-                "label": "subscriptions", "recurrence": schedule.to_json(),
-                "conversion": { "type": "fixed", "rates": [{ "asset": "btc", "value": "2" }] }
-            })),
-        );
+        let period = PeriodRef::from(schedule.periods(2).unwrap()[usize::from(later_destination)]);
+        let mut subscription = object(json!({
+            "amount": { "asset": "usd", "value": "1" },
+            "payment_reference": "subscription-1", "proposal_expires_at": null,
+            "label": "subscriptions", "recurrence": schedule.to_json(),
+            "conversion": { "type": "fixed", "rates": [{ "asset": "btc", "value": "2" }] }
+        }));
+        if later_destination {
+            subscription.insert("per_period_endpoints".into(), json!(true));
+            subscription.insert(
+                "required_app_id".into(),
+                json!(pubky_switch_core::enc::zbase32_encode(&shop.app_id())),
+            );
+            subscription.insert(
+                "accepted_payment_endpoint_identifiers".into(),
+                json!(["btc-lightning-bolt11"]),
+            );
+        }
+        let request = shop.message(&payer, "paykit.payment_request", vec![], subscription);
+        let selected = later_destination.then(|| {
+            let details = object(json!({
+                "billing_period": period.to_json(),
+                "payment_endpoints": { "btc-lightning-bolt11": "lnbc1period" },
+                "expires_at": period.ends_at
+            }));
+            shop.message(
+                &payer,
+                "paykit.payment_period_details",
+                vec![request.hash()],
+                details,
+            )
+        });
+        let mut references = vec![request.hash()];
+        if let Some(detail) = &selected {
+            references.push(detail.hash());
+        }
         let attempt = AttemptId::from_bytes([3; 16]);
         let proof = payer.message(
             &shop,
             "paykit.payment_proof",
-            vec![request.hash()],
+            references,
             object(json!({
                 "attempt_id": attempt.to_text(), "billing_period": period.to_json(),
                 "payment_endpoint_identifier": "btc-lightning-bolt11",
@@ -819,6 +852,7 @@ mod tests {
         activity.request_hash = Some(request.hash());
         activity.billing_period = Some(period);
         activity.proof = Some(proof.clone());
+        activity.period_details = selected;
         for (scope, allowed) in [
             ("paykit_request:subscriptions", true),
             ("paykit_request", true),
