@@ -706,6 +706,7 @@ impl Paykit {
         // next load. Nothing is written under a certificate Paykit refuses.
         if self.certificate_refused().is_none() {
             self.bound_restored_cursor_time().await?;
+            Box::pin(self.recover_original_approvals()).await?;
             Box::pin(self.take_restore_verdict()).await?;
         }
         // Records are unlisted here until the next list read (`hold::side_unlisted`).
