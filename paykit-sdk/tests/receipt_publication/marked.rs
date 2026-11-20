@@ -9,7 +9,7 @@ async fn test_receipt_cursor_readers_verify_the_repair_of_a_marked_one_time_rece
 async fn read_repaired_marker(world: &World, sale: IssuedSale) -> TestResult {
     let IssuedSale {
         mut shop,
-        mut till,
+        till: mut other_wallet,
         mut buyer,
         seller,
         rail,
@@ -49,8 +49,11 @@ async fn read_repaired_marker(world: &World, sale: IssuedSale) -> TestResult {
         original
     );
 
-    let deleted = till.app_mut().delete_record(&target, vec![]).await?;
-    let delete = record_op(&till, key, till.app().cert()).await?;
+    let deleted = other_wallet
+        .app_mut()
+        .delete_record(&target, vec![])
+        .await?;
+    let delete = record_op(&other_wallet, key, other_wallet.app().cert()).await?;
     assert!(matches!(&delete.body().kind, OpKind::RecordPut(p)
         if p.key == key && p.expected_version == prior.version && p.value_sealed.looks_like_delete()));
     let delete_ref = ApplicationRef {
@@ -63,7 +66,7 @@ async fn read_repaired_marker(world: &World, sale: IssuedSale) -> TestResult {
         let notices = wallet.payee_deletion_notices().await?;
         assert!(notices
             .iter()
-            .any(|n| n.delete == delete_ref.item_hash && n.writer == Some(till.app_id())));
+            .any(|n| n.delete == delete_ref.item_hash && n.writer == Some(other_wallet.app_id())));
     }
     let mut eager = original.clone();
     eager["lost_to_delete"] = pubky_switch_core::enc::b64(&delete_ref.item_hash).into();
@@ -77,11 +80,11 @@ async fn read_repaired_marker(world: &World, sale: IssuedSale) -> TestResult {
         revision: delete_ref,
         deleted: true,
     };
-    let marked = till
+    let marked = other_wallet
         .app_mut()
         .put_record(&target, &serde_json::to_vec(&eager)?, vec![answers_delete])
         .await?;
-    let signed = record_op(&till, key, till.app().cert()).await?;
+    let signed = record_op(&other_wallet, key, other_wallet.app().cert()).await?;
     assert_eq!(signed.body().conditions, [answers_delete]);
     assert!(
         matches!(&signed.body().kind, OpKind::RecordPut(p) if p.key == key && p.expected_version == deleted.version && p.policy == target.collection.policy)
