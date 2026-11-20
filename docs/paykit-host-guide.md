@@ -264,6 +264,21 @@ installed wallet still has that proof and its later ledger, reconciliation
 counts the outstanding reservations. Show the existing consent prompt if the
 restored Allowance requires confirmation.
 
+If `Paykit::ledger_alarm` returns an alarm, show its reason when opening the
+wallet and after a reconciliation error. The Switch client stops new payment
+attempts, including manual payments. Direct the user to the signer to move to
+another provider or declare provider loss (Switch spec 10.1).
+
+Call `Paykit::reserved_by_other_apps` with the permanent Allowance handle.
+For each returned attempt, show its ID and transfer amount in the Allowance's
+asset. If the user selects that attempt and confirms the release, pass its ID
+and `UserConfirmed` to `Paykit::release_allowance_attempt`. The wallet
+checks the current grant and failure and its own durable evidence that the
+attempt ended before dispatch. A restored journal cannot establish that.
+If the call returns a kept batch ID, show the release as pending. Receive or
+resume and read the verified usage again before showing a change in capacity.
+A later signed paid outcome still spends the amount (Paykit spec 8.3).
+
 To pay an eligible one-time request, call `Paykit::pay_under_allowance`
 with the same permanent Allowance handle. The wallet reserves the transfer
 amount under the grant before calling the payment method. A refused limit or

@@ -1322,6 +1322,7 @@ impl Paykit {
             carrier_record: None,
             attempt_proof: None,
             failed_by_method: false,
+            never_dispatched: false,
             request: Some(KeptMessage::of(&stored)),
             record_held: false,
             transfer_bound: Some(bound),
@@ -1576,6 +1577,7 @@ impl Paykit {
             carrier_record: None,
             attempt_proof: None,
             failed_by_method: false,
+            never_dispatched: false,
             request: None,
             record_held: false,
             transfer_bound: Some(bound),
@@ -1737,6 +1739,9 @@ impl Paykit {
     }
 
     pub(crate) async fn set_stage(&mut self, entry: &mut JournalEntry, stage: Stage) -> Result<()> {
+        if matches!(stage, Stage::Finished | Stage::Abandoned) {
+            entry.end_before_the_call();
+        }
         entry.stage = stage;
         self.save(entry).await
     }
@@ -3672,6 +3677,11 @@ impl Paykit {
                 batch = Box::pin(self.executor_outcome(entry, paid, batch)).await?;
             }
             let mut finished = entry.clone();
+            if paid {
+                finished.never_dispatched = false;
+            } else {
+                finished.end_before_the_call();
+            }
             // An acceptance still owed keeps the entry where a resume visits it: the outcome
             // is written, the acceptance not yet sent or placed.
             finished.stage = if paid && entry.owes_acceptance()? {
@@ -4264,7 +4274,9 @@ impl Paykit {
         for entry in self.journal().await? {
             let Some(bound) = prune_bound(
                 entry.stage,
-                entry.failed_by_method || entry.failed_on_claim,
+                entry.failed_by_method
+                    || entry.failed_on_claim
+                    || (entry.never_dispatched && entry.stage == Stage::Finished),
                 entry.deadline,
                 entry.journaled_at_ms,
             ) else {
