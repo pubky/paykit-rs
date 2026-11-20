@@ -5,7 +5,10 @@ use paykit_lib::{
     PaymentReference,
 };
 use paykit_sdk::{rail::FakeRail, AppScopes, Paykit, RequestDestination, RequestDraft, Timer};
-use pubky_switch_client::{store::MemoryStore, transport::BoxFuture};
+use pubky_switch_client::{
+    store::{client_namespace, MemoryStore, StateStore},
+    transport::BoxFuture,
+};
 use pubky_switch_harness::{parties::Asking, Backend, World};
 use std::{collections::BTreeMap, error::Error, sync::Arc};
 
@@ -23,6 +26,7 @@ async fn enrolled(
     name: &str,
     scopes: AppScopes,
     rail: Arc<FakeRail>,
+    store: Arc<MemoryStore>,
 ) -> Result<Paykit> {
     let identity = world.identity(name)?;
     let mut signer = super::signer::serving(world, name).await?;
@@ -32,7 +36,7 @@ async fn enrolled(
     let reviewed = signer.review(asking.request.signed(), &asking.auth)?;
     let approved = Box::pin(signer.approve(reviewed)).await?;
     let app = Box::pin(Paykit::join(
-        world.app_env(Arc::new(MemoryStore::new())),
+        world.app_env(store),
         Default::default(),
         asking.join_request(identity.public(), &approved)?,
         rail,
@@ -55,14 +59,23 @@ async fn receive(wallet: &mut Paykit) -> Result<()> {
 pub(super) async fn print_wallet() -> Result<()> {
     let world = World::start(Backend::Scripted)?.ok_or("missing wallet world")?;
     let rail = Arc::new(FakeRail::with_clock(world.clock().clone()));
+    let payer_store = Arc::new(MemoryStore::new());
     let mut payer = Box::pin(enrolled(
         &world,
         "payer",
         AppScopes::new().pay(),
         rail.clone(),
+        payer_store.clone(),
     ))
     .await?;
-    let mut seller = Box::pin(enrolled(&world, "seller", AppScopes::new().request(), rail)).await?;
+    let mut seller = Box::pin(enrolled(
+        &world,
+        "seller",
+        AppScopes::new().request(),
+        rail,
+        Arc::new(MemoryStore::new()),
+    ))
+    .await?;
     Box::pin(receive(&mut payer)).await?;
     Box::pin(receive(&mut seller)).await?;
     payer.app_mut().allow_connect(&seller.identity()).await?;
@@ -115,6 +128,14 @@ pub(super) async fn print_wallet() -> Result<()> {
     println!("{attempt}");
     println!("{receipt}");
     println!("{}", STANDARD.encode(backup));
+    // Hand the language process the unchanged test store of the original device as well.
+    // It can distinguish an ordinary reopen from restoring the backup before its first read.
+    let namespace = client_namespace(&payer.app_id());
+    drop(payer);
+    println!("{namespace}");
+    for (key, value) in payer_store.scan(&namespace, b"", None, u32::MAX)? {
+        println!("{} {}", STANDARD.encode(key), STANDARD.encode(value));
+    }
     world.close().await?;
     Ok(())
 }
