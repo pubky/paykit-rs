@@ -37,7 +37,31 @@ async fn approval(world: &World) -> TestResult {
         )
         .await
     };
+    let mut invalid = auth.clone();
+    invalid.caps = "/pub/another-app.json:rw".into();
+    assert!(
+        matches!(prepare(&host,reference.clone(),&invalid).await, Err(WalletError::InvalidInput{field}) if field == "capabilities")
+    );
+    invalid.caps = format!("{},{}", auth.caps, auth.caps);
+    assert!(matches!(
+        prepare(&host, reference.clone(), &invalid).await,
+        Err(WalletError::InvalidInput { .. })
+    ));
+    let backup =
+        pubky_switch_core::records::app_backup_path(&first.app_id.clone().try_into().unwrap());
+    let auth = AuthRequest {
+        caps: format!("{backup}:rw,{}", auth.caps),
+        ..auth
+    };
     let original = prepare(&host, reference.clone(), &auth).await?;
+    let reordered = AuthRequest {
+        caps: format!("{}:rw,{backup}:rw", first.app_record_path),
+        ..auth.clone()
+    };
+    assert!(matches!(
+        prepare(&host, reference.clone(), &reordered).await,
+        Err(WalletError::EnrollmentConflict)
+    ));
     drop(host);
     let host = open();
     let recovered = prepare(&host, reference.clone(), &auth).await?;
@@ -128,4 +152,35 @@ fn test_enrollment_keeps_the_selected_approval_across_reopen_on_scripted() {
 #[test]
 fn test_enrollment_keeps_the_selected_approval_across_reopen_on_postgresql() {
     run(Backend::Service);
+}
+
+#[tokio::test]
+async fn test_enrollment_recovers_an_acquisition_applied_without_its_reply() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let open = || WalletEnrollment::new(Arc::new(storage::DeviceStore::open(root.path())));
+    let reference = vec![37; 16];
+    let original = open().begin_enrollment(reference.clone()).await?;
+    let lost = root.path().join("acquired-without-answer");
+    let withheld = root.path().join("hold-release");
+    std::fs::write(&lost, [])?;
+    std::fs::write(&withheld, [])?;
+    assert!(matches!(
+        open().begin_enrollment(reference.clone()).await,
+        Err(WalletError::Storage {
+            failure: StorageError::Unknown
+        })
+    ));
+    std::fs::remove_file(&lost)?;
+    assert!(matches!(
+        open().begin_enrollment(reference.clone()).await,
+        Err(WalletError::Storage {
+            failure: StorageError::InUse
+        })
+    ));
+    std::fs::remove_file(&withheld)?;
+    assert_eq!(
+        open().begin_enrollment(reference).await?.app_id,
+        original.app_id
+    );
+    Ok(())
 }

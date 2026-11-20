@@ -1,9 +1,9 @@
-use crate::{HostRail, HostStore, PaymentMethod, WalletError, WalletStore};
-use paykit_sdk::{AppEnv, PaymentEndpointIdentifier, Rail, Timer};
+use crate::{HostRail, PaymentMethod, WalletError, WalletStore};
+use paykit_sdk::{ PaymentEndpointIdentifier, Rail, Timer};
 use pubky_switch_client::app::{HomeserverReader, HomeserverWriter};
-use pubky_switch_client::clock::SystemClock;
-use pubky_switch_client::store::StoreHandle;
-use pubky_switch_client::transport::{BoxFuture, HttpConfig, HttpTransport, TransportError};
+use pubky_switch_client::clock::{Clock,SystemClock};
+
+use pubky_switch_client::transport::{BoxFuture, HttpConfig, HttpTransport, Transport, TransportError};
 use std::{sync::Arc, time::Duration};
 
 /// Failure reading or writing a Pubky Homeserver path.
@@ -92,7 +92,10 @@ impl Timer for RuntimeTimer {
 /// A Paykit application's protected store, Pubky session and payment method.
 #[derive(uniffi::Object)]
 pub struct WalletHost {
-    pub(crate) env: AppEnv,
+    pub(crate) clock: Arc<dyn Clock>,
+    pub(crate) transport: Arc<dyn Transport>,
+    pub(crate) home: Arc<dyn HomeserverReader>,
+    pub(crate) writer: Arc<dyn HomeserverWriter>,
     pub(crate) store: Arc<dyn WalletStore>,
     pub(crate) rail: Arc<dyn Rail>,
     pub(crate) timer: Arc<dyn Timer>,
@@ -115,15 +118,9 @@ impl WalletHost {
         let home = Arc::new(Home(homeserver));
         let transport = HttpTransport::new(HttpConfig::default())
             .map_err(|_| WalletError::invalid("HTTPS transport configuration"))?;
-        let env = AppEnv {
-            store: StoreHandle::new(Arc::new(HostStore(store.clone()))),
-            transport: Arc::new(transport),
-            clock: Arc::new(SystemClock),
-            homeserver: home.clone(),
-            homeserver_writer: Some(home),
-        };
         Ok(Arc::new(Self {
-            env,
+            clock:Arc::new(SystemClock),
+            transport:Arc::new(transport), home:home.clone(), writer:home,
             store,
             rail: Arc::new(HostRail {
                 method,

@@ -1,6 +1,6 @@
 use crate::{StorageError, StoreEntry, StoreWrite, WalletStore};
 use pubky_switch_core::enc::{b64, hash};
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::{
     collections::BTreeMap,
     fs::File,
@@ -72,42 +72,18 @@ impl DeviceStore {
             Err(_) => Err(StorageError::Unavailable),
         }
     }
-    fn apply(&self, writes: Vec<StoreWrite>) -> Result<(), StorageError> {
+    fn apply(&self, namespace: &str, writes: Vec<StoreWrite>) -> Result<(), StorageError> {
         let mut db = self.db();
         let tx = db.transaction().map_err(|_| StorageError::Unavailable)?;
         for w in writes {
-            apply(&tx, w).map_err(|_| StorageError::Unavailable)?;
+            match w {
+                StoreWrite::Put{key,value} => tx.execute("INSERT OR REPLACE INTO wallet VALUES(?1,?2,?3)",params![namespace,key,value]),
+                StoreWrite::Delete{key} => tx.execute("DELETE FROM wallet WHERE ns=?1 AND k=?2",params![namespace,key]),
+                StoreWrite::DeletePrefix{prefix} => tx.execute("DELETE FROM wallet WHERE ns=?1 AND (length(?2)=0 OR substr(k,1,length(?2))=?2)",params![namespace,prefix]),
+            }.map_err(|_|StorageError::Unavailable)?;
         }
         tx.commit().map_err(|_| StorageError::Unknown)
     }
-}
-fn ns(w: &StoreWrite) -> &str {
-    match w {
-        StoreWrite::Put { namespace, .. }
-        | StoreWrite::Delete { namespace, .. }
-        | StoreWrite::DeletePrefix { namespace, .. } => namespace,
-    }
-}
-fn apply(tx: &Transaction<'_>, w: StoreWrite) -> rusqlite::Result<()> {
-    match w {
-        StoreWrite::Put {
-            namespace,
-            key,
-            value,
-        } => tx.execute(
-            "INSERT OR REPLACE INTO wallet VALUES(?1,?2,?3)",
-            params![namespace, key, value],
-        )?,
-        StoreWrite::Delete { namespace, key } => tx.execute(
-            "DELETE FROM wallet WHERE ns=?1 AND k=?2",
-            params![namespace, key],
-        )?,
-        StoreWrite::DeletePrefix { namespace, prefix } => tx.execute(
-            "DELETE FROM wallet WHERE ns=?1 AND substr(k,1,length(?2))=?2",
-            params![namespace, prefix],
-        )?,
-    };
-    Ok(())
 }
 impl WalletStore for DeviceStore {
     fn get(&self, namespace: String, key: Vec<u8>) -> Result<Option<Vec<u8>>, StorageError> {
@@ -145,6 +121,9 @@ impl WalletStore for DeviceStore {
             return Ok(false);
         };
         self.leases.lock().unwrap().insert(namespace, (owner, file));
+        if self.root.join("acquired-without-answer").exists() {
+            return Err(StorageError::Unknown);
+        }
         Ok(true)
     }
     fn release(&self, namespace: String, owner: Vec<u8>) -> Result<(), StorageError> {
@@ -167,10 +146,7 @@ impl WalletStore for DeviceStore {
         if !leases.get(&namespace).is_some_and(|(id, _)| id == &owner) {
             return Ok(false);
         }
-        if writes.iter().any(|w| ns(w) != namespace) {
-            return Err(StorageError::NotOwner);
-        }
-        self.apply(writes)?;
+        self.apply(&namespace, writes)?;
         Ok(true)
     }
 }
@@ -183,7 +159,6 @@ fn test_device_store_fences_a_second_process_and_a_reopened_writer() {
     let new = vec![2; 32];
     let put = |value| {
         vec![StoreWrite::Put {
-            namespace: ns.clone(),
             key: vec![1],
             value: vec![value],
         }]

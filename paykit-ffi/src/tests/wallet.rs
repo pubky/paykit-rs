@@ -46,8 +46,8 @@ fn host(world: &World, root: &Path, account: Arc<Account>) -> Arc<WalletHost> {
     .unwrap();
     let mut host = Arc::into_inner(host).unwrap();
     let env = world.app_env(Arc::new(MemoryStore::new()));
-    host.env.clock = env.clock;
-    host.env.transport = env.transport;
+    host.clock = env.clock;
+    host.transport = env.transport;
     Arc::new(host)
 }
 
@@ -277,7 +277,7 @@ async fn journey(world: &World) -> TestResult {
     assert_eq!(DeviceStore::open(empty.path()).rows(), 0);
     assert_eq!(std::fs::read_dir(empty.path())?.count(), 1);
     let restored = restoring
-        .restore(id.clone(), backup, BackupDevice::KnownWiped)
+        .restore(id.clone(), backup, BackupDevice::InPossession)
         .await?;
     assert_eq!(restored.app_id().await?, id);
     assert_eq!(restored.identity().await?, identity);

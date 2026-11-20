@@ -42,9 +42,6 @@ private final class EnrollmentStore: WalletStore, @unchecked Sendable {
     func get(namespace: String, key: Data) throws -> Data? {
         lock.withLock { rows[namespace]?[key] }
     }
-    func scan(namespace: String, prefix: Data, after: Data?, limit: UInt32) throws -> [StoreEntry] {
-        preconditionFailure("unexpected enrollment scan")
-    }
     func acquire(namespace: String, owner: Data) throws -> Bool {
         lock.withLock {
             guard owners[namespace] == nil else { return false }
@@ -71,9 +68,9 @@ private final class EnrollmentStore: WalletStore, @unchecked Sendable {
         return lock.withLock {
             guard owners[namespace] == owner else { return false }
             precondition(writes.count == 1)
-            guard case let .put(ns, key, value) = writes[0], ns == namespace else {
-                preconditionFailure("unexpected enrollment write")
-            }
+            let key: Data
+            let value: Data
+            switch writes[0] { case let .put(k, v): key = k; value = v }
             rows[namespace, default: [:]][key] = value
             return true
         }
@@ -94,6 +91,11 @@ private enum WalletConsumer {
         do {
             let first = host()
             let entry = try await first.beginEnrollment(reference: reference)
+            do {
+                _ = try await first.prepareEnrollment(reference: reference, clientId: "wallet.example",
+                    clientKey: key, capabilities: "/pub/another.json:rw", authSecret: secret)
+                preconditionFailure("invalid app capabilities were pinned")
+            } catch WalletError.InvalidInput(let field) { precondition(field == "capabilities") }
             original = try await first.prepareEnrollment(reference: reference, clientId: "wallet.example", clientKey: key, capabilities: entry.appRecordPath + ":rw", authSecret: secret)
         }
         let next = host()

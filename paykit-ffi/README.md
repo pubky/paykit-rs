@@ -2,7 +2,7 @@
 
 `WalletEnrollment` prepares a payer application for the signer and keeps the selected approval on the device. Both languages use the same native implementation. The Kotlin package is `com.synonym.paykit.v2`. The Swift module is `PaykitV2`.
 
-Use a host-owned, protected store with process-wide and cross-process writer exclusion for each physical namespace. Implement ordered prefix reads and one atomic, durable commit that verifies the exact owner in the same transaction. Report an unknown outcome when a commit may have applied. A release can be retried with the original token. It must leave a newer owner intact. A process exit must release its ownership. Keep signing material and the protected approval out of system backups and logs.
+Use a host-owned, protected store with process-wide and cross-process writer exclusion for each physical namespace. Implement key reads and an atomic, durable commit that verifies the exact owner in the same transaction. Report an unknown outcome when a commit may have applied. If acquisition may have applied before its answer was lost, report an unknown outcome. A release can be retried with the original token. It must leave a newer owner intact. A process exit must release its ownership. Keep signing material and the protected approval out of system backups and logs.
 
 1. Save a random 16-byte enrollment reference, then call `beginEnrollment` for its App ID and public record path.
 2. Call `prepareEnrollment` with the original Pubky authentication request and secret. Give the returned signed app request to the signer.

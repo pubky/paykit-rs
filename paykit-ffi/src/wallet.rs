@@ -81,10 +81,9 @@ impl WalletHost {
         &self,
         id: [u8; 16],
     ) -> Result<(AppEnv, Arc<crate::LeaseOwner>), WalletError> {
-        let mut env = self.env.clone();
-        let session = crate::WalletStoreSession::open(self.store.clone(), id).await?;
+        let session = crate::WalletStoreSession::open(self.store.clone(), pubky_switch_client::store::client_namespace(&id)).await?;
         let owner = session.ownership.clone();
-        env.store = StoreHandle::new(session);
+        let env=AppEnv{ store: StoreHandle::new(session), clock:self.clock.clone(),transport:self.transport.clone(),homeserver:self.home.clone(),homeserver_writer:Some(self.writer.clone()) };
         Ok((env, owner))
     }
     pub(crate) async fn load_app(&self, env: AppEnv, id: [u8; 16]) -> Result<Paykit, PaykitError> {

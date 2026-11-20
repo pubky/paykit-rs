@@ -14,9 +14,6 @@ private class EnrollmentStore : WalletStore {
     @Synchronized override fun get(namespace: String, key: ByteArray) =
         rows[key(namespace, key)]?.copyOf()
 
-    override fun scan(namespace: String, prefix: ByteArray, after: ByteArray?, limit: UInt): List<StoreEntry> =
-        error("unexpected enrollment scan")
-
     @Synchronized override fun acquire(namespace: String, owner: ByteArray): Boolean =
         owners.putIfAbsent(namespace, owner.copyOf()) == null
 
@@ -27,7 +24,6 @@ private class EnrollmentStore : WalletStore {
     @Synchronized override fun commitIf(namespace: String, owner: ByteArray, writes: List<StoreWrite>): Boolean {
         if (owners[namespace]?.contentEquals(owner) != true) return false
         val put = writes.single() as StoreWrite.Put
-        check(put.namespace == namespace)
         rows[key(namespace, put.key)] = put.value.copyOf()
         return true
     }
@@ -41,6 +37,10 @@ fun main() = runBlocking {
     fun host() = WalletEnrollment(store)
     val original = host().use { wallet ->
         val entry = wallet.beginEnrollment(reference)
+        try {
+            wallet.prepareEnrollment(reference, "wallet.example", clientKey, "/pub/another.json:rw", secret)
+            error("invalid app capabilities were pinned")
+        } catch (error: WalletException.InvalidInput) { check(error.field == "capabilities") }
         wallet.prepareEnrollment(reference, "wallet.example", clientKey, entry.appRecordPath + ":rw", secret)
     }
     host().use { wallet ->
@@ -56,7 +56,7 @@ fun main() = runBlocking {
             error("changed secret accepted")
         } catch (_: WalletException.EnrollmentConflict) { }
     }
-    check(StoreWrite.Put("wallet", byteArrayOf(1), secret).toString() == "StoreWrite(<redacted>)")
+    check(StoreWrite.Put(byteArrayOf(1), secret).toString() == "StoreWrite(<redacted>)")
     val issuer = ProcessBuilder(checkNotNull(System.getenv("PAYKIT_TEST_ISSUER"))).start()
     issuer.outputStream.use { it.write(original.signedRequest) }
     val response = issuer.inputStream.bufferedReader().readLines()
