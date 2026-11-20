@@ -24,6 +24,8 @@ pubky-switch-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# The pay path's Instant: std's, or `performance.now()` on wasm32-unknown-unknown (std's panics).
+web-time = "1.1.0"
 
 # The workspace dependency turns the client's default features off, so the browser build drops
 # its native HTTP transport; every other target takes the defaults back here.

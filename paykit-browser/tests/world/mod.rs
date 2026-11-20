@@ -1,6 +1,9 @@
-//! The world the flow runs in: a payer and a payee, each with a signer and a scripted switch at
-//! an origin of its own, one `Router` between the switches, a shared Homeserver, a test clock
-//! started at the browser's wall clock, and the SDK's fake rail.
+//! The world the browser flow tests run in: a payer and a payee, each with a signer and a
+//! scripted switch at an origin of its own, one `Router` between the switches, a shared
+//! Homeserver, a test clock started at the browser's wall clock, and the SDK's fake rail.
+//!
+//! The `request_flow` and `pay_flow` targets both include this module. The items only one of
+//! them uses allow `dead_code`, as the other target builds them unused.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -18,14 +21,16 @@ use paykit_sdk::rail::FakeRail;
 use paykit_sdk::{
     AppScopes, Paykit, PaykitConfig, RequestDraft, RequestRef, RequestView, RequestedScopes,
 };
-use pubky_switch_client::app::RecordContent;
+use pubky_switch_client::app::{AppEnv, RecordContent};
 use pubky_switch_client::clock::{Clock, TestClock};
-use pubky_switch_client::store::MemoryStore;
+use pubky_switch_client::store::{MemoryStore, StateStore};
 use pubky_switch_client::testing::{
     AppSpec, ProtocolSpec, Router, Seeds, TestHomeserver, TestIdentity, TestSigner,
 };
 
 pub const HOUR_MS: u64 = 3_600_000;
+#[allow(dead_code)] // `pay_flow` only.
+pub const DAY_MS: u64 = 24 * HOUR_MS;
 
 /// Where the payer's switch is.
 const PAYER_ORIGIN: &str = "https://payer-switch.example";
@@ -38,7 +43,7 @@ pub struct World {
     pub payer: TestSigner,
     payee: TestSigner,
     router: Arc<Router>,
-    rail: Arc<FakeRail>,
+    pub rail: Arc<FakeRail>,
 }
 
 impl World {
@@ -87,11 +92,24 @@ impl World {
     }
 
     /// The payer's wallet, holding `paykit_pay`, which has not invited the payee.
+    #[allow(dead_code)] // `request_flow` only.
     pub async fn uninvited_wallet(&self) -> Paykit {
-        self.join(
+        self.uninvited_wallet_with(Arc::new(MemoryStore::new()), PaykitConfig::default())
+            .await
+    }
+
+    /// The payer's wallet, as [`World::uninvited_wallet`], on `store` and with `config`.
+    async fn uninvited_wallet_with(
+        &self,
+        store: Arc<dyn StateStore>,
+        config: PaykitConfig,
+    ) -> Paykit {
+        self.join_with(
             &self.payer,
             "wallet",
             AppScopes::new().pay().build().unwrap(),
+            config,
+            store,
         )
         .await
     }
@@ -100,9 +118,35 @@ impl World {
     /// the payer starts, as at a checkout, so the payee's Payment Requests are admitted
     /// (Paykit spec 1).
     pub async fn wallet(&self) -> Paykit {
-        let mut wallet = self.uninvited_wallet().await;
+        self.wallet_with(Arc::new(MemoryStore::new()), PaykitConfig::default())
+            .await
+    }
+
+    /// The payer's wallet, as [`World::wallet`], on `store` and with `config`.
+    pub async fn wallet_with(&self, store: Arc<dyn StateStore>, config: PaykitConfig) -> Paykit {
+        let mut wallet = self.uninvited_wallet_with(store, config).await;
         wallet.app_mut().invite(&self.payee_id()).await.unwrap();
         wallet
+    }
+
+    /// The payer's app `app_id`, loaded again from `store` with `config`, as a host does after
+    /// a restart.
+    #[allow(dead_code)] // `pay_flow` only.
+    pub async fn reload_wallet(
+        &self,
+        store: Arc<dyn StateStore>,
+        app_id: [u8; 16],
+        config: PaykitConfig,
+    ) -> Paykit {
+        Paykit::load(
+            self.env(&self.payer, store),
+            config,
+            app_id,
+            Arc::clone(&self.rail) as Arc<_>,
+            Arc::new(JsTimer),
+        )
+        .await
+        .unwrap()
     }
 
     /// The payee's shop, holding `paykit_request`.
@@ -115,20 +159,41 @@ impl World {
         .await
     }
 
+    /// The environment of an app of `signer` on `store`, reaching the switches through the
+    /// router.
+    fn env(&self, signer: &TestSigner, store: Arc<dyn StateStore>) -> AppEnv {
+        signer.env_with(store, Arc::clone(&self.router) as Arc<_>)
+    }
+
     /// Join app `name` of `signer` with `scopes`, approved by the signer, on a store of its
     /// own, and finish the join with a first receive.
     async fn join(&self, signer: &TestSigner, name: &str, scopes: RequestedScopes) -> Paykit {
+        self.join_with(
+            signer,
+            name,
+            scopes,
+            PaykitConfig::default(),
+            Arc::new(MemoryStore::new()),
+        )
+        .await
+    }
+
+    /// [`World::join`], with `config`, on `store`.
+    async fn join_with(
+        &self,
+        signer: &TestSigner,
+        name: &str,
+        scopes: RequestedScopes,
+        config: PaykitConfig,
+        store: Arc<dyn StateStore>,
+    ) -> Paykit {
         let keys = signer.identity().app_keys(name);
         let names: Vec<&str> = scopes.scopes.iter().map(String::as_str).collect();
         let app = AppSpec::new(&names).with_permissions(&scopes.permissions);
         let request = signer.approve(&keys, &app).unwrap();
-        let env = signer.env_with(
-            Arc::new(MemoryStore::new()),
-            Arc::clone(&self.router) as Arc<_>,
-        );
         let mut app = Paykit::join(
-            env,
-            PaykitConfig::default(),
+            self.env(signer, store),
+            config,
             request,
             Arc::clone(&self.rail) as Arc<_>,
             Arc::new(JsTimer),
@@ -167,6 +232,7 @@ pub async fn send(shop: &mut Paykit, payer: [u8; 32], draft: RequestDraft) -> Re
 
 /// The Payment Request as the payer's activity record for `view` stores it, from the copy
 /// `wallet` holds: the message the payee signed (Paykit wire 5.3).
+#[allow(dead_code)] // `request_flow` only.
 pub async fn stored_request(wallet: &Paykit, view: &RequestView) -> PaymentRequest {
     let record = wallet
         .app()

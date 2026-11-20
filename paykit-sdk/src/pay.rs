@@ -889,7 +889,7 @@ pub(crate) struct Answered {
     /// acceptance, so the age counted from it is never short.
     pub(crate) wall_ms: u64,
     /// The monotonic clock just before the attempt was sent.
-    pub(crate) at: std::time::Instant,
+    pub(crate) at: web_time::Instant,
 }
 
 impl Answered {
@@ -927,7 +927,7 @@ pub(crate) enum Dispatch {
         /// The highest service time verified once that read is answered, with the monotonic
         /// clock taken before it was sent: their sum later is never short of service time,
         /// the read's own time included, whatever the device clock was set to meanwhile.
-        read_at: (u64, std::time::Instant),
+        read_at: (u64, web_time::Instant),
     },
 }
 
@@ -2890,7 +2890,7 @@ impl Paykit {
         // [`crate::PRE_DISPATCH_BUDGET_MS`]) counts from before it is sent, on both device
         // clocks: the request, the answer and the answer's local commit are all in it, so
         // the age is never less than the time since the service accepted the attempt.
-        let (answered_wall_ms, answered_at) = (self.now(), std::time::Instant::now());
+        let (answered_wall_ms, answered_at) = (self.now(), web_time::Instant::now());
         // The client checks the attempt's proof: only one that shows this app's own open
         // attempt lets money move (Paykit spec 7.2; Switch wire 6.5 "Binding").
         let submitted = self.submit(batch).await;
@@ -4355,7 +4355,7 @@ impl Paykit {
             // The monotonic clock before the read, with the service time verified once it is
             // answered: their sum later never falls short of service time, the read's own
             // time included.
-            let read_started = std::time::Instant::now();
+            let read_started = web_time::Instant::now();
             let Some(claim) = self.app.read_claim(&entry.obligation).await? else {
                 return Ok(Some(PayOutcome::Uncertain { attempt_id }));
             };
@@ -4911,7 +4911,7 @@ impl Paykit {
     fn repeat_completes_before_orphaned(
         &self,
         now: u64,
-        read_at: (u64, std::time::Instant),
+        read_at: (u64, web_time::Instant),
         opened_at_ms: u64,
         orphan_after_s: u64,
         longest_completion_ms: u64,

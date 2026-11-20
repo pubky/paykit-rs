@@ -8,8 +8,7 @@
 //! through `JsClock`.
 //!
 //! The steps follow paykit-sdk's native flow tests (`paykit-sdk/tests/flows/`) up to the
-//! payment, which is not made here: paying calls `std::time::Instant::now()`, which panics on
-//! `wasm32-unknown-unknown`.
+//! payment, which the `pay_flow` target makes, in the same world (`tests/world/`).
 //!
 //! The scripted switch exists only in the browser build of this target, so natively the
 //! target is empty. wasm-bindgen-test runs it in a browser page or in a dedicated worker; the
@@ -18,4 +17,5 @@
 #![cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 
 mod one_time;
+#[path = "../world/mod.rs"]
 mod world;
