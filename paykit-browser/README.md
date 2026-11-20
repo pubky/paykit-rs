@@ -131,8 +131,11 @@ cannot be told apart. A slot of a newer format fails the open with
 `OpenError::NewerFormat`, even next to a valid one. Opening writes nothing. The tag detects torn
 and damaged writes and tampering, not rollback.
 
-A real page reload is tested at the store level only: the payment tests reopen the store in
-the same worker, as their in-memory test world would not survive a reload.
+The test targets test a real page reload at the store level only: their payment tests reopen
+the store in the same worker, as their in-memory test world would not survive a reload. The
+hosted harness goes further (see [Hosting](#hosting)): it pays a Payment Request against the
+real service, reloads the page, and a new worker reads the payment and its Payment Receipt
+back from the sealed stores alone.
 
 ### Measurements
 
@@ -220,6 +223,12 @@ target feature) is refused at compile time.
   [Run the tests in a browser](#run-the-tests-in-a-browser)). The store tests with a host's
   key run in WebKit on macOS, locally only. The library's unit tests of the sealed format,
   tampering and nonces run in all three engines, locally and in CI.
+- The SDK hosted as a web app would host it (see [Hosting](#hosting)): a page served over
+  HTTPS under a strict Content Security Policy, on an origin that is not the switch's, and
+  the SDK in a dedicated module worker with the sealed store and `FetchTransport`. There the
+  one-time Payment Request flow runs against the real service, and after a real page reload
+  a new worker reads the payment back from the store. Three negative controls show what the
+  policy blocks, and a panic shows how a host recovers.
 
 The network tests have these limits:
 
@@ -229,8 +238,8 @@ The network tests have these limits:
 - `fetch` merges repeated response headers into one value.
 - A redirect answer is `TransportError::Other`, where the native transport returns it as an
   answer with its 3xx status: with `redirect: "manual"`, `fetch` hides that status.
-- Trusting the rig's self-signed certificate is a rig setting: the runner ignores
-  certificate errors in a `--switch` run only.
+- Trusting the rig's self-signed certificate is a rig setting: the runners ignore
+  certificate errors in a `--switch` or `--harness` run only.
 - Trusted time is off in the rig's service configuration, a test setting.
 - The rig raises the service's per-source and per-minute limits.
 - Nothing moves the real service's clock, so expiry and period flows are covered only by the
@@ -248,7 +257,9 @@ Not run in a browser yet:
   `Paykit::pay_period_automatically` dispatch through the same code, but no test here runs
   them, and `pay_without_request` to a public Payment Endpoint while the payer's switch is
   unavailable meets the hazard below;
-- service workers and shared workers: only a page and a dedicated worker are tested.
+- the SDK in a service worker or a shared worker: the bundle loads and the `pure` scenario
+  runs in a service worker (see [Service workers](#service-workers)), but no store and no
+  payment; shared workers are not tested.
 
 On `wasm32-unknown-unknown` the standard library has no clock: `std::time::Instant::now()` and
 `std::time::SystemTime::now()` panic. `paykit-sdk` takes the pay path's monotonic time from the
@@ -289,13 +300,252 @@ value of `__stack_pointer` in each measurement binary showed. To measure again, 
 into its own WebAssembly module sets that module's stack size when it links it, and should
 measure its own call paths.
 
+The hosted harness bundle is such a module: a `cdylib`, which gets the 1 MiB default, as this
+crate's `build.rs` covers its test binaries only. `rig/harness/build.rs` gives it 2 MiB with
+the same `-zstack-size` argument, sized from the network flow's need above. A debug build of
+the bundle ran `flow_pay`, its deepest scenario, in Chromium.
+
+## Hosting
+
+`rig/harness/` holds a test harness that hosts the SDK the way a web app would: served over
+HTTPS under a strict Content Security Policy, in a dedicated module worker with the sealed
+durable store, against a real Switch service on another origin. It is test rig code only,
+not a proposal for the SDK's JavaScript surface: `paykit-browser` itself still exports nothing
+to JavaScript, and there is no TypeScript package and no generated binding. To run it, see
+[Run the hosted harness](#run-the-hosted-harness).
+
+### The harness bundle
+
+The crate `paykit-browser-harness` (`rig/harness/`, not published) builds a `cdylib` for
+`wasm32-unknown-unknown`. It is a workspace member, empty on every other target, with all
+its dependencies in a wasm32 target table, so a native workspace build compiles nothing of it
+and gets none of the test-only features it turns on. It exports one function,
+`runScenario(name, args)`. The arguments are a JSON object in a string. The result is a JSON
+object in a string, or an `Error` whose message is `<code>: <text>`. The scenarios are test
+scripts written in Rust, which make their assertions in Rust:
+
+- `pure`: no network. A signature and a sealed record value round trip, a `JsClock` reading
+  and a `JsTimer` sleep.
+- `switch_reach`: one request through `FetchTransport` to the Switch origin.
+- `flow_pay`: the one-time Payment Request flow of `tests/switch_flow/` against the real
+  service, with the payer's and the payee's Paykit App each on a store of its own:
+  requested, paid through `FakeRail`, proven and receipted. It returns the ids, the request's
+  state and timings.
+- `flow_read_back`: after a page reload, in a new worker, opens the same stores, loads both
+  apps from them alone with `Paykit::load`, and checks that the request reads paid, with the
+  Payment Receipt that `flow_pay` saw.
+- `cleanup`: destroys the stores of a run.
+- `panic`: panics after an await, on purpose.
+
+No secret crosses to JavaScript: the identities' keys come from the rig's world inside Rust,
+and each store keeps the App ID of its app for the read-back.
+
+### Page and worker
+
+`rig/harness/www/index.html` holds no inline script and loads `page.mjs`, which starts
+`worker.mjs` as a dedicated module worker. The worker loads the bundle (`harness.js` and
+`harness_bg.wasm`), and so holds the SDK, the sealed store and the `fetch` transport. The page
+only exchanges plain-data messages with it:
+
+```text
+request  { id: <number>, scenario: "<name>", args: "<JSON object>" }
+reply    { id, status: "ok", result: "<JSON>" }
+       | { id, status: "error", code: "<code>", message: "<text>" }
+```
+
+The page records every message it posts and receives. The runner checks that each one is a
+plain object of one of these shapes, that every value is a string or a number, and that none
+carries a port.
+
+### The policy
+
+`harnessPolicy` in `rig/switch-rig.mjs` is the one place that builds the policy:
+
+```text
+default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self' <Switch origin>; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+```
+
+| Directive | Why it is there |
+| --- | --- |
+| `default-src 'none'` | Nothing loads that another directive does not allow. |
+| `script-src 'self' 'wasm-unsafe-eval'` | Scripts come only from the harness's own origin, never inline. `'wasm-unsafe-eval'` lets the bundle compile WebAssembly without allowing JavaScript `eval`. |
+| `worker-src 'self'` | Workers come only from the harness's own script files: no `blob:` or `data:` worker. |
+| `connect-src 'self' <Switch origin>` | The glue fetches the `.wasm` from its own origin, and the SDK calls the switch. |
+| `base-uri 'none'` | No `<base>` element can move the page's relative URLs. |
+| `form-action 'none'` | No form can post anywhere. |
+| `frame-ancestors 'none'` | No other page can frame the harness. |
+
+The runner checks that the rig sends exactly this policy on the page and on the worker
+script, and that the strict worker refuses `new Function`. In the strict and same-origin
+cases it fails on any violation event and on any console error from the start of the page's
+load, apart from two things an engine reports on its own: in Firefox, its own request for
+`/favicon.ico`, which `default-src 'none'` blocks (the harness loads no image), and in WebKit,
+the line `Failed to load resource: the server responded with a status of 404`, which WebKit
+logs when the Switch answers 404 for a record that does not exist yet and the client reads as
+none. A violation during the load, such as a blocked inline script, comes before `page.mjs`
+listens for violation events, but each of the three engines also reports it as a console
+error. A host that runs the SDK this way must:
+
+- Send the policy on the worker script's response too. A worker loaded from a URL runs under
+  its own response's policy and ignores its page's, and a worker whose response has no policy
+  header runs with no policy at all. The `worker-no-header` control below shows this in all
+  three engines.
+- Allow `'wasm-unsafe-eval'` in the policy of the context that runs the SDK. It needs neither
+  `'unsafe-eval'` nor `'unsafe-inline'`: the harness has no inline script, no `eval` and no
+  `blob:` or `data:` worker.
+- Serve the `.wasm` as `application/wasm`. With another type, `instantiateStreaming` refuses
+  it, and the glue falls back to a slower path with a console warning. The runner fails on
+  that warning.
+- List in `connect-src` every origin the SDK calls. The harness lists only its own origin and
+  the switch's; a real app also lists the other origins it calls, such as its Homeserver.
+
+### Cross-origin and same-origin
+
+The rig serves the harness from a second port, so the harness origin,
+`https://localhost:<harness port>`, is not the Switch origin, `https://localhost:<rig port>`.
+The rig answers CORS for the harness origin. Every Switch call carries a Switch header, so
+the browser sends a CORS preflight first; the runner checks that `switch_reach` sent at least
+one, counted at the rig under the call's own tag (`GET /rig/count?tag=<tag>`). The whole
+flow runs in this arrangement: `flow_pay`, a real page reload, `flow_read_back` and
+`cleanup`. It shows the SDK working from a page on another origin, as a web app would host
+it.
+
+The rig also serves the same files, with the strict policy only, from its own origin
+(`/rig/harness/strict/`). There the worker loads, `pure` and `switch_reach` pass, and the rig
+counts no preflight under the tag of `switch_reach`. It shows that same-origin calls cost no
+preflight. The flow does not run in this arrangement.
+
+### Negative controls
+
+Each control is a separate run that must fail in the expected way, or the run fails:
+
+- `no-wasm`, the policy without `'wasm-unsafe-eval'` on the page and the worker: loading the
+  bundle fails with a `CompileError` (the runner checks only the name, as the wording differs
+  per engine). This shows that the worker's policy governs WebAssembly. In WebKit it is the
+  only evidence of that: WebKit was seen to fire no violation event for a blocked WebAssembly
+  compile, so the strict run's lack of violation events shows nothing there.
+- `worker-no-header`, the page strict and the worker script with no policy header: the worker
+  runs `new Function`. This shows that a worker ignores its page's policy.
+- `no-switch`, `connect-src` without the Switch origin: `switch_reach` fails with the code
+  `switch`, and the rig counts no request under its tag, not even a preflight. This shows that
+  `connect-src` governs the worker's `fetch` transport. The runner also logs whether the
+  engine reported a `connect-src` violation naming the Switch, but does not require one.
+
+### Panics
+
+On `wasm32-unknown-unknown` a panic aborts: `rustc --print cfg` already reports
+`panic="abort"` for the target, so `panic = "abort"` in a profile changes nothing. The panic
+hook writes the message to the worker's console, and the instance then traps with a
+`RuntimeError`. The runner's `panic` case checks that the call never answers, that the page
+sees the worker's `error` event, and that the page replaces the worker, on which `pure` then
+passes.
+
+`page.mjs` does not replace a worker that dies before its bundle loaded, as a new one would
+most likely fail the same way. The failed load is the outcome, and so is every later call
+until the runner starts a worker again. The runner's `start failure` case starts a worker
+from a script that does not exist and checks that its load and a later call end with the
+worker's death, and that the page starts no other worker.
+
+A host must replace the worker after any `error` event from it or any `RuntimeError` from a
+call, and reject the calls still pending; `page.mjs` does both. An async call that panicked
+never settles, so waiting for it does not work. Two more things were seen in all three
+engines, though the runner checks neither: the `error` event carries only the engine's own
+`RuntimeError` text, never the panic message, and the instance keeps answering other calls
+after the panic.
+
+### Service workers
+
+In a separate browser launch with no profile, the runner registers `sw.mjs` as a module
+service worker under the same policy. The bundle loads and `pure` passes there, with no
+violation event and no console error or MIME warning on the page. Playwright reports a
+service worker's own console in Chromium only, so only the `chromium` run also checks the
+service worker's console. Nothing else runs there.
+
+A service worker cannot host the durable store: it has no synchronous file handles, which
+`OpfsStore` needs, and it cannot start a dedicated worker. So an app whose logic lives in a
+service worker needs a dedicated worker, owned by a page, for the SDK. Playwright's
+certificate setting does not cover a service worker's script in Chromium, so the runner
+starts Chromium with `--ignore-certificate-errors` for this launch only.
+
+### Bundle size
+
+`harness_bg.wasm` after `wasm-bindgen --target web`, for the bundle that links the whole flow,
+in bytes (gzip level 9, brotli quality 11). The glue is `harness.js`.
+
+| Profile | wasm raw | wasm gzip | wasm brotli | glue raw | glue gzip |
+| --- | --- | --- | --- | --- | --- |
+| `release` | 13,476,660 | 3,806,950 | 2,430,541 | 44,099 | 7,928 |
+| `browser-release` | 5,290,540 | 2,010,778 | 1,501,815 | 44,051 | 7,926 |
+
+`browser-release` is a profile in the root `Cargo.toml`. It inherits `release` and sets
+`opt-level = "z"`, `lto = true`, `codegen-units = 1` and `strip = true`: it optimizes for size
+over speed, and only a build that names it uses it. It makes the `.wasm` 61 percent smaller
+raw, 47 percent with gzip and 38 percent with brotli. `wasm-bindgen` warns that `strip`
+removes the `target_features` section. With warm dependencies, a `release` build took 22 to
+23 s and a `browser-release` build 31 to 32 s; the first `browser-release` build of its
+dependencies took 63 s.
+
+To measure again, build the bundle and print its sizes. The network scenarios read the rig's
+origin and token at compile time, so give the build an origin and a 32-character token, as
+CI does, for the bundle to link the network flow:
+
+```sh
+PAYKIT_BROWSER_RIG_ORIGIN=https://localhost:18443 PAYKIT_BROWSER_RIG_TOKEN=00000000000000000000000000000000 \
+  paykit-browser/rig/harness/build.sh browser-release
+node paykit-browser/rig/harness/size.mjs \
+  browser-release="$(paykit-browser/rig/harness/build.sh --print-out-dir browser-release)/harness_bg.wasm"
+```
+
+`build.sh` takes `dev`, `release` (the default) or `browser-release`, and needs `wasm-bindgen`
+at the version in `Cargo.lock`, and `jq`. It writes the bundle to
+`<target dir>/paykit-browser-harness/<profile>/`, where `<target dir>` is Cargo's target
+directory, `target` at the repository root by default; `build.sh --print-out-dir <profile>`
+prints that folder.
+
+### Timings
+
+Medians of three runs of `rig/test.sh --harness all`, in milliseconds. Load is the worker's
+fetch, compile and instantiate of the bundle. First call is `pure`. Pay is the pay step of
+`flow_pay`, and flow total is the whole `flow_pay`.
+
+| Engine | Profile | Load | First call | Pay | Flow total |
+| --- | --- | --- | --- | --- | --- |
+| Chromium | `release` | 25.1 | 30.1 | 224 | 1818 |
+| Chromium | `browser-release` | 13.8 | 29.0 | 232 | 1850 |
+| Firefox | `release` | 266 | 29 | 377 | 2440 |
+| Firefox | `browser-release` | 119 | 29 | 446 | 2729 |
+| WebKit | `release` | 43 | 29 | 195 | 1383 |
+| WebKit | `browser-release` | 23 | 27 | 200 | 1402 |
+
+Chromium compiles lazily, so its load figure leaves out compilation; its pay step is the
+fair comparison. Firefox compiles up front: the `browser-release` bundle loads 2.2 times
+faster there, but pays about 18 percent slower. Runs spread within 15 percent.
+
+### Limits
+
+- Measured on one Apple Silicon Mac with headless Playwright 1.62.1 (Chromium 151.0.7922.34,
+  Firefox 153.0, WebKit 26.5), rustc 1.96.0 and wasm-bindgen 0.2.130, against a local
+  loopback HTTPS server. Timings vary from run to run and from machine to machine.
+- Playwright's WebKit build is not Safari.
+- The rig's certificate is self-signed and made at its start. The runner accepts it with
+  Playwright's setting, plus Chromium's flag for the service worker launch.
+- The store and the read-back differ by engine and platform. On macOS, Chromium and Firefox
+  use the origin-held key (`WrappingKey::Origin`) and read back after the reload; WebKit uses
+  a host key kept in memory (`WrappingKey::Host`) and reads back after the reload, as
+  Playwright's WebKit on macOS asks for Keychain access to store a `CryptoKey` in IndexedDB.
+  In CI, on Linux, Chromium and Firefox use the origin-held key and read back; Playwright's
+  WebKit for Linux has no OPFS, so WebKit uses the in-memory store and does no read-back,
+  with a printed warning. The run prints which engine ran which store.
+- Trusted Types are not tested here.
+
 ## Tests
 
 There are fourteen test targets, and the library has unit tests. Five of the targets,
 `tests/fetch_transport/`, `tests/switch_flow/`, `tests/transport_faults/`,
 `tests/switch_faults/` and `tests/switch_http/`, are network targets: they need a real Switch
 service, and run only as [Run the network tests](#run-the-network-tests) describes. The others
-need no network, no database and no service.
+need no network, no database and no service. The hosted harness in `rig/harness/` is not a
+test target: see [Hosting](#hosting) and [Run the hosted harness](#run-the-hosted-harness).
 
 The tests in `tests/conformance/` build for both the host and wasm32, with the same test
 bodies, so a browser result is compared with the native result by construction. They cover:
@@ -385,7 +635,8 @@ over TLS and CORS, so they run only in a browser. They check that:
 The tests in `tests/switch_flow/` run the network flow described above, so they also run only
 in a browser. Each test asks the rig for a world of its own, and joins its apps through
 `FetchTransport` (`tests/switch_flow/switch_world.rs`, on the rig helpers in
-`tests/switch_rig/`, shared with the other network targets). They follow the
+`tests/switch_rig/`, shared with the other network targets and the hosted harness). They
+follow the
 SDK's native flow tests (`paykit-sdk/tests/flows/one_time.rs`), with the real service's
 answers in place of a scripted switch's. They check that:
 
@@ -536,7 +787,7 @@ Playwright's WebKit for Linux has no OPFS: no `navigator.storage` in a page, and
 `FileSystemSyncAccessHandle` in a dedicated worker. There, the runner checks from a page of the
 test origin that `navigator.storage` is still missing, does not run the store target, and
 prints it as excluded; `test.sh` lists every excluded target at the end as a warning. If that
-engine gains OPFS, the run fails until its entry in `NO_OPFS` (`rig/runner.mjs`) is removed.
+engine gains OPFS, the run fails until its entry in `NO_OPFS` (`rig/engines.mjs`) is removed.
 The summary line names what did not run, each with its reason: targets excluded for want of
 OPFS, and tests left out for the Keychain.
 
@@ -554,13 +805,15 @@ test rig code only, never for production. On the local machine, the run starts:
 - `rig/switch-rig.mjs`, one Node.js process in front of the service. It terminates TLS on
   `https://localhost:<rig port>`, on both `127.0.0.1` and `::1`, with a self-signed
   certificate for `localhost` that it makes at start, answers CORS preflights, adds CORS
-  headers to its answers, and forwards every other request to the service byte for byte. It
-  answers CORS only for the test page's origin, `http://127.0.0.1`, `http://localhost` or
-  `http://[::1]` on any port. It serves the routes under `/rig/` itself and never forwards
-  them.
+  headers to its answers (the harness files aside, which only their own origin loads), and
+  forwards every other request to the service byte for byte. It answers CORS only for the
+  test page's origin, `http://127.0.0.1`, `http://localhost` or `http://[::1]` on any port,
+  and, in a `--harness` run, the harness origin. It serves the routes under `/rig/` itself
+  and never forwards them.
 
-The routes under `/rig/` are fixed routes for the transport tests, fault routes, and
-`POST /rig/world`. The header comment of `rig/switch-rig.mjs` describes each route. The fault
+The routes under `/rig/` are fixed routes for the transport tests, fault routes,
+`POST /rig/world`, and, for the hosted harness, the harness files under
+`/rig/harness/strict/`. The header comment of `rig/switch-rig.mjs` describes each route. The fault
 routes are these:
 
 - `/rig/hang` reads the request and never answers, or sends the head of an answer and then
@@ -660,6 +913,43 @@ the run runs the five network targets. Unless `PAYKIT_BROWSER_ENROLL_BIN` is set
 
 Nothing may already listen on the four ports, on `127.0.0.1` or `::1`: a browser may resolve
 `localhost` to either.
+
+### Run the hosted harness
+
+`rig/test.sh --harness` runs the hosted harness (see [Hosting](#hosting)) against a real
+Pubky Switch service. It takes one argument, the engine: `chromium`, `firefox`, `webkit`,
+`chrome` or `all`. You need what [Run the network tests](#run-the-network-tests) lists, except
+`wasm-bindgen-test-runner`: instead, `wasm-bindgen` from the same `wasm-bindgen-cli` must be
+on `PATH`, or named in `WASM_BINDGEN`. Then run, from the repository root:
+
+```sh
+export PAYKIT_BROWSER_SWITCH_BIN=<dir>/bin/pubky-switch
+export PAYKIT_BROWSER_SWITCH_DATABASE_URL=postgres://postgres:<test password>@127.0.0.1:5433/postgres
+paykit-browser/rig/test.sh --harness all
+```
+
+The run starts the service on a fresh database and the rig, as `--switch` does, with the rig
+also serving the harness on a second port. It then builds the bundle with
+`rig/harness/build.sh`, giving it the rig's origin and the run's token, into
+`<target dir>/paykit-browser-harness/<profile>/`, and runs `rig/harness-runner.mjs`, whose
+header comment lists each case. Each case prints `PASS` or `FAIL`, and the run prints a
+timings table and which engine ran which store. The run skips nothing: a bundle that does not
+build, a rig that does not start, or a failed case fails it. It stops the service and the rig
+and drops the database on every exit, including a failure and Ctrl-C. The runner destroys the
+stores the cases made, fails a passing run that left anything in OPFS or IndexedDB, and
+removes its browser profiles. `PAYKIT_BROWSER_SKIP_KEYCHAIN_TESTS` does not apply, as the
+harness stores no `CryptoKey` in IndexedDB in WebKit on macOS.
+
+It reads the variables of the `--switch` run, and these:
+
+| Variable | What it sets | Default |
+| --- | --- | --- |
+| `PAYKIT_BROWSER_HARNESS_PORT` | The harness's TLS port, in its origin. | `18444` |
+| `PAYKIT_BROWSER_HARNESS_PROFILE` | The bundle's Cargo profile: `dev`, `release` or `browser-release`. | `release` |
+| `PAYKIT_BROWSER_HARNESS_TIMINGS` | A file the runner writes the timings to, as JSON, also with what it collected when its time limit or a signal stops it early. The timings are printed either way. | None |
+| `PAYKIT_BROWSER_HARNESS_TIMEOUT_SECS` | A limit for the whole runner, in seconds. | `1200` |
+
+The harness port must differ from the other four, and nothing may already listen on it.
 
 ### The engines
 
@@ -805,7 +1095,8 @@ such a resend safe.
 
 The `Browser` workflow (`.github/workflows/browser.yml`) runs on the same pushes and pull
 requests as `CI`. Its `wasm-check` job runs `cargo clippy` for `wasm32-unknown-unknown`, which
-also type-checks the build, with the clippy settings in `rig/wasm-clippy/`; `cargo check` of
+also type-checks the build, with the clippy settings in `rig/wasm-clippy/`, once for
+`paykit-browser` and once for the harness bundle (`paykit-browser-harness`); `cargo check` of
 the library alone, without the test-only features of the dev-dependencies; `cargo doc` for
 wasm32, where the host pieces are; and then `rig/check-wasm-deps.sh`, which fails when the
 wasm32 dependency graph contains a native networking or TLS crate such as `mio`, `ring` or
@@ -837,6 +1128,23 @@ Firefox) and `switch_http` about 15 to 17 s: about 26 to 32 s per context, so ab
 per engine job, plus the time to build their three test binaries. A CI runner's times may
 differ.
 
+Each `switch-tests` job then runs `rig/test.sh --harness` for its engine, with the `release`
+bundle. In the `chromium` and `firefox` jobs the flow uses the origin-held key and reads the
+payment back after the reload. In the `webkit` job, as Playwright's WebKit for Linux has no
+OPFS, the flow uses the in-memory store and does no read-back, and the job shows a warning
+annotation. The runner puts its timings table on the run's summary page and writes the
+timings as JSON to the log folder, also with what it collected when a timeout or a cancel
+stops it early, and the job keeps that folder when it fails or is cancelled. A separate
+`harness-size` job, with no service and no database, builds the `release` and
+`browser-release` bundles and puts their sizes on the run's summary page with
+`rig/harness/size.mjs`; no size limit applies.
+Locally, one engine's harness run takes 27 to 32 s, of which the `release` build is about
+23 s. In CI the `release` build of the wasm32 dependencies is new, as the tests build them in
+the dev profile. That adds an estimated 5 to 9 minutes to each `switch-tests` job; the
+`harness-size` job runs beside them. These are estimates, not CI measurements. The
+`switch-tests` job's timeout is 60 minutes, so the runner's own 20-minute limit fits after
+the network targets.
+
 The clippy settings in `rig/wasm-clippy/clippy.toml` reject `now` and `elapsed` of
 `std::time::Instant` and of `std::time::SystemTime`, which compile for `wasm32-unknown-unknown`
 and then panic there, and the Switch client's `SystemClock`, which reads `SystemTime::now()`
@@ -844,10 +1152,13 @@ and then panic there, and the Switch client's `SystemClock`, which reads `System
 clippy does not. With `-p paykit-browser`, clippy lints this crate and the workspace crates it
 depends on, `paykit-lib` and `paykit-sdk`, as the browser build compiles them: code for other
 targets and features that build leaves off are not checked, and neither is any dependency
-from outside the workspace, such as the git dependency `pubky-switch-client`. To run the same
-check from the repository root:
+from outside the workspace, such as the git dependency `pubky-switch-client`. The harness
+bundle is linted in a command of its own, as one that selects both packages would turn the
+harness's test-only features on in `paykit-browser`. To run the same checks from the
+repository root:
 
 ```sh
-CLIPPY_CONF_DIR="$PWD/paykit-browser/rig/wasm-clippy" \
-  cargo clippy --locked --target wasm32-unknown-unknown -p paykit-browser --all-targets -- -D warnings
+export CLIPPY_CONF_DIR="$PWD/paykit-browser/rig/wasm-clippy"
+cargo clippy --locked --target wasm32-unknown-unknown -p paykit-browser --all-targets -- -D warnings
+cargo clippy --locked --target wasm32-unknown-unknown -p paykit-browser-harness --all-targets -- -D warnings
 ```
