@@ -70,7 +70,7 @@ use crate::stored::{Placed, StoredNote};
 pub(crate) use delivery::{
     append_records, judge_append, pending_delivery, reply_is_applied, AppliedReply,
 };
-pub(crate) use original::{restore_originals, OriginalAllowanceApplication, OriginalApproval};
+pub(crate) use original::{restore_originals, OriginalAllowance, OriginalAllowanceApplication};
 pub(crate) use pending::PreparedPendingReply;
 pub(crate) use replies::holds_delivery as pending_conflict_holds_delivery;
 pub(crate) use replies::{
@@ -1789,19 +1789,17 @@ impl Paykit {
         let mut tx = Tx::default();
         self.note_peer(&mut tx, &to)?;
         let record_key = self.app.record_key(&permanent)?;
-        if role == AllowanceRole::Allower {
-            // Recorded with the signed proposal before it can reach the seller.
-            tx.put(
-                &key::original_approval(&record_key),
-                &OriginalApproval::new(
-                    to,
-                    record.proposal(),
-                    allower_generation,
-                    execution.is_some(),
-                )
-                .with_pending_create(self.identity(), self.app_id(), &write)?,
-            )?;
-        }
+        // Each proposer keeps its own create in the service generation that applies it.
+        tx.put(
+            &key::original_allowance(&record_key),
+            &OriginalAllowance::new(
+                to,
+                record.proposal(),
+                self.app.own_identity().generation(),
+                execution.is_some(),
+            )
+            .with_pending_create(self.identity(), self.app_id(), &write)?,
+        )?;
         let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
             .entry(write)
             .queue(signed)
