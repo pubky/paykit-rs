@@ -110,10 +110,13 @@ private suspend fun restoreCheckout(
         host.load(app).use { wallet ->
             val state = wallet.restoreState()
             check(state.reconciling && state.cursor != null && state.registrations == listOf(1uL))
+            check(state.toString() == "WalletRestoreState(<redacted>)")
             try {
                 wallet.confirmRestoredRegistrations(emptyList())
                 error("the stale restore question was accepted")
-            } catch (_: WalletException.Refused) {}
+            } catch (error: WalletException.Refused) {
+                error.refusal.use { check(it.kind() is RefusalKind.NotNow) }
+            }
             check(wallet.restoreState().registrations == state.registrations)
             suspend fun interruptConfirmation(failure: EnrollmentStore.AnswerFailure) {
                 destination.interruptAnswer(failure)

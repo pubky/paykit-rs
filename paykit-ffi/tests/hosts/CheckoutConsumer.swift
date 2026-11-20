@@ -142,10 +142,14 @@ private func restoreCheckout(
     let reopen = try await host.load(appId: app)
     let state = try await reopen.restoreState()
     precondition(state.reconciling && state.cursor != nil && state.registrations == [1])
+    precondition(String(describing: state) == "WalletRestoreState(<redacted>)")
+    precondition(String(reflecting: state) == "WalletRestoreState(<redacted>)" && Mirror(reflecting: state).children.isEmpty)
     do {
         try await reopen.confirmRestoredRegistrations(registrations: [])
         preconditionFailure("the stale restore question was accepted")
-    } catch WalletError.Refused {}
+    } catch let WalletError.Refused(refusal) {
+        guard case .notNow = refusal.kind() else { preconditionFailure("unexpected restore refusal") }
+    }
     let stillPending = try await reopen.restoreState()
     precondition(stillPending.registrations == state.registrations)
     if action == "refuse" {
