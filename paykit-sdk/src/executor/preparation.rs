@@ -10,7 +10,7 @@ use super::checkpoint::ledger_target;
 use super::evidence::AppliedRecord;
 use super::spend::JournalAllowance;
 use crate::state::{self, key, Binder};
-use crate::{Paykit, PaykitError, Result};
+use crate::{Paykit, PaykitError, Refusal, Result};
 
 /// The wallet stages the complete proposal before handing the batch to Switch. Only
 /// the ID Switch commits with its signed batch makes this a submitted preparation.
@@ -22,6 +22,7 @@ pub(crate) struct LedgerProposal {
     before: KeptOp,
     #[serde(with = "serde_b64_vec")]
     result: Vec<u8>,
+    standalone: bool,
 }
 
 impl LedgerProposal {
@@ -30,6 +31,7 @@ impl LedgerProposal {
         before: KeptOp,
         result: Vec<u8>,
         ledger: &Ledger,
+        standalone: bool,
     ) -> Result<Self> {
         let Condition::RecordCurrent {
             revision,
@@ -43,6 +45,7 @@ impl LedgerProposal {
             grant: JournalAllowance::new(&ledger.allowance_id, *revision),
             before,
             result,
+            standalone,
         })
     }
 
@@ -103,6 +106,7 @@ impl super::restore::ReconciledLedger {
         app: &mut Paykit,
         batch: OpBatch,
         extra: Vec<Condition>,
+        standalone: bool,
     ) -> Result<OpBatch> {
         let Condition::RecordCurrent { key, .. } = self.grant else {
             return Err(PaykitError::corrupt());
@@ -112,7 +116,7 @@ impl super::restore::ReconciledLedger {
         let mut conditions = vec![self.grant, self.current];
         conditions.extend(extra);
         let op = app.app.record_op(&target, Some(&value), conditions).await?;
-        LedgerProposal::new(&self.grant, self.evidence, value, &self.ledger)?
+        LedgerProposal::new(&self.grant, self.evidence, value, &self.ledger, standalone)?
             .stage(app, &key, batch.entry(op))
             .await
     }
@@ -121,7 +125,7 @@ impl super::restore::ReconciledLedger {
 pub(super) enum Prepared {
     Clear,
     Waiting,
-    Applied { suffix: String },
+    Applied { standalone: bool, suffix: String },
 }
 
 impl Paykit {
@@ -193,7 +197,10 @@ impl Paykit {
                 if !matches!(applied, Prepared::Clear) {
                     return Ok(Prepared::Waiting);
                 }
-                applied = Prepared::Applied { suffix };
+                applied = Prepared::Applied {
+                    standalone: proposal.standalone,
+                    suffix,
+                };
             } else {
                 discarded.delete(&format!("{}{suffix}", key::LEDGER_PROPOSALS));
                 discarded.delete(&marker);
@@ -210,4 +217,8 @@ impl Paykit {
         }
         Ok(applied)
     }
+}
+
+pub(super) fn unavailable() -> PaykitError {
+    Refusal::NotNow("the previous Allowance ledger write is unresolved".into()).into()
 }

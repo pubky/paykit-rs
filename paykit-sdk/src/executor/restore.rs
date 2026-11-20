@@ -3,7 +3,8 @@
 use std::collections::{hash_map::Entry, HashMap};
 
 use paykit_lib::allowances::{
-    check_successor, usage, AllowanceTerms, CompactedFailed, Ledger, LedgerEntry, Usage,
+    check_successor, usage, AllowanceTerms, ClaimState, CompactedFailed, EntryOutcome, Ledger,
+    LedgerEntry, Usage,
 };
 use paykit_lib::records::{bind_ledger, ActivityRecord, RecordBinding, StoredMessage};
 use paykit_lib::{AllowanceId, Asset, Body, EndpointAmount, PaymentAmount};
@@ -13,7 +14,7 @@ use pubky_switch_core::shared::ApplicationRef;
 
 use super::approval::ApprovedOpening;
 use super::checkpoint::{ledger_target, ExecutorCheckpoint};
-use super::compaction::{CompactionRead, LedgerCompaction};
+use super::compaction::{CompactionRead, LedgerCompaction, Retired};
 use super::evidence::AppliedRecord;
 use super::ExecutorHistory;
 use super::{reconciled_usage, wallet_inventory, Accounting};
@@ -21,9 +22,17 @@ use crate::allowances::allowance_target;
 use crate::state::key;
 use crate::{Paykit, Result};
 
+const MISSING_LEDGER: &str =
+    "the current service is missing the executor's accepted permanent ledger";
+const EARLIER_LEDGER: &str = "the ledger write is based before the executor's accepted version";
+const MISSING_PAYMENT: &str =
+    "the service ledger omits a paid Allowance attempt opened after the accepted write";
+
 /// The SDK keeps the authenticated application it accepted. The spending batch must still
 /// condition on both current records and atomically open the new attempt and reservation.
 pub(super) struct ReconciledLedger {
+    pub(super) facts: HashMap<paykit_lib::AttemptId, paykit_lib::allowances::AttemptEvidence>,
+    pub(super) signers: super::checkpoint::ReservationSigners,
     pub(super) applied_proposal: Option<String>,
     pub(super) ledger: Ledger,
     pub(super) usage: Usage,
@@ -285,6 +294,15 @@ impl Paykit {
         let Some(history) = self.local_get::<ExecutorHistory>(&local).await? else {
             return Ok(None);
         };
+        Box::pin(self.executor_from_history(record, source_kind, history)).await
+    }
+
+    pub(super) async fn executor_from_history(
+        &mut self,
+        record: &[u8; 32],
+        source_kind: LedgerRead,
+        history: ExecutorHistory,
+    ) -> Result<Option<ReconciledLedger>> {
         let Some(opening) = Box::pin(self.approved_opening(record)).await? else {
             return Ok(None);
         };
@@ -324,6 +342,7 @@ impl Paykit {
             };
             tx.put(&receipt.key(&key)?, receipt)?;
         }
+        checkpoint.signers = checked.signers.clone();
         if !checked.at_initial_ledger {
             checkpoint.later = Some(checked.evidence.clone());
         }
@@ -361,10 +380,7 @@ impl Paykit {
             } => {
                 let alarm = self
                     .app
-                    .raise_rollback(
-                        crate::protocol::BACKUP_NAME,
-                        "the current service is missing the executor's accepted permanent ledger",
-                    )
+                    .raise_rollback(crate::protocol::BACKUP_NAME, MISSING_LEDGER)
                     .await?;
                 return Err(pubky_switch_client::app::AppError::Alarm(alarm).into());
             }
@@ -413,21 +429,22 @@ impl Paykit {
         {
             let alarm = self
                 .app
-                .raise_rollback(
-                    crate::protocol::BACKUP_NAME,
-                    "the ledger write is based before the executor's accepted version",
-                )
+                .raise_rollback(crate::protocol::BACKUP_NAME, EARLIER_LEDGER)
                 .await?;
             return Err(pubky_switch_client::app::AppError::Alarm(alarm).into());
         }
-        let applied_proposal =
+        let (standalone, applied_proposal) =
             match Box::pin(self.prepared_ledger(permanent_key, &current, &exact_grant)).await? {
                 super::preparation::Prepared::Waiting => return Ok(None),
-                super::preparation::Prepared::Clear => None,
-                super::preparation::Prepared::Applied { suffix } => Some(suffix),
+                super::preparation::Prepared::Clear => (false, None),
+                super::preparation::Prepared::Applied { standalone, suffix } => {
+                    (standalone, Some(suffix))
+                }
             };
+        let mut signers = checkpoint.signers.clone();
         let mut compaction = None;
         let mut reads = HashMap::new();
+        let mut recovered_copy = false;
         if current.revision != accepted.application.revision {
             if !current.follows(&accepted.application)
                 || !current.cert.holds_scope("paykit_allowance_execute")
@@ -446,50 +463,102 @@ impl Paykit {
             {
                 return Ok(None);
             }
-            let Some(change) = ledger_change(&accepted.ledger, &ledger, &proposed.terms)? else {
-                return Ok(None);
-            };
-            let entry = match change {
-                LedgerChange::Reservation(entry) => {
-                    if !current.opens_in_window(&proposed.terms, entry)? {
-                        return Ok(None);
+            let mut reservation = None;
+            if !standalone {
+                match ledger_change(&accepted.ledger, &ledger, &proposed.terms)? {
+                    Some(LedgerChange::Reservation(entry)) => {
+                        if !current.opens_in_window(&proposed.terms, entry)? {
+                            return Ok(None);
+                        }
+                        let Some(claim) = self.app.read_claim(&entry.obligation).await? else {
+                            return Ok(None);
+                        };
+                        let with_claim = self.app.shared_evidence().await?;
+                        let Some(((opening, seq), original)) =
+                            with_claim.ops.iter().find_map(|op| {
+                                Some((current.reservation(&self.app, op, entry, &claim)?, op))
+                            })
+                        else {
+                            return Ok(None);
+                        };
+                        if matches!(opening.state, ClaimState::Done | ClaimState::Failed { .. })
+                            && !super::evidence::ClaimResults::new(
+                                &self.app,
+                                &with_claim.ops,
+                                &signers,
+                                &accepted,
+                                &current,
+                            )
+                            .confirms(
+                                entry.attempt_id,
+                                opening,
+                                seq,
+                                None,
+                            )
+                        {
+                            return Ok(None);
+                        }
+                        // The service proved both operations in the same reservation batch.
+                        if signers
+                            .keep(
+                                entry.attempt_id.to_text(),
+                                original.op.doc_hash()?,
+                                current.cert.signed(),
+                            )
+                            .is_none()
+                        {
+                            return Ok(None);
+                        }
+                        if ledger.count > accepted.ledger.count {
+                            reservation = Some(KeptOp {
+                                cert: current.cert.signed().clone(),
+                                ..original.clone()
+                            });
+                        }
+                        claims.insert(entry.attempt_id, opening);
+                        reads.insert(entry.obligation, Some(claim));
                     }
-                    entry
+                    Some(LedgerChange::Outcome(entry)) => {
+                        let claim = self.app.read_claim(&entry.obligation).await?;
+                        let joined = if let Some(claim) = &claim {
+                            self.app.shared_evidence().await?.ops.iter().any(|op| {
+                                current
+                                    .applied_outcome(&self.app, op, entry, claim)
+                                    .is_some()
+                            })
+                        } else {
+                            false
+                        };
+                        reads.insert(entry.obligation, claim);
+                        recovered_copy = !joined;
+                    }
+                    None => recovered_copy = true,
                 }
-                LedgerChange::Outcome(entry) => entry,
-            };
-            let Some(claim) = self.app.read_claim(&entry.obligation).await? else {
-                return Ok(None);
-            };
-            let with_claim = self.app.shared_evidence().await?;
-            if matches!(change, LedgerChange::Reservation(_)) {
-                let Some((opening, original)) = with_claim
-                    .ops
-                    .iter()
-                    .find_map(|op| Some((current.reservation(&self.app, op, entry, &claim)?, op)))
-                else {
+                if recovered_copy
+                    && (applied_proposal.is_some()
+                        || !Box::pin(self.copied_successor(
+                            &accepted,
+                            &signers,
+                            &current,
+                            &ledger,
+                            &exact_grant,
+                        ))
+                        .await?)
+                {
                     return Ok(None);
-                };
-                if ledger.count > accepted.ledger.count {
-                    compaction = Some(LedgerCompaction {
-                        before: checkpoint
-                            .later
-                            .as_ref()
-                            .unwrap_or(&approval.ledger_write)
-                            .clone(),
-                        after: evidence.clone(),
-                        opening: original.clone(),
-                    });
                 }
-                claims.insert(entry.attempt_id, opening);
-            } else if !with_claim.ops.iter().any(|op| {
-                current
-                    .applied_outcome(&self.app, op, entry, &claim)
-                    .is_some()
-            }) {
-                return Ok(None);
             }
-            reads.insert(entry.obligation, Some(claim));
+            if ledger.count > accepted.ledger.count {
+                compaction = Some(LedgerCompaction {
+                    before: checkpoint
+                        .later
+                        .as_ref()
+                        .unwrap_or(&approval.ledger_write)
+                        .clone(),
+                    after: evidence.clone(),
+                    opening: reservation,
+                });
+            }
         }
         let Some(at) = self.service_time() else {
             return Ok(None);
@@ -499,10 +568,15 @@ impl Paykit {
             LedgerRead::Outcome => {
                 checkpoint.restored || current.revision != accepted.application.revision
             }
-            LedgerRead::Applied(revision) if revision == current.revision => false,
+            LedgerRead::Applied(revision) if revision == current.revision => recovered_copy,
             LedgerRead::Applied(_) => return Ok(None),
         };
-        let result = |usage, ledger, grant, compaction| ReconciledLedger {
+        if compaction.is_some() {
+            signers.retain(&ledger);
+        }
+        let result = |usage, ledger, grant, compaction, facts| ReconciledLedger {
+            signers,
+            facts,
             applied_proposal,
             compaction,
             at_initial_ledger: current.revision == approval.ledger.revision,
@@ -522,7 +596,13 @@ impl Paykit {
             let Ok(counted) = usage(&proposed.terms, &ledger, &HashMap::new(), at) else {
                 return Ok(None);
             };
-            return Ok(Some(result(counted, ledger, exact_grant, compaction)));
+            return Ok(Some(result(
+                counted,
+                ledger,
+                exact_grant,
+                compaction,
+                Default::default(),
+            )));
         }
         let Some(inventory) = wallet_inventory(&*self.rail, self.identity()).await else {
             return Ok(None);
@@ -550,14 +630,11 @@ impl Paykit {
             .iter()
             .filter(|entry| {
                 !claims.contains_key(&entry.attempt_id)
-                    && (entry.outcome.is_none() || dispatched.contains_key(&entry.attempt_id))
+                    && (entry.outcome != Some(EntryOutcome::Done)
+                        || dispatched.contains_key(&entry.attempt_id))
             })
             .collect();
-        let failed: Vec<_> = ledger
-            .failed
-            .iter()
-            .filter(|entry| dispatched.contains_key(&entry.attempt_id))
-            .collect();
+        let failed = &ledger.failed;
         for obligation in entries
             .iter()
             .map(|e| e.obligation)
@@ -569,21 +646,41 @@ impl Paykit {
         }
         if !entries.is_empty() || !failed.is_empty() {
             let ops = self.app.shared_evidence().await?;
+            let results = super::evidence::ClaimResults::new(
+                &self.app,
+                &ops.ops,
+                &checkpoint.signers,
+                &accepted,
+                &current,
+            );
             let accepted_entries: HashMap<_, _> = accepted
                 .ledger
                 .entries
                 .iter()
                 .map(|e| (e.attempt_id, e))
                 .collect();
-            let openings = || ops.ops.iter().chain(compactions.iter().map(|c| &c.opening));
+            let openings = || {
+                ops.ops
+                    .iter()
+                    .chain(compactions.iter().filter_map(|c| c.opening.as_ref()))
+            };
             for entry in entries {
                 let Some(read) = reads.get(&entry.obligation).and_then(Option::as_ref) else {
                     continue;
                 };
                 if let Some(opening) = openings().find_map(|op| {
-                    accepted
-                        .application
-                        .accepted_opening(&self.app, op, entry, read, &exact_grant)
+                    let op = checkpoint.signers.original(entry.attempt_id, op)?;
+                    let (claim, seq) = accepted.application.opening(
+                        &self.app,
+                        &op,
+                        &entry.obligation,
+                        entry.attempt_id,
+                        read,
+                        Some((&exact_grant, entry.at)),
+                    )?;
+                    results
+                        .confirms(entry.attempt_id, claim, seq, None)
+                        .then_some(claim)
                 }) {
                     claims.insert(entry.attempt_id, opening);
                 } else if let Some(payment) = dispatched.get(&entry.attempt_id).filter(|payment| {
@@ -600,7 +697,7 @@ impl Paykit {
                         entry.attempt_id,
                         super::ReservationClaim {
                             obligation: entry.obligation,
-                            state: paykit_lib::allowances::ClaimState::Done,
+                            state: ClaimState::Done,
                         },
                     );
                     settled_payments.push((*payment).clone());
@@ -617,20 +714,25 @@ impl Paykit {
                 let Some(read) = reads.get(&entry.obligation).and_then(Option::as_ref) else {
                     continue;
                 };
-                if let Some(opening) = openings()
-                    .find_map(|op| current.failed_opening(&self.app, op, entry, read, &exact_grant))
-                {
+                if let Some(opening) = openings().find_map(|op| {
+                    let op = checkpoint.signers.original(entry.attempt_id, op)?;
+                    let (claim, seq) = current.opening(
+                        &self.app,
+                        &op,
+                        &entry.obligation,
+                        entry.attempt_id,
+                        read,
+                        Some((&exact_grant, 0)),
+                    )?;
+                    results
+                        .confirms(entry.attempt_id, claim, seq, None)
+                        .then_some(claim)
+                }) {
                     claims.insert(entry.attempt_id, opening);
                 }
             }
         }
-        let Some(Accounting {
-            counted,
-            unclassified,
-        }) = reconciled_usage(inventory, &proposed.terms, &ledger, &claims, at)
-        else {
-            return Ok(None);
-        };
+        let facts = Box::pin(self.allowance_outcomes(&ledger, &claims, &dispatched)).await?;
         let mut retired = if ledger.count == 0 {
             HashMap::new()
         } else {
@@ -646,6 +748,21 @@ impl Paykit {
                 return Ok(None);
             };
             retired
+        };
+        let Some(Accounting {
+            counted,
+            unclassified,
+        }) = reconciled_usage(
+            inventory,
+            &proposed.terms,
+            &ledger,
+            &claims,
+            &mut retired,
+            facts.clone(),
+            at,
+        )
+        else {
+            return Ok(None);
         };
         if !unclassified.is_empty() || !settled_payments.is_empty() {
             let records = self.payer_records().await?;
@@ -734,6 +851,12 @@ impl Paykit {
                     .iter()
                     .find(|entry| entry.attempt_id == dispatch.attempt_id);
                 let compacted = retired.get(&dispatch.attempt_id);
+                let (compacted, failed) = match (compacted, failed) {
+                    (Some(Retired::PreviouslyFailed(_)), Some(_)) => return Ok(None),
+                    (Some(Retired::PreviouslyFailed(entry)), None) => (None, Some(entry)),
+                    (Some(Retired::Paid(entry)), failed) => (Some(entry), failed),
+                    (None, failed) => (None, failed),
+                };
                 if compacted.is_some() || failed.is_some() {
                     if !this_allowance
                         || signed_amount
@@ -792,20 +915,31 @@ impl Paykit {
                             dispatch.attempt_id,
                         )
                     }) {
-                        let alarm = self.app.raise_rollback(
-                            crate::protocol::BACKUP_NAME,
-                            "the service ledger omits a paid Allowance attempt opened after the accepted write",
-                        ).await?;
+                        let alarm = self
+                            .app
+                            .raise_rollback(crate::protocol::BACKUP_NAME, MISSING_PAYMENT)
+                            .await?;
                         return Err(pubky_switch_client::app::AppError::Alarm(alarm).into());
                     }
                 }
                 return Ok(None);
             }
         }
-        if !retired.is_empty() {
+        // A later signed claim can confirm a compacted failure even after method
+        // history has expired. Its accepted transition already accounts for it once.
+        if retired
+            .values()
+            .any(|entry| matches!(entry, Retired::Paid(_)))
+        {
             return Ok(None);
         }
-        Ok(Some(result(counted, ledger, exact_grant, compaction)))
+        Ok(Some(result(
+            counted,
+            ledger,
+            exact_grant,
+            compaction,
+            facts,
+        )))
     }
 }
 

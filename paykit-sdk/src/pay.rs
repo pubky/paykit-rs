@@ -4180,6 +4180,7 @@ impl Paykit {
         }
         if self.holds("paykit_pay") && !payer_waits {
             out.extend(self.recheck_failed().await?);
+            Box::pin(self.record_ledger_outcomes()).await?;
         }
         self.prune_journal().await?;
         // Last, after every payment's own work: what can't be delivered now stays queued.

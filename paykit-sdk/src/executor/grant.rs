@@ -259,6 +259,7 @@ impl Paykit {
             counterparty: view.counterparty,
             allowance_id: view.allowance_id.as_str().into(),
             later: None,
+            signers: Default::default(),
             grant: GrantEvidence::AwaitingProof {
                 value_hash: hash(&value),
             },

@@ -244,7 +244,7 @@ impl AllowanceReservation {
             start: Some(checked.at),
             end: Some(end),
         };
-        checked.stage(app, batch, vec![window]).await
+        checked.stage(app, batch, vec![window], false).await
     }
 }
 
@@ -309,9 +309,14 @@ impl Paykit {
         };
         let evidence = self.app.shared_evidence().await?;
         if !evidence.ops.iter().any(|op| {
-            application
-                .accepted_opening(&self.app, op, entry, &read, &checked.grant)
-                .is_some()
+            checked
+                .signers
+                .original(entry.attempt_id, op)
+                .is_some_and(|op| {
+                    application
+                        .accepted_opening(&self.app, &op, entry, &read, &checked.grant)
+                        .is_some()
+                })
         }) {
             return Ok(None);
         }
@@ -360,7 +365,7 @@ impl Paykit {
             return Ok(batch);
         }
         reserved.outcome = Some(outcome);
-        checked.stage(self, batch, Vec::new()).await
+        checked.stage(self, batch, Vec::new(), false).await
     }
 
     pub(crate) async fn allowance_reservation(

@@ -13,9 +13,9 @@ categories = ["finance", "cryptography"]
 publish = false
 
 [features]
-# Test-only: the fake payment rail. No production build enables it; this crate's own tests
+# Test-only wallet fixtures. No production build enables them; this crate's own tests
 # turn it on through the dev-dependency below.
-test-support = []
+test-support = ["dep:tokio"]
 
 [dependencies]
 paykit-lib.workspace = true
@@ -24,6 +24,7 @@ pubky-switch-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio = { version = "1", features = ["rt"], optional = true }
 
 [dev-dependencies]
 paykit-sdk = { path = ".", features = ["test-support"] }
