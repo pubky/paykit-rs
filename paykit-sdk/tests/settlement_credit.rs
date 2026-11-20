@@ -1,6 +1,9 @@
 //! Independent tills confirm a shared invoice settlement through the ordinary wallet.
 #![recursion_limit = "256"]
 
+#[path = "settlement_credit/first_dispatch.rs"]
+mod first_dispatch;
+
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::sync::Arc;
@@ -87,24 +90,28 @@ async fn join(
     Ok((wallet, signer))
 }
 
-async fn paid_request(
-    shop: &mut Paykit,
-    mut buyer: Paykit,
-    endpoint_id: &str,
-    payload: &str,
-) -> TestResult<(Paykit, RequestRef, [u8; 32])> {
+fn invoice(endpoint_id: &str, payload: &str) -> TestResult<RequestDraft> {
     let endpoints = BTreeMap::from([(
         PaymentEndpointIdentifier::new(endpoint_id)?,
         PaymentEndpointPayload::new(payload)?,
     )]);
-    let draft = RequestDraft::new(
+    Ok(RequestDraft::new(
         PaymentAmount {
             asset: Asset::new("btc")?,
             value: Decimal::new("0.00025")?,
         },
         PaymentReference::new("invoice")?,
         RequestDestination::Endpoints(endpoints),
-    );
+    ))
+}
+
+async fn paid_request(
+    shop: &mut Paykit,
+    mut buyer: Paykit,
+    endpoint_id: &str,
+    payload: &str,
+) -> TestResult<(Paykit, RequestRef, [u8; 32])> {
+    let draft = invoice(endpoint_id, payload)?;
     let request = shop
         .send_request(buyer.identity(), draft)
         .await?
