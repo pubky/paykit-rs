@@ -2,7 +2,7 @@ import Foundation
 import PaykitV2
 
 /// The signed enrollment request can be recovered by a different host handle.
-private final class EnrollmentStore: WalletStore, @unchecked Sendable {
+final class EnrollmentStore: WalletStore, @unchecked Sendable {
     private let lock = NSLock()
     private let gate = NSCondition()
     private var holdWrite = false
@@ -160,7 +160,7 @@ private final class EnrollmentStore: WalletStore, @unchecked Sendable {
     }
 }
 
-private final class ReceiptReader: WalletHomeserver, PaymentMethod, @unchecked Sendable {
+class ReceiptReader: WalletHomeserver, PaymentMethod, @unchecked Sendable {
     private let lock = NSLock()
     private var transfers = 0
     var transferCount: Int { lock.withLock { transfers } }
@@ -382,6 +382,9 @@ private func acknowledgeRecovery(_ issuer: String, cleared: Bool) async throws {
 @main
 private enum WalletConsumer {
     static func main() async throws {
+        #if PAYKIT_CHECKOUT_TEST
+        try await driveCheckout()
+        #endif
         let store = EnrollmentStore()
         let reference = Data(repeating: 7, count: 16)
         let key = Data(repeating: 8, count: 32)

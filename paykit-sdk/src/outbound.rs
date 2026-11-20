@@ -39,6 +39,20 @@ impl Paykit {
                 || self.app.identity_confirmed_at().is_none())
     }
 
+    /// Allow this payee to start a conversation, including a pending connection request
+    /// (Switch spec 7). A restored wallet completes its required first read first, and
+    /// its next receive reports those effects (Switch spec 12.4).
+    ///
+    /// # Errors
+    ///
+    /// The first read's failure, or the Switch client's refusal without `conversation.add`.
+    pub async fn allow_connect(&mut self, payee: &[u8; 32]) -> Result<()> {
+        self.refresh_own()?;
+        Box::pin(self.first_read_before_writing()).await?;
+        self.refresh_own()?;
+        Ok(self.app.allow_connect(payee).await?)
+    }
+
     /// Read before preparing a public operation's effects. The host receives the summary
     /// with its next receive; durable duty events remain the client's (Switch spec 12.4).
     pub(crate) async fn first_read_before_writing(&mut self) -> Result<()> {

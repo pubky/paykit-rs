@@ -11,7 +11,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /** Enrollment needs only the store. A Homeserver or payment call here fails the test. */
-private class EnrollmentStore : WalletStore {
+internal class EnrollmentStore : WalletStore {
     fun reopen(namespace: String, entries: List<String>) {
         for (line in entries) {
             val (key, value) = line.split(" ", limit = 2)
@@ -82,7 +82,7 @@ private class EnrollmentStore : WalletStore {
     }
 }
 
-private class ReceiptReader : WalletHomeserver, PaymentMethod {
+internal open class ReceiptReader : WalletHomeserver, PaymentMethod {
     var transfers = 0
     override suspend fun get(identity: ByteArray, path: String): ByteArray? = null
     override suspend fun put(identity: ByteArray, path: String, bytes: ByteArray) = error("unexpected public write")
