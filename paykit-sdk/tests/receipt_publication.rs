@@ -1,6 +1,9 @@
 //! An independent till can recover an already-issued receipt after the issuing shop restarts.
 #![recursion_limit = "256"]
 
+#[path = "receipt_publication/older_backup.rs"]
+mod older_backup;
+
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::sync::Arc;
@@ -12,7 +15,7 @@ use paykit_lib::derive::natural_key;
 use paykit_lib::identifiers::{
     PaymentEndpointIdentifier, PaymentEndpointPayload, PaymentReference,
 };
-use paykit_lib::records::{ActivityRecord, ActivitySide};
+use paykit_lib::records::{ActivityRecord, ActivitySide, StoredMessage};
 use paykit_lib::{Asset, Decimal, PaymentAmount};
 use paykit_sdk::rail::FakeRail;
 use paykit_sdk::{
@@ -90,24 +93,28 @@ async fn join(
     Ok((wallet, signer))
 }
 
-async fn paid_request(
-    shop: &mut Paykit,
-    mut buyer: Paykit,
-    endpoint_id: &str,
-    payload: &str,
-) -> TestResult<(Paykit, RequestRef, [u8; 32])> {
+fn invoice(endpoint_id: &str, payload: &str) -> TestResult<RequestDraft> {
     let endpoints = BTreeMap::from([(
         PaymentEndpointIdentifier::new(endpoint_id)?,
         PaymentEndpointPayload::new(payload)?,
     )]);
-    let draft = RequestDraft::new(
+    Ok(RequestDraft::new(
         PaymentAmount {
             asset: Asset::new("btc")?,
             value: Decimal::new("0.00025")?,
         },
         PaymentReference::new("invoice")?,
         RequestDestination::Endpoints(endpoints),
-    );
+    ))
+}
+
+async fn paid_request(
+    shop: &mut Paykit,
+    mut buyer: Paykit,
+    endpoint_id: &str,
+    payload: &str,
+) -> TestResult<(Paykit, RequestRef, [u8; 32])> {
+    let draft = invoice(endpoint_id, payload)?;
     let request = shop
         .send_request(buyer.identity(), draft)
         .await?
@@ -195,11 +202,21 @@ async fn test_reopened_shop_accepts_an_already_published_complete_receipt() -> T
 }
 
 async fn on_both_services(shared: Shared, restart: Restart) -> TestResult {
+    with_issued_sale(async |world, sale| {
+        Box::pin(publish_after_restart(world, sale, shared, restart)).await
+    })
+    .await
+}
+
+async fn with_issued_sale(scenario: impl AsyncFn(&World, IssuedSale) -> TestResult) -> TestResult {
     for backend in [Backend::Scripted, Backend::Service] {
         let Some(world) = World::start(backend)? else {
             continue;
         };
-        let result = Box::pin(publish_after_restart(&world, shared, restart)).await;
+        let result = match Box::pin(issued_sale(&world)).await {
+            Ok(sale) => Box::pin(scenario(&world, sale)).await,
+            Err(error) => Err(error),
+        };
         world.close().await?;
         result?;
     }
@@ -238,7 +255,23 @@ async fn shared_position(client: &SwitchClient, key: &[u8; 32]) -> TestResult<(u
     Ok((record.version, service_cursor(client).await?))
 }
 
-async fn publish_after_restart(world: &World, shared: Shared, restart: Restart) -> TestResult {
+struct IssuedSale {
+    seller: Signer,
+    buyer: Paykit,
+    shop: Paykit,
+    till: Paykit,
+    store: Arc<MemoryStore>,
+    rail: Arc<FakeRail>,
+    request: RequestRef,
+    key: [u8; 32],
+    target: RecordTarget,
+    observer: SwitchClient,
+    original: serde_json::Value,
+    proof_only: serde_json::Value,
+    receipt: StoredMessage,
+}
+
+async fn issued_sale(world: &World) -> TestResult<IssuedSale> {
     const SHOP: &str = "https://shop.payment.test";
     let payer = setup_identity(world, "buyer", "https://buyer.payment.test").await?;
     let seller = setup_identity(world, "shop", SHOP).await?;
@@ -276,23 +309,21 @@ async fn publish_after_restart(world: &World, shared: Shared, restart: Restart) 
     .await?;
     buyer.app_mut().invite(&shop.identity()).await?;
     shop.app_mut().invite(&buyer.identity()).await?;
-    let (mut buyer, request, key) = Box::pin(paid_request(
+    let (buyer, request, key) = Box::pin(paid_request(
         &mut shop,
         buyer,
         "btc-lightning-bolt11",
         "ln-purchase",
     ))
     .await?;
-    let id = shop.app_id();
     let identity = shop.identity();
-    let cert = shop.app().cert().clone();
     let observer = SwitchClient::new(
         SHOP,
         identity,
         Credentials::App {
             identity,
             keys: world.app_keys(&world.identity("shop")?, "issuer")?,
-            cert: cert.clone(),
+            cert: shop.app().cert().clone(),
         },
         seller
             .identity_doc()?
@@ -338,6 +369,49 @@ async fn publish_after_restart(world: &World, shared: Shared, restart: Restart) 
     shop.receive(None).await?;
     till.receive(None).await?;
     shop.app_mut().flush_cursor().await?;
+    Ok(IssuedSale {
+        seller,
+        buyer,
+        shop,
+        till,
+        store,
+        rail,
+        request,
+        key,
+        target,
+        observer,
+        original,
+        proof_only,
+        receipt,
+    })
+}
+
+async fn publish_after_restart(
+    world: &World,
+    sale: IssuedSale,
+    shared: Shared,
+    restart: Restart,
+) -> TestResult {
+    let IssuedSale {
+        mut buyer,
+        mut shop,
+        mut till,
+        store,
+        rail,
+        request,
+        key,
+        target,
+        observer,
+        original,
+        proof_only,
+        receipt,
+        ..
+    } = sale;
+    let identity = shop.identity();
+    let id = shop.app_id();
+    let cert = shop.app().cert().clone();
+    let issued = receipt.message().msg_id.clone();
+    let read = |bytes: &[u8]| ActivityRecord::read(bytes, &identity, ActivitySide::Payee);
     let delete = till.app_mut().delete_record(&target, vec![]).await?;
     // The shop observes the deletion before its conditional publication reaches the service.
     world.unreachable("POST", "/ops");
