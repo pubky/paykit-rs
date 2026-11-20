@@ -860,8 +860,12 @@ mod tests {
         use paykit_lib::records::ActivitySide;
         use serde_json::json;
 
-        let payer = Party::new("alice", "wallet", &["paykit_pay"]);
-        let shop = Party::new("bob", "counter", &["paykit_request", "paykit_settlements"]);
+        let payer = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let shop = Party::new(
+            "bob",
+            "counter",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
         let request = shop.message(
             &payer,
             "paykit.payment_request",
