@@ -128,8 +128,9 @@ jobs:
           cargo install --locked --root ~/pubky-dispatch-bin
           --git https://github.com/pubky/pubky-dispatch --rev "$REV" --bin pubky-dispatch pubky-dispatch
 
-  # The network test targets (fetch_transport, dispatch_flow) against a real Dispatch service on a
-  # fresh database, behind the TLS and CORS rig (rig/dispatch-rig.mjs). See rig/test.sh.
+  # The network test targets (fetch_transport, dispatch_flow, transport_faults, dispatch_faults,
+  # dispatch_http) against a real Dispatch service on a fresh database, behind the TLS and CORS rig
+  # (rig/dispatch-rig.mjs). See rig/test.sh.
   dispatch-tests:
     name: Dispatch tests (${{ matrix.engine }})
     needs: dispatch-service
