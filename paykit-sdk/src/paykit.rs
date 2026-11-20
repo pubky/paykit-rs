@@ -464,15 +464,18 @@ impl Paykit {
     /// refuses; `Validation` for an `orphan_after_s` below the rail's floor
     /// ([`orphan_floor_s`]); the client's `Usage` refusal for a capabilities list
     /// ([`crate::Rail::endpoint_identifiers`]) the app's record can't carry. Otherwise the
-    /// client's join errors, as [`pubky_switch_client::app::App::join`] gives them: after a
-    /// network error there, the app is kept, and [`Paykit::load`] then a receive finish it.
+    /// client's join errors, as [`pubky_switch_client::app::App::join`] gives them. The
+    /// client may have committed state before an error finishing its join; when state was
+    /// kept, [`Paykit::load`] followed by a receive resumes the pending work.
     ///
     /// Once the client's join has returned the app, nothing else fails the join: the app is
-    /// joined and kept, and its handle is returned. The record update that follows is then
-    /// owed when it fails, and the next receive or [`Paykit::update_own_record`] completes
-    /// it: after a delivery error the client keeps the new record and sends it again; after
-    /// a store, clock or other failure before the client kept it, the record held still
-    /// lacks the capabilities, so the next call puts it again.
+    /// joined and kept, and its handle is returned. The record update that follows remains
+    /// owed if it fails. After a delivery error the client keeps the new record and sends
+    /// it again; after a definite failure before the client kept it, the held record still
+    /// lacks the capabilities, so the next receive or [`Paykit::update_own_record`] retries.
+    /// If the store cannot tell whether its write applied, own-record edits return
+    /// [`Refusal::NotNow`] and upkeep waits until [`Paykit::load`] reloads the stored state.
+    /// A receive or update can then retry the pending work.
     pub async fn join(
         env: AppEnv,
         config: PaykitConfig,
@@ -568,9 +571,9 @@ impl Paykit {
             let mut paykit = Self::assemble(app, protocol, config, rail, timer);
             // The app is joined and kept: an error here would hide it from the host, which
             // could join again or lose it. A failed update stays owed instead, for the next
-            // receive or `update_own_record` (the Errors section above), and nothing is
-            // marked done for it. The update signs the capabilities checked above; later
-            // upkeep reads the payment method again.
+            // receive or `update_own_record`, after a reload if the store result was unknown
+            // (the Errors section above), and nothing is marked done for it. The update
+            // signs the capabilities checked above; later upkeep reads the payment method again.
             paykit.capability_snapshot = snapshot;
             let _owed = Box::pin(paykit.tend_own_record()).await;
             paykit.capability_snapshot = None;
@@ -1118,10 +1121,12 @@ impl Paykit {
             });
         }
         self.refresh_own()?;
-        // The client retries kept batches before the feed. Until a floor batch settles,
-        // its local mark and restore updates still belong to that batch. Hand the host
-        // the read normally and leave those updates and outgoing asks for the next pass.
-        if self.first_read_pending() || self.floor_write_is_kept().await? {
+        // A recovery notice holds own writes. Return the client's report before upkeep
+        // can try a held write. A restore or a kept floor batch also defers that work.
+        if self.app.recovery_required().is_some()
+            || self.first_read_pending()
+            || self.floor_write_is_kept().await?
+        {
             let applied = report
                 .events
                 .iter()

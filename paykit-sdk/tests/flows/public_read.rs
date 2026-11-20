@@ -1103,6 +1103,7 @@ async fn test_public_read_payment_tells_a_conflict_it_first_finds() {
         .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    let first_attempt = outcome.attempt_id();
     // Another body of the shop's record at the same updated_at: the next payment is the
     // first read to find the conflict, pays the till, and tells the conflict.
     publish_app_at(
@@ -1118,6 +1119,8 @@ async fn test_public_read_payment_tells_a_conflict_it_first_finds() {
         matches!(paid.outcome, Ok(PayOutcome::Paid { .. })),
         "{paid:?}"
     );
+    let second_attempt = paid.outcome.as_ref().unwrap().attempt_id();
+    assert_ne!(first_attempt, second_attempt);
     assert_eq!(public_failures.len(), 1, "{public_failures:?}");
     assert_eq!(public_failures[0].app_id, apps[0].1);
     assert!(
@@ -1125,9 +1128,16 @@ async fn test_public_read_payment_tells_a_conflict_it_first_finds() {
             if rule.contains("Switch spec 4.2")),
         "{public_failures:?}"
     );
+    let payments = wallet.payments().await.unwrap();
+    assert_eq!(payments.len(), 2);
+    let second = payments
+        .iter()
+        .find(|payment| payment.attempt_id == second_attempt)
+        .unwrap();
+    assert_eq!(second.endpoint_id.as_str(), "btc-lightning-bolt11");
     assert_eq!(
-        wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
-        "btc-lightning-bolt11"
+        w.rail.all_executions(),
+        BTreeMap::from([(first_attempt, 1), (second_attempt, 1)])
     );
 }
 
