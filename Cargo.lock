@@ -1778,6 +1778,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "paykit-browser-harness"
+version = "0.2.0-alpha.0"
+dependencies = [
+ "js-sys",
+ "paykit-browser",
+ "paykit-lib",
+ "paykit-sdk",
+ "pubky-dispatch-client",
+ "pubky-dispatch-core",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "paykit-ffi"
 version = "0.2.0-alpha.0"
 dependencies = [
