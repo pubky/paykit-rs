@@ -87,7 +87,11 @@ async fn join(
     .await?
 }
 
-async fn grant(world: &World, proposer: AllowanceRole, restore_after_payment: bool) -> TestResult {
+async fn grant(
+    world: &World,
+    proposer: AllowanceRole,
+    restored_payments: Option<[&str; 3]>,
+) -> TestResult {
     let storage = Arc::new(ListsStore::default());
     let rail = Arc::new(paykit_sdk::rail::FakeRail::with_clock(
         world.clock().clone(),
@@ -199,7 +203,7 @@ async fn grant(world: &World, proposer: AllowanceRole, restore_after_payment: bo
     assert_eq!(original.body().batch, zero.body().batch);
     assert_eq!(original.body().batch.count, 3);
     assert_eq!(permanent_revision.seq + 1, ledger_revision.seq);
-    let pending = if restore_after_payment {
+    let pending = if restored_payments.is_some() {
         world.lose_answer("POST", "/ops");
         assert!(Box::pin(payer.resume_allowance_executor(&key))
             .await
@@ -248,9 +252,15 @@ async fn grant(world: &World, proposer: AllowanceRole, restore_after_payment: bo
         granted.version
     );
     assert!(rail.all_executions().is_empty());
-    if let Some(backup) = pending {
+    if let (Some(backup), Some(amounts)) = (pending, restored_payments) {
         Box::pin(payments::payment_after_restore(
-            world, payer, seller, storage, rail, key, backup,
+            world,
+            (payer, seller),
+            storage,
+            rail,
+            key,
+            backup,
+            amounts,
         ))
         .await?;
     }
@@ -259,15 +269,20 @@ async fn grant(world: &World, proposer: AllowanceRole, restore_after_payment: bo
 
 #[tokio::test]
 async fn test_enrolled_wallet_first_grant_on_both_services() -> TestResult {
-    enrolled_wallets(false).await
+    enrolled_wallets(None).await
 }
 
 #[tokio::test]
 async fn test_enrolled_allowance_payments_after_an_older_grant_backup() -> TestResult {
-    enrolled_wallets(true).await
+    enrolled_wallets(Some(["70", "31", "30"])).await
 }
 
-async fn enrolled_wallets(restore_after_payment: bool) -> TestResult {
+#[tokio::test]
+async fn test_enrolled_rounded_allowance_payments_after_an_older_grant_backup() -> TestResult {
+    enrolled_wallets(Some(["69.9999999991", "30.000000001", "29.9999999991"])).await
+}
+
+async fn enrolled_wallets(restored_payments: Option<[&str; 3]>) -> TestResult {
     tokio::task::LocalSet::new()
         .run_until(async {
             for backend in [Backend::Scripted, Backend::Service] {
@@ -275,7 +290,7 @@ async fn enrolled_wallets(restore_after_payment: bool) -> TestResult {
                     let Some(world) = World::start(backend)? else {
                         continue;
                     };
-                    let result = Box::pin(grant(&world, proposer, restore_after_payment)).await;
+                    let result = Box::pin(grant(&world, proposer, restored_payments)).await;
                     world.close().await?;
                     result?;
                 }

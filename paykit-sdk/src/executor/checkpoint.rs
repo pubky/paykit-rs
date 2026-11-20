@@ -141,15 +141,19 @@ impl ExecutorHistory {
         }
         verified.sort_by_key(|(_, accepted)| accepted.application.revision);
         for pair in verified.windows(2) {
-            let (_, a) = &pair[0];
+            let (older, a) = &pair[0];
             let (_, b) = &pair[1];
             let Body::AllowanceProposal(proposed) = a.record.proposal.body() else {
                 return None;
             };
+            // The grant already pins its original zero. A retained complete checkpoint
+            // under that grant can follow a later write. Two noninitial checkpoints
+            // still need the exact predecessor between them (Paykit spec 8.3).
             if a.grant.revision != b.grant.revision
                 || a.application.revision == b.application.revision && a.ledger != b.ledger
                 || (a.application.revision != b.application.revision
-                    && !b.application.follows(&a.application))
+                    && !(b.application.follows(&a.application)
+                        || older.later.is_none() && b.application.pins_write_after(&a.application)))
                 || check_successor(
                     &proposed.terms,
                     &a.ledger,

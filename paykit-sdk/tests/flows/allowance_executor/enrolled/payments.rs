@@ -4,20 +4,21 @@ use super::*;
 
 pub(super) async fn payment_after_restore(
     world: &World,
-    mut payer: Paykit,
-    mut seller: Paykit,
+    wallets: (Paykit, Paykit),
     storage: Arc<ListsStore>,
     rail: Arc<paykit_sdk::rail::FakeRail>,
     key: [u8; 32],
     backup: PaykitBackup,
+    amounts: [&str; 3],
 ) -> TestResult {
     use crate::common::{draft, request_from};
     use pubky_switch_client::clock::Clock;
 
+    let (mut payer, mut seller) = wallets;
     let identity = payer.identity();
     rail.set_history_payer(identity);
     let mut paid = Vec::new();
-    for amount in ["70", "31", "30"] {
+    for (index, amount) in amounts.into_iter().enumerate() {
         let request = Box::pin(request_from(
             &mut seller,
             identity,
@@ -25,7 +26,7 @@ pub(super) async fn payment_after_restore(
         ))
         .await;
         Box::pin(finish_listing(&mut payer)).await;
-        if amount != "70" {
+        if index != 0 {
             let held = payer
                 .request(&request)
                 .await?
@@ -43,7 +44,7 @@ pub(super) async fn payment_after_restore(
             Box::pin(payer.confirm_possibly_cancelled(&request, &held, UserConfirmed::new()))
                 .await?;
         }
-        if amount == "30" {
+        if index == 2 {
             rail.set_history_payer(seller.identity());
             let held = Box::pin(payer.pay_under_allowance(&request, &key))
                 .await
@@ -56,7 +57,7 @@ pub(super) async fn payment_after_restore(
         let result = Box::pin(payer.pay_under_allowance(&request, &key))
             .await
             .outcome;
-        if amount == "31" {
+        if index == 1 {
             let refusal = result.unwrap_err();
             assert!(refusal.to_string().contains("lifetime"), "{refusal}");
             assert_eq!(rail.all_executions().len(), 1);
@@ -69,6 +70,10 @@ pub(super) async fn payment_after_restore(
         };
         paid.push(attempt_id);
         assert_eq!(rail.pay_calls(&attempt_id), 1);
+        assert_eq!(
+            rail.paid_amount(&attempt_id),
+            Some(crate::common::btc(if index == 0 { "70" } else { "30" }))
+        );
         Box::pin(finish_listing(&mut seller)).await;
         let sale = seller
             .payee_activity()
@@ -120,7 +125,7 @@ pub(super) async fn payment_after_restore(
         assert_eq!(receipts[0].attempt_id, attempt_id);
         assert_eq!(receipts[0].payee, seller.identity());
 
-        if amount == "70" {
+        if index == 0 {
             let current = Box::pin(payer.reconcile_allowance(&key))
                 .await?
                 .expect("paid ledger before restoring");
@@ -148,7 +153,7 @@ pub(super) async fn payment_after_restore(
             .expect("verified budget");
         assert_eq!(
             usage.lifetime().as_str(),
-            if amount == "70" { "70" } else { "100" }
+            if index == 0 { "70" } else { "100" }
         );
         assert_eq!(
             (usage.reserved(), usage.spent(), usage.released()),
