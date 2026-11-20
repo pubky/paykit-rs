@@ -3,12 +3,14 @@
 # bundle is a test harness, not a proposal for the SDK's JavaScript surface (src/lib.rs).
 #
 #   paykit-browser/rig/harness/build.sh [dev|release|browser-release]
+#   paykit-browser/rig/harness/build.sh --print-out-dir [dev|release|browser-release]
 #
 # The profile defaults to release. The script builds the paykit-browser-harness cdylib for
 # wasm32-unknown-unknown with --locked, then runs `wasm-bindgen --target web --out-name harness`
 # on it, into <target dir>/paykit-browser-harness/<profile>/, which it empties first; it holds
 # harness.js and harness_bg.wasm. Needs wasm-bindgen on PATH (or in WASM_BINDGEN) at exactly the
-# wasm-bindgen version of Cargo.lock, and jq.
+# wasm-bindgen version of Cargo.lock, and jq. With --print-out-dir, it only prints that folder
+# for the profile and builds nothing.
 #
 # The network scenarios read the rig's origin and token at compile time, from
 # PAYKIT_BROWSER_RIG_ORIGIN and PAYKIT_BROWSER_RIG_TOKEN, as the network test targets do: the
@@ -18,7 +20,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 [dev|release|browser-release]" >&2
+  echo "usage: $0 [--print-out-dir] [dev|release|browser-release]" >&2
   exit 2
 }
 
@@ -27,6 +29,11 @@ die() {
   exit 1
 }
 
+print_out_dir=0
+if [[ "${1:-}" == "--print-out-dir" ]]; then
+  print_out_dir=1
+  shift
+fi
 [[ $# -le 1 ]] || usage
 profile=${1:-release}
 case "$profile" in
@@ -39,16 +46,17 @@ rig=$(cd "$harness/.." && pwd)
 root=$(cd "$rig/../.." && pwd)
 
 command -v jq >/dev/null 2>&1 || die "jq is not on PATH"
-locked=$("$rig/wasm-bindgen-version.sh")
-install_hint="cargo install wasm-bindgen-cli --version $locked --locked"
-bindgen=${WASM_BINDGEN:-wasm-bindgen}
-command -v "$bindgen" >/dev/null 2>&1 || die "$bindgen not found; install it with: $install_hint"
-version_line=$("$bindgen" --version) || die "$bindgen --version failed; install it with: $install_hint"
-installed=$(awk '{ print $2 }' <<<"$version_line")
-if [[ "$installed" != "$locked" ]]; then
-  die "$bindgen is $installed, but Cargo.lock has wasm-bindgen $locked;" \
-    "install the matching CLI with: $install_hint"
+target_dir=$(cargo metadata --locked --format-version 1 --no-deps --manifest-path "$root/Cargo.toml" |
+  jq -r .target_directory) || die "could not read the target directory"
+[[ -n "$target_dir" && "$target_dir" != null ]] || die "cargo reported no target directory"
+out="$target_dir/paykit-browser-harness/$profile"
+if [[ $print_out_dir -eq 1 ]]; then
+  echo "$out"
+  exit 0
 fi
+
+bindgen=${WASM_BINDGEN:-wasm-bindgen}
+"$rig/wasm-bindgen-version.sh" --check "$bindgen" >/dev/null
 
 echo "== building paykit-browser-harness for wasm32-unknown-unknown, profile $profile"
 messages=$(cargo build --locked --manifest-path "$root/Cargo.toml" -p paykit-browser-harness \
@@ -58,10 +66,6 @@ wasm=$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "paykit_
   | .filenames[] | select(endswith(".wasm"))' <<<"$messages" | tail -n 1)
 [[ -n "$wasm" && -f "$wasm" ]] || die "cargo reported no paykit_browser_harness .wasm file"
 
-target_dir=$(cargo metadata --locked --format-version 1 --no-deps --manifest-path "$root/Cargo.toml" |
-  jq -r .target_directory) || die "could not read the target directory"
-[[ -n "$target_dir" && "$target_dir" != null ]] || die "cargo reported no target directory"
-out="$target_dir/paykit-browser-harness/$profile"
 rm -rf "$out"
 mkdir -p "$out"
 "$bindgen" --target web --out-name harness --no-typescript --out-dir "$out" "$wasm" ||
