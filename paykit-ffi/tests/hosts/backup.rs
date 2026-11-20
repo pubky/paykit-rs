@@ -156,7 +156,12 @@ fn write_store(output: &mut impl Write, app: [u8; 16], store: &MemoryStore) -> R
     let namespace = client_namespace(&app);
     writeln!(output, "{namespace}")?;
     for (key, value) in store.scan(&namespace, b"", None, u32::MAX)? {
-        writeln!(output, "{} {}", STANDARD.encode(key), STANDARD.encode(value))?;
+        writeln!(
+            output,
+            "{} {}",
+            STANDARD.encode(key),
+            STANDARD.encode(value)
+        )?;
     }
     output.flush()?;
     Ok(())
