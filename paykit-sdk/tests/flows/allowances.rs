@@ -12639,6 +12639,144 @@ async fn test_original_payer_reopens_the_selected_proposal_and_sends_the_same_pr
 }
 
 #[tokio::test]
+async fn test_counterparty_end_before_original_acceptance_placement() {
+    Box::pin(counterparty_ends_its_acceptance(false)).await;
+}
+
+#[tokio::test]
+async fn test_counterparty_end_after_original_acceptance_placement() {
+    Box::pin(counterparty_ends_its_acceptance(true)).await;
+}
+
+async fn counterparty_ends_its_acceptance(placed: bool) {
+    let w = World::new();
+    let store = crate::common::store();
+    let mut payer = Box::pin(alice_on(
+        &w,
+        "wallet",
+        AppScopes::new().allowance_execute().build().unwrap(),
+        store.clone(),
+    ))
+    .await;
+    let mut seller = Box::pin(shop(&w)).await;
+    let sent = payer
+        .propose_executable_allowance(w.bob_id(), terms(), UserConfirmed::new())
+        .await
+        .unwrap();
+    seller.receive(None).await.unwrap();
+    let peer = seller.allowances().await.unwrap().pop().unwrap();
+    let answer = seller.accept_allowance(&peer.record).await.unwrap();
+    if placed {
+        let first = payer.receive(None).await.unwrap();
+        assert!(received(&first, "paykit.allowance_acceptance"));
+        assert_eq!(
+            payer.allowance(&sent.record).await.unwrap().status,
+            AllowanceStatus::Accepted
+        );
+    }
+    let end = seller.end_allowance(&peer.record).await.unwrap();
+    let mirror = AllowanceRecord::read(
+        seller
+            .app()
+            .shared_record(&peer.record)
+            .await
+            .unwrap()
+            .unwrap()
+            .content
+            .value()
+            .unwrap(),
+        &seller.identity(),
+    )
+    .unwrap();
+    let q = mirror.response.unwrap();
+    let e = mirror.end.unwrap();
+    assert_eq!(q.message().msg_id, answer);
+    assert_eq!(e.message().msg_id, end);
+    assert_eq!(e.message().refs, [mirror.proposal.hash(), q.hash()]);
+    let first = payer.receive(None).await.unwrap();
+    if !placed {
+        assert!(received(&first, "paykit.allowance_acceptance"), "{first:?}");
+    }
+    assert!(received(&first, "paykit.allowance_end"), "{first:?}");
+    let view = payer.allowance(&sent.record).await.unwrap();
+    assert_eq!(view.status, AllowanceStatus::Ended);
+    assert!(!view.consented && view.executor_app_id.is_none());
+    let app_id = payer.app_id();
+    drop(payer);
+    let mut payer = Box::pin(Paykit::load(
+        w.env(&w.alice, store),
+        Default::default(),
+        app_id,
+        w.rail.clone(),
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    w.clock
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
+    for _ in 0..2 {
+        payer.receive(None).await.unwrap();
+    }
+    let after = payer.allowance(&sent.record).await.unwrap();
+    assert_eq!(after.status, AllowanceStatus::Ended);
+    assert!(!after.consented && after.executor_app_id.is_none());
+    if !placed {
+        let notices = payer.notices().await.unwrap();
+        assert_eq!(
+            notices
+                .iter()
+                .filter(|n| n.kind == paykit_sdk::NoticeKind::MessageGivenUp
+                    && n.msg_id.as_deref() == Some(answer.as_str()))
+                .count(),
+            1
+        );
+        assert!(!Box::pin(keeps(&payer, b"pr/", &answer)).await);
+        assert!(Box::pin(original_approval(&payer, &sent.record)).await["opening"].is_null());
+        assert!(payer
+            .app()
+            .shared_record(&sent.record)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(payer
+            .app()
+            .records_of("allowance_ledgers")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(w.rail.all_executions().is_empty());
+        // A verified retirement ends this local stop. The same signed P on a
+        // later lifetime has no accepted pair or execution authority.
+        let mut phone = Box::pin(alice_app(
+            &w,
+            "phone",
+            AppScopes::new().allowance().build().unwrap(),
+        ))
+        .await;
+        let target = pending_target(&w.bob_id(), &sent.allowance_id);
+        phone.app_mut().read_record_fresh(&target).await.unwrap();
+        phone.end_allowance(&sent.record).await.unwrap();
+        payer.app_mut().read_record_fresh(&target).await.unwrap();
+        Box::pin(records_proposal(
+            &mut phone,
+            &mirror.proposal,
+            &sent.allowance_id,
+        ))
+        .await;
+        payer.app_mut().read_record_fresh(&target).await.unwrap();
+        payer.receive(None).await.unwrap();
+        let fresh = payer.allowance(&sent.record).await.unwrap();
+        assert_eq!(fresh.status, AllowanceStatus::Proposed);
+        assert!(!fresh.consented && fresh.executor_app_id.is_none());
+    } else {
+        let held = Box::pin(value(&payer, &sent.record)).await;
+        let accepted =
+            AllowanceRecord::read(&serde_json::to_vec(&held).unwrap(), &payer.identity()).unwrap();
+        assert_eq!(accepted.end.unwrap().hash(), e.hash());
+    }
+}
+
+#[tokio::test]
 async fn test_original_payer_recovers_its_incoming_acceptance_after_the_batch_applies() {
     for resume in [
         ResumeOriginal::Load,

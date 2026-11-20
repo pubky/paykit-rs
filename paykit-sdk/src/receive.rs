@@ -1199,15 +1199,23 @@ pub(crate) fn make_room_for_stop(
                 return Err(Fail::corrupt());
             };
             let (end, _) = kept_with_time(cx, &stop)?;
-            ends.entry(record)
-                .or_default()
-                .push((ordered(&stop)?, name, end));
+            ends.entry(record).or_default().push((
+                ordered(&stop)?,
+                name,
+                end,
+                stop.ended_acceptance.is_some(),
+            ));
         }
         for (record, mut group) in ends {
-            group.sort_by_key(|(order, _, _)| *order);
+            group.sort_by_key(|(order, _, _, _)| *order);
             let content = cx.record_at(&record)?.map(|held| held.content);
-            for (index, (order, name, end)) in group.into_iter().enumerate() {
-                if index == 0
+            let matched = group.iter().position(|(_, _, _, matched)| *matched);
+            for (index, (order, name, end, _)) in group.into_iter().enumerate() {
+                if matched == Some(index) {
+                    continue;
+                }
+                if matched.is_none()
+                    && index == 0
                     && (!crate::allowances::end_bounded(cx, content.as_ref(), &end)?
                         || crate::allowances::keeps_stored_message(cx, &end.sender(), &record)?)
                 {

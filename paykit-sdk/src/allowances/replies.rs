@@ -1063,6 +1063,43 @@ impl Paykit {
         Ok(app.shared_evidence().await?.ops.iter().find_map(expected))
     }
 
+    /// An end stays effective while its matching acceptance cannot open the permanent record.
+    /// The retained signed answer is evidence for that stop after the placement duty expires.
+    async fn pending_acceptance_stopped(
+        &mut self,
+        record: &[u8; 32],
+        source: RecordVersion,
+        reply: &StoredMessage,
+        position: FeedPosition,
+    ) -> Result<bool> {
+        // E can arrive before Q, or before either could be tied to the current P.
+        // Keep the signed match with the stop even after Q's placement deadline.
+        let prefix = key::allowance_ends(record);
+        let mut ends = self.local_scan::<KeptMessage>(&prefix).await?;
+        if ends.is_empty() {
+            return Ok(false);
+        }
+        if ends.iter().all(|(_, end)| end.ended_acceptance.is_none()) {
+            ends.sort_by_key(|(_, end)| end.order().ok());
+            for (suffix, mut end) in ends {
+                let Some(at) = end.position() else { continue };
+                end.ended_acceptance = super::pending_end_acceptance(
+                    &end.stored(&self.identity())?,
+                    at,
+                    reply,
+                    Some(position),
+                    source,
+                    |a, b| self.app.received_order(a, b),
+                );
+                if end.ended_acceptance.is_some() {
+                    self.local_put(&format!("{prefix}{suffix}"), &end).await?;
+                    break;
+                }
+            }
+        }
+        Ok(true)
+    }
+
     /// Apply the first eligible reply to the exact current proposal. A rejection deletes
     /// that proposal. An acceptance also opens the permanent pair and the payer’s ledger.
     async fn apply_pending_reply(
@@ -1089,7 +1126,18 @@ impl Paykit {
             }
         };
         if accepting
-            && (self.pause_at(&selected.key).await?.paused
+            && (Box::pin(
+                self.pending_acceptance_stopped(
+                    &self.app.record_key(&permanent)?,
+                    evidence
+                        .pending_source
+                        .map_or(selected.version, SeenVersion::record_version),
+                    reply,
+                    position,
+                ),
+            )
+            .await?
+                || self.pause_at(&selected.key).await?.paused
                 || crate::stored::past_window(
                     reply.accepted_at().ok_or_else(PaykitError::corrupt)?,
                     self.service_time(),
@@ -1199,9 +1247,7 @@ impl Paykit {
         let mut conditions = vec![self.app.record_condition(&selected.key).await?];
         let mut writes = Vec::new();
         if accepting {
-            if self.conflict_kept(&permanent_key).await?
-                || self.allowance_stopped(&permanent_key).await?
-            {
+            if self.conflict_kept(&permanent_key).await? {
                 return Ok(waiting());
             }
             let super::pending::Acceptance::Eligible { ledger } =
