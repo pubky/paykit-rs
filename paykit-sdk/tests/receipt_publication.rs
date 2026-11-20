@@ -202,11 +202,21 @@ async fn test_reopened_shop_accepts_an_already_published_complete_receipt() -> T
 }
 
 async fn on_both_services(shared: Shared, restart: Restart) -> TestResult {
+    with_issued_sale(async |world, sale| {
+        Box::pin(publish_after_restart(world, sale, shared, restart)).await
+    })
+    .await
+}
+
+async fn with_issued_sale(scenario: impl AsyncFn(&World, IssuedSale) -> TestResult) -> TestResult {
     for backend in [Backend::Scripted, Backend::Service] {
         let Some(world) = World::start(backend)? else {
             continue;
         };
-        let result = Box::pin(publish_after_restart(&world, shared, restart)).await;
+        let result = match Box::pin(issued_sale(&world)).await {
+            Ok(sale) => Box::pin(scenario(&world, sale)).await,
+            Err(error) => Err(error),
+        };
         world.close().await?;
         result?;
     }
@@ -376,7 +386,12 @@ async fn issued_sale(world: &World) -> TestResult<IssuedSale> {
     })
 }
 
-async fn publish_after_restart(world: &World, shared: Shared, restart: Restart) -> TestResult {
+async fn publish_after_restart(
+    world: &World,
+    sale: IssuedSale,
+    shared: Shared,
+    restart: Restart,
+) -> TestResult {
     let IssuedSale {
         mut buyer,
         mut shop,
@@ -391,7 +406,7 @@ async fn publish_after_restart(world: &World, shared: Shared, restart: Restart) 
         proof_only,
         receipt,
         ..
-    } = Box::pin(issued_sale(world)).await?;
+    } = sale;
     let identity = shop.identity();
     let id = shop.app_id();
     let cert = shop.app().cert().clone();

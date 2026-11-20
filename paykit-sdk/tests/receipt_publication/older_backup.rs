@@ -47,18 +47,10 @@ fn publications(backup: &PaykitBackup) -> TestResult<Publications> {
 
 #[tokio::test]
 async fn test_older_shop_backup_keeps_the_earlier_hold_and_original_submission() -> TestResult {
-    for backend in [Backend::Scripted, Backend::Service] {
-        let Some(world) = World::start(backend)? else {
-            continue;
-        };
-        let result = Box::pin(older_shop_backup(&world)).await;
-        world.close().await?;
-        result?;
-    }
-    Ok(())
+    with_issued_sale(older_shop_backup).await
 }
 
-async fn older_shop_backup(world: &World) -> TestResult {
+async fn older_shop_backup(world: &World, sale: IssuedSale) -> TestResult {
     let IssuedSale {
         mut buyer,
         mut shop,
@@ -73,7 +65,7 @@ async fn older_shop_backup(world: &World) -> TestResult {
         mut proof_only,
         receipt,
         ..
-    } = Box::pin(issued_sale(world)).await?;
+    } = sale;
     let identity = shop.identity();
     let cert = shop.app().cert().clone();
 
