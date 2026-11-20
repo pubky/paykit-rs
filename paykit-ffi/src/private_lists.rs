@@ -17,6 +17,62 @@ use crate::{
     PaykitFfiError,
 };
 
+/// Original owner/app/grant-bound empty-list withdrawal handle.
+///
+/// Persist with the original operation; never replace it from the current wallet.
+#[derive(uniffi::Record, Clone)]
+pub struct FfiPrivatePaymentListWithdrawal {
+    /// Original owner public key.
+    pub owner: String,
+    /// Original local Paykit App.
+    pub app_id: String,
+    /// Original counterparty public key.
+    pub counterparty: String,
+    /// Original history row.
+    pub outbound_message_id: u64,
+    /// Opaque binding of the original grant, signer, block, and packet.
+    pub original_binding: String,
+}
+
+impl fmt::Debug for FfiPrivatePaymentListWithdrawal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("FfiPrivatePaymentListWithdrawal(<redacted>)")
+    }
+}
+
+/// Publication and durable acknowledgement of exactly the original withdrawal.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct FfiPrivatePaymentListWithdrawalAcknowledgement {
+    /// Match this entire value to the caller's original operation.
+    pub withdrawal: FfiPrivatePaymentListWithdrawal,
+}
+
+impl From<paykit_sdk::PrivatePaymentListWithdrawal> for FfiPrivatePaymentListWithdrawal {
+    fn from(value: paykit_sdk::PrivatePaymentListWithdrawal) -> Self {
+        Self {
+            owner: app_public_key(&value.owner),
+            app_id: value.app_id.to_string(),
+            counterparty: app_public_key(&value.counterparty),
+            outbound_message_id: value.outbound_message_id,
+            original_binding: value.original_binding,
+        }
+    }
+}
+
+impl TryFrom<FfiPrivatePaymentListWithdrawal> for paykit_sdk::PrivatePaymentListWithdrawal {
+    type Error = PaykitFfiError;
+    fn try_from(value: FfiPrivatePaymentListWithdrawal) -> Result<Self, Self::Error> {
+        Ok(Self {
+            owner: parse_public_key(value.owner)?,
+            app_id: paykit_sdk::PaykitAppId::new(value.app_id)
+                .map_err(paykit_sdk::PaykitSdkError::from)?,
+            counterparty: parse_public_key(value.counterparty)?,
+            outbound_message_id: value.outbound_message_id,
+            original_binding: value.original_binding,
+        })
+    }
+}
+
 /// Delivery status for one queued outbound Private Application Message.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FfiOutboundPrivateMessageStatus {
@@ -302,6 +358,55 @@ impl FfiPaykitSdk {
             .clear_private_payment_list_and_process_outbound(parse_public_key(counterparty)?)
             .await
             .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    /// Prepare one original empty-list packet and atomically block its peer.
+    ///
+    /// Requires explicit withdrawal confirmation. No withdrawal packet is published.
+    /// Retain the returned handle with the original owner/app cleanup operation.
+    /// Already-lost state and an occupied nonempty/Event slot refuse. This does
+    /// not unblock, relink, cancel payment reservations, or erase credentials.
+    pub async fn prepare_private_payment_list_withdrawal_and_block(
+        &self,
+        counterparty: String,
+    ) -> Result<FfiPrivatePaymentListWithdrawal, PaykitFfiError> {
+        self.runtime
+            .prepare_private_payment_list_withdrawal_and_block(parse_public_key(counterparty)?)
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    /// Retry only the original retained empty packet after explicit confirmation.
+    ///
+    /// Requires the same owner/app/grant and blocked generation. Acknowledges
+    /// publication and its durable commit, not peer receipt or completed cleanup.
+    /// Failed/canceled attempts retain uncertainty; no arbitrary sends run.
+    pub async fn retry_private_payment_list_withdrawal(
+        &self,
+        withdrawal: FfiPrivatePaymentListWithdrawal,
+    ) -> Result<FfiPrivatePaymentListWithdrawalAcknowledgement, PaykitFfiError> {
+        self.runtime
+            .retry_private_payment_list_withdrawal(withdrawal.try_into()?)
+            .await
+            .map(|ack| FfiPrivatePaymentListWithdrawalAcknowledgement {
+                withdrawal: ack.withdrawal.into(),
+            })
+            .map_err(Into::into)
+    }
+
+    /// Consume a completed receipt only after the caller durably accepts it.
+    ///
+    /// Releases the packet journal so backup export can resume; keeps outbound
+    /// history. Unknown/pending work refuses. Does not authorize local erasure.
+    pub async fn finish_private_payment_list_withdrawal(
+        &self,
+        withdrawal: FfiPrivatePaymentListWithdrawal,
+    ) -> Result<(), PaykitFfiError> {
+        self.runtime
+            .finish_private_payment_list_withdrawal(withdrawal.try_into()?)
+            .await
             .map_err(Into::into)
     }
 

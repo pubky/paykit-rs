@@ -535,3 +535,18 @@ misconstruction.
   malformed event payloads, receipt-access descriptors, outbound queue records,
   and link recovery diagnostics should be available only through an explicitly
   named sensitive diagnostics export, because they can contain sensitive data.
+
+
+### Explicit private-list withdrawal before blocking
+
+The Swift, Kotlin and React Native surfaces expose
+`preparePrivatePaymentListWithdrawalAndBlock`,
+`retryPrivatePaymentListWithdrawal` and `finishPrivatePaymentListWithdrawal`.
+Persist the complete returned withdrawal handle with the original operation;
+retry and finish accept that handle rather than a current peer/message-id pair.
+The acknowledgement carries the same handle. Swift and Kotlin descriptions
+redact both records. React Native records are plain JavaScript objects and must
+not be logged or reported. These APIs preserve one explicitly requested empty list, refuse
+already-lost state, and do not authorize unblocking, other sends, reservation
+cancellation or credential erasure. See the SDK's blocked-peer withdrawal
+contract for durable acknowledgement, original-grant checks and backup limits.

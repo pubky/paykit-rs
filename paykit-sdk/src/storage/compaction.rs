@@ -39,6 +39,14 @@ pub(super) fn compact_private_payment_lists(state: &mut StorageState) {
         .values()
         .map(|reservation| reservation.outbound_message_id)
         .collect::<HashSet<_>>();
+    // Every retained withdrawal owns its exact history row, even after
+    // invalidation or publication. Dropping it would corrupt the next decode.
+    keep.extend(
+        state
+            .private_payment_list_withdrawals
+            .values()
+            .map(|record| record.outbound_message_id),
+    );
     keep.extend(published.into_values());
     keep.extend(attempted.into_values());
     keep.extend(latest.into_values());

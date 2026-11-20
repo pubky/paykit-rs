@@ -25,6 +25,7 @@ pub(in crate::backup) fn validate_storage_state_counting_links(
     mut link_counts: Option<&mut HashMap<PubkyPublicKey, usize>>,
 ) -> Result<()> {
     validate_live_identity(state)?;
+    validate_private_list_withdrawals(state)?;
     if let Some(accounting) = &state.allowance_accounting {
         crate::domain::allowance_accounting::validate_accounting(accounting)?;
         let identity = state
@@ -200,6 +201,7 @@ fn validate_live_identity(state: &StorageState) -> Result<()> {
 
 fn has_identity_scoped_live_state(state: &StorageState) -> bool {
     state.allowance_accounting.is_some()
+        || !state.private_payment_list_withdrawals.is_empty()
         || state.paykit_noise_public_key.is_some()
         || !state.linked_peers.is_empty()
         || !state.contact_records.is_empty()
@@ -624,4 +626,82 @@ fn invalid_live_state(context: &'static str) -> PaykitSdkError {
         context: context.into(),
         source: None,
     }
+}
+
+fn validate_private_list_withdrawals(state: &StorageState) -> Result<()> {
+    for grant in &state.closed_private_payment_list_withdrawal_grants {
+        // These are denials, not initialized identity or session authority.
+        if grant.grant_id.is_empty()
+            || grant.client_id.is_empty()
+            || grant.grant_id.len() > 256
+            || grant.client_id.len() > 256
+        {
+            return Err(invalid_live_state(
+                "invalid closed private list withdrawal grant",
+            ));
+        }
+    }
+    for (peer, record) in &state.private_payment_list_withdrawals {
+        let fail = || invalid_live_state("invalid retained private list withdrawal");
+        if peer != &record.counterparty
+            || state
+                .identity_state
+                .as_ref()
+                .and_then(|s| s.public_key.as_ref())
+                != Some(&record.owner)
+            || record.owner == record.counterparty
+            || record.grant_id.is_empty()
+            || record.client_id.is_empty()
+            || record.grant_id.len() > 256
+            || record.client_id.len() > 256
+            || state
+                .closed_private_payment_list_withdrawal_grants
+                .iter()
+                .any(|closed| {
+                    closed.owner == record.owner
+                        && closed.homeserver == record.homeserver
+                        && closed.grant_id == record.grant_id
+                        && closed.client_id == record.client_id
+                })
+        {
+            return Err(fail());
+        }
+        let message = state
+            .outbound_private_messages
+            .iter()
+            .find(|m| m.outbound_message_id == record.outbound_message_id)
+            .ok_or_else(fail)?;
+        let list = paykit_lib::parse_private_payment_list_json(&message.raw_json)?;
+        if message.counterparty != *peer
+            || message.app_id != record.app_id
+            || message.kind != paykit_lib::PrivateMessageKind::PrivatePaymentList.as_str()
+            || !list.is_empty()
+            || list.app_id() != &record.app_id
+            || (record.confirmed_at.is_some()
+                && message.status != OutboundPrivateMessageStatus::Sent)
+        {
+            return Err(fail());
+        }
+        records::validate_prepared_private_send(record.outbound_message_id, &record.prepared)?;
+        if !record.invalidated
+            && (state.paykit_noise_public_key.as_ref() != Some(&record.noise_public_key)
+                || state
+                    .linked_peers
+                    .get(peer)
+                    .is_none_or(|p| p.state != LinkedPeerState::Blocked)
+                || state.encrypted_link_states.get(peer).is_none_or(|s| {
+                    s.generation != record.blocked_generation
+                        || s.link_snapshot.is_some()
+                        || s.handshake_snapshot.is_some()
+                        || s.handshake_role.is_some()
+                })
+                || state
+                    .outbound_private_messages
+                    .iter()
+                    .any(|m| m.counterparty == *peer && m.prepared_send.is_some()))
+        {
+            return Err(fail());
+        }
+    }
+    Ok(())
 }

@@ -23,7 +23,8 @@ where
     /// Retry with the exact same current and replacement keys;
     /// do not generate another replacement for the same generation. Distribute
     /// the replacement to remaining authorized applications before they resume.
-    /// Rotation rejects live shared peer leases. Expired leases cannot fence
+    /// Rotation rejects unconfirmed private list withdrawals and live shared
+    /// peer leases. Expired leases cannot fence
     /// remote requests already dispatched by another application.
     pub async fn rotate_paykit_identity_key(
         &self,
@@ -190,10 +191,27 @@ pub(super) fn rotate_private_state(
         });
     }
 
+    // The original key remains necessary until the retained packet is confirmed.
+    if state
+        .private_payment_list_withdrawals
+        .values()
+        .any(|record| record.confirmed_at.is_none())
+    {
+        return Err(PaykitSdkError::Policy {
+            context:
+                "cannot rotate Paykit identity key with an unconfirmed private list withdrawal"
+                    .into(),
+            source: None,
+        });
+    }
+
     // Key rotation revokes prepared handoffs, but unresolved usage remains held
     // until the wallet reconciles external execution evidence.
     if let Some(accounting) = state.allowance_accounting.as_mut() {
         crate::domain::allowance_accounting::invalidate_accounting(accounting);
+    }
+    for withdrawal in state.private_payment_list_withdrawals.values_mut() {
+        withdrawal.invalidated = true;
     }
     state.encrypted_link_states.clear();
     state.private_intake_peers.clear();
@@ -233,4 +251,44 @@ pub(super) fn rotate_private_state(
     crate::validate_storage_state(&state)?;
     tx.replace_storage_state(crate::storage::ValidatedStorageState::new(state));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::{InMemoryStorage, PrivatePaymentListWithdrawalGrant, StorageState};
+
+    #[tokio::test]
+    async fn test_key_rotation_preserves_closed_withdrawal_grants() {
+        let owner = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let closed = PrivatePaymentListWithdrawalGrant {
+            owner: owner.clone(),
+            homeserver: owner.clone(),
+            grant_id: "original-grant".into(),
+            client_id: "original-client".into(),
+        };
+        let now = Utc::now();
+        let state = StorageState {
+            identity_state: Some(IdentityState {
+                public_key: Some(owner.clone()),
+                initialized_at: now,
+            }),
+            closed_private_payment_list_withdrawal_grants: std::collections::HashSet::from([
+                closed,
+            ]),
+            ..StorageState::default()
+        };
+        let storage = InMemoryStorage::from_state(state.clone());
+        storage
+            .transaction(|tx| rotate_private_state(tx, &owner, now))
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .snapshot()
+                .unwrap()
+                .closed_private_payment_list_withdrawal_grants,
+            state.closed_private_payment_list_withdrawal_grants
+        );
+    }
 }

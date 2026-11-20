@@ -88,6 +88,16 @@ extension PrivatePaymentListAcknowledgement: CustomStringConvertible, CustomDebu
     public var debugDescription: String { description }
 }
 
+extension PrivatePaymentListWithdrawal: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PrivatePaymentListWithdrawal(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension PrivatePaymentListWithdrawalAcknowledgement: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PrivatePaymentListWithdrawalAcknowledgement(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
 extension PrivatePaymentListDeliveryFailure: CustomStringConvertible, CustomDebugStringConvertible {
     public var description: String { "PrivatePaymentListDeliveryFailure(<redacted>)" }
     public var debugDescription: String { description }

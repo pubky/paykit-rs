@@ -12,6 +12,7 @@ mod noise_key_authorization;
 mod observation;
 mod payment_conversion;
 mod private_intake;
+mod private_list_withdrawal;
 mod private_lists;
 mod profiles;
 mod public_endpoints;
