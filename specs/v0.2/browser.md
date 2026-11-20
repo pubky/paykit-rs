@@ -326,7 +326,7 @@ build must turn off ([Groundwork](#groundwork-on-the-v02-crates), `http` row).
 
 | Contract | v0.2 requirement | Browser plan | Status |
 | --- | --- | --- | --- |
-| `StateStore` (`store/mod.rs:84`) | Synchronous; guarantees 1 to 7 (`store/mod.rs:60-83`) | OPFS in a dedicated worker, or IndexedDB behind an async seam (D3) | Partly blocked: #537 items 1 and 3 |
+| `StateStore` (`store/mod.rs:84`) | Synchronous; guarantees 1 to 7 (`store/mod.rs:60-83`) | OPFS in a dedicated worker, or IndexedDB behind an async seam (D3) | Partly blocked: #537 items 1 and 3. A sealed OPFS store runs in the drafts #586 and #591 |
 | `StoreHandle` (`store/handle.rs:9-59`) | Inline, or Tokio `spawn_blocking` | Inline only | Fits; no async-store mode |
 | Ownership (`store/mod.rs:116-143`) | No timeout or preemption | Web Lock plus the OPFS file lock (D4) | Open: #537 item 3 |
 | `Transport::send` (`transport/mod.rs:212-222`) | No redirects; switch origin rules (`sw:spec/wire-format.md:1593`) | `fetch` with `redirect: "manual"`, `credentials: "omit"`, reference timeouts (D5, D8) | Open: address check (#537 item 1) and CORS (item 2). A `fetch` transport runs against a real service in the draft #573 |
@@ -510,7 +510,12 @@ the same database (*verified (v0.1 spike)*). Whether that protects a copied
 profile depends on the engine (*read*): Chromium and Firefox write the raw
 key bytes into the profile; WebKit on Apple platforms wraps them with a
 Keychain master key; WebKitGTK and WPE (so Playwright WebKit on Linux) use an
-empty key. The Pubky client's `#[doc(hidden)]` proof-of-possession hook takes
+empty key. The draft #591 does not test these statements. It observed that
+on macOS, storing a `CryptoKey` in IndexedDB makes Playwright's WebKit ask
+for Keychain access in a dialog, and the worker waits until someone answers;
+generating a non-extractable key in memory does not (*measured (#591)*;
+Safari not tested). An app that keeps such a key in WebKit on macOS may meet
+the same prompt. The Pubky client's `#[doc(hidden)]` proof-of-possession hook takes
 a signing callback from the host, not a key (`delegated_client_signer`, pubky
 0.18.0 `src/actors/auth/grant/builder.rs:141-151`; `DelegatedSignFn`
 re-exported `#[doc(hidden)]` at `src/lib.rs:84-85`). The host can back that
@@ -564,7 +569,11 @@ a copied profile; it is a host option.
   protection against profile theft in Chrome, Edge, or Firefox supplies its
   own. A key behind a user unlock step rules out unattended start-up (reload,
   browser restart, push wake-up with no page); panic recovery still works, as
-  the page can post the `CryptoKey` to the new worker.
+  the page can post the `CryptoKey` to the new worker. The draft #591
+  implements options 1 and 3 as `WrappingKey::Origin`, its default, and
+  `WrappingKey::Host`; the default is its decision 2. In WebKit, the tests
+  of the origin-held key run nowhere today (Keychain prompt on macOS, no OPFS
+  in Playwright's WebKit for Linux); how to cover them is its decision 5.
 - The backup key must survive eviction, so it comes from outside the origin's
   storage: the user's password or passkey (option 2), the wallet seed through
   the host's derivation, or a key the host keeps elsewhere. The seed counts
@@ -648,7 +657,11 @@ pre-release only.
   then reads, writes, and flushes synchronously, with an exclusive lock per
   file and no transactions. `localStorage` does not fit (`Window` only,
   strings only, small quota, no transactions). So a page or service worker
-  needs an async store.
+  needs an async store. *Verified (#586)*: an OPFS store runs in a dedicated
+  worker in all three engines, and opening it in a page fails with a typed
+  error. Because the trait is synchronous and only a dedicated worker has
+  sync handles, the SDK, the Switch client, and the store must all run in
+  that one worker (#586).
 - **Eviction.** Under storage pressure the browser deletes whole origins,
   least recently used first, unless storage is persistent. Safari deletes all
   script-writable storage after 7 days of use without interaction with the
@@ -737,14 +750,14 @@ pre-release only.
 
   | Requirement | Browser form |
   | --- | --- |
-  | Atomic (guarantee 1) | One IndexedDB `readwrite` transaction per `commit` and `commit_if`, or A/B slots or a log on OPFS. `commit_if` is never a read followed by a commit (`store/mod.rs:133`) |
-  | Durable before `Ok` (2) | `durability: "strict"` on every IndexedDB transaction (no engine defaults to strict: Chrome 121 and later default to relaxed, Safari treats the default like relaxed, and Firefox's default is a weaker SQLite sync level than strict); `flush()` on OPFS |
+  | Atomic (guarantee 1) | One IndexedDB `readwrite` transaction per `commit` and `commit_if`, or A/B slots or a log on OPFS. `commit_if` is never a read followed by a commit (`store/mod.rs:133`). The draft #586 writes a whole snapshot into one of two slots on every commit; snapshots or a log is its decision 1 |
+  | Durable before `Ok` (2) | `durability: "strict"` on every IndexedDB transaction (no engine defaults to strict: Chrome 121 and later default to relaxed, Safari treats the default like relaxed, and Firefox's default is a weaker SQLite sync level than strict); `flush()` on OPFS. Unflushed OPFS writes survived a SIGKILL of the browser in all three engines, so a kill cannot show that `flush()` is called, and power loss cannot be tested in a browser rig (*measured (#586)*) |
   | Ordered (3) | Reads see every returned commit, across handles; scans in ascending byte order |
   | Exclusive (4) | D4 |
-  | Encrypted (5) | AEAD per value with AAD binding store identity, App ID, store namespace, and key; atomic sealing-key creation |
-  | Deletion (6) | `DeletePrefix` plus deleting the sealing key |
+  | Encrypted (5) | AEAD per value with AAD binding store identity, App ID, store namespace, and key; atomic sealing-key creation. The draft #591 seals each whole snapshot as one blob instead, with namespaces and keys inside it and a header with a random store identifier as AAD; per snapshot or per value is its decision 1. Sealing does not detect a rollback to an older valid snapshot of the same store (#591) |
+  | Deletion (6) | `DeletePrefix` plus deleting the sealing key. In the draft #586 a deleted value is overwritten in both slots within two commits; the browser cannot promise that freed disk blocks are erased |
   | Sizes (7) | 16 MiB values and 32 MiB batches within quota |
-  | Errors | Reject on `abort` as well as `error`. An OPFS `NoModificationAllowedError` from a second opener (Firefox and Safari have no `mode` option) maps to `InUse`. Map the rest as in [Host-visible errors](#host-visible-errors) |
+  | Errors | Reject on `abort` as well as `error`. A second opener of an OPFS sync access handle is refused (*verified (#586)*) with `NoModificationAllowedError` in Chromium and Firefox and `InvalidStateError` in WebKit; both map to `InUse`. Firefox and WebKit accept the `mode` option and ignore it, so only the default mode is exclusive in all three engines (*measured (#586)*). Map the rest as in [Host-visible errors](#host-visible-errors) |
   | Lifecycle | Handle `versionchange`, `blocked`, and `close`; version the format |
 
 - The page calls `navigator.storage.persist()` after a user action, even for a
@@ -758,6 +771,8 @@ pre-release only.
   whose own state is evicted with the origin offers the Paykit restore in its
   own recovery step. `identity.json` lists current App IDs, and a published
   app record may carry a display `label`, which can help the user choose.
+  The draft #586's store opens an evicted store as a new, empty store with
+  no error (*read* from its documentation; not tested).
 - After a join without restore, the host asks the user to remove the lost app
   in the signer (Switch spec 12.3, "Reinstalling", `sw:spec/spec.md:903`).
   Until then payers may use its public endpoints until `expires_at` or
@@ -769,7 +784,14 @@ pre-release only.
   leads to a rotation (`sw:spec/spec.md:898`, `:901`). So frequent eviction
   is an identity-wide cost, another reason for a backup outside the origin.
 - Measure store cost up to a backup-sized value (11,185,390 bytes,
-  `store/mod.rs:80-83`).
+  `store/mod.rs:80-83`). *Measured (#586, #591)* on macOS arm64, release
+  build, dedicated worker: with sealing, a commit (one 64-byte put) into
+  16 MiB of encoded state takes a median of 32.6 ms in Chromium, 446 ms in
+  Firefox, and 35.9 ms in WebKit, nearly all of it the cipher, and an open
+  about twice that. 250 MiB of state worked in all three engines without
+  sealing. Whole snapshots cost bytes: one `pay_request` makes 27 commits
+  that write 1,245,816 bytes for a slot of about 65 KB, about 6.5 times the
+  192,249 bytes of batch data a log would write.
 
 **Decision needed (Owner: Paykit).** Ship a reference store, on OPFS now or
 IndexedDB after a seam? Assurance is decided in D2.
@@ -853,7 +875,11 @@ the restore flow above and the rollout step 3 backup-and-restore test.
 - At most one live owner context per store namespace and partition. Back the
   store lease with a Web Lock, plus the OPFS file's exclusive handle if D3
   picks OPFS. Map `AcquireOutcome::Busy` and `StoreError::InUse` to a distinct
-  host code ([Host-visible errors](#host-visible-errors)).
+  host code ([Host-visible errors](#host-visible-errors)). The draft #586
+  uses the files' exclusive locks alone, held until the store and every
+  lease it granted drop, with no Web Lock: a second open from the same
+  worker or a nested worker fails with `InUse` (*verified (#586)*), and a
+  second tab gets `InUse` instead of waiting.
 - Ship option 2's helper as optional, with these rules. The owner context
   stops its runtime and waits for in-flight store calls and sends before it
   releases the lock. It keeps the lock while the page is hidden: releasing
@@ -1444,6 +1470,11 @@ rollout step 2 and Paykit decision 20's phased plan.
   the SDK worker while the page stays strict; a `blob:` or `data:` worker
   inherits the page policy. The page's `worker-src` (falling back to
   `child-src`, then `script-src`) must allow the worker's URL.
+- Playwright's WebKit for Linux has no OPFS: no `navigator.storage` in a
+  page and no `FileSystemSyncAccessHandle` in a dedicated worker. So CI on
+  Linux runs no store test in WebKit. OPFS under Playwright also needs a
+  persistent context: without a profile WebKit refuses it and Chromium keeps
+  it in memory only (*measured (#586)*).
 - Lockdown Mode on Apple devices turns off WebAssembly, IndexedDB, OPFS, the
   Cache API, service workers, Web Locks, and Push; WebAssembly may stay
   blocked even for an excluded site
@@ -1698,7 +1729,7 @@ Nothing was dropped silently. Each line says what changed and why.
 | `PubkyGrantLogout` on wasm | Dropped | `sign_out` already revoked on wasm; v0.2 revocation is the signer's |
 | pubky 0.16.2 pin and its upgrade | Dropped; release notes name the host's Pubky client versions (Rollout) | Paykit v0.2 has no `pubky` dependency |
 | v0.1 groundwork (`snow` and `ring`, `uuid`, `chrono` `wasmbind`, `is_connect`, bounded-read sites, runtime module) | Replaced by v0.2 Groundwork | v0.2 has no `snow`, `uuid`, `is_connect`, or runtime module. `chrono` comes in through `pubky-switch-core` with only `std` (no clock, so no `wasmbind`). `ring` comes in through the client's default `http` feature, which the browser build turns off (Groundwork, `http` row) |
-| Whole-blob rewrite cost ([#188](https://github.com/pubky/paykit-rs/issues/188)) | Dropped; store cost is measured instead (Facts to measure) | v0.2 stores one record per key |
+| Whole-blob rewrite cost ([#188](https://github.com/pubky/paykit-rs/issues/188)) | Dropped; store cost is measured instead (Facts to measure; measured in #586 and #591, D3) | v0.2 stores one record per key. The draft #586's store still rewrites a whole snapshot per commit, at the store level (D3) |
 | v0.1 sign-up latency | Replaced by cold-start join latency (Facts to measure) | No v0.1 sign-up in v0.2 |
 | Mobile bindings turning the DHT off; `sync_public_endpoints` failing silently; the FFI's 30-second default; storage lockup after a panic inside a transaction | Dropped | v0.1 FFI and runtime |
 | v0.1 doc drift: stale-snapshot wording in the SDK spec and `backup.rs`; the sessions wording in `specs/paykit-sdk.md`; the `StateBlobStorageAdapter` heading; the CLAUDE.md deadline wording | Moved out; the deadline rule is now `v02:AGENTS.md:57` | Still on master (`m:specs/paykit-sdk.md:1888-1891`, `m:paykit-sdk/src/runtime/backup.rs:52`, `m:specs/paykit-sdk-bindings.md:85`); to be filed as an issue against master |
