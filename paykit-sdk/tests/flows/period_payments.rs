@@ -3343,14 +3343,9 @@ async fn test_period_payments_by_policy_stops_at_the_earlier_attempt_deadline() 
 }
 
 fn monthly_requiring(app: [u8; 16]) -> RequestDraft {
-    let rule = AnchoredRule::new(START_MS, 1, Unit::Month).unwrap();
-    RequestDraft::new(
-        btc("1"),
-        PaymentReference::new("plan-1").unwrap(),
-        RequestDestination::RequiredApp(app),
-    )
-    .with_proposal_expires_at_ms(START_MS + DAY_MS)
-    .with_recurrence(Recurrence::new(rule, START_MS, None).unwrap())
+    let mut draft = monthly();
+    draft.destination = RequestDestination::RequiredApp(app);
+    draft
 }
 
 #[tokio::test]
@@ -3546,7 +3541,7 @@ async fn test_period_payments_required_app_accepts_rates_from_another_app() {
         );
         till.app_mut().invite(&w.alice_id()).await.unwrap();
         let listed = paykit_lib::bodies::PrivatePaymentList {
-            version: now,
+            version: crate::common::list_version(till.app().own_identity().generation(), 1),
             payment_endpoints: endpoints,
             expires_at: now + DAY_MS,
         }
