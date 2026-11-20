@@ -436,14 +436,6 @@ async fn test_hold_confirmation_cancellation_overrides_a_current_token() {
     assert!(w.rail.all_executions().is_empty());
 }
 
-fn payer_target(request: &RequestRef) -> pubky_switch_client::app::RecordTarget {
-    let collection = paykit_lib::collections::Collection::PayerActivity;
-    pubky_switch_client::app::RecordTarget::new(
-        pubky_switch_client::app::Collection::new(collection.name(), collection.fixed_policy()),
-        &paykit_lib::derive::natural_key::request_record(&request.payee, &request.request_hash),
-    )
-}
-
 async fn request_without_expiry(w: &World, shop: &mut Paykit) -> RequestRef {
     let mut order = draft("1", w.clock.now_ms());
     order.proposal_expires_at_ms = None;
@@ -470,7 +462,7 @@ async fn test_hold_confirmation_paid_request_stays_unpayable_after_deletion_and_
     let obligation = payer.payments().await.unwrap()[0].obligation;
     let calls = w.rail.all_pay_calls();
     assert_eq!(calls.get(&payment.attempt_id()), Some(&1));
-    let target = payer_target(&request);
+    let target = crate::outcome_record::payer_record(&request);
     payer
         .app_mut()
         .delete_record(&target, Vec::new())
@@ -520,7 +512,10 @@ async fn test_hold_confirmation_signed_payer_loss_outlives_consent_to_a_missed_i
         .confirm_possibly_cancelled(&request, &consent, UserConfirmed::new())
         .await
         .unwrap();
-    let target = payer_target(&request);
+    missed(&w, &mut payer).await;
+    let current = shown(&payer, &request).await;
+    assert_ne!(consent, current);
+    let target = crate::outcome_record::payer_record(&request);
     let key = payer.app().record_key(&target).unwrap();
     let original = payer.app().shared_record(&key).await.unwrap().unwrap();
     let mut record = ActivityRecord::read(
@@ -539,6 +534,21 @@ async fn test_hold_confirmation_signed_payer_loss_outlives_consent_to_a_missed_i
     let view = payer.request(&request).await.unwrap();
     assert_eq!(view.status, RequestStatus::MayBePaid);
     assert!(view.held.is_none());
+    let prior_consent = payer.app().protocol_scan("paykit", b"hc/").await.unwrap();
+    for token in [&consent, &current] {
+        let refused = payer
+            .confirm_possibly_cancelled(&request, token, UserConfirmed::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::RecordHeld(_))
+        ));
+    }
+    assert_eq!(
+        payer.app().protocol_scan("paykit", b"hc/").await.unwrap(),
+        prior_consent
+    );
     w.rail.next(paykit_sdk::rail::Behaviour::Refuse);
     let error = payer
         .pay_request(

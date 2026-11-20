@@ -773,6 +773,9 @@ impl Paykit {
         let Some(record) = self.held_activity(&target).await? else {
             return Err(self.request_record_refusal(&target).await?);
         };
+        if record.lost_to_delete.is_some() {
+            return Err(crate::requests::payment_history_lost().into());
+        }
         if let Some(key) = self.pass_hold(&record_key, &record, Some(held)).await? {
             self.local_put(&key::hold_confirmed(&key), &true).await?;
         }

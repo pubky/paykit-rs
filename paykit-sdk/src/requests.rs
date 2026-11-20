@@ -411,7 +411,8 @@ pub enum RequestStatus {
     BeingPaidHere,
     /// "Being handled by your other wallet": another own app's attempt is open.
     BeingHandledByOtherWallet,
-    /// An `unknown` or orphaned attempt: "may be paid" (Paykit spec 7.1).
+    /// An `unknown` or orphaned attempt, or a one-time request whose payer record lost its
+    /// payment history to deletion (Paykit spec 6, 7.1).
     MayBePaid,
     /// SETTLED, or the record holds the proof of a payment: "Paid" only then.
     Paid,
@@ -471,8 +472,9 @@ pub struct RequestView {
     pub recurrence: Option<Recurrence>,
     /// What the user sees.
     pub status: RequestStatus,
-    /// The current hold to show before confirmation. None for an unheld or unrecorded
-    /// request; a later restore or missed item requires showing its new hold.
+    /// The current restore or missed-item hold to show before confirmation. A later restore
+    /// or missed item requires showing its new hold. A payer deletion marker makes payment
+    /// permanently unavailable and carries no confirmation.
     pub held: Option<crate::HeldRequest>,
     /// Its request record is paused after a view showed it divergent, or its latest view
     /// shows it divergent (Paykit spec 6): shown whatever the status
