@@ -25,6 +25,7 @@ name = "wallet-test-issuer"
 path = "tests/hosts/issuer.rs"
 
 [dependencies]
+async-trait = "0.1"
 paykit-sdk = { path = "../paykit-sdk" }
 paykit-lib.workspace = true
 pubky-switch-client = { workspace = true, features = ["tokio"] }

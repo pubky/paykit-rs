@@ -4,6 +4,7 @@ use pubky_switch_client::store::{
     StoreOwner, Write, WriteBatch,
 };
 use std::sync::{Arc, Mutex};
+use tokio::sync::watch;
 
 /// One key and value from an ordered protected-store scan.
 #[derive(uniffi::Record)]
@@ -223,11 +224,15 @@ pub(crate) struct LeaseOwner {
     host: HostStore,
     namespace: String,
     token: [u8; 32],
+    result: watch::Sender<Option<Result<(), StorageError>>>,
     releasing: Mutex<()>,
 }
 impl LeaseOwner {
     fn release(self: &Arc<Self>) -> Result<(), StorageError> {
         let _busy = self.releasing.lock().unwrap_or_else(|e| e.into_inner());
+        if self.result.borrow().as_ref().is_some_and(Result::is_ok) {
+            return Ok(());
+        }
         let result = self
             .host
             .0
@@ -239,6 +244,7 @@ impl LeaseOwner {
                 failed.push(self.clone());
             }
         }
+        self.result.send_replace(Some(result.clone()));
         result
     }
 
@@ -254,10 +260,44 @@ impl LeaseOwner {
             let _ = owner.release();
         }
     }
+
+    pub(crate) async fn finish(self: &Arc<Self>) -> Result<(), crate::WalletError> {
+        let mut released = self.result.subscribe();
+        let first = released
+            .wait_for(Option::is_some)
+            .await
+            .map_err(|_| StoreError::Unknown)?
+            .as_ref()
+            .cloned()
+            .ok_or(StoreError::Unknown)?;
+        if first.is_err() {
+            let owner = self.clone();
+            tokio::task::spawn_blocking(move || owner.release())
+                .await
+                .map_err(|_| StoreError::Unknown)?
+                .map_err(StoreError::from)?;
+        }
+        Ok(())
+    }
 }
 impl StoreLease for WalletStoreSession {}
 
 impl WalletStoreSession {
+    pub(crate) async fn open(
+        store: Arc<dyn WalletStore>,
+        id: [u8; 16],
+    ) -> Result<Arc<Self>, crate::WalletError> {
+        let namespace = pubky_switch_client::store::client_namespace(&id);
+        let owner = pubky_switch_core::enc::random_bytes()
+            .map_err(|_| crate::WalletError::RandomUnavailable)?;
+        // The blocking acquisition holds the lease even if the caller cancels.
+        tokio::task::spawn_blocking(move || {
+            Self::acquire_for(store, namespace, owner)?.ok_or(StoreError::InUse)
+        })
+        .await
+        .map_err(|_| StoreError::Unknown)?
+        .map_err(Into::into)
+    }
     fn acquire_for(
         store: Arc<dyn WalletStore>,
         namespace: String,
@@ -272,14 +312,59 @@ impl WalletStoreSession {
                 host: HostStore(store),
                 namespace,
                 token: owner,
+                result: watch::channel(None).0,
                 releasing: Mutex::new(()),
             }),
         })))
+    }
+    fn owns(&self, ns: &str) -> Result<(), StoreError> {
+        if ns == self.ownership.namespace {
+            Ok(())
+        } else {
+            Err(StoreError::NotOwner)
+        }
     }
 }
 impl Drop for WalletStoreSession {
     fn drop(&mut self) {
         let _ = self.ownership.release();
+    }
+}
+impl StateStore for WalletStoreSession {
+    fn get(&self, ns: &str, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
+        self.owns(ns)?;
+        self.ownership.host.get(ns, key)
+    }
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<KeyValue>, StoreError> {
+        self.owns(ns)?;
+        self.ownership.host.scan(ns, prefix, after, limit)
+    }
+    fn commit(&self, batch: WriteBatch) -> Result<(), StoreError> {
+        match self.ownership.host.commit_as(
+            &self.ownership.namespace,
+            &self.ownership.token,
+            batch,
+        )? {
+            CommitOutcome::Applied => Ok(()),
+            CommitOutcome::NotOwner => Err(StoreError::NotOwner),
+        }
+    }
+    fn acquire(&self, _ns: &str, _owner: StoreOwner) -> Result<AcquireOutcome, StoreError> {
+        Ok(AcquireOutcome::Busy)
+    }
+    fn commit_if(
+        &self,
+        _ns: &str,
+        _owner: StoreOwner,
+        _batch: WriteBatch,
+    ) -> Result<CommitOutcome, StoreError> {
+        Ok(CommitOutcome::NotOwner)
     }
 }
 impl From<uniffi::UnexpectedUniFFICallbackError> for StorageError {

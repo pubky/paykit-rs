@@ -3,9 +3,11 @@ use pubky_switch_core::{records::AuthRequest, sig::SignedDoc};
 use pubky_switch_harness::{Backend, World};
 use std::{error::Error, sync::Arc};
 
+mod method;
 #[path = "../../tests/hosts/signer.rs"]
 mod signer;
 mod storage;
+mod wallet;
 
 type TestResult = Result<(), Box<dyn Error>>;
 

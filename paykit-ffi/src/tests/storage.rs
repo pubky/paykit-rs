@@ -22,6 +22,38 @@ impl DeviceStore {
         store.db().execute_batch("PRAGMA secure_delete=ON; CREATE TABLE IF NOT EXISTS wallet(ns TEXT,k BLOB,v BLOB,PRIMARY KEY(ns,k));").unwrap();
         store
     }
+    pub(super) fn hold_enrollment_completion(root: &Path, hold: bool) {
+        let db = Connection::open(root.join("wallet.sqlite")).unwrap();
+        if hold {
+            db.execute_batch(
+                "CREATE TRIGGER hold_completion BEFORE INSERT ON wallet
+                WHEN new.ns LIKE 'paykit-enrollment/%'
+                AND json_type(CAST(new.v AS TEXT), '$.Joined') = 'object'
+                BEGIN SELECT RAISE(ABORT, 'enrollment completion held'); END;",
+            )
+            .unwrap();
+        } else {
+            db.execute_batch("DROP TRIGGER hold_completion").unwrap();
+        }
+    }
+    /// Interrupt the native app's write after the enrollment has pinned its approval.
+    pub(super) fn hold_installation(root: &Path, hold: bool) {
+        let db = Connection::open(root.join("wallet.sqlite")).unwrap();
+        let statement = if hold {
+            "CREATE TRIGGER hold_app BEFORE INSERT ON wallet
+             WHEN new.ns NOT LIKE 'paykit-enrollment/%'
+             BEGIN SELECT RAISE(ABORT, 'app installation held'); END;"
+        } else {
+            "DROP TRIGGER hold_app"
+        };
+        db.execute_batch(statement).unwrap();
+    }
+
+    pub(super) fn rows(&self) -> u64 {
+        self.db()
+            .query_row("SELECT count(*) FROM wallet", [], |r| r.get(0))
+            .unwrap()
+    }
     fn db(&self) -> Connection {
         Connection::open(self.root.join("wallet.sqlite")).unwrap()
     }

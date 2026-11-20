@@ -12,7 +12,7 @@ def redact(kotlin_path, swift_path):
     if kotlin.count(length) != 1:
         raise ValueError("expected one generated JNA buffer method")
     kotlin = kotlin.replace(length, "getByteBuffer(0, this.len)")
-    types = ("StoreEntry", "StoreWrite", "EnrollmentRequest")
+    types = ("StoreEntry", "StoreWrite", "EnrollmentRequest", "Receipt", "MethodProof", "MethodPayment", "MethodOutcome", "EndpointCandidate")
     swift = []
     for name in types:
         sealed = rf"^sealed class {name}\b[^{{\n]*\{{\n"
