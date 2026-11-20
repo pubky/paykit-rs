@@ -92,6 +92,7 @@ enum GrantFlow {
     FirstGrant,
     OlderBackup([&'static str; 3]),
     LatePeriodProof,
+    UnansweredReservation,
 }
 
 async fn grant(world: &World, proposer: AllowanceRole, flow: GrantFlow) -> TestResult {
@@ -255,7 +256,12 @@ async fn grant(world: &World, proposer: AllowanceRole, flow: GrantFlow) -> TestR
         granted.version
     );
     assert!(rail.all_executions().is_empty());
-    if let GrantFlow::OlderBackup(amounts) = flow {
+    if matches!(flow, GrantFlow::UnansweredReservation) {
+        Box::pin(payments::unanswered_reservation(
+            world, payer, seller, storage, rail, key,
+        ))
+        .await?;
+    } else if let GrantFlow::OlderBackup(amounts) = flow {
         Box::pin(payments::payment_after_restore(
             world,
             (payer, seller),
@@ -297,6 +303,16 @@ async fn test_enrolled_rounded_allowance_payments_after_an_older_grant_backup() 
         "29.9999999991",
     ]))
     .await
+}
+
+#[tokio::test]
+async fn test_enrolled_unanswered_reservation_on_scripted_switch() -> TestResult {
+    enrolled_on(Backend::Scripted, GrantFlow::UnansweredReservation).await
+}
+
+#[tokio::test]
+async fn test_enrolled_unanswered_reservation_on_switch_service() -> TestResult {
+    enrolled_on(Backend::Service, GrantFlow::UnansweredReservation).await
 }
 
 #[tokio::test]
