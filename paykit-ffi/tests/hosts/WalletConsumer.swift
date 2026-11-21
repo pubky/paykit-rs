@@ -85,6 +85,8 @@ final class EnrollmentStore: WalletStore, @unchecked Sendable {
         }
     }
 
+    private var acquisitions = 0
+    var untouched: Bool { lock.withLock { acquisitions == 0 && rows.isEmpty } }
     private var owners: [String: Data] = [:]
     private var rows: [String: [Data: Data]] = [:]
     private var failingRead: String?
@@ -123,6 +125,7 @@ final class EnrollmentStore: WalletStore, @unchecked Sendable {
     }
     func acquire(namespace: String, owner: Data) throws -> Bool {
         lock.withLock {
+            acquisitions += 1
             guard owners[namespace] == nil else { return false }
             owners[namespace] = owner
             return true

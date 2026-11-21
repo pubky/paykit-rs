@@ -437,6 +437,15 @@ async fn journey(world: &World) -> TestResult {
     let identity = payer.identity().await?;
     let blocked_release = root.path().join("hold-release");
     std::fs::write(&blocked_release, [])?;
+    // This backup belongs to a different app. The failed restore must report its
+    // unconfirmed release and retain the exact owner for the next open.
+    let other_id = vec![12; 16];
+    assert!(matches!(
+        Box::pin(env.restore(other_id.clone(), backup.clone(), BackupDevice::InPossession)).await,
+        Err(WalletError::Storage {
+            failure: StorageError::Unavailable
+        })
+    ));
     // The read failed with NotJoined, but its writer could not be released.
     // The host must receive the storage failure. A later open retries that token.
     assert!(matches!(
@@ -458,6 +467,10 @@ async fn journey(world: &World) -> TestResult {
         })
     ));
     std::fs::remove_file(blocked_release)?;
+    assert!(matches!(
+        other.load(other_id).await,
+        Err(WalletError::NotJoined)
+    ));
     assert!(matches!(
         other.load(vec![13; 16]).await,
         Err(WalletError::NotJoined)

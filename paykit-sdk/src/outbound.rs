@@ -53,6 +53,47 @@ impl Paykit {
         Ok(self.app.allow_connect(payee).await?)
     }
 
+    /// Confirm that the user recognizes these post-backup registrations as this device's
+    /// own (Switch spec 12.4). Pass the numbers from the current restore question.
+    ///
+    /// # Errors
+    ///
+    /// The first read's failure, a changed or empty question, or a store failure.
+    pub async fn confirm_restored_registrations(
+        &mut self,
+        registrations: &[u64],
+        confirmed: crate::UserConfirmed,
+    ) -> Result<()> {
+        self.check_restore_question(registrations).await?;
+        Ok(self.app.confirm_restored_registrations(confirmed).await?)
+    }
+
+    /// Report that the user cannot account for these post-backup registrations (Switch
+    /// spec 12.4). The client raises its compromise alarm and requests revocation.
+    ///
+    /// # Errors
+    ///
+    /// The first read's failure, a changed or empty question, or the client's alarm.
+    pub async fn refuse_restored_registrations(&mut self, registrations: &[u64]) -> Result<()> {
+        self.check_restore_question(registrations).await?;
+        Ok(self.app.refuse_restored_registrations().await?)
+    }
+
+    async fn check_restore_question(&mut self, registrations: &[u64]) -> Result<()> {
+        // Compare the answer with the durable registrations even after a lost commit reply.
+        self.app.pending_duty_events().await?;
+        if let Some(alarm) = self.app.alarm() {
+            return Err(AppError::Alarm(alarm.clone()).into());
+        }
+        self.refresh_own()?;
+        Box::pin(self.first_read_before_writing()).await?;
+        self.refresh_own()?;
+        if registrations.is_empty() || self.app.restore_question() != registrations {
+            return Err(crate::Refusal::NotNow("read the current restore question".into()).into());
+        }
+        Ok(())
+    }
+
     /// Read before preparing a public operation's effects. The host receives the summary
     /// with its next receive; durable duty events remain the client's (Switch spec 12.4).
     pub(crate) async fn first_read_before_writing(&mut self) -> Result<()> {

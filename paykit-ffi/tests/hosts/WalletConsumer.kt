@@ -12,6 +12,14 @@ import java.util.concurrent.TimeUnit
 
 /** Enrollment needs only the store. A Homeserver or payment call here fails the test. */
 internal class EnrollmentStore : WalletStore {
+    enum class AnswerFailure { UNAVAILABLE, UNKNOWN_BEFORE_COMMIT, UNKNOWN_AFTER_COMMIT }
+    private var answerFailure: AnswerFailure? = null
+
+    @Synchronized fun interruptAnswer(failure: AnswerFailure) {
+        check(answerFailure == null)
+        answerFailure = failure
+    }
+
     fun reopen(namespace: String, entries: List<String>) {
         for (line in entries) {
             val (key, value) = line.split(" ", limit = 2)
@@ -19,6 +27,8 @@ internal class EnrollmentStore : WalletStore {
         }
     }
 
+    @Synchronized fun untouched() = rows.isEmpty() && acquisitions == 0
+    private var acquisitions = 0
     private val owners = mutableMapOf<String, ByteArray>()
     private val rows = mutableMapOf<Pair<String, String>, ByteArray>()
     private var failingRead: String? = null
@@ -52,8 +62,10 @@ internal class EnrollmentStore : WalletStore {
             .sortedWith { a, b -> java.util.Arrays.compareUnsigned(a.key, b.key) }
             .take(limit.toLong().coerceAtMost(Int.MAX_VALUE.toLong()).toInt()).toList()
 
-    @Synchronized override fun acquire(namespace: String, owner: ByteArray): Boolean =
-        owners.putIfAbsent(namespace, owner.copyOf()) == null
+    @Synchronized override fun acquire(namespace: String, owner: ByteArray): Boolean {
+        acquisitions++
+        return owners.putIfAbsent(namespace, owner.copyOf()) == null
+    }
 
     override fun release(namespace: String, owner: ByteArray) {
         if (slowRelease == namespace) {
@@ -68,6 +80,13 @@ internal class EnrollmentStore : WalletStore {
 
     @Synchronized override fun commitIf(namespace: String, owner: ByteArray, writes: List<StoreWrite>): Boolean {
         if (owners[namespace]?.contentEquals(owner) != true) return false
+        val failure = answerFailure?.takeIf {
+            val keys = writes.filterIsInstance<StoreWrite.Put>().map { it.key.decodeToString() }
+            keys.any { it.startsWith("reg/") } && keys.any { it.startsWith("kid/") }
+        }
+        if (failure != null) answerFailure = null
+        if (failure == AnswerFailure.UNAVAILABLE) throw StorageException.Unavailable()
+        if (failure == AnswerFailure.UNKNOWN_BEFORE_COMMIT) throw StorageException.Unknown()
         for (write in writes) {
             when (write) {
                 is StoreWrite.Put -> rows[key(namespace, write.key)] = write.value.copyOf()
@@ -78,6 +97,7 @@ internal class EnrollmentStore : WalletStore {
                 }
             }
         }
+        if (failure == AnswerFailure.UNKNOWN_AFTER_COMMIT) throw StorageException.Unknown()
         return true
     }
 }

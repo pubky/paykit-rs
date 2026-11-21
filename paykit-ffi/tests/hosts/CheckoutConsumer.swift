@@ -27,6 +27,9 @@ private final class CheckoutMethod: ReceiptReader, @unchecked Sendable {
     private let ledger: URL
     private let guardLock = NSLock()
     private var dispatches = 0
+    private var pendingLookup = false
+    func holdLookup() { guardLock.withLock { pendingLookup = true } }
+    func chargedAttempt() throws -> String { try guardLock.withLock { try stored()! } }
     let progress = AsyncThrowingStream<CheckoutStep, Error>.makeStream()
     let release = PaymentGate()
     var calls: Int { guardLock.withLock { dispatches } }
@@ -65,7 +68,10 @@ private final class CheckoutMethod: ReceiptReader, @unchecked Sendable {
     }
 
     override func payment(attemptId: String) async throws -> MethodOutcome? {
-        try guardLock.withLock { try stored() == attemptId ? paid(attemptId) : nil }
+        try guardLock.withLock {
+            guard try stored() == attemptId else { return nil }
+            return pendingLookup ? .pending : paid(attemptId)
+        }
     }
     override func verify(proof: MethodProof) async throws -> UInt64? {
         try guardLock.withLock {
@@ -90,9 +96,120 @@ private extension NativeWallet {
     }
 }
 
-private func payWhileWaiting(
-    payer: NativeWallet, fixture: CheckoutFixture, method: CheckoutMethod,
-    request: RequestId, options: PaymentOptions
+private func restoreCheckout(
+    fixture: CheckoutFixture, source: WalletHost, app: Data, reference: Data,
+    method: CheckoutMethod, action: String
+) async throws {
+    precondition(["confirm", "refuse", "doubt"].contains(action))
+    let options = PaymentOptions(endpoint: nil, listApp: nil, publicEndpointsConfirmed: false, unconfirmedIdentityConfirmed: false, confirmedRefusals: [])
+    let wallet = try await source.completeEnrollment(reference: reference)
+    try await wallet.finishReceive()
+    try await wallet.allowConnect(payee: fixture.payee())
+    let original = try await fixture.sendCheckout()
+    try await wallet.finishReceive()
+    let backup = try await wallet.backup()
+    try await fixture.passRotationInterval()
+    try await wallet.finishReceive()
+    if action == "doubt" {
+        try await interruptPayment(payer: wallet, method: method, request: original, options: options)
+        method.holdLookup()
+    }
+    try await wallet.shutdown()
+
+    let store = EnrollmentStore()
+    let host = fixture.hostForStore(store: store)
+    do {
+        _ = try await host.restore(appId: app, bytes: backup, sourceDevice: .unaccountedFor)
+        preconditionFailure("an unaccounted source device was restored")
+    } catch WalletError.SourceDeviceUnaccountedFor {}
+    precondition(store.untouched)
+    let restored = try await host.restore(appId: app, bytes: backup, sourceDevice: .inPossession)
+    let restoredId = try await restored.appId()
+    let initial = try await restored.restoreState()
+    precondition(restoredId == app && initial.reconciling)
+    var asked = false
+    for _ in 0..<8 where !asked {
+        let report = try await restored.receive()
+        asked = report.events.contains {
+            if case let .restoreQuestion(numbers) = $0.data { return numbers == [1] }
+            return false
+        }
+    }
+    let shown = try await restored.restoreState()
+    precondition(asked && shown.registrations == [1])
+    try await restored.shutdown()
+
+    let reopen = try await host.load(appId: app)
+    let state = try await reopen.restoreState()
+    precondition(state.reconciling && state.cursor != nil && state.registrations == [1])
+    precondition(String(describing: state) == "WalletRestoreState(<redacted>)")
+    precondition(String(reflecting: state) == "WalletRestoreState(<redacted>)" && Mirror(reflecting: state).children.isEmpty)
+    do {
+        try await reopen.confirmRestoredRegistrations(registrations: [])
+        preconditionFailure("the stale restore question was accepted")
+    } catch let WalletError.Refused(refusal) {
+        guard case .notNow = refusal.kind() else { preconditionFailure("unexpected restore refusal") }
+    }
+    let stillPending = try await reopen.restoreState()
+    precondition(stillPending.registrations == state.registrations)
+    if action == "refuse" {
+        do {
+            try await reopen.refuseRestoredRegistrations(registrations: state.registrations)
+            preconditionFailure("the unrecognized registration did not stop the wallet")
+        } catch WalletError.Operation {}
+        let stopped = try await reopen.restoreState()
+        guard case let .compromise(n, _)? = stopped.alarm else { preconditionFailure("missing compromise alarm") }
+        precondition(n == 1 && method.calls == 0)
+    } else {
+        try await reopen.confirmRestoredRegistrations(registrations: state.registrations)
+        try await reopen.finishReceive()
+        let report = try await reopen.reconcile()
+        let answered = try await reopen.restoreState()
+        precondition(!report.payerSkipped && answered.registrations.isEmpty)
+        if action == "doubt" {
+            let charged = try method.chargedAttempt()
+            let doubtful = report.doubtful.filter { $0.attempts.contains(charged) }
+            precondition(doubtful.count == 1)
+            try await reopen.resolveConfirmedAttempt(obligation: doubtful[0].obligation, attemptId: charged, resolution: .paid)
+            let reviewed = try await reopen.reconcile()
+            precondition(reviewed.doubtful.isEmpty && method.calls == 1)
+        } else {
+            precondition(report.doubtful.isEmpty && method.calls == 0)
+        }
+        try await reopen.endConfirmedReconciliation()
+        let finished = try await reopen.restoreState()
+        precondition(!finished.reconciling)
+    }
+    try await reopen.shutdown()
+    if action == "confirm" {
+        let payer = try await host.load(appId: app)
+        let finished = try await payer.restoreState()
+        precondition(!finished.reconciling)
+        try await payer.finishReceive()
+        let requests = try await payer.requests().filter { $0.id.requestHash == original.requestHash }
+        precondition(requests.count == 1)
+        let refused = try await payer.payRequest(id: original, options: options)
+        guard case let .error(.Refused(confirmation)) = refused.decision,
+              case let .heldAfterRestore(record) = confirmation.kind() else {
+            preconditionFailure("missing original request hold")
+        }
+        precondition(record == requests[0].record && method.calls == 0)
+        await method.release.signal()
+        var confirmed = options
+        confirmed.confirmedRefusals = [confirmation]
+        let decision = try await payer.payRequest(id: original, options: confirmed)
+        guard case let .outcome(.paid(attempt, _)) = decision.decision else { preconditionFailure("restored wallet did not pay the confirmed request") }
+        let signed = try await fixture.confirmPayment(request: original)
+        try await payer.finishReceive()
+        let receipts = try await payer.requestReceipts(id: original)
+        precondition(receipts.count == 1 && receipts[0].messageId == signed && receipts[0].attemptId == attempt && method.calls == 1)
+        try await payer.shutdown()
+    }
+}
+
+private func interruptPayment(
+    payer: NativeWallet, method: CheckoutMethod, request: RequestId, options: PaymentOptions,
+    waitingAt fixture: CheckoutFixture? = nil
 ) async throws {
     let report = method.progress.continuation
     let timer = DispatchSource.makeTimerSource(queue: .global())
@@ -104,16 +221,18 @@ private func payWhileWaiting(
         report.finish()
     }
 
-    let watch = Task {
-        do {
-            let wake = try await payer.feedWait(seconds: 25)
-            guard wake == .ready else { throw CheckoutFailure.unexpectedWake(wake) }
-            report.yield(.feedReady)
-        } catch { report.finish(throwing: error) }
+    let watch = fixture.map { _ in
+        Task {
+            do {
+                let wake = try await payer.feedWait(seconds: 25)
+                guard wake == .ready else { throw CheckoutFailure.unexpectedWake(wake) }
+                report.yield(.feedReady)
+            } catch { report.finish(throwing: error) }
+        }
     }
     let paying = Task {
         do {
-            try await fixture.waitForHeldFeed()
+            try await fixture?.waitForHeldFeed()
             try Task.checkCancellation()
             _ = try await payer.payRequest(id: request, options: options)
             report.finish(throwing: CheckoutFailure.paymentReturned)
@@ -125,15 +244,19 @@ private func payWhileWaiting(
     do {
         var steps = method.progress.stream.makeAsyncIterator()
         let first = try await steps.next()
-        let second = try await steps.next()
-        switch (first, second) {
-        case (.feedReady?, .methodEntered?), (.methodEntered?, .feedReady?): break
-        default: throw CheckoutFailure.missingStep
+        if fixture != nil {
+            let second = try await steps.next()
+            switch (first, second) {
+            case (.feedReady?, .methodEntered?), (.methodEntered?, .feedReady?): break
+            default: throw CheckoutFailure.missingStep
+            }
+        } else if first != .methodEntered {
+            throw CheckoutFailure.missingStep
         }
         paying.cancel()
         guard try await steps.next() == .paymentCancelled else { throw CheckoutFailure.missingStep }
     } catch {
-        watch.cancel()
+        watch?.cancel()
         paying.cancel()
         await method.release.signal()
         throw error
@@ -204,10 +327,14 @@ private func reviewLoss(_ wallet: NativeWallet, _ fixture: CheckoutFixture, _ re
 private enum CheckoutReview: CaseIterable { case ordinary, divergence, providerLoss }
 
 func driveCheckout() async throws {
-    for review in CheckoutReview.allCases { try await driveCheckout(review) }
+    if let action = ProcessInfo.processInfo.environment["PAYKIT_TEST_RESTORE"] {
+        try await driveCheckout(.ordinary, restore: action)
+    } else {
+        for review in CheckoutReview.allCases { try await driveCheckout(review) }
+    }
 }
 
-private func driveCheckout(_ recovery: CheckoutReview) async throws {
+private func driveCheckout(_ recovery: CheckoutReview, restore: String? = nil) async throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -223,6 +350,11 @@ private func driveCheckout(_ recovery: CheckoutReview) async throws {
     let approval = try await fixture.approve(request: original.signedRequest, secret: secret)
     try await owner.acceptApproval(reference: reference, identity: fixture.identity(), claim: approval)
     let host = fixture.host()
+    if let action = restore {
+        try await restoreCheckout(fixture: fixture, source: host, app: enrolled.appId, reference: reference, method: method, action: action)
+        try await fixture.finish()
+        return
+    }
     let first = try await host.completeEnrollment(reference: reference)
     try await first.finishReceive()
     try await fixture.setAccountMissing(missing: true)
@@ -288,7 +420,7 @@ private func driveCheckout(_ recovery: CheckoutReview) async throws {
     case .ordinary: break
     }
     try await payer.finishReceive()
-    try await payWhileWaiting(payer: payer, fixture: fixture, method: method, request: request, options: options)
+    try await interruptPayment(payer: payer, method: method, request: request, options: options, waitingAt: fixture)
     try await payer.shutdown()
 
     var reopened = try await host.load(appId: enrolled.appId)
