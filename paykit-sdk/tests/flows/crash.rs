@@ -12,7 +12,6 @@
 
 use std::sync::Arc;
 
-use paykit_lib::bodies::PaymentReceipt;
 use paykit_sdk::rail::Behaviour;
 use paykit_sdk::{
     AppScopes, PayOptions, PayOutcome, PayeeStatus, Paykit, PaykitConfig, Rail, RequestStatus,
@@ -237,25 +236,8 @@ async fn crash_receiving_a_receipt(fault: Fault) -> bool {
         panic!("pending");
     };
     let obligation = wallet.payments().await.unwrap()[0].obligation;
+    crate::receipts::deliver_proved_receipt(&w, &mut wallet, &shop, &request, attempt_id).await;
     drop(wallet);
-    // Only the payee's yes counts (Paykit spec 7.3): its receipt names the attempt.
-    let body = PaymentReceipt {
-        attempt_id,
-        billing_period: None,
-        metadata: None,
-        payment_reference: None,
-    }
-    .to_body(2)
-    .unwrap();
-    w.inject(
-        &w.bob,
-        "shop",
-        &w.alice,
-        &[wallet_id],
-        "paykit.payment_receipt",
-        vec![[7; 32], request.request_hash],
-        body,
-    );
 
     let faulty = Arc::new(FaultStore::new(Arc::clone(&base), fault));
     let mut crashing = load(

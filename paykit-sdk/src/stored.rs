@@ -1196,6 +1196,20 @@ impl Paykit {
             }
             terms = Some(parent);
             record
+        } else if stored.message().refs.get(1).is_some() {
+            let key = self.activity_key(target)?;
+            conditions.push(self.app.record_condition(&key).await?);
+            let held = self.app.shared_record(&key).await?;
+            if crate::records::activity_base_changed(held.as_ref())
+                || crate::receive::waits_for_requested_record(&stored, held.as_ref())
+            {
+                return Ok(Placed::Not);
+            }
+            current = self.read_activity(target, held.as_ref());
+            let Some(record) = current.as_ref() else {
+                return Ok(Placed::Not);
+            };
+            record
         } else {
             record
         };
@@ -1204,6 +1218,9 @@ impl Paykit {
             self.local_commit(tx).await?;
             return Ok(Placed::Done);
         };
+        if found.waits_for_proof {
+            return Ok(Placed::Not);
+        }
         let sender = stored.sender();
         let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME);
         let mut writes = false;

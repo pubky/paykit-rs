@@ -52,11 +52,59 @@ impl NativeWallet {
                         attempts: d.attempts.iter().map(|i| i.to_text()).collect(),
                         payee: d.payee.map(Vec::from),
                         request_hash: d.request_hash.map(Vec::from),
-                        before_loss: d.before_loss.map(Into::into),
+                        before_loss: d
+                            .before_loss
+                            .map(|loss| ProviderLossBoundary::for_payment(d.obligation, loss)),
                     })
                     .collect(),
                 payer_skipped: r.payer_skipped,
             })
+        })
+        .await
+    }
+
+    /// The user states that this one-time obligation was not paid before the loss they saw.
+    /// Show that another wallet may already have paid it. A loss alone can leave zero attempts
+    /// in the reconciliation report. If the loss changed, show the new report before asking again.
+    pub async fn confirm_not_paid_before_loss(
+        &self,
+        payment: std::sync::Arc<crate::PaymentBeforeLoss>,
+    ) -> Result<(), WalletError> {
+        self.with_wallet(async |app| {
+            Ok(app
+                .confirm_not_paid_before_loss(
+                    &payment.obligation,
+                    &payment.loss,
+                    paykit_sdk::UserConfirmed::new(),
+                )
+                .await?)
+        })
+        .await
+    }
+
+    /// List the observed divergent records, including those whose held messages still await receive.
+    pub async fn divergent_records(&self) -> Result<Vec<crate::Divergence>, WalletError> {
+        Ok(self
+            .lock()
+            .await?
+            .divergent_records()
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    /// The user permits this wallet to proceed over the exact record version and warning shown.
+    /// Run receive until its held writes are drained, then retry the original action. If the
+    /// record changed, show the new observation and ask again.
+    pub async fn confirm_divergent(
+        &self,
+        observation: std::sync::Arc<crate::DivergentObservation>,
+    ) -> Result<(), WalletError> {
+        self.with_wallet(async |app| {
+            Ok(app
+                .confirm_divergent(&observation.0, paykit_sdk::UserConfirmed::new())
+                .await?)
         })
         .await
     }
