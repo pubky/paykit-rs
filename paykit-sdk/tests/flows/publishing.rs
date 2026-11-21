@@ -2487,6 +2487,7 @@ async fn give_up_withdrawal(shop: &mut Paykit, payer: [u8; 32]) -> ListPublicati
 #[tokio::test]
 async fn test_publication_reselecting_one_contact_retires_only_its_withdrawal_retry() {
     use crate::common::HOUR_MS;
+    use paykit_lib::ListVersion;
     use paykit_sdk::AppScopes;
 
     let w = World::new();
@@ -2532,12 +2533,18 @@ async fn test_publication_reselecting_one_contact_retires_only_its_withdrawal_re
         .conversations
         .iter()
         .any(|c| c.pubky == carol.identity()));
+    let before_retry = published(&shop, &carol).await;
+    assert_eq!(before_retry.len(), 1);
+    assert_eq!(before_retry[0].version, ListVersion::new(1, 1).unwrap());
+    assert!(!before_retry[0].withdrawn);
     w.clock.advance_ms(HOUR_MS / 2);
     shop.receive(None).await.unwrap();
     assert_eq!(published(&shop, &alice).await, reselected);
     let left = published(&shop, &carol).await;
-    assert_eq!(left.last().unwrap().version.counter(), 3);
-    let withdrawal = left.last().unwrap();
+    assert_eq!(left.len(), 2);
+    assert_eq!(left[0], before_retry[0]);
+    let withdrawal = &left[1];
+    assert_eq!(withdrawal.version, ListVersion::new(1, 3).unwrap());
     assert!(withdrawal.withdrawn);
     assert_eq!(withdrawal.repeats, 0);
     assert!(matches!(
