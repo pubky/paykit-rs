@@ -3,6 +3,8 @@
 
 #[path = "settlement_credit/first_dispatch.rs"]
 mod first_dispatch;
+#[path = "settlement_credit/quota.rs"]
+mod quota;
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -23,6 +25,7 @@ use paykit_sdk::{
     RequestDraft, RequestRef, RequestedScopes, Timer,
 };
 use pubky_switch_client::store::MemoryStore;
+use pubky_switch_client::testing::TestIdentity;
 use pubky_switch_client::transport::BoxFuture;
 use pubky_switch_harness::{parties::Asking, Backend, World};
 use pubky_switch_signer::{Protocols, Signer};
@@ -39,9 +42,13 @@ impl Timer for TestTimer {
 async fn setup_identity(world: &World, name: &str, origin: &str) -> TestResult<Signer> {
     let identity = world.identity(name)?;
     world.add_switch(origin, &[&identity]).await?;
-    let mut env = world.signer_env(&identity, Arc::new(MemoryStore::new()))?;
+    signer_on(world, &identity, origin).await
+}
+
+async fn signer_on(world: &World, identity: &TestIdentity, origin: &str) -> TestResult<Signer> {
+    let mut env = world.signer_env(identity, Arc::new(MemoryStore::new()))?;
     env.protocols = Protocols::new(vec![Arc::new(paykit_lib::signer::PaykitProtocol)])?;
-    let keyring = world.keyring(&identity)?;
+    let keyring = world.keyring(identity)?;
     let origin = origin.to_owned();
     Ok(tokio::spawn(Box::pin(async move {
         let mut signer = Signer::create(env, keyring, &origin).await?;
@@ -74,15 +81,11 @@ async fn join(
     .await??;
     let join = request.join_request(owner.public(), &approved)?;
     world.advance_ms(1000);
-    let mut wallet = Paykit::join(
-        world.app_env(store),
-        Default::default(),
-        join,
-        rail.clone(),
-        Arc::new(TestTimer),
-    )
-    .await?;
+    let env = world.app_env(store);
+    let rail = Arc::clone(rail);
     let wallet = tokio::spawn(Box::pin(async move {
+        let mut wallet =
+            Paykit::join(env, Default::default(), join, rail, Arc::new(TestTimer)).await?;
         wallet.receive(None).await?;
         Ok::<_, paykit_sdk::PaykitError>(wallet)
     }))
@@ -177,9 +180,19 @@ struct SellerWallets {
 }
 
 async fn enrolled_seller_wallets(world: &World) -> TestResult<SellerWallets> {
+    Box::pin(enrolled_merchant_wallets(world, None)).await
+}
+
+async fn enrolled_merchant_wallets(
+    world: &World,
+    shop: Option<Signer>,
+) -> TestResult<SellerWallets> {
     let first = setup_identity(world, "buyer", "https://buyer.payment.test").await?;
     let second = setup_identity(world, "other-buyer", "https://other-buyer.payment.test").await?;
-    let shop = setup_identity(world, "shop", "https://shop.payment.test").await?;
+    let shop = match shop {
+        Some(signer) => signer,
+        None => setup_identity(world, "shop", "https://shop.payment.test").await?,
+    };
     let rail = Arc::new(FakeRail::with_clock(world.clock().clone()));
     let (mut buyer, _) = join(
         world,
@@ -458,6 +471,50 @@ async fn test_different_requests_compete_for_one_transaction_in_a_new_and_curren
     Ok(())
 }
 
+async fn confirm_after_other_credit(
+    loser: &mut Paykit,
+    losing_key: &[u8; 32],
+    rail: &FakeRail,
+) -> TestResult {
+    let original = loser
+        .app()
+        .shared_record(losing_key)
+        .await?
+        .ok_or("missing losing occurrence")?;
+    let activity = paykit_lib::records::ActivityRecord::read(
+        original
+            .content
+            .value()
+            .ok_or("unreadable losing occurrence")?,
+        &loser.identity(),
+        paykit_lib::records::ActivitySide::Payee,
+    )?;
+    assert!(activity.receipt.is_none());
+    let Some(paykit_lib::Body::PaymentProof(proof)) =
+        activity.proof.as_ref().map(|signed| signed.body())
+    else {
+        return Err("missing losing occurrence's proof".into());
+    };
+    let checked = rail.proof_checks().len();
+    let consent = ReceiptDetails::new()
+        .with_unmarked_credit_confirmed(pubky_switch_client::app::UserConfirmed::new());
+    assert!(Box::pin(loser.confirm_payment_with(losing_key, consent))
+        .await?
+        .is_none());
+    let checks = rail.proof_checks();
+    assert_eq!(checks.len(), checked + 1);
+    assert_eq!(checks[checked].attempt_id, proof.attempt_id);
+    assert_eq!(checks[checked].proof, proof.proof);
+    let current = loser
+        .app()
+        .shared_record(losing_key)
+        .await?
+        .ok_or("missing checked occurrence")?;
+    assert_eq!(original.version, current.version);
+    assert_eq!(original.content, current.content);
+    Ok(())
+}
+
 /// Distinct method transactions whose marks share a physical bucket.
 fn transactions_in_one_bucket<const N: usize>(
     naming: &pubky_switch_core::ident::NamingKey,
@@ -479,11 +536,7 @@ fn transactions_in_one_bucket<const N: usize>(
         .map_err(|_| "too few test transactions in the bucket".into())
 }
 
-/// Two independent transactions in the same bucket. Each has two payments and one
-/// method settlement ID under Paykit wire 1.5.
-async fn two_transactions(world: &World) -> TestResult {
-    let mut wallets = Box::pin(enrolled_seller_wallets(world)).await?;
-    // Finish each buyer's authenticated seller lookup before the two seller wallets compete.
+async fn finish_seller_lookups(wallets: &mut SellerWallets) -> TestResult {
     let seller = wallets.seller_wallet.identity();
     for buyer in [&mut wallets.buyer, &mut wallets.other] {
         let identity = buyer.app_mut().identity_of(&seller, true).await?;
@@ -492,6 +545,15 @@ async fn two_transactions(world: &World) -> TestResult {
             pubky_switch_client::app::SwitchCopy::Read
         );
     }
+    Ok(())
+}
+
+/// Two independent transactions in the same bucket. Each has two payments and one
+/// method settlement ID under Paykit wire 1.5.
+async fn two_transactions(world: &World) -> TestResult {
+    let mut wallets = Box::pin(enrolled_seller_wallets(world)).await?;
+    // Finish each buyer's authenticated seller lookup before the two seller wallets compete.
+    Box::pin(finish_seller_lookups(&mut wallets)).await?;
     let naming = wallets.seller_wallet.app().naming_key();
     let [first, second] = transactions_in_one_bucket(naming)?;
     let number = settlement_bucket(&first.1);
@@ -534,42 +596,7 @@ async fn two_transactions(world: &World) -> TestResult {
         } else {
             (&mut wallets.seller_wallet, &plain_key)
         };
-        let original = loser
-            .app()
-            .shared_record(losing_key)
-            .await?
-            .ok_or("missing losing occurrence")?;
-        let activity = paykit_lib::records::ActivityRecord::read(
-            original
-                .content
-                .value()
-                .ok_or("unreadable losing occurrence")?,
-            &loser.identity(),
-            paykit_lib::records::ActivitySide::Payee,
-        )?;
-        assert!(activity.receipt.is_none());
-        let Some(paykit_lib::Body::PaymentProof(proof)) =
-            activity.proof.as_ref().map(|signed| signed.body())
-        else {
-            return Err("missing losing occurrence's proof".into());
-        };
-        let checked = wallets.rail.proof_checks().len();
-        let consent = ReceiptDetails::new()
-            .with_unmarked_credit_confirmed(pubky_switch_client::app::UserConfirmed::new());
-        assert!(Box::pin(loser.confirm_payment_with(losing_key, consent))
-            .await?
-            .is_none());
-        let checks = wallets.rail.proof_checks();
-        assert_eq!(checks.len(), checked + 1);
-        assert_eq!(checks[checked].attempt_id, proof.attempt_id);
-        assert_eq!(checks[checked].proof, proof.proof);
-        let current = loser
-            .app()
-            .shared_record(losing_key)
-            .await?
-            .ok_or("missing checked occurrence")?;
-        assert_eq!(original.version, current.version);
-        assert_eq!(original.content, current.content);
+        Box::pin(confirm_after_other_credit(loser, losing_key, &wallets.rail)).await?;
         wallets.buyer.receive(None).await?;
         wallets.other.receive(None).await?;
         let receipt_ids = |receipts: Vec<paykit_sdk::ReceivedReceipt>| {

@@ -295,6 +295,19 @@ pub enum PaykitError {
     /// own refusals.
     #[error(transparent)]
     Client(AppError),
+    /// The original marked receipt is still pending and the store could not save its
+    /// bucket warning. Show the warning once for this bucket and follow the original
+    /// batch ID. The warning grants no consent to issue another receipt (Paykit wire 5.7).
+    #[error("settlement bucket {bucket} cannot store the mark and unmarked credit may credit this payment twice. Saving the warning failed ({storage}). {submission}")]
+    SettlementNoticeUnavailable {
+        /// The settlement bucket to which the verified record-slot refusal applies.
+        bucket: u16,
+        /// The original Switch error, including the ID of the kept merchant submission.
+        #[source]
+        submission: Box<AppError>,
+        /// Why the warning could not be saved or its existing status checked.
+        storage: Box<PaykitError>,
+    },
     /// The requested public endpoint edit is durable but has no signed record yet.
     /// The reported signing refusal must be resolved before the client can publish it.
     #[error("public endpoint change pending: {0}")]
@@ -325,6 +338,7 @@ impl PaykitError {
     pub fn code(&self) -> Option<ErrorCode> {
         match self {
             Self::Client(error) => error.code(),
+            Self::SettlementNoticeUnavailable { submission, .. } => submission.code(),
             _ => None,
         }
     }
@@ -342,6 +356,7 @@ impl PaykitError {
     pub fn kept_batch(&self) -> Option<[u8; 16]> {
         match self {
             Self::Client(error) => error.kept_batch(),
+            Self::SettlementNoticeUnavailable { submission, .. } => submission.kept_batch(),
             _ => None,
         }
     }

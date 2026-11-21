@@ -400,6 +400,7 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `PaykitError::Lib` | Use the rule error to distinguish invalid input from invalid network or shared data. |
 | `PaykitError::Rail` | Preserve any unresolved attempt unless the method established definitive refusal. |
 | `PaykitError::PublicEndpointChangePending` | Keep the previously signed offer visible with a pending change. Resolve the reported signing refusal and check the resulting publication. |
+| `PaykitError::SettlementNoticeUnavailable` | Show the bucket warning from this error if the host has yet to show it. The store could not save or check the notice. Track the original marked receipt through `kept_batch()`. The service code is available through `code()`. The existing batch may still apply and queue its original receipt. |
 | `PaykitError::Homeserver` | Retry discovery when the Homeserver is available. If the user is waiting, explain that discovery could not finish. |
 | `PaykitError::Refused` | Follow the specific refusal below. |
 | `PaykitError::Conflict` | Read the current state and decide again. |
