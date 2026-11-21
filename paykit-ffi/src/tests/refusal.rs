@@ -93,3 +93,26 @@ fn test_kept_switch_refusals_retain_the_original_batch_and_recovery_generation()
         } if matches!(refusal.kind(), SwitchRefusalKind::Gone)
     ));
 }
+
+#[test]
+fn test_unsaved_settlement_warning_preserves_the_service_error_and_kept_id() {
+    let answer = pubky_switch_client::ClientError::Switch {
+        status: 429,
+        code: pubky_switch_core::http::ErrorCode::QuotaExceeded,
+        current: serde_json::json!({ "limit": "record_keys" }),
+        message: "record slot limit".into(),
+        known_version: None,
+        retry_after: None,
+    };
+    let error = PaykitError::SettlementNoticeUnavailable {
+        bucket: 176,
+        submission: Box::new(AppError::Kept {
+            batch_id: [4; 16],
+            error: Box::new(AppError::Switch(answer)),
+        }),
+        storage: Box::new(pubky_switch_client::StoreError::Unavailable.into()),
+    };
+    assert!(matches!(WalletError::from(error), WalletError::Operation {
+        kind: WalletFailureKind::Client, service_code: Some(code), kept_batch: Some(id), detail, ..
+    } if code == "quota_exceeded" && id == [4; 16] && detail.contains("bucket 176")));
+}

@@ -6,8 +6,11 @@ use paykit_lib::derive::{occurrence_tag, settlement_bucket, settlement_tag};
 use paykit_lib::records::{
     CreditDecision, CurrentBucket, OccurrenceKind, RecordBinding, SettlementBucket,
 };
-use pubky_switch_client::app::{KeptReason, OpBatch, RecordRead, RecordTarget, SharedRecord};
+use pubky_switch_client::app::{
+    AppError, KeptReason, OpBatch, RecordRead, RecordTarget, SharedRecord,
+};
 use pubky_switch_client::client::Submitted;
+use pubky_switch_client::ClientError;
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::ops::{Condition, RecordVersion};
 
@@ -202,11 +205,14 @@ impl Paykit {
                 write.conditions.clone(),
             )
             .await?;
-        if let [Condition::RecordVersion {
-            version: RecordVersion::NONE,
-            ..
-        }] = write.conditions.as_slice()
-        {
+        let creates_bucket = matches!(
+            write.conditions.as_slice(),
+            [Condition::RecordVersion {
+                version: RecordVersion::NONE,
+                ..
+            }]
+        );
+        if creates_bucket {
             if let pubky_switch_core::ops::OpKind::RecordPut(put) = &mut operation {
                 // A covering hosted absence can coexist with a retained pre-loss
                 // value. Create at strict zero with its actual blinded name inputs.
@@ -218,16 +224,31 @@ impl Paykit {
                 conditions.clone_from(&write.conditions);
             }
         }
-        let submitted = self
+        let error = match self
             .submit(batch.clone().entry((conditions, operation)))
-            .await;
-        if submitted.as_ref().err().is_some_and(|err| {
-            err.kept_batch().is_none()
-                && matches!(
-                    err.code(),
-                    Some(ErrorCode::QuotaExceeded | ErrorCode::TooLarge)
-                )
-        }) {
+            .await
+        {
+            Ok(submitted) => return Ok(submitted),
+            Err(error) => error,
+        };
+        if let AppError::Kept { error: cause, .. } = &error {
+            // The receipt updates its checked live occurrence. Only the new bucket
+            // needs another record slot (Paykit wire 5.7, Switch wire 6.4 and 9.3).
+            if creates_bucket && refused_record_key(cause) {
+                if let Err(storage) = self
+                    .raise_settlement_notice(SettlementSubject::Bucket(write.number), write.payer)
+                    .await
+                {
+                    return Err(crate::PaykitError::SettlementNoticeUnavailable {
+                        bucket: write.number,
+                        submission: Box::new(error),
+                        storage: Box::new(storage),
+                    });
+                }
+            }
+        } else if matches!(&error, AppError::Switch(answer)
+            if matches!(answer.code(), Some(ErrorCode::QuotaExceeded | ErrorCode::TooLarge)))
+        {
             self.raise_settlement_notice(SettlementSubject::Bucket(write.number), write.payer)
                 .await?;
             if unmarked_confirmed {
@@ -239,7 +260,7 @@ impl Paykit {
             }
             .into());
         }
-        Ok(submitted?)
+        Err(error.into())
     }
 
     /// A definite refusal releases the original batch's marker before a fresh decision.
@@ -269,6 +290,13 @@ impl Paykit {
     }
 }
 
+/// The verified service answer for this submission (Switch wire 7.6 and 9.3).
+fn refused_record_key(cause: &AppError) -> bool {
+    matches!(cause, AppError::Switch(ClientError::Switch {
+        status: 429, code: ErrorCode::QuotaExceeded, current, ..
+    }) if current.get("limit").and_then(serde_json::Value::as_str) == Some("record_keys"))
+}
+
 /// The put and a receipt-only write both compare the version that supplied the
 /// decision. A recovered write also compares its physical application.
 pub(crate) fn bucket_conditions(
@@ -293,6 +321,36 @@ mod tests {
     use paykit_lib::records::{SeenMarks, SettlementMark};
     use pubky_switch_core::ident::NamingKey;
     use pubky_switch_core::shared::ApplicationRef;
+
+    #[test]
+    fn test_only_the_signed_record_key_limit_identifies_a_new_bucket_refusal() {
+        let answer = |code, limit| {
+            AppError::Switch(ClientError::Switch {
+                status: 429,
+                code,
+                current: serde_json::json!({ "limit": limit }),
+                message: String::new(),
+                known_version: None,
+                retry_after: None,
+            })
+        };
+        assert!(refused_record_key(&answer(
+            ErrorCode::QuotaExceeded,
+            "record_keys"
+        )));
+        assert!(!refused_record_key(&answer(
+            ErrorCode::RateLimited,
+            "record_keys"
+        )));
+        assert!(!refused_record_key(&answer(
+            ErrorCode::QuotaExceeded,
+            "storage"
+        )));
+        assert!(!refused_record_key(&answer(
+            ErrorCode::QuotaExceeded,
+            "contacts"
+        )));
+    }
 
     #[test]
     fn test_only_an_intervening_loss_can_release_an_absent_bucket() {
@@ -372,8 +430,28 @@ mod tests {
                 panic!("second request is eligible before either is applied")
             };
             assert_ne!(first, second);
-            assert_eq!(bucket_conditions(key, version, compare).unwrap(), [compare]);
+            let receipt_conditions = bucket_conditions(key, version, compare).unwrap();
+            assert_eq!(receipt_conditions, [compare]);
+            let application = |v: RecordVersion| ApplicationRef {
+                generation: v.generation,
+                seq: v.version,
+                item_hash: [4; 32],
+            };
+            let before = (!version.is_none()).then(|| (version, application(version)));
+            assert!(pubky_switch_core::shared::version_holds(
+                &key,
+                version,
+                before,
+                &receipt_conditions
+            ));
             let next = RecordVersion::new(1, 49);
+            // The same receipt-only comparison no longer holds after the first request wins.
+            assert!(!pubky_switch_core::shared::version_holds(
+                &key,
+                version,
+                Some((next, application(next))),
+                &receipt_conditions
+            ));
             assert!(bucket_conditions(
                 key,
                 version,
