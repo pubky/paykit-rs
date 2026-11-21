@@ -2494,7 +2494,17 @@ async fn test_publication_reselecting_one_contact_retires_only_its_withdrawal_re
     let mut carol = w
         .join(&w.carol, "carol", AppScopes::new().pay().build().unwrap())
         .await;
-    let mut shop = w.shop().await;
+    let mut shop = w
+        .join(
+            &w.bob,
+            "shop",
+            AppScopes::new()
+                .request()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+        )
+        .await;
     carol.app_mut().invite(&shop.identity()).await.unwrap();
     shop.set_list_endpoints(offered("lno1current"))
         .await
