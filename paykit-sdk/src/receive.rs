@@ -1768,14 +1768,17 @@ fn receipt_effect(
     // written or settled past the pause and the record's gates hold until it is written.
     // Kept so over a record that doesn't read, it takes the spam rule a reply before its
     // record takes ([`admits_receipt_over_unread_record`]).
-    if let Some(held) = held.filter(|held| holds_record(Some(&held.content))) {
-        if crate::divergent::step_write_waits(cx, &held, stored, seq, settlement)? {
+    if let Some(held) = held
+        .as_ref()
+        .filter(|held| holds_record(Some(&held.content)))
+    {
+        if crate::divergent::step_write_waits(cx, held, stored, seq, settlement)? {
             if record.is_none() && !admits_receipt_over_unread_record(cx, stored)? {
                 return Ok(());
             }
             return crate::divergent::step_keep(
                 cx,
-                &held,
+                held,
                 stored,
                 seq,
                 settlement,
@@ -1791,11 +1794,16 @@ fn receipt_effect(
         }
         return Ok(());
     };
+    if found.waits_for_proof || waits_for_requested_record(stored, held.as_ref()) {
+        return keep_reply(cx, &target, stored, position);
+    }
     let mut conditions = Vec::new();
+    if stored.message().refs.get(1).is_some() {
+        let key = cx.record_key(&target.record_target())?;
+        conditions.push(cx.record_condition(&key)?);
+    }
     let parent = if let Some(parent_target) = receipt_parent(stored) {
-        let record_key = cx.record_key(&target.record_target())?;
         let parent_key = cx.record_key(&parent_target.record_target())?;
-        conditions.push(cx.record_condition(&record_key)?);
         conditions.push(cx.record_condition(&parent_key)?);
         let held = intake_activity(cx, &parent_target, RecordSide::Payer)?;
         let Some(held) = held.filter(|h| !crate::records::activity_base_changed(Some(h))) else {
@@ -2003,6 +2011,17 @@ pub(crate) fn receipt_parent(stored: &StoredMessage) -> Option<ActivityTarget> {
     )))
 }
 
+/// A refused payer record, or a recovered write by a removed wallet that nothing
+/// dates, can't establish the proof of the requested payment (Switch spec 8.2, 12.2).
+pub(crate) fn waits_for_requested_record(
+    receipt: &StoredMessage,
+    held: Option<&SharedRecord>,
+) -> bool {
+    receipt.message().refs.get(1).is_some()
+        && receipt.body().billing_period().is_none()
+        && held.is_some_and(|record| record.flagged || record.not_taken || record.doubtful)
+}
+
 /// The signed evidence for a receipt naming a Billing Period (Paykit wire 4.11).
 pub(crate) enum PeriodReceipt {
     Matched,
@@ -2050,6 +2069,8 @@ pub(crate) fn period_receipt(
 /// What a receipt finds in the payer's record it names ([`receipt_on_record`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ReceiptOnRecord {
+    /// A one-time requested receipt stays in custody until its signed request and proof match.
+    pub(crate) waits_for_proof: bool,
     /// The record holds the proof the receipt names, so the receipt goes beside it.
     pub(crate) names_held_proof: bool,
     /// The record holds the proof the receipt names and no receipt yet: this receipt is the
@@ -2057,40 +2078,50 @@ pub(crate) struct ReceiptOnRecord {
     pub(crate) first_receipt: bool,
 }
 
-/// What a receipt `stored` finds in `record`, the payer's record it names: `None` when the
-/// record's counterparty isn't the receipt's sender, through whom the payer matches it
-/// (Paykit spec 8.4), so the receipt does nothing.
-///
-/// A receipt names the proof it confirms first (Paykit wire 4.11), and the record holds a
-/// receipt only beside that proof (Paykit wire 5.3): the payer's proof goes into the record
-/// in the batch that sends it, so a receipt for a record without it, or naming another
-/// proof, isn't stored. Stored, it would leave the payer unable to record its own proof. It
-/// still settles the attempt it names. Only stored messages decide here: the record's
-/// `status` is informational, rewritten by every writer, so it is never read (Paykit wire
-/// 5.3).
+/// Match the signed receipt to its counterparty, request and proof before placing it
+/// beside that proof or using it to resolve the requested attempt (Paykit
+/// spec 3.4, 7.3, Paykit wire 4.11). A period's signed parent is read separately.
 pub(crate) fn receipt_on_record(
     record: &ActivityRecord,
     stored: &StoredMessage,
 ) -> Option<ReceiptOnRecord> {
-    // A recurring request has no payment of its own. Its receipt and proof
-    // belong to the separate record of the Billing Period they name.
-    if record.counterparty != stored.sender()
-        || crate::requests::request_of(record).is_some_and(|(_, request)| request.is_recurring())
-    {
+    let Body::PaymentReceipt(receipt) = stored.body() else {
+        return None;
+    };
+    if record.counterparty != stored.sender() {
         return None;
     }
-    // Paykit spec 3.4: a receipt about a request from an app its label doesn't let send it
-    // does nothing, stored nowhere and settling nothing.
-    if crate::requests::request_of(record)
-        .is_some_and(|(_, request)| stored.check_payee_sender(request).is_err())
-    {
-        return None;
+    let requested = stored.message().refs.get(1);
+    let terms = crate::requests::request_of(record);
+    if let Some((signed, request)) = terms {
+        if request.is_recurring()
+            || requested != Some(&signed.hash())
+            || stored.check_payee_sender(request).is_err()
+        {
+            return None;
+        }
     }
-    let names_held_proof = record
+    let named = record
         .proof
         .as_ref()
-        .is_some_and(|proof| stored.message().refs.first() == Some(&proof.hash()));
+        .filter(|proof| stored.message().refs.first() == Some(&proof.hash()));
+    if let Some(proof) = named {
+        let Body::PaymentProof(paid) = proof.body() else {
+            return None;
+        };
+        if paid.attempt_id != receipt.attempt_id
+            || paid.billing_period != receipt.billing_period
+            || proof.message().refs.first() != requested
+        {
+            return None;
+        }
+    }
+    let names_held_proof = named.is_some()
+        && (requested.is_none() || receipt.billing_period.is_some() || terms.is_some());
     Some(ReceiptOnRecord {
+        waits_for_proof: requested.is_some()
+            && receipt.billing_period.is_none()
+            && !names_held_proof,
         names_held_proof,
         first_receipt: names_held_proof && record.receipt.is_none(),
     })
@@ -2153,7 +2184,7 @@ pub(crate) struct ReceiptClaim<'a> {
     pub(crate) service_time: Option<u64>,
     /// The attempt's journal entry, if this app holds it.
     pub(crate) journaled: Option<JournalEntry>,
-    /// The receipt is the first of the payment its record holds the proof of.
+    /// This is the first receipt of the proof held in the payer's record.
     pub(crate) first_receipt: bool,
 }
 
@@ -2228,14 +2259,12 @@ pub(crate) fn receipt_settles(claim: &ReceiptClaim<'_>) -> Result<ReceiptSettles
         out.received = waiting;
         return Ok(out);
     }
-    let open = view.attempts.iter().any(|a| {
-        a.attempt_id == claim.attempt_id.to_bytes()
-            && matches!(
-                a.outcome,
-                Outcome::Open | Outcome::Unknown | Outcome::Failed
-            )
-    });
-    if open {
+    if view.attempt(&claim.attempt_id.to_bytes()).is_some_and(|a| {
+        matches!(
+            a.outcome,
+            Outcome::Open | Outcome::Unknown | Outcome::Failed
+        )
+    }) {
         let op = ClaimOp::done(
             claim.obligation,
             view.step,
@@ -3797,6 +3826,64 @@ pub(crate) fn unrequested_of(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_receipt_names_the_attempt_of_its_signed_proof() {
+        use crate::testkit::{object, Party};
+        use paykit_lib::bodies::PaymentReceipt;
+        use serde_json::json;
+
+        let alice = Party::new("alice", "wallet", &["paykit_contacts", "paykit_pay"]);
+        let bob = Party::new(
+            "bob",
+            "shop",
+            &["paykit_contacts", "paykit_request", "paykit_settlements"],
+        );
+        let attempt = AttemptId::from_bytes([3; 16]);
+        let request = bob.message(
+            &alice,
+            "paykit.payment_request",
+            vec![],
+            object(json!({
+                "amount": { "asset": "btc", "value": "1" },
+                "payment_reference": "order", "proposal_expires_at": null
+            })),
+        );
+        let proof = alice.message(
+            &bob,
+            "paykit.payment_proof",
+            vec![request.hash()],
+            object(json!({
+                "attempt_id": attempt.to_text(),
+                "payment_endpoint_identifier": "btc-lightning-bolt11",
+                "payment_app_id": pubky_switch_core::enc::zbase32_encode(&bob.app_id()),
+                "proof": {"reference": "paid"}
+            })),
+        );
+        let refs = vec![proof.hash(), request.hash()];
+        let mut record = ActivityRecord::new(paykit_lib::records::ActivitySide::Payer, bob.id());
+        record.request = Some(request);
+        record.proof = Some(proof);
+        for id in [attempt, AttemptId::from_bytes([4; 16])] {
+            let receipt = bob.message(
+                &alice,
+                "paykit.payment_receipt",
+                refs.clone(),
+                PaymentReceipt {
+                    attempt_id: id,
+                    billing_period: None,
+                    metadata: None,
+                    payment_reference: None,
+                }
+                .to_body(2)
+                .unwrap(),
+            );
+            assert_eq!(
+                receipt_on_record(&record, &receipt).is_some_and(|found| found.names_held_proof),
+                id == attempt
+            );
+        }
+    }
 
     fn current_answer() -> QueuedAnswer {
         let requester = crate::testkit::Party::new("alice", "wallet", &["paykit_pay"]);

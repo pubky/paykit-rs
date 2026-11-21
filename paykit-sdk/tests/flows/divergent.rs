@@ -1918,7 +1918,8 @@ struct OverUnread {
     store: Arc<dyn StateStore>,
     wallet: Paykit,
     phone: Paykit,
-    _shop: Paykit,
+    shop: Paykit,
+    proof: paykit_lib::records::StoredMessage,
     request: RequestRef,
     attempt_id: paykit_lib::AttemptId,
     /// The payer record's key.
@@ -1930,7 +1931,7 @@ struct OverUnread {
 /// [`OverUnread`]: the wallet keeps no mark of what it has seen in a record, so it holds the
 /// value that doesn't read rather than refuse it as a regression. With `failed`, the method
 /// reported the payment failed, `failed` is on its claim and in the record, and the money
-/// went after all: only the payee's receipt shows it.
+/// went after all. The payer proof and the payee's receipt arrive later.
 async fn over_unread(w: &World, failed: bool) -> OverUnread {
     let seen = Arc::new(crate::outcome_record::NoSeenMarks::default());
     let store = Arc::clone(&seen) as Arc<dyn StateStore>;
@@ -1967,6 +1968,7 @@ async fn over_unread(w: &World, failed: bool) -> OverUnread {
         .value()
         .unwrap()
         .to_vec();
+    let proof = crate::receipts::requested_proof(w, &wallet, &shop, &request, attempt_id);
     seen.armed.store(true, std::sync::atomic::Ordering::SeqCst);
     crate::outcome_record::phone_writes(&mut phone, &request, Some(crate::outcome_record::INVALID))
         .await;
@@ -1977,7 +1979,8 @@ async fn over_unread(w: &World, failed: bool) -> OverUnread {
         store,
         wallet,
         phone,
-        _shop: shop,
+        shop,
+        proof,
         request,
         attempt_id,
         record,
@@ -1986,10 +1989,29 @@ async fn over_unread(w: &World, failed: bool) -> OverUnread {
 }
 
 impl OverUnread {
+    fn deliver_receipt(&self, w: &World) {
+        let receipt = crate::receipts::signed_receipt(w, &self.shop, &self.request, &self.proof);
+        w.deliver(
+            &w.bob,
+            "shop",
+            &w.alice,
+            &[self.wallet.app_id()],
+            receipt.plaintext(),
+        );
+    }
+
     /// The phone writes the payer record again with the value that reads.
     async fn phone_writes_back(&mut self) {
         self.phone.receive(None).await.unwrap();
         crate::outcome_record::phone_writes(&mut self.phone, &self.request, Some(&self.good)).await;
+    }
+
+    /// The readable payer record now also holds the proof Bob's receipt names.
+    async fn phone_writes_back_with_proof(&mut self) {
+        self.phone.receive(None).await.unwrap();
+        let value =
+            crate::receipts::record_with_proof(&self.good, &self.wallet, self.proof.clone());
+        crate::outcome_record::phone_writes(&mut self.phone, &self.request, Some(&value)).await;
     }
 
     /// The attempt's outcome on its claim, read from the switch.
@@ -2043,14 +2065,14 @@ async fn test_divergent_receipt_over_a_record_that_doesnt_read_kept_until_confir
     let w = World::new();
     let mut s = over_unread(&w, false).await;
     set_divergent(&s.store, &s.wallet, &s.record, true);
-    crate::stored::receipt_of_another_proof(&w, &s.wallet, &s.request, s.attempt_id);
+    s.deliver_receipt(&w);
     s.wallet.receive(None).await.unwrap();
     s.wallet.receive(None).await.unwrap();
     assert_eq!(s.kept("dw/").await, 1);
     assert_eq!(s.kept("pr/").await, 0);
     assert_eq!(s.outcome().await, Outcome::Open);
     // The record reads again and the newer write clears the view; the user hasn't confirmed.
-    s.phone_writes_back().await;
+    s.phone_writes_back_with_proof().await;
     s.wallet.receive(None).await.unwrap();
     s.wallet.receive(None).await.unwrap();
     assert!(!s.divergent().await);
@@ -2074,7 +2096,7 @@ async fn test_divergent_receipt_over_a_record_that_doesnt_read_confirmed_waits_u
     let w = World::new();
     let mut s = over_unread(&w, false).await;
     set_divergent(&s.store, &s.wallet, &s.record, true);
-    crate::stored::receipt_of_another_proof(&w, &s.wallet, &s.request, s.attempt_id);
+    s.deliver_receipt(&w);
     s.wallet.receive(None).await.unwrap();
     assert_eq!(s.kept("dw/").await, 1);
     confirm(&mut s.wallet, &s.record).await.unwrap();
@@ -2089,12 +2111,12 @@ async fn test_divergent_receipt_over_a_record_that_doesnt_read_confirmed_waits_u
     );
     assert_eq!(s.outcome().await, Outcome::Open);
     w.clock.advance_ms(1);
-    crate::stored::receipt_of_another_proof(&w, &s.wallet, &s.request, s.attempt_id);
+    s.deliver_receipt(&w);
     s.wallet.receive(None).await.unwrap();
     assert_eq!(s.kept("dw/").await, 2);
     assert_eq!(s.kept("pr/").await, 0);
     assert_eq!(s.outcome().await, Outcome::Open);
-    s.phone_writes_back().await;
+    s.phone_writes_back_with_proof().await;
     s.wallet.receive(None).await.unwrap();
     s.wallet.receive(None).await.unwrap();
     assert_eq!(s.kept("dw/").await, 0);
@@ -2121,7 +2143,7 @@ async fn test_divergent_receipt_kept_before_its_record_read_moves_over_it_once_i
     use pubky_switch_core::claims::Outcome;
     let w = World::new();
     let mut s = over_unread(&w, true).await;
-    crate::stored::receipt_of_another_proof(&w, &s.wallet, &s.request, s.attempt_id);
+    s.deliver_receipt(&w);
     s.wallet.receive(None).await.unwrap();
     assert_eq!(s.kept("pr/").await, 1);
     assert_eq!(s.kept("dw/").await, 0);
@@ -2161,6 +2183,7 @@ async fn test_divergent_receipt_kept_before_its_record_read_moves_over_it_once_i
         "{records:?}"
     );
     assert_eq!(w.rail.all_executions().len(), executions);
+    s.phone_writes_back_with_proof().await;
     s.wallet.receive(None).await.unwrap();
     assert_eq!(s.kept("dw/").await, 0);
     assert_eq!(s.kept("pr/").await, 0);

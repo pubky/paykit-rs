@@ -18,6 +18,82 @@ fn metadata() -> serde_json::Map<String, serde_json::Value> {
         .unwrap()
 }
 
+/// A signed payer proof available to the test before the reader sees it in shared data.
+pub(crate) fn requested_proof(
+    w: &World,
+    payer: &paykit_sdk::Paykit,
+    shop: &paykit_sdk::Paykit,
+    request: &RequestRef,
+    attempt: paykit_lib::AttemptId,
+) -> paykit_lib::records::StoredMessage {
+    use pubky_switch_client::app::OutgoingMessage;
+    let body = json!({
+        "attempt_id": attempt.to_text(),
+        "payment_endpoint_identifier": "btc-lightning-bolt11",
+        "payment_app_id": pubky_switch_core::enc::zbase32_encode(&shop.app_id()),
+        "proof": { "reference": "purchase" }
+    });
+    let mut message = OutgoingMessage::new(
+        shop.identity(),
+        "paykit.payment_proof",
+        body.as_object().unwrap().clone(),
+    );
+    message.refs.push(request.request_hash);
+    let signed = payer.app().sign_message(message).unwrap();
+    paykit_lib::records::StoredMessage::new(
+        payer.identity(),
+        payer.app().cert().signed(),
+        signed.plaintext().clone(),
+        Some(w.clock.now_ms()),
+        &shop.identity(),
+    )
+    .unwrap()
+}
+
+/// Publish the proof after this wallet has observed the original signed request.
+pub(crate) async fn publish_requested_proof(
+    payer: &mut paykit_sdk::Paykit,
+    request: &RequestRef,
+    proof: paykit_lib::records::StoredMessage,
+) {
+    let target = crate::outcome_record::payer_record(request);
+    let held = payer.app_mut().read_record(&target).await.unwrap().unwrap();
+    let value = record_with_proof(held.content.value().unwrap(), payer, proof);
+    crate::outcome_record::phone_writes(payer, request, Some(&value)).await;
+}
+
+pub(crate) fn record_with_proof(
+    value: &[u8],
+    payer: &paykit_sdk::Paykit,
+    proof: paykit_lib::records::StoredMessage,
+) -> Vec<u8> {
+    use paykit_lib::records::{ActivityRecord, ActivitySide};
+    let mut record = ActivityRecord::read(value, &payer.identity(), ActivitySide::Payer).unwrap();
+    record.proof = Some(proof);
+    record.to_json().unwrap()
+}
+
+/// The payer has the signed proof when the receipt reaches its inbox.
+pub(crate) async fn deliver_proved_receipt(
+    w: &World,
+    payer: &mut paykit_sdk::Paykit,
+    shop: &paykit_sdk::Paykit,
+    request: &RequestRef,
+    attempt: paykit_lib::AttemptId,
+) -> paykit_lib::records::StoredMessage {
+    let proof = requested_proof(w, payer, shop, request, attempt);
+    let receipt = signed_receipt(w, shop, request, &proof);
+    publish_requested_proof(payer, request, proof).await;
+    w.deliver(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[payer.app_id()],
+        receipt.plaintext(),
+    );
+    receipt
+}
+
 /// Bob's receipt for the payment Alice's signed proof identifies.
 pub(crate) fn signed_receipt(
     w: &World,
@@ -324,4 +400,213 @@ async fn test_receipts_of_a_billing_period_carry_the_requests_reference() {
     assert_eq!(found.len(), 1, "{found:?}");
     assert_eq!(found[0].billing_period, Some(period));
     assert_eq!(found[0].payment_reference.as_deref(), Some("plan-7"));
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReceiptClaimState {
+    OtherAttempt,
+    Settled,
+    Expired,
+    Absent,
+}
+
+impl ReceiptClaimState {
+    async fn prepare(
+        self,
+        w: &World,
+        payer: &mut paykit_sdk::Paykit,
+        obligation: [u8; 32],
+        attempt: paykit_lib::AttemptId,
+        proof_hash: [u8; 32],
+        deadline: u64,
+    ) -> Option<pubky_switch_core::claims::ClaimView> {
+        use pubky_switch_client::app::{ClaimOp, OpBatch};
+        use pubky_switch_core::claims::{Basis, ClaimStatus, RECONCILIATION_MS};
+        if self != Self::Absent {
+            let id = if self == Self::OtherAttempt {
+                [4; 16]
+            } else {
+                attempt.to_bytes()
+            };
+            let begin = ClaimOp::attempt(obligation, 0, id, 300, Some(deadline));
+            payer
+                .app_mut()
+                .submit_batch(OpBatch::new().op(begin.kind()))
+                .await
+                .unwrap();
+            if self != Self::OtherAttempt {
+                let done =
+                    ClaimOp::done(obligation, 1, id, Basis::Owner, Some(proof_hash)).unwrap();
+                payer
+                    .app_mut()
+                    .submit_batch(OpBatch::new().op(done.kind()))
+                    .await
+                    .unwrap();
+            }
+        }
+        if self == Self::Expired {
+            w.clock.set_ms(deadline + RECONCILIATION_MS);
+        }
+        let before = payer
+            .app_mut()
+            .read_claim(&obligation)
+            .await
+            .unwrap()
+            .map(|c| c.view);
+        match self {
+            Self::OtherAttempt => {
+                let claim = before.as_ref().unwrap();
+                assert_eq!(claim.status, ClaimStatus::Attempting);
+                assert!(claim.attempt(&attempt.to_bytes()).is_none());
+            }
+            Self::Settled => {
+                let claim = before.as_ref().unwrap();
+                assert_eq!(claim.status, ClaimStatus::Settled);
+                assert!(claim.tombstone);
+            }
+            Self::Expired | Self::Absent => assert!(before.is_none()),
+        }
+
+        before
+    }
+}
+
+async fn requested_receipt_without_proof(state: ReceiptClaimState) {
+    use paykit_lib::records::{ActivityRecord, ActivitySide};
+    use paykit_lib::AttemptId;
+
+    let w = World::new();
+    let storage = crate::common::store();
+    let mut reader = w.wallet_on("reader", storage.clone()).await;
+    let mut payer = w.wallet("payer").await;
+    let mut shop = w.shop().await;
+    let draft = draft("1", w.clock.now_ms());
+    let deadline = draft.proposal_expires_at_ms.unwrap() + 1;
+    let request = request_from(&mut shop, w.alice_id(), draft).await;
+    reader.receive(None).await.unwrap();
+    payer.receive(None).await.unwrap();
+    let attempt = AttemptId::from_bytes([3; 16]);
+    let proof = requested_proof(&w, &payer, &shop, &request, attempt);
+    let obligation = paykit_lib::derive::request_obligation(
+        reader.app().naming_key(),
+        &request.payee,
+        &request.request_hash,
+        0,
+    );
+    let before = state
+        .prepare(&w, &mut payer, obligation, attempt, proof.hash(), deadline)
+        .await;
+    assert_eq!(
+        reader
+            .app_mut()
+            .read_claim(&obligation)
+            .await
+            .unwrap()
+            .map(|c| c.view),
+        before
+    );
+    let receipt = signed_receipt(&w, &shop, &request, &proof);
+    let app_id = reader.app_id();
+    w.deliver(&w.bob, "shop", &w.alice, &[app_id], receipt.plaintext());
+    reader.receive(None).await.unwrap();
+    let kept = reader.app().protocol_scan("paykit", b"pr/").await.unwrap();
+    assert_eq!(kept.len(), 1, "{state:?}");
+    assert!(kept[0].0.ends_with(receipt.message().msg_id.as_bytes()));
+    let value: serde_json::Value = serde_json::from_slice(&kept[0].1).unwrap();
+    assert_eq!(
+        value["d"]["plaintext"],
+        pubky_switch_core::enc::b64(&receipt.plaintext().encode())
+    );
+    assert_eq!(
+        value["d"]["cert"],
+        serde_json::to_value(receipt.cert().signed()).unwrap()
+    );
+    assert!(reader
+        .receipts(ReceiptsOf::Request(request))
+        .await
+        .unwrap()
+        .is_empty());
+    drop(reader);
+    let mut reader = w
+        .load_on_clock(&w.alice, storage, app_id, w.clock.clone())
+        .await;
+    reader.receive(None).await.unwrap();
+    assert_eq!(
+        reader.app().protocol_scan("paykit", b"pr/").await.unwrap(),
+        kept
+    );
+
+    if state == ReceiptClaimState::Absent {
+        w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
+        reader.receive(None).await.unwrap();
+        assert!(reader
+            .app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .is_empty());
+        let notices = reader.notices().await.unwrap();
+        assert!(notices.iter().any(
+            |notice| notice.kind == paykit_sdk::NoticeKind::MessageGivenUp
+                && notice.msg_id.as_ref() == Some(&receipt.message().msg_id)
+        ));
+        return;
+    }
+    let target = crate::outcome_record::payer_record(&request);
+    publish_requested_proof(&mut payer, &request, proof).await;
+    reader.receive(None).await.unwrap();
+    let placed = reader.receipts(ReceiptsOf::Request(request)).await.unwrap();
+    assert_eq!(placed.len(), 1);
+    assert_eq!(placed[0].msg_id, receipt.message().msg_id);
+    let held = reader
+        .app()
+        .shared_record(&reader.app().record_key(&target).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let record = ActivityRecord::read(
+        held.content.value().unwrap(),
+        &w.alice_id(),
+        ActivitySide::Payer,
+    )
+    .unwrap();
+    assert_eq!(record.receipt.unwrap().hash(), receipt.hash());
+    assert!(reader
+        .app()
+        .protocol_scan("paykit", b"pr/")
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        reader
+            .app_mut()
+            .read_claim(&obligation)
+            .await
+            .unwrap()
+            .map(|c| c.view),
+        before
+    );
+}
+
+#[tokio::test]
+async fn test_requested_receipt_outlives_an_unmatched_attempt() {
+    Box::pin(requested_receipt_without_proof(
+        ReceiptClaimState::OtherAttempt,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn test_requested_receipt_outlives_a_settled_claim() {
+    Box::pin(requested_receipt_without_proof(ReceiptClaimState::Settled)).await;
+}
+
+#[tokio::test]
+async fn test_requested_receipt_outlives_an_expired_claim() {
+    Box::pin(requested_receipt_without_proof(ReceiptClaimState::Expired)).await;
+}
+
+#[tokio::test]
+async fn test_requested_receipt_without_a_claim_expires_from_its_original_acceptance() {
+    Box::pin(requested_receipt_without_proof(ReceiptClaimState::Absent)).await;
 }
