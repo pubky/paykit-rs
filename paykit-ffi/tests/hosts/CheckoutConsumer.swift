@@ -111,7 +111,7 @@ private func restoreCheckout(
     try await fixture.passRotationInterval()
     try await wallet.finishReceive()
     if action == "doubt" {
-        try await payWhileWaiting(payer: wallet, fixture: fixture, method: method, request: original, options: options)
+        try await interruptPayment(payer: wallet, method: method, request: original, options: options)
         method.holdLookup()
     }
     try await wallet.shutdown()
@@ -207,9 +207,9 @@ private func restoreCheckout(
     }
 }
 
-private func payWhileWaiting(
-    payer: NativeWallet, fixture: CheckoutFixture, method: CheckoutMethod,
-    request: RequestId, options: PaymentOptions
+private func interruptPayment(
+    payer: NativeWallet, method: CheckoutMethod, request: RequestId, options: PaymentOptions,
+    waitingAt fixture: CheckoutFixture? = nil
 ) async throws {
     let report = method.progress.continuation
     let timer = DispatchSource.makeTimerSource(queue: .global())
@@ -221,16 +221,18 @@ private func payWhileWaiting(
         report.finish()
     }
 
-    let watch = Task {
-        do {
-            let wake = try await payer.feedWait(seconds: 25)
-            guard wake == .ready else { throw CheckoutFailure.unexpectedWake(wake) }
-            report.yield(.feedReady)
-        } catch { report.finish(throwing: error) }
+    let watch = fixture.map { _ in
+        Task {
+            do {
+                let wake = try await payer.feedWait(seconds: 25)
+                guard wake == .ready else { throw CheckoutFailure.unexpectedWake(wake) }
+                report.yield(.feedReady)
+            } catch { report.finish(throwing: error) }
+        }
     }
     let paying = Task {
         do {
-            try await fixture.waitForHeldFeed()
+            try await fixture?.waitForHeldFeed()
             try Task.checkCancellation()
             _ = try await payer.payRequest(id: request, options: options)
             report.finish(throwing: CheckoutFailure.paymentReturned)
@@ -242,15 +244,19 @@ private func payWhileWaiting(
     do {
         var steps = method.progress.stream.makeAsyncIterator()
         let first = try await steps.next()
-        let second = try await steps.next()
-        switch (first, second) {
-        case (.feedReady?, .methodEntered?), (.methodEntered?, .feedReady?): break
-        default: throw CheckoutFailure.missingStep
+        if fixture != nil {
+            let second = try await steps.next()
+            switch (first, second) {
+            case (.feedReady?, .methodEntered?), (.methodEntered?, .feedReady?): break
+            default: throw CheckoutFailure.missingStep
+            }
+        } else if first != .methodEntered {
+            throw CheckoutFailure.missingStep
         }
         paying.cancel()
         guard try await steps.next() == .paymentCancelled else { throw CheckoutFailure.missingStep }
     } catch {
-        watch.cancel()
+        watch?.cancel()
         paying.cancel()
         await method.release.signal()
         throw error
@@ -414,7 +420,7 @@ private func driveCheckout(_ recovery: CheckoutReview, restore: String? = nil) a
     case .ordinary: break
     }
     try await payer.finishReceive()
-    try await payWhileWaiting(payer: payer, fixture: fixture, method: method, request: request, options: options)
+    try await interruptPayment(payer: payer, method: method, request: request, options: options, waitingAt: fixture)
     try await payer.shutdown()
 
     var reopened = try await host.load(appId: enrolled.appId)
