@@ -14,6 +14,7 @@ crate-type = ["lib", "cdylib", "staticlib"]
 
 [features]
 bindgen = ["uniffi/cli"]
+test-wallet = ["dep:pubky-switch-harness", "dep:pubky-switch-signer", "paykit-lib/signer"]
 
 [[bin]]
 name = "paykit-bindgen"
@@ -30,6 +31,8 @@ paykit-sdk = { path = "../paykit-sdk" }
 paykit-lib.workspace = true
 pubky-switch-client = { workspace = true, features = ["tokio"] }
 pubky-switch-core.workspace = true
+pubky-switch-harness = { workspace = true, optional = true }
+pubky-switch-signer = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

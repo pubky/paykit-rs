@@ -5,8 +5,7 @@ use std::{error::Error, sync::Arc};
 
 mod method;
 mod refusal;
-#[path = "../../tests/hosts/signer.rs"]
-mod signer;
+use crate::fixture_signer as signer;
 mod storage;
 mod wallet;
 
