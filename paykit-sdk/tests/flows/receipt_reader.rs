@@ -12,7 +12,7 @@ use pubky_switch_client::TransportError;
 use pubky_switch_core::ops::{Entry, OpsRequest};
 use std::sync::Arc;
 
-/// This reader can receive and acknowledge pages while another till publishes.
+/// This reader can receive and acknowledge pages while another wallet of the same seller publishes.
 /// Its service refuses signed writes for quota throughout this reader's journey.
 struct ReaderQuota {
     transport: Arc<dyn Transport>,
@@ -103,7 +103,7 @@ async fn read_repaired_marker(case: ReadCase) {
     let scopes = || AppScopes::new().request().build().unwrap();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    let mut till = w.join(&w.bob, "till", scopes()).await;
+    let mut seller_wallet = w.join(&w.bob, "seller-wallet", scopes()).await;
     let device = store();
     let mut witness = w
         .join_with(
@@ -149,7 +149,7 @@ async fn read_repaired_marker(case: ReadCase) {
         .put_record(&target, &serde_json::to_vec(&original).unwrap(), Vec::new())
         .await
         .unwrap();
-    for reader in [&mut witness, &mut till] {
+    for reader in [&mut witness, &mut seller_wallet] {
         reader.receive(None).await.unwrap();
         let held = reader.app().shared_record(&key).await.unwrap().unwrap();
         assert!(held.authenticated && !held.flagged);
@@ -176,14 +176,18 @@ async fn read_repaired_marker(case: ReadCase) {
     )
     .await
     .unwrap();
-    let deletion = till
+    let deletion = seller_wallet
         .app_mut()
         .delete_record(&target, Vec::new())
         .await
         .unwrap();
     if case == ReadCase::Recovered {
         Box::pin(keep_recovered_delete(
-            &w, &mut shop, &mut till, &target, &signed,
+            &w,
+            &mut shop,
+            &mut seller_wallet,
+            &target,
+            &signed,
         ))
         .await;
         return;
@@ -199,9 +203,9 @@ async fn read_repaired_marker(case: ReadCase) {
         .unwrap()
         .pop()
         .unwrap();
-    assert_eq!(notice.writer, Some(till.app_id()));
+    assert_eq!(notice.writer, Some(seller_wallet.app_id()));
     if case == ReadCase::Complete {
-        let published = till
+        let published = seller_wallet
             .app_mut()
             .put_record(&target, &serde_json::to_vec(&original).unwrap(), Vec::new())
             .await
@@ -247,7 +251,7 @@ async fn read_repaired_marker(case: ReadCase) {
     } else {
         vec![condition]
     };
-    let eager_write = till
+    let eager_write = seller_wallet
         .app_mut()
         .put_record(&target, &serde_json::to_vec(&eager).unwrap(), conditions)
         .await
@@ -402,7 +406,7 @@ async fn read_repaired_marker(case: ReadCase) {
 async fn keep_recovered_delete(
     w: &World,
     shop: &mut Paykit,
-    till: &mut Paykit,
+    seller_wallet: &mut Paykit,
     target: &RecordTarget,
     receipt: &paykit_lib::records::StoredMessage,
 ) {
@@ -429,8 +433,8 @@ async fn keep_recovered_delete(
         })
         .unwrap();
     service.deliver_identity(&doc).unwrap();
-    till.app_mut().refresh_identity().await.unwrap();
-    till.receive(None).await.unwrap();
+    seller_wallet.app_mut().refresh_identity().await.unwrap();
+    seller_wallet.receive(None).await.unwrap();
     let deleted_op = w
         .bob
         .switch()

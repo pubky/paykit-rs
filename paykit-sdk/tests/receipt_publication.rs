@@ -1,4 +1,4 @@
-//! An independent till can recover an already-issued receipt after the issuing shop restarts.
+//! Another wallet of the same seller can recover an already-issued receipt after the issuing shop restarts.
 #![recursion_limit = "256"]
 
 #[path = "receipt_publication/marked.rs"]
@@ -124,7 +124,7 @@ async fn paid_request(
         .await?
         .request
         .ok_or("request was not sent")?;
-    // The payer drives its own wallet task, just as each independent till does.
+    // The payer drives its own wallet task, just as each seller wallet does.
     // The shop's orchestration frame need not stay on the payer's native stack.
     let buyer = tokio::spawn(Box::pin(async move {
         buyer.receive(None).await?;
@@ -180,13 +180,13 @@ async fn test_reopened_shop_conditionally_publishes_over_the_exact_deletion() ->
 }
 
 #[tokio::test]
-async fn test_reopened_shop_conditionally_adds_its_receipt_to_the_other_tills_record() -> TestResult
-{
+async fn test_reopened_shop_conditionally_adds_its_receipt_to_the_other_wallets_record(
+) -> TestResult {
     on_both_services(Shared::ProofOnly, Restart::Cold).await
 }
 
 #[tokio::test]
-async fn test_reopened_shop_preserves_a_later_update_to_the_other_tills_proof() -> TestResult {
+async fn test_reopened_shop_preserves_a_later_update_to_the_other_wallets_proof() -> TestResult {
     on_both_services(Shared::ExtendedProof, Restart::Cold).await
 }
 
@@ -289,7 +289,7 @@ struct IssuedSale {
     seller: Signer,
     buyer: Paykit,
     shop: Paykit,
-    till: Paykit,
+    seller_wallet: Paykit,
     store: Arc<MemoryStore>,
     rail: Arc<FakeRail>,
     request: RequestRef,
@@ -326,11 +326,11 @@ async fn issued_sale(world: &World) -> TestResult<IssuedSale> {
         &rail,
     )
     .await?;
-    let (mut till, seller) = join(
+    let (mut seller_wallet, seller) = join(
         world,
         seller,
         "shop",
-        "till",
+        "seller-wallet",
         AppScopes::new().request().build()?,
         Arc::new(MemoryStore::new()),
         &rail,
@@ -382,13 +382,13 @@ async fn issued_sale(world: &World) -> TestResult<IssuedSale> {
         .ok_or("original receipt missing")?;
     assert_eq!(receipt.message().msg_id, issued);
     shop.receive(None).await?;
-    till.receive(None).await?;
+    seller_wallet.receive(None).await?;
     shop.app_mut().flush_cursor().await?;
     Ok(IssuedSale {
         seller,
         buyer,
         shop,
-        till,
+        seller_wallet,
         store,
         rail,
         request,
@@ -410,7 +410,7 @@ async fn publish_after_restart(
     let IssuedSale {
         mut buyer,
         mut shop,
-        mut till,
+        mut seller_wallet,
         store,
         rail,
         request,
@@ -427,7 +427,10 @@ async fn publish_after_restart(
     let cert = shop.app().cert().clone();
     let issued = receipt.message().msg_id.clone();
     let read = |bytes: &[u8]| ActivityRecord::read(bytes, &identity, ActivitySide::Payee);
-    let delete = till.app_mut().delete_record(&target, vec![]).await?;
+    let delete = seller_wallet
+        .app_mut()
+        .delete_record(&target, vec![])
+        .await?;
     // The shop observes the deletion before its conditional publication reaches the service.
     world.unreachable("POST", "/ops");
     shop.app_mut().receive(None).await?;
@@ -437,7 +440,7 @@ async fn publish_after_restart(
         .await?
         .pop()
         .ok_or("missing deletion notice")?;
-    assert_eq!(notice.writer, Some(till.app_id()));
+    assert_eq!(notice.writer, Some(seller_wallet.app_id()));
     let before = service_cursor(&observer).await?;
     assert!(
         before < delete.version.version,
@@ -460,7 +463,7 @@ async fn publish_after_restart(
             proof_only
         };
         value["proof"]["cert"]["shipping_note"] = "delivered".into();
-        let eager = till
+        let eager = seller_wallet
             .app_mut()
             .put_record(
                 &target,
@@ -472,7 +475,7 @@ async fn publish_after_restart(
                 }],
             )
             .await?;
-        let op = record_op(&till, key, till.app().cert()).await?;
+        let op = record_op(&seller_wallet, key, seller_wallet.app().cert()).await?;
         let reference = ApplicationRef {
             generation: eager.version.generation,
             seq: eager.version.version,
@@ -480,7 +483,7 @@ async fn publish_after_restart(
         };
         if shared == Shared::ExtendedProof {
             value["proof"]["cert"]["shipment_id"] = "package-5".into();
-            let updated = till
+            let updated = seller_wallet
                 .app_mut()
                 .put_record(
                     &target,
@@ -492,7 +495,7 @@ async fn publish_after_restart(
                     }],
                 )
                 .await?;
-            let op = record_op(&till, key, till.app().cert()).await?;
+            let op = record_op(&seller_wallet, key, seller_wallet.app().cert()).await?;
             let reference = ApplicationRef {
                 generation: updated.version.generation,
                 seq: updated.version.version,
@@ -535,9 +538,9 @@ async fn publish_after_restart(
     let fresh = shared_position(&observer, &key).await?;
     shop.receive(None).await?;
     let received = shared_position(&observer, &key).await?;
-    till.app_mut().read_record_fresh(&target).await?;
-    till.receive(None).await?;
-    let final_record = till
+    seller_wallet.app_mut().read_record_fresh(&target).await?;
+    seller_wallet.receive(None).await?;
+    let final_record = seller_wallet
         .app()
         .shared_record(&key)
         .await?
@@ -560,11 +563,11 @@ async fn publish_after_restart(
     }
     if shared == Shared::Issued {
         assert_eq!(final_record.version, current);
-        assert_eq!(final_record.writer, till.app_id());
+        assert_eq!(final_record.writer, seller_wallet.app_id());
     } else {
         assert!(final_record.version.version > current.version);
         assert_eq!(final_record.writer, id);
-        let signed = record_op(&till, key, &cert).await?;
+        let signed = record_op(&seller_wallet, key, &cert).await?;
         let OpKind::RecordPut(put) = &signed.body().kind else {
             unreachable!()
         };
@@ -617,9 +620,10 @@ async fn publish_after_restart(
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].msg_id, issued);
     assert_eq!(rail.all_executions().values().sum::<u64>(), 1);
-    till.app_mut().read_record_fresh(&target).await?;
+    seller_wallet.app_mut().read_record_fresh(&target).await?;
     assert_eq!(
-        till.app()
+        seller_wallet
+            .app()
             .shared_record(&key)
             .await?
             .ok_or("missing final record")?

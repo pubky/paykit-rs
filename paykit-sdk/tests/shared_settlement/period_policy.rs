@@ -72,7 +72,7 @@ async fn open_subscription(world: &World) -> TestResult<Subscription> {
         world,
         &mut shop_signer,
         "shop",
-        "period-till",
+        "period-wallet",
         AppScopes::new().request().manage_contacts().build()?,
         Arc::new(MemoryStore::new()),
         &rail,

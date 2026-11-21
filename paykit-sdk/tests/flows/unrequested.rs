@@ -1036,7 +1036,7 @@ async fn test_unrequested_receipt_from_another_identity_refused() {
 
 #[tokio::test]
 async fn test_unrequested_proof_of_a_settlement_seen_not_credited_again_over_its_delete() {
-    // The shop credited alice's payment without a request; bob's till then deletes the
+    // The shop credited alice's payment without a request; Bob's wallet then deletes the
     // record, and a proof of the same settlement comes again. The shop saw the record's
     // messages, so the proof is one for the record it saw: nothing is written over the
     // delete, and the payment isn't credited again (Paykit spec 8.1, "Records not listed
@@ -1044,10 +1044,10 @@ async fn test_unrequested_proof_of_a_settlement_seen_not_credited_again_over_its
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    let mut till = w
+    let mut seller_wallet = w
         .join(
             &w.bob,
-            "till",
+            "seller-wallet",
             paykit_sdk::AppScopes::new().request().build().unwrap(),
         )
         .await;
@@ -1062,7 +1062,7 @@ async fn test_unrequested_proof_of_a_settlement_seen_not_credited_again_over_its
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     shop.receive(None).await.unwrap();
     assert_eq!(shop.payee_activity().await.unwrap().len(), 1);
-    till.receive(None).await.unwrap();
+    seller_wallet.receive(None).await.unwrap();
     let sent = wallet
         .app()
         .sent_to(&w.bob_id(), 0, u64::MAX)
@@ -1089,7 +1089,8 @@ async fn test_unrequested_proof_of_a_settlement_seen_not_credited_again_over_its
             &proof.settlement_id().unwrap(),
         ),
     );
-    till.app_mut()
+    seller_wallet
+        .app_mut()
         .delete_record(&target, Vec::new())
         .await
         .unwrap();

@@ -155,19 +155,21 @@ async fn test_payee_deletion_offline_custom_receipt_waits_for_its_method() {
         proof_only,
         ..
     } = Box::pin(issue()).await;
-    let mut till = joined(
+    let mut seller_wallet = joined(
         &w,
         &w.bob,
-        "till",
+        "seller-wallet",
         AppScopes::new().request().build().unwrap(),
         &rail,
     )
     .await;
-    till.app_mut()
+    seller_wallet
+        .app_mut()
         .delete_record(&target, Vec::new())
         .await
         .unwrap();
-    till.app_mut()
+    seller_wallet
+        .app_mut()
         .put_record(&target, &proof_only, Vec::new())
         .await
         .unwrap();

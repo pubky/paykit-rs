@@ -9,7 +9,7 @@ async fn test_receipt_cursor_readers_verify_the_repair_of_a_marked_one_time_rece
 async fn read_repaired_marker(world: &World, sale: IssuedSale) -> TestResult {
     let IssuedSale {
         mut shop,
-        till: mut other_wallet,
+        seller_wallet: mut other_wallet,
         mut buyer,
         seller,
         rail,
