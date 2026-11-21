@@ -2512,12 +2512,29 @@ async fn test_publication_reselecting_one_contact_retires_only_its_withdrawal_re
     let reselected = published(&shop, &alice).await;
     assert_eq!(reselected.last().unwrap().version.counter(), 3);
     assert!(!reselected.last().unwrap().withdrawn);
+    shop.app_mut()
+        .remove_conversation(&carol.identity())
+        .await
+        .unwrap();
+    let before = shop.app_mut().allow_list().await.unwrap();
+    assert!(!before.contacts.contains(&carol.identity()));
+    assert!(!before
+        .conversations
+        .iter()
+        .any(|c| c.pubky == carol.identity()));
     w.clock.advance_ms(HOUR_MS / 2);
     shop.receive(None).await.unwrap();
     assert_eq!(published(&shop, &alice).await, reselected);
     let left = published(&shop, &carol).await;
     assert_eq!(left.last().unwrap().version.counter(), 3);
-    assert!(left.last().unwrap().withdrawn);
+    let withdrawal = left.last().unwrap();
+    assert!(withdrawal.withdrawn);
+    assert_eq!(withdrawal.repeats, 0);
+    assert!(matches!(
+        shop.app().delivery(&withdrawal.id).await.unwrap(),
+        Some(pubky_switch_client::app::Delivery::Accepted { .. })
+    ));
+    assert_eq!(shop.app_mut().allow_list().await.unwrap(), before);
 
     // A second withdrawal starts from its own issue, even after the old interval elapsed.
     let second = give_up_withdrawal(&mut shop, alice.identity()).await;
@@ -2531,6 +2548,22 @@ async fn test_publication_reselecting_one_contact_retires_only_its_withdrawal_re
     assert_eq!(latest.last().unwrap().version.counter(), 5);
     assert!(latest.last().unwrap().withdrawn);
     assert_eq!(published(&shop, &carol).await, left);
+
+    let before_resend = shop.app_mut().allow_list().await.unwrap();
+    assert_eq!(before_resend, before);
+    assert!(matches!(
+        shop.app_mut().resend(&withdrawal.id).await.unwrap(),
+        pubky_switch_client::app::Delivery::Accepted { .. }
+    ));
+    let resent = published(&shop, &carol).await;
+    assert_eq!(
+        resent.last().unwrap(),
+        &Published {
+            repeats: 1,
+            ..withdrawal.clone()
+        }
+    );
+    assert_eq!(shop.app_mut().allow_list().await.unwrap(), before_resend);
 }
 
 #[tokio::test]
