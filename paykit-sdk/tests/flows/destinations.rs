@@ -1763,6 +1763,45 @@ async fn test_destinations_fee_at_the_cap_paid_automatically_above_it_asked_by_h
     assert!(w.rail.all_executions().is_empty());
 }
 
+#[tokio::test]
+async fn test_destinations_fee_cap_of_the_asset_transferred_binds_a_chosen_fee() {
+    // The app caps usd fees at 1 and sets no btc cap. The method would pay the 1 btc request
+    // with 30 usd and a fee of 5: the user chooses that transfer, its fee above the usd cap.
+    // Just before the call the method charges 50: the fee is judged by the cap of the asset
+    // transferred, and only the fee the user chose passes (Paykit spec 7.2 step 1).
+    let usd = |value: &str| paykit_lib::PaymentAmount {
+        value: paykit_lib::Decimal::new(value).unwrap(),
+        asset: paykit_lib::Asset::new("usd").unwrap(),
+    };
+    let w = World::new();
+    w.rail.set_transfer_amount(Some(usd("30")));
+    let config = paykit_sdk::PaykitConfig::default().with_fee_cap(
+        paykit_lib::Asset::new("usd").unwrap(),
+        paykit_lib::Decimal::new("1").unwrap(),
+    );
+    let (mut wallet, request) = with_fee(&w, "5", config).await;
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap_err();
+    let shown = quote_of(&refused);
+    w.rail.next_max_fees(fees(&[Some("5"), Some("50")]));
+    let refused = wallet
+        .pay_request(
+            &request,
+            PayOptions::default().with_transfer_confirmed(shown),
+        )
+        .await
+        .outcome
+        .unwrap_err();
+    let Some(Refusal::AttemptFailed(inner)) = refused.refusal() else {
+        panic!("{refused:?}");
+    };
+    assert!(matches!(**inner, Refusal::Transfer { .. }), "{inner:?}");
+    assert!(w.rail.all_executions().is_empty());
+}
+
 /// The fee the method reports for the next transfers, one each, as decimals.
 fn fees(values: &[Option<&str>]) -> Vec<Option<paykit_lib::Decimal>> {
     values

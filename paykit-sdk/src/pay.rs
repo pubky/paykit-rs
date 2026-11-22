@@ -2598,7 +2598,7 @@ impl Paykit {
         let endpoint_id = destination.endpoint_id()?;
         let payload = destination.payload()?;
         let transfer = self.rail.transfer(&endpoint_id, &payload, amount);
-        let cap = self.config.fee_caps.get(&amount.asset);
+        let cap = self.fee_cap(&transfer, amount);
         let kept_cap = cap.map(|cap| cap.as_str().to_owned());
         let reason = transfer_refused(&transfer, amount, cap)
             .or_else(|| by_hand.then_some(conversion::BY_HAND_ONLY));
@@ -2639,6 +2639,17 @@ impl Paykit {
         .into())
     }
 
+    /// The fee cap the app configures for the asset the method transfers (Paykit spec 7.2
+    /// step 1): its fee is in that asset. For a transfer whose amount the method can't tell,
+    /// the asset of the amount paid.
+    fn fee_cap(&self, transfer: &Transfer, amount: &PaymentAmount) -> Option<&paykit_lib::Decimal> {
+        let asset = transfer
+            .amount
+            .as_ref()
+            .map_or(&amount.asset, |transferred| &transferred.asset);
+        self.config.fee_caps.get(asset)
+    }
+
     /// The transfer check again, at the final payment check just before the call, a
     /// repeat's included (Paykit spec 7.2 step 1): the method's transfer now of the amount
     /// paid, the one its host authorized for a payment priced by a rate, must still be
@@ -2675,7 +2686,7 @@ impl Paykit {
                 amount,
                 max_fee,
             }) => (parse(cap)?, Some((amount, max_fee))),
-            None => (self.config.fee_caps.get(&amount.asset).cloned(), None),
+            None => (self.fee_cap(&transfer, &amount).cloned(), None),
         };
         let reason = transfer_refused(&transfer, &amount, cap.as_ref())
             .or_else(|| by_hand.then_some(conversion::BY_HAND_ONLY));
