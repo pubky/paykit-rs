@@ -19,9 +19,16 @@ async fn in_flight(
     w: &World,
     base: &Arc<dyn pubky_switch_client::store::StateStore>,
 ) -> (paykit_lib::AttemptId, [u8; 16]) {
-    let mut wallet = w
-        .wallet_with("wallet", Arc::clone(base), crate::common::day_window())
-        .await;
+    in_flight_with(w, base, crate::common::day_window()).await
+}
+
+/// As [`in_flight`], the wallet planning the payment under `config`.
+async fn in_flight_with(
+    w: &World,
+    base: &Arc<dyn pubky_switch_client::store::StateStore>,
+    config: paykit_sdk::PaykitConfig,
+) -> (paykit_lib::AttemptId, [u8; 16]) {
+    let mut wallet = w.wallet_with("wallet", Arc::clone(base), config).await;
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
@@ -940,12 +947,17 @@ async fn test_recovery_repeat_of_a_request_cancelled_since_withheld_and_paid_onc
 
 #[tokio::test]
 async fn test_recovery_repeat_with_a_fee_grown_since_the_first_dispatch_not_made() {
-    // The payment is in flight with no fee, and the method keeps no history; it now
-    // charges a fee of 5. The repeat would transfer more than the first dispatch was
-    // allowed to: it isn't made, and the attempt stays "may be paid".
+    // Planned under a cap of 1, the payment is in flight with no fee, and the method keeps
+    // no history; it now charges a fee of 5. The repeat would transfer more than the first
+    // dispatch was allowed to: it isn't made, and the attempt stays "may be paid".
     let w = World::new();
     let base = store();
-    let (attempt_id, app_id) = in_flight(&w, &base).await;
+    let (attempt_id, app_id) = in_flight_with(
+        &w,
+        &base,
+        crate::common::btc_fee_cap(crate::common::day_window(), "1"),
+    )
+    .await;
     w.rail.set_declaration(idempotent_without_history());
     w.rail
         .set_max_fee(Some(paykit_lib::Decimal::new("5").unwrap()));
@@ -964,6 +976,54 @@ async fn test_recovery_repeat_with_a_fee_grown_since_the_first_dispatch_not_made
     );
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
     assert_eq!(wallet.payments().await.unwrap()[0].stage, Stage::Paying);
+}
+
+/// A payment planned under `planned`, in flight with no fee, repeated by a wallet opened under
+/// `reopened` once the method, which keeps no history, charges a fee of 5. Returns how many
+/// calls the method got.
+async fn repeat_with_grown_fee(
+    planned: paykit_sdk::PaykitConfig,
+    reopened: paykit_sdk::PaykitConfig,
+) -> u64 {
+    let w = World::new();
+    let base = store();
+    let (attempt_id, app_id) = in_flight_with(&w, &base, planned).await;
+    w.rail.set_declaration(idempotent_without_history());
+    w.rail
+        .set_max_fee(Some(paykit_lib::Decimal::new("5").unwrap()));
+    let mut wallet = w
+        .load_with(
+            &w.alice,
+            Arc::clone(&base),
+            app_id,
+            Arc::clone(&w.clock),
+            reopened,
+        )
+        .await;
+    wallet.resume_payments().await.unwrap();
+    w.rail.pay_calls(&attempt_id)
+}
+
+#[tokio::test]
+async fn test_recovery_repeat_fee_judged_by_the_cap_the_attempt_was_journaled_with() {
+    // The cap at planning decides the repeat, whatever the app's cap is now (Paykit spec 7.2
+    // step 1). Planned under a cap of 1 and reopened with none, the fee of 5 is above the
+    // journaled cap: no repeat. Planned with no cap and reopened under a cap of 1, the
+    // attempt was journaled with no fee check: the repeat is made.
+    let day = crate::common::day_window;
+    let capped = || crate::common::btc_fee_cap(day(), "1");
+    assert_eq!(repeat_with_grown_fee(capped(), day()).await, 1);
+    assert_eq!(repeat_with_grown_fee(day(), capped()).await, 2);
+}
+
+#[tokio::test]
+async fn test_recovery_repeat_with_no_cap_pays_a_grown_fee() {
+    // With no fee cap, nothing bounds the fee between planning and dispatch, a repeat's
+    // included: the fee is what the method reports at the call (Paykit spec 7.2 step 1).
+    assert_eq!(
+        repeat_with_grown_fee(crate::common::day_window(), crate::common::day_window()).await,
+        2
+    );
 }
 
 #[tokio::test]

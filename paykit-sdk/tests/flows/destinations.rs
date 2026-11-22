@@ -1512,13 +1512,19 @@ async fn test_destinations_confirmed_transfer_of_another_destination_refused_aga
 
 #[tokio::test]
 async fn test_destinations_confirmed_transfer_quoted_again_differently_refused_again() {
-    // The method charges a fee of 5 above the app's cap of none: the user sees it and pays
+    // The method charges a fee of 5 above the app's cap of 1: the user sees it and pays
     // anyway. Asked again, the method now charges 6: the payment is refused again with the
     // new fee, nothing paid. Confirmed at 6, it is paid, once.
     let w = World::new();
     w.rail
         .set_max_fee(Some(paykit_lib::Decimal::new("5").unwrap()));
-    let mut wallet = w.wallet("wallet").await;
+    let mut wallet = w
+        .wallet_with(
+            "wallet",
+            crate::common::store(),
+            crate::common::btc_fee_cap(paykit_sdk::PaykitConfig::default(), "1"),
+        )
+        .await;
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
@@ -1615,6 +1621,148 @@ async fn test_destinations_confirmed_retry_pays_a_destination_that_passes_withou
     assert_eq!(w.rail.all_executions().len(), 1);
 }
 
+/// Alice's wallet under `config`, holding bob's one-time request for 1 btc, the method
+/// reporting `fee` as the largest fee of every transfer.
+async fn with_fee(
+    w: &World,
+    fee: &str,
+    config: paykit_sdk::PaykitConfig,
+) -> (paykit_sdk::Paykit, paykit_sdk::RequestRef) {
+    w.rail
+        .set_max_fee(Some(paykit_lib::Decimal::new(fee).unwrap()));
+    let mut wallet = w
+        .wallet_with("wallet", crate::common::store(), config)
+        .await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    (wallet, request)
+}
+
+#[tokio::test]
+async fn test_destinations_fee_with_no_cap_paid_without_asking() {
+    // With no fee cap, Paykit makes no check of the fee and asks nothing for it (Paykit spec
+    // 7.2 step 1): a fee of 5 is paid by hand and automatically, with no confirmation.
+    for automatic in [false, true] {
+        let w = World::new();
+        let (mut wallet, request) = with_fee(&w, "5", paykit_sdk::PaykitConfig::default()).await;
+        let outcome = if automatic {
+            wallet
+                .pay_request_automatically(&request, PayOptions::default())
+                .await
+        } else {
+            wallet.pay_request(&request, PayOptions::default()).await
+        }
+        .outcome
+        .unwrap();
+        assert!(
+            matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
+            "{automatic}: {outcome:?}"
+        );
+        assert_eq!(w.rail.all_executions().len(), 1, "{automatic}");
+    }
+}
+
+#[tokio::test]
+async fn test_destinations_fee_with_no_cap_grown_before_dispatch_still_paid() {
+    // With no fee cap, nothing bounds the fee between planning and dispatch: the fee is
+    // what the method reports at the call (Paykit spec 7.2 step 1).
+    let w = World::new();
+    let (mut wallet, request) = with_fee(&w, "5", paykit_sdk::PaykitConfig::default()).await;
+    w.rail.next_max_fees(fees(&[Some("5"), Some("6")]));
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(
+        matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_destinations_fee_with_no_cap_not_bound_by_a_confirmation_for_another_amount() {
+    // The only destination fixes 2 btc: the user confirms that amount, shown with a fee of
+    // 5. Asked again, the method charges 6. With no fee cap the confirmation was given for
+    // the amount and binds no fee: it is paid, once (Paykit spec 7.2 step 1).
+    let w = World::new();
+    w.rail
+        .set_endpoint_identifiers(vec![crate::common::endpoint("btc-bitcoin-p2wpkh")]);
+    w.rail
+        .set_max_fee(Some(paykit_lib::Decimal::new("5").unwrap()));
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let draft = endpoints_draft(
+        w.clock.now_ms(),
+        &[("btc-bitcoin-p2wpkh", "bc1qaddress?amount=2")],
+    );
+    let request = request_from(&mut shop, w.alice_id(), draft).await;
+    wallet.receive(None).await.unwrap();
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap_err();
+    let shown = quote_of(&refused);
+    assert_eq!(
+        shown.transfer.max_fee,
+        Some(paykit_lib::Decimal::new("5").unwrap())
+    );
+    w.rail
+        .set_max_fee(Some(paykit_lib::Decimal::new("6").unwrap()));
+    let outcome = wallet
+        .pay_request(
+            &request,
+            PayOptions::default().with_transfer_confirmed(shown),
+        )
+        .await
+        .outcome
+        .unwrap();
+    assert!(
+        matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_destinations_fee_at_the_cap_paid_automatically_above_it_asked_by_hand() {
+    // Under a cap of 1: a fee equal to it is paid automatically; one a smallest unit above
+    // it is refused automatically and asked by hand (Paykit spec 7.2 step 1).
+    let capped = || crate::common::btc_fee_cap(paykit_sdk::PaykitConfig::default(), "1");
+    let w = World::new();
+    let (mut wallet, request) = with_fee(&w, "1", capped()).await;
+    let outcome = wallet
+        .pay_request_automatically(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(
+        matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
+        "{outcome:?}"
+    );
+    let w = World::new();
+    let (mut wallet, request) = with_fee(&w, "1.00000001", capped()).await;
+    for automatic in [true, false] {
+        let refused = if automatic {
+            wallet
+                .pay_request_automatically(&request, PayOptions::default())
+                .await
+        } else {
+            wallet.pay_request(&request, PayOptions::default()).await
+        }
+        .outcome
+        .unwrap_err();
+        assert!(
+            matches!(refused.refusal(), Some(Refusal::Transfer { .. })),
+            "{automatic}: {refused:?}"
+        );
+    }
+    assert!(w.rail.all_executions().is_empty());
+}
+
 /// The fee the method reports for the next transfers, one each, as decimals.
 fn fees(values: &[Option<&str>]) -> Vec<Option<paykit_lib::Decimal>> {
     values
@@ -1625,10 +1773,16 @@ fn fees(values: &[Option<&str>]) -> Vec<Option<paykit_lib::Decimal>> {
 
 #[tokio::test]
 async fn test_destinations_fee_grown_since_planning_not_paid() {
-    // The method charges no fee when the payment is planned, and 5 just before the call:
-    // the final check refuses it, `failed` is written, and nothing is paid.
+    // Under a cap of 1, the method charges no fee when the payment is planned, and 5 just
+    // before the call: the final check refuses it, `failed` is written, and nothing is paid.
     let w = World::new();
-    let mut wallet = w.wallet("wallet").await;
+    let mut wallet = w
+        .wallet_with(
+            "wallet",
+            crate::common::store(),
+            crate::common::btc_fee_cap(paykit_sdk::PaykitConfig::default(), "1"),
+        )
+        .await;
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
@@ -1653,12 +1807,18 @@ async fn test_destinations_fee_grown_since_planning_not_paid() {
 
 #[tokio::test]
 async fn test_destinations_fee_grown_past_the_confirmed_quote_not_paid() {
-    // The user confirms a fee of 5; planned at 5, the method charges 6 just before the call:
-    // the final check refuses it, and nothing is paid.
+    // Under a cap of 1, the user confirms a fee of 5; planned at 5, the method charges 6
+    // just before the call: the final check refuses it, and nothing is paid.
     let w = World::new();
     w.rail
         .set_max_fee(Some(paykit_lib::Decimal::new("5").unwrap()));
-    let mut wallet = w.wallet("wallet").await;
+    let mut wallet = w
+        .wallet_with(
+            "wallet",
+            crate::common::store(),
+            crate::common::btc_fee_cap(paykit_sdk::PaykitConfig::default(), "1"),
+        )
+        .await;
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();

@@ -751,8 +751,9 @@ struct Ordered {
 
 /// Why the transfer check refuses `transfer` for `amount` (Paykit spec 7.2 step 1), under
 /// the fee cap `cap`: another amount or asset, or one the method can't tell, or a fee above
-/// the cap. A fee of nothing needs no cap: the default, with no caps, still pays it. The fee
-/// is in the transfer's asset, which is the payment's (checked first). `None` when it passes.
+/// the cap. With no cap Paykit makes no check of the fee: it is left to the payment method,
+/// whose own limit, if any, is the only bound on it. The fee is in the transfer's asset,
+/// which is the payment's (checked first). `None` when it passes.
 fn transfer_refused(
     transfer: &Transfer,
     amount: &PaymentAmount,
@@ -763,12 +764,37 @@ fn transfer_refused(
             "the destination transfers another amount or asset, or one the method can't tell",
         );
     }
+    fee_above_cap(transfer, cap).then_some("a fee above the app's cap")
+}
+
+/// Whether `transfer`'s largest fee is above the fee cap `cap` (Paykit spec 7.2 step 1):
+/// never with no cap.
+fn fee_above_cap(transfer: &Transfer, cap: Option<&paykit_lib::Decimal>) -> bool {
     transfer
         .max_fee
         .as_ref()
         .filter(|fee| !fee.is_zero())
-        .is_some_and(|fee| cap.is_none_or(|cap| fee > cap))
-        .then_some("a fee above the app's cap")
+        .zip(cap)
+        .is_some_and(|(fee, cap)| fee > cap)
+}
+
+/// Whether `quote`, the transfer the method reports now, is the one the user confirmed,
+/// `confirmed` (Paykit spec 7.2 step 1): the same destination, amount and transfer amount,
+/// and the same largest fee when it is above the cap `cap`. The user's choice binds the
+/// fee only above a cap: with no cap, or within it, a confirmation given for another reason
+/// doesn't bind the fee.
+fn confirms(
+    confirmed: &TransferQuote,
+    quote: &TransferQuote,
+    cap: Option<&paykit_lib::Decimal>,
+) -> bool {
+    let feeless = |q: &TransferQuote| TransferQuote {
+        transfer: Transfer::new(q.transfer.amount.clone(), None),
+        ..q.clone()
+    };
+    feeless(confirmed) == feeless(quote)
+        && (!fee_above_cap(&quote.transfer, cap)
+            || confirmed.transfer.max_fee == quote.transfer.max_fee)
 }
 
 /// A fixed rate lasts as long as its request. A period rate needs both clocks.
@@ -2575,17 +2601,23 @@ impl Paykit {
             amount: amount.clone(),
             transfer,
         };
-        if confirmed == Some(&quote)
+        if confirmed.is_some_and(|confirmed| confirms(confirmed, &quote, cap))
             && (price.is_none() || quote.transfer.amount.as_ref() == Some(amount))
         {
+            // The fee is bound only when the user chose one above the cap.
+            let max_fee = fee_above_cap(&quote.transfer, cap)
+                .then(|| {
+                    quote
+                        .transfer
+                        .max_fee
+                        .as_ref()
+                        .map(|f| f.as_str().to_owned())
+                })
+                .flatten();
             return Ok(TransferBound::Confirmed {
                 cap: kept_cap,
                 amount: quote.transfer.amount.as_ref().map(KeptAmount::of),
-                max_fee: quote
-                    .transfer
-                    .max_fee
-                    .as_ref()
-                    .map(|f| f.as_str().to_owned()),
+                max_fee,
             });
         }
         Err(Refusal::Transfer {
@@ -2635,10 +2667,13 @@ impl Paykit {
         };
         let reason = transfer_refused(&transfer, &amount, cap.as_ref())
             .or_else(|| by_hand.then_some(conversion::BY_HAND_ONLY));
+        // A fee above the cap passes only when it is the one the user chose; with no cap, or
+        // within it, the fee is what the method reports at the call (Paykit spec 7.2 step 1).
         let as_confirmed = (entry.price.is_none() || transfer.amount.as_ref() == Some(&amount))
             && confirmed.is_some_and(|(kept_amount, max_fee)| {
                 transfer.amount.as_ref().map(KeptAmount::of) == *kept_amount
-                    && transfer.max_fee.as_ref().map(|f| f.as_str().to_owned()) == *max_fee
+                    && (!fee_above_cap(&transfer, cap.as_ref())
+                        || transfer.max_fee.as_ref().map(|f| f.as_str().to_owned()) == *max_fee)
             });
         let amount_changed = transfer.amount != entry.paid_amount()?;
         let reason = if amount_changed {

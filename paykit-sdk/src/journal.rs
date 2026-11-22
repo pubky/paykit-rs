@@ -173,20 +173,21 @@ impl Destination {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum TransferBound {
-    /// What the user asked for: exactly the amount paid, with a fee of nothing or at most
-    /// `cap`, the app's cap for the asset at planning.
+    /// What the user asked for: exactly the amount paid, with a fee at most `cap`, the app's
+    /// cap for the asset at planning, or any fee with no cap.
     Asked {
         /// The cap, as a decimal; `None` for none.
         cap: Option<String>,
     },
-    /// The selected transfer the user confirmed: its amount and largest fee remain bound
-    /// for every dispatch.
+    /// The selected transfer the user confirmed: its amount remains bound for every
+    /// dispatch, and its largest fee when the user chose one above the cap.
     Confirmed {
         /// The cap at planning, for a transfer that is what the user asked for.
         cap: Option<String>,
         /// The amount confirmed; `None` for one the method couldn't tell.
         amount: Option<KeptAmount>,
-        /// The largest fee confirmed, as a decimal; `None` for none.
+        /// The largest fee the user chose above the cap, as a decimal; `None` when the
+        /// confirmation binds no fee: none, one within the cap, or no cap.
         max_fee: Option<String>,
     },
 }

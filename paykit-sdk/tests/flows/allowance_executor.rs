@@ -2931,6 +2931,32 @@ fn repeat_without_method_history(world: &World) {
 }
 
 #[tokio::test]
+async fn test_executor_pays_a_fee_with_no_cap() {
+    // With no fee cap, an Allowance executor's payment is not refused or held for its fee:
+    // the fee is left to the payment method and counts against no limit (Paykit spec 7.2
+    // step 1, 8.3).
+    use paykit_sdk::PayOutcome;
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    world.rail.set_history_payer(payer.identity());
+    world
+        .rail
+        .set_max_fee(Some(paykit_lib::Decimal::new("0.5").unwrap()));
+    let request = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("1", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    let paid = Box::pin(payer.pay_under_allowance(&request, &key))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(world.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
 async fn test_an_earlier_failure_under_the_same_allowance_allows_a_new_attempt() {
     use paykit_sdk::{rail::Behaviour, PayOutcome};
     let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;

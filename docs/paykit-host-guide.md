@@ -355,7 +355,9 @@ shop, payable to its chosen BTC endpoint for at most 0.0002 BTC at a rate of at 
 before comparing the decimal amounts. If either ceiling is exceeded, keep the payment
 waiting or show this quote to the user. The same standing policy can evaluate the next
 month's quote. The SDK checks the signed source, amount and payment method again. A fee
-above the configured cap still stops automatic payment. For a payment by hand, pass the
+above the configured cap still stops automatic payment. With no cap configured, the SDK
+makes no fee check and asks nothing for the fee: the payment method's own limit, if it
+has one, is the only bound on it. For a payment by hand, pass the
 authorized quote through `PayOptions::with_rate_authorized`.
 
 The SDK checks the automatic payment window, the request and period records, and the

@@ -443,6 +443,14 @@ pub fn day_window() -> PaykitConfig {
     PaykitConfig::default().with_orphan_after_s(86_400)
 }
 
+/// `config` with a fee cap of `cap` btc (Paykit spec 7.2 step 1).
+pub fn btc_fee_cap(config: PaykitConfig, cap: &str) -> PaykitConfig {
+    config.with_fee_cap(
+        paykit_lib::Asset::new("btc").unwrap(),
+        paykit_lib::Decimal::parse(cap).unwrap(),
+    )
+}
+
 pub fn store() -> Arc<dyn StateStore> {
     Arc::new(MemoryStore::new())
 }
