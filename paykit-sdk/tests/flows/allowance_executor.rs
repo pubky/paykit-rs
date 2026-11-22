@@ -3468,6 +3468,7 @@ async fn test_executor_holds_a_period_whose_record_diverges_after_paying_is_jour
     );
     assert!(world.rail.all_executions().is_empty());
     assert!(base.fired(), "the record diverged after Paying");
+}
 
 /// An Allowance that expires at `expires`, its reservation written 5 s before and its batch's
 /// answer taking `delay_ms`, so the first dispatch is judged at `expires - 5_000 + delay_ms`.
