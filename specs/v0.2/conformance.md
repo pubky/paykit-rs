@@ -424,11 +424,11 @@ Strict ordinary admission keeps each existing family within its stated count bou
 
 ### Claim for a payment without a request
 
-For wire 1.5, require the blinded input, derivation preimage and obligation ID for a fixed payer naming key and 16-byte attempt ID. Two wallets of the same payer derive the same claim key for the same attempt. Changing the payer’s key or the attempt changes the result.
+Library and vector checks: for wire 1.5, require the blinded input, `key_material_hex` and obligation ID for a fixed payer naming key and 16-byte attempt ID (vectors: `identifiers.json` `obligations`). Two wallets of the same payer derive the same claim key for the same attempt. Changing the payer's key or the attempt changes the result.
 
-For both public and private online payments, verify that a lost submission reply, restoration and a late verified receipt use the original claim and attempt with no second payment call. A second authorized wallet uses the authenticated payer activity to find that claim. Check the live owner and the orphan resolution allowed by Section 7.3, including a receipt with the wrong sender or attempt that leaves the claim unresolved. For an eligible offline public payment, verify late recording against the same derived claim. A private or single-use destination requires the payer’s switch before dispatch (Section 8.4).
+Required runtime tests: for both public and private online payments, verify that a lost submission reply, restoration and a late verified receipt use the original claim and attempt with no second payment call. A second authorized wallet uses the payment's `payer_activity` record to find that claim. Check the live owner and the orphan resolution allowed by Section 7.3, including a receipt with the wrong sender or attempt that leaves the claim unresolved. For an eligible offline public payment, verify late recording against the same derived claim.
 
-Supply a claim only under the key derived from the unblinded attempt ID, with no other evidence of settlement. For each payment mode, verify from its claim lookups that the recovering wallet never queries the unblinded key. It leaves the attempt unresolved and makes no further payment call.
+Hold a claim carrying the attempt's `attempt_id` only at `derive("paykit/v1/obligation", "payment", attempt ID)`, with the attempt ID not blinded, and no other evidence of settlement. In each payment mode the recovering app neither reads that key nor takes that claim as the payment's: it finds no claim at the obligation of wire 1.5, leaves the attempt unresolved and makes no further payment call (wire 1.5).
 
 ### Recording an offline payment
 
