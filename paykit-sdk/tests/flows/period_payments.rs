@@ -629,6 +629,60 @@ async fn test_period_payments_later_period_with_per_period_endpoints_has_no_dest
 }
 
 #[tokio::test]
+async fn test_period_payments_details_expired_by_the_attempt_answer_not_paid() {
+    // The wallet's device clock runs ten seconds behind the service. February is paid only
+    // to its period details' destination. The service time first reaches their expiry in
+    // the attempt's answer: the attempt is written failed before dispatch, with no payment
+    // method call, and the refusal says the device clock is behind (Paykit spec 7.2, check
+    // the destination, the last time immediately before dispatch).
+    let w = World::new();
+    let base = Arc::new(StageStore::default());
+    let mut shop = w.shop().await;
+    let mut wallet = w
+        .wallet_on("wallet", Arc::clone(&base) as Arc<dyn StateStore>)
+        .await;
+    let app_id = wallet.app_id();
+    let (request, sale) = subscribed_to(
+        &w,
+        &mut shop,
+        &mut wallet,
+        monthly().with_per_period_endpoints(),
+    )
+    .await;
+    let period = february();
+    w.clock.set_ms(period.starts_at);
+    let expires = period.starts_at + 120_000;
+    shop.send_period_details(&sale, details(period, "lnbc1february", expires))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    drop(wallet);
+    w.clock.set_ms(expires - 5_000);
+    let behind = Arc::new(pubky_switch_client::clock::TestClock::new(expires - 15_000));
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&base) as Arc<dyn StateStore>,
+            app_id,
+            behind,
+        )
+        .await;
+    let clock = Arc::clone(&w.clock);
+    base.on_stage("recorded", move || clock.set_ms(expires));
+    let refused = by_user(&mut wallet, &request, period, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{refused:?}").contains("the device clock is behind"),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    let payment = wallet.payments().await.unwrap().remove(0);
+    assert_eq!(payment.stage, paykit_sdk::Stage::Finished);
+    assert_eq!(w.rail.pay_calls(&payment.attempt_id), 0);
+}
+
+#[tokio::test]
 async fn test_period_payments_before_its_start_only_by_the_users_early_confirmation() {
     let w = World::new();
     let mut shop = w.shop().await;

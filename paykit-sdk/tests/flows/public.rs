@@ -226,6 +226,57 @@ async fn test_public_expired_or_stale_record_refused() {
 }
 
 #[tokio::test]
+async fn test_public_record_expired_by_the_service_time_alone_is_refused() {
+    // The wallet's device clock runs ten seconds behind the service. Once the service time
+    // it verified reaches the record's expiry, by its own expires_at and by its updated_at
+    // plus the record age limit alike, the record has expired, and the refusal says the
+    // device clock is behind (Paykit spec 7.2, check the destination).
+    for age_limit in [false, true] {
+        let w = World::new();
+        let wallet_store = crate::common::store();
+        let wallet = w
+            .wallet_on("wallet", std::sync::Arc::clone(&wallet_store))
+            .await;
+        let app_id = wallet.app_id();
+        drop(wallet);
+        let _shop = w.shop().await;
+        let expires = if age_limit {
+            // A null expires_at lasts until updated_at plus the 90-day age limit.
+            publish(&w, tip_jar(), None);
+            w.clock.now_ms() + 90 * DAY_MS
+        } else {
+            publish(&w, tip_jar(), Some(w.clock.now_ms() + HOUR_MS));
+            w.clock.now_ms() + HOUR_MS
+        };
+        w.clock.set_ms(expires);
+        let behind =
+            std::sync::Arc::new(pubky_switch_client::clock::TestClock::new(expires - 10_000));
+        let mut wallet = w
+            .load_on_clock(&w.alice, wallet_store, app_id, behind)
+            .await;
+        wallet.receive(None).await.unwrap();
+        assert!(wallet
+            .app()
+            .highest_service_time()
+            .is_some_and(|at| at >= expires));
+        let refused = wallet
+            .pay_without_request(public_to_bob(&w))
+            .await
+            .outcome
+            .unwrap_err();
+        assert!(
+            matches!(refused.refusal(), Some(Refusal::NoDestination(_))),
+            "{age_limit}: {refused:?}"
+        );
+        assert!(
+            format!("{refused:?}").contains("the device clock is behind"),
+            "{age_limit}: {refused:?}"
+        );
+        assert!(w.rail.all_executions().is_empty(), "{age_limit}");
+    }
+}
+
+#[tokio::test]
 async fn test_public_record_without_public_endpoints_offers_none() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;

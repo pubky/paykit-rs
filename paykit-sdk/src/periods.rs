@@ -1257,7 +1257,9 @@ impl Paykit {
             .as_ref()
             .map_or_else(Vec::new, |held| valid_details(held, &body));
         let mut destinations = if per_period_destination {
-            let now = self.now();
+            // A period details' destination is used while neither clock is at its expiry
+            // (Paykit spec 7.2).
+            let clocks = self.clocks();
             let named = options.selected_period_rate();
             let mut destinations: Vec<_> = details
                 .iter()
@@ -1267,7 +1269,7 @@ impl Paykit {
                         return false;
                     };
                     detail.payment_endpoints.is_some()
-                        && now < detail.expires_at
+                        && !clocks.past(detail.expires_at)
                         && destination_app_permitted(&body, signed.cert().app_id())
                         && named.is_none_or(|id| id == signed.message().msg_id)
                 })

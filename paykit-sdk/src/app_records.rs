@@ -71,7 +71,7 @@ use pubky_switch_core::sig::SignedDoc;
 use serde::{Deserialize, Serialize};
 
 use crate::destination::{
-    current, homeserver_window, payee_copy_usable, public_read_window, Carrier, Need,
+    current, homeserver_window, payee_copy_usable, public_read_window, Carrier, Clocks, Need,
 };
 use crate::error::{PaykitError, Refusal, Result};
 use crate::journal::Destination;
@@ -244,14 +244,14 @@ pub(crate) fn usable(
     app_id: &[u8; 16],
     record: &AppRecord,
     doc: &IdentityDoc,
-    now: u64,
+    clocks: Clocks,
 ) -> std::result::Result<UsableRecord, PublicAppFailureReason> {
     let member = PaykitMember::read(record).map_err(|error| {
         PublicAppFailureReason::Refused(format!(
             "Paykit wire 3.2: the record's Paykit member doesn't read: {error}"
         ))
     })?;
-    check_record_lifetime_and_certificate(app_id, record, doc, now)?;
+    check_record_lifetime_and_certificate(app_id, record, doc, clocks)?;
     Ok(UsableRecord {
         record: record.clone(),
         member,
@@ -262,18 +262,20 @@ fn check_record_lifetime_and_certificate(
     app_id: &[u8; 16],
     record: &AppRecord,
     doc: &IdentityDoc,
-    now: u64,
+    clocks: Clocks,
 ) -> std::result::Result<(), PublicAppFailureReason> {
-    crate::destination::check_record_time(record, now)
-        .map_err(|reason| PublicAppFailureReason::Expired(reason.into()))?;
-    if now >= record.trusted_until(doc.record_max_age_ms() / 1000) {
-        return Err(PublicAppFailureReason::Expired(
-            "Paykit spec 4: the record is past the identity's record age limit".into(),
-        ));
+    crate::destination::check_record_time(record, clocks)
+        .map_err(PublicAppFailureReason::Expired)?;
+    let until = record.trusted_until(doc.record_max_age_ms() / 1000);
+    if clocks.past(until) {
+        return Err(PublicAppFailureReason::Expired(format!(
+            "Paykit spec 4: the record is past the identity's record age limit{}",
+            clocks.note(until)
+        )));
     }
     let carrier = Carrier::Record(Box::new(record.clone()));
     // The app's standing, with the record's certificate (the record age limit passed above).
-    current(doc, app_id, &carrier, now).map_err(PublicAppFailureReason::Refused)
+    current(doc, app_id, &carrier, clocks).map_err(PublicAppFailureReason::Refused)
 }
 
 type AppRecordResult = std::result::Result<Option<Vec<u8>>, TransportError>;
@@ -566,6 +568,11 @@ impl Paykit {
         fetched: Vec<([u8; 16], AppRecordResult)>,
         failures: &mut Vec<PublicAppFailure>,
     ) -> Result<Vec<UsableRecord>> {
+        // A record's expiry is judged by both clocks (Paykit spec 7.2).
+        let clocks = Clocks {
+            device: now,
+            service: self.service_time(),
+        };
         let mut usable_records = Vec::new();
         let mut room = Room::new();
         for (app_id, bytes) in fetched {
@@ -611,7 +618,7 @@ impl Paykit {
                         // the record without retaining it or taking room from later apps.
                         let over_bound = PaykitMember::read(&record)
                             .is_ok_and(|member| room.remaining_after(&member).is_none())
-                            && check_record_lifetime_and_certificate(&app_id, &record, doc, now)
+                            && check_record_lifetime_and_certificate(&app_id, &record, doc, clocks)
                                 .is_ok()
                             && !view.see(&record, now);
                         let reason = if over_bound {
@@ -679,7 +686,7 @@ impl Paykit {
             if PaykitMember::read(used).is_ok_and(|member| member.public_endpoints.is_empty()) {
                 continue;
             }
-            match usable(&app_id, used, doc, now) {
+            match usable(&app_id, used, doc, clocks) {
                 // An app's endpoints are taken whole or not at all (Paykit spec 4).
                 Ok(usable) if room.take(&usable.member) => usable_records.push(usable),
                 Ok(_) => failures.push(fail(PublicAppFailureReason::OverBound)),
@@ -753,6 +760,14 @@ mod tests {
     use crate::destination::carries;
     use crate::testkit::{object, Party, NOW};
 
+    /// The device clock at `now`, with no service time verified.
+    fn device(now: u64) -> Clocks {
+        Clocks {
+            device: now,
+            service: None,
+        }
+    }
+
     /// A record served at `app_id`'s path, read and checked as one used.
     fn usable_bytes(
         payee: &[u8; 32],
@@ -761,7 +776,13 @@ mod tests {
         doc: &IdentityDoc,
         now: u64,
     ) -> Option<UsableRecord> {
-        usable(app_id, &read_record(payee, app_id, bytes)?, doc, now).ok()
+        usable(
+            app_id,
+            &read_record(payee, app_id, bytes)?,
+            doc,
+            device(now),
+        )
+        .ok()
     }
 
     const DAY_MS: u64 = 86_400_000;
@@ -801,13 +822,13 @@ mod tests {
         let destination = usable.destination(id, payload);
         let carrier = Carrier::Record(Box::new(usable.record));
         assert_eq!(
-            carries(&bob.id(), &destination, &carrier, None, when),
+            carries(&bob.id(), &destination, &carrier, None, device(when)),
             Ok(())
         );
         // Another payload isn't carried.
         let mut other = destination.clone();
         other.payload = "lno1other".into();
-        assert!(carries(&bob.id(), &other, &carrier, None, when).is_err());
+        assert!(carries(&bob.id(), &other, &carrier, None, device(when)).is_err());
     }
 
     #[test]
@@ -1026,7 +1047,7 @@ mod tests {
         now: u64,
     ) -> Option<PublicAppFailureReason> {
         let record = read_record(&app.id(), &app.app_id(), bytes).unwrap();
-        usable(&app.app_id(), &record, doc, now).err()
+        usable(&app.app_id(), &record, doc, device(now)).err()
     }
 
     #[test]

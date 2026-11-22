@@ -289,7 +289,7 @@ impl Paykit {
         by: Initiator,
         confirmed: Option<UserConfirmed>,
     ) -> Result<std::result::Result<PeerIdentity, Refusal>> {
-        if let Err(why) = carries(payee, destination, carrier, request_hash, self.now()) {
+        if let Err(why) = carries(payee, destination, carrier, request_hash, self.clocks()) {
             return Ok(Err(Refusal::Destination(why)));
         }
         // Switch spec 4.3 asks for the switch's confirmation for public endpoints only; a
@@ -320,7 +320,7 @@ impl Paykit {
                 .await?;
                 match checked {
                     Ok((checked, records)) if records.iter().any(|r|
-                        record_carries(payee, destination, &r.record, self.now()).is_ok()) => identity = checked,
+                        record_carries(payee, destination, &r.record, self.clocks()).is_ok()) => identity = checked,
                     Ok(_) => return Ok(Err(Refusal::Destination(
                         "Paykit spec 7.2: the payee app no longer offers the selected public endpoint".into(),
                     ))),
@@ -406,8 +406,13 @@ impl Paykit {
         doc: &IdentityDoc,
         now: u64,
     ) -> std::result::Result<(), Refusal> {
-        carries(payee, destination, carrier, request_hash, now).map_err(Refusal::Destination)?;
-        current(doc, &destination.app_id, carrier, now).map_err(Refusal::Destination)
+        // Judged again immediately before dispatch, by both clocks (Paykit spec 7.2).
+        let clocks = Clocks {
+            device: now,
+            service: self.service_time(),
+        };
+        carries(payee, destination, carrier, request_hash, clocks).map_err(Refusal::Destination)?;
+        current(doc, &destination.app_id, carrier, clocks).map_err(Refusal::Destination)
     }
 }
 
@@ -556,19 +561,58 @@ impl Carrier {
     }
 }
 
-/// The carrier carries the destination, names the obligation, and hasn't expired (Paykit
-/// spec 4, 5, 7.2). A record's age limit needs the identity's `identity.json`, and is checked
-/// with the app's standing ([`current`]).
+/// The clocks a destination's expiry is judged by (Paykit spec 7.2, check the destination):
+/// the device clock, and the highest service time the app has verified for its own account
+/// at its current service. A destination has expired once its expiry is at or before the
+/// later of the two, so a device clock running behind a verified service time never keeps an
+/// expired destination usable; with no service time verified, the device clock decides.
+/// Other checks, such as a record's `updated_at` ahead of the clock, stay on the device clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Clocks {
+    pub(crate) device: u64,
+    pub(crate) service: Option<u64>,
+}
+
+impl Clocks {
+    /// Whether a destination expiring at `at` has expired by the later clock (Paykit spec 7.2).
+    pub(crate) fn past(&self, at: u64) -> bool {
+        paykit_lib::periods::destination_expired(at, self.device, self.service)
+    }
+
+    /// What a refusal of an expiry at `at` adds when only the service time shows it passed:
+    /// the payer tells the user that its device clock is behind the service's time.
+    pub(crate) fn note(&self, at: u64) -> &'static str {
+        if at > self.device {
+            ", by the service's time: the device clock is behind it"
+        } else {
+            ""
+        }
+    }
+}
+
+impl Paykit {
+    /// The device clock now, and the highest service time verified, to judge an expiry by.
+    pub(crate) fn clocks(&self) -> Clocks {
+        Clocks {
+            device: self.now(),
+            service: self.service_time(),
+        }
+    }
+}
+
+/// The carrier carries the destination, names the obligation, and hasn't expired by either
+/// of `clocks` (Paykit spec 4, 5, 7.2). A record's age limit needs the identity's
+/// `identity.json`, and is checked with the app's standing ([`current`]).
 pub(crate) fn carries(
     payee: &[u8; 32],
     destination: &Destination,
     carrier: &Carrier,
     request_hash: Option<&[u8; 32]>,
-    now: u64,
+    clocks: Clocks,
 ) -> std::result::Result<(), String> {
     let carrier = match carrier {
         Carrier::Message(message) => message,
-        Carrier::Record(record) => return record_carries(payee, destination, record, now),
+        Carrier::Record(record) => return record_carries(payee, destination, record, clocks),
     };
     if &carrier.sender() != payee {
         return Err("Paykit spec 6: the destination comes from another identity".into());
@@ -605,8 +649,11 @@ pub(crate) fn carries(
                     "Paykit spec 7.2: the period details do not carry the destination".into(),
                 );
             }
-            if now >= details.expires_at {
-                return Err("Paykit wire 4.9: the period details have expired".into());
+            if clocks.past(details.expires_at) {
+                return Err(format!(
+                    "Paykit wire 4.9: the period details have expired{}",
+                    clocks.note(details.expires_at)
+                ));
             }
             Ok(())
         }
@@ -618,9 +665,12 @@ pub(crate) fn carries(
             if !listed || destination.list_version != Some(list.version) {
                 return Err("Paykit spec 7.2: the list doesn't carry the destination".into());
             }
-            let accepted = carrier.accepted_at().unwrap_or(0);
-            if now >= list.usable_until(accepted) {
-                return Err("Paykit spec 5: the Private Payment List has expired".into());
+            let until = list.usable_until(carrier.accepted_at().unwrap_or(0));
+            if clocks.past(until) {
+                return Err(format!(
+                    "Paykit spec 5: the Private Payment List has expired{}",
+                    clocks.note(until)
+                ));
             }
             Ok(())
         }
@@ -648,7 +698,7 @@ fn record_carries(
     payee: &[u8; 32],
     destination: &Destination,
     record: &AppRecord,
-    now: u64,
+    clocks: Clocks,
 ) -> std::result::Result<(), String> {
     if destination.source().map_err(|e| e.to_string())? != DestinationSource::Public {
         return Err("Paykit spec 7.2: no verified message carries the destination".into());
@@ -668,20 +718,24 @@ fn record_carries(
     {
         return Err("Paykit spec 7.2: the record doesn't carry the destination".into());
     }
-    check_record_time(record, now).map_err(str::to_owned)
+    check_record_time(record, clocks)
 }
 
-/// Time limits signed into the record itself (Paykit spec 4). The identity document
-/// supplies the additional age limit when the payer checks the publishing app.
+/// Time limits signed into the record itself (Paykit spec 4): an `updated_at` ahead of the
+/// device clock, and an `expires_at` passed by either clock. The identity document supplies
+/// the additional age limit when the payer checks the publishing app.
 pub(crate) fn check_record_time(
     record: &AppRecord,
-    now: u64,
-) -> std::result::Result<(), &'static str> {
-    if record.is_ahead(now) {
-        return Err("Paykit spec 4: the record's updated_at is ahead of the clock");
+    clocks: Clocks,
+) -> std::result::Result<(), String> {
+    if record.is_ahead(clocks.device) {
+        return Err("Paykit spec 4: the record's updated_at is ahead of the device clock".into());
     }
-    if record.expires_at().is_some_and(|at| at <= now) {
-        return Err("Paykit spec 4: the record is past its expires_at");
+    if let Some(at) = record.expires_at().filter(|at| clocks.past(*at)) {
+        return Err(format!(
+            "Paykit spec 4: the record is past its expires_at{}",
+            clocks.note(at)
+        ));
     }
     Ok(())
 }
@@ -698,8 +752,9 @@ pub(crate) fn current(
     doc: &IdentityDoc,
     app_id: &[u8; 16],
     carrier: &Carrier,
-    now: u64,
+    clocks: Clocks,
 ) -> std::result::Result<(), String> {
+    let now = clocks.device;
     let cert = carrier.cert();
     let allowed = match carrier {
         Carrier::Message(message) => {
@@ -712,8 +767,12 @@ pub(crate) fn current(
     // The record age limit is the identity's (Paykit spec 4): a record is used only until
     // its `updated_at` plus `record_max_age`, whatever `expires_at` it signed.
     if let Carrier::Record(record) = carrier {
-        if now >= record.trusted_until(doc.record_max_age_ms() / 1000) {
-            return Err("Paykit spec 4: the record is past the identity's record age limit".into());
+        let until = record.trusted_until(doc.record_max_age_ms() / 1000);
+        if clocks.past(until) {
+            return Err(format!(
+                "Paykit spec 4: the record is past the identity's record age limit{}",
+                clocks.note(until)
+            ));
         }
     }
     Ok(())
@@ -769,6 +828,78 @@ mod tests {
 
     use super::*;
     use crate::testkit::{object, Party, NOW};
+
+    /// [`super::carries`] on the device clock at `now`, with no service time verified.
+    fn carries(
+        payee: &[u8; 32],
+        destination: &Destination,
+        carrier: &Carrier,
+        request_hash: Option<&[u8; 32]>,
+        now: u64,
+    ) -> std::result::Result<(), String> {
+        super::carries(
+            payee,
+            destination,
+            carrier,
+            request_hash,
+            Clocks {
+                device: now,
+                service: None,
+            },
+        )
+    }
+
+    /// [`super::current`] on the device clock at `now`, with no service time verified.
+    fn current(
+        doc: &IdentityDoc,
+        app_id: &[u8; 16],
+        carrier: &Carrier,
+        now: u64,
+    ) -> std::result::Result<(), String> {
+        super::current(
+            doc,
+            app_id,
+            carrier,
+            Clocks {
+                device: now,
+                service: None,
+            },
+        )
+    }
+
+    #[test]
+    fn test_destination_expiry_judged_by_the_later_clock() {
+        let (alice, bob) = parties();
+        let expires = NOW + 3_600_000;
+        let list = bob.message(
+            &alice,
+            "paykit.private_payment_list",
+            vec![],
+            list_body(expires),
+        );
+        let dest = destination(&bob, "btc-bitcoin-p2wpkh", "bc1q", DestinationSource::List);
+        let judge = |device: u64, service: Option<u64>| {
+            super::carries(
+                &bob.id(),
+                &dest,
+                &Carrier::Message(Box::new(list.clone())),
+                None,
+                Clocks { device, service },
+            )
+        };
+        // A device clock behind a verified service time at the expiry: expired, and the
+        // refusal says the device clock is behind.
+        let behind = judge(expires - 1, Some(expires)).unwrap_err();
+        assert!(behind.contains("the device clock is behind"), "{behind}");
+        // A service time behind a device clock at the expiry: expired, by the device clock.
+        let ahead = judge(expires, Some(expires - 1)).unwrap_err();
+        assert!(!ahead.contains("the device clock is behind"), "{ahead}");
+        // A millisecond before the expiry by both clocks, or by the device clock with no
+        // service time verified: usable.
+        assert_eq!(judge(expires - 1, Some(expires - 1)), Ok(()));
+        assert_eq!(judge(expires - 1, None), Ok(()));
+        assert!(judge(expires, None).is_err());
+    }
 
     fn request_body() -> serde_json::Map<String, serde_json::Value> {
         object(json!({

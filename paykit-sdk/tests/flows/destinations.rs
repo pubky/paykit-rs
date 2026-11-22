@@ -1,11 +1,13 @@
 //! Destination checks before paying (Paykit spec 4, 7.2): only from the payee's current app.
 
+use std::sync::Arc;
+
 use paykit_sdk::{PayOptions, Refusal, RequestStatus};
 use pubky_switch_client::app::UserConfirmed;
 use pubky_switch_client::clock::Clock;
 use pubky_switch_core::records::RemovedApp;
 
-use crate::common::{draft, list_version, request_from, World};
+use crate::common::{draft, endpoint, list_version, request_from, World, HOUR_MS};
 
 #[tokio::test]
 async fn test_destinations_from_a_revoked_app_refused() {
@@ -1956,4 +1958,46 @@ async fn test_destinations_used_up_list_beside_a_list_the_method_doesnt_pay_aske
     );
     assert!(asked_for_a_list(&mut shop).await);
     assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_destinations_list_expired_by_the_service_time_alone_is_refused() {
+    // The wallet's device clock runs ten seconds behind the service. Once the service time
+    // it verified reaches the list's expiry, 30 days after its inbox accepted the list, the
+    // destination has expired, also for a payment by hand, and the refusal says the device
+    // clock is behind (Paykit spec 7.2, check the destination).
+    let w = World::new();
+    let wallet_store = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&wallet_store)).await;
+    let app_id = wallet.app_id();
+    let mut shop = w.shop().await;
+    let sent = w.clock.now_ms();
+    w.list_to_alice(&mut shop, &[app_id], list_version(1, 1))
+        .await;
+    wallet.receive(None).await.unwrap();
+    drop(wallet);
+    let expires = sent + 30 * HOUR_MS * 24;
+    w.clock.set_ms(expires);
+    let behind = Arc::new(pubky_switch_client::clock::TestClock::new(expires - 10_000));
+    let mut wallet = w
+        .load_on_clock(&w.alice, wallet_store, app_id, behind)
+        .await;
+    wallet.receive(None).await.unwrap();
+    assert!(wallet
+        .app()
+        .highest_service_time()
+        .is_some_and(|at| at >= expires));
+    let refused = wallet
+        .pay_without_request(
+            paykit_sdk::UnrequestedPayment::new(w.bob_id(), crate::common::btc("0.001"))
+                .with_options(PayOptions::default().with_endpoint(endpoint("btc-bitcoin-p2wpkh"))),
+        )
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        format!("{refused:?}").contains("the device clock is behind"),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
 }

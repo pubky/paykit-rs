@@ -1433,7 +1433,7 @@ impl Paykit {
                     &peer.doc,
                     &stored.message().from.app_id,
                     &first.carrier,
-                    self.now(),
+                    self.clocks(),
                 )
                 .map_err(Refusal::NoDestination)?;
             }
@@ -1897,7 +1897,7 @@ impl Paykit {
             RequestDestination::Endpoints(_) => {
                 let carrier = Carrier::Message(Box::new(request.clone()));
                 let app_id = request.message().from.app_id;
-                crate::destination::current(&identity.doc, &app_id, &carrier, self.now())
+                crate::destination::current(&identity.doc, &app_id, &carrier, self.clocks())
                     .map_err(|why| Refusal::Destination(why).into())
             }
             _ => Ok(()),
@@ -2077,7 +2077,16 @@ impl Paykit {
             let now = self.now();
             lists.retain(|l| {
                 let carrier = Carrier::Message(Box::new(l.list.clone()));
-                crate::destination::current(&identity.doc, &l.app_id, &carrier, now).is_ok()
+                crate::destination::current(
+                    &identity.doc,
+                    &l.app_id,
+                    &carrier,
+                    crate::destination::Clocks {
+                        device: now,
+                        service: self.service_time(),
+                    },
+                )
+                .is_ok()
             });
         }
         // Taken after the read of the payee's identity.json: a list that expired while it
