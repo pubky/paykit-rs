@@ -36,8 +36,8 @@
 //! | `ar/<payee>/<app_id>` | a payee app's records that took part in its comparison, for its public endpoints | |
 //! | `ct` | the acceptance time of the last Paykit entry the receive step passed | |
 //! | `rh` | the cursor verdict, earlier holds and block windows for restored requests (`hold.rs`) | |
-//! | `hc/<record key>` | the user confirmed the current hold on a request | |
-//! | `hb/<record key>` | the backup's confirmation of an earlier hold | |
+//! | `hc/<record key>` | the hold identifier (`he`) the user confirmed a held request under | |
+//! | `hb/<record key>` | the hold identifier of the restore that carried the backup's confirmation of an earlier hold | |
 //! | `rsc/<record key>` | an Allowance whose consent this restore marked for confirmation, until the held cursor settles it | |
 //! | `pl` | the latest provider-loss boundary followed, retained across restore (`loss.rs`, Paykit spec 7.3) | |
 //! | `pn/<obligation>` | the user states this obligation was not paid before the kept loss; a newer loss clears these statements | |
@@ -700,8 +700,6 @@ impl Stored for bool {
             | StateKey::MissedEndUnknown
             | StateKey::MissedConsents
             | StateKey::PayerPassOwed
-            | StateKey::HoldConfirmed(_)
-            | StateKey::HoldConfirmedBefore(_)
             | StateKey::RestoreConsent(_)
             | StateKey::NotPaidBeforeLoss(_)
             | StateKey::FloorDeleted
@@ -718,10 +716,14 @@ impl Stored for bool {
 
 impl sealed::Sealed for crate::hold::HoldEpoch {}
 
+/// The current hold identifier (`he`), and the one a confirmation was given under (`hc/`,
+/// `hb/`), which confirms nothing once `he` has changed.
 impl Stored for crate::hold::HoldEpoch {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
-            StateKey::HoldEpoch => Ok(()),
+            StateKey::HoldEpoch | StateKey::HoldConfirmed(_) | StateKey::HoldConfirmedBefore(_) => {
+                Ok(())
+            }
             _ => corrupt(),
         }
     }
@@ -2345,9 +2347,11 @@ pub(crate) enum StateKey {
         payee: [u8; 32],
         msg_id: String,
     },
-    /// `hc/<record key>`: the user's confirmation of a held request.
+    /// `hc/<record key>`: the user's confirmation of a held request, holding the hold
+    /// identifier it was given under.
     HoldConfirmed([u8; 32]),
-    /// A request confirmation carried from before the restore.
+    /// A request confirmation carried from before the restore, holding the identifier of
+    /// the restore that carried it.
     HoldConfirmedBefore([u8; 32]),
     /// An Allowance consent held specifically by this restore.
     RestoreConsent([u8; 32]),

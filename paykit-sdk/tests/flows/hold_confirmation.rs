@@ -826,3 +826,98 @@ async fn test_hold_confirmation_restore_commit_refusal_installs_no_epoch() {
 async fn test_hold_confirmation_restore_lost_commit_answer_retains_the_epoch() {
     Box::pin(restore_commit(true)).await;
 }
+
+/// The wallet confirms a request held by a `missed` item and pays, but the attempt's batch
+/// goes unanswered and is kept. A second `missed` item is read before the kept batch is sent
+/// again, so the batch's confirmation is applied under the newer hold.
+async fn confirmation_applied_after_a_newer_hold(w: &World) -> (Paykit, RequestRef) {
+    use pubky_switch_client::testing::Fault;
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    missed(w, &mut wallet).await;
+    let confirmed = shown(&wallet, &request).await;
+    w.alice.switch().fail_next(Fault::Unanswered {
+        path: "/ops".into(),
+        after: 0,
+    });
+    wallet
+        .pay_request(
+            &request,
+            PayOptions::default().with_possibly_cancelled_confirmed(confirmed),
+        )
+        .await
+        .outcome
+        .expect_err("the attempt's batch is unanswered");
+    assert!(w.rail.all_executions().is_empty());
+    w.clock.advance_ms(1_000);
+    w.alice.switch().fail_next(Fault::Unreachable {
+        path: "/ops".into(),
+        after: 0,
+    });
+    missed(w, &mut wallet).await;
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"hc/")
+        .await
+        .unwrap()
+        .is_empty());
+    // The kept batch is sent again and applied, its confirmation with it.
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"hc/")
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the kept batch's confirmation is applied after the newer hold"
+    );
+    (wallet, request)
+}
+
+#[tokio::test]
+async fn test_hold_confirmation_applied_after_a_newer_hold_confirms_nothing() {
+    let w = World::new();
+    let (mut wallet, request) = confirmation_applied_after_a_newer_hold(&w).await;
+    let view = wallet.request(&request).await.unwrap();
+    assert_ne!(view.status, RequestStatus::Paid, "{view:?}");
+    let held = view.held.expect("the newer hold stands");
+    wallet.resume_payments().await.unwrap();
+    assert!(w.rail.all_executions().is_empty());
+    wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .expect_err("the newer hold still needs the user's confirmation");
+    assert!(w.rail.all_executions().is_empty());
+    let result = wallet
+        .pay_request(
+            &request,
+            PayOptions::default().with_possibly_cancelled_confirmed(held),
+        )
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(result, PayOutcome::Paid { .. }), "{result:?}");
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_hold_confirmation_applied_after_a_newer_hold_is_not_carried_by_a_restore() {
+    let w = World::new();
+    let (mut wallet, request) = confirmation_applied_after_a_newer_hold(&w).await;
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let restored = restored(&w, &backup).await;
+    assert!(restored
+        .app()
+        .protocol_scan("paykit", b"hb/")
+        .await
+        .unwrap()
+        .is_empty());
+    shown(&restored, &request).await;
+    assert!(w.rail.all_executions().is_empty());
+}

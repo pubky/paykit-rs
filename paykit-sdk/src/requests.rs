@@ -2587,9 +2587,10 @@ impl Paykit {
         let signed = self.sign(request.payee, kind, vec![request.request_hash], body)?;
         let msg_id = signed.msg_id().to_owned();
         let mut tx = Tx::default();
-        if let Some(record_key) = end_hold {
+        if let Some(end) = end_hold {
             // The hold ends with the acceptance, and stays when it isn't recorded.
-            tx.put(&key::hold_confirmed(&record_key), &true)?;
+            let (key, epoch) = end.confirmation();
+            tx.put(&key, &epoch)?;
         }
         if answer == Answer::Cancel {
             tx.put(
