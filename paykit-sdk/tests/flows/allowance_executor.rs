@@ -1121,16 +1121,18 @@ async fn test_first_grant_restore_holds_evidence_without_the_original_grant() {
     }
 }
 
+/// After the Allowance at `record` was withdrawn: the executor's resume and a payment under
+/// it are both refused, and nothing is written. Returns the two refusals.
 pub(super) async fn attempt_after_withdrawal(
     world: &World,
     payer: &mut paykit_sdk::Paykit,
     shop: &mut paykit_sdk::Paykit,
     record: &[u8; 32],
-) -> paykit_sdk::PaykitError {
+) -> (paykit_sdk::PaykitError, paykit_sdk::PaykitError) {
     let writes = world.record_writes(&world.alice, record);
-    assert!(Box::pin(payer.resume_allowance_executor(record))
+    let grant = Box::pin(payer.resume_allowance_executor(record))
         .await
-        .is_err());
+        .unwrap_err();
 
     world.rail.set_history_payer(payer.identity());
     let request = Box::pin(request_from(
@@ -1145,7 +1147,7 @@ pub(super) async fn attempt_after_withdrawal(
         .outcome
         .unwrap_err();
     assert_eq!(world.record_writes(&world.alice, record), writes);
-    refused
+    (grant, refused)
 }
 
 #[tokio::test]

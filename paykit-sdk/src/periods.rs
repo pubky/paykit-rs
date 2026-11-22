@@ -1007,7 +1007,8 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// As [`Paykit::pay_period_automatically`] and [`Paykit::pay_under_allowance`].
+    /// As [`Paykit::pay_period_automatically`] and [`Paykit::pay_under_allowance`], whose
+    /// refusals tell a final stop from one the user or a later read lifts.
     /// An unfunded subscription, an ineligible period or an unverified grant cannot spend.
     pub async fn pay_period_under_allowance(
         &mut self,
@@ -1223,7 +1224,8 @@ impl Paykit {
                 .filter(|r| r.authenticated && !r.doubtful)
                 .and_then(|r| r.written_at_ms)
                 .ok_or_else(|| {
-                    Refusal::NotAutomatic("no proof dates the accepted subscription's write".into())
+                    // A later read can authenticate the write.
+                    Refusal::NotNow("no proof dates the accepted subscription's write".into())
                 })?;
             if accepted_at >= period.ends_at {
                 return Err(Refusal::NotAutomatic(

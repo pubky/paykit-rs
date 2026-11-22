@@ -1104,6 +1104,15 @@ impl Paykit {
     /// or current request cannot authorize the transfer, including when the payment
     /// would exceed a limit. Method, Switch and storage failures follow the ordinary
     /// payment request flow.
+    ///
+    /// Where the Allowance itself stops it, the refusal says whether that is for good:
+    /// [`Refusal::AllowanceEnded`] (ended, or its terms expired), [`Refusal::AllowanceConflicted`],
+    /// [`Refusal::Rejected`], [`Refusal::ScopeMissing`], [`Refusal::Usage`] (this app isn't
+    /// its executor, or the request is another counterparty's) and [`Refusal::NotAutomatic`]
+    /// (outside its terms, or its lifetime limit used up with nothing reserved) stop
+    /// automatic payment for good; [`Refusal::AllowanceConfirmationNeeded`] waits for the
+    /// user ([`Paykit::confirm_allowance_executor`]); [`Refusal::NotNow`] waits for a later
+    /// read or answer, such as an unblock of the counterparty.
     pub async fn pay_under_allowance(
         &mut self,
         request: &RequestRef,

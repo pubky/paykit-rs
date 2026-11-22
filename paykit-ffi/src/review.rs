@@ -155,7 +155,8 @@ pub enum RefusalKind {
     /// A labelled selling app sends every request under one of its labels, and only under a label
     /// it holds (Paykit spec 3.1, 8.1).
     Label,
-    /// The request was rejected by this identity (Paykit spec 8.1).
+    /// The request was rejected by this identity (Paykit spec 8.1), or the Allowance by either
+    /// side (Paykit spec 8.3): nothing more is done under it.
     Rejected,
     /// The request was cancelled by either side (Paykit spec 8.1).
     Cancelled,
@@ -167,8 +168,9 @@ pub enum RefusalKind {
     /// answered, ended, granted or paid under it, for good (Paykit spec 8.3, "Conflicted").
     AllowanceConflicted,
     /// The user must confirm this Allowance again before this app pays under it, after a missed
-    /// item or a restore that isn't clean. Show the Allowance and, once the user confirms, call
-    /// `confirm_allowance_executor` (Paykit spec 8.3).
+    /// item, or a restore until it is judged clean or the user confirms. Show the Allowance and,
+    /// once the user confirms, call `confirm_allowance_executor` (Paykit spec 8.3). No Allowance
+    /// payment, resume or confirm call is bound yet, so hosts don't receive it today.
     AllowanceConfirmationNeeded {
         /// The 32-byte record key of the Allowance to confirm.
         record: Vec<u8>,
@@ -195,7 +197,10 @@ pub enum RefusalKind {
     PeriodNotStarted,
     /// The occurrence carries a manual-only mark or is funded under an Allowance.
     ManualOnly,
-    /// The subscription or service time does not authorize automatic payment.
+    /// Not paid automatically, for good: the subscription or service time doesn't authorize
+    /// automatic payment (Paykit spec 8.2), or the request or Billing Period doesn't qualify
+    /// under its Allowance: outside its terms, or its lifetime limit used up with nothing
+    /// reserved (Paykit spec 8.3). The user may still pay it by hand.
     NotAutomatic,
     /// All retained period slots may have an open attempt.
     AttemptedPeriodsFull,

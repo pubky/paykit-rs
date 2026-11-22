@@ -10,10 +10,10 @@ use pubky_switch_core::ops::Condition;
 use super::approval::ApprovedOpening;
 use super::checkpoint::{ledger_target, ExecutorCheckpoint, ExecutorHistory, GrantEvidence};
 use super::evidence::AppliedRecord;
-use super::spend::{removed_refusal, status_refusal};
+use super::spend::{standing, Standing};
 use crate::allowances::{allowance_target, Consent, ConsentEntry};
 use crate::state::{self, key};
-use crate::{AllowanceRole, Paykit, Refusal, Result};
+use crate::{AllowanceRole, AllowanceStatus, Paykit, Refusal, Result};
 
 fn held() -> Refusal {
     Refusal::NotNow("the executor cannot establish the original Allowance grant and ledger".into())
@@ -42,9 +42,13 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// The original approval, its complete service application, or current authority is
-    /// unavailable, the ledger cannot be reconciled, a later user decision is owed, or accessing
-    /// the store or service failed.
+    /// Where the Allowance stands first, as a payment under it gets it: for good
+    /// [`Refusal::AllowanceEnded`], [`Refusal::AllowanceConflicted`], [`Refusal::Rejected`],
+    /// [`Refusal::ScopeMissing`] or [`Refusal::Usage`]; [`Refusal::AllowanceConfirmationNeeded`]
+    /// when the user must confirm it again ([`Paykit::confirm_allowance_executor`]); and
+    /// [`Refusal::NotNow`] when the original approval, its complete service application or
+    /// current authority is unavailable, or the ledger cannot be reconciled yet. Accessing the
+    /// store or service can fail too.
     pub async fn resume_allowance_executor(&mut self, record: &[u8; 32]) -> Result<()> {
         Box::pin(self.apply_executor_grant(record, None)).await
     }
@@ -57,8 +61,12 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// The original ledger, the user's standing consent, or the grant result cannot be
-    /// established; another app changed either record; or the service or store failed.
+    /// Where the Allowance stands, as [`Paykit::resume_allowance_executor`] says, except that
+    /// this call never asks for the user's confirmation again. It can still refuse with
+    /// [`Refusal::NotNow`] when the original ledger or grant result can't be established
+    /// yet, for example while the payment method's history is incomplete after a restore, or
+    /// another app changed either record: the host keeps the user's confirmation and calls
+    /// again with it later, without asking the user again. The service or store can fail too.
     pub async fn confirm_allowance_executor(
         &mut self,
         record: &[u8; 32],
@@ -83,6 +91,18 @@ impl Paykit {
             return Err(Refusal::ScopeMissing("paykit_allowance_execute".into()).into());
         }
         self.refuse_while_payer_pass_owed().await?;
+        // Where the Allowance stands decides first, by the classification a payment under it
+        // follows: the user is asked to confirm only where confirming lifts the refusal.
+        let shown = self.allowance(record).await?;
+        let consent = Box::pin(self.consent_state(record)).await?;
+        match standing(self, &shown, consent) {
+            Standing::Final(refusal) => return Err(refusal.into()),
+            Standing::Temporary(why) => return Err(Refusal::NotNow(why.into()).into()),
+            Standing::Confirm if confirmed.is_none() => {
+                return Err(Refusal::AllowanceConfirmationNeeded { record: *record }.into());
+            }
+            Standing::Confirm | Standing::Payable | Standing::NotTakenUp => {}
+        }
         let opening = Box::pin(self.approved_opening(record))
             .await?
             .ok_or_else(held)?;
@@ -104,10 +124,8 @@ impl Paykit {
             let (current_ledger, _) = self.current_executor_record(&ledger).await?;
             let original_ledger = current_ledger.revision == opening.ledger.revision
                 && accepted.application.revision == opening.ledger.revision;
-            if let Some(refusal) = status_refusal(view.status) {
-                return Err(refusal.into());
-            }
             if fresh.revision != accepted.grant.revision
+                || view.status != AllowanceStatus::Accepted
                 || view.blocked != Some(false)
                 || self
                     .local_get::<bool>(key::MISSED_CONSENTS)
@@ -120,8 +138,8 @@ impl Paykit {
                 .local_get::<ConsentEntry>(&key::consent(record))
                 .await?
                 .ok_or_else(held)?;
-            if let Consent::Removed { reason } = consent.consent {
-                return Err(removed_refusal(reason).into());
+            if !matches!(consent.consent, Consent::Held { .. }) {
+                return Err(held().into());
             }
             // A missed inbox entry can hold an already dispatched attempt. The user can
             // renew its consent against the exact ledger this installation incorporated.
@@ -145,7 +163,7 @@ impl Paykit {
             } = consent.consent
             {
                 if confirmed.is_none() {
-                    return Err(Refusal::AllowanceConfirmationNeeded { record: *record }.into());
+                    return Err(held().into());
                 }
                 self.local_put(
                     &key::consent(record),
@@ -161,34 +179,21 @@ impl Paykit {
             .local_get::<bool>(key::MISSED_CONSENTS)
             .await?
             .is_some()
+            || self
+                .local_get::<ConsentEntry>(&key::consent(record))
+                .await?
+                .is_some_and(|c| match c.consent {
+                    Consent::Removed { .. } => true,
+                    Consent::Held { confirm_again } => confirm_again && confirmed.is_none(),
+                })
         {
             return Err(held().into());
         }
-        match self
-            .local_get::<ConsentEntry>(&key::consent(record))
-            .await?
-            .map(|c| c.consent)
-        {
-            Some(Consent::Removed { reason }) => {
-                return Err(removed_refusal(reason).into());
-            }
-            Some(Consent::Held {
-                confirm_again: true,
-            }) if confirmed.is_none() => {
-                return Err(Refusal::AllowanceConfirmationNeeded { record: *record }.into());
-            }
-            _ => {}
-        }
         let view = self.allowance(record).await?;
-        if view.role != Some(AllowanceRole::Allower) {
-            return Err(
-                Refusal::Usage("this identity doesn't pay under this Allowance".into()).into(),
-            );
-        }
-        if let Some(refusal) = status_refusal(view.status) {
-            return Err(refusal.into());
-        }
-        if view.blocked != Some(false) {
+        if view.role != Some(AllowanceRole::Allower)
+            || view.status != AllowanceStatus::Accepted
+            || view.blocked != Some(false)
+        {
             return Err(held().into());
         }
         let allow = allowance_target(&view.counterparty, &view.allowance_id);
@@ -218,14 +223,10 @@ impl Paykit {
         let Body::AllowanceProposal(proposal) = next.proposal.body() else {
             return Err(held().into());
         };
-        if next.end.is_some() {
-            return Err(Refusal::AllowanceEnded.into());
-        }
-        if next.conflicted.is_some() {
-            return Err(Refusal::AllowanceConflicted.into());
-        }
         if !next.grants.is_empty()
             || next.grant.is_some()
+            || next.end.is_some()
+            || next.conflicted.is_some()
             || !super::in_grant_history(
                 proposal.allower_generation,
                 self.app.own_identity().generation(),

@@ -25,8 +25,9 @@ pub enum Refusal {
     /// label it holds (Paykit spec 3.1, 8.1).
     #[error("Paykit spec 3.1: {0}")]
     Label(String),
-    /// The request was rejected by this identity (Paykit spec 8.1).
-    #[error("the request was rejected")]
+    /// The request was rejected by this identity (Paykit spec 8.1), or the Allowance by
+    /// either side (Paykit spec 8.3): nothing more is done under it.
+    #[error("the request or Allowance was rejected")]
     Rejected,
     /// Restored from a backup, or past a `missed` item, the app holds the request: the payee
     /// may have cancelled it since the backup, or among the entries the service deleted. It
@@ -54,11 +55,14 @@ pub enum Refusal {
     #[error("Paykit spec 8.3: the Allowance is conflicted")]
     AllowanceConflicted,
     /// The user must confirm this Allowance again before this app pays under it: after a
-    /// `missed` item or a restore that isn't clean, an executor pays under no Allowance on
-    /// its consent list until the user has confirmed it again, since an end may be among
-    /// what was lost (Paykit spec 8.3, "Ends reach the executor"). The host shows the
-    /// Allowance at `record` and, once the user confirms, calls
-    /// [`crate::Paykit::confirm_allowance_executor`].
+    /// `missed` item, or a restore until it is judged clean or the user confirms, an
+    /// executor pays under no Allowance on its consent list until the user has confirmed it
+    /// again, since an end may be among what was lost (Paykit spec 8.3, "Ends reach the
+    /// executor"). It is returned only where confirming lifts it, so not while the Allowance
+    /// is ended, expired, executed by another app or its counterparty blocked. The host shows
+    /// the Allowance at `record` and, once the user confirms, calls
+    /// [`crate::Paykit::confirm_allowance_executor`]; if that answers
+    /// [`Refusal::NotNow`], it keeps the confirmation and calls again later.
     #[error("Paykit spec 8.3: the user must confirm this Allowance again")]
     AllowanceConfirmationNeeded {
         /// The record key of the Allowance to confirm.
@@ -145,9 +149,13 @@ pub enum Refusal {
     /// The occurrence carries a manual-only mark or is funded under an Allowance.
     #[error("Paykit spec 8.2, 8.3: this occurrence cannot be paid by the wallet's own policy")]
     ManualOnly,
-    /// The authenticated subscription and service time do not authorize this automatic
-    /// Billing Period. At an open attempt's first dispatch this is an [`Self::AttemptFailed`].
-    #[error("Paykit spec 8.2: not paid automatically: {0}")]
+    /// Not paid automatically, for good: the authenticated subscription and service time
+    /// don't authorize this automatic Billing Period (Paykit spec 8.2), or the request or
+    /// Billing Period doesn't qualify under the Allowance it is paid under: outside its
+    /// terms, or its lifetime limit used up with nothing reserved (Paykit spec 8.3). The
+    /// user may still pay it by hand. At an open attempt's first dispatch this is an
+    /// [`Self::AttemptFailed`].
+    #[error("Paykit spec 8.2, 8.3: not paid automatically: {0}")]
     NotAutomatic(String),
     /// The request record lists 16 Billing Periods that may have an open attempt and none of
     /// them has finished: no attempt is made on another period until one does (Paykit spec

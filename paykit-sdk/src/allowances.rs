@@ -151,9 +151,12 @@ pub struct AllowanceView {
     /// [`Paykit::confirm_allowance_executor`] (Paykit spec 8.3).
     pub consented: bool,
     /// The user must confirm this Allowance again before this app pays under it, after a
-    /// `missed` item or a restore that isn't clean: true exactly when a payment under it
-    /// would be refused with [`crate::Refusal::AllowanceConfirmationNeeded`], so the host can
-    /// ask for [`Paykit::confirm_allowance_executor`] without attempting a payment.
+    /// `missed` item, or a restore until it is judged clean or the user confirms: true
+    /// exactly when the Allowance's own state refuses a payment under it with
+    /// [`crate::Refusal::AllowanceConfirmationNeeded`], which
+    /// [`Paykit::confirm_allowance_executor`] lifts. So the host can ask the user from the
+    /// list, without attempting a payment. A payment can still be refused first for the
+    /// request's own state, such as a request held after the same restore.
     pub confirmation_needed: bool,
     /// Whether the counterparty is on the identity's deny list, as the app last read it
     /// (Paykit spec 8.1, "Blocked counterparties"): nothing new from it is taken, its
@@ -263,15 +266,6 @@ pub(crate) enum ConsentEnd {
     Conflicted,
 }
 
-/// Whether the user must confirm the Allowance `view` shows again before this app pays under
-/// it: the one rule a payment's refusal and the view's flag both follow
-/// ([`crate::Refusal::AllowanceConfirmationNeeded`]).
-pub(crate) fn confirmation_needed(view: &AllowanceView, consent: ConsentState) -> bool {
-    view.status == AllowanceStatus::Accepted
-        && view.role == Some(AllowanceRole::Allower)
-        && consent == ConsentState::ConfirmAgain
-}
-
 /// Where this app's consent to execute an Allowance stands ([`Paykit::consent_state`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ConsentState {
@@ -283,8 +277,11 @@ pub(crate) enum ConsentState {
     ConfirmAgain,
     /// Removed for good, and why.
     Removed(ConsentEnd),
-    /// Not held for now: no consent recorded yet, a `missed` item's mark the next receive
-    /// turns into [`ConsentState::ConfirmAgain`], or a record not held as it must be yet.
+    /// This app holds no consent entry for it: before its first grant, or after a restore of
+    /// a backup taken before it.
+    Unrecorded,
+    /// Not held for now: a `missed` item's mark the next receive turns into
+    /// [`ConsentState::ConfirmAgain`], or a record not held as it must be yet.
     Waiting,
 }
 
@@ -2496,7 +2493,10 @@ impl Paykit {
             .map(|(grant, _)| grant.app_id);
         let consent = Box::pin(self.consent_state(&record)).await?;
         view.consented = consent == ConsentState::Held;
-        view.confirmation_needed = confirmation_needed(&view, consent);
+        view.confirmation_needed = matches!(
+            crate::executor::standing(self, &view, consent),
+            crate::executor::Standing::Confirm
+        );
         Ok(view)
     }
 
@@ -2641,7 +2641,7 @@ impl Paykit {
             .local_get::<ConsentEntry>(&key::consent(record))
             .await?
         else {
-            return Ok(ConsentState::Waiting);
+            return Ok(ConsentState::Unrecorded);
         };
         if Box::pin(self.rejection_kept(record, &held.counterparty)).await? {
             return Ok(ConsentState::Removed(ConsentEnd::Rejected));

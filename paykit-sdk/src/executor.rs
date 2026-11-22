@@ -16,7 +16,7 @@ mod restore;
 mod spend;
 pub(crate) use checkpoint::ExecutorHistory;
 pub(crate) use compaction::LedgerCompaction;
-pub(crate) use spend::{AllowanceReservation, JournalAllowance};
+pub(crate) use spend::{standing, AllowanceReservation, JournalAllowance, Standing};
 
 use std::collections::{HashMap, HashSet};
 
