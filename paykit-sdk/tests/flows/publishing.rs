@@ -3163,6 +3163,104 @@ async fn test_publication_change_undone_before_it_went_sends_nothing_over_an_unk
     );
 }
 
+/// Inject a list request from alice's wallet to `shop`, naming `held`.
+fn ask_shop(w: &World, shop: &Paykit, held: Option<paykit_sdk::ListVersion>) {
+    let body = paykit_lib::bodies::PrivatePaymentListRequest {
+        held_version: held,
+        app_id: Some(shop.app_id()),
+    }
+    .to_body()
+    .unwrap();
+    w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        paykit_lib::Kind::PrivatePaymentListRequest.as_str(),
+        Vec::new(),
+        body,
+    );
+}
+
+#[tokio::test]
+async fn test_publication_answers_past_their_bounds_issue_nothing_over_a_given_up_version() {
+    let w = World::new();
+    let buyer = w.wallet("wallet").await;
+    let payer = buyer.identity();
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&payer).await.unwrap();
+    shop.set_list_endpoints(offered("lno1first")).await.unwrap();
+    shop.publish_list_to(payer).await.unwrap();
+    let key = shop.app().record_key(&target(&shop, &payer, 1)).unwrap();
+    // Four requests naming the newest version each get a newer one: the daily bound.
+    for counter in 1..=4 {
+        ask_shop(
+            &w,
+            &shop,
+            Some(paykit_sdk::ListVersion::new(1, counter).unwrap()),
+        );
+        shop.receive(None).await.unwrap();
+        assert_eq!(w.record_writes(&w.bob, &key), counter as usize + 1);
+    }
+    let (_, _) = unknown_list(&w, &mut shop, payer, async |shop| {
+        shop.set_list_endpoints(offered("lno1second"))
+            .await
+            .unwrap();
+    })
+    .await;
+    shop.receive(None).await.unwrap();
+    assert_eq!(w.record_writes(&w.bob, &key), 6);
+    // A request naming a version already answered gets the newest sent again, nothing newly
+    // issued; that one was given up, so nothing goes.
+    ask_shop(&w, &shop, Some(paykit_sdk::ListVersion::new(1, 5).unwrap()));
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert_eq!(w.record_writes(&w.bob, &key), 6);
+    let shown = unknown_shown(shop.publish_list_to(payer).await.unwrap_err());
+    assert_eq!(shown.version, paykit_sdk::ListVersion::new(1, 6).unwrap());
+}
+
+#[tokio::test]
+async fn test_publication_notice_of_a_version_superseded_while_its_batch_waited_goes() {
+    use pubky_switch_client::testing::Fault;
+
+    let w = World::new();
+    let buyer = w.wallet("wallet").await;
+    let payer = buyer.identity();
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&payer).await.unwrap();
+    shop.set_list_endpoints(offered("lno1first")).await.unwrap();
+    w.alice.switch().fail_next(Fault::Unanswered {
+        path: "inbox".into(),
+        after: 0,
+    });
+    shop.publish_list_to(payer).await.unwrap();
+    let key = shop.app().record_key(&target(&shop, &payer, 1)).unwrap();
+    let held = shop.app().shared_record(&key).await.unwrap().unwrap();
+    let first = ListPublicationRecord::read(held.content.value().unwrap()).unwrap();
+    // The change's batch waits unanswered while the first version is given up.
+    w.bob.switch().fail_next(Fault::Unanswered {
+        path: "/ops".into(),
+        after: 0,
+    });
+    let _ = shop.set_list_endpoints(offered("lno1second")).await;
+    assert!(shop
+        .app_mut()
+        .withdraw_message("paykit", &first.msg_id)
+        .await
+        .unwrap());
+    for _ in 0..3 {
+        let _ = shop.receive(None).await;
+    }
+    assert_eq!(w.record_writes(&w.bob, &key), 2);
+    assert!(!shop
+        .notices()
+        .await
+        .unwrap()
+        .iter()
+        .any(|n| n.kind == paykit_sdk::NoticeKind::ListDeliveryUnknown));
+}
+
 #[tokio::test]
 async fn test_publication_answers_a_list_request_over_a_list_of_unknown_delivery() {
     for expired in [false, true] {

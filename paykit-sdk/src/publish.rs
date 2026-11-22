@@ -97,23 +97,29 @@ fn unresolved() -> Refusal {
 /// The revision of a reusable list is derived from its endpoints, so the same list set
 /// again is the same revision: a change that is undone before it went out sends nothing
 /// in place of a list of unknown delivery (Paykit spec 8.4).
-fn list_revision(endpoints: &BTreeMap<String, String>) -> Result<[u8; 16]> {
-    let bytes = serde_json::to_vec(endpoints).map_err(|_| crate::PaykitError::corrupt())?;
-    let digest =
-        pubky_switch_core::enc::hash(&[b"paykit/v1/list-revision\0".as_slice(), &bytes].concat());
+fn list_revision(endpoints: &BTreeMap<String, String>) -> [u8; 16] {
+    let mut parts: Vec<&[u8]> = vec![b"paykit/v1/list-revision"];
+    for (id, payload) in endpoints {
+        parts.extend([id.as_bytes(), payload.as_bytes()]);
+    }
+    let digest = pubky_switch_core::enc::hash(&pubky_switch_core::enc::lp(&parts));
     let mut revision = [0; 16];
     revision.copy_from_slice(&digest[..16]);
-    Ok(revision)
+    revision
 }
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ListSettings {
-    revision: [u8; 16],
     endpoints: BTreeMap<String, String>,
 }
 
 impl ListSettings {
+    /// Derived on every read, never stored, so no stored value can disagree with it.
+    fn revision(&self) -> [u8; 16] {
+        list_revision(&self.endpoints)
+    }
+
     fn endpoints(&self) -> Result<BTreeMap<PaymentEndpointIdentifier, PaymentEndpointPayload>> {
         self.endpoints
             .iter()
@@ -477,7 +483,7 @@ pub(crate) fn may_send(view: &DeliveryView<'_>) -> std::result::Result<bool, Sto
         let settings = crate::state::view_get::<ListSettings>(local, key::LIST_SETTINGS)?;
         if !recipient.chosen
             || recipient.withdraw
-            || !settings.is_some_and(|current| Some(current.revision) == issue.revision)
+            || !settings.is_some_and(|current| Some(current.revision()) == issue.revision)
         {
             return Ok(false);
         }
@@ -677,14 +683,8 @@ impl Paykit {
         {
             return Ok(());
         }
-        self.local_put(
-            key::LIST_SETTINGS,
-            &ListSettings {
-                revision: list_revision(&endpoints)?,
-                endpoints,
-            },
-        )
-        .await?;
+        self.local_put(key::LIST_SETTINGS, &ListSettings { endpoints })
+            .await?;
         Box::pin(self.tend_private_lists(None)).await
     }
 
@@ -922,7 +922,7 @@ impl Paykit {
         }
         let settings =
             settings.filter(|s| recipient.chosen && !recipient.withdraw && !s.endpoints.is_empty());
-        let revision = settings.as_ref().map(|s| s.revision);
+        let revision = settings.as_ref().map(ListSettings::revision);
         let at = key::list_reservation(&recipient.recipient);
         // Only the original batch's outcome or its atomic applied write settles it.
         // An equal readable counter can outlive an undecided batch.
@@ -990,9 +990,6 @@ impl Paykit {
                     match recipient.answers.decision(now, version, missing) {
                         answers::Reply::Wait => return Ok(()),
                         answers::Reply::Newer => reason = IssueFor::Answer(version),
-                        answers::Reply::Repeat if version == local && given_up => {
-                            reason = IssueFor::Answer(version);
-                        }
                         answers::Reply::Repeat if version == local => {
                             return self.repeat_list(&mut recipient, prior, now, report).await
                         }
@@ -1281,7 +1278,9 @@ impl Paykit {
             if self
                 .kept_notice(&notice)
                 .await?
-                .is_some_and(|kept| kept.kind == crate::notices::NoticeKind::ListDeliveryUnknown)
+                // Also when none is kept yet: the earlier version's duty can be taken while
+                // this batch is pending. A notice of another kind at that key stays.
+                .is_none_or(|kept| kept.kind == crate::notices::NoticeKind::ListDeliveryUnknown)
             {
                 applied.delete(&notice);
             }
