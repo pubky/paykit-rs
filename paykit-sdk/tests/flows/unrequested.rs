@@ -1561,4 +1561,20 @@ async fn test_unrequested_list_held_over_a_forgotten_delete_stays_held_after_a_f
     );
     assert_eq!(w.rail.all_executions().len(), 1);
     assert_eq!(w.record_writes(&w.alice, &key), writes);
+    // The user's way to pay this payee meanwhile: its public endpoints, a separate choice,
+    // which never touches the held list or its single-use endpoint.
+    crate::public::publish(
+        &w,
+        crate::public::tip_jar(),
+        Some(w.clock.now_ms() + 30 * 24 * HOUR_MS),
+    );
+    let public = restored
+        .pay_without_request(crate::public::public_to_bob(&w))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(public, PayOutcome::Paid { .. }), "{public:?}");
+    assert_eq!(w.rail.all_executions().len(), 2);
+    assert_eq!(restored.held_lists().await.unwrap().len(), 1);
+    assert_eq!(w.record_writes(&w.alice, &key), writes);
 }
