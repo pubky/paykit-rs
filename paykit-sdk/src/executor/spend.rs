@@ -236,6 +236,7 @@ impl AllowanceReservation {
             return Err(crate::PaykitError::corrupt());
         }
         entry.allowance = Some(JournalAllowance::new(&self.id, revision));
+        entry.allowance_expires_at_ms = checked.terms.expires_at.as_ref().map(|t| t.ms());
         let mut end = checked.terms.entry_window_end(checked.at)?;
         if let Some(expiry) = &checked.terms.expires_at {
             end = end.min(expiry.ms());

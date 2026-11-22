@@ -171,7 +171,7 @@ class ReceiptReader: WalletHomeserver, PaymentMethod, @unchecked Sendable {
     func put(identity: Data, path: String, bytes: Data) async throws { preconditionFailure("unexpected public write") }
     func delete(identity: Data, path: String) async throws { preconditionFailure("unexpected public delete") }
     func declaration() -> MethodDeclaration {
-        MethodDeclaration(idempotent: true, idempotencyRetentionMs: nil, history: true, historyRetentionMs: nil, historySurvivesRestore: true, longestCompletionMs: 3_600_000)
+        MethodDeclaration(idempotent: true, idempotencyRetentionMs: nil, history: true, historyRetentionMs: nil, historySurvivesRestore: true, longestCompletionMs: 3_600_000, paymentTimeToleranceMs: 0)
     }
     func selectEndpoints(candidates: [EndpointCandidate], amount: Amount?) throws -> SelectedEndpoints {
         var payable: [UInt32] = []

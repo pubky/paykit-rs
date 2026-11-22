@@ -178,6 +178,13 @@ pub enum RefusalKind {
     Recurring,
     /// The settlement may already have been credited.
     MaybeCredited,
+    /// The payment was verified, but its verified payment time lies outside what the request
+    /// allows: before the request less the method's tolerance, or past its deadline or the
+    /// validity of its destination or rates (Paykit spec 7.1, 8.2). Nothing is credited.
+    PaymentTimeOutside {
+        /// The verified payment time, in Unix milliseconds.
+        paid_at_ms: u64,
+    },
     /// The recurring request is accepted already, by this app or another own app (Paykit spec
     /// 8.2): it is neither accepted nor rejected again, only cancelled.
     Subscribed,
@@ -305,6 +312,9 @@ impl PaymentRefusal {
             Refusal::DeadlinePassed => D::DeadlinePassed,
             Refusal::Recurring => D::Recurring,
             Refusal::MaybeCredited => D::MaybeCredited,
+            Refusal::PaymentTimeOutside { paid_at_ms } => D::PaymentTimeOutside {
+                paid_at_ms: *paid_at_ms,
+            },
             Refusal::Subscribed => D::Subscribed,
             Refusal::NotSubscribed => D::NotSubscribed,
             Refusal::PeriodNotStarted => D::PeriodNotStarted,

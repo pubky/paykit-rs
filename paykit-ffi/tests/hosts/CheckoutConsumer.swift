@@ -28,6 +28,10 @@ private final class CheckoutMethod: ReceiptReader, @unchecked Sendable {
     private let guardLock = NSLock()
     private var dispatches = 0
     private var pendingLookup = false
+    /// The test services' clock, which dates each payment as a real method's evidence would.
+    private var clock: (() -> UInt64)?
+    private var paidAt: UInt64?
+    func useClock(_ now: @escaping () -> UInt64) { guardLock.withLock { clock = now } }
     func holdLookup() { guardLock.withLock { pendingLookup = true } }
     func chargedAttempt() throws -> String { try guardLock.withLock { try stored()! } }
     let progress = AsyncThrowingStream<CheckoutStep, Error>.makeStream()
@@ -60,6 +64,7 @@ private final class CheckoutMethod: ReceiptReader, @unchecked Sendable {
                 let output = try FileHandle(forWritingTo: ledger)
                 try output.synchronize()
                 try output.close()
+                paidAt = clock!()
             }
         }
         progress.continuation.yield(.methodEntered)
@@ -78,7 +83,7 @@ private final class CheckoutMethod: ReceiptReader, @unchecked Sendable {
             guard try stored() == proof.attemptId, proof.proofJson == originalProof(proof.attemptId),
                   proof.amount.asset == "btc", proof.amount.value == "7", proof.endpoint == "btc-lightning-bolt11",
                   proof.payload == nil || proof.payload == "lnbc1checkout" else { return nil }
-            return 1
+            return paidAt
         }
     }
     override func settlementId(proofJson: Data) -> Data? {
@@ -341,6 +346,7 @@ private func driveCheckout(_ recovery: CheckoutReview, restore: String? = nil) a
     let method = CheckoutMethod(ledger: directory.appendingPathComponent("settled"))
     let store = EnrollmentStore()
     let fixture = try await enrolledTestCheckout(store: store, method: method)
+    method.useClock { fixture.nowMs() }
     precondition(fixture.allowanceRecoveryNoticeKinds() == [.allowanceAcceptanceBeforeLoss, .allowanceWithdrawalConfirmed])
     let reference = Data(repeating: 23, count: 16)
     let secret = Data(repeating: 9, count: 32)

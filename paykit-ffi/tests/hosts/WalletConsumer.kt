@@ -107,7 +107,7 @@ internal open class ReceiptReader : WalletHomeserver, PaymentMethod {
     override suspend fun get(identity: ByteArray, path: String): ByteArray? = null
     override suspend fun put(identity: ByteArray, path: String, bytes: ByteArray) = error("unexpected public write")
     override suspend fun delete(identity: ByteArray, path: String) = error("unexpected public delete")
-    override fun declaration() = MethodDeclaration(true, null, true, null, true, 3600000uL)
+    override fun declaration() = MethodDeclaration(true, null, true, null, true, 3600000uL, 0uL)
     override fun selectEndpoints(candidates: List<EndpointCandidate>, amount: Amount?): SelectedEndpoints {
         val (unavailable, usable) = candidates.partition { it.identifier == "btc-lightning-bolt12" }
         return SelectedEndpoints(usable.asReversed().map { it.id }, unavailable.map {
