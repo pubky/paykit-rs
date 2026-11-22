@@ -1,5 +1,5 @@
 //! Paying a contact without a request, at the endpoint of the Private Payment List it shared,
-//! and that list updated and withdrawn (Paykit spec 4, 8.4).
+//! and that list updated and withdrawn (Paykit spec 8.4).
 
 use std::collections::BTreeMap;
 
@@ -37,11 +37,19 @@ fn expected(value: &str) -> TestResult<Expected> {
     ))
 }
 
-/// The seller sets `offer` as its list's endpoints and publishes the list to the payer's
-/// wallet, which receives it.
+/// The seller sets `text` as its list's endpoints and chooses the payer as a contact to
+/// publish the list to; the payer's wallet receives it.
 async fn shared(wallet: &mut Paykit, shop: &mut Paykit, text: &str) -> TestResult {
     Box::pin(shop.set_list_endpoints(offer(text)?)).await?;
     Box::pin(shop.publish_list_to(wallet.identity())).await?;
+    Box::pin(wallet.receive(None)).await?;
+    Ok(())
+}
+
+/// The seller changes its list's endpoints to `text`, and only that: the changed list is
+/// owed to each contact already chosen. The payer's wallet receives it.
+async fn updated(wallet: &mut Paykit, shop: &mut Paykit, text: &str) -> TestResult {
+    Box::pin(shop.set_list_endpoints(offer(text)?)).await?;
     Box::pin(wallet.receive(None)).await?;
     Ok(())
 }
@@ -56,13 +64,17 @@ async fn pay_from_list(
     published: &str,
 ) -> TestResult<String> {
     let payment = UnrequestedPayment::new(shop.identity(), btc(value)?);
+    let before = rail.selections().len();
     let outcome = Box::pin(wallet.pay_without_request(payment))
         .await
         .outcome?;
-    let selected = rail.selections();
-    let (chosen, _) = selected.last().ok_or("the method chose no endpoint")?;
-    assert_eq!(chosen.len(), 1, "{chosen:?}");
-    assert_eq!(chosen[0].payload.as_str(), published);
+    let selections = rail.selections();
+    assert_eq!(selections.len(), before + 1, "{selections:?}");
+    let (candidates, _) = selections
+        .last()
+        .ok_or("the method was handed no endpoint")?;
+    assert_eq!(candidates.len(), 1, "{candidates:?}");
+    assert_eq!(candidates[0].payload.as_str(), published);
     Box::pin(paid_and_receipted(
         wallet,
         shop,
@@ -150,7 +162,7 @@ async fn updated_then_withdrawn(world: &World) -> TestResult {
         "lno1first",
     ))
     .await?;
-    Box::pin(shared(&mut wallet, &mut shop, "lno1second")).await?;
+    Box::pin(updated(&mut wallet, &mut shop, "lno1second")).await?;
     Box::pin(pay_from_list(
         &mut wallet,
         &mut shop,

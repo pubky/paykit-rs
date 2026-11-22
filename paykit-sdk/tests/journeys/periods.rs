@@ -89,21 +89,60 @@ fn at_start(world: &World, period: PeriodRef) {
     world.advance_ms(period.starts_at.saturating_sub(world.now_ms()));
 }
 
-/// After the payer's `outcome` for `period`: the method was called once, at `published`;
-/// the payer's journal holds the period's payment, finished, and its request shows the
-/// period paid; the seller holds the proof, verifies and confirms it and shows the period
-/// credited; and the payer then holds exactly that receipt. Returns the receipt's `msg_id`.
-#[allow(clippy::too_many_arguments)]
+/// A Billing Period due: the subscription's request, the seller's record of it, the period,
+/// and the payload its destination publishes.
+#[derive(Clone, Copy)]
+struct Due<'a> {
+    request: RequestRef,
+    sale: [u8; 32],
+    period: PeriodRef,
+    published: &'a str,
+}
+
+/// How the payer's wallet pays a period.
+#[derive(Clone, Copy)]
+enum How {
+    /// The user pays it by hand.
+    ByHand,
+    /// The app's policy pays the requested amount.
+    ByPolicy,
+}
+
+/// The payer's wallet pays `due` as `how` says. Then: the method was handed one new
+/// selection, `published`, and called once; the payer's journal holds the period's payment,
+/// finished, and its request shows the period paid; the seller holds the proof, verifies
+/// and confirms it and shows the period credited; and the payer then holds exactly that
+/// receipt, in its receipts and in its journal's entry. Returns the receipt's `msg_id`.
 async fn period_paid_and_receipted(
     wallet: &mut Paykit,
     shop: &mut Paykit,
     rail: &FakeRail,
-    outcome: PayOutcome,
-    request: RequestRef,
-    sale: [u8; 32],
-    period: PeriodRef,
-    published: &str,
+    due: Due<'_>,
+    how: How,
 ) -> TestResult<String> {
+    let Due {
+        request,
+        sale,
+        period,
+        published,
+    } = due;
+    let before = rail.selections().len();
+    let outcome = match how {
+        How::ByHand => {
+            Box::pin(wallet.pay_period(&request, &period, PayOptions::default()))
+                .await
+                .outcome?
+        }
+        How::ByPolicy => {
+            Box::pin(wallet.pay_period_automatically(
+                &request,
+                &period,
+                PeriodPrice::RequestedAmount,
+            ))
+            .await
+            .outcome?
+        }
+    };
     let PayOutcome::Paid {
         attempt_id,
         proof_msg_id: Some(_),
@@ -113,10 +152,13 @@ async fn period_paid_and_receipted(
         return Err(format!("the period was not paid with a proof: {outcome:?}").into());
     };
     assert_eq!(rail.executions(&attempt_id), 1);
-    let selected = rail.selections();
-    let (chosen, _) = selected.last().ok_or("the method chose no endpoint")?;
-    assert_eq!(chosen.len(), 1, "{chosen:?}");
-    assert_eq!(chosen[0].payload.as_str(), published);
+    let selections = rail.selections();
+    assert_eq!(selections.len(), before + 1, "{selections:?}");
+    let (candidates, _) = selections
+        .last()
+        .ok_or("the method was handed no endpoint")?;
+    assert_eq!(candidates.len(), 1, "{candidates:?}");
+    assert_eq!(candidates[0].payload.as_str(), published);
 
     // The payer's view: the period's payment, finished, and the period paid.
     let payments = Box::pin(wallet.payments()).await?;
@@ -161,6 +203,13 @@ async fn period_paid_and_receipted(
     assert_eq!(receipts[0].msg_id, receipt);
     assert_eq!(receipts[0].attempt_id, attempt_id);
     assert_eq!(receipts[0].billing_period, Some(period));
+    let payments = Box::pin(wallet.payments()).await?;
+    let journal = payments
+        .iter()
+        .find(|payment| payment.attempt_id == attempt_id)
+        .and_then(|payment| payment.receipt.as_ref())
+        .ok_or("the payer's journal shows no receipt")?;
+    assert_eq!(journal.msg_id, receipt);
     Ok(receipt)
 }
 
@@ -194,25 +243,26 @@ async fn paid_by_hand(world: &World) -> TestResult {
     let (request, sale) = Box::pin(subscribed(&mut wallet, &mut shop, draft)).await?;
 
     // The first period is paid by hand, to the request's endpoint, once.
-    let first = Box::pin(wallet.pay_period(&request, &periods[0], PayOptions::default()))
-        .await
-        .outcome?;
-    let again = Box::pin(wallet.pay_period(&request, &periods[0], PayOptions::default()))
-        .await
-        .outcome;
-    let refused = again.err().ok_or("a paid period was paid again")?;
-    assert_eq!(refused.refusal(), Some(&Refusal::AlreadyPaid));
+    let first = Due {
+        request,
+        sale,
+        period: periods[0],
+        published: "lnbc-first-period",
+    };
     Box::pin(period_paid_and_receipted(
         &mut wallet,
         &mut shop,
         &rail,
         first,
-        request,
-        sale,
-        periods[0],
-        "lnbc-first-period",
+        How::ByHand,
     ))
     .await?;
+    let again = Box::pin(wallet.pay_period(&request, &periods[0], PayOptions::default()))
+        .await
+        .outcome;
+    let refused = again.err().ok_or("a paid period was paid again")?;
+    assert_eq!(refused.refusal(), Some(&Refusal::AlreadyPaid));
+    assert_eq!(rail.all_executions().len(), 1);
 
     // At its start, the second period's details name its own invoice, and it is paid there.
     at_start(world, periods[1]);
@@ -240,18 +290,18 @@ async fn paid_by_hand(world: &World) -> TestResult {
     assert_eq!(second.details.len(), 1, "{second:?}");
     assert_eq!(second.details[0].msg_id, sent.msg_id);
     assert!(!second.paid);
-    let outcome = Box::pin(wallet.pay_period(&request, &periods[1], PayOptions::default()))
-        .await
-        .outcome?;
+    let due = Due {
+        request,
+        sale,
+        period: periods[1],
+        published: "lnbc-second-period",
+    };
     Box::pin(period_paid_and_receipted(
         &mut wallet,
         &mut shop,
         &rail,
-        outcome,
-        request,
-        sale,
-        periods[1],
-        "lnbc-second-period",
+        due,
+        How::ByHand,
     ))
     .await?;
     assert_eq!(rail.all_executions().len(), 2);
@@ -290,22 +340,18 @@ async fn paid_by_policy(world: &World) -> TestResult {
     assert!(rail.all_executions().is_empty());
     for &period in &periods {
         at_start(world, period);
-        let outcome = Box::pin(wallet.pay_period_automatically(
-            &request,
-            &period,
-            PeriodPrice::RequestedAmount,
-        ))
-        .await
-        .outcome?;
+        let due = Due {
+            request,
+            sale,
+            period,
+            published: "lnbc-plan",
+        };
         Box::pin(period_paid_and_receipted(
             &mut wallet,
             &mut shop,
             &rail,
-            outcome,
-            request,
-            sale,
-            period,
-            "lnbc-plan",
+            due,
+            How::ByPolicy,
         ))
         .await?;
     }

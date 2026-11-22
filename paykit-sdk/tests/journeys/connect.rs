@@ -23,7 +23,8 @@ async fn test_connect_admits_the_seller_and_its_waiting_request_is_paid() -> Tes
     on_both_backends(admits_the_seller_and_its_waiting_request_is_paid).await
 }
 
-/// Whether `wallet`'s allow list holds a conversation entry for `peer`.
+/// Whether `wallet`'s allow list holds a conversation entry for `peer`: the Switch client's
+/// own read, used here only to observe admission.
 async fn admits(wallet: &mut Paykit, peer: &[u8; 32]) -> TestResult<bool> {
     let allowed = Box::pin(wallet.app_mut().allow_list()).await?;
     Ok(allowed
@@ -74,8 +75,8 @@ async fn admits_the_seller_and_its_waiting_request_is_paid(world: &World) -> Tes
     assert!(!read.applied.contains(&sent.msg_id), "{read:?}");
     assert!(Box::pin(wallet.requests()).await?.is_empty());
 
-    // The payer's identity takes no connect requests, so the seller can't ask; the payer
-    // admits the seller itself.
+    // The payer's identity takes no connect requests, so the seller's ask, through the
+    // Switch client, is refused; the payer admits the seller itself.
     let asked = Box::pin(shop.app_mut().ask_to_connect(&payer_id)).await;
     assert!(
         matches!(
@@ -90,7 +91,7 @@ async fn admits_the_seller_and_its_waiting_request_is_paid(world: &World) -> Tes
     Box::pin(wallet.allow_connect(&seller_id)).await?;
     assert!(Box::pin(admits(&mut wallet, &seller_id)).await?);
 
-    // The waiting request now goes and is applied once.
+    // The waiting request goes at the seller's next flush, and is applied once.
     Box::pin(shop.flush()).await?;
     let delivery = Box::pin(shop.message_delivery(&sent.msg_id)).await?;
     assert!(
@@ -114,6 +115,10 @@ async fn admits_the_seller_and_its_waiting_request_is_paid(world: &World) -> Tes
     let outcome = Box::pin(wallet.pay_request(&request, PayOptions::default()))
         .await
         .outcome?;
+    assert_eq!(
+        Box::pin(wallet.request(&request)).await?.status,
+        RequestStatus::Paid
+    );
     let expected = Expected::new(
         Some(request.request_hash),
         btc("0.001")?,
