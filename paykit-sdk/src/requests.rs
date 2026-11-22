@@ -2496,9 +2496,9 @@ impl Paykit {
         } else if answer == Answer::Accept {
             (self.denied_for_user(&request.payee).await?, false)
         } else {
-            // A copy past its refresh interval is read first: its delivery is judged on a
-            // fresh one (Paykit spec 8.1, "Messages already queued").
-            self.refresh_lists_when_due().await?;
+            if !self.deny_copy_known().await? {
+                self.refresh_lists_when_due().await?;
+            }
             (false, self.sends_held(&request.payee).await?)
         };
         let (target, mut record) = self.payer_request(request).await?;
@@ -2724,6 +2724,9 @@ impl Paykit {
         // An acceptance recorded and queued is sent whatever a try to deliver it now gives;
         // a rejection's or cancellation's failed try is the call's error, as before.
         if answer != Answer::Accept {
+            // Its delivery is judged on a fresh copy of the deny list: one past its refresh
+            // interval is read first (Paykit spec 8.1, "Messages already queued").
+            self.refresh_lists_when_due().await?;
             self.send_message(&msg_id).await?;
         }
         Ok((msg_id.clone(), Some(self.delivered(&msg_id).await?)))

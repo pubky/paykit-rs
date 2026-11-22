@@ -1447,7 +1447,7 @@ impl Protocol for PaykitProtocol {
     /// Requests, period details, list requests, rejections, payer cancellations and
     /// subscription acceptances go only while the deny decision permits them, however
     /// long ago they were queued; a payee's cancellation and a payment's acceptance, proof
-    /// and receipt still go (Paykit spec 8.1, [`crate::send_holds`]).
+    /// and receipt still go (Paykit spec 8.1).
     fn may_send(
         &self,
         delivery: &pubky_switch_client::app::DeliveryView<'_>,

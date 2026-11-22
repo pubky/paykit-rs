@@ -1526,6 +1526,8 @@ async fn send_list_request(
     }
     .to_body()
     .unwrap();
+    // A list request goes only on a fresh copy of the deny list (Paykit spec 8.1).
+    wallet.flush().await.unwrap();
     let (id, delivery) = wallet
         .app_mut()
         .send(pubky_switch_client::app::OutgoingMessage::new(
