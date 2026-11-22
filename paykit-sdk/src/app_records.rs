@@ -65,7 +65,7 @@ use pubky_switch_client::error::TransportError;
 use pubky_switch_client::transport::BoxFuture;
 use pubky_switch_core::enc::zbase32_encode;
 use pubky_switch_core::records::{
-    app_record_path, AppRecord, IdentityDoc, RecordOrder, RecordView,
+    app_record_path, AppRecord, IdentityDoc, RecordOrder, RecordView, CLOCK_TOLERANCE_MS,
 };
 use pubky_switch_core::sig::SignedDoc;
 use serde::{Deserialize, Serialize};
@@ -387,15 +387,22 @@ impl SeenRecords {
     }
 
     /// Whether `record`, served now, is at or before a timestamp group the reader couldn't
-    /// keep: its other bodies are unknown, so it may be in conflict or withdrawn.
-    fn before_unkept(&self, served_at: Option<u64>) -> bool {
-        self.unkept_at
-            .is_some_and(|at| served_at.is_none_or(|served| served <= at))
+    /// keep: its other bodies are unknown, so it may be in conflict or withdrawn. A group
+    /// ahead of the reader's clock `now` is set aside, as a record ahead of it is (Switch
+    /// wire 3.2): one is never kept from a record ahead of the clock, so this is only after
+    /// the clock went back, or a restored value no record set, which then holds nothing.
+    fn before_unkept(&self, served_at: Option<u64>, now: u64) -> bool {
+        self.unkept_at.is_some_and(|at| {
+            at <= now.saturating_add(CLOCK_TOLERANCE_MS)
+                && served_at.is_none_or(|served| served <= at)
+        })
     }
 
-    /// Whether the kept records are nonempty and each is `payee`'s, verified as its signer
-    /// signed it, and of app `app_id`: checked before a restore installs
-    /// a copy (`p/ar/<payee>/<app>`), so none can fail every later read of the payee.
+    /// Whether the kept records each are `payee`'s, verified as its signer signed it, and of
+    /// app `app_id`, and there is one at least or a group the reader couldn't keep: checked
+    /// before a restore installs a copy (`p/ar/<payee>/<app>`), so none can fail every later
+    /// read of the payee. A group's time isn't signed, so one ahead of the clock holds
+    /// nothing ([`SeenRecords::before_unkept`]).
     pub(crate) fn verifies(&self, payee: &[u8; 32], app_id: &[u8; 16]) -> bool {
         (!self.records.is_empty() || self.unkept_at.is_some())
             && self.records.iter().all(|signed| {
@@ -651,7 +658,7 @@ impl Paykit {
             }
             // A record at or before a group the reader couldn't keep is never used, nor an
             // earlier one in its place, until a strictly later record is kept.
-            if seen.before_unkept(served_at) {
+            if seen.before_unkept(served_at, now) {
                 failures.push(fail(PublicAppFailureReason::Refused(format!(
                     "Paykit spec 4: the app's records up to a group that exceeded the history \
                      a reader keeps ({SEEN_RECORDS} records, {SEEN_RECORDS_BYTES} bytes) are \
@@ -1026,6 +1033,25 @@ mod tests {
             serde_json::from_value(json!({"records": [], "unkept_at": 5})).unwrap();
         assert!(held.verifies(&bob.id(), &bob.app_id()));
         assert!(serde_json::from_value::<SeenRecords>(json!({"records": []})).is_err());
+    }
+
+    #[test]
+    fn test_discovery_state_group_ahead_of_the_clock_holds_nothing() {
+        let now = 1_000_000_000;
+        let held = |at: u64| SeenRecords {
+            records: Vec::new(),
+            unkept_at: Some(at),
+        };
+        // A group up to the clock tolerance ahead holds what is at or before it.
+        let near = held(now + CLOCK_TOLERANCE_MS);
+        assert!(near.before_unkept(Some(now), now));
+        assert!(near.before_unkept(None, now));
+        assert!(!near.before_unkept(Some(now + CLOCK_TOLERANCE_MS + 1), now));
+        // One further ahead, such as a restored value no record set, holds nothing.
+        for far in [now + CLOCK_TOLERANCE_MS + 1, u64::MAX] {
+            assert!(!held(far).before_unkept(Some(now), now));
+            assert!(!held(far).before_unkept(None, now));
+        }
     }
 
     #[test]
