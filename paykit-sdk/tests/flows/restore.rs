@@ -1327,6 +1327,15 @@ pub(crate) fn kept(value: serde_json::Value) -> serde_json::Value {
     serde_json::json!({ "v": 1, "d": value })
 }
 
+/// The `msg_id` of the message a [`kept`] value holds.
+pub(crate) fn kept_msg_id(kept: &serde_json::Value) -> String {
+    let plaintext =
+        pubky_switch_core::enc::unb64(kept["d"]["plaintext"].as_str().unwrap()).unwrap();
+    let plaintext = pubky_switch_core::message::MessagePlaintext::decode(&plaintext).unwrap();
+    let json: serde_json::Value = serde_json::from_slice(plaintext.json()).unwrap();
+    json["msg_id"].as_str().unwrap().to_owned()
+}
+
 #[tokio::test]
 async fn test_restore_kept_cancellation_binds_the_received_kind_and_request() {
     let w = World::new();
@@ -1461,10 +1470,14 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
     let cases: [(&str, String, serde_json::Value); 20] = [
         (
             "held list of another kind",
-            key_of("lh/"),
+            format!("{}/{}", key_of("lh/"), kept_msg_id(&kept(request.clone()))),
             kept(request.clone()),
         ),
-        ("held list under another key", key_of("lh/"), kept(list)),
+        (
+            "held list under another key",
+            format!("{}/{}", key_of("lh/"), kept_msg_id(&kept(list.clone()))),
+            kept(list),
+        ),
         (
             "queued answer of another's certificate",
             answer_key.clone(),

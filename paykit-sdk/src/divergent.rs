@@ -1780,18 +1780,11 @@ impl Paykit {
         list: &StoredMessage,
         mut tx: Tx,
     ) -> Result<()> {
-        let held_key = key::held_list(&record);
         // A list held already is read bound to its key: a list of the payee app whose
         // `payment_lists` record the key names (`state::Stored`).
-        let newer = match self.local_get::<KeptMessage>(&held_key).await? {
-            None => true,
-            Some(kept) => {
-                crate::receive::list_version(&kept.stored(&self.identity())?)
-                    < crate::receive::list_version(list)
-            }
-        };
-        if newer {
-            tx.put(&held_key, &KeptMessage::of(list))?;
+        let held = self.held_lists_over(&record).await?;
+        if let Some(hold) = crate::receive::HeldListWrite::newer(&record, list, &held) {
+            hold.stage(&mut tx)?;
         }
         self.local_commit(tx).await
     }

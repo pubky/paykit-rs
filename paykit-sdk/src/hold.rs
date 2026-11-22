@@ -584,6 +584,21 @@ impl Paykit {
             .all(|scope| self.app.scope_key(epoch, scope).is_some())
     }
 
+    /// The current hold identifier (`he`), `None` before any restore or `missed` item.
+    pub(crate) async fn current_hold(&self) -> Result<Option<HoldEpoch>> {
+        self.local_get::<HoldEpoch>(key::HOLD_EPOCH).await
+    }
+
+    /// Whether this app holds the user's approval of automatic execution of the Allowance
+    /// at `record`, given under the current hold.
+    pub(crate) async fn execution_approved(&self, record: &[u8; 32]) -> Result<bool> {
+        let hold = self.current_hold().await?;
+        Ok(self
+            .local_get::<bool>(&key::execution_approval(record, hold.as_ref()))
+            .await?
+            .is_some())
+    }
+
     /// Whether the request record at `record_key`, `record`, is held after a restore or a
     /// `missed` item: one of them set the hold, the user hasn't confirmed this request
     /// since, and it is open.
@@ -1516,6 +1531,9 @@ impl Paykit {
         if hold.widening_from_ms.is_some() {
             tx.delete(key::LISTS_READ);
         }
+        for (rest, _) in self.local_scan::<bool>(key::RESTORE_APPROVALS).await? {
+            tx.delete(&format!("{}{rest}", key::RESTORE_APPROVALS));
+        }
         tx.put(key::RESTORE_HOLD, &hold)?;
         self.local_commit(tx).await
     }
@@ -1560,9 +1578,25 @@ impl Paykit {
                     }
                     tx.delete(&format!("{}{rest}", key::RESTORE_CONSENTS));
                 }
+                // A clean restore keeps the approvals for execution its backup held, now
+                // under the current hold, unless a `missed` item came meanwhile.
+                let hold_now = self.current_hold().await?;
+                for (rest, _) in self.local_scan::<bool>(key::RESTORE_APPROVALS).await? {
+                    if !missed {
+                        let record = pubky_switch_core::enc::unb64_array::<32>(&rest)
+                            .map_err(|_| crate::error::PaykitError::corrupt())?;
+                        tx.put(&key::execution_approval(&record, hold_now.as_ref()), &true)?;
+                    }
+                    tx.delete(&format!("{}{rest}", key::RESTORE_APPROVALS));
+                }
                 hold.verdict = RestoreVerdict::Clean;
             }
             (RestoreVerdict::Open, false) => {
+                // The approvals the backup held approve nothing after a restore that isn't
+                // clean (Paykit spec 8.3, After a restore).
+                for (rest, _) in self.local_scan::<bool>(key::RESTORE_APPROVALS).await? {
+                    tx.delete(&format!("{}{rest}", key::RESTORE_APPROVALS));
+                }
                 // The restore's widening of the block marks, which waited for the verdict, is
                 // applied at the next read of the lists, made due now (`marks.rs`).
                 if hold.widening_from_ms.is_some() {
@@ -1582,7 +1616,11 @@ impl Paykit {
                         tx.put(&format!("{}{rest}", key::CONSENTS), &entry.with(again))?;
                     }
                 }
-                for prefix in [key::HOLD_CONFIRMED, key::HOLD_CONFIRMED_BEFORE] {
+                for prefix in [
+                    key::HOLD_CONFIRMED,
+                    key::HOLD_CONFIRMED_BEFORE,
+                    key::EXECUTION_APPROVALS,
+                ] {
                     for (rest, _) in self.local_scan::<bool>(prefix).await? {
                         tx.delete(&format!("{prefix}{rest}"));
                     }

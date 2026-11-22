@@ -618,6 +618,15 @@ pub(crate) fn restore_paykit_layer(
         .map(|(key, value)| state::restored::<RestoreHold>(key, value, &binder))
         .transpose()
         .map_err(|_| String::from("the backup's restore hold cannot be read"))?;
+    // The hold identifier the backup's approvals for execution are matched to: one given
+    // under an older hold approved nothing there, and carries nothing here.
+    let backup_hold = state
+        .iter()
+        .find(|(key, _)| key.as_slice() == key::HOLD_EPOCH.as_bytes())
+        .map(|(key, value)| state::restored::<crate::hold::HoldEpoch>(key, value, &binder))
+        .transpose()
+        .map_err(|_| String::from("the backup's hold identifier cannot be read"))?;
+    let mut approvals = std::collections::BTreeSet::new();
     let mut confirmed_before = std::collections::BTreeSet::new();
     let mut executor_history = std::collections::BTreeMap::new();
     for (key, value) in restoring
@@ -713,8 +722,15 @@ pub(crate) fn restore_paykit_layer(
                 }
                 continue;
             }
-            StateKey::RestoreConsent(_) => {
+            StateKey::RestoreConsent(_) | StateKey::RestoreApproval(_) => {
                 state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
+                continue;
+            }
+            StateKey::ExecutionApproval { record, hold } => {
+                state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
+                if hold.as_ref() == backup_hold.as_ref().map(crate::hold::HoldEpoch::as_bytes) {
+                    approvals.insert(record);
+                }
                 continue;
             }
             // So do the marks of records not yet listed and of the payer pass owed: this
@@ -1021,7 +1037,7 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::HeldList(_) => {
+            StateKey::HeldList { .. } => {
                 state::restored::<KeptMessage>(&key, &value, &binder).map_err(|_| {
                     String::from("Paykit wire 5.4: a held list in the backup doesn't verify")
                 })?;
@@ -1273,6 +1289,15 @@ pub(crate) fn restore_paykit_layer(
         state::local_put(key::HOLD_EPOCH, &epoch)
             .map_err(|_| String::from("the restore's hold identifier can't be written"))?,
     );
+    // A carried approval waits for the restore's verdict: a clean one makes it the current
+    // hold's approval, and one that isn't clean drops it, so its Allowance is held until the
+    // user confirms again, as every first grant needs the current hold's approval.
+    for record in approvals {
+        writes.push(
+            state::local_put(&key::restore_approval(&record), &true)
+                .map_err(|_| String::from("the restored approval cannot be written"))?,
+        );
+    }
     let hold = state::local_put(key::RESTORE_HOLD, &restore_hold)
         .map_err(|_| String::from("the restore's hold can't be written"))?;
     writes.push(hold);
@@ -1792,6 +1817,13 @@ impl Protocol for PaykitProtocol {
             },
             LocalWrite::DeletePrefix {
                 prefix: key::RESTORE_CONSENTS.as_bytes().to_vec(),
+            },
+            // An approval given before the item approves nothing after it (Paykit spec 7.2).
+            LocalWrite::DeletePrefix {
+                prefix: key::EXECUTION_APPROVALS.as_bytes().to_vec(),
+            },
+            LocalWrite::DeletePrefix {
+                prefix: key::RESTORE_APPROVALS.as_bytes().to_vec(),
             },
         ])
     }
@@ -3502,9 +3534,12 @@ mod receive_tests {
             })),
         );
         let target = crate::records::list_target(&bob.id(), &list.message().from.app_id);
-        let at = key::held_list(&fake_key(&target));
+        let at = key::held_list(&fake_key(&target), &list.message().msg_id);
         let value = state::encode(&KeptMessage::of(&list)).unwrap();
         assert!(restores::<KeptMessage>(&alice, at.as_bytes(), &value));
+        // Held under the key of another list message, it doesn't bind.
+        let other = key::held_list(&fake_key(&target), "0b9cb2f3-5a52-4d0a-8b8e-31a1f4a0c6d2");
+        assert!(!restores::<KeptMessage>(&alice, other.as_bytes(), &value));
         assert!(!restores::<KeptMessage>(
             &alice,
             at.as_bytes(),

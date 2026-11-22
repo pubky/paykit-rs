@@ -3674,3 +3674,56 @@ async fn test_blocked_return_entry_held_while_the_notices_owed_are_full() {
     assert_eq!(lost_for(&wallet, &w.bob_id()).await, 0);
     assert_eq!(lost_owed(&wallet).await, 0);
 }
+
+#[tokio::test]
+async fn test_blocked_return_kept_floor_raise_holds_the_restore_verdict() {
+    // The restore's raise of the block floor goes unanswered and is kept, the batch carrying
+    // the restore's hold as it was. Reconcile mode can't end while it is kept, so no verdict
+    // is decided that the kept batch could later write back over.
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let _shop = w.shop().await;
+    wallet.app_mut().deny(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    crate::common::restore_with_unknown_cursor(&mut restored).await;
+    // Every batch of this receive goes unanswered, the floor's raise among them.
+    for _ in 0..4 {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Unanswered {
+                path: "/ops".into(),
+                after: 0,
+            });
+    }
+    let _ = restored.receive(None).await;
+    let before = verdict(&restored).await;
+    restored.reconcile().await.unwrap();
+    restored
+        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .expect_err("reconcile mode waits for the kept raise");
+    assert_eq!(verdict(&restored).await, before);
+}
+
+/// The restore's verdict as Paykit keeps it (`rh`).
+async fn verdict(app: &Paykit) -> serde_json::Value {
+    let raw = app
+        .app()
+        .protocol_get("paykit", b"rh")
+        .await
+        .unwrap()
+        .unwrap();
+    serde_json::from_slice::<serde_json::Value>(&raw).unwrap()["d"]["verdict"].clone()
+}

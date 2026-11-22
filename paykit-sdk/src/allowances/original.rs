@@ -327,12 +327,18 @@ impl Paykit {
         }
         let mut approval = match self.local_get::<OriginalAllowance>(&at).await? {
             Some(held) => held,
-            None if p.proposer_role == ProposerRole::Allowee => OriginalAllowance::new(
-                peer,
-                decision,
-                p.allower_generation,
-                confirmed.ok_or_else(unconfirmed)?,
-            ),
+            None if p.proposer_role == ProposerRole::Allowee => {
+                let confirmed = confirmed.ok_or_else(unconfirmed)?;
+                if confirmed {
+                    // The approval counts under the hold it is given under, so this batch,
+                    // kept and applied after a newer hold, authorizes no grant.
+                    tx.put(
+                        &key::execution_approval(&record, self.current_hold().await?.as_ref()),
+                        &true,
+                    )?;
+                }
+                OriginalAllowance::new(peer, decision, p.allower_generation, confirmed)
+            }
             None => return Err(unconfirmed()),
         };
         if approval.peer != peer

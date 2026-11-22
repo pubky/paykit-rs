@@ -3421,3 +3421,189 @@ async fn resume_seller_proposal(lose_answer: bool) {
     assert_eq!(granted.executor_app_id, Some(app_id));
     assert!(granted.consented);
 }
+
+/// A payer wallet that proposed an Allowance with automatic execution, approved by its
+/// user, and the shop's acceptance read, the first grant not made yet.
+async fn accepted_not_granted(
+    store: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+) -> (World, paykit_sdk::Paykit, paykit_sdk::Paykit, [u8; 32]) {
+    let world = World::new();
+    let mut payer = Box::pin(world.join_with(
+        &world.alice,
+        "wallet",
+        AppScopes::new().allowance_execute().build().unwrap(),
+        Default::default(),
+        store,
+    ))
+    .await;
+    let mut shop = Box::pin(world.join(
+        &world.bob,
+        "shop",
+        AppScopes::new().allowance().request().build().unwrap(),
+    ))
+    .await;
+    payer.app_mut().invite(&shop.identity()).await.unwrap();
+    shop.app_mut().invite(&payer.identity()).await.unwrap();
+    Box::pin(payer.propose_executable_allowance(shop.identity(), terms(), UserConfirmed::new()))
+        .await
+        .unwrap();
+    Box::pin(shop.receive(None)).await.unwrap();
+    let offer = shop.allowances().await.unwrap().pop().unwrap();
+    Box::pin(shop.accept_allowance(&offer.record))
+        .await
+        .unwrap();
+    Box::pin(payer.receive(None)).await.unwrap();
+    let key = payer.allowances().await.unwrap().pop().unwrap().record;
+    (world, payer, shop, key)
+}
+
+async fn missed_item(world: &World, payer: &mut paykit_sdk::Paykit) {
+    let now = world.clock.now_ms();
+    world.alice.switch().push_missed(1, now - 1_000, now);
+    Box::pin(payer.receive(None)).await.unwrap();
+    // The copy of the shared records counts as listed again from the next receive's listing.
+    Box::pin(payer.receive(None)).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_executor_approval_before_a_missed_item_needs_a_new_confirmation() {
+    // Every Allowance is held at a `missed` item, one approved but not granted yet among
+    // them (Paykit spec 7.2): its first grant waits for the user to confirm again.
+    let (world, mut payer, _shop, key) =
+        Box::pin(accepted_not_granted(crate::common::store())).await;
+    Box::pin(missed_item(&world, &mut payer)).await;
+    Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .expect_err("the approval was given before the missed item");
+    assert!(!payer.allowance(&key).await.unwrap().consented);
+    Box::pin(payer.confirm_allowance_executor(&key, UserConfirmed::new()))
+        .await
+        .unwrap();
+    assert!(payer.allowance(&key).await.unwrap().consented);
+}
+
+#[tokio::test]
+async fn test_executor_kept_first_grant_landing_after_a_missed_item_consents_nothing() {
+    // The first grant's batch goes unanswered and is kept; a `missed` item is read before it
+    // lands. The grant applies, but the batch carries no consent, and the approval it was
+    // made on is the earlier hold's: the Allowance waits for the user to confirm it again.
+    use pubky_switch_client::testing::Fault;
+    let (world, mut payer, _shop, key) =
+        Box::pin(accepted_not_granted(crate::common::store())).await;
+    world.alice.switch().fail_next(Fault::Unanswered {
+        path: "/ops".into(),
+        after: 0,
+    });
+    Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .expect_err("the grant's batch is unanswered");
+    world.clock.advance_ms(1_000);
+    world.alice.switch().fail_next(Fault::Unreachable {
+        path: "/ops".into(),
+        after: 0,
+    });
+    Box::pin(missed_item(&world, &mut payer)).await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    let view = payer.allowance(&key).await.unwrap();
+    assert_eq!(
+        view.executor_app_id,
+        Some(payer.app_id()),
+        "the grant applied"
+    );
+    assert!(!view.consented, "{view:?}");
+    Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .expect_err("no consent without a confirmation under the current hold");
+    assert!(!payer.allowance(&key).await.unwrap().consented);
+    Box::pin(payer.confirm_allowance_executor(&key, UserConfirmed::new()))
+        .await
+        .unwrap();
+    assert!(payer.allowance(&key).await.unwrap().consented);
+}
+
+async fn restored_approval(clean: bool) -> bool {
+    let storage = crate::common::store();
+    let (world, mut payer, _shop, key) = Box::pin(accepted_not_granted(storage)).await;
+    let backup = payer.backup().await.unwrap();
+    drop(payer);
+    let mut restored = paykit_sdk::Paykit::restore(
+        world.env(&world.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&world.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        world.timer(),
+    )
+    .await
+    .unwrap();
+    if clean {
+        Box::pin(restored.receive(None)).await.unwrap();
+    } else {
+        crate::common::restore_with_unknown_cursor(&mut restored).await;
+    }
+    Box::pin(restored.reconcile()).await.unwrap();
+    Box::pin(restored.end_reconcile(UserConfirmed::new()))
+        .await
+        .unwrap();
+    Box::pin(restored.resume_allowance_executor(&key))
+        .await
+        .is_ok()
+        && restored.allowance(&key).await.unwrap().consented
+}
+
+#[tokio::test]
+async fn test_executor_clean_restore_keeps_the_approval() {
+    assert!(Box::pin(restored_approval(true)).await);
+}
+
+#[tokio::test]
+async fn test_executor_restore_that_isnt_clean_needs_a_new_confirmation() {
+    assert!(!Box::pin(restored_approval(false)).await);
+}
+
+/// After a first grant, the consent list's entry for it is `consent`; a resume, which turns
+/// an approval into consent, leaves the entry exactly as it is.
+async fn promote_keeps(consent: serde_json::Value) {
+    use pubky_switch_client::app::LocalWrite;
+    let (_world, mut payer, _shop, key) = Box::pin(first_grant()).await;
+    let at = format!("ac/{}", pubky_switch_core::enc::b64(&key));
+    let held = payer
+        .app()
+        .protocol_get("paykit", at.as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut entry: serde_json::Value = serde_json::from_slice(&held).unwrap();
+    entry["d"]["consent"] = consent;
+    let bytes = serde_json::to_vec(&entry).unwrap();
+    payer
+        .app_mut()
+        .protocol_commit(
+            "paykit",
+            &[LocalWrite::Put {
+                key: at.as_bytes().to_vec(),
+                value: bytes.clone(),
+            }],
+        )
+        .await
+        .unwrap();
+    let _ = Box::pin(payer.resume_allowance_executor(&key)).await;
+    assert_eq!(
+        payer
+            .app()
+            .protocol_get("paykit", at.as_bytes())
+            .await
+            .unwrap(),
+        Some(bytes)
+    );
+    assert!(!payer.allowance(&key).await.unwrap().consented);
+}
+
+#[tokio::test]
+async fn test_executor_consent_never_replaces_a_removal() {
+    Box::pin(promote_keeps(json!({ "removed": { "reason": "ended" } }))).await;
+}
+
+#[tokio::test]
+async fn test_executor_consent_never_replaces_a_newer_decision() {
+    Box::pin(promote_keeps(json!({ "held": { "confirm_again": true } }))).await;
+}

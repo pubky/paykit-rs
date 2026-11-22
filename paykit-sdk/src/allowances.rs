@@ -1862,6 +1862,14 @@ impl Paykit {
         let mut tx = Tx::default();
         self.note_peer(&mut tx, &to)?;
         let record_key = self.app.record_key(&permanent)?;
+        if execution.is_some() {
+            // The approval counts under the hold it is given under, so this batch, kept and
+            // applied after a newer hold, authorizes no grant (Paykit spec 7.2, 8.3).
+            tx.put(
+                &key::execution_approval(&record_key, self.current_hold().await?.as_ref()),
+                &true,
+            )?;
+        }
         // Each proposer keeps its own create in the service generation that applies it.
         tx.put(
             &key::original_allowance(&record_key),

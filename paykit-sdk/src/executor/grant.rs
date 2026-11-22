@@ -113,6 +113,13 @@ impl Paykit {
             {
                 return Err(held().into());
             }
+            if confirmed.is_some() {
+                let hold = self.current_hold().await?;
+                self.local_put(&key::execution_approval(record, hold.as_ref()), &true)
+                    .await?;
+            }
+            self.promote_consent(record, &view.counterparty, &view.allowance_id)
+                .await?;
             let consent = self
                 .local_get::<ConsentEntry>(&key::consent(record))
                 .await?
@@ -166,6 +173,16 @@ impl Paykit {
                     Consent::Held { confirm_again } => confirm_again && confirmed.is_none(),
                 })
         {
+            return Err(held().into());
+        }
+        // A first grant goes on the user's approval only under the hold it was given under:
+        // after a restore that isn't clean or a `missed` item, every Allowance is held until
+        // the user confirms it again (Paykit spec 7.2, 8.3). A confirmation now is that.
+        if confirmed.is_some() {
+            let hold = self.current_hold().await?;
+            self.local_put(&key::execution_approval(record, hold.as_ref()), &true)
+                .await?;
+        } else if !self.execution_approved(record).await? {
             return Err(held().into());
         }
         let view = self.allowance(record).await?;
@@ -264,17 +281,12 @@ impl Paykit {
                 value_hash: hash(&value),
             },
         };
-        let consent = ConsentEntry::new(
-            view.counterparty,
-            &view.allowance_id,
-            Consent::Held {
-                confirm_again: false,
-            },
-        );
+        // The consent isn't in the batch: one kept and applied later could bring an Allowance
+        // back over a removal, a newer decision or a newer hold. It is written only by
+        // `promote_consent`, at once, once the grant applied.
         let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
             .entry(op)
-            .local(state::local_put(&key, &ExecutorHistory(vec![checkpoint]))?)
-            .local(state::local_put(&key::consent(record), &consent)?);
+            .local(state::local_put(&key, &ExecutorHistory(vec![checkpoint]))?);
         self.app.submit_batch(batch).await?;
         let applied = self
             .local_get::<ExecutorHistory>(&key)
@@ -288,7 +300,45 @@ impl Paykit {
             &opening,
         )
         .await?;
-        Ok(())
+        self.promote_consent(record, &view.counterparty, &view.allowance_id)
+            .await
+    }
+
+    /// Put the Allowance at `record` on the consent list once its grant applied, by a local
+    /// commit made now, never by a batch the client may keep and apply later. It decides from
+    /// the state now: a consent entry kept already, a removal or a newer decision, stays; while
+    /// a `missed` item's mark waits nothing is consented; and only the user's approval under
+    /// the current hold consents (Paykit spec 7.2, 8.3). Otherwise the Allowance waits for the
+    /// user to confirm it ([`Paykit::confirm_allowance_executor`]).
+    pub(super) async fn promote_consent(
+        &mut self,
+        record: &[u8; 32],
+        counterparty: &[u8; 32],
+        allowance_id: &paykit_lib::AllowanceId,
+    ) -> Result<()> {
+        if self
+            .local_get::<ConsentEntry>(&key::consent(record))
+            .await?
+            .is_some()
+            || self
+                .local_get::<bool>(key::MISSED_CONSENTS)
+                .await?
+                .is_some()
+            || !self.execution_approved(record).await?
+        {
+            return Ok(());
+        }
+        self.local_put(
+            &key::consent(record),
+            &ConsentEntry::new(
+                *counterparty,
+                allowance_id,
+                Consent::Held {
+                    confirm_again: false,
+                },
+            ),
+        )
+        .await
     }
 
     pub(super) async fn finish_executor_grant(

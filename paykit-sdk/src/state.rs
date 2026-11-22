@@ -39,6 +39,8 @@
 //! | `hc/<record key>` | the user confirmed the current hold on a request | |
 //! | `hb/<record key>` | the backup's confirmation of an earlier hold | |
 //! | `rsc/<record key>` | an Allowance whose consent this restore marked for confirmation, until the held cursor settles it | |
+//! | `xr/<record key>` | an approval for execution a restore carried, which counts once its verdict is clean | |
+//! | `xa/<record key>/<hold identifier>` | the user approved automatic execution of an Allowance under that hold; only the current hold's approval lets a first grant go without a new confirmation | |
 //! | `pl` | the latest provider-loss boundary followed, retained across restore (`loss.rs`, Paykit spec 7.3) | |
 //! | `pn/<obligation>` | the user states this obligation was not paid before the kept loss; a newer loss clears these statements | |
 //! | `mh` | the hold a `missed` item set on the open requests, bounded by a time: the item's last acceptance time, or, for an item whose end isn't known, a service time verified after the read that handed it (`hold.rs`) | |
@@ -46,7 +48,7 @@
 //! | `ml` | set by a `missed` item: the shared records aren't listed by Paykit since, so a record's absence means nothing yet; cleared by Paykit's next listing (`hold.rs`); never restored | |
 //! | `lp/<recipient>/<generation>/<message hash>` | outstanding original publication batch IDs, kept atomically before submission and retained across restore | yes |
 //! | `lres/<recipient>` | the applied list, its publisher and original signed message, first non-delivery, prior offers' latest possible expiry, and the interval of an outstanding withdrawal | yes |
-//! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read: never written over it, which could drop its single-use marks, until the record reads | |
+//! | `lh/<record key>/<msg_id>` | a Private Payment List held because its `payment_lists` record doesn't read: never written over it, which could drop its single-use marks, until the record reads; keyed by the list's message, so a placement applied late deletes only its own list | |
 //! | `kc/<record key>/<certificate hash>/<feed generation>` | a payee's cancellation of a request, kept until it is placed in the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
 //! | `lr` | when the app last read the lists, on the device clock; absent before the first read and after a due read failed, when new activity waits (Paykit wire 4.1); never restored, so a restored app reads the deny list again before any payment | |
@@ -703,6 +705,8 @@ impl Stored for bool {
             | StateKey::HoldConfirmed(_)
             | StateKey::HoldConfirmedBefore(_)
             | StateKey::RestoreConsent(_)
+            | StateKey::ExecutionApproval { .. }
+            | StateKey::RestoreApproval(_)
             | StateKey::NotPaidBeforeLoss(_)
             | StateKey::FloorDeleted
             | StateKey::FloorOpened(_)
@@ -898,8 +902,9 @@ impl sealed::Sealed for KeptMessage {}
 ///   ([`crate::receive::receipt_target`]); or a proof of a payment without a request, from
 ///   that sender and of that `msg_id`, whose record, the payee's of its settlement, is
 ///   proven against the rail before it is placed.
-/// - At `lh/<record key>`, a `paykit.private_payment_list`, kept under the record key of its
-///   payee app's `payment_lists` record, from its sender and App ID (Paykit wire 5.4).
+/// - At `lh/<record key>/<msg_id>`, a `paykit.private_payment_list` of that `msg_id`, kept
+///   under the record key of its payee app's `payment_lists` record, from its sender and App
+///   ID (Paykit wire 5.4).
 /// - At `pr/<sender>/<record key>/<msg_id>` too, an Allowance's acceptance or rejection the
 ///   receive step took, from that sender and of that `msg_id`, kept under the record key of
 ///   the Allowance record it names, with its feed `seq`. The app tries to place the answer
@@ -1021,14 +1026,16 @@ impl Stored for KeptMessage {
                     crate::receive::receipt_target(&message, &binder.own, &receipt.attempt_id);
                 (target.record_target(), record)
             }
-            (StateKey::HeldList(record_key), Body::PrivatePaymentList(_))
-                if message.accepted_at().is_some() =>
-            {
-                (
-                    list_target(&message.sender(), &message.message().from.app_id),
-                    record_key,
-                )
-            }
+            (
+                StateKey::HeldList {
+                    record: record_key,
+                    msg_id,
+                },
+                Body::PrivatePaymentList(_),
+            ) if message.accepted_at().is_some() && message.message().msg_id == *msg_id => (
+                list_target(&message.sender(), &message.message().from.app_id),
+                record_key,
+            ),
             (
                 StateKey::KeptReply {
                     sender,
@@ -1824,6 +1831,8 @@ pub(crate) mod key {
     pub(crate) const HOLD_CONFIRMED: &str = "hc/";
     pub(crate) const HOLD_CONFIRMED_BEFORE: &str = "hb/";
     pub(crate) const RESTORE_CONSENTS: &str = "rsc/";
+    pub(crate) const EXECUTION_APPROVALS: &str = "xa/";
+    pub(crate) const RESTORE_APPROVALS: &str = "xr/";
     pub(crate) const LIST_SETTINGS: &str = "list";
     pub(crate) const PUBLICATIONS: &str = "lp/";
     pub(crate) const LIST_RESERVATIONS: &str = "lres/";
@@ -2160,12 +2169,36 @@ pub(crate) mod key {
         format!("{HOLD_CONFIRMED_BEFORE}{}", b64(record_key))
     }
 
+    /// `xa/<record key>/<hold identifier>`: the user approved automatic execution of the
+    /// Allowance at `record_key` under that hold (`he`), or `none` before any hold.
+    pub(crate) fn execution_approval(
+        record_key: &[u8; 32],
+        hold: Option<&crate::hold::HoldEpoch>,
+    ) -> String {
+        format!(
+            "{EXECUTION_APPROVALS}{}/{}",
+            b64(record_key),
+            hold.map_or_else(|| String::from("none"), |hold| b64(hold.as_bytes()))
+        )
+    }
+
+    /// `xr/<record key>`: an approval for execution a restore carried, until its verdict.
+    pub(crate) fn restore_approval(record_key: &[u8; 32]) -> String {
+        format!("{RESTORE_APPROVALS}{}", b64(record_key))
+    }
+
     pub(crate) fn restore_consent(record_key: &[u8; 32]) -> String {
         format!("{RESTORE_CONSENTS}{}", b64(record_key))
     }
 
-    pub(crate) fn held_list(record_key: &[u8; 32]) -> String {
-        format!("{HELD_LISTS}{}", b64(record_key))
+    /// `lh/<record key>/<msg_id>`: the list `msg_id` held over the record at `record_key`.
+    pub(crate) fn held_list(record_key: &[u8; 32], msg_id: &str) -> String {
+        format!("{HELD_LISTS}{}/{msg_id}", b64(record_key))
+    }
+
+    /// The prefix of every list held over the record at `record_key`.
+    pub(crate) fn held_lists_of(record_key: &[u8; 32]) -> String {
+        format!("{HELD_LISTS}{}/", b64(record_key))
     }
 
     /// This app's block or unblock of `pubky` not yet shown by a read of the lists
@@ -2351,10 +2384,26 @@ pub(crate) enum StateKey {
     HoldConfirmedBefore([u8; 32]),
     /// An Allowance consent held specifically by this restore.
     RestoreConsent([u8; 32]),
+    /// `xr/<record key>`: an approval for execution a restore carried from its backup,
+    /// which counts only once the restore's verdict is clean.
+    RestoreApproval([u8; 32]),
+    /// `xa/<record key>/<hold identifier>`: the user's approval of automatic execution of
+    /// an Allowance, under the hold it was given under (`None` before any hold).
+    ExecutionApproval {
+        /// The Allowance record's key.
+        record: [u8; 32],
+        /// The hold identifier the approval was given under.
+        hold: Option<[u8; 16]>,
+    },
     /// `lr`: when the lists were last read.
     ListsRead,
-    /// `lh/<record key>`: a list held over a record that didn't read.
-    HeldList([u8; 32]),
+    /// `lh/<record key>/<msg_id>`: a list held over a record that didn't read.
+    HeldList {
+        /// The `payment_lists` record's key.
+        record: [u8; 32],
+        /// The held list message's `msg_id`.
+        msg_id: String,
+    },
     /// `side/<msg_id>`: the side of a message the app sent.
     Side(String),
     /// `ar/<payee>/<app>`: a payee app's records a reader has seen.
@@ -2673,9 +2722,27 @@ impl StateKey {
                     "hc" => Self::HoldConfirmed(b64_32(rest)?),
                     "hb" => Self::HoldConfirmedBefore(b64_32(rest)?),
                     "rsc" => Self::RestoreConsent(b64_32(rest)?),
+                    "xr" => Self::RestoreApproval(b64_32(rest)?),
+                    "xa" => {
+                        let (record, hold) = rest.split_once('/')?;
+                        Self::ExecutionApproval {
+                            record: b64_32(record)?,
+                            hold: if hold == "none" {
+                                None
+                            } else {
+                                Some(b64_16(hold)?)
+                            },
+                        }
+                    }
                     "pn" => Self::NotPaidBeforeLoss(b64_32(rest)?),
                     "fo" => Self::FloorOpened(b64_32(rest)?),
-                    "lh" => Self::HeldList(b64_32(rest)?),
+                    "lh" => {
+                        let (record, id) = rest.split_once('/')?;
+                        Self::HeldList {
+                            record: b64_32(record)?,
+                            msg_id: msg_id(id)?,
+                        }
+                    }
                     "side" => Self::Side(msg_id(rest)?),
                     "ha" => {
                         let (payee, id) = rest.split_once('/')?;
@@ -3601,6 +3668,7 @@ mod tests {
     #[test]
     fn test_state_key_every_builder_parses_to_its_family() {
         let pubky = [3u8; 32];
+        let hold = crate::hold::HoldEpoch::new().unwrap();
         let app = [4u8; 16];
         let attempt = AttemptId::from_bytes([5; 16]);
         let id = "123e4567-e89b-42d3-a456-426614174000";
@@ -3664,6 +3732,24 @@ mod tests {
                 key::restore_consent(&pubky),
                 StateKey::RestoreConsent(pubky),
             ),
+            (
+                key::restore_approval(&pubky),
+                StateKey::RestoreApproval(pubky),
+            ),
+            (
+                key::execution_approval(&pubky, None),
+                StateKey::ExecutionApproval {
+                    record: pubky,
+                    hold: None,
+                },
+            ),
+            (
+                key::execution_approval(&pubky, Some(&hold)),
+                StateKey::ExecutionApproval {
+                    record: pubky,
+                    hold: Some(*hold.as_bytes()),
+                },
+            ),
             (key::LISTS_READ.into(), StateKey::ListsRead),
             (key::DENIED.into(), StateKey::Denied),
             (key::own_block(&pubky), StateKey::OwnBlock(pubky)),
@@ -3671,7 +3757,13 @@ mod tests {
                 format!("{}{}-7", key::TAKEN, "05".repeat(16)),
                 StateKey::Taken(format!("{}-7", "05".repeat(16))),
             ),
-            (key::held_list(&pubky), StateKey::HeldList(pubky)),
+            (
+                key::held_list(&pubky, id),
+                StateKey::HeldList {
+                    record: pubky,
+                    msg_id: id.into(),
+                },
+            ),
             (key::side(id), StateKey::Side(id.into())),
             (
                 key::held_answer(&pubky, id),

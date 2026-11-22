@@ -2389,6 +2389,82 @@ pub(crate) fn list_version(stored: &StoredMessage) -> Option<ListVersion> {
     }
 }
 
+/// A list to hold over its record (`lh/<record key>/<msg_id>`), with the keys of the lists
+/// held there already, all older, which the same commit deletes: every commit that holds a
+/// list leaves one held per record. A list's own key names its message, so a placement the
+/// client applies only later, from a batch kept to send again, deletes only its own list and
+/// never a newer one held meanwhile.
+#[derive(Clone)]
+pub(crate) struct HeldListWrite {
+    key: String,
+    kept: KeptMessage,
+    older: Vec<String>,
+}
+
+impl HeldListWrite {
+    /// `stored` to hold over the record at `record_key`, of the lists held there, `held`;
+    /// `None` when one of them is as new or newer.
+    pub(crate) fn newer(
+        record_key: &[u8; 32],
+        stored: &StoredMessage,
+        held: &[(String, StoredMessage)],
+    ) -> Option<Self> {
+        if held
+            .iter()
+            .any(|(_, list)| list_version(list) >= list_version(stored))
+        {
+            return None;
+        }
+        Some(Self {
+            key: key::held_list(record_key, &stored.message().msg_id),
+            kept: KeptMessage::of(stored),
+            older: held.iter().map(|(key, _)| key.clone()).collect(),
+        })
+    }
+
+    pub(crate) fn writes(&self) -> crate::error::Result<Vec<LocalWrite>> {
+        let mut writes: Vec<LocalWrite> = self
+            .older
+            .iter()
+            .map(|key| LocalWrite::Delete {
+                key: key.as_bytes().to_vec(),
+            })
+            .collect();
+        writes.push(state::local_put(&self.key, &self.kept)?);
+        Ok(writes)
+    }
+
+    pub(crate) fn stage(&self, tx: &mut Tx) -> crate::error::Result<()> {
+        for key in &self.older {
+            tx.delete(key);
+        }
+        tx.put(&self.key, &self.kept)?;
+        Ok(())
+    }
+}
+
+impl Paykit {
+    /// The lists held over the record at `record_key`, each with its full key, read bound
+    /// to its key (`state::Stored`).
+    pub(crate) async fn held_lists_over(
+        &self,
+        record_key: &[u8; 32],
+    ) -> crate::error::Result<Vec<(String, StoredMessage)>> {
+        let own = self.identity();
+        let prefix = key::held_lists_of(record_key);
+        let mut held = Vec::new();
+        for (rest, kept) in self.local_scan::<KeptMessage>(&prefix).await? {
+            held.push((format!("{prefix}{rest}"), kept.stored(&own)?));
+        }
+        Ok(held)
+    }
+}
+
+/// The newest of `held`, the lists held over one record, by list version.
+pub(crate) fn newest_held(held: Vec<(String, StoredMessage)>) -> Option<(String, StoredMessage)> {
+    held.into_iter().max_by_key(|(_, list)| list_version(list))
+}
+
 /// Hold `stored`, a list whose `payment_lists` record doesn't read, with the cursor move,
 /// unless a newer list is held already ([`list_effect`]).
 fn hold_list(
@@ -2396,14 +2472,20 @@ fn hold_list(
     target: &pubky_switch_client::app::RecordTarget,
     stored: &StoredMessage,
 ) -> Result<(), Fail> {
-    let kept = key::held_list(&cx.record_key(target)?);
-    if let Some(held) = state::cx_get::<KeptMessage>(cx, &kept)? {
-        let held = held.stored(&cx.identity()).map_err(|_| Fail::corrupt())?;
-        if list_version(&held) >= list_version(stored) {
-            return Ok(());
-        }
+    let record_key = cx.record_key(target)?;
+    let mut held = Vec::new();
+    for (key, kept) in state::cx_scan::<KeptMessage>(cx, &key::held_lists_of(&record_key))? {
+        held.push((
+            key,
+            kept.stored(&cx.identity()).map_err(|_| Fail::corrupt())?,
+        ));
     }
-    keep_local(cx, local(&kept, &KeptMessage::of(stored))?);
+    let Some(write) = HeldListWrite::newer(&record_key, stored, &held) else {
+        return Ok(());
+    };
+    for write in write.writes().map_err(|_| Fail::corrupt())? {
+        keep_local(cx, write);
+    }
     Ok(())
 }
 
@@ -2708,7 +2790,10 @@ impl Paykit {
         let own = self.identity();
         let mut out = Vec::new();
         for (rest, kept) in self.local_scan::<KeptMessage>(key::HELD_LISTS).await? {
-            let record_key = pubky_switch_core::enc::unb64_array::<32>(&rest)
+            let (record, _) = rest
+                .split_once('/')
+                .ok_or_else(crate::error::PaykitError::corrupt)?;
+            let record_key = pubky_switch_core::enc::unb64_array::<32>(record)
                 .map_err(|_| crate::error::PaykitError::corrupt())?;
             if self
                 .app
@@ -2760,7 +2845,8 @@ impl Paykit {
         let list = kept.stored(&own)?;
         let target = list_target(&list.sender(), &list.message().from.app_id);
         let record_key = self.app.record_key(&target)?;
-        if format!("{}{rest}", key::HELD_LISTS) != key::held_list(&record_key) {
+        let own_key = key::held_list(&record_key, &list.message().msg_id);
+        if format!("{}{rest}", key::HELD_LISTS) != own_key {
             return Err(crate::error::PaykitError::corrupt());
         }
         // A newer list over a divergent record its user hasn't confirmed stays held (Paykit
@@ -2785,8 +2871,10 @@ impl Paykit {
             },
             Some(RecordContent::Deleted | RecordContent::Unreadable(_)) => return Ok(()),
         };
+        // Only this list's own key: a newer list held meanwhile, at its own key, stays held
+        // when this batch is kept and applied later.
         let mut tx = Tx::default();
-        tx.delete(&key::held_list(&record_key));
+        tx.delete(&own_key);
         match next_list_record(held, &list) {
             Some(record) => {
                 let value = record.to_json()?;
@@ -3659,12 +3747,8 @@ impl Paykit {
         let own = self.identity();
         let target = list_target(payee, app_id);
         let record_key = self.app.record_key(&target)?;
-        let notice = key::held_list(&record_key);
-        let list = self
-            .local_get::<KeptMessage>(&notice)
-            .await?
-            .ok_or(crate::error::Refusal::NotFound)?
-            .stored(&own)?;
+        let (notice, list) = newest_held(self.held_lists_over(&record_key).await?)
+            .ok_or(crate::error::Refusal::NotFound)?;
         // Over a divergent record the user confirms that record first (Paykit spec 6).
         Box::pin(self.refuse_while_write_waits(&record_key)).await?;
         let held = self.app.shared_record(&record_key).await?;
