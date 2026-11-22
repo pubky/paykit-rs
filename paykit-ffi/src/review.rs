@@ -159,12 +159,20 @@ pub enum RefusalKind {
     Rejected,
     /// The request was cancelled by either side (Paykit spec 8.1).
     Cancelled,
-    /// The Allowance has ended, by either side or by its proposal's withdrawal, or this app keeps
-    /// the counterparty's end as its stop: nothing more is done under it (Paykit spec 8.3).
+    /// The Allowance has ended, by either side, by its proposal's withdrawal or when its terms
+    /// expire, or this app keeps the counterparty's end as its stop: nothing more is done under
+    /// it, and no later call changes that (Paykit spec 8.3).
     AllowanceEnded,
     /// The Allowance is conflicted: a second, different proposal or response came, so nothing is
     /// answered, ended, granted or paid under it, for good (Paykit spec 8.3, "Conflicted").
     AllowanceConflicted,
+    /// The user must confirm this Allowance again before this app pays under it, after a missed
+    /// item or a restore that isn't clean. Show the Allowance and, once the user confirms, call
+    /// `confirm_allowance_executor` (Paykit spec 8.3).
+    AllowanceConfirmationNeeded {
+        /// The 32-byte record key of the Allowance to confirm.
+        record: Vec<u8>,
+    },
     /// A payee activity record lost credit history to a delete.
     CreditHistoryLost,
     /// The obligation is paid: its claim is SETTLED, or its record holds the proof of a payment
@@ -299,6 +307,9 @@ impl PaymentRefusal {
             Refusal::Cancelled => D::Cancelled,
             Refusal::AllowanceEnded => D::AllowanceEnded,
             Refusal::AllowanceConflicted => D::AllowanceConflicted,
+            Refusal::AllowanceConfirmationNeeded { record } => D::AllowanceConfirmationNeeded {
+                record: record.to_vec(),
+            },
             Refusal::CreditHistoryLost => D::CreditHistoryLost,
             Refusal::AlreadyPaid => D::AlreadyPaid,
             Refusal::BeingHandledByOtherWallet => D::BeingHandledByOtherWallet,

@@ -10,9 +10,10 @@ use pubky_switch_core::ops::Condition;
 use super::approval::ApprovedOpening;
 use super::checkpoint::{ledger_target, ExecutorCheckpoint, ExecutorHistory, GrantEvidence};
 use super::evidence::AppliedRecord;
+use super::spend::{removed_refusal, status_refusal};
 use crate::allowances::{allowance_target, Consent, ConsentEntry};
 use crate::state::{self, key};
-use crate::{AllowanceRole, AllowanceStatus, Paykit, Refusal, Result};
+use crate::{AllowanceRole, Paykit, Refusal, Result};
 
 fn held() -> Refusal {
     Refusal::NotNow("the executor cannot establish the original Allowance grant and ledger".into())
@@ -103,8 +104,10 @@ impl Paykit {
             let (current_ledger, _) = self.current_executor_record(&ledger).await?;
             let original_ledger = current_ledger.revision == opening.ledger.revision
                 && accepted.application.revision == opening.ledger.revision;
+            if let Some(refusal) = status_refusal(view.status) {
+                return Err(refusal.into());
+            }
             if fresh.revision != accepted.grant.revision
-                || view.status != AllowanceStatus::Accepted
                 || view.blocked != Some(false)
                 || self
                     .local_get::<bool>(key::MISSED_CONSENTS)
@@ -117,8 +120,8 @@ impl Paykit {
                 .local_get::<ConsentEntry>(&key::consent(record))
                 .await?
                 .ok_or_else(held)?;
-            if !matches!(consent.consent, Consent::Held { .. }) {
-                return Err(held().into());
+            if let Consent::Removed { reason } = consent.consent {
+                return Err(removed_refusal(reason).into());
             }
             // A missed inbox entry can hold an already dispatched attempt. The user can
             // renew its consent against the exact ledger this installation incorporated.
@@ -142,7 +145,7 @@ impl Paykit {
             } = consent.consent
             {
                 if confirmed.is_none() {
-                    return Err(held().into());
+                    return Err(Refusal::AllowanceConfirmationNeeded { record: *record }.into());
                 }
                 self.local_put(
                     &key::consent(record),
@@ -158,21 +161,34 @@ impl Paykit {
             .local_get::<bool>(key::MISSED_CONSENTS)
             .await?
             .is_some()
-            || self
-                .local_get::<ConsentEntry>(&key::consent(record))
-                .await?
-                .is_some_and(|c| match c.consent {
-                    Consent::Removed { .. } => true,
-                    Consent::Held { confirm_again } => confirm_again && confirmed.is_none(),
-                })
         {
             return Err(held().into());
         }
-        let view = self.allowance(record).await?;
-        if view.role != Some(AllowanceRole::Allower)
-            || view.status != AllowanceStatus::Accepted
-            || view.blocked != Some(false)
+        match self
+            .local_get::<ConsentEntry>(&key::consent(record))
+            .await?
+            .map(|c| c.consent)
         {
+            Some(Consent::Removed { reason }) => {
+                return Err(removed_refusal(reason).into());
+            }
+            Some(Consent::Held {
+                confirm_again: true,
+            }) if confirmed.is_none() => {
+                return Err(Refusal::AllowanceConfirmationNeeded { record: *record }.into());
+            }
+            _ => {}
+        }
+        let view = self.allowance(record).await?;
+        if view.role != Some(AllowanceRole::Allower) {
+            return Err(
+                Refusal::Usage("this identity doesn't pay under this Allowance".into()).into(),
+            );
+        }
+        if let Some(refusal) = status_refusal(view.status) {
+            return Err(refusal.into());
+        }
+        if view.blocked != Some(false) {
             return Err(held().into());
         }
         let allow = allowance_target(&view.counterparty, &view.allowance_id);
@@ -202,10 +218,14 @@ impl Paykit {
         let Body::AllowanceProposal(proposal) = next.proposal.body() else {
             return Err(held().into());
         };
+        if next.end.is_some() {
+            return Err(Refusal::AllowanceEnded.into());
+        }
+        if next.conflicted.is_some() {
+            return Err(Refusal::AllowanceConflicted.into());
+        }
         if !next.grants.is_empty()
             || next.grant.is_some()
-            || next.end.is_some()
-            || next.conflicted.is_some()
             || !super::in_grant_history(
                 proposal.allower_generation,
                 self.app.own_identity().generation(),

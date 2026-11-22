@@ -1243,7 +1243,7 @@ async fn test_allowances_withdrawal_crossing_the_acceptance_ends_it_on_both_side
     ))
     .await;
     assert!(
-        matches!(refused.refusal(), Some(Refusal::NotNow(reason)) if reason.contains("accepted executor grant")),
+        matches!(refused.refusal(), Some(Refusal::AllowanceEnded)),
         "{refused:?}"
     );
     let ledger = wallet

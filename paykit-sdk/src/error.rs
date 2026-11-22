@@ -43,9 +43,9 @@ pub enum Refusal {
     /// The request was cancelled by either side (Paykit spec 8.1).
     #[error("the request was cancelled")]
     Cancelled,
-    /// The Allowance has ended, by either side or by its proposal's withdrawal, or this app
-    /// keeps the counterparty's end as its stop: nothing more is done under it (Paykit spec
-    /// 8.3).
+    /// The Allowance has ended, by either side, by its proposal's withdrawal or when its
+    /// terms expire, or this app keeps the counterparty's end as its stop: nothing more is
+    /// done under it, and no later call changes that (Paykit spec 8.3).
     #[error("Paykit spec 8.3: the Allowance has ended")]
     AllowanceEnded,
     /// The Allowance is conflicted: a second, different proposal or response came, so
@@ -53,6 +53,17 @@ pub enum Refusal {
     /// "Conflicted").
     #[error("Paykit spec 8.3: the Allowance is conflicted")]
     AllowanceConflicted,
+    /// The user must confirm this Allowance again before this app pays under it: after a
+    /// `missed` item or a restore that isn't clean, an executor pays under no Allowance on
+    /// its consent list until the user has confirmed it again, since an end may be among
+    /// what was lost (Paykit spec 8.3, "Ends reach the executor"). The host shows the
+    /// Allowance at `record` and, once the user confirms, calls
+    /// [`crate::Paykit::confirm_allowance_executor`].
+    #[error("Paykit spec 8.3: the user must confirm this Allowance again")]
+    AllowanceConfirmationNeeded {
+        /// The record key of the Allowance to confirm.
+        record: [u8; 32],
+    },
     /// A payee activity record lost credit history to a delete. A new receipt cannot
     /// be issued for this occurrence, including by hand (Paykit spec 6).
     #[error("Paykit spec 6: the payee record lost credit history to a delete")]

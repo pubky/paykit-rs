@@ -150,6 +150,11 @@ pub struct AllowanceView {
     /// item or a restore without a clean verdict requires confirmation through
     /// [`Paykit::confirm_allowance_executor`] (Paykit spec 8.3).
     pub consented: bool,
+    /// The user must confirm this Allowance again before this app pays under it, after a
+    /// `missed` item or a restore that isn't clean: true exactly when a payment under it
+    /// would be refused with [`crate::Refusal::AllowanceConfirmationNeeded`], so the host can
+    /// ask for [`Paykit::confirm_allowance_executor`] without attempting a payment.
+    pub confirmation_needed: bool,
     /// Whether the counterparty is on the identity's deny list, as the app last read it
     /// (Paykit spec 8.1, "Blocked counterparties"): nothing new from it is taken, its
     /// requests are paused and nothing is sent to it, so the host shows the Allowance as
@@ -256,6 +261,31 @@ pub(crate) enum ConsentEnd {
     HandedOff,
     /// It is conflicted.
     Conflicted,
+}
+
+/// Whether the user must confirm the Allowance `view` shows again before this app pays under
+/// it: the one rule a payment's refusal and the view's flag both follow
+/// ([`crate::Refusal::AllowanceConfirmationNeeded`]).
+pub(crate) fn confirmation_needed(view: &AllowanceView, consent: ConsentState) -> bool {
+    view.status == AllowanceStatus::Accepted
+        && view.role == Some(AllowanceRole::Allower)
+        && consent == ConsentState::ConfirmAgain
+}
+
+/// Where this app's consent to execute an Allowance stands ([`Paykit::consent_state`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConsentState {
+    /// On the consent list and confirmed since any restore or `missed` item: the executor
+    /// may pay under it.
+    Held,
+    /// On the list, but to be confirmed by the user again, after a restore that isn't clean
+    /// or a `missed` item ([`Paykit::confirm_allowance_executor`]).
+    ConfirmAgain,
+    /// Removed for good, and why.
+    Removed(ConsentEnd),
+    /// Not held for now: no consent recorded yet, a `missed` item's mark the next receive
+    /// turns into [`ConsentState::ConfirmAgain`], or a record not held as it must be yet.
+    Waiting,
 }
 
 /// The executor app an `executor_notice` is wrapped to (`en/<msg_id>`), kept with the batch
@@ -2438,6 +2468,7 @@ impl Paykit {
             status: AllowanceStatus::Conflicted,
             executor_app_id: None,
             consented: false,
+            confirmation_needed: false,
             blocked: Box::pin(self.blocked_as_known(&stored.sender())).await?,
         }))
     }
@@ -2463,7 +2494,9 @@ impl Paykit {
         view.executor_app_id = held
             .current_grant(&self.identity())
             .map(|(grant, _)| grant.app_id);
-        view.consented = Box::pin(self.consents(&record)).await?;
+        let consent = Box::pin(self.consent_state(&record)).await?;
+        view.consented = consent == ConsentState::Held;
+        view.confirmation_needed = confirmation_needed(&view, consent);
         Ok(view)
     }
 
@@ -2498,6 +2531,7 @@ impl Paykit {
             status,
             executor_app_id: None,
             consented: false,
+            confirmation_needed: false,
             blocked: Box::pin(self.blocked_as_known(&counterparty)).await?,
         })
     }
@@ -2564,39 +2598,63 @@ impl Paykit {
     /// 8.2; Paykit spec 8.3, "Executor", "Ending"): the user's confirmation of such a write
     /// comes with the executor, so until then it pays nothing.
     pub(crate) async fn consents(&self, record: &[u8; 32]) -> Result<bool> {
-        if Box::pin(self.consents_unconfirmed()).await?
-            || Box::pin(self.allowance_stopped(record)).await?
-            || Box::pin(self.conflict_kept(record)).await?
-        {
-            return Ok(false);
+        Ok(Box::pin(self.consent_state(record)).await? == ConsentState::Held)
+    }
+
+    /// Where this app's consent to execute the Allowance at `record` stands, by the rules of
+    /// [`Paykit::consents`], which holds it only at [`ConsentState::Held`]. The other states
+    /// tell why it doesn't: one the user can lift, one a later read can, or one that is final.
+    pub(crate) async fn consent_state(&self, record: &[u8; 32]) -> Result<ConsentState> {
+        if Box::pin(self.consents_unconfirmed()).await? {
+            return Ok(ConsentState::Waiting);
+        }
+        if Box::pin(self.allowance_stopped(record)).await? {
+            return Ok(ConsentState::Removed(ConsentEnd::Ended));
+        }
+        if Box::pin(self.conflict_kept(record)).await? {
+            return Ok(ConsentState::Removed(ConsentEnd::Conflicted));
         }
         let Some(shared) = Box::pin(self.app.shared_record(record)).await? else {
-            return Ok(false);
+            return Ok(ConsentState::Waiting);
         };
         if shared.flagged {
-            return Ok(false);
+            return Ok(ConsentState::Waiting);
         }
         match Box::pin(self.held_allowance(record)).await? {
-            Some(held) if held.end.is_none() && !rejected(&held) && held.conflicted.is_none() => {
+            Some(held) if held.end.is_some() => {
+                return Ok(ConsentState::Removed(ConsentEnd::Ended))
+            }
+            Some(held) if held.conflicted.is_some() => {
+                return Ok(ConsentState::Removed(ConsentEnd::Conflicted))
+            }
+            Some(held) if rejected(&held) => {
+                return Ok(ConsentState::Removed(ConsentEnd::Rejected))
+            }
+            Some(held) => {
                 if self.unresolved_for_allowance(record, &held).await? {
-                    return Ok(false);
+                    return Ok(ConsentState::Waiting);
                 }
             }
-            _ => return Ok(false),
+            None => return Ok(ConsentState::Waiting),
         }
         let Some(held) = self
             .local_get::<ConsentEntry>(&key::consent(record))
             .await?
         else {
-            return Ok(false);
+            return Ok(ConsentState::Waiting);
         };
         if Box::pin(self.rejection_kept(record, &held.counterparty)).await? {
-            return Ok(false);
+            return Ok(ConsentState::Removed(ConsentEnd::Rejected));
         }
-        Ok(held.consent
-            == Consent::Held {
+        Ok(match held.consent {
+            Consent::Held {
                 confirm_again: false,
-            })
+            } => ConsentState::Held,
+            Consent::Held {
+                confirm_again: true,
+            } => ConsentState::ConfirmAgain,
+            Consent::Removed { reason } => ConsentState::Removed(reason),
+        })
     }
 
     /// Whether this app keeps a rejection from `counterparty` of the Allowance at `record`

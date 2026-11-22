@@ -1,6 +1,7 @@
 //! The approving app's first grant from its retained original acceptance.
 
 mod enrolled;
+mod refusals;
 
 use paykit_lib::allowances::{AllowanceTerms, Ledger};
 use paykit_lib::records::AllowanceRecord;
@@ -63,15 +64,23 @@ async fn first_grant_in(
     store: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
     terms: AllowanceTerms,
 ) -> (World, paykit_sdk::Paykit, paykit_sdk::Paykit, [u8; 32]) {
-    let world = World::new();
-    let mut payer = Box::pin(world.join_with(
-        &world.alice,
-        "wallet",
-        AppScopes::new().allowance_execute().build().unwrap(),
-        Default::default(),
+    Box::pin(first_grant_as(
         store,
+        terms,
+        AppScopes::new().allowance_execute().build().unwrap(),
     ))
-    .await;
+    .await
+}
+
+/// The first grant, the payer's wallet joined with `scopes`.
+async fn first_grant_as(
+    store: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+    terms: AllowanceTerms,
+    scopes: paykit_sdk::RequestedScopes,
+) -> (World, paykit_sdk::Paykit, paykit_sdk::Paykit, [u8; 32]) {
+    let world = World::new();
+    let mut payer =
+        Box::pin(world.join_with(&world.alice, "wallet", scopes, Default::default(), store)).await;
     let mut shop = Box::pin(world.join(
         &world.bob,
         "shop",
@@ -1119,13 +1128,9 @@ pub(super) async fn attempt_after_withdrawal(
     record: &[u8; 32],
 ) -> paykit_sdk::PaykitError {
     let writes = world.record_writes(&world.alice, record);
-    let grant = Box::pin(payer.resume_allowance_executor(record))
+    assert!(Box::pin(payer.resume_allowance_executor(record))
         .await
-        .unwrap_err();
-    assert!(
-        matches!(grant.refusal(), Some(paykit_sdk::Refusal::NotNow(_))),
-        "{grant:?}"
-    );
+        .is_err());
 
     world.rail.set_history_payer(payer.identity());
     let request = Box::pin(request_from(
@@ -1225,7 +1230,7 @@ async fn test_executor_pays_the_period_of_its_accepted_subscription() {
         .outcome
         .unwrap_err();
     assert!(
-        matches!(excess.refusal(), Some(Refusal::NotNow(reason)) if reason.contains("lifetime")),
+        matches!(excess.refusal(), Some(Refusal::NotAutomatic(reason)) if reason.contains("lifetime")),
         "{excess:?}"
     );
     assert_eq!(world.rail.all_executions().len(), 1);

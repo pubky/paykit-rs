@@ -430,8 +430,9 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `Refusal::Rejected` | Show that the request has already been rejected. |
 | `Refusal::HeldAfterRestore` | Show the exact hold and possibility of cancellation. Confirm only the hold shown. |
 | `Refusal::Cancelled` | Show that the request has already been cancelled. |
-| `Refusal::AllowanceEnded` | Show the stop and close actions on this Allowance. |
-| `Refusal::AllowanceConflicted` | Show the conflict and close actions on this Allowance. |
+| `Refusal::AllowanceEnded` | Show the stop and close actions on this Allowance. It is final: a scheduler stops paying under it and does not retry. |
+| `Refusal::AllowanceConflicted` | Show the conflict and close actions on this Allowance. It is final: a scheduler stops paying under it and does not retry. |
+| `Refusal::AllowanceConfirmationNeeded` | Automatic payment under the named Allowance waits for the user. Show its counterparty, terms and executor; once the user confirms, call `confirm_allowance_executor` and then pay again. Do not retry before that. |
 | `Refusal::CreditHistoryLost` | Show that credit is held because the prior credit history is unavailable. |
 | `Refusal::AlreadyPaid` | Show the existing paid state. |
 | `Refusal::BeingHandledByOtherWallet` | Show that another own wallet holds the attempt. |
@@ -444,7 +445,7 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `Refusal::Subscribed` | Show that the recurring request is already accepted. |
 | `Refusal::NotSubscribed` | Wait until the payer accepts the recurring request. |
 | `Refusal::ManualOnly` | Leave this period for the payer or the executor named by its Allowance. |
-| `Refusal::NotAutomatic` | Show why the current automatic window or dated subscription does not permit this payment. |
+| `Refusal::NotAutomatic` | Show why this payment can't be made automatically: the window or dated subscription, or, under an Allowance, a request outside its terms, a blocked counterparty or a used-up lifetime limit. It is final for automatic payment; the user may still pay by hand. |
 | `Refusal::PeriodNotStarted` | Show when this Billing Period starts. If the payer chooses to pay early, call `pay_period` for that period with `PayOptions::with_early_payment_confirmed`. After a payer-provider loss, an older subscription may already have paid this period early. Keep it pending while that history is incomplete. |
 | `Refusal::AttemptedPeriodsFull` | Wait for an existing period attempt to finish or reconcile its outcome before starting another. |
 | `Refusal::Destination` | Show the failed destination check and refresh when the payee has a usable endpoint. |
@@ -458,8 +459,8 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `Refusal::IdentityUnconfirmed` | Ask for explicit confirmation before using a public destination without Switch confirmation. |
 | `Refusal::PaymentInProgress` | Wait for the existing attempt before rejecting or cancelling. |
 | `Refusal::NotCurrent` | Refresh authority and reconcile the existing attempt under the current provider and certificate. |
-| `Refusal::NotNow` | Inspect account, clock and restore state before continuing. |
-| `Refusal::Usage` | Correct the supplied API input. |
+| `Refusal::NotNow` | Temporary: inspect account, clock and restore state, and try again later. |
+| `Refusal::Usage` | Correct the supplied API input, such as a payment under an Allowance asked of an app that isn't its executor. |
 | `Refusal::RecordHeld` | A payer record with payment history lost to deletion permanently holds that obligation. For a temporarily unreadable record, resume when it can be read or repaired. |
 | `Refusal::CertificateRefused` | Seek a suitable certificate from the signer and keep Paykit actions paused meanwhile. |
 | `Refusal::SwitchUnavailable` | Show the own Switch as unavailable and keep payment actions waiting. |

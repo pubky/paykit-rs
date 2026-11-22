@@ -1222,6 +1222,11 @@ impl Paykit {
             return Err(self.past_deadline(&target, None).await?);
         }
         let allowance = if let Some(key) = allowance {
+            // An occurrence marked manual-only is never paid automatically, whatever else
+            // holds (Paykit spec 8.3, "Manual only").
+            if record.manual_only {
+                return Err(Refusal::ManualOnly.into());
+            }
             let reservation = Box::pin(self.allowance_reservation(&key, &request.payee)).await?;
             reservation.request(&record, claim.as_ref(), None)?;
             if blocked
