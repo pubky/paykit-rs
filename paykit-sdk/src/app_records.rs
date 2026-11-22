@@ -336,10 +336,15 @@ const SEEN_RECORDS_BYTES: usize = (pubky_switch_client::store::MAX_VALUE_BYTES /
 /// spec 4.2, Switch wire 3.2 "Equal times"), oldest first (`p/ar/<payee>/<app>`). Replayed
 /// in order, they rebuild the core's [`RecordView`]; kept, they survive a restart, so a
 /// copy older than one seen, or one conflicting with it, is never used after a reload.
+/// A served record whose timestamp group is too large to keep leaves `unkept_at`, its
+/// `updated_at`: no record at or before it is used, across restarts too, until a strictly
+/// later record is kept (Switch spec 4.2).
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SeenRecords {
     records: Vec<SignedDoc>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    unkept_at: Option<u64>,
 }
 
 impl SeenRecords {
@@ -370,18 +375,29 @@ impl SeenRecords {
             start -= group.len();
         }
         if at < start {
+            self.unkept_at = self.unkept_at.max(Some(record.updated_at()));
             return None;
         }
         let view = Self::replay(&held[start..], now);
         self.records = held.into_iter().skip(start).map(SignedDoc::from).collect();
+        if self.unkept_at.is_some_and(|at| record.updated_at() > at) {
+            self.unkept_at = None;
+        }
         Some(view)
+    }
+
+    /// Whether `record`, served now, is at or before a timestamp group the reader couldn't
+    /// keep: its other bodies are unknown, so it may be in conflict or withdrawn.
+    fn before_unkept(&self, served_at: Option<u64>) -> bool {
+        self.unkept_at
+            .is_some_and(|at| served_at.is_none_or(|served| served <= at))
     }
 
     /// Whether the kept records are nonempty and each is `payee`'s, verified as its signer
     /// signed it, and of app `app_id`: checked before a restore installs
     /// a copy (`p/ar/<payee>/<app>`), so none can fail every later read of the payee.
     pub(crate) fn verifies(&self, payee: &[u8; 32], app_id: &[u8; 16]) -> bool {
-        !self.records.is_empty()
+        (!self.records.is_empty() || self.unkept_at.is_some())
             && self.records.iter().all(|signed| {
                 AppRecord::verify(signed, payee)
                     .is_ok_and(|record| record.cert().app_id() == *app_id)
@@ -600,6 +616,7 @@ impl Paykit {
             // member that doesn't read makes that record's endpoints unusable, as `usable`
             // judges the record used (Paykit wire 3.2), and decides nothing of the comparison.
             let served_ahead = read.as_ref().is_some_and(|record| record.is_ahead(now));
+            let served_at = read.as_ref().map(AppRecord::updated_at);
             let served_refused = read.is_none();
             if let Some(record) = read {
                 if takes_part(&record, &held, &view, now) {
@@ -607,6 +624,9 @@ impl Paykit {
                     // is an earlier one in its place, which it may withdraw: the app's
                     // failure, and the other apps' reads go on (Paykit spec 4, below).
                     let Some(kept) = seen.keep(&record, held, now) else {
+                        // Kept before the failure is told: after a restart the records
+                        // retained alone could make an earlier one look current.
+                        self.local_put(&seen_key, &seen).await?;
                         // Report the read's bound for otherwise usable endpoints. Compare
                         // the record without retaining it or taking room from later apps.
                         let over_bound = PaykitMember::read(&record)
@@ -628,6 +648,16 @@ impl Paykit {
                     view = kept;
                     self.local_put(&seen_key, &seen).await?;
                 }
+            }
+            // A record at or before a group the reader couldn't keep is never used, nor an
+            // earlier one in its place, until a strictly later record is kept.
+            if seen.before_unkept(served_at) {
+                failures.push(fail(PublicAppFailureReason::Refused(format!(
+                    "Paykit spec 4: the app's records up to a group that exceeded the history \
+                     a reader keeps ({SEEN_RECORDS} records, {SEEN_RECORDS_BYTES} bytes) are \
+                     not used"
+                ))));
+                continue;
             }
             // The record served now is judged on its own: refused, made ahead of the payer's
             // clock, or in conflict with one seen, it is reported as this app's failure.
@@ -943,6 +973,7 @@ mod tests {
                 signed(1, json!({})),
                 signed(2, json!({})),
             ],
+            unkept_at: None,
         };
         let (view, held) = records.view(&bob.id(), NOW + 2).unwrap();
         assert!(view.in_conflict());

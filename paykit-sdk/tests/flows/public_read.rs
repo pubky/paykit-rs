@@ -1354,6 +1354,64 @@ async fn test_public_read_unretained_conflicting_or_expired_record_is_refused() 
     }
 }
 
+#[tokio::test]
+async fn test_public_read_unretained_conflict_still_refused_after_a_reload() {
+    let w = World::new();
+    let storage = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&storage)).await;
+    let apps = bob_apps(&w, &["shop", "seller-wallet"]).await;
+    let original_time = w.clock.now_ms();
+    let expiry = Some(original_time + DAY_MS);
+    let original = one_endpoint("btc-lightning-bolt11", "lnbc1shop");
+    publish_app_at(&w, apps[0].0, original.clone(), original_time, expiry);
+    publish_now(
+        &w,
+        apps[1].0,
+        one_endpoint("btc-lightning-bolt12", "lno1wallet"),
+    );
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(offering(&read), [apps[0].1, apps[1].1]);
+
+    // A second body at the original time conflicts with it and is too large to keep.
+    w.clock.advance_ms(1000);
+    publish_app_at(&w, apps[0].0, many(3, 3 * MIB), original_time, expiry);
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(offering(&read), [apps[1].1]);
+
+    // After a reload the Homeserver serves the original body again. The conflict seen before
+    // still holds it: neither body is used.
+    let wallet_id = wallet.app_id();
+    drop(wallet);
+    let mut wallet = w
+        .load_on_clock(&w.alice, storage, wallet_id, Arc::clone(&w.clock))
+        .await;
+    publish_app_at(&w, apps[0].0, original, original_time, expiry);
+    for _ in 0..2 {
+        let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+        assert_eq!(offering(&read), [apps[1].1], "{read:?}");
+        assert_eq!(read.failures.len(), 1, "{:?}", read.failures);
+        assert_eq!(read.failures[0].app_id, apps[0].1);
+        assert!(
+            matches!(&read.failures[0].reason, PublicAppFailureReason::Refused(rule)
+                if rule.contains("a reader keeps")),
+            "{:?}",
+            read.failures
+        );
+    }
+
+    // A strictly later record ends the hold.
+    publish_app_at(
+        &w,
+        apps[0].0,
+        one_endpoint("btc-onchain-address", "bc1qlater"),
+        original_time + 2000,
+        expiry,
+    );
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(offering(&read), [apps[0].1, apps[1].1]);
+    assert!(read.failures.is_empty(), "{:?}", read.failures);
+}
+
 /// A store that moves the world's clock on at the first read, once armed, of the records a
 /// reader keeps of a payee app (`ar/`).
 struct ClockOnSeenRead {
