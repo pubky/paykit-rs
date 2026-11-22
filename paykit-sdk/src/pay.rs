@@ -33,7 +33,7 @@ use paykit_lib::bodies::{
     PaymentProof, PaymentRequest, PaymentRequestAcceptance, PrivatePaymentListRequest,
     RequestDestination,
 };
-use paykit_lib::derive::{natural_key, payment_obligation};
+use paykit_lib::derive::natural_key;
 use paykit_lib::kinds::Kind;
 use paykit_lib::periods::PeriodRef;
 use paykit_lib::records::{
@@ -1521,7 +1521,7 @@ impl Paykit {
             refuse_blocked(true, shown, options.blocked_confirmed.as_ref())?;
         }
         let attempt_id = AttemptId::generate()?;
-        let obligation = payment_obligation(&attempt_id);
+        let obligation = self.payment_obligation(&attempt_id);
         let deadline = match self.app.read_claim(&obligation).await {
             Ok(_) => Some(
                 self.recent_service_time(&obligation)
@@ -1554,7 +1554,7 @@ impl Paykit {
             user_started: true,
             allowance: None,
             attempt_id: attempt_id.to_text(),
-            obligation: payment_obligation(&attempt_id),
+            obligation: self.payment_obligation(&attempt_id),
             payee: payment.payee,
             request_hash: None,
             natural_key: natural.clone(),

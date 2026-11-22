@@ -96,7 +96,7 @@
 //! | `end/<msg_id>` | origin of the exact signed Allowance end and its target and references, written before submission and retained through its delivery lifetime | |
 
 use paykit_lib::bodies::ResendRequest;
-use paykit_lib::derive::{natural_key, request_obligation_blinded};
+use paykit_lib::derive::natural_key;
 use paykit_lib::scopes::verify_certificate;
 use paykit_lib::{AttemptId, Body};
 use pubky_switch_client::app::{LocalView, LocalWrite, ReceiveContext, RecordTarget};
@@ -1177,9 +1177,7 @@ impl Stored for JournalEntry {
         }
         let blind = binder.blind()?;
         let cert = binder.cert.ok_or_else(PaykitError::corrupt)?;
-        self.check_restored(&binder.own, cert, |payee, request_hash, start| {
-            request_obligation_blinded(&blind(payee), &blind(request_hash), start)
-        })?;
+        self.check_restored(&binder.own, cert, |input| blind(input))?;
         if self.request_hash()?.is_none()
             && self.natural_key != natural_key::payer_payment_record(&binder.own, attempt)
         {

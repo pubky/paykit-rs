@@ -20,7 +20,7 @@
 //! rail's proof.
 
 use paykit_lib::bodies::{Body, Conversion};
-use paykit_lib::derive::{natural_key, payment_obligation};
+use paykit_lib::derive::{natural_key, payment_obligation_blinded, request_obligation_blinded};
 use paykit_lib::periods::PeriodRef;
 use paykit_lib::records::{DestinationSource, StoredMessage};
 use paykit_lib::{
@@ -666,7 +666,7 @@ impl JournalEntry {
     ///   method.
     pub(crate) fn check(&self) -> Result<()> {
         let bad = || Err(PaykitError::corrupt());
-        let attempt = self.attempt()?;
+        self.attempt()?;
         let request_hash = self.request_hash()?;
         self.amount.amount()?;
         self.destination.check()?;
@@ -701,7 +701,6 @@ impl JournalEntry {
                 if self.acceptance_owed
                     || period.is_some()
                     || self.destination.source()? == DestinationSource::Request
-                    || self.obligation != payment_obligation(&attempt)
                 {
                     return bad();
                 }
@@ -820,22 +819,25 @@ impl JournalEntry {
         }
     }
 
-    /// [`JournalEntry::check`], and the entry's claim key bound to what it pays: for a
-    /// payment of a request, the obligation `request_obligation` derives from the payee, the
-    /// request and the start of the Billing Period paid, in Unix seconds, 0 for a one-time
-    /// request (Paykit spec 7.1, Paykit wire 1.5); a payment without a request's is checked
-    /// by `check` already. An entry whose claim key names another obligation would read and
-    /// write one claim while its record and proof name another: it is a corrupt store.
-    pub(crate) fn check_bound(
-        &self,
-        request_obligation: impl Fn(&[u8; 32], &[u8; 32], u64) -> [u8; 32],
-    ) -> Result<()> {
+    /// [`JournalEntry::check`], and the entry's claim key bound to what it pays, each input
+    /// blinded by `blind` with the payer's naming key (Paykit spec 7.1, Paykit wire 1.5): for
+    /// a payment of a request, the obligation of the payee, the request and the start of the
+    /// Billing Period paid, in Unix seconds, 0 for a one-time request; for a payment without
+    /// a request, the obligation of its attempt ID. An entry whose claim key names another
+    /// obligation would read and write one claim while its record and proof name another: it
+    /// is a corrupt store.
+    pub(crate) fn check_bound(&self, blind: impl Fn(&[u8]) -> [u8; 32]) -> Result<()> {
         self.check()?;
-        if let Some(hash) = self.request_hash()? {
-            if self.obligation != request_obligation(&self.payee, &hash, self.period_start_secs()?)
-            {
-                return Err(PaykitError::corrupt());
-            }
+        let expected = match self.request_hash()? {
+            Some(hash) => request_obligation_blinded(
+                &blind(&self.payee),
+                &blind(&hash),
+                self.period_start_secs()?,
+            ),
+            None => payment_obligation_blinded(&blind(&self.attempt()?.to_bytes())),
+        };
+        if self.obligation != expected {
+            return Err(PaykitError::corrupt());
         }
         Ok(())
     }
@@ -862,9 +864,9 @@ impl JournalEntry {
         &self,
         own: &[u8; 32],
         own_cert: &AppCert,
-        request_obligation: impl Fn(&[u8; 32], &[u8; 32], u64) -> [u8; 32],
+        blind: impl Fn(&[u8]) -> [u8; 32],
     ) -> Result<()> {
-        self.check_bound(request_obligation)?;
+        self.check_bound(blind)?;
         let corrupt = || Err(PaykitError::corrupt());
         let request_hash = self.request_hash()?;
         if let Some(kept) = &self.request {
