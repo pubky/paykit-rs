@@ -60,6 +60,7 @@ private suspend fun checkoutFromMain(directory: File) {
     method.release.complete(Unit)
     val store = EnrollmentStore()
     enrolledTestCheckout(store, method).use { fixture ->
+        method.clock = { fixture.nowMs() }
         val reference = ByteArray(16) { 23 }
         val secret = ByteArray(32) { 9 }
         WalletEnrollment(store).use { owner ->
