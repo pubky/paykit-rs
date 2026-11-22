@@ -2484,7 +2484,7 @@ impl Paykit {
         // An answer goes to no counterparty whose sends are held (Paykit spec 8.1, "Blocked
         // counterparties"). A rejection or a payer's cancellation is still a stop: it is
         // recorded as when they aren't, and only its message waits ([`Paykit::record_held`]);
-        // a copy of the deny list not known is read first. An acceptance takes paying's gate
+        // a copy of the deny list past its refresh interval or not known is read first. An acceptance takes paying's gate
         // instead (Paykit spec 8.1, 8.2): the deny list as judged for a payment the user
         // starts, read first when the copy is older than 10 minutes or not known, a read that
         // fails being the call's error, so it never goes on a copy not known; to a blocked
@@ -2496,9 +2496,9 @@ impl Paykit {
         } else if answer == Answer::Accept {
             (self.denied_for_user(&request.payee).await?, false)
         } else {
-            if !self.deny_copy_known().await? {
-                self.refresh_lists_when_due().await?;
-            }
+            // Judged on a fresh copy: one past its refresh interval is read first, so a
+            // block another own app wrote holds the answer in its record, not the outbox.
+            self.refresh_lists_when_due().await?;
             (false, self.sends_held(&request.payee).await?)
         };
         let (target, mut record) = self.payer_request(request).await?;
@@ -2724,8 +2724,8 @@ impl Paykit {
         // An acceptance recorded and queued is sent whatever a try to deliver it now gives;
         // a rejection's or cancellation's failed try is the call's error, as before.
         if answer != Answer::Accept {
-            // Its delivery is judged on a fresh copy of the deny list: one past its refresh
-            // interval is read first (Paykit spec 8.1, "Messages already queued").
+            // Its delivery is judged on a fresh copy of the deny list, which the time spent
+            // recording it may have aged (Paykit spec 8.1, "Messages already queued").
             self.refresh_lists_when_due().await?;
             self.send_message(&msg_id).await?;
         }

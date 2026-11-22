@@ -1458,7 +1458,7 @@ impl Protocol for PaykitProtocol {
     /// Requests, period details, list requests, rejections, payer cancellations and
     /// subscription acceptances go only while the deny decision permits them, however
     /// long ago they were queued; a payee's cancellation and a payment's acceptance, proof
-    /// and receipt still go (Paykit spec 8.1).
+    /// and receipt still go when first sent, but not as a re-send (Paykit spec 8.1, 9).
     fn may_send(
         &self,
         delivery: &pubky_switch_client::app::DeliveryView<'_>,
@@ -1494,9 +1494,11 @@ impl Protocol for PaykitProtocol {
                 | Kind::PaymentRequestAcceptance
                 | Kind::PaymentRequestRejection
                 | Kind::PaymentRequestCancellation
-                | Kind::PrivatePaymentListRequest),
+                | Kind::PrivatePaymentListRequest
+                | Kind::PaymentProof
+                | Kind::PaymentReceipt),
             )) => crate::send_holds::may_deliver(delivery, kind).map_err(view_failure),
-            // A proof and a receipt report a payment already made (Paykit spec 8.1).
+            // An `executor_notice` goes to an own app, not a counterparty (Paykit spec 8.1).
             _ => Ok(true),
         }
     }

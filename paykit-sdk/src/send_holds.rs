@@ -7,10 +7,12 @@
 //! permits it, so one queued or signed before a block waits once the block is recorded.
 //! An exception goes from the signed message and the durable state that establishes its
 //! role, never from its kind alone: a payee's cancellation by its kept side, a payment's
-//! acceptance by the evidence written before it was queued.
+//! acceptance by the evidence written before it was queued. An exception covers the first
+//! delivery and its retries only: a re-send answering a `resend_request` goes only while
+//! the deny decision permits it, whatever its kind (Paykit spec 9).
 
 use paykit_lib::kinds::Kind;
-use pubky_switch_client::app::{DeliveryView, KeptBatchStatus};
+use pubky_switch_client::app::{DeliveryOrigin, DeliveryView, KeptBatchStatus};
 use pubky_switch_core::enc::serde_b64;
 use serde::{Deserialize, Serialize};
 
@@ -34,7 +36,8 @@ pub(crate) enum ExemptionReason {
     /// The acceptance reports a payment the payment method was already asked to make.
     DispatchedPayment,
     /// The user confirmed accepting this subscription of a blocked payee. Only its
-    /// original delivery and retries of it go, never a re-send.
+    /// original delivery and retries of it go, never a re-send or a copy reconstructed
+    /// from a shared record.
     ConfirmedWhileBlocked {
         #[serde(with = "serde_b64")]
         payee: [u8; 32],
@@ -113,8 +116,15 @@ pub(crate) fn may_deliver(delivery: &DeliveryView<'_>, kind: Kind) -> Result<boo
     if !receive::reads_lists(delivery.cert().scopes()) {
         return Ok(true);
     }
+    // Re-sending an answer requires a known deny copy that permits the counterparty,
+    // what settles a payment included (Paykit spec 8.1, 9).
+    if delivery.resend() {
+        return Ok(deny_decision(delivery)? == DenyDecision::Permits);
+    }
     let message = delivery.message();
     match kind {
+        // A proof and a receipt report a payment already made (Paykit spec 8.1).
+        Kind::PaymentProof | Kind::PaymentReceipt => return Ok(true),
         Kind::PaymentRequestCancellation => {
             let side = state::delivery_get::<KeptSide>(delivery, &key::side(&message.msg_id))?;
             if side.is_some_and(|kept| kept.side == SideTag::Payee) {
@@ -133,7 +143,7 @@ pub(crate) fn may_deliver(delivery: &DeliveryView<'_>, kind: Kind) -> Result<boo
                     request_hash,
                 }) if payee == message.to
                     && message.refs.as_slice() == [request_hash]
-                    && !delivery.resend() =>
+                    && delivery.origin() == DeliveryOrigin::Original =>
                 {
                     return Ok(deny_decision(delivery)? != DenyDecision::Unknown);
                 }

@@ -3423,6 +3423,34 @@ mod tests {
     }
 
     #[test]
+    fn test_state_send_exemption_bound_to_its_message() {
+        let id = "123e4567-e89b-42d3-a456-426614174000";
+        let other = "223e4567-e89b-42d3-a456-426614174000";
+        // Why an acceptance may go while sends are held, of the message its key names, read
+        // at runtime and at a restore alike.
+        let binder = Binder::unblinded([1; 32]);
+        for exemption in [
+            crate::send_holds::SendExemption::dispatched(id),
+            crate::send_holds::SendExemption::confirmed_while_blocked(id, [3; 32], [4; 32]),
+        ] {
+            let bytes = encode(&exemption).unwrap();
+            let read = |key: &str| {
+                (
+                    bound::<crate::send_holds::SendExemption>(key.as_bytes(), &bytes, &binder),
+                    restored::<crate::send_holds::SendExemption>(key.as_bytes(), &bytes, &binder),
+                )
+            };
+            let (runtime, restore) = read(&key::send_exemption(id));
+            assert_eq!(runtime.unwrap(), exemption);
+            assert_eq!(restore.unwrap(), exemption);
+            for key in [key::send_exemption(other), key::side(id)] {
+                let (runtime, restore) = read(&key);
+                assert!(runtime.is_err() && restore.is_err(), "{key}");
+            }
+        }
+    }
+
+    #[test]
     fn test_state_values_bound_to_their_family_and_key() {
         let pubky = [3u8; 32];
         let id = "123e4567-e89b-42d3-a456-426614174000";
