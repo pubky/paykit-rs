@@ -413,6 +413,7 @@ mod tests {
             publisher: actual.publisher,
             predecessors: Payable::Unknown,
             delivery: crate::publish::FirstDelivery::Open,
+            confirmed: false,
             withdrawal: Some(Withdrawal {
                 first: 0,
                 issued: 0,

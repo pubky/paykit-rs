@@ -1,7 +1,7 @@
 //! First-delivery evidence and the withdrawal interval for a recipient (Paykit spec 8.4).
 
 use super::{
-    counter_unavailable, target, ListRecipient, ListReservation, ListWithdrawal, DAY, HOUR,
+    counter_unavailable, target, ListRecipient, ListReservation, UnknownListDelivery, DAY, HOUR,
 };
 use crate::error::Result;
 use crate::notices::KeptNotice;
@@ -33,7 +33,7 @@ impl Payable {
 
 /// What the client reported about a list's first delivery (Pubky Switch spec 11).
 /// `Undelivered` proves the recipient never got it. `Unknown` means it may have: no
-/// replacement follows without the user's confirmation (Paykit spec 8.4, 8.5).
+/// replacement follows without the user's confirmation (Paykit spec 8.4, 9).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum FirstDelivery {
@@ -144,10 +144,12 @@ impl Paykit {
 
     /// Keep the client's report of a list's first delivery with the original issue, in
     /// the commit that takes its native duty. Definite non-delivery lets the withdrawal
-    /// schedule replace an empty list. An unknown outcome of an empty list is kept with
-    /// a notice for the host: only the user can authorize another withdrawal
-    /// ([`Paykit::withdraw_list_again`]). A failed resend or permanent refusal records
-    /// nothing. Whether `id` is the recipient's current issue.
+    /// schedule replace an empty list. An unknown outcome is kept with a notice for the
+    /// host while the list is the counterparty's current one and its outcome still
+    /// matters ([`ListReservation::unknown_matters`]): only the user can authorize
+    /// another version ([`Paykit::send_list_again`]; Paykit spec 8.4, 9). A failed
+    /// resend or permanent refusal records nothing. Whether `id` is the recipient's
+    /// current issue.
     pub(crate) async fn take_list_delivery(
         &self,
         tx: &mut Tx,
@@ -163,19 +165,25 @@ impl Paykit {
             }
             issue.delivery = issue.delivery.with(observed);
             tx.put(&key::list_reservation(&issue.recipient), &issue)?;
-            if observed == FirstDelivery::Unknown && issue.revision.is_none() {
-                let accepted = self
+            if observed == FirstDelivery::Unknown {
+                let current = self
                     .local_get::<ListRecipient>(&key::list_recipient(&issue.recipient))
                     .await?
-                    .and_then(|recipient| recipient.answers.first(&issue));
+                    .filter(|recipient| {
+                        recipient.choice == issue.choice
+                            && recipient.answers.first(&issue).is_none()
+                    });
+                let now = self.service_time().unwrap_or(0);
                 let at = key::restored_delivery(&issue.recipient, &issue.id, &issue.hash);
-                if accepted.is_none() && self.kept_notice(&at).await?.is_none() {
-                    let raised = self.service_time().unwrap_or(0);
-                    let notice = KeptNotice::list_withdrawal_unknown(
+                if current.is_some()
+                    && issue.unknown_matters(now)
+                    && self.kept_notice(&at).await?.is_none()
+                {
+                    let notice = KeptNotice::list_delivery_unknown(
                         &issue.recipient,
                         &issue.id,
                         &issue.hash,
-                        raised,
+                        now,
                     );
                     tx.put(&at, &notice)?;
                 }
@@ -185,17 +193,18 @@ impl Paykit {
         Ok(false)
     }
 
-    /// The recipient's current empty list whose delivery ended unknown, unless the
-    /// recipient has since accepted it.
-    pub(super) async fn unknown_withdrawal(
+    /// The recipient's current list, under its current choice, whose delivery ended
+    /// unknown and whose outcome still matters, unless the recipient has accepted it
+    /// since or the user already confirmed another version.
+    pub(super) async fn unknown_issue(
         &mut self,
         recipient: &mut ListRecipient,
-    ) -> Result<Option<(ListReservation, ListWithdrawal)>> {
+    ) -> Result<Option<(ListReservation, UnknownListDelivery)>> {
         let at = key::list_reservation(&recipient.recipient);
         let Some(mut issue) = self.local_get::<ListReservation>(&at).await? else {
             return Ok(None);
         };
-        if issue.revision.is_some() || issue.choice != recipient.choice {
+        if issue.choice != recipient.choice {
             return Ok(None);
         }
         if issue.delivery == FirstDelivery::Open && self.take_prior_list_delivery(&issue.id).await?
@@ -205,7 +214,10 @@ impl Paykit {
             };
             issue = taken;
         }
+        let now = self.service_time().unwrap_or(0);
         if issue.delivery != FirstDelivery::Unknown
+            || issue.confirmed
+            || !issue.unknown_matters(now)
             || self
                 .observe_list_acceptance(recipient, &issue)
                 .await?
@@ -213,16 +225,33 @@ impl Paykit {
         {
             return Ok(None);
         }
-        let shown = ListWithdrawal {
+        let withdrawal = issue.revision.is_none();
+        let shown = UnknownListDelivery {
             recipient: issue.recipient,
             version: ListVersion::new(issue.generation, issue.counter)?,
             msg_id: issue.id.clone(),
-            earlier_list_payable_until_ms: match issue.predecessors {
-                Payable::Until(end) => Some(end),
-                Payable::Unknown => None,
+            withdrawal,
+            payable_until_ms: if withdrawal {
+                match issue.predecessors {
+                    Payable::Until(end) => Some(end),
+                    Payable::Unknown => None,
+                }
+            } else {
+                Some(issue.expires)
             },
         };
         Ok(Some((issue, shown)))
+    }
+}
+
+impl ListReservation {
+    /// Whether an unknown outcome of this list can still matter at `now`: a withdrawal
+    /// while an earlier offer may be paid, a nonempty list until it expires.
+    pub(super) fn unknown_matters(&self, now: u64) -> bool {
+        if self.revision.is_some() {
+            return self.expires > now;
+        }
+        !matches!(self.predecessors, Payable::Until(end) if end <= now)
     }
 }
 
@@ -245,6 +274,7 @@ mod tests {
             missing: None,
             predecessors,
             delivery: FirstDelivery::Undelivered,
+            confirmed: false,
             withdrawal: Some(Withdrawal {
                 first: 1,
                 issued: HOUR + 1,
@@ -275,6 +305,20 @@ mod tests {
         assert!(empty.withdrawal_due(3 * DAY));
         empty.delivery = FirstDelivery::Unknown;
         assert!(!empty.withdrawal_due(3 * DAY));
+    }
+
+    #[test]
+    fn test_withdrawal_unknown_outcome_matters_while_something_can_be_paid() {
+        let mut empty = issue(Payable::Until(3 * DAY));
+        assert!(empty.unknown_matters(3 * DAY - 1));
+        assert!(!empty.unknown_matters(3 * DAY));
+        empty.predecessors = Payable::Unknown;
+        assert!(empty.unknown_matters(60 * DAY));
+        let mut list = issue(Payable::Until(0));
+        list.revision = Some([8; 16]);
+        list.withdrawal = None;
+        assert!(list.unknown_matters(5 * DAY - 1));
+        assert!(!list.unknown_matters(5 * DAY));
     }
 
     #[test]

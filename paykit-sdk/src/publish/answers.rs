@@ -485,6 +485,30 @@ impl Answers {
     }
 }
 
+/// A list request naming the exact version of the counterparty's current list whose
+/// delivery is unknown is evidence that it arrived (Paykit spec 9): it counts as that
+/// list's acceptance, at the request's acceptance time. Whether `recipient` changed.
+fn observe_named(
+    recipient: &mut ListRecipient,
+    held: Option<&ListReservation>,
+    request: &PrivatePaymentListRequest,
+    stored: &StoredMessage,
+) -> std::result::Result<bool, Fail> {
+    let Some(issue) = held.filter(|issue| {
+        issue.delivery == super::FirstDelivery::Unknown
+            && issue.choice == recipient.choice
+            && recipient.answers.first(issue).is_none()
+            && request.held_version == ListVersion::new(issue.generation, issue.counter).ok()
+    }) else {
+        return Ok(false);
+    };
+    let accepted = stored.accepted_at().ok_or_else(Fail::corrupt)?;
+    recipient
+        .answers
+        .observe(issue, accepted, true)
+        .map_err(|_| Fail::corrupt())
+}
+
 pub(crate) fn note(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
@@ -510,9 +534,20 @@ pub(crate) fn note(
             keep_local(cx, local(&at, &recipient)?);
             return Ok(());
         }
-        _ => return Ok(()),
+        other => {
+            // A withdrawn counterparty is answered nothing, but its request can still show
+            // that it holds the current list whose delivery was unknown.
+            if let Some(mut current) = other {
+                let held = state::cx_get::<ListReservation>(cx, &key::list_reservation(&sender))?;
+                if observe_named(&mut current, held.as_ref(), request, stored)? {
+                    keep_local(cx, local(&at, &current)?);
+                }
+            }
+            return Ok(());
+        }
     };
     let held = state::cx_get::<ListReservation>(cx, &key::list_reservation(&sender))?;
+    observe_named(&mut recipient, held.as_ref(), request, stored)?;
     let reserved = held
         .map(|r| ListVersion::new(r.generation, r.counter))
         .transpose()?;

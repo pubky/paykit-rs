@@ -28,7 +28,7 @@ pub enum WalletNoticeKind {
     PossiblyDelivered,
     /// An empty Private Payment List withdrawing a counterparty's list was given up with an
     /// unknown outcome. The counterparty may keep paying the earlier list.
-    ListWithdrawalUnknown,
+    ListDeliveryUnknown,
     /// Messages a blocked counterparty's inbox accepted from `Notice::lost_from_ms` to
     /// `Notice::lost_until_ms`, which the app dropped for the user's block to ask for again once
     /// the counterparty is unblocked, can no longer come back: its sender keeps them no longer,
@@ -58,7 +58,7 @@ impl From<paykit_sdk::NoticeKind> for WalletNoticeKind {
             K::AllowanceAcceptanceBeforeLoss => Self::AllowanceAcceptanceBeforeLoss,
             K::AllowanceWithdrawalConfirmed => Self::AllowanceWithdrawalConfirmed,
             K::PossiblyDelivered => Self::PossiblyDelivered,
-            K::ListWithdrawalUnknown => Self::ListWithdrawalUnknown,
+            K::ListDeliveryUnknown => Self::ListDeliveryUnknown,
             K::BlockedMessagesLost => Self::BlockedMessagesLost,
             K::SettlementBucketFull => Self::SettlementBucketFull,
             K::CreditNeedsUser => Self::CreditNeedsUser,
