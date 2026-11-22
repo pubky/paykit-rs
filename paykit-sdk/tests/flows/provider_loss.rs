@@ -546,9 +546,12 @@ async fn test_provider_loss_completed_rail_waits_for_an_accepted_activity_succes
     let before = next.record(&key).unwrap().revision;
     w.rail.settle(&attempt_id, true);
     w.rail.set_declaration(
-        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true)
-            .with_history(true),
+        RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true)
+        .with_history(true),
     );
     let held = wallet.resume_payments().await.unwrap();
     assert!(
@@ -2098,7 +2101,11 @@ async fn test_provider_loss_request_created_inside_the_residual_window_is_paid_o
 async fn test_provider_loss_resume_never_repeats_a_dispatch_from_before_the_loss() {
     let w = World::new();
     w.rail.set_declaration(
-        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS).with_idempotent(true),
+        RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -2894,6 +2901,7 @@ async fn journaled_orphan_report(after_loss: bool) {
     let w = World::new();
     w.rail.set_declaration(RailDeclaration::new(
         paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+        paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
     ));
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;

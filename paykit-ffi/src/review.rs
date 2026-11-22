@@ -140,6 +140,23 @@ pub enum RefusalKind {
         /// The settlement bucket that could not accept the mark.
         bucket: u16,
     },
+    /// The delivery of the counterparty's current Private Payment List is unknown. Only the
+    /// user can authorize another version.
+    ListDeliveryUnknown {
+        /// The counterparty the list was sent to.
+        recipient: Vec<u8>,
+        /// The publishing identity generation of the list's version.
+        generation: u64,
+        /// The list version's counter.
+        counter: u64,
+        /// The list message's ID.
+        msg_id: String,
+        /// Whether the list was empty, withdrawing an earlier one.
+        withdrawal: bool,
+        /// For a withdrawal, when an earlier list may last be paid; otherwise when the list
+        /// expires. `None` when it can't be bounded.
+        payable_until_ms: Option<u64>,
+    },
     /// The host must show the affected records and their observed versions before asking for confirmation.
     Divergent {
         /// The records the user is asked to confirm.
@@ -178,6 +195,13 @@ pub enum RefusalKind {
     Recurring,
     /// The settlement may already have been credited.
     MaybeCredited,
+    /// The payment was verified, but its verified payment time lies outside what the request
+    /// allows: before the request less the method's tolerance, or past its deadline or the
+    /// validity of its destination or rates (Paykit spec 7.1, 8.2). Nothing is credited.
+    PaymentTimeOutside {
+        /// The verified payment time, in Unix milliseconds.
+        paid_at_ms: u64,
+    },
     /// The recurring request is accepted already, by this app or another own app (Paykit spec
     /// 8.2): it is neither accepted nor rejected again, only cancelled.
     Subscribed,
@@ -290,6 +314,14 @@ impl PaymentRefusal {
                 amount: (&p.amount).into(),
             },
             Refusal::SettlementBucketFull { bucket } => D::SettlementBucketFull { bucket: *bucket },
+            Refusal::ListDeliveryUnknown(list) => D::ListDeliveryUnknown {
+                recipient: list.recipient.into(),
+                generation: list.version.generation(),
+                counter: list.version.counter(),
+                msg_id: list.msg_id.clone(),
+                withdrawal: list.withdrawal,
+                payable_until_ms: list.payable_until_ms,
+            },
             Refusal::Divergent { records } => D::Divergent {
                 records: records.iter().cloned().map(Into::into).collect(),
             },
@@ -308,6 +340,9 @@ impl PaymentRefusal {
             Refusal::DeadlinePassed => D::DeadlinePassed,
             Refusal::Recurring => D::Recurring,
             Refusal::MaybeCredited => D::MaybeCredited,
+            Refusal::PaymentTimeOutside { paid_at_ms } => D::PaymentTimeOutside {
+                paid_at_ms: *paid_at_ms,
+            },
             Refusal::Subscribed => D::Subscribed,
             Refusal::NotSubscribed => D::NotSubscribed,
             Refusal::PeriodNotStarted => D::PeriodNotStarted,

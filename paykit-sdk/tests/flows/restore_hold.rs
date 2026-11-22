@@ -609,8 +609,11 @@ async fn test_restore_hold_missed_item_holds_a_repeat_until_the_user_confirms() 
         panic!("pending");
     };
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     wallet
         .confirm_possibly_cancelled(&request, &earlier, UserConfirmed::new())

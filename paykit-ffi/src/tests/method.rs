@@ -11,6 +11,8 @@ use tokio::sync::Notify;
 
 pub(super) struct Account {
     file: PathBuf,
+    /// The clock the account stamps each payment's verified time from.
+    clock: Arc<dyn pubky_switch_client::clock::Clock>,
     pub calls: AtomicUsize,
     pub park: AtomicBool,
     pub entered: Notify,
@@ -24,11 +26,12 @@ enum Coverage {
     Unavailable,
 }
 impl Account {
-    pub fn open(root: &Path) -> Self {
+    pub fn open(root: &Path, clock: Arc<dyn pubky_switch_client::clock::Clock>) -> Self {
         let file = root.join("account.sqlite");
-        Connection::open(&file).unwrap().execute_batch("CREATE TABLE IF NOT EXISTS payments(attempt TEXT PRIMARY KEY,asset TEXT NOT NULL,amount TEXT NOT NULL,endpoint TEXT NOT NULL,payload TEXT NOT NULL);").unwrap();
+        Connection::open(&file).unwrap().execute_batch("CREATE TABLE IF NOT EXISTS payments(attempt TEXT PRIMARY KEY,asset TEXT NOT NULL,amount TEXT NOT NULL,endpoint TEXT NOT NULL,payload TEXT NOT NULL,paid_at INTEGER NOT NULL);").unwrap();
         Self {
             file,
+            clock,
             calls: AtomicUsize::new(0),
             park: AtomicBool::new(true),
             entered: Notify::new(),
@@ -59,6 +62,7 @@ impl PaymentMethod for Account {
             history_retention_ms: None,
             history_survives_restore: true,
             longest_completion_ms: 1000,
+            payment_time_tolerance_ms: 7_200_000,
         }
     }
     fn select_endpoints(
@@ -86,13 +90,14 @@ impl PaymentMethod for Account {
         Connection::open(&self.file)
             .unwrap()
             .execute(
-                "INSERT INTO payments VALUES(?1,?2,?3,?4,?5) ON CONFLICT(attempt) DO NOTHING",
+                "INSERT INTO payments VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(attempt) DO NOTHING",
                 params![
                     p.attempt_id,
                     p.amount.asset,
                     p.amount.value,
                     p.endpoint,
-                    p.payload
+                    p.payload,
+                    i64::try_from(self.clock.now_ms()).unwrap()
                 ],
             )
             .unwrap();
@@ -149,8 +154,8 @@ impl PaymentMethod for Account {
         if proof["payment"].as_str() != Some(p.attempt_id.as_str()) {
             return Ok(None);
         }
-        let found=Connection::open(&self.file).unwrap().query_row("SELECT 1 FROM payments WHERE attempt=?1 AND asset=?2 AND amount=?3 AND endpoint=?4 AND (?5 IS NULL OR payload=?5)",params![p.attempt_id,p.amount.asset,p.amount.value,p.endpoint,p.payload],|r|r.get::<_,u8>(0)).optional().unwrap();
-        Ok(found.map(|_| 1))
+        let found=Connection::open(&self.file).unwrap().query_row("SELECT paid_at FROM payments WHERE attempt=?1 AND asset=?2 AND amount=?3 AND endpoint=?4 AND (?5 IS NULL OR payload=?5)",params![p.attempt_id,p.amount.asset,p.amount.value,p.endpoint,p.payload],|r|r.get::<_,i64>(0)).optional().unwrap();
+        Ok(found.map(|at| u64::try_from(at).unwrap()))
     }
     fn settlement_id(&self, proof: Vec<u8>) -> Option<Vec<u8>> {
         serde_json::from_slice::<serde_json::Value>(&proof)
@@ -165,7 +170,10 @@ impl PaymentMethod for Account {
 async fn test_method_history_distinguishes_complete_empty_from_missing_and_unavailable() {
     use paykit_sdk::{Rail, RailError};
     let directory = tempfile::tempdir().unwrap();
-    let account = Arc::new(Account::open(directory.path()));
+    let account = Arc::new(Account::open(
+        directory.path(),
+        Arc::new(pubky_switch_client::clock::TestClock::new(0)),
+    ));
     let rail = HostRail {
         method: account.clone(),
         identifiers: Vec::new(),
@@ -182,4 +190,19 @@ async fn test_method_history_distinguishes_complete_empty_from_missing_and_unava
         rail.allowance_history(payer).await,
         Err(RailError::Unavailable(_))
     ));
+}
+
+#[test]
+fn test_method_declaration_forwards_the_payment_time_tolerance() {
+    use paykit_sdk::Rail;
+    let directory = tempfile::tempdir().unwrap();
+    let rail = HostRail {
+        method: Arc::new(Account::open(
+            directory.path(),
+            Arc::new(pubky_switch_client::clock::TestClock::new(0)),
+        )),
+        identifiers: Vec::new(),
+    };
+    assert_eq!(rail.declaration().payment_time_tolerance_ms, 7_200_000);
+    assert_eq!(rail.declaration().longest_completion_ms, 1000);
 }

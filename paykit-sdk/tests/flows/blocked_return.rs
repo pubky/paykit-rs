@@ -1256,8 +1256,11 @@ async fn test_blocked_return_repeat_of_a_request_paid_only_by_hand_not_made() {
     // resume makes no repeat: a repeat is an automatic payment.
     let w = World::new();
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let mut wallet = contacts_wallet_with(&w, store(), crate::common::day_window()).await;
     let mut shop = w.shop().await;
@@ -2117,8 +2120,11 @@ async fn test_blocked_return_floor_raised_again_before_the_new_app_reads_still_p
     // request: the request shows as paid only by hand, and a resume makes no repeat of it.
     let w = World::new();
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let mut wallet = contacts_wallet(&w, store()).await;
     wallet.app_mut().invite(&w.carol_id()).await.unwrap();
@@ -2457,8 +2463,11 @@ async fn test_blocked_return_dispatch_of_a_request_dated_before_the_floor_not_re
     // a resume makes no repeat of its dispatch.
     let w = World::new();
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let mut wallet = contacts_wallet_with(&w, store(), crate::common::day_window()).await;
     wallet.app_mut().invite(&w.carol_id()).await.unwrap();
@@ -2520,8 +2529,11 @@ async fn phone_paying_carol_through(
     transport: Arc<dyn Transport>,
 ) -> (Paykit, Paykit, Paykit, paykit_sdk::RequestRef) {
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let mut wallet = contacts_wallet(w, store()).await;
     wallet.app_mut().invite(&w.carol_id()).await.unwrap();
@@ -3273,8 +3285,11 @@ async fn test_blocked_return_floor_kept_copy_not_taken_for_the_switch_at_a_dispa
     // called and the attempt is known unsubmitted.
     let w = World::new();
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let mut wallet = contacts_wallet(&w, store()).await;
     wallet.app_mut().invite(&w.carol_id()).await.unwrap();

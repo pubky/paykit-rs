@@ -75,6 +75,17 @@ pub enum NoticeKind {
     /// Reconcile its outcome with the counterparty. Acknowledging it records that the host
     /// has seen it, without authorizing delivery or a replacement (Paykit spec 7.2).
     PossiblyDelivered,
+    /// The client gave up a counterparty's current Private Payment List, and its delivery
+    /// is unknown. `counterparty` is the recipient, `msg_id` and `message_hash` the list.
+    /// Nothing more is sent on its own, but an answer to the counterparty's list request
+    /// still goes. Acknowledging the notice authorizes nothing. A call that would otherwise
+    /// send nothing for that counterparty reports the list as
+    /// [`crate::Refusal::ListDeliveryUnknown`], whose value the user confirms another
+    /// version with: [`Paykit::publish_list_to`] for a chosen counterparty and
+    /// [`Paykit::withdraw_list_from`] for a withdrawn one or for an emptied list. A call
+    /// that changes what the counterparty gets, such as withdrawing a nonempty list, sends
+    /// the new version instead, and the notice is removed (Paykit spec 8.4, 9).
+    ListDeliveryUnknown,
     /// Messages a blocked counterparty's inbox accepted from
     /// [`Notice::lost_from_ms`] to [`Notice::lost_until_ms`], which the app dropped for the
     /// user's block to ask for again once the counterparty is unblocked, can no longer come
@@ -102,6 +113,12 @@ pub enum NoticeKind {
 }
 
 impl NoticeKind {
+    /// A notice about an own outgoing message that may have reached its recipient. It is
+    /// kept at that message's key once acknowledged, so it is raised once.
+    pub(crate) fn names_outgoing_message(self) -> bool {
+        matches!(self, Self::PossiblyDelivered | Self::ListDeliveryUnknown)
+    }
+
     /// The kind's name in a notice's key.
     pub(crate) fn tag(self) -> &'static str {
         match self {
@@ -112,6 +129,7 @@ impl NoticeKind {
             Self::AllowanceAcceptanceBeforeLoss => "allowance_acceptance_before_loss",
             Self::AllowanceWithdrawalConfirmed => "allowance_withdrawal_confirmed",
             Self::PossiblyDelivered => "possibly_delivered",
+            Self::ListDeliveryUnknown => "list_delivery_unknown",
             Self::BlockedMessagesLost => "blocked_lost",
             Self::SettlementBucketFull => "settlement_bucket_full",
             Self::CreditNeedsUser => "credit_needs_user",
@@ -514,15 +532,36 @@ impl KeptNotice {
         })
     }
 
+    pub(crate) fn list_delivery_unknown(
+        to: &[u8; 32],
+        msg_id: &str,
+        hash: &[u8; 32],
+        at: u64,
+    ) -> Self {
+        Self::outgoing(NoticeKind::ListDeliveryUnknown, to, msg_id, hash, at)
+    }
+
     fn possibly_delivered(stored: &paykit_lib::records::StoredMessage, at: u64) -> Self {
+        let message = stored.message();
+        Self::outgoing(
+            NoticeKind::PossiblyDelivered,
+            &message.to,
+            &message.msg_id,
+            &stored.hash(),
+            at,
+        )
+    }
+
+    /// A notice about an own outgoing message, kept at that message's key.
+    fn outgoing(kind: NoticeKind, to: &[u8; 32], msg_id: &str, hash: &[u8; 32], at: u64) -> Self {
         Self {
-            kind: NoticeKind::PossiblyDelivered,
+            kind,
             settlement: None,
             attempt_id: None,
-            msg_id: Some(stored.message().msg_id.clone()),
-            counterparty: Some(b64(&stored.message().to)),
+            msg_id: Some(msg_id.to_owned()),
+            counterparty: Some(b64(to)),
             request_hash: None,
-            message_hash: Some(pubky_switch_core::enc::b64(&stored.hash())),
+            message_hash: Some(pubky_switch_core::enc::b64(hash)),
             raised_at_ms: at,
             acknowledged: false,
             stored: None,
@@ -549,6 +588,7 @@ impl KeptNotice {
                     | NoticeKind::AllowanceAcceptanceBeforeLoss
                     | NoticeKind::AllowanceWithdrawalConfirmed
                     | NoticeKind::PossiblyDelivered
+                    | NoticeKind::ListDeliveryUnknown
                     | NoticeKind::BlockedMessagesLost
                     | NoticeKind::DroppedMessagesLost
             )
@@ -748,7 +788,7 @@ pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
             }
         }
         Some(StateKey::RestoredDelivery { to, msg_id, hash }) => {
-            if notice.kind != NoticeKind::PossiblyDelivered
+            if !notice.kind.names_outgoing_message()
                 || notice.counterparty.as_deref() != Some(&b64(&to))
                 || notice.msg_id.as_ref() != Some(&msg_id)
                 || notice.message_hash.as_deref() != Some(&pubky_switch_core::enc::b64(&hash))
@@ -903,7 +943,7 @@ impl Paykit {
         if let Some(stored) = &kept.stored {
             self.forget_stored(stored, &kept).await?;
         }
-        if !held && kept.settlement.is_none() && kept.kind != NoticeKind::PossiblyDelivered {
+        if !held && kept.settlement.is_none() && !kept.kind.names_outgoing_message() {
             return self.local_delete(&key).await;
         }
         kept.acknowledged = true;
@@ -1146,13 +1186,16 @@ mod tests {
         }
         notice.kind = NoticeKind::MessageGivenUp;
         assert!(bind_notice(&key, &notice).is_err());
+        let withdrawal = KeptNotice::list_delivery_unknown(&to, id, &hash, 3);
+        assert!(bind_notice(&key, &withdrawal).is_ok());
+        assert!(bind_notice(&key::restored_delivery(&to, id, &[4; 32]), &withdrawal).is_err());
         notice.kind = NoticeKind::PossiblyDelivered;
         notice.message_hash = None;
         assert!(bind_notice(&key, &notice).is_err());
     }
 
     #[test]
-    fn test_notices_only_possibly_delivered_carries_a_message_hash() {
+    fn test_notices_only_outgoing_message_notices_carry_a_message_hash() {
         let attempt = AttemptId::from_bytes([5; 16]);
         let paid = kept(&attempt);
         let held = KeptNotice {

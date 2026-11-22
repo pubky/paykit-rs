@@ -45,7 +45,7 @@
 //! | `mu` | set by a `missed` item whose end isn't known: every open request is held, as after a restore, until a read that completes bounds the hold by the service time verified then, into `mh`, and clears it (`hold.rs`) | |
 //! | `ml` | set by a `missed` item: the shared records aren't listed by Paykit since, so a record's absence means nothing yet; cleared by Paykit's next listing (`hold.rs`); never restored | |
 //! | `lp/<recipient>/<generation>/<message hash>` | outstanding original publication batch IDs, kept atomically before submission and retained across restore | yes |
-//! | `lres/<recipient>` | the applied list, its publisher and original signed message, first non-delivery, prior offers' latest possible expiry, and the interval of an outstanding withdrawal | yes |
+//! | `lres/<recipient>` | the applied list, its publisher and original signed message, its first delivery outcome (open, undelivered or unknown) and any kept confirmation of another version, prior offers' latest possible expiry, and the interval of an outstanding withdrawal | yes |
 //! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read: never written over it, which could drop its single-use marks, until the record reads | |
 //! | `kc/<record key>/<certificate hash>/<feed generation>` | a payee's cancellation of a request, kept until it is placed in the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
@@ -59,7 +59,7 @@
 //! | `ha/<payee>/<msg_id>` | the wallet's held answer and request. A backup marks it restored so it cannot authorize delivery | |
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `paykit_pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
-//! | `nt/outgoing/<recipient>/<msg_id>/<hash>` | the disposition of an exact original delivery is unknown after restore. Acknowledgment is retained for repeated imports | |
+//! | `nt/outgoing/<recipient>/<msg_id>/<hash>` | the disposition of an exact original delivery is unknown: after restore, or a counterparty's current list given up with an unknown outcome. Acknowledgment is retained for repeated imports; a list's notice goes once a newer version supersedes it | |
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>`, `nt/<tag>` | a notice for the host about a payment, a message given up, or the identity as a whole, until acknowledged (`notices.rs`); an identity-wide one is never restored and is told again at each load while what it tells stands | |
 //! | `xm/<sender>/<msg_id>` | an extension message from `sender` of a kind the host registered, kept from its receive step until the host takes it (`extensions.rs`, Paykit spec 3.3); at most 64 per sender and 128 in all | yes |
 //! | `dl` | the deny list as the app last read it, with this app's blocks kept unanswered (`bk/`), for the views and a payment the user starts (Paykit spec 8.1) | |
