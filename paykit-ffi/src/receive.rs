@@ -46,6 +46,16 @@ pub enum CursorStatus {
     /// A native case that this binding does not recognize.
     Other,
 }
+impl From<HeldCursor> for CursorStatus {
+    fn from(value: HeldCursor) -> Self {
+        match value {
+            HeldCursor::Clean => Self::Clean,
+            HeldCursor::Ahead { held, position, .. } => Self::Ahead { held, position },
+            HeldCursor::Unknown => Self::Unknown,
+            _ => Self::Other,
+        }
+    }
+}
 /// What a `Paykit::receive` did.
 #[derive(uniffi::Record)]
 pub struct WalletReceiveReport {
@@ -156,14 +166,7 @@ impl NativeWallet {
                 sequence: r.cursor.seq,
                 stopped: r.stopped,
                 more: r.more,
-                held_cursor: r.held_cursor.map(|v| match v {
-                    HeldCursor::Clean => CursorStatus::Clean,
-                    HeldCursor::Ahead { held, position, .. } => {
-                        CursorStatus::Ahead { held, position }
-                    }
-                    HeldCursor::Unknown => CursorStatus::Unknown,
-                    _ => CursorStatus::Other,
-                }),
+                held_cursor: r.held_cursor.map(Into::into),
                 events: r.events.into_iter().map(|e| event(app, e)).collect(),
                 applied: s.applied,
                 resends: s.resends,

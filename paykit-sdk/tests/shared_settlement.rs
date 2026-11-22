@@ -5,6 +5,8 @@
 mod allowance_end;
 #[path = "shared_settlement/cancellation_admission.rs"]
 mod cancellation_admission;
+#[path = "shared_settlement/foreign_receipt.rs"]
+mod foreign_receipt;
 #[path = "shared_settlement/invitations.rs"]
 mod invitations;
 #[path = "shared_settlement/period_policy.rs"]

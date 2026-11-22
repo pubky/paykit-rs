@@ -11,6 +11,9 @@ pub enum WalletError {
         /// Name of the invalid field, without its contents.
         field: String,
     },
+    /// The source device must be in custody or known wiped before restoring.
+    #[error("revoke the old app and enroll this device with new keys")]
+    SourceDeviceUnaccountedFor,
     /// The SDK has no installed wallet under this App ID.
     #[error("no wallet with this app id")]
     NotJoined,

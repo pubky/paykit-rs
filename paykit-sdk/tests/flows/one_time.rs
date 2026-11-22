@@ -554,8 +554,7 @@ async fn test_one_time_receipt_naming_another_proof_leaves_the_proof_recordable(
     else {
         panic!("pending");
     };
-    // Bob's receipt for the attempt names a proof alice's record doesn't hold (Paykit wire
-    // 4.11): it settles the attempt, and isn't stored beside a proof it doesn't confirm.
+    // This receipt names a different proof. The attempt stays open for the method's report.
     let body = paykit_lib::bodies::PaymentReceipt {
         attempt_id,
         billing_period: None,
@@ -576,7 +575,7 @@ async fn test_one_time_receipt_naming_another_proof_leaves_the_proof_recordable(
     wallet.receive(None).await.unwrap();
     assert_eq!(
         wallet.request(&request).await.unwrap().status,
-        RequestStatus::Paid
+        RequestStatus::BeingPaidHere
     );
     // The payment completes: its proof is still recorded, in a record readers take (Paykit
     // wire 5.3), and sent.
@@ -597,6 +596,15 @@ async fn test_one_time_receipt_naming_another_proof_leaves_the_proof_recordable(
     let value: serde_json::Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
     assert!(!value["proof"].is_null());
     assert!(value["receipt"].is_null());
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 // ---------------------------------------------------------------------------------------

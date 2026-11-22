@@ -1,5 +1,6 @@
 use crate::{Amount, PaymentRefusal, RequestId};
 use paykit_sdk::{RateSource, Refusal};
+use std::sync::Arc;
 
 /// The provider loss that decides a payment doubt (Paykit spec 7.3).
 #[derive(uniffi::Record)]
@@ -13,6 +14,9 @@ pub struct ProviderLossBoundary {
     /// Until when, in Unix milliseconds of the service, an attempt could have been authorized at
     /// the old service.
     pub uncertain_until_ms: u64,
+    /// The original obligation and loss for an explicit not-paid statement. A notice that
+    /// the loss changed has no payment to confirm: read the doubtful payment again.
+    pub payment: Option<Arc<PaymentBeforeLoss>>,
 }
 impl From<paykit_sdk::LossBoundary> for ProviderLossBoundary {
     fn from(v: paykit_sdk::LossBoundary) -> Self {
@@ -20,6 +24,21 @@ impl From<paykit_sdk::LossBoundary> for ProviderLossBoundary {
             generation: v.generation(),
             declared_at_ms: v.declared_at_ms(),
             uncertain_until_ms: v.uncertain_until_ms(),
+            payment: None,
+        }
+    }
+}
+/// An obligation and its original deciding provider loss, as shown by the wallet.
+#[derive(uniffi::Object)]
+pub struct PaymentBeforeLoss {
+    pub(crate) obligation: [u8; 32],
+    pub(crate) loss: paykit_sdk::LossBoundary,
+}
+impl ProviderLossBoundary {
+    pub(crate) fn for_payment(obligation: [u8; 32], loss: paykit_sdk::LossBoundary) -> Self {
+        Self {
+            payment: Some(Arc::new(PaymentBeforeLoss { obligation, loss })),
+            ..Self::from(loss)
         }
     }
 }
@@ -195,7 +214,8 @@ pub enum RefusalKind {
     NotNow,
     /// A value the protocol or the host gave breaks a rule: the text names it.
     Usage,
-    /// The payer's activity record cannot yet be updated.
+    /// A payment action is held by its record. If the payer's payment history was lost to
+    /// deletion, the obligation stays held and the user cannot confirm another payment.
     RecordHeld,
     /// Paykit refused the app's certificate.
     CertificateRefused,
@@ -230,7 +250,9 @@ impl PaymentRefusal {
                     divergent: d.divergent,
                     after_distrust: d.after_distrust,
                     early_pin: d.early_pin,
-                    before_loss: d.before_loss.map(Into::into),
+                    before_loss: d
+                        .before_loss
+                        .map(|loss| ProviderLossBoundary::for_payment(d.obligation, loss)),
                 }),
             },
             Refusal::LossChanged { decisive } => D::LossChanged {
@@ -328,7 +350,7 @@ impl From<pubky_switch_core::ops::RecordVersion> for Version {
 
 /// A record the app has seen divergent, as the host shows it (Paykit spec 6): from
 /// `Paykit::divergent_records`, a receive's summary, or a refusal (`Refusal::Divergent`).
-/// `Paykit::confirm_divergent` takes its `record`.
+/// After showing these fields, pass the original observation to the wallet for confirmation.
 #[derive(uniffi::Record)]
 pub struct Divergence {
     /// The record key.
@@ -352,7 +374,13 @@ pub struct Divergence {
     /// at the next receive (`Paykit::receive`): until then nothing is paid, accepted or credited
     /// on it, by hand or automatically.
     pub writes_waiting: bool,
+    /// The original SDK observation. Return it only after showing this record to the user.
+    pub observation: Arc<DivergentObservation>,
 }
+/// The original divergent record, including its observed write and credit warning.
+#[derive(uniffi::Object)]
+pub struct DivergentObservation(pub(crate) paykit_sdk::DivergentRecord);
+
 impl From<paykit_sdk::DivergentRecord> for Divergence {
     fn from(v: paykit_sdk::DivergentRecord) -> Self {
         Self {
@@ -363,6 +391,7 @@ impl From<paykit_sdk::DivergentRecord> for Divergence {
             version: v.version.map(Into::into),
             may_hold_credit: v.may_hold_credit,
             writes_waiting: v.writes_waiting,
+            observation: Arc::new(DivergentObservation(v)),
         }
     }
 }

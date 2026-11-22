@@ -23,8 +23,8 @@ use serde_json::{json, Value};
 
 use crate::common::refuse_writes;
 use crate::common::{btc, draft, endpoint, list_version, request_from, World};
+use crate::receipts::deliver_proved_receipt;
 use crate::restore::{kept, kept_message};
-use crate::stored::receipt_of_another_proof;
 
 /// A `msg_id` no message here has.
 const OTHER_MSG_ID: &str = "223e4567-e89b-42d3-a456-426614174000";
@@ -482,7 +482,7 @@ async fn test_local_state_receipt_parked_on_an_entry_of_another_claim() {
     let two = paid_and_pending(&w, &mut wallet, &mut shop).await;
     let entry = swapped(&wallet, &two, Swap::AnotherClaim).await;
     put(&mut wallet, &journal(&two.a_attempt), &entry).await;
-    receipt_of_another_proof(&w, &wallet, &two.a, two.a_attempt);
+    deliver_proved_receipt(&w, &mut wallet, &shop, &two.a, two.a_attempt).await;
     let _ = wallet.receive(None).await;
     assert_eq!(
         outcome(&mut wallet, &two.a_obligation, &two.a_attempt).await,
@@ -499,7 +499,7 @@ async fn test_local_state_receipt_written_later_kept_on_an_entry_of_another_clai
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     let two = paid_and_pending(&w, &mut wallet, &mut shop).await;
-    receipt_of_another_proof(&w, &wallet, &two.a, two.a_attempt);
+    deliver_proved_receipt(&w, &mut wallet, &shop, &two.a, two.a_attempt).await;
     refuse_writes(&w.alice, 2);
     wallet.receive(None).await.unwrap();
     assert_eq!(keys(&wallet, "se/").await.len(), 1);

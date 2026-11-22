@@ -22,11 +22,30 @@ Use `backup` to export the installed wallet’s SDK backup. Store its bytes and 
 
 A refused operation carries a `PaymentRefusal`. Use `kind()` to choose the next action and `reason()` for display. For example, `IdentityUnavailable` means the wallet needs a fresh identity before it can resume a payment. A `Divergent` refusal identifies the affected records and versions. `attemptedFailure()` exposes the original refusal when an attempt failed before dispatch. A client operation can also carry a typed `switchRefusal`, including the generation requiring recovery. `KeptBatchesAhead` identifies the earlier batch and its answer window. The separate `keptBatch` field identifies a batch retained for this call. Keep an unrecognized refusal held.
 
+## Restore the wallet from a protected backup
+
+Ask whether the source device is still in the user's possession or known to have been wiped. If its custody is unknown, have the signer revoke the old app and enroll a new one. For a device the user can account for, pass the original App ID, backup bytes and custody decision to `restore` (Switch spec §12.4). If a storage commit has an unknown result, use `load` on that store to learn what was installed.
+
+1. Run the normal foreground `receive`. Follow additional pages and handle its recovery or availability notices. `restoreState` reports the current cursor verdict, any questioned registrations and whether reconciliation continues. After interruption, load the same App ID and read this state again.
+2. Show the questioned registrations to the user and ask whether the original device ran after the backup. Call `confirmRestoredRegistrations` with the displayed numbers only if the user recognizes them. Otherwise, `refuseRestoredRegistrations` stops the app and requests revocation. Read the resulting alarm. If the question changed, show its current registrations before asking again.
+3. Call `reconcile` and show any doubtful attempts. If `payerSkipped` is set, the payer pass still needs the proper certificate and record coverage. An uncertain attempt may already have paid. Use `resolveConfirmedAttempt` for the exact obligation and attempt only after the user chooses its outcome. An absent receipt alone cannot establish failure.
+4. After the user reviews the results, call `endConfirmedReconciliation`. Reopen and check `restoreState` when interrupted. Each registered protocol must finish its own reconciliation. A request may still be held because the seller could have cancelled it since the backup. Show that request and its `heldAfterRestore` refusal before passing the user's confirmation to `payRequest`.
+
 ## Receive and acknowledge
 
 Call `receive` on startup and after a feed wake. It returns one bounded report. Use `more` to decide when to read another page. If `stopped` is set, inspect the reported event. Persist or show each duty before acknowledging its ID with `acknowledgeEvents`. This acknowledges the processed prefix for Paykit. Each other protocol in a shared app remains responsible for its own duties.
 
 After an interruption, `unacknowledgedEvents` lists surviving Paykit duties in order. After a failed receive, keep those events and wait for a successful receive before acknowledging through the last duty in that report. `recoveryRequired` returns the current signed service notice across reopen even after acknowledging delivery. A clearance event names the generation that was held. The receive cursor can already be in the next generation.
+
+## Pay a one-time request
+
+After reading the feed, show the request from `requests` with its payee, amount, payment reference, selling label and status. Pass its original `RequestId` to `payRequest` when the user chooses to pay. The result includes the method outcome or typed failure and any failures for individual public Payment Endpoints. Inspect `refusal.kind()` to show a quote, earlier payment doubt, or other confirmation. Pass back the same refusal only after the user confirms it.
+
+For a divergent request, show the original record, collection, version and warnings returned by the refusal or `divergentRecords`. After the user confirms that observation, call `confirmDivergent` with its `observation`. Run `receive` until its waiting writes are drained before trying the payment again. If the write changed, show the new observation and ask again.
+
+A one-time obligation can appear in `reconcile` with a provider-loss boundary and an empty attempt list. Show the original obligation and boundary, including that another wallet may already have paid it at the old service. Only if the user states it was unpaid, pass that boundary’s `payment` to `confirmNotPaidBeforeLoss`. A `LossChanged` refusal requires a fresh report and a new decision. The statement applies only to that obligation and loss. Other attempt uncertainties still require their original outcomes.
+
+After an interrupted payment, shut down the old handle, reopen the same App ID and use `resumePayments` to look up the original attempt. Use `reconcile` for obligations with an unknown outcome and show the remaining doubt before any user-confirmed resolution. `requestReceipts` returns the signed seller receipt after it arrives. On a newly restored store that lookup can be held until the first inventory completes. `notices` and the payee deletion notices each have their own acknowledgement, separate from feed duties.
 
 ## Generate both languages
 
@@ -68,7 +87,7 @@ The native enrollment cases use the actual signer, SQLite-backed device storage,
 
 ### Run the generated-language consumers
 
-The test issuer uses Scripted by default. Set `PUBKY_SWITCH_REQUIRE_DB=1` and `PUBKY_SWITCH_TEST_DATABASE_URL` to run its signer, paid-wallet and recovery fixtures against the PostgreSQL-backed service.
+The test issuer and enrolled checkout use Scripted by default. Set `PUBKY_SWITCH_REQUIRE_DB=1` and `PUBKY_SWITCH_TEST_DATABASE_URL` to run the signer, checkout, paid-wallet and recovery fixtures against the PostgreSQL-backed service.
 
 On macOS, use the host library and the sources generated above. Set `LIB` to the absolute directory containing `libpaykit_v2.dylib`, and use an absolute `OUT` path. The Kotlin consumer runs with a local Gradle installation. The Swift consumer imports the generated module from a host compiled in Swift 6 mode.
 
@@ -86,3 +105,7 @@ swiftc -swift-version 6 -parse-as-library -I "$OUT" -I "$OUT/swift" \
     -o "$OUT/wallet-consumer"
 DYLD_LIBRARY_PATH="$OUT:$LIB" "$OUT/wallet-consumer"
 ```
+
+To exercise a full checkout from the host, build the host library with `--features bindgen,test-wallet` and regenerate the bindings. Supply `-PcheckoutTest=true` to the Kotlin command. For the Swift 6 command, add `-D PAYKIT_CHECKOUT_TEST` and `paykit-ffi/tests/hosts/CheckoutConsumer.swift`. Both consumers enroll with a local shop, acknowledge a recovery notice across reopen, and cancel the payment call after the host method has durably charged it. The reopened wallet uses the original attempt to obtain the signed seller receipt. The same programs also exercise a divergent request with a held receipt and a payment whose only doubt is a provider loss.
+
+Run either checkout consumer with `PAYKIT_TEST_RESTORE=confirm` to restore a backup into a fresh store, review a registration made since the backup, and pay the original held request after confirmation. Use `refuse` to decline the registration and observe the compromise alarm, or `doubt` to reconcile an interrupted, already charged attempt.
