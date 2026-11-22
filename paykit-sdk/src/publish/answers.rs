@@ -485,6 +485,36 @@ impl Answers {
     }
 }
 
+/// A list request to this app naming the exact version of the counterparty's current list,
+/// given up or still in flight, is evidence that it arrived (Paykit spec 9): it counts as that
+/// list's acceptance, at the request's acceptance time. Whether `recipient` changed.
+fn observe_named(
+    app_id: [u8; 16],
+    recipient: &mut ListRecipient,
+    held: Option<&ListReservation>,
+    request: &PrivatePaymentListRequest,
+    stored: &StoredMessage,
+) -> std::result::Result<bool, Fail> {
+    // Only a request addressed to this app names this app's counter: versions of the
+    // payee's other apps may coincide (Paykit wire 4.14).
+    if request.app_id != Some(app_id) {
+        return Ok(false);
+    }
+    let Some(issue) = held.filter(|issue| {
+        issue.delivery != super::FirstDelivery::Undelivered
+            && issue.choice == recipient.choice
+            && recipient.answers.first(issue).is_none()
+            && request.held_version == ListVersion::new(issue.generation, issue.counter).ok()
+    }) else {
+        return Ok(false);
+    };
+    let accepted = stored.accepted_at().ok_or_else(Fail::corrupt)?;
+    recipient
+        .answers
+        .observe(issue, accepted, true)
+        .map_err(|_| Fail::corrupt())
+}
+
 pub(crate) fn note(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
@@ -510,9 +540,20 @@ pub(crate) fn note(
             keep_local(cx, local(&at, &recipient)?);
             return Ok(());
         }
-        _ => return Ok(()),
+        other => {
+            // A withdrawn counterparty is answered nothing, but its request can still show
+            // that it holds the current list whose delivery was unknown.
+            if let Some(mut current) = other {
+                let held = state::cx_get::<ListReservation>(cx, &key::list_reservation(&sender))?;
+                if observe_named(cx.app_id(), &mut current, held.as_ref(), request, stored)? {
+                    keep_local(cx, local(&at, &current)?);
+                }
+            }
+            return Ok(());
+        }
     };
     let held = state::cx_get::<ListReservation>(cx, &key::list_reservation(&sender))?;
+    observe_named(cx.app_id(), &mut recipient, held.as_ref(), request, stored)?;
     let reserved = held
         .map(|r| ListVersion::new(r.generation, r.counter))
         .transpose()?;

@@ -569,9 +569,9 @@ pub(crate) struct Plan {
     pub(crate) unconfirmed: Option<UserConfirmed>,
     /// The blocked payment the user confirmed, checked against the selected payment.
     pub(crate) blocked_confirmed: Option<BlockedPayment>,
-    /// The request record whose restore hold the user's confirmation ends, in the attempt's
-    /// batch: a call refused before it keeps the hold.
-    pub(crate) end_hold: Option<[u8; 32]>,
+    /// The restore or `missed` hold the user's confirmation ends, in the attempt's batch: a
+    /// call refused before it keeps the hold.
+    pub(crate) end_hold: Option<crate::hold::HoldEnd>,
     /// More conditions of the attempt, such as a Billing Period's `server_time_in`.
     pub(crate) conditions: Vec<Condition>,
     /// Record writes of the attempt's batch, such as a Billing Period's `attempted_periods`
@@ -955,8 +955,9 @@ pub(crate) enum FinalCheck {
     Pay,
     /// Not now: nothing is paid and the attempt stays open.
     Hold,
-    /// A repeat past the idempotency retention, or one that might not complete before its
-    /// attempt is orphaned: never made.
+    /// A repeat past the idempotency retention, one that might not complete before its
+    /// attempt is orphaned, or one under an Allowance that has expired: never made, and the
+    /// attempt stays "may be paid".
     Lapsed,
     /// The client refused the payee's late switch answer, such as an equivocation (Switch
     /// wire 3.3): nothing is paid, and the refusal is the caller's.
@@ -972,6 +973,15 @@ pub(crate) enum FinalCheck {
 /// key forgotten. A retention kept for good holds whatever the clock.
 pub(crate) fn retained(retention: Option<u64>, journaled_at_ms: u64, now: u64) -> bool {
     retention.is_none_or(|r| now.checked_sub(journaled_at_ms).is_some_and(|age| age < r))
+}
+
+/// Whether the Allowance an attempt was reserved under has expired by the later of the
+/// device clock `now` and the highest service time verified, `service_time`.
+fn allowance_expired(entry: &JournalEntry, now: u64, service_time: Option<u64>) -> bool {
+    entry.allowance.is_some()
+        && entry
+            .allowance_expires_at_ms
+            .is_some_and(|expiry| expiry <= now.max(service_time.unwrap_or(0)))
 }
 
 /// Whether `bound` has passed (Paykit spec 7.2, "Kept proofs"): it lies before the earlier
@@ -1322,6 +1332,7 @@ impl Paykit {
             offline: None,
             restored: false,
             journaled_at_ms: self.now(),
+            allowance_expires_at_ms: None,
             carrier: None,
             carrier_record: None,
             attempt_proof: None,
@@ -1577,6 +1588,7 @@ impl Paykit {
             offline: None,
             restored: false,
             journaled_at_ms: self.now(),
+            allowance_expires_at_ms: None,
             carrier: None,
             carrier_record: None,
             attempt_proof: None,
@@ -2861,10 +2873,11 @@ impl Paykit {
         for write in record_writes {
             batch = batch.entry(write);
         }
-        if let Some(record_key) = end_hold {
+        if let Some(end) = end_hold {
             // The user saw the payee may have cancelled it (Paykit spec 7.2): the hold ends
-            // with the attempt, and stays when the attempt isn't made.
-            batch = batch.local(state::local_put(&key::hold_confirmed(&record_key), &true)?);
+            // with the attempt, and stays when the attempt isn't made. A batch kept to send
+            // again may be applied after a newer hold, which this confirmation doesn't end.
+            batch = batch.local(state::local_put(&end.confirmation(), &true)?);
         }
         if let Some(under) = allowance {
             batch = Box::pin(under.reserve(self, &mut entry, batch)).await?;
@@ -3340,8 +3353,9 @@ impl Paykit {
         match check {
             FinalCheck::Pay => {}
             FinalCheck::Hold => return Ok(PayOutcome::Pending { attempt_id }),
-            // The method may have forgotten the key: the repeat isn't made, and the attempt
-            // stays "may be paid" (Paykit spec 7.2).
+            // The method may have forgotten the key, the repeat may not complete in time, or
+            // its Allowance has expired: the repeat isn't made, and the attempt stays "may be
+            // paid" (Paykit spec 7.2, 8.3).
             FinalCheck::Lapsed => return Ok(PayOutcome::Uncertain { attempt_id }),
             // A refused answer stops the payment. A first dispatch submitted nothing, so it
             // is written `failed` and refused with the answer's refusal; a repeat may follow
@@ -4553,9 +4567,10 @@ impl Paykit {
     ///    request's or a list's endpoint, by the switch's rules for a public endpoint;
     /// 4. the own `identity.json` is confirmed in the last 60 s, and lists this app at the
     ///    attempt's service and generation;
-    /// 5. for a repeat, the method's idempotency retention hasn't ended, and the repeat can
-    ///    complete before its attempt is orphaned ([`FinalCheck::Lapsed`]); for a first
-    ///    dispatch, the attempt is within its pre-dispatch budget;
+    /// 5. for a repeat, the method's idempotency retention hasn't ended, the Allowance it
+    ///    was reserved under hasn't expired, and the repeat can complete before its attempt
+    ///    is orphaned ([`FinalCheck::Lapsed`]); for a first dispatch, the attempt is within
+    ///    its pre-dispatch budget and the Allowance it was reserved under hasn't expired;
     /// 6. the app may still make the attempt: no alarm or restore question raised meanwhile,
     ///    for an automatic payment the clocks within the tolerance, and its certificate
     ///    holds `paykit_pay`, so an app a renewal reduced moves no money on any path, a repeat at a
@@ -5075,6 +5090,12 @@ impl Paykit {
                 if !retained(idempotency_retention_ms, entry.journaled_at_ms, now) {
                     return Ok(FinalCheck::Lapsed);
                 }
+                // An expired Allowance pays nothing more (Paykit spec 8.3): no repeat of a
+                // dispatch that may have gone, and the attempt stays open as possibly paid,
+                // for the method's history or a receipt to settle, never written failed.
+                if allowance_expired(entry, now, self.service_time()) {
+                    return Ok(FinalCheck::Lapsed);
+                }
                 if !self.repeat_completes_before_orphaned(
                     now,
                     read_at,
@@ -5088,6 +5109,15 @@ impl Paykit {
             Dispatch::First { answered, .. } => {
                 if let Err(refusal) = self.within_budget(&answered, now) {
                     return Ok(FinalCheck::Refused(refusal));
+                }
+                // An expired Allowance pays nothing more (Paykit spec 8.3): the reservation's
+                // window bounds when the attempt was written, this when its first dispatch
+                // goes. Nothing was submitted, so the attempt is written `failed`; a repeat is
+                // stopped above instead, as `Lapsed`, since the first call may have paid.
+                if allowance_expired(entry, now, self.service_time()) {
+                    return Ok(FinalCheck::Refused(Refusal::NotAutomatic(
+                        "the Allowance expired before dispatch".into(),
+                    )));
                 }
                 if automatic_first
                     && entry.period()?.is_some_and(|period| {

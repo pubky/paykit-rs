@@ -36,8 +36,8 @@
 //! | `ar/<payee>/<app_id>` | a payee app's records that took part in its comparison, for its public endpoints | |
 //! | `ct` | the acceptance time of the last Paykit entry the receive step passed | |
 //! | `rh` | the cursor verdict, earlier holds and block windows for restored requests (`hold.rs`) | |
-//! | `hc/<record key>` | the user confirmed the current hold on a request | |
-//! | `hb/<record key>` | the backup's confirmation of an earlier hold | |
+//! | `hc/<record key>/<hold identifier>` | the user confirmed a held request under that hold (`he`) | |
+//! | `hb/<record key>/<hold identifier>` | the restore under that hold carried the backup's confirmation of an earlier hold | |
 //! | `rsc/<record key>` | an Allowance whose consent this restore marked for confirmation, until the held cursor settles it | |
 //! | `pl` | the latest provider-loss boundary followed, retained across restore (`loss.rs`, Paykit spec 7.3) | |
 //! | `pn/<obligation>` | the user states this obligation was not paid before the kept loss; a newer loss clears these statements | |
@@ -45,7 +45,7 @@
 //! | `mu` | set by a `missed` item whose end isn't known: every open request is held, as after a restore, until a read that completes bounds the hold by the service time verified then, into `mh`, and clears it (`hold.rs`) | |
 //! | `ml` | set by a `missed` item: the shared records aren't listed by Paykit since, so a record's absence means nothing yet; cleared by Paykit's next listing (`hold.rs`); never restored | |
 //! | `lp/<recipient>/<generation>/<message hash>` | outstanding original publication batch IDs, kept atomically before submission and retained across restore | yes |
-//! | `lres/<recipient>` | the applied list, its publisher and original signed message, first non-delivery, prior offers' latest possible expiry, and the interval of an outstanding withdrawal | yes |
+//! | `lres/<recipient>` | the applied list, its publisher and original signed message, its first delivery outcome (open, undelivered or unknown) and any kept confirmation of another version, prior offers' latest possible expiry, and the interval of an outstanding withdrawal | yes |
 //! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read: never written over it, which could drop its single-use marks, until the record reads | |
 //! | `kc/<record key>/<certificate hash>/<feed generation>` | a payee's cancellation of a request, kept until it is placed in the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
@@ -59,7 +59,7 @@
 //! | `ha/<payee>/<msg_id>` | the wallet's held answer and request. A backup marks it restored so it cannot authorize delivery | |
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `paykit_pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
-//! | `nt/outgoing/<recipient>/<msg_id>/<hash>` | the disposition of an exact original delivery is unknown after restore. Acknowledgment is retained for repeated imports | |
+//! | `nt/outgoing/<recipient>/<msg_id>/<hash>` | the disposition of an exact original delivery is unknown: after restore, or a counterparty's current list given up with an unknown outcome. Acknowledgment is retained for repeated imports; a list's notice goes once a newer version supersedes it | |
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
 //! | `xm/<sender>/<msg_id>` | an extension message from `sender` of a kind the host registered, kept from its receive step until the host takes it (`extensions.rs`, Paykit spec 3.3); at most 64 per sender and 128 in all | yes |
 //! | `dl` | the deny list as the app last read it, with this app's blocks kept unanswered (`bk/`), for the views and a payment the user starts (Paykit spec 8.1) | |
@@ -700,8 +700,8 @@ impl Stored for bool {
             | StateKey::MissedEndUnknown
             | StateKey::MissedConsents
             | StateKey::PayerPassOwed
-            | StateKey::HoldConfirmed(_)
-            | StateKey::HoldConfirmedBefore(_)
+            | StateKey::HoldConfirmed { .. }
+            | StateKey::HoldConfirmedBefore { .. }
             | StateKey::RestoreConsent(_)
             | StateKey::NotPaidBeforeLoss(_)
             | StateKey::FloorDeleted
@@ -2152,12 +2152,23 @@ pub(crate) mod key {
         format!("{FLOOR_OPENED}{}", b64(record_key))
     }
 
-    pub(crate) fn hold_confirmed(record_key: &[u8; 32]) -> String {
-        format!("{HOLD_CONFIRMED}{}", b64(record_key))
+    pub(crate) fn hold_confirmed(record_key: &[u8; 32], epoch: &crate::hold::HoldEpoch) -> String {
+        format!(
+            "{HOLD_CONFIRMED}{}/{}",
+            b64(record_key),
+            b64(epoch.as_bytes())
+        )
     }
 
-    pub(crate) fn hold_confirmed_before(record_key: &[u8; 32]) -> String {
-        format!("{HOLD_CONFIRMED_BEFORE}{}", b64(record_key))
+    pub(crate) fn hold_confirmed_before(
+        record_key: &[u8; 32],
+        epoch: &crate::hold::HoldEpoch,
+    ) -> String {
+        format!(
+            "{HOLD_CONFIRMED_BEFORE}{}/{}",
+            b64(record_key),
+            b64(epoch.as_bytes())
+        )
     }
 
     pub(crate) fn restore_consent(record_key: &[u8; 32]) -> String {
@@ -2345,10 +2356,22 @@ pub(crate) enum StateKey {
         payee: [u8; 32],
         msg_id: String,
     },
-    /// `hc/<record key>`: the user's confirmation of a held request.
-    HoldConfirmed([u8; 32]),
-    /// A request confirmation carried from before the restore.
-    HoldConfirmedBefore([u8; 32]),
+    /// `hc/<record key>/<hold identifier>`: the user's confirmation of a held request,
+    /// under the hold identifier it was given under.
+    HoldConfirmed {
+        /// The request's record key.
+        record: [u8; 32],
+        /// The hold identifier (`he`) the confirmation was given under.
+        epoch: [u8; 16],
+    },
+    /// `hb/<record key>/<hold identifier>`: a request confirmation carried from before the
+    /// restore, under the identifier of the restore that carried it.
+    HoldConfirmedBefore {
+        /// The request's record key.
+        record: [u8; 32],
+        /// The hold identifier the restore set.
+        epoch: [u8; 16],
+    },
     /// An Allowance consent held specifically by this restore.
     RestoreConsent([u8; 32]),
     /// `lr`: when the lists were last read.
@@ -2670,8 +2693,15 @@ impl StateKey {
                         }
                     }
                     "bk" => Self::OwnBlock(b64_32(rest)?),
-                    "hc" => Self::HoldConfirmed(b64_32(rest)?),
-                    "hb" => Self::HoldConfirmedBefore(b64_32(rest)?),
+                    "hc" | "hb" => {
+                        let (record, epoch) = rest.split_once('/')?;
+                        let (record, epoch) = (b64_32(record)?, b64_16(epoch)?);
+                        if family == "hc" {
+                            Self::HoldConfirmed { record, epoch }
+                        } else {
+                            Self::HoldConfirmedBefore { record, epoch }
+                        }
+                    }
                     "rsc" => Self::RestoreConsent(b64_32(rest)?),
                     "pn" => Self::NotPaidBeforeLoss(b64_32(rest)?),
                     "fo" => Self::FloorOpened(b64_32(rest)?),
@@ -3118,6 +3148,40 @@ mod tests {
             key::HOLD_EPOCH,
             serde_json::json!("short")
         ));
+    }
+
+    #[test]
+    fn test_hold_epoch_confirmations_are_keyed_by_their_hold() {
+        let record = [7; 32];
+        let epoch = crate::hold::HoldEpoch::new().unwrap();
+        for (key, family) in [
+            (
+                key::hold_confirmed(&record, &epoch),
+                StateKey::HoldConfirmed {
+                    record,
+                    epoch: *epoch.as_bytes(),
+                },
+            ),
+            (
+                key::hold_confirmed_before(&record, &epoch),
+                StateKey::HoldConfirmedBefore {
+                    record,
+                    epoch: *epoch.as_bytes(),
+                },
+            ),
+        ] {
+            assert_eq!(StateKey::parse(key.as_bytes()), Some(family));
+            assert!(reads::<bool>(&key, serde_json::json!(true)));
+            assert!(!reads::<crate::hold::HoldEpoch>(
+                &key,
+                serde_json::to_value(epoch).unwrap()
+            ));
+        }
+        // A key per record with no hold identifier is not a key the SDK writes.
+        for prefix in [key::HOLD_CONFIRMED, key::HOLD_CONFIRMED_BEFORE] {
+            let bare = format!("{prefix}{}", pubky_switch_core::enc::b64(&record));
+            assert_eq!(StateKey::parse(bare.as_bytes()), None);
+        }
     }
 
     #[test]
@@ -3655,10 +3719,19 @@ mod tests {
             (key::PAYER_PASS_OWED.into(), StateKey::PayerPassOwed),
             (key::OWN_RESEND_OWED.into(), StateKey::OwnResendOwed),
             (key::LISTED_CERT.into(), StateKey::ListedCert),
-            (key::hold_confirmed(&pubky), StateKey::HoldConfirmed(pubky)),
             (
-                key::hold_confirmed_before(&pubky),
-                StateKey::HoldConfirmedBefore(pubky),
+                key::hold_confirmed(&pubky, &crate::hold::HoldEpoch::from_bytes([4; 16])),
+                StateKey::HoldConfirmed {
+                    record: pubky,
+                    epoch: [4; 16],
+                },
+            ),
+            (
+                key::hold_confirmed_before(&pubky, &crate::hold::HoldEpoch::from_bytes([4; 16])),
+                StateKey::HoldConfirmedBefore {
+                    record: pubky,
+                    epoch: [4; 16],
+                },
             ),
             (
                 key::restore_consent(&pubky),

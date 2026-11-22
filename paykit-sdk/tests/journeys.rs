@@ -13,10 +13,16 @@
 mod connect;
 #[path = "journeys/one_time.rs"]
 mod one_time;
+#[path = "journeys/periods.rs"]
+mod periods;
+#[path = "journeys/priced.rs"]
+mod priced;
 #[path = "journeys/private_list.rs"]
 mod private_list;
 #[path = "journeys/public_endpoint.rs"]
 mod public_endpoint;
+#[path = "journeys/restore.rs"]
+mod restore;
 
 use std::any::Any;
 use std::error::Error;
@@ -308,9 +314,46 @@ struct Expected {
     request_hash: Option<[u8; 32]>,
     amount: PaymentAmount,
     endpoint_id: PaymentEndpointIdentifier,
+    /// The amount the method transferred: the requested one unless a rate priced it.
+    paid: PaymentAmount,
+    /// The rate that priced the payment, if one did.
+    rate: Option<&'static str>,
+    /// How many selections the method had made before the payment.
+    selections: usize,
 }
 
-/// After the payer's `outcome`: the method was called once; the payer's journal holds the
+impl Expected {
+    /// A payment of `amount` to `endpoint_id`, of the request `request_hash` if any, about
+    /// to be made on `rail`: made before the payment, it notes the method's selections so
+    /// far.
+    fn new(
+        rail: &FakeRail,
+        request_hash: Option<[u8; 32]>,
+        amount: PaymentAmount,
+        endpoint_id: PaymentEndpointIdentifier,
+    ) -> Self {
+        Self {
+            request_hash,
+            paid: amount.clone(),
+            amount,
+            endpoint_id,
+            rate: None,
+            selections: rail.selections().len(),
+        }
+    }
+
+    /// The same payment priced at `rate`, the method transferring `paid`.
+    fn at_rate(self, rate: &'static str, paid: PaymentAmount) -> Self {
+        Self {
+            rate: Some(rate),
+            paid,
+            ..self
+        }
+    }
+}
+
+/// After the payer's `outcome`: the method was handed one new selection, including the
+/// expected endpoint, and called once; the payer's journal holds the
 /// payment, finished; the seller holds the payer's proof, verifies it, confirms it and shows
 /// it receipted; and the payer then holds exactly that receipt, in its receipts and in its
 /// journal's entry. Returns the receipt's `msg_id`.
@@ -330,6 +373,17 @@ async fn paid_and_receipted(
         return Err(format!("not paid with a proof: {outcome:?}").into());
     };
     assert_eq!(rail.executions(&attempt_id), 1);
+    let selections = rail.selections();
+    assert_eq!(selections.len(), expected.selections + 1, "{selections:?}");
+    let (candidates, _) = selections
+        .last()
+        .ok_or("the method was handed no endpoint")?;
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.endpoint_id == expected.endpoint_id),
+        "{candidates:?}"
+    );
 
     // The payer's view: its own payment, finished.
     let payments = Box::pin(wallet.payments()).await?;
@@ -341,6 +395,12 @@ async fn paid_and_receipted(
     assert_eq!(payment.request_hash, expected.request_hash);
     assert_eq!(payment.amount, expected.amount);
     assert_eq!(payment.endpoint_id, expected.endpoint_id);
+    assert_eq!(payment.paid.as_ref(), Some(&expected.paid), "{payment:?}");
+    assert_eq!(
+        payment.rate.as_ref().map(|rate| rate.value().as_str()),
+        expected.rate
+    );
+    assert_eq!(rail.paid_amount(&attempt_id).as_ref(), Some(&expected.paid));
     assert_eq!(payment.stage, Stage::Finished, "{payment:?}");
 
     // The seller's view: the proof, verified, then the receipt.

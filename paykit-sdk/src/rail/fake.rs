@@ -34,6 +34,8 @@ type Choice = Arc<
 
 /// The longest a fake dispatch takes to complete or fail, as its declaration says: an hour.
 pub const FAKE_LONGEST_COMPLETION_MS: u64 = 3_600_000;
+/// How early the fake method's verified payment time may lie: it reports the time it pays.
+pub const FAKE_PAYMENT_TIME_TOLERANCE_MS: u64 = 0;
 
 /// What the next new payment does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -324,6 +326,18 @@ impl FakeRail {
         }
     }
 
+    /// Finish a payment left in flight as paid, its evidence dated `paid_at_ms`, as a method
+    /// whose verified payment time may lie before or after the real time of the payment.
+    pub fn settle_at(&self, key: &AttemptId, paid_at_ms: u64) {
+        let mut inner = self.lock();
+        let counter = inner.counter;
+        if let Some(payment) = inner.payments.get_mut(key) {
+            if payment.outcome == RailOutcome::Pending {
+                payment.outcome = paid_outcome(key, counter, Some(paid_at_ms));
+            }
+        }
+    }
+
     /// A payment the method reported failed completes after all: its history shows it paid,
     /// and money moved once.
     pub fn complete_after_failure(&self, key: &AttemptId) {
@@ -430,7 +444,7 @@ impl Rail for FakeRail {
         if let Some(declared) = inner.declaration {
             return declared;
         }
-        RailDeclaration::new(FAKE_LONGEST_COMPLETION_MS)
+        RailDeclaration::new(FAKE_LONGEST_COMPLETION_MS, FAKE_PAYMENT_TIME_TOLERANCE_MS)
             .with_idempotent(inner.idempotent)
             .with_history(true)
             .with_history_survives_restore(true)
