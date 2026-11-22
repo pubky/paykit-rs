@@ -869,6 +869,47 @@ async fn test_restore_hold_missed_item_holds_no_request_created_after_it() {
 }
 
 #[tokio::test]
+async fn test_restore_hold_missed_item_pays_a_request_created_after_it_without_a_confirmation() {
+    // On the pay path: a request bob creates and sends past the item's last acceptance time
+    // plus the clock tolerance is paid with no confirmation, by hand and automatically. One
+    // created within the tolerance still needs the user's confirmation (Paykit spec 7.2,
+    // "What a `missed` item loses").
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    missed(&w);
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(CLOCK_TOLERANCE_MS - 1_000);
+    let within = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    w.clock.advance_ms(2_000);
+    let after = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    let later = request_from(&mut shop, w.alice_id(), draft("3", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let refused = wallet
+        .pay_request(&within, PayOptions::default())
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::HeldAfterRestore { .. })),
+        "{refused:?}"
+    );
+    let paid = wallet
+        .pay_request(&after, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    let paid = wallet
+        .pay_request_automatically(&later, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(w.rail.all_executions().len(), 2);
+}
+
+#[tokio::test]
 async fn test_restore_hold_missed_item_holds_a_request_held_at_it_whatever_its_creation_time() {
     // A request the wallet held when the item came stays held, even one whose payee's clock
     // ran ahead, its creation time later than the item's.
