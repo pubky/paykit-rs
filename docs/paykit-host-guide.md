@@ -257,7 +257,9 @@ complete its first executor grant. Repeating that call or reopening the same
 wallet preserves the original grant. A sibling wallet, missing original
 application or unverified ledger change leaves the grant held. When the grant's
 write gets no answer, the Allowance isn't consented yet even if the grant later
-applies: retry `Paykit::resume_allowance_executor` until it succeeds. After a
+applies: retry `Paykit::resume_allowance_executor` until it succeeds. Each retry
+sends the kept grant again first, so no `receive` is needed in between, and no
+second grant is built. After a
 restore that isn't clean or a `missed` item, the user confirms again before the
 first grant, as for any Allowance that requires consent again: show the
 counterparty, terms and this executor before calling

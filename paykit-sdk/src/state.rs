@@ -534,7 +534,10 @@ impl Stored for [u8; 16] {
 
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
-            StateKey::OfflineBatch(_) | StateKey::EndBatch(_) | StateKey::FloorBatch => Ok(()),
+            StateKey::OfflineBatch(_)
+            | StateKey::EndBatch(_)
+            | StateKey::FloorBatch
+            | StateKey::GrantBatch(_) => Ok(()),
             _ => corrupt(),
         }
     }
@@ -1997,6 +2000,12 @@ pub(crate) mod key {
         format!("{EXECUTOR_CHECKPOINTS}{}", b64(record))
     }
 
+    /// The batch ID of this app's first grant of the Allowance at `record`, while the client
+    /// keeps it to send again; the batch deletes it when it applies.
+    pub(crate) fn grant_batch(record: &[u8; 32]) -> String {
+        format!("gb/{}", b64(record))
+    }
+
     /// Staged complete values and the native batches that actually submitted them.
     pub(crate) const LEDGER_PROPOSALS: &str = "lw/";
     pub(crate) const LEDGER_BATCHES: &str = "lb/";
@@ -2599,6 +2608,8 @@ pub(crate) enum StateKey {
     EndOrigin(String),
     /// The unresolved native batch that will record an automatic end before queueing.
     EndBatch(String),
+    /// The unresolved native batch of this app's first grant of an Allowance.
+    GrantBatch([u8; 32]),
 }
 
 impl StateKey {
@@ -2830,6 +2841,7 @@ impl StateKey {
                     "en" => Self::NoticeTarget(msg_id(rest)?),
                     "end" => Self::EndOrigin(msg_id(rest)?),
                     "eb" => Self::EndBatch(msg_id(rest)?),
+                    "gb" => Self::GrantBatch(b64_32(rest)?),
                     "eo" => Self::OwedEnd(b64_32(rest)?),
                     "rs" => {
                         let (requester, id) = rest.split_once('/')?;
@@ -4033,6 +4045,7 @@ mod tests {
             (key::notice_target(id), StateKey::NoticeTarget(id.into())),
             (key::end_origin(id), StateKey::EndOrigin(id.into())),
             (key::end_batch(id), StateKey::EndBatch(id.into())),
+            (key::grant_batch(&pubky), StateKey::GrantBatch(pubky)),
         ];
         for (built, family) in cases {
             assert_eq!(StateKey::parse(built.as_bytes()), Some(family), "{built}");

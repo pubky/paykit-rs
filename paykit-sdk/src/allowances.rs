@@ -144,10 +144,11 @@ pub struct AllowanceView {
     pub status: AllowanceStatus,
     /// The executor app the record's current grant names, if it holds one that verifies.
     pub executor_app_id: Option<[u8; 16]>,
-    /// Whether this app holds current consent. The first executor grant records the
-    /// consent authorized through [`Paykit::propose_executable_allowance`] or
-    /// [`Paykit::accept_executable_allowance`]. A clean restore preserves it. A missed
-    /// item or a restore without a clean verdict requires confirmation through
+    /// Whether this app holds current consent. Once the first executor grant has applied,
+    /// [`Paykit::resume_allowance_executor`] records the consent authorized through
+    /// [`Paykit::propose_executable_allowance`] or [`Paykit::accept_executable_allowance`]
+    /// under the current hold. A clean restore preserves it. A missed item or a restore
+    /// without a clean verdict requires confirmation through
     /// [`Paykit::confirm_allowance_executor`] (Paykit spec 8.3).
     pub consented: bool,
     /// Whether the counterparty is on the identity's deny list, as the app last read it
@@ -1481,29 +1482,36 @@ pub(crate) fn notice_effect(
         NoticeReason::Ended => ConsentEnd::Ended,
         NoticeReason::HandedOff => ConsentEnd::HandedOff,
     };
-    // Only an entry the list holds, or an Allowance this app granted itself, is removed: a
-    // notice naming any other record key adds nothing, so own apps' notices can't grow the
-    // list. Its grant applies before its consent is written (`promote_consent`), so between
-    // the two the notice is kept as a removal, which that step then leaves as it is. Both
-    // are read bound to their key, so the Allowance they name is the one whose record the
-    // notice names.
+    // Only an entry the list holds, or an Allowance this app granted itself or approved for
+    // automatic execution, is removed: a notice naming any other record key adds nothing,
+    // so own apps' notices can't grow the list. The consent is written only once the grant
+    // applied, so a notice before then, while the grant's batch is still kept too, is kept
+    // as a removal, which the consent step then leaves as it is (Paykit spec 8.3, "removes
+    // it for good ... even before it has added it"). All three are read bound to their key,
+    // so the Allowance they name is the one whose record the notice names.
     let record = &notice.allowance_record;
     let named = match state::cx_get::<ConsentEntry>(cx, &key::consent(record))? {
         Some(entry) => Some((
             entry.counterparty,
             entry.allowance_id().map_err(|_| Fail::corrupt())?,
         )),
-        None => state::cx_get::<crate::executor::ExecutorHistory>(
+        None => match state::cx_get::<crate::executor::ExecutorHistory>(
             cx,
             &key::executor_checkpoint(record),
         )?
         .and_then(|history| history.0.first().cloned())
-        .map(|granted| {
-            AllowanceId::parse(&granted.allowance_id)
-                .map(|id| (granted.counterparty, id))
-                .map_err(|_| Fail::corrupt())
-        })
-        .transpose()?,
+        {
+            Some(granted) => Some(
+                AllowanceId::parse(&granted.allowance_id)
+                    .map(|id| (granted.counterparty, id))
+                    .map_err(|_| Fail::corrupt())?,
+            ),
+            None => state::cx_get::<OriginalAllowance>(cx, &key::original_allowance(record))?
+                .map(|approved| approved.approved_for_execution())
+                .transpose()
+                .map_err(|_| Fail::corrupt())?
+                .flatten(),
+        },
     };
     let Some((counterparty, allowance_id)) = named else {
         return Ok(());
@@ -2702,24 +2710,65 @@ impl Paykit {
     /// made loses nothing the user consented to. Run after each receive.
     pub(crate) async fn sweep_consents(&mut self) -> Result<()> {
         let mut tx = Tx::default();
+        let mut listed = std::collections::HashSet::new();
         for (rest, entry) in Box::pin(self.local_scan::<ConsentEntry>(key::CONSENTS)).await? {
             let record = consent_record(&rest)?;
+            listed.insert(record);
             if !matches!(entry.consent, Consent::Held { .. }) {
                 continue;
             }
-            let reason = match Box::pin(self.held_allowance(&record)).await? {
-                Some(held) if held.conflicted.is_some() => ConsentEnd::Conflicted,
-                Some(held) if held.end.is_some() => ConsentEnd::Ended,
-                Some(held) if rejected(&held) => ConsentEnd::Rejected,
-                _ if Box::pin(self.conflict_kept(&record)).await? => ConsentEnd::Conflicted,
-                _ => continue,
+            let Some(reason) = Box::pin(self.stopped_as(&record)).await? else {
+                continue;
             };
             tx.put(
                 &key::consent(&record),
                 &entry.with(Consent::Removed { reason }),
             )?;
         }
+        // An Allowance this app granted, or approved for automatic execution, and sees
+        // stopped before its consent is written is kept as a removal all the same (Paykit
+        // spec 8.3, "even before it has added it").
+        let mut unlisted = Vec::new();
+        for (_, history) in
+            Box::pin(self.local_scan::<crate::executor::ExecutorHistory>(key::EXECUTOR_CHECKPOINTS))
+                .await?
+        {
+            if let Some(granted) = history.0.first() {
+                let id = AllowanceId::parse(&granted.allowance_id)
+                    .map_err(|_| PaykitError::corrupt())?;
+                unlisted.push((granted.counterparty, id));
+            }
+        }
+        for (_, approved) in
+            Box::pin(self.local_scan::<OriginalAllowance>(key::ORIGINAL_ALLOWANCES)).await?
+        {
+            unlisted.extend(approved.approved_for_execution()?);
+        }
+        for (counterparty, id) in unlisted {
+            let record = self.app.record_key(&allowance_target(&counterparty, &id))?;
+            if !listed.insert(record) {
+                continue;
+            }
+            if let Some(reason) = Box::pin(self.stopped_as(&record)).await? {
+                tx.put(
+                    &key::consent(&record),
+                    &ConsentEntry::new(counterparty, &id, Consent::Removed { reason }),
+                )?;
+            }
+        }
         Box::pin(self.local_commit(tx)).await
+    }
+
+    /// How the Allowance at `record` has stopped, as the record this app holds or a kept
+    /// conflict shows it; `None` while it runs.
+    async fn stopped_as(&mut self, record: &[u8; 32]) -> Result<Option<ConsentEnd>> {
+        Ok(match Box::pin(self.held_allowance(record)).await? {
+            Some(held) if held.conflicted.is_some() => Some(ConsentEnd::Conflicted),
+            Some(held) if held.end.is_some() => Some(ConsentEnd::Ended),
+            Some(held) if rejected(&held) => Some(ConsentEnd::Rejected),
+            _ if Box::pin(self.conflict_kept(record)).await? => Some(ConsentEnd::Conflicted),
+            _ => None,
+        })
     }
 
     // ---------------------------------------------------------------------------------

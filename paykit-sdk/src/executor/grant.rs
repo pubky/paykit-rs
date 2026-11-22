@@ -3,7 +3,9 @@
 use paykit_lib::grant::{grant_fields, EXECUTOR_GRANT_LABEL};
 use paykit_lib::records::{AllowanceRecord, GrantEntry, Origin};
 use paykit_lib::{Body, ExecutorGrant};
-use pubky_switch_client::app::{KeptOp, OpBatch, RecordRead, RecordTarget, UserConfirmed};
+use pubky_switch_client::app::{
+    KeptBatchStatus, KeptOp, LocalWrite, OpBatch, RecordRead, RecordTarget, UserConfirmed,
+};
 use pubky_switch_core::enc::hash;
 use pubky_switch_core::ops::Condition;
 
@@ -36,8 +38,11 @@ impl Paykit {
     }
 
     /// Complete this app's previously authorized first grant after the original reply,
-    /// including after reopening. An independent later hold requires its own confirmation.
-    /// A repeated call requires the same app's current grant and the original or reconciled ledger.
+    /// including after reopening, and record the consent once the grant has applied. A grant
+    /// whose answer was lost is sent again first, so the host retries this call until it
+    /// succeeds, with no read needed in between. An independent later hold requires its own
+    /// confirmation. A repeated call requires the same app's current grant and the original
+    /// or reconciled ledger.
     ///
     /// # Errors
     ///
@@ -82,6 +87,7 @@ impl Paykit {
             return Err(Refusal::ScopeMissing("paykit_allowance_execute".into()).into());
         }
         self.refuse_while_payer_pass_owed().await?;
+        Box::pin(self.land_kept_grant(record)).await?;
         let opening = Box::pin(self.approved_opening(record))
             .await?
             .ok_or_else(held)?;
@@ -298,9 +304,14 @@ impl Paykit {
         // The consent isn't in the batch: one kept and applied later could bring an Allowance
         // back over a removal, a newer decision or a newer hold. It is written only by
         // `promote_consent`, at once, once the grant applied.
+        // Kept to send again, the batch leaves its ID at `gb/`, which it deletes when it
+        // applies: a resume lands it first and never builds a second grant over it.
+        let marker = key::grant_batch(record).into_bytes();
         let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
             .entry(op)
-            .local(state::local_put(&key, &ExecutorHistory(vec![checkpoint]))?);
+            .local(state::local_put(&key, &ExecutorHistory(vec![checkpoint]))?)
+            .keep_id_at(marker.clone())
+            .local(LocalWrite::Delete { key: marker });
         if confirmed.is_some() {
             let hold = self.current_hold().await?;
             self.local_put(&key::execution_approval(record, hold.as_ref()), &true)
@@ -321,6 +332,30 @@ impl Paykit {
         .await?;
         self.promote_consent(record, &view.counterparty, &view.allowance_id)
             .await
+    }
+
+    /// Land this app's first grant of the Allowance at `record` when the client keeps its
+    /// batch from a call whose answer was lost: a read sends kept batches again before the
+    /// feed, so a resume or a confirmation retried without the host reading in between
+    /// still converges. While the batch stays kept, nothing more is decided now; a batch the
+    /// client applied or dropped leaves nothing to land.
+    async fn land_kept_grant(&mut self, record: &[u8; 32]) -> Result<()> {
+        let marker = key::grant_batch(record);
+        let Some(id) = self.local_get::<[u8; 16]>(&marker).await? else {
+            return Ok(());
+        };
+        let kept =
+            |status: Option<KeptBatchStatus>| matches!(status, Some(KeptBatchStatus::Kept { .. }));
+        if kept(self.app.kept_batch(id).await?) {
+            Box::pin(self.receive(None)).await?;
+            if kept(self.app.kept_batch(id).await?) {
+                return Err(Refusal::NotNow(
+                    "the executor grant's write waits to be sent again".into(),
+                )
+                .into());
+            }
+        }
+        self.local_delete(&marker).await
     }
 
     /// Put the Allowance at `record` on the consent list once its grant applied, by a local

@@ -1022,6 +1022,12 @@ pub(crate) fn restore_paykit_layer(
                 state::restored::<[u8; 16]>(&key, &value, &binder).map_err(|_| unread())?;
                 continue;
             }
+            StateKey::GrantBatch(_) => {
+                // The client omits unresolved batches on restore, so a first grant kept in
+                // one is not carried: the restored app reads the grant from the record.
+                state::restored::<[u8; 16]>(&key, &value, &binder).map_err(|_| unread())?;
+                continue;
+            }
             StateKey::EndBatch(_) => {
                 // A backup omits the unresolved Switch batch. Its signed end's origin
                 // can survive independently of the outcome of its counterparty delivery.
@@ -2369,6 +2375,31 @@ mod receive_tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn test_missed_drops_every_approval_for_execution() {
+        // An approval given before the item approves nothing after it, and neither does one
+        // a restore carries to its verdict (Paykit spec 7.2, "What a `missed` item loses").
+        let missed = MissedEntries {
+            read_at_ms: 0,
+            seq: 1,
+            entries: 0,
+            accepted_from_ms: 10,
+            accepted_until_ms: 20,
+        };
+        let deleted: Vec<Vec<u8>> = PaykitProtocol::new()
+            .missed(&missed)
+            .unwrap()
+            .into_iter()
+            .filter_map(|write| match write {
+                LocalWrite::DeletePrefix { prefix } => Some(prefix),
+                _ => None,
+            })
+            .collect();
+        for prefix in [key::EXECUTION_APPROVALS, key::RESTORE_APPROVALS] {
+            assert!(deleted.contains(&prefix.as_bytes().to_vec()), "{prefix}");
+        }
     }
 
     #[test]

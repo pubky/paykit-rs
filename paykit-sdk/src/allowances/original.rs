@@ -9,7 +9,7 @@ use crate::divergent::SeenVersion;
 use crate::error::{PaykitError, Refusal, Result};
 use crate::records::KeptMessage;
 use crate::state::{self, key, Binder, StateKey, Tx};
-use paykit_lib::{bodies::ProposerRole, Collection};
+use paykit_lib::{bodies::ProposerRole, AllowanceId, Collection};
 use pubky_switch_client::app::{
     KeptOp, LocalWrite, RecordApplication, RestoreContext, SharedRecord,
 };
@@ -99,6 +99,17 @@ impl OriginalAllowance {
             rejected: None,
             opening: None,
         }
+    }
+
+    /// The counterparty and Allowance ID of an Allowance this app approved for automatic
+    /// execution; `None` for one it didn't.
+    pub(crate) fn approved_for_execution(&self) -> Result<Option<([u8; 32], AllowanceId)>> {
+        if !self.confirmed_for_execution {
+            return Ok(None);
+        }
+        let decision = self.decision.stored(&self.peer)?;
+        let id = named_allowance(decision.body()).ok_or_else(PaykitError::corrupt)?;
+        Ok(Some((self.peer, id.clone())))
     }
 
     pub(crate) fn check(&self, record: &[u8; 32], binder: &Binder<'_>) -> Result<()> {
