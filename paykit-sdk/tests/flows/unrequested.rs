@@ -631,7 +631,8 @@ async fn test_unrequested_list_after_a_delete_stays_held_and_its_single_use_endp
     use pubky_switch_client::app::{Collection as SwitchCollection, OpBatch, RecordTarget};
 
     let w = World::new();
-    let mut wallet = w.wallet("wallet").await;
+    let storage = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", std::sync::Arc::clone(&storage)).await;
     let mut phone = w.wallet("phone").await;
     let mut shop = w.shop().await;
     w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
@@ -651,6 +652,8 @@ async fn test_unrequested_list_after_a_delete_stays_held_and_its_single_use_endp
         &paykit_lib::derive::natural_key::payment_list(&w.bob_id(), &shop.app_id()),
     );
     phone.app_mut().read_record(&target).await.unwrap();
+    let (_, marked) = list_record(&phone, &w).await;
+    assert_eq!(marked["used"].as_array().unwrap().len(), 1);
     let op = phone
         .app_mut()
         .record_op(&target, None, Vec::new())
@@ -662,6 +665,8 @@ async fn test_unrequested_list_after_a_delete_stays_held_and_its_single_use_endp
         .await
         .unwrap();
     wallet.receive(None).await.unwrap();
+    let key = wallet.app().record_key(&target).unwrap();
+    let writes = w.record_writes(&w.alice, &key);
 
     // Bob sends a list of the same version again, the single-use endpoint the wallet paid
     // in it: written afresh, it would be payable again. It is held instead.
@@ -670,27 +675,71 @@ async fn test_unrequested_list_after_a_delete_stays_held_and_its_single_use_endp
     wallet.receive(None).await.unwrap();
     let held = wallet.held_lists().await.unwrap();
     assert_eq!(held.len(), 1, "{held:?}");
-    let refused = wallet
-        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
-        .await
-        .outcome;
-    assert!(refused.is_err(), "{refused:?}");
+    let waiting = |refused: Result<PayOutcome, paykit_sdk::PaykitError>| {
+        assert!(
+            matches!(
+                refused.as_ref().err().and_then(|e| e.refusal()),
+                Some(Refusal::WaitingForList)
+            ),
+            "{refused:?}"
+        );
+    };
+    waiting(
+        wallet
+            .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+            .await
+            .outcome,
+    );
     assert_eq!(w.rail.all_executions().len(), 1);
 
-    // No receive or newer list makes the single-use endpoint payable again: the delete took
-    // its mark, so the list stays held until an own app holding the mark writes it back.
+    // No receive, newer list or reload makes the single-use endpoint payable again: no SDK
+    // app writes the record over the delete, so the list stays held.
     w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 2))
         .await;
     wallet.receive(None).await.unwrap();
+    let app_id = wallet.app_id();
+    drop(wallet);
+    let mut wallet = w
+        .load_on_clock(&w.alice, storage, app_id, std::sync::Arc::clone(&w.clock))
+        .await;
     wallet.receive(None).await.unwrap();
     let held = wallet.held_lists().await.unwrap();
     assert_eq!(held.len(), 1, "{held:?}");
     assert_eq!(held[0].version, list_version(1, 2));
-    let refused = wallet
-        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
-        .await
-        .outcome;
-    assert!(refused.is_err(), "{refused:?}");
+    waiting(
+        wallet
+            .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+            .await
+            .outcome,
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
+    assert_eq!(w.record_writes(&w.alice, &key), writes);
+
+    // A write over the delete that drops the mark the wallet saw is refused: still held.
+    let put = |value: &serde_json::Value| serde_json::to_vec(value).unwrap();
+    let mut unmarked = marked.clone();
+    unmarked["used"] = serde_json::json!([]);
+    for value in [&unmarked, &marked] {
+        let op = phone
+            .app_mut()
+            .record_op(&target, Some(&put(value)), Vec::new())
+            .await
+            .unwrap();
+        phone
+            .app_mut()
+            .submit_batch(OpBatch::for_protocol("paykit").entry(op))
+            .await
+            .unwrap();
+        wallet.receive(None).await.unwrap();
+        wallet.receive(None).await.unwrap();
+        if value == &unmarked {
+            assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
+        }
+    }
+    // One that keeps it places the held list with the mark.
+    assert!(wallet.held_lists().await.unwrap().is_empty());
+    let (_, placed) = list_record(&wallet, &w).await;
+    assert_eq!(placed["used"].as_array().unwrap().len(), 1, "{placed}");
     assert_eq!(w.rail.all_executions().len(), 1);
 }
 
@@ -863,9 +912,8 @@ pub(crate) fn store_bundle_at(
 async fn test_unrequested_list_over_a_value_awaiting_its_epoch_key_keeps_single_use_marks() {
     // The wallet paid the single-use endpoint, marked used in the record. The data epoch
     // rotates; the phone gets the new key and writes the record again, sealed at the new
-    // epoch, which the wallet holds unopened for now. A newer list is held, not offered to
-    // be placed without the marks. Once the wallet's key comes, late, the record opens and
-    // the list is placed with the mark.
+    // epoch, which the wallet holds unopened for now. A newer list is held. Once the
+    // wallet's key comes, late, the record opens and the list is placed with the mark.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut phone = w.wallet("phone").await;

@@ -804,8 +804,8 @@ async fn test_local_state_held_list_under_another_apps_key_never_placed_there() 
     let mut wallet = w.wallet("wallet").await;
     let _shop = w.shop().await;
     list_under_another_apps_key(&w, &mut wallet, &[9; 16]).await;
-    let received = wallet.receive(None).await;
-    assert!(received.as_ref().err().is_none_or(corrupt), "{received:?}");
+    let error = wallet.receive(None).await.unwrap_err();
+    assert!(corrupt(&error), "{error:?}");
     let record = wallet.app().record_key(&lists_of(&w, &[9; 16])).unwrap();
     assert_eq!(w.record_writes(&w.alice, &record), 0);
 }

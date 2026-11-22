@@ -2304,11 +2304,17 @@ pub(crate) fn obligation(
 /// would let an endpoint already paid be paid again. A record whose current write is a
 /// delete is held the same way: the delete took the marks with it. The list is held
 /// instead ([`key::held_list`], the newest version kept), a durable notice
-/// ([`Paykit::held_lists`]), and placed once another own app that holds the marks writes
-/// the record again ([`Paykit::place_held_lists`]). No confirmation places it without
-/// them: every single-use endpoint at or below the held version counts as used (Paykit
-/// wire 5.4, 6). Payments meanwhile don't use the record: lists that don't read, or are
-/// held, are never paid to. The SDK never deletes a record.
+/// ([`Paykit::held_lists`]), and placed only onto a readable write that keeps the marks
+/// this app saw ([`Paykit::place_held_lists`]). Nothing places it without them, by
+/// confirmation or otherwise, and an absence of the record later, as after the service
+/// forgot the delete, keeps it held. Payments meanwhile don't use the record: lists that
+/// don't read, or are held, are never paid to. The SDK never deletes a record.
+///
+/// So after a delete, that payee app's lists stay held at every SDK app, the one holding
+/// every mark included: no SDK path writes this record over a delete, as this revision
+/// withholds the put-back (Paykit wire 5, "Incomplete protected-record contract"; spec 6).
+/// Only a readable write over the delete from outside the SDK, that keeps the marks this
+/// app saw, places the list.
 ///
 /// The limit: a delete is seen only by an app that holds the record's delete write, from
 /// its feed or a read. To an app that never held the record, a deleted one looks absent,
@@ -2684,8 +2690,10 @@ pub(crate) fn lists_read_is_fresh(read: u64, now: u64) -> bool {
 
 /// A Private Payment List held because its `payment_lists` record doesn't read, or is
 /// deleted ([`Paykit::held_lists`]): never written over it, which could drop the single-use
-/// marks it holds or held, until the record reads again. No payment uses that payee app's
-/// list meanwhile; its public endpoints remain a separate choice of the user.
+/// marks it holds or held, until the record reads again with those marks. After a delete
+/// that doesn't happen in this revision (module docs of the receive step). No payment uses
+/// that payee app's list meanwhile; its public endpoints remain a separate choice of the
+/// user, as does a list the payee shares from another app.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct HeldList {
@@ -2702,9 +2710,10 @@ pub struct HeldList {
 impl Paykit {
     /// The Private Payment Lists held because their `payment_lists` record doesn't read or
     /// is deleted (Paykit wire 5.4): a durable notice for the host. Each is placed once the
-    /// record reads again, at a receive; until then no payment uses the payee app's list. A list held over a value only waiting for its scope key isn't listed: that
-    /// value opens once the key comes, and the list is placed with its marks then, so
-    /// nothing offers to place it without them.
+    /// record reads again with the marks this app saw, at a receive; until then no payment
+    /// uses the payee app's list. A list held over a value only waiting for its scope key
+    /// isn't listed: that value opens once the key comes, and the list is placed with its
+    /// marks then.
     ///
     /// # Errors
     ///
