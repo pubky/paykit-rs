@@ -47,6 +47,7 @@
 //! | `lp/<recipient>/<generation>/<message hash>` | outstanding original publication batch IDs, kept atomically before submission and retained across restore | yes |
 //! | `lres/<recipient>` | the applied list, its publisher and original signed message, first non-delivery, prior offers' latest possible expiry, and the interval of an outstanding withdrawal | yes |
 //! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read: never written over it, which could drop its single-use marks, until the record reads | |
+//! | `lgone/<record key>` | set once this app saw the `payment_lists` record deleted or unreadable: a later absence of it, as after a forgotten delete or a restore into a fresh store, keeps a list held there; cleared when the list is placed | yes |
 //! | `kc/<record key>/<certificate hash>/<feed generation>` | a payee's cancellation of a request, kept until it is placed in the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
 //! | `lr` | when the app last read the lists, on the device clock; absent before the first read and after a due read failed, when new activity waits (Paykit wire 4.1); never restored, so a restored app reads the deny list again before any payment | |
@@ -706,6 +707,7 @@ impl Stored for bool {
             | StateKey::NotPaidBeforeLoss(_)
             | StateKey::FloorDeleted
             | StateKey::FloorOpened(_)
+            | StateKey::ListRecordLost(_)
             | StateKey::Taken(_)
                 if *self =>
             {
@@ -2179,6 +2181,12 @@ pub(crate) mod key {
         format!("{HELD_LISTS}{}", b64(record_key))
     }
 
+    /// Set while this app has seen the `payment_lists` record at `record_key` deleted or
+    /// unreadable, so a later absence of it says nothing of the marks it held.
+    pub(crate) fn list_record_lost(record_key: &[u8; 32]) -> String {
+        format!("lgone/{}", b64(record_key))
+    }
+
     /// This app's block or unblock of `pubky` not yet shown by a read of the lists
     /// ([`OwnBlockMark`]). A block is marked before the switch is asked, so a crash before
     /// the call leaves it counted; its mark goes once the switch took it, or once a read of
@@ -2378,6 +2386,8 @@ pub(crate) enum StateKey {
     ListsRead,
     /// `lh/<record key>`: a list held over a record that didn't read.
     HeldList([u8; 32]),
+    /// `lgone/<record key>`: a `payment_lists` record seen deleted or unreadable.
+    ListRecordLost([u8; 32]),
     /// `side/<msg_id>`: the side of a message the app sent.
     Side(String),
     /// `ar/<payee>/<app>`: a payee app's records a reader has seen.
@@ -2706,6 +2716,7 @@ impl StateKey {
                     "pn" => Self::NotPaidBeforeLoss(b64_32(rest)?),
                     "fo" => Self::FloorOpened(b64_32(rest)?),
                     "lh" => Self::HeldList(b64_32(rest)?),
+                    "lgone" => Self::ListRecordLost(b64_32(rest)?),
                     "side" => Self::Side(msg_id(rest)?),
                     "ha" => {
                         let (payee, id) = rest.split_once('/')?;
@@ -3745,6 +3756,10 @@ mod tests {
                 StateKey::Taken(format!("{}-7", "05".repeat(16))),
             ),
             (key::held_list(&pubky), StateKey::HeldList(pubky)),
+            (
+                key::list_record_lost(&pubky),
+                StateKey::ListRecordLost(pubky),
+            ),
             (key::side(id), StateKey::Side(id.into())),
             (
                 key::held_answer(&pubky, id),

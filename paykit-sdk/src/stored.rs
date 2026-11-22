@@ -11,7 +11,8 @@
 //!   a request into the record of its settlement, a receipt beside the proof it names, and
 //!   period details and a Billing Period's proof into the period record, once the request
 //!   record they are checked against is held.
-//!   Meanwhile a Private Payment List is held over its record (`lh/`), the newer kept, and a
+//!   Meanwhile a Private Payment List is held over its record (`lh/`), the newer kept, and
+//!   placed as any held list is ([`Paykit::place_held_lists`]); a
 //!   request is shown unrecorded ([`crate::RequestStatus::Unrecorded`]). A payee's
 //!   cancellation needs nothing here: its stop is kept with the cursor move, with no write
 //!   at the switch (`kc/`, Paykit spec 8.1). An Allowance proposal or answer is tried

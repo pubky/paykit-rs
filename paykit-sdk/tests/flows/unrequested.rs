@@ -715,7 +715,7 @@ async fn test_unrequested_list_after_a_delete_stays_held_and_its_single_use_endp
     assert_eq!(w.rail.all_executions().len(), 1);
     assert_eq!(w.record_writes(&w.alice, &key), writes);
 
-    // A write over the delete that drops the mark the wallet saw is refused: still held.
+    // A write over the delete that drops the mark the wallet saw is ignored: still held.
     let put = |value: &serde_json::Value| serde_json::to_vec(value).unwrap();
     let mut unmarked = marked.clone();
     unmarked["used"] = serde_json::json!([]);
