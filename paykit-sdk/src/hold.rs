@@ -92,6 +92,28 @@ impl HoldEpoch {
     pub(crate) fn new() -> pubky_switch_core::Result<Self> {
         pubky_switch_core::enc::random_bytes().map(Self)
     }
+
+    #[cfg(test)]
+    pub(crate) fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+}
+
+/// The hold a user's confirmation ends ([`Paykit::pass_hold`]): the request record and the
+/// hold identifier the user confirmed it under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HoldEnd {
+    record: [u8; 32],
+    epoch: HoldEpoch,
+}
+
+impl HoldEnd {
+    /// The `hc/` key that records the confirmation, under the hold it was given for: a
+    /// write the client applies after a newer hold neither confirms it nor replaces the
+    /// newer hold's own confirmation.
+    pub(crate) fn confirmation(&self) -> String {
+        key::hold_confirmed(&self.record, &self.epoch)
+    }
 }
 
 impl HeldRequest {
@@ -617,6 +639,12 @@ impl Paykit {
     /// ([`RestoreHold::earlier`]) and a `missed` item's (`mh`, `mu`), with the user's
     /// confirmations of them (`hb/`). This restore's own hold, while in force, is released
     /// only by a confirmation given since it (`hc/`); a carried one by either.
+    ///
+    /// A confirmation is kept under the hold identifier (`he`) it was given under, and only
+    /// the current one's counts: each restore, `missed` item, and clean verdict a later
+    /// report ends sets a new one. A confirmation the client applies only later, such as one
+    /// in an attempt's batch kept to send again, lands under its own hold, so it neither
+    /// confirms a newer hold nor touches that hold's confirmation.
     pub(crate) async fn held(
         &self,
         record_key: &[u8; 32],
@@ -654,8 +682,12 @@ impl Paykit {
         if payment_ended(record, crossing_payee) {
             return Ok(false);
         }
+        let Some(epoch) = self.local_get::<HoldEpoch>(key::HOLD_EPOCH).await? else {
+            // A hold with no identifier is one no confirmation can be matched to.
+            return Ok(true);
+        };
         if self
-            .local_get::<bool>(&key::hold_confirmed(record_key))
+            .local_get::<bool>(&key::hold_confirmed(record_key, &epoch))
             .await?
             .is_some()
         {
@@ -663,7 +695,7 @@ impl Paykit {
         }
         Ok(own
             || self
-                .local_get::<bool>(&key::hold_confirmed_before(record_key))
+                .local_get::<bool>(&key::hold_confirmed_before(record_key, &epoch))
                 .await?
                 .is_none())
     }
@@ -700,7 +732,8 @@ impl Paykit {
 
     /// Whether the request at `record_key`, its record `record`, may go on over its hold:
     /// not held, or held as the user was shown it and confirmed, `confirmed`. `Ok(None)` when
-    /// not held; `Ok(Some(key))` with the record key whose hold the confirmation ends.
+    /// not held; `Ok(Some(end))` with the hold the confirmation ends, which its writer keeps
+    /// under `hc/` ([`HoldEnd::confirmation`]).
     ///
     /// # Errors
     ///
@@ -711,7 +744,7 @@ impl Paykit {
         record_key: &[u8; 32],
         record: &ActivityRecord,
         confirmed: Option<&HeldRequest>,
-    ) -> Result<Option<[u8; 32]>> {
+    ) -> Result<Option<HoldEnd>> {
         if !self.held(record_key, record).await? {
             return Ok(None);
         }
@@ -722,7 +755,10 @@ impl Paykit {
             }
             .into());
         }
-        Ok(Some(*record_key))
+        Ok(Some(HoldEnd {
+            record: held.record,
+            epoch: held.epoch,
+        }))
     }
 
     /// Bound the hold of a `missed` item whose end isn't known (`mu`), at a receive whose
@@ -791,8 +827,8 @@ impl Paykit {
         if record.lost_to_delete.is_some() {
             return Err(crate::requests::payment_history_lost().into());
         }
-        if let Some(key) = self.pass_hold(&record_key, &record, Some(held)).await? {
-            self.local_put(&key::hold_confirmed(&key), &true).await?;
+        if let Some(end) = self.pass_hold(&record_key, &record, Some(held)).await? {
+            self.local_put(&end.confirmation(), &true).await?;
         }
         Ok(())
     }

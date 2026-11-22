@@ -618,9 +618,10 @@ pub(crate) fn restore_paykit_layer(
         .map(|(key, value)| state::restored::<RestoreHold>(key, value, &binder))
         .transpose()
         .map_err(|_| String::from("the backup's restore hold cannot be read"))?;
-    // The hold identifier the backup's approvals for execution are matched to: one given
-    // under an older hold approved nothing there, and carries nothing here.
-    let backup_hold = state
+    // The hold identifier the backup's confirmations and approvals for execution are
+    // matched to: one given under an older identifier counted for nothing there, and carries
+    // nothing here.
+    let backup_epoch = state
         .iter()
         .find(|(key, _)| key.as_slice() == key::HOLD_EPOCH.as_bytes())
         .map(|(key, value)| state::restored::<crate::hold::HoldEpoch>(key, value, &binder))
@@ -713,10 +714,12 @@ pub(crate) fn restore_paykit_layer(
                 continue;
             }
             // A confirmation of an earlier hold cannot also confirm a later restore.
-            StateKey::HoldConfirmed(record) | StateKey::HoldConfirmedBefore(record) => {
+            StateKey::HoldConfirmed { record, epoch }
+            | StateKey::HoldConfirmedBefore { record, epoch } => {
                 state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
-                if matches!(family, StateKey::HoldConfirmed(_))
-                    || !before.as_ref().is_some_and(RestoreHold::in_force)
+                if backup_epoch.as_ref().map(crate::hold::HoldEpoch::as_bytes) == Some(&epoch)
+                    && (matches!(family, StateKey::HoldConfirmed { .. })
+                        || !before.as_ref().is_some_and(RestoreHold::in_force))
                 {
                     confirmed_before.insert(record);
                 }
@@ -728,7 +731,7 @@ pub(crate) fn restore_paykit_layer(
             }
             StateKey::ExecutionApproval { record, hold } => {
                 state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
-                if hold.as_ref() == backup_hold.as_ref().map(crate::hold::HoldEpoch::as_bytes) {
+                if hold.as_ref() == backup_epoch.as_ref().map(crate::hold::HoldEpoch::as_bytes) {
                     approvals.insert(record);
                 }
                 continue;
@@ -1276,15 +1279,16 @@ pub(crate) fn restore_paykit_layer(
     {
         return Err("Paykit's local state in the backup doesn't read".into());
     }
-    for record in confirmed_before {
-        writes.push(
-            state::local_put(&key::hold_confirmed_before(&record), &true)
-                .map_err(|_| String::from("the restored request confirmation cannot be written"))?,
-        );
-    }
     let restore_hold = RestoreHold::of(cursor_time_ms, before.as_ref());
     let epoch = crate::hold::HoldEpoch::new()
         .map_err(|_| String::from("the restore's hold identifier can't be created"))?;
+    // A carried confirmation holds this restore's identifier, so a later hold ends it.
+    for record in confirmed_before {
+        writes.push(
+            state::local_put(&key::hold_confirmed_before(&record, &epoch), &true)
+                .map_err(|_| String::from("the restored request confirmation cannot be written"))?,
+        );
+    }
     writes.push(
         state::local_put(key::HOLD_EPOCH, &epoch)
             .map_err(|_| String::from("the restore's hold identifier can't be written"))?,
