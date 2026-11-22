@@ -1479,7 +1479,7 @@ async fn consent(app: &mut Paykit, record: &[u8; 32]) {
 }
 
 /// The consent list's entry of `record` at `app`, as stored.
-async fn consent_entry(app: &Paykit, record: &[u8; 32]) -> Option<Value> {
+pub(super) async fn consent_entry(app: &Paykit, record: &[u8; 32]) -> Option<Value> {
     let key = format!("ac/{}", pubky_switch_core::enc::b64(record));
     app.app()
         .protocol_get("paykit", key.as_bytes())

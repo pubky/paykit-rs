@@ -11,7 +11,7 @@ use super::approval::ApprovedOpening;
 use super::checkpoint::{ledger_target, ExecutorCheckpoint, ExecutorHistory, GrantEvidence};
 use super::evidence::AppliedRecord;
 use crate::allowances::{allowance_target, Consent, ConsentEntry};
-use crate::state::{self, key};
+use crate::state::{self, key, Tx};
 use crate::{AllowanceRole, AllowanceStatus, Paykit, Refusal, Result};
 
 fn held() -> Refusal {
@@ -113,17 +113,26 @@ impl Paykit {
             {
                 return Err(held().into());
             }
-            if confirmed.is_some() {
-                let hold = self.current_hold().await?;
-                self.local_put(&key::execution_approval(record, hold.as_ref()), &true)
-                    .await?;
-            }
-            self.promote_consent(record, &view.counterparty, &view.allowance_id)
-                .await?;
-            let consent = self
+            // Every check runs before anything is written, so a refused call leaves no
+            // approval and no consent behind. The consent kept already stays as it is; with
+            // none, the grant applied before its consent was written, and only the user's
+            // approval under the current hold, or a confirmation now, consents.
+            let kept = self
                 .local_get::<ConsentEntry>(&key::consent(record))
-                .await?
-                .ok_or_else(held)?;
+                .await?;
+            let consent = match kept.clone() {
+                Some(entry) => entry,
+                None if confirmed.is_some() || self.execution_approved(record).await? => {
+                    ConsentEntry::new(
+                        view.counterparty,
+                        &view.allowance_id,
+                        Consent::Held {
+                            confirm_again: false,
+                        },
+                    )
+                }
+                None => return Err(held().into()),
+            };
             if !matches!(consent.consent, Consent::Held { .. }) {
                 return Err(held().into());
             }
@@ -144,22 +153,30 @@ impl Paykit {
             {
                 return Err(held().into());
             }
-            if let Consent::Held {
-                confirm_again: true,
-            } = consent.consent
-            {
-                if confirmed.is_none() {
-                    return Err(held().into());
+            let again = matches!(
+                consent.consent,
+                Consent::Held {
+                    confirm_again: true
                 }
-                self.local_put(
+            );
+            if again && confirmed.is_none() {
+                return Err(held().into());
+            }
+            // The approval and the consent are written together, in one local commit.
+            let mut tx = Tx::default();
+            if confirmed.is_some() {
+                let hold = self.current_hold().await?;
+                tx.put(&key::execution_approval(record, hold.as_ref()), &true)?;
+            }
+            if kept.is_none() || again {
+                tx.put(
                     &key::consent(record),
                     &consent.with(Consent::Held {
                         confirm_again: false,
                     }),
-                )
-                .await?;
+                )?;
             }
-            return Ok(());
+            return self.local_commit(tx).await;
         }
         if self
             .local_get::<bool>(key::MISSED_CONSENTS)
@@ -177,12 +194,9 @@ impl Paykit {
         }
         // A first grant goes on the user's approval only under the hold it was given under:
         // after a restore that isn't clean or a `missed` item, every Allowance is held until
-        // the user confirms it again (Paykit spec 7.2, 8.3). A confirmation now is that.
-        if confirmed.is_some() {
-            let hold = self.current_hold().await?;
-            self.local_put(&key::execution_approval(record, hold.as_ref()), &true)
-                .await?;
-        } else if !self.execution_approved(record).await? {
+        // the user confirms it again (Paykit spec 7.2, 8.3). A confirmation now is that, and
+        // is written only once every check below has passed.
+        if confirmed.is_none() && !self.execution_approved(record).await? {
             return Err(held().into());
         }
         let view = self.allowance(record).await?;
@@ -287,6 +301,11 @@ impl Paykit {
         let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
             .entry(op)
             .local(state::local_put(&key, &ExecutorHistory(vec![checkpoint]))?);
+        if confirmed.is_some() {
+            let hold = self.current_hold().await?;
+            self.local_put(&key::execution_approval(record, hold.as_ref()), &true)
+                .await?;
+        }
         self.app.submit_batch(batch).await?;
         let applied = self
             .local_get::<ExecutorHistory>(&key)

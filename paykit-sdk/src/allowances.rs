@@ -1481,20 +1481,34 @@ pub(crate) fn notice_effect(
         NoticeReason::Ended => ConsentEnd::Ended,
         NoticeReason::HandedOff => ConsentEnd::HandedOff,
     };
-    // Only an entry the list holds is removed: a notice naming any other record key adds
-    // nothing, so own apps' notices can't grow the list. The entry is read bound to its key,
-    // so the Allowance it names is the one whose record the notice names.
-    let Some(entry) = state::cx_get::<ConsentEntry>(cx, &key::consent(&notice.allowance_record))?
-    else {
+    // Only an entry the list holds, or an Allowance this app granted itself, is removed: a
+    // notice naming any other record key adds nothing, so own apps' notices can't grow the
+    // list. Its grant applies before its consent is written (`promote_consent`), so between
+    // the two the notice is kept as a removal, which that step then leaves as it is. Both
+    // are read bound to their key, so the Allowance they name is the one whose record the
+    // notice names.
+    let record = &notice.allowance_record;
+    let named = match state::cx_get::<ConsentEntry>(cx, &key::consent(record))? {
+        Some(entry) => Some((
+            entry.counterparty,
+            entry.allowance_id().map_err(|_| Fail::corrupt())?,
+        )),
+        None => state::cx_get::<crate::executor::ExecutorHistory>(
+            cx,
+            &key::executor_checkpoint(record),
+        )?
+        .and_then(|history| history.0.first().cloned())
+        .map(|granted| {
+            AllowanceId::parse(&granted.allowance_id)
+                .map(|id| (granted.counterparty, id))
+                .map_err(|_| Fail::corrupt())
+        })
+        .transpose()?,
+    };
+    let Some((counterparty, allowance_id)) = named else {
         return Ok(());
     };
-    let allowance_id = entry.allowance_id().map_err(|_| Fail::corrupt())?;
-    drop_consent(
-        cx,
-        &notice.allowance_record,
-        (entry.counterparty, &allowance_id),
-        reason,
-    )
+    drop_consent(cx, record, (counterparty, &allowance_id), reason)
 }
 
 /// The `allowances` record the stored entry's message `note` is to be written into (`se/`,

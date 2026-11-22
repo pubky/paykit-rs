@@ -330,8 +330,9 @@ impl Paykit {
             None if p.proposer_role == ProposerRole::Allowee => {
                 let confirmed = confirmed.ok_or_else(unconfirmed)?;
                 if confirmed {
-                    // The approval counts under the hold it is given under, so this batch,
-                    // kept and applied after a newer hold, authorizes no grant.
+                    // Written in an immediate local commit, the approval counts under the
+                    // hold it is given under: once a later hold replaces that one, it
+                    // authorizes no grant.
                     tx.put(
                         &key::execution_approval(&record, self.current_hold().await?.as_ref()),
                         &true,

@@ -255,10 +255,13 @@ After the original exchange applies, the approving payer calls
 `Paykit::resume_allowance_executor` with the permanent Allowance handle to
 complete its first executor grant. Repeating that call or reopening the same
 wallet preserves the original grant. A sibling wallet, missing original
-application or unverified ledger change leaves the grant held. After a restore
-that requires consent again, show the counterparty, terms and this executor
-before calling `Paykit::confirm_allowance_executor`. These calls establish the
-first grant.
+application or unverified ledger change leaves the grant held. When the grant's
+write gets no answer, the Allowance isn't consented yet even if the grant later
+applies: retry `Paykit::resume_allowance_executor` until it succeeds. After a
+restore that isn't clean or a `missed` item, the user confirms again before the
+first grant, as for any Allowance that requires consent again: show the
+counterparty, terms and this executor before calling
+`Paykit::confirm_allowance_executor`. These calls establish the first grant.
 
 Call `Paykit::reconcile_allowance` to read this executor's verified usage.
 The method adapter supplies `Rail::allowance_history` for the payer's entire
