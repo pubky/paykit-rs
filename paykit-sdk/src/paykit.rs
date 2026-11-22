@@ -1368,6 +1368,17 @@ mod tests {
         assert_send(&wallet.end_reconcile(confirmed));
         assert_send(&wallet.request_resend(key, ResendSelection::default()));
         assert_send(&wallet.held_lists());
+        assert_send(&wallet.set_list_endpoints(std::collections::BTreeMap::new()));
+        assert_send(&wallet.publish_list_to(key));
+        assert_send(&wallet.withdraw_list_from(key));
+        let unknown = crate::UnknownListDelivery {
+            recipient: key,
+            version: paykit_lib::ListVersion::new(1, 1).unwrap(),
+            msg_id: String::new(),
+            withdrawal: true,
+            payable_until_ms: None,
+        };
+        assert_send(&wallet.send_list_again(&unknown, confirmed));
         assert_send(&wallet.spam_count(&key));
         assert_send(&wallet.place_held_list_without_marks(&key, &[0; 16], confirmed));
         assert_send(&wallet.send_request(key, draft));
