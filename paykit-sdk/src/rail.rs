@@ -39,7 +39,10 @@ use serde_json::{Map, Value};
 mod fake;
 
 #[cfg(feature = "test-support")]
-pub use fake::{Behaviour, FakeRail, FAKE_ENDPOINT_IDENTIFIERS, FAKE_LONGEST_COMPLETION_MS};
+pub use fake::{
+    Behaviour, FakeRail, FAKE_ENDPOINT_IDENTIFIERS, FAKE_LONGEST_COMPLETION_MS,
+    FAKE_PAYMENT_TIME_TOLERANCE_MS,
+};
 
 /// A failure of the payment method's call (Paykit spec 7.2). [`RailError::Unavailable`] is
 /// ambiguous: a payment may have been submitted, so it means nothing yet and the attempt
@@ -88,13 +91,21 @@ pub struct RailDeclaration {
     /// least this plus [`crate::PRE_DISPATCH_BUDGET_MS`], so no other own app can resolve it
     /// while its payment may still run.
     pub longest_completion_ms: u64,
+    /// How far, in milliseconds, the method's verified payment time may lie before the real
+    /// time of the payment, plus the payee's clock skew (Paykit spec 7.2, "Not before the
+    /// request"): a Bitcoin block timestamp may lie well before the time it was mined. A
+    /// payee credits no evidence whose verified payment time is earlier than the request's
+    /// signed `created_at` less this. It widens only that lower bound, never a deadline,
+    /// a destination's expiry or a rate's window.
+    pub payment_time_tolerance_ms: u64,
 }
 
 impl RailDeclaration {
-    /// A method that takes at most `longest_completion_ms` to complete or fail, and declares
-    /// nothing else: not idempotent, and no history. Each `with_` setter declares one more
-    /// thing it does.
-    pub fn new(longest_completion_ms: u64) -> Self {
+    /// A method that takes at most `longest_completion_ms` to complete or fail, whose
+    /// verified payment time lies at most `payment_time_tolerance_ms` early
+    /// ([`RailDeclaration::payment_time_tolerance_ms`]), and that declares nothing else: not
+    /// idempotent, and no history. Each `with_` setter declares one more thing it does.
+    pub fn new(longest_completion_ms: u64, payment_time_tolerance_ms: u64) -> Self {
         Self {
             idempotent: false,
             idempotency_retention_ms: None,
@@ -102,6 +113,7 @@ impl RailDeclaration {
             history_retention_ms: None,
             history_survives_restore: false,
             longest_completion_ms,
+            payment_time_tolerance_ms,
         }
     }
 

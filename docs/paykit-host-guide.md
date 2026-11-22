@@ -440,6 +440,7 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `Refusal::DeadlinePassed` | Show the expired deadline and stop the old attempt. |
 | `Refusal::Recurring` | Use subscription and Billing Period APIs for this request. |
 | `Refusal::MaybeCredited` | Show that the occurrence may already be credited. Wait for evidence or the supported explicit confirmation. |
+| `Refusal::PaymentTimeOutside` | The payment method verified the payment, but at a time the request doesn't allow: before the request less the method's tolerance, or past its deadline or its destination's or rates' validity. Nothing is credited. Show the funds as received and the request as unpaid, for the user to settle with the payer. |
 | `Refusal::SettlementBucketFull` | Wait for the payee to decide whether to issue an unmarked receipt. Pass the explicit choice through `ReceiptDetails::with_unmarked_credit_confirmed`. |
 | `Refusal::Subscribed` | Show that the recurring request is already accepted. |
 | `Refusal::NotSubscribed` | Wait until the payer accepts the recurring request. |

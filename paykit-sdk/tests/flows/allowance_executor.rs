@@ -2924,9 +2924,12 @@ async fn test_allowance_refuses_an_earlier_failed_attempt_outside_its_ledger() {
 
 fn repeat_without_method_history(world: &World) {
     world.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true)
-            .with_idempotency_retention_ms(86_400_000),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true)
+        .with_idempotency_retention_ms(86_400_000),
     );
 }
 
@@ -3420,4 +3423,56 @@ async fn resume_seller_proposal(lose_answer: bool) {
     let granted = payer.allowance(&key).await.unwrap();
     assert_eq!(granted.executor_app_id, Some(app_id));
     assert!(granted.consented);
+}
+
+/// An Allowance that expires after its reservation was written but before the first
+/// dispatch pays nothing more (Paykit spec 8.3): the payer's check of its own
+/// `identity.json` after the attempt takes the clock past the expiry.
+#[tokio::test]
+async fn test_executor_expiry_after_the_reservation_refuses_the_first_dispatch() {
+    let expires = pubky_switch_client::testing::START_MS + 60 * 60_000;
+    let terms = AllowanceTerms::from_json(&json!({
+        "asset": "btc", "lifetime_amount_limit": "100", "period_limits": [],
+        "per_payment_amount": null, "active_from": null,
+        "expires_at": pubky_switch_core::time::rfc3339(expires),
+        "allowed_payment_endpoint_identifiers": null
+    }))
+    .unwrap();
+    let storage = crate::common::store();
+    let (world, payer, mut shop, key) = Box::pin(first_grant_in(storage.clone(), terms)).await;
+    world.rail.set_history_payer(payer.identity());
+    let app_id = payer.app_id();
+    drop(payer);
+    let slow = std::sync::Arc::new(crate::common::SlowOps::new(std::sync::Arc::clone(
+        &world.router,
+    )));
+    let mut payer = world
+        .load_with_transport(
+            &world.alice,
+            storage,
+            app_id,
+            std::sync::Arc::clone(&slow)
+                as std::sync::Arc<dyn pubky_switch_client::transport::Transport>,
+        )
+        .await;
+    world.clock.set_ms(expires - 5_000);
+    let request = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("1", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    // The reservation is written 5 s before the expiry, and its batch's answer takes 10 s.
+    slow.delay_next(std::sync::Arc::clone(&world.clock), 10_000);
+    let refused = Box::pin(payer.pay_under_allowance(&request, &key))
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(world.clock.now_ms() > expires);
+    assert!(
+        format!("{refused:?}").contains("the Allowance expired before dispatch"),
+        "{refused:?}"
+    );
+    assert!(world.rail.all_executions().is_empty());
 }

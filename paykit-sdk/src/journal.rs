@@ -328,6 +328,11 @@ pub(crate) struct JournalEntry {
     /// The original executor grant that authorized this attempt's reservation.
     #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) allowance: Option<crate::executor::JournalAllowance>,
+    /// The `expires_at` of the Allowance terms the reservation was made under, set with
+    /// `allowance`: no first dispatch goes once it has passed, while a repeat of a dispatch
+    /// that may have gone still reconciles (Paykit spec 8.3).
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(crate) allowance_expires_at_ms: Option<u64>,
     pub(crate) attempt_id: String,
     #[serde(with = "serde_b64")]
     pub(crate) obligation: [u8; 32],

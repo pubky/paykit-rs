@@ -970,6 +970,15 @@ pub(crate) enum FinalCheck {
 /// be gone already. A clock now behind the journaling can't tell the age, which is outside
 /// every finite retention: an empty history proves nothing then, and a repeat may find the
 /// key forgotten. A retention kept for good holds whatever the clock.
+/// Whether the Allowance an attempt was reserved under has expired by the later of the
+/// device clock `now` and the highest service time verified, `service_time`.
+fn allowance_expired(entry: &JournalEntry, now: u64, service_time: Option<u64>) -> bool {
+    entry.allowance.is_some()
+        && entry
+            .allowance_expires_at_ms
+            .is_some_and(|expiry| expiry <= now.max(service_time.unwrap_or(0)))
+}
+
 pub(crate) fn retained(retention: Option<u64>, journaled_at_ms: u64, now: u64) -> bool {
     retention.is_none_or(|r| now.checked_sub(journaled_at_ms).is_some_and(|age| age < r))
 }
@@ -1322,6 +1331,7 @@ impl Paykit {
             offline: None,
             restored: false,
             journaled_at_ms: self.now(),
+            allowance_expires_at_ms: None,
             carrier: None,
             carrier_record: None,
             attempt_proof: None,
@@ -1577,6 +1587,7 @@ impl Paykit {
             offline: None,
             restored: false,
             journaled_at_ms: self.now(),
+            allowance_expires_at_ms: None,
             carrier: None,
             carrier_record: None,
             attempt_proof: None,
@@ -5088,6 +5099,14 @@ impl Paykit {
             Dispatch::First { answered, .. } => {
                 if let Err(refusal) = self.within_budget(&answered, now) {
                     return Ok(FinalCheck::Refused(refusal));
+                }
+                // An expired Allowance pays nothing more (Paykit spec 8.3): the reservation's
+                // window bounds when the attempt was written, this when its first dispatch
+                // goes. A repeat isn't refused for it, since the first call may have paid.
+                if allowance_expired(entry, now, self.service_time()) {
+                    return Ok(FinalCheck::Refused(Refusal::NotAutomatic(
+                        "the Allowance expired before dispatch".into(),
+                    )));
                 }
                 if automatic_first
                     && entry.period()?.is_some_and(|period| {

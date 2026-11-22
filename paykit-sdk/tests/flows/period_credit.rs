@@ -268,8 +268,35 @@ async fn check_credit(case: Case, expected: bool) {
         .unwrap();
         shop.receive(None).await.unwrap();
     }
-    let verified = shop.verify_payment(&period_key).await.unwrap();
-    let receipt = shop.confirm_payment(&period_key).await.unwrap();
+    // Evidence the method verified at a time the period doesn't allow is flagged, never
+    // credited; one this method can't verify is simply not credited.
+    let flagged_or = |result: paykit_sdk::Result<Option<u64>>| match result {
+        Err(error) => {
+            assert_eq!(
+                error.refusal(),
+                Some(&paykit_sdk::Refusal::PaymentTimeOutside {
+                    paid_at_ms: paid_at
+                }),
+                "{case:?}"
+            );
+            None
+        }
+        Ok(verified) => verified,
+    };
+    let verified = flagged_or(shop.verify_payment(&period_key).await);
+    let receipt = match shop.confirm_payment(&period_key).await {
+        Err(error) => {
+            assert!(
+                matches!(
+                    error.refusal(),
+                    Some(paykit_sdk::Refusal::PaymentTimeOutside { .. })
+                ),
+                "{case:?}"
+            );
+            None
+        }
+        Ok(receipt) => receipt,
+    };
     let view = shop.payee_activity().await.unwrap();
     let held = shop
         .app()
