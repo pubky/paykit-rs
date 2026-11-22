@@ -92,6 +92,11 @@ impl HoldEpoch {
     pub(crate) fn new() -> pubky_switch_core::Result<Self> {
         pubky_switch_core::enc::random_bytes().map(Self)
     }
+
+    #[cfg(test)]
+    pub(crate) fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
 }
 
 /// The hold a user's confirmation ends ([`Paykit::pass_hold`]): the request record and the
@@ -103,10 +108,11 @@ pub(crate) struct HoldEnd {
 }
 
 impl HoldEnd {
-    /// The `hc/` key and value that record the confirmation. The value is the hold
-    /// identifier, so a write the client applies after a newer hold confirms nothing.
-    pub(crate) fn confirmation(&self) -> (String, HoldEpoch) {
-        (key::hold_confirmed(&self.record), self.epoch)
+    /// The `hc/` key that records the confirmation, under the hold it was given for: a
+    /// write the client applies after a newer hold neither confirms it nor replaces the
+    /// newer hold's own confirmation.
+    pub(crate) fn confirmation(&self) -> String {
+        key::hold_confirmed(&self.record, &self.epoch)
     }
 }
 
@@ -619,10 +625,11 @@ impl Paykit {
     /// confirmations of them (`hb/`). This restore's own hold, while in force, is released
     /// only by a confirmation given since it (`hc/`); a carried one by either.
     ///
-    /// A confirmation counts only under the hold identifier (`he`) it was given under,
-    /// compared on every read: each restore, `missed` item and clean verdict sets a new
-    /// one, and a confirmation the client applies only later, such as one in an attempt's
-    /// batch kept to send again, confirms nothing it wasn't given for.
+    /// A confirmation is kept under the hold identifier (`he`) it was given under, and only
+    /// the current one's counts: each restore, `missed` item, and clean verdict a later
+    /// report ends sets a new one. A confirmation the client applies only later, such as one
+    /// in an attempt's batch kept to send again, lands under its own hold, so it neither
+    /// confirms a newer hold nor touches that hold's confirmation.
     pub(crate) async fn held(
         &self,
         record_key: &[u8; 32],
@@ -664,18 +671,18 @@ impl Paykit {
             // A hold with no identifier is one no confirmation can be matched to.
             return Ok(true);
         };
-        let confirmed = |given: Option<HoldEpoch>| given == Some(epoch);
-        if confirmed(
-            self.local_get::<HoldEpoch>(&key::hold_confirmed(record_key))
-                .await?,
-        ) {
+        if self
+            .local_get::<bool>(&key::hold_confirmed(record_key, &epoch))
+            .await?
+            .is_some()
+        {
             return Ok(false);
         }
         Ok(own
-            || !confirmed(
-                self.local_get::<HoldEpoch>(&key::hold_confirmed_before(record_key))
-                    .await?,
-            ))
+            || self
+                .local_get::<bool>(&key::hold_confirmed_before(record_key, &epoch))
+                .await?
+                .is_none())
     }
 
     /// The hold over the request at `record_key`, as [`HeldRequest`] shows it: what
@@ -711,7 +718,7 @@ impl Paykit {
     /// Whether the request at `record_key`, its record `record`, may go on over its hold:
     /// not held, or held as the user was shown it and confirmed, `confirmed`. `Ok(None)` when
     /// not held; `Ok(Some(end))` with the hold the confirmation ends, which its writer keeps
-    /// as `hc/` ([`HoldEnd::confirmation`]).
+    /// under `hc/` ([`HoldEnd::confirmation`]).
     ///
     /// # Errors
     ///
@@ -806,8 +813,7 @@ impl Paykit {
             return Err(crate::requests::payment_history_lost().into());
         }
         if let Some(end) = self.pass_hold(&record_key, &record, Some(held)).await? {
-            let (key, epoch) = end.confirmation();
-            self.local_put(&key, &epoch).await?;
+            self.local_put(&end.confirmation(), &true).await?;
         }
         Ok(())
     }
@@ -1613,7 +1619,7 @@ impl Paykit {
                     }
                 }
                 for prefix in [key::HOLD_CONFIRMED, key::HOLD_CONFIRMED_BEFORE] {
-                    for (rest, _) in self.local_scan::<HoldEpoch>(prefix).await? {
+                    for (rest, _) in self.local_scan::<bool>(prefix).await? {
                         tx.delete(&format!("{prefix}{rest}"));
                     }
                 }

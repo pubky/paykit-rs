@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use paykit_sdk::{
-    AcceptOptions, PayOptions, PayOutcome, Paykit, PaykitBackup, PaykitConfig, Rail, RequestRef,
-    RequestStatus,
+    AcceptOptions, PayOptions, PayOutcome, Paykit, PaykitBackup, PaykitConfig, Rail, Refusal,
+    RequestRef, RequestStatus,
 };
 use pubky_switch_client::app::UserConfirmed;
 use pubky_switch_client::clock::Clock;
@@ -887,11 +887,24 @@ async fn test_hold_confirmation_applied_after_a_newer_hold_confirms_nothing() {
     let held = view.held.expect("the newer hold stands");
     wallet.resume_payments().await.unwrap();
     assert!(w.rail.all_executions().is_empty());
-    wallet
+    let refused = wallet
+        .pay_request_automatically(&request, PayOptions::default())
+        .await
+        .outcome
+        .expect_err("the newer hold holds automatic payment");
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::HeldAfterRestore { .. })),
+        "{refused:?}"
+    );
+    let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
         .outcome
         .expect_err("the newer hold still needs the user's confirmation");
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::HeldAfterRestore { .. })),
+        "{refused:?}"
+    );
     assert!(w.rail.all_executions().is_empty());
     let result = wallet
         .pay_request(
@@ -920,4 +933,142 @@ async fn test_hold_confirmation_applied_after_a_newer_hold_is_not_carried_by_a_r
         .is_empty());
     shown(&restored, &request).await;
     assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_hold_confirmation_applied_after_a_newer_hold_stays_held_after_a_clean_restore() {
+    // A clean restore lifts its own hold, so the `missed` item's hold the backup carries is
+    // the only one: the late confirmation in the backup must not release it.
+    let w = World::new();
+    let (mut wallet, request) = confirmation_applied_after_a_newer_hold(&w).await;
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    restored.receive(None).await.unwrap();
+    assert_eq!(
+        restored.app().restore_held_cursor(),
+        Some(pubky_switch_client::app::HeldCursor::Clean)
+    );
+    restored.reconcile().await.unwrap();
+    restored.end_reconcile(UserConfirmed::new()).await.unwrap();
+    assert!(restored.request(&request).await.unwrap().held.is_some());
+    for automatic in [false, true] {
+        let refused = if automatic {
+            restored
+                .pay_request_automatically(&request, PayOptions::default())
+                .await
+        } else {
+            restored.pay_request(&request, PayOptions::default()).await
+        }
+        .outcome
+        .unwrap_err();
+        assert!(
+            matches!(refused.refusal(), Some(Refusal::HeldAfterRestore { .. })),
+            "{refused:?}"
+        );
+    }
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_hold_confirmation_kept_subscription_acceptance_confirms_no_newer_hold() {
+    // The user accepts a held subscription, its batch unanswered and kept; a second
+    // `missed` item is read before the batch is applied. The acceptance stands, but its
+    // confirmation is of the earlier hold: no Billing Period is paid automatically.
+    use pubky_switch_client::testing::Fault;
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(
+        &mut shop,
+        w.alice_id(),
+        crate::periods::monthly(w.clock.now_ms(), None),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    missed(&w, &mut wallet).await;
+    let confirmed = shown(&wallet, &request).await;
+    w.alice.switch().fail_next(Fault::Unanswered {
+        path: "/ops".into(),
+        after: 0,
+    });
+    let sent = wallet
+        .accept_subscription_with(
+            &request,
+            AcceptOptions::default().with_possibly_cancelled_confirmed(confirmed),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(sent.delivery, paykit_sdk::MessageDelivery::Kept { .. }),
+        "the acceptance's batch is unanswered and kept: {sent:?}"
+    );
+    w.clock.advance_ms(1_000);
+    w.alice.switch().fail_next(Fault::Unreachable {
+        path: "/ops".into(),
+        after: 0,
+    });
+    missed(&w, &mut wallet).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"hc/")
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the kept batch's confirmation is applied after the newer hold"
+    );
+    assert!(wallet.request(&request).await.unwrap().held.is_some());
+    let refused = wallet
+        .pay_period_automatically(
+            &request,
+            &crate::periods::january(),
+            paykit_sdk::PeriodPrice::RequestedAmount,
+        )
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::HeldAfterRestore { .. })),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_hold_confirmation_backup_with_a_malformed_hold_identifier_is_refused() {
+    use pubky_switch_client::app::LocalWrite;
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    missed(&w, &mut wallet).await;
+    wallet
+        .app_mut()
+        .protocol_commit(
+            "paykit",
+            &[LocalWrite::Put {
+                key: b"he".to_vec(),
+                value: br#"{"v":1,"d":false}"#.to_vec(),
+            }],
+        )
+        .await
+        .unwrap();
+    // The backup's own check, the one a restore runs, refuses the layer.
+    let refused = wallet.backup().await.unwrap_err();
+    assert!(
+        format!("{refused:?}").contains("the backup's hold identifier cannot be read"),
+        "{refused:?}"
+    );
 }

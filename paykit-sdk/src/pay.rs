@@ -2865,8 +2865,7 @@ impl Paykit {
             // The user saw the payee may have cancelled it (Paykit spec 7.2): the hold ends
             // with the attempt, and stays when the attempt isn't made. A batch kept to send
             // again may be applied after a newer hold, which this confirmation doesn't end.
-            let (key, epoch) = end.confirmation();
-            batch = batch.local(state::local_put(&key, &epoch)?);
+            batch = batch.local(state::local_put(&end.confirmation(), &true)?);
         }
         if let Some(under) = allowance {
             batch = Box::pin(under.reserve(self, &mut entry, batch)).await?;

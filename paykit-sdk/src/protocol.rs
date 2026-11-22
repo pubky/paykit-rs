@@ -712,11 +712,11 @@ pub(crate) fn restore_paykit_layer(
                 continue;
             }
             // A confirmation of an earlier hold cannot also confirm a later restore.
-            StateKey::HoldConfirmed(record) | StateKey::HoldConfirmedBefore(record) => {
-                let given = state::restored::<crate::hold::HoldEpoch>(&key, &value, &binder)
-                    .map_err(|_| unread())?;
-                if Some(given) == backup_epoch
-                    && (matches!(family, StateKey::HoldConfirmed(_))
+            StateKey::HoldConfirmed { record, epoch }
+            | StateKey::HoldConfirmedBefore { record, epoch } => {
+                state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
+                if backup_epoch.as_ref().map(crate::hold::HoldEpoch::as_bytes) == Some(&epoch)
+                    && (matches!(family, StateKey::HoldConfirmed { .. })
                         || !before.as_ref().is_some_and(RestoreHold::in_force))
                 {
                     confirmed_before.insert(record);
@@ -1276,7 +1276,7 @@ pub(crate) fn restore_paykit_layer(
     // A carried confirmation holds this restore's identifier, so a later hold ends it.
     for record in confirmed_before {
         writes.push(
-            state::local_put(&key::hold_confirmed_before(&record), &epoch)
+            state::local_put(&key::hold_confirmed_before(&record, &epoch), &true)
                 .map_err(|_| String::from("the restored request confirmation cannot be written"))?,
         );
     }

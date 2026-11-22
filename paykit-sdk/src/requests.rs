@@ -2589,8 +2589,7 @@ impl Paykit {
         let mut tx = Tx::default();
         if let Some(end) = end_hold {
             // The hold ends with the acceptance, and stays when it isn't recorded.
-            let (key, epoch) = end.confirmation();
-            tx.put(&key, &epoch)?;
+            tx.put(&end.confirmation(), &true)?;
         }
         if answer == Answer::Cancel {
             tx.put(
