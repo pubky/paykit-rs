@@ -642,8 +642,11 @@ async fn second_app_rate(world: &World, issuer: QuoteIssuer) -> TestResult {
 
     let rail = Arc::new(FakeRail::with_clock(world.clock().clone()));
     rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let buyer_store = Arc::new(MemoryStore::new());
     let (mut buyer, mut shop, mut payee) =
