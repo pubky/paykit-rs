@@ -58,6 +58,10 @@ async fn missed_while_away(
     Ok(())
 }
 
+async fn confirmations(wallet: &Paykit) -> TestResult<usize> {
+    Ok(wallet.app().protocol_scan("paykit", b"hc/").await?.len())
+}
+
 fn reports_missed(report: &paykit_sdk::ReceiveSummary) -> bool {
     report
         .report
@@ -159,7 +163,17 @@ async fn kept_confirmation(world: &World) -> TestResult {
     world.unreachable("POST", "/ops");
     let report = wallet.receive(None).await?;
     assert!(reports_missed(&report), "{:?}", report.report.events);
+    assert_eq!(
+        confirmations(&wallet).await?,
+        0,
+        "the newer item cleared them"
+    );
     wallet.receive(None).await?;
+    assert_eq!(
+        confirmations(&wallet).await?,
+        1,
+        "the kept batch's confirmation landed after the newer item"
+    );
 
     assert!(wallet.request(&request).await?.held.is_some());
     for automatic in [true, false] {

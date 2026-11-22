@@ -831,6 +831,12 @@ async fn test_hold_confirmation_restore_lost_commit_answer_retains_the_epoch() {
 /// goes unanswered and is kept. A second `missed` item is read before the kept batch is sent
 /// again, so the batch's confirmation is applied under the newer hold.
 async fn confirmation_applied_after_a_newer_hold(w: &World) -> (Paykit, RequestRef) {
+    Box::pin(kept_confirmation_lands(w, false)).await
+}
+
+/// [`confirmation_applied_after_a_newer_hold`], the user confirming the newer hold before the
+/// kept batch lands when `confirm_newer`.
+async fn kept_confirmation_lands(w: &World, confirm_newer: bool) -> (Paykit, RequestRef) {
     use pubky_switch_client::testing::Fault;
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -863,6 +869,13 @@ async fn confirmation_applied_after_a_newer_hold(w: &World) -> (Paykit, RequestR
         .await
         .unwrap()
         .is_empty());
+    if confirm_newer {
+        let newer = shown(&wallet, &request).await;
+        wallet
+            .confirm_possibly_cancelled(&request, &newer, UserConfirmed::new())
+            .await
+            .unwrap();
+    }
     // The kept batch is sent again and applied, its confirmation with it.
     wallet.receive(None).await.unwrap();
     assert_eq!(
@@ -872,7 +885,7 @@ async fn confirmation_applied_after_a_newer_hold(w: &World) -> (Paykit, RequestR
             .await
             .unwrap()
             .len(),
-        1,
+        1 + usize::from(confirm_newer),
         "the kept batch's confirmation is applied after the newer hold"
     );
     (wallet, request)
@@ -1071,4 +1084,26 @@ async fn test_hold_confirmation_backup_with_a_malformed_hold_identifier_is_refus
         format!("{refused:?}").contains("the backup's hold identifier cannot be read"),
         "{refused:?}"
     );
+}
+
+#[tokio::test]
+async fn test_hold_confirmation_late_write_keeps_the_newer_holds_confirmation() {
+    // The user confirms the newer hold before the kept batch of the earlier one lands: the
+    // late write lands under its own hold and leaves the newer confirmation in place, so the
+    // request isn't held and a payment by hand needs no further confirmation. (The user's own
+    // attempt marked the request manual-only, so no automatic payment applies to it.)
+    let w = World::new();
+    let (mut wallet, request) = Box::pin(kept_confirmation_lands(&w, true)).await;
+    let view = wallet.request(&request).await.unwrap();
+    assert!(view.held.is_none(), "{view:?}");
+    if let Err(error) = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+    {
+        assert!(
+            !matches!(error.refusal(), Some(Refusal::HeldAfterRestore { .. })),
+            "{error:?}"
+        );
+    }
 }

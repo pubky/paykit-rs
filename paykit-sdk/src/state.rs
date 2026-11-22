@@ -3177,11 +3177,19 @@ mod tests {
                 serde_json::to_value(epoch).unwrap()
             ));
         }
-        // The earlier form, a mark per record with no hold, is a key the SDK doesn't write.
+        // A key per record with no hold identifier is not a key the SDK writes.
         for prefix in [key::HOLD_CONFIRMED, key::HOLD_CONFIRMED_BEFORE] {
             let bare = format!("{prefix}{}", pubky_switch_core::enc::b64(&record));
             assert_eq!(StateKey::parse(bare.as_bytes()), None);
         }
+    }
+
+    #[test]
+    fn test_recovery_checkpoint_empty_waiting_refused() {
+        assert!(!reads::<OwnResendOwed>(
+            key::OWN_RESEND_OWED,
+            serde_json::json!({ "waiting": [], "restored_at_ms": null })
+        ));
     }
 
     #[test]
