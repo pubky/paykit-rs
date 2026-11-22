@@ -2695,10 +2695,10 @@ pub(crate) fn lists_read_is_fresh(read: u64, now: u64) -> bool {
 /// A Private Payment List held because its `payment_lists` record doesn't read, or is
 /// deleted ([`Paykit::held_lists`]): never written over it, which could drop the single-use
 /// marks it holds or held, until the record reads again with those marks. After a delete
-/// no SDK app writes the record again ([`list_effect`]); only a readable write from outside
-/// the SDK that keeps the marks places the list. No payment uses
-/// that payee app's list meanwhile; its public endpoints remain a separate choice of the
-/// user, as does a list the payee shares from another app.
+/// no SDK app writes the record again; only a readable write from outside the SDK that
+/// keeps the marks places the list. No payment uses that payee app's list meanwhile; its
+/// public endpoints remain a separate choice of the user, as does a list the payee shares
+/// from another app.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct HeldList {
