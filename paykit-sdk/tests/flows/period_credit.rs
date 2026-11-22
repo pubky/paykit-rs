@@ -268,8 +268,50 @@ async fn check_credit(case: Case, expected: bool) {
         .unwrap();
         shop.receive(None).await.unwrap();
     }
-    let verified = shop.verify_payment(&period_key).await.unwrap();
-    let receipt = shop.confirm_payment(&period_key).await.unwrap();
+    // Evidence the method verified at a time the period doesn't allow is flagged, never
+    // credited; one this method can't verify is simply not credited.
+    let time_refused = !expected
+        && matches!(
+            case.paid_at,
+            PaidAt::BeforeStart | PaidAt::Expiry | PaidAt::AfterExpiry
+        );
+    let flagged_or = |result: paykit_sdk::Result<Option<u64>>| match result {
+        Err(error) => {
+            // Only a case refused for its payment time is flagged.
+            assert!(time_refused, "{case:?}: {error:?}");
+            assert_eq!(
+                error.refusal(),
+                Some(&paykit_sdk::Refusal::PaymentTimeOutside {
+                    paid_at_ms: paid_at
+                }),
+                "{case:?}"
+            );
+            None
+        }
+        Ok(verified) => {
+            // A case refused for its payment time alone is flagged, never silently uncredited.
+            assert!(
+                !time_refused,
+                "{case:?} is flagged, never silently uncredited"
+            );
+            verified
+        }
+    };
+    let verified = flagged_or(shop.verify_payment(&period_key).await);
+    let receipt = match shop.confirm_payment(&period_key).await {
+        Err(error) => {
+            assert!(time_refused, "{case:?}: {error:?}");
+            assert_eq!(
+                error.refusal(),
+                Some(&paykit_sdk::Refusal::PaymentTimeOutside {
+                    paid_at_ms: paid_at
+                }),
+                "{case:?}"
+            );
+            None
+        }
+        Ok(receipt) => receipt,
+    };
     let view = shop.payee_activity().await.unwrap();
     let held = shop
         .app()

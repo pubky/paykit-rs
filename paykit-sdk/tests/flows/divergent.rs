@@ -123,7 +123,11 @@ async fn sale(shop: &Paykit, request: &RequestRef) -> paykit_sdk::PayeeActivity 
 }
 
 fn idempotent_without_history() -> RailDeclaration {
-    RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS).with_idempotent(true)
+    RailDeclaration::new(
+        paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+        paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+    )
+    .with_idempotent(true)
 }
 
 #[tokio::test]
@@ -807,9 +811,12 @@ async fn test_divergent_outcome_waits_for_the_confirmation() {
     set_divergent(&base, &wallet, &record, true);
     w.rail.settle(&attempt_id, true);
     w.rail.set_declaration(
-        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true)
-            .with_history(true),
+        RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true)
+        .with_history(true),
     );
     let resumed = wallet.resume_payments().await.unwrap();
     assert!(
@@ -1824,9 +1831,12 @@ async fn test_divergent_outcome_waits_after_the_view_clears_until_confirmed() {
     set_divergent(&base, &wallet, &record, true);
     w.rail.settle(&attempt_id, true);
     w.rail.set_declaration(
-        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true)
-            .with_history(true),
+        RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true)
+        .with_history(true),
     );
     let resumed = wallet.resume_payments().await.unwrap();
     assert!(
@@ -4298,9 +4308,12 @@ async fn test_divergent_failure_goes_on_the_claim_alone_while_divergent() {
     let before = wallet.app().shared_record(&record).await.unwrap().unwrap();
     w.rail.settle(&attempt_id, false);
     w.rail.set_declaration(
-        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true)
-            .with_history(true),
+        RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true)
+        .with_history(true),
     );
     let resumed = wallet.resume_payments().await.unwrap();
     assert!(

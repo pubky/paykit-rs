@@ -195,6 +195,11 @@ impl CheckoutFixture {
     pub fn identity(&self) -> Vec<u8> {
         self.buyer.into()
     }
+    /// The test services' clock now, in Unix milliseconds, which a host's test payment
+    /// method dates its payments by.
+    pub fn now_ms(&self) -> u64 {
+        self.host.clock.now_ms()
+    }
     /// The identity of the enrolled shop.
     pub fn payee(&self) -> Vec<u8> {
         self.payee.into()

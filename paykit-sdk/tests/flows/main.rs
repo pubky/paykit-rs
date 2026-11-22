@@ -32,6 +32,7 @@ mod offline_public;
 mod one_time;
 mod outcome_record;
 mod own_record;
+mod payment_time;
 mod period_credit;
 mod period_payments;
 mod periods;

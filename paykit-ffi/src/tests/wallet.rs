@@ -416,7 +416,7 @@ async fn payment(
 }
 async fn journey(world: &World) -> TestResult {
     let root = tempfile::tempdir()?;
-    let account = Arc::new(Account::open(root.path()));
+    let account = Arc::new(Account::open(root.path(), world.clock().clone()));
     let (env, payer, id, _) = Box::pin(enrolled_payer(world, root.path(), account.clone())).await?;
     assert!(matches!(
         env.load(vec![13; 16]).await,
