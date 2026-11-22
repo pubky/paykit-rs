@@ -390,8 +390,11 @@ async fn test_conversion_payee_credits_no_priced_payment_of_another_amount() {
 /// The world's rail declared idempotent, so a resume repeats a dispatch left in flight.
 fn idempotent(w: &World) {
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
 }
 

@@ -55,7 +55,11 @@ fn fail_list_read(w: &World) {
 /// times the rail was called.
 async fn resumed_repeat(w: &World, between: impl AsyncFnOnce(&mut Paykit)) -> u64 {
     w.rail.set_declaration(
-        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS).with_idempotent(true),
+        RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let (mut wallet, _, request) = received(w, day_window()).await;
     w.rail.next(Behaviour::Hang);

@@ -1394,6 +1394,7 @@ impl Paykit {
             proof_msg_id: None,
             restored: false,
             journaled_at_ms: self.now(),
+            allowance_expires_at_ms: None,
             carrier: None,
             carrier_record: None,
             attempt_proof: None,
