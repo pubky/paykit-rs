@@ -421,6 +421,10 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `PublicAppFailureReason::Expired` | Wait for a current record from that app. A public record reaches its limit at any finite signed deadline or at the maximum age in the payee's signed identity document (90 days by default). |
 | `PublicAppFailureReason::OverBound` | This app's endpoints did not fit within the lookup bounds. Use the reason when explaining an incomplete lookup. |
 
+## The payment method's time tolerance
+
+The method declares `payment_time_tolerance_ms` with its declaration. The payee credits a request only on evidence dated at or after the request's `created_at` less this tolerance. Choose it to cover the method's time precision (at least 1,000 ms for times in whole seconds), the skew of the clock that dates the evidence, and the method's own timestamp rules. Two hours is a conservative early tolerance for a Bitcoin block timestamp. A block timestamp ahead of real time can also put a payment made in time past a deadline, and no tolerance covers that. A Lightning method that reads its own node's settle time needs a few minutes. The tolerance never widens a deadline. The time `verify` returns decides credit, so return the time the payment's evidence dates it, never a placeholder.
+
 ## Refusals
 
 | Case | What to show or do |
@@ -441,6 +445,7 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `Refusal::DeadlinePassed` | Show the expired deadline and stop the old attempt. |
 | `Refusal::Recurring` | Use subscription and Billing Period APIs for this request. |
 | `Refusal::MaybeCredited` | Show that the occurrence may already be credited. Wait for evidence or the supported explicit confirmation. |
+| `Refusal::PaymentTimeOutside` | The payment method verified the payment, but at a time the request doesn't allow: before the request less the method's declared tolerance, or past its payment deadline or its destination's or rates' validity. Nothing is credited or receipted, and nothing is recorded: the request stays `ProofReceived`, and `verify_payment` or `confirm_payment` refuses the same way again. Show the funds as received and the request as unpaid, for the user to settle with the payer. |
 | `Refusal::SettlementBucketFull` | Wait for the payee to decide whether to issue an unmarked receipt. Pass the explicit choice through `ReceiptDetails::with_unmarked_credit_confirmed`. |
 | `Refusal::Subscribed` | Show that the recurring request is already accepted. |
 | `Refusal::NotSubscribed` | Wait until the payer accepts the recurring request. |

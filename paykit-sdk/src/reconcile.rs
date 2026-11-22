@@ -619,6 +619,7 @@ impl Paykit {
             offline: None,
             restored: true,
             journaled_at_ms: self.now(),
+            allowance_expires_at_ms: None,
             carrier: None,
             carrier_record: None,
             attempt_proof: None,

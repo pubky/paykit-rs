@@ -109,6 +109,17 @@ pub enum Refusal {
         "Paykit spec 8.4: whether this payment is credited to another occurrence can't be told now"
     )]
     MaybeCredited,
+    /// The payment method verified the payment, but its verified payment time, `paid_at_ms`,
+    /// lies outside what the occurrence allows: before the request's time less the method's
+    /// declared tolerance, after the occurrence's deadline, or outside the validity of the
+    /// destination or the rates it was paid by (Paykit spec 7.1, 8.2). Nothing is
+    /// credited or receipted on this evidence: the occurrence stays unpaid, and the funds
+    /// are the payee's received funds, for its user to settle with the payer.
+    #[error("Paykit spec 7.1: the verified payment time lies outside what the request allows")]
+    PaymentTimeOutside {
+        /// The verified payment time, in Unix milliseconds.
+        paid_at_ms: u64,
+    },
     /// The settlement mark cannot be stored. A receipt without it leaves other
     /// occurrences at risk of a second credit (Paykit wire 5.7, Full).
     #[error("Paykit wire 5.7: bucket {bucket} cannot store the mark; this payment may be credited again")]
@@ -134,9 +145,11 @@ pub enum Refusal {
     /// The occurrence carries a manual-only mark or is funded under an Allowance.
     #[error("Paykit spec 8.2, 8.3: this occurrence cannot be paid by the wallet's own policy")]
     ManualOnly,
-    /// The authenticated subscription and service time do not authorize this automatic
-    /// Billing Period. At an open attempt's first dispatch this is an [`Self::AttemptFailed`].
-    #[error("Paykit spec 8.2: not paid automatically: {0}")]
+    /// Not paid automatically: the authenticated subscription and service time do not
+    /// authorize this automatic Billing Period (Paykit spec 8.2), or the Allowance the
+    /// payment was reserved under expired before its first dispatch (Paykit spec 8.3). At an
+    /// open attempt's first dispatch this is an [`Self::AttemptFailed`].
+    #[error("Paykit spec 8.2, 8.3: not paid automatically: {0}")]
     NotAutomatic(String),
     /// The request record lists 16 Billing Periods that may have an open attempt and none of
     /// them has finished: no attempt is made on another period until one does (Paykit spec
