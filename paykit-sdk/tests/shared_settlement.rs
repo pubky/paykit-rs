@@ -9,6 +9,8 @@ mod cancellation_admission;
 mod foreign_receipt;
 #[path = "shared_settlement/invitations.rs"]
 mod invitations;
+#[path = "shared_settlement/kept_confirmation.rs"]
+mod kept_confirmation;
 #[path = "shared_settlement/period_policy.rs"]
 mod period_policy;
 #[path = "shared_settlement/selling_scope.rs"]
