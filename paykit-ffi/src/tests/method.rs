@@ -12,6 +12,7 @@ use tokio::sync::Notify;
 pub(super) struct Account {
     file: PathBuf,
     pub calls: AtomicUsize,
+    pub lookups: AtomicUsize,
     pub park: AtomicBool,
     pub entered: Notify,
     pub finish: Notify,
@@ -30,6 +31,7 @@ impl Account {
         Self {
             file,
             calls: AtomicUsize::new(0),
+            lookups: AtomicUsize::new(0),
             park: AtomicBool::new(true),
             entered: Notify::new(),
             finish: Notify::new(),
@@ -103,6 +105,7 @@ impl PaymentMethod for Account {
         Ok(Self::paid(&p.attempt_id))
     }
     async fn payment(&self, id: String) -> Result<Option<MethodOutcome>, MethodError> {
+        self.lookups.fetch_add(1, Ordering::SeqCst);
         let paid = Connection::open(&self.file)
             .unwrap()
             .query_row("SELECT attempt FROM payments WHERE attempt=?1", [id], |r| {
@@ -166,10 +169,7 @@ async fn test_method_history_distinguishes_complete_empty_from_missing_and_unava
     use paykit_sdk::{Rail, RailError};
     let directory = tempfile::tempdir().unwrap();
     let account = Arc::new(Account::open(directory.path()));
-    let rail = HostRail {
-        method: account.clone(),
-        identifiers: Vec::new(),
-    };
+    let rail = HostRail::new(account.clone(), Vec::new()).unwrap();
     let payer = [17; 32];
     assert_eq!(
         rail.allowance_history(payer).await.unwrap(),

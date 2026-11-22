@@ -38,9 +38,16 @@ pub enum WalletError {
         /// The original storage failure, including an unknown commit outcome.
         failure: crate::StorageError,
     },
-    /// The wallet handle was shut down or its in-flight mutation was cancelled.
+    /// The wallet handle was shut down.
     #[error("the wallet is closed")]
     Closed,
+    /// A wallet call was made from inside a synchronous host callback, which the call
+    /// would have waited for.
+    #[error("a wallet call from inside a host callback")]
+    Reentrant,
+    /// The bindings could not start the threads they run wallet work on.
+    #[error("the wallet runtime is unavailable")]
+    RuntimeUnavailable,
     /// The payment rules prevent this action on the evidence currently available.
     #[error("payment refused")]
     Refused {

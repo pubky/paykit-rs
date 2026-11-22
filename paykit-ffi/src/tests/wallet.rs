@@ -47,6 +47,13 @@ fn host(world: &World, root: &Path, account: Arc<Account>) -> Arc<WalletHost> {
     )
     .unwrap();
     let mut host = Arc::into_inner(host).unwrap();
+    let rail = HostRail::new(
+        account,
+        vec![PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap()],
+    )
+    .unwrap()
+    .with_pay_limit(std::time::Duration::from_millis(300));
+    host.rail = Arc::new(rail);
     let env = world.app_env(Arc::new(MemoryStore::new()));
     host.clock = env.clock;
     host.transport = env.transport;
@@ -264,14 +271,16 @@ async fn payment(
     .await?;
     signer.claim_delivered(&approved.request).await?;
     let buyer = world.identity("buyer")?.public();
-    let invitation = {
-        let mut app = payer.lock().await?;
-        Box::pin(receive(&mut app)).await?;
-        assert!(!app.app().admits(&shop.public()).await?);
-        app.app_mut()
-            .register_invite_code(world.now_ms() + 3_600_000, 1)
-            .await?
-    };
+    let invitation = payer
+        .lend(async |app| -> Result<_, Box<dyn std::error::Error>> {
+            Box::pin(receive(app)).await?;
+            assert!(!app.app().admits(&shop.public()).await?);
+            Ok(app
+                .app_mut()
+                .register_invite_code(world.now_ms() + 3_600_000, 1)
+                .await?)
+        })
+        .await??;
     Box::pin(receive(&mut seller)).await?;
     seller.app_mut().allow_connect(&buyer).await?;
     let endpoint = PaymentEndpointIdentifier::new("btc-lightning-bolt11")?;
@@ -304,19 +313,16 @@ async fn payment(
     );
     assert_eq!(delivery.entry_id.len(), 16);
     assert_eq!(delivery.read_at_ms, world.now_ms());
-    {
-        let mut original = payer.lock().await?;
-        assert_eq!(
-            delivery.service_key,
-            original.app().own_identity().inbox().service_key
-        );
-        Box::pin(connect_after_earlier_batch(
-            world,
-            &mut original,
-            shop.public(),
-        ))
-        .await?;
-    }
+    payer
+        .lend(async |original| -> Result<(), Box<dyn std::error::Error>> {
+            assert_eq!(
+                delivery.service_key,
+                original.app().own_identity().inbox().service_key
+            );
+            Box::pin(connect_after_earlier_batch(world, original, shop.public())).await?;
+            Ok(())
+        })
+        .await??;
     let views = payer.requests().await?;
     assert_eq!(views.len(), 1);
     assert_eq!(views[0].id.request_hash, request.request_hash);
@@ -334,6 +340,8 @@ async fn payment(
     );
     assert!(refused.public_failures.is_empty());
     assert_eq!(account.count(), 0);
+    // The host's `pay` is still running when the wallet stops waiting for it, and when the
+    // host stops waiting for the wallet. Its late answer is recorded without any host call.
     {
         let mut paying =
             Box::pin(payer.pay_request(views[0].id.clone(), PaymentOptions::default()));
@@ -343,18 +351,47 @@ async fn payment(
         }
         assert_eq!(account.count(), 1);
     }
-    assert!(matches!(payer.payments().await, Err(WalletError::Closed)));
-    payer.shutdown().await?;
-    let restored = host.load(app_id.clone()).await?;
-    let pending = restored.payments().await?;
+    let pending = payer.payments().await?;
     assert_eq!(pending.len(), 1);
     assert!(matches!(pending[0].stage, PaymentStage::Paying));
-    let attempt = &pending[0].attempt_id;
+    let attempt = &pending[0].attempt_id.clone();
+    // While the host's `pay` runs, a resume neither pays the attempt again nor asks the host.
+    Box::pin(payer.resume_payments()).await?;
+    assert_eq!(account.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(account.lookups.load(Ordering::SeqCst), 0);
+    // A wallet call from inside a synchronous host callback is refused, not queued.
+    let reentrant = crate::runtime::in_callback(|| super::host_calls::first_poll(payer.app_id()));
+    assert!(matches!(
+        reentrant,
+        std::task::Poll::Ready(Err(WalletError::Reentrant))
+    ));
     account.park.store(false, Ordering::SeqCst);
+    account.finish.notify_one();
+    let mut settled = false;
+    for _ in 0..200 {
+        let now = payer.payments().await?;
+        if now
+            .iter()
+            .any(|p| &p.attempt_id == attempt && recorded_paid(p))
+        {
+            settled = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(settled, "the late answer was not recorded");
+    assert_eq!(account.lookups.load(Ordering::SeqCst), 0);
+    payer.shutdown().await?;
+    let restored = host.load(app_id.clone()).await?;
     let finished = Box::pin(restored.resume_payments()).await?;
-    assert!(finished
+    assert!(!finished
         .iter()
-        .any(|o| matches!(o,PaymentOutcome::Paid{attempt_id,..} if attempt_id==attempt)));
+        .any(|o| matches!(o, PaymentOutcome::Paid { attempt_id, .. } if attempt_id == attempt)));
+    assert!(restored
+        .payments()
+        .await?
+        .iter()
+        .any(|p| &p.attempt_id == attempt && recorded_paid(p)));
     assert_eq!(account.count(), 1);
     assert_eq!(account.calls.load(Ordering::SeqCst), 1);
     Box::pin(receive(&mut seller)).await?;
@@ -414,6 +451,14 @@ async fn payment(
     assert_eq!(account.calls.load(Ordering::SeqCst), 1);
     Ok(())
 }
+/// Whether the method's "paid" answer is written for this entry.
+fn recorded_paid(entry: &PaymentEntry) -> bool {
+    matches!(
+        entry.stage,
+        PaymentStage::RailPaid | PaymentStage::AcceptanceOwed | PaymentStage::Finished
+    )
+}
+
 async fn journey(world: &World) -> TestResult {
     let root = tempfile::tempdir()?;
     let account = Arc::new(Account::open(root.path()));

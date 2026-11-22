@@ -3,6 +3,7 @@ use paykit_sdk::{PaymentEndpointIdentifier, Rail, Timer};
 use pubky_switch_client::app::{HomeserverReader, HomeserverWriter};
 use pubky_switch_client::clock::{Clock, SystemClock};
 
+use crate::runtime::HOST_CALL_LIMIT;
 use pubky_switch_client::transport::{
     BoxFuture, HttpConfig, HttpTransport, Transport, TransportError,
 };
@@ -59,13 +60,23 @@ pub trait WalletHomeserver: Send + Sync {
     async fn delete(&self, identity: Vec<u8>, path: String) -> Result<(), HomeserverError>;
 }
 struct Home(Arc<dyn WalletHomeserver>);
+
+/// Wait for a host Homeserver call at most [`HOST_CALL_LIMIT`]. Past it the call counts as
+/// timed out, which leaves a write's outcome unknown, as for any transport timeout.
+async fn bounded<T>(
+    call: impl std::future::Future<Output = Result<T, HomeserverError>>,
+) -> Result<T, TransportError> {
+    Ok(tokio::time::timeout(HOST_CALL_LIMIT, call)
+        .await
+        .map_err(|_| TransportError::Timeout)??)
+}
 impl HomeserverReader for Home {
     fn get(
         &self,
         identity: [u8; 32],
         path: String,
     ) -> BoxFuture<'_, Result<Option<Vec<u8>>, TransportError>> {
-        Box::pin(async move { Ok(self.0.get(identity.to_vec(), path).await?) })
+        Box::pin(bounded(self.0.get(identity.to_vec(), path)))
     }
 }
 impl HomeserverWriter for Home {
@@ -75,14 +86,14 @@ impl HomeserverWriter for Home {
         path: String,
         bytes: Vec<u8>,
     ) -> BoxFuture<'_, Result<(), TransportError>> {
-        Box::pin(async move { Ok(self.0.put(identity.to_vec(), path, bytes).await?) })
+        Box::pin(bounded(self.0.put(identity.to_vec(), path, bytes)))
     }
     fn delete(
         &self,
         identity: [u8; 32],
         path: String,
     ) -> BoxFuture<'_, Result<(), TransportError>> {
-        Box::pin(async move { Ok(self.0.delete(identity.to_vec(), path).await?) })
+        Box::pin(bounded(self.0.delete(identity.to_vec(), path)))
     }
 }
 pub(crate) struct RuntimeTimer;
@@ -92,7 +103,7 @@ impl Timer for RuntimeTimer {
     }
 }
 /// A Paykit application's protected store, Pubky session and payment method.
-#[derive(uniffi::Object)]
+#[derive(Clone, uniffi::Object)]
 pub struct WalletHost {
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) transport: Arc<dyn Transport>,
@@ -126,10 +137,7 @@ impl WalletHost {
             home: home.clone(),
             writer: home,
             store,
-            rail: Arc::new(HostRail {
-                method,
-                identifiers,
-            }),
+            rail: Arc::new(HostRail::new(method, identifiers)?),
             timer: Arc::new(RuntimeTimer),
         }))
     }

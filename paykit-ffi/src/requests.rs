@@ -228,43 +228,48 @@ impl From<paykit_sdk::PayResult> for PaymentResult {
     }
 }
 
-#[uniffi::export(async_runtime = "tokio")]
+#[uniffi::export]
 impl NativeWallet {
     /// Allow an explicitly chosen identity to start a conversation with this payer (Switch spec 7).
     pub async fn allow_connect(&self, payee: Vec<u8>) -> Result<(), WalletError> {
         let identity = fixed(payee, "payee identity")?;
-        self.with_wallet(async |app| Ok(app.allow_connect(&identity).await?))
-            .await
+        self.with_wallet(move |app| {
+            Box::pin(async move { Ok(app.allow_connect(&identity).await?) })
+        })
+        .await
     }
 
     /// List one-time payment requests and their verified current status.
     pub async fn requests(&self) -> Result<Vec<OneTimeRequest>, WalletError> {
-        self.lock()
-            .await?
-            .requests()
-            .await?
-            .into_iter()
-            .filter(|r| !r.recurring)
-            .map(|r| {
-                Ok(OneTimeRequest {
-                    id: r.request.into(),
-                    record: r.record.into(),
-                    amount: (&r.amount).into(),
-                    payment_reference: r.payment_reference,
-                    label: r.label,
-                    proposal_expires_at_ms: r.proposal_expires_at_ms,
-                    held: r.held.map(|held| {
-                        Arc::new(PaymentRefusal(Refusal::HeldAfterRestore {
-                            held: Box::new(held),
-                        }))
-                    }),
-                    manual_only: r.manual_only,
-                    status: r.status.into(),
-                    divergent: r.divergent,
-                    receipt: r.receipt.map(TryInto::try_into).transpose()?,
-                })
+        self.with_wallet(|app| {
+            Box::pin(async move {
+                app.requests()
+                    .await?
+                    .into_iter()
+                    .filter(|r| !r.recurring)
+                    .map(|r| {
+                        Ok(OneTimeRequest {
+                            id: r.request.into(),
+                            record: r.record.into(),
+                            amount: (&r.amount).into(),
+                            payment_reference: r.payment_reference,
+                            label: r.label,
+                            proposal_expires_at_ms: r.proposal_expires_at_ms,
+                            held: r.held.map(|held| {
+                                Arc::new(PaymentRefusal(Refusal::HeldAfterRestore {
+                                    held: Box::new(held),
+                                }))
+                            }),
+                            manual_only: r.manual_only,
+                            status: r.status.into(),
+                            divergent: r.divergent,
+                            receipt: r.receipt.map(TryInto::try_into).transpose()?,
+                        })
+                    })
+                    .collect()
             })
-            .collect()
+        })
+        .await
     }
     /// Record the user's cancellation on the original request and return the signed message ID.
     /// A held outgoing cancellation stays with the SDK for delivery (Paykit spec 8.1).
@@ -274,8 +279,10 @@ impl NativeWallet {
         reason: Option<String>,
     ) -> Result<String, WalletError> {
         let request = id.try_into()?;
-        self.with_wallet(async |app| Ok(app.cancel_request(&request, reason).await?))
-            .await
+        self.with_wallet(move |app| {
+            Box::pin(async move { Ok(app.cancel_request(&request, reason).await?) })
+        })
+        .await
     }
     /// Pay the original request by identity and hash under the supplied confirmations.
     pub async fn pay_request(
@@ -285,7 +292,9 @@ impl NativeWallet {
     ) -> Result<PaymentResult, WalletError> {
         let request = id.try_into()?;
         let options = options.try_into()?;
-        self.with_wallet(async |app| Ok(app.pay_request(&request, options).await.into()))
-            .await
+        self.with_wallet(move |app| {
+            Box::pin(async move { Ok(app.pay_request(&request, options).await.into()) })
+        })
+        .await
     }
 }

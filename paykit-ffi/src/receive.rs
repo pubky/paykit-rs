@@ -123,34 +123,36 @@ pub enum FeedWake {
     Other,
 }
 
-#[uniffi::export(async_runtime = "tokio")]
+#[uniffi::export]
 impl NativeWallet {
     /// Wait on the feed and apply the native loop's retry pause before returning.
-    /// The wait releases the wallet lock. Cancellation during polling or the pause
-    /// leaves the durable cursor unchanged.
+    /// The wait holds up no other wallet call. A host that stops waiting leaves the
+    /// durable cursor unchanged.
     pub async fn feed_wait(&self, seconds: u32) -> Result<FeedWake, WalletError> {
-        let wait = {
-            let app = self.lock().await?;
-            app.app().feed_wait(seconds)
-        };
-        let requested = wait.seconds();
-        let started = std::time::Instant::now();
-        let wake = wait.wait().await;
-        let pause = self
-            .pace
-            .lock()
-            .await
-            .after_wait(wake, requested, started.elapsed());
-        if let Some(pause) = pause {
-            tokio::time::sleep(pause).await;
-        }
-        Ok(match wake {
-            Woken::Ready => FeedWake::Ready,
-            Woken::Quiet => FeedWake::Quiet,
-            Woken::ReadNow => FeedWake::ReadNow,
-            Woken::ReadLater => FeedWake::ReadLater,
-            _ => FeedWake::Other,
+        let wait = self
+            .with_wallet(move |app| Box::pin(async move { Ok(app.app().feed_wait(seconds)) }))
+            .await?;
+        let pace = self.pace.clone();
+        crate::runtime::run(async move {
+            let requested = wait.seconds();
+            let started = std::time::Instant::now();
+            let wake = wait.wait().await;
+            let pause = pace
+                .lock()
+                .await
+                .after_wait(wake, requested, started.elapsed());
+            if let Some(pause) = pause {
+                tokio::time::sleep(pause).await;
+            }
+            Ok(match wake {
+                Woken::Ready => FeedWake::Ready,
+                Woken::Quiet => FeedWake::Quiet,
+                Woken::ReadNow => FeedWake::ReadNow,
+                Woken::ReadLater => FeedWake::ReadLater,
+                _ => FeedWake::Other,
+            })
         })
+        .await
     }
     /// Delay in milliseconds before retrying a failed receive in this wallet's feed loop.
     pub async fn failed_read_pause_ms(&self) -> u64 {
@@ -158,25 +160,27 @@ impl NativeWallet {
     }
     /// Process one bounded receive. Persist the handled effects before acknowledging their prefix.
     pub async fn receive(&self) -> Result<WalletReceiveReport, WalletError> {
-        self.with_wallet(async |app| {
-            let s = app.receive(None).await?;
-            let r = s.report;
-            Ok(WalletReceiveReport {
-                generation: r.cursor.generation,
-                sequence: r.cursor.seq,
-                stopped: r.stopped,
-                more: r.more,
-                held_cursor: r.held_cursor.map(Into::into),
-                events: r.events.into_iter().map(|e| event(app, e)).collect(),
-                applied: s.applied,
-                resends: s.resends,
-                resend_refused: s.resend_refused.map(|r| Arc::new(PaymentRefusal(r))),
-                certificate_refused: s.certificate_refused.map(|r| Arc::new(PaymentRefusal(r))),
-                records_unlisted: s.records_unlisted,
-                scope_keys_awaited: s.scope_keys_awaited,
-                key_epochs_awaited: s.key_epochs_awaited,
-                account_gone: s.account_gone,
-                divergent: s.divergent.into_iter().map(Into::into).collect(),
+        self.with_wallet(move |app| {
+            Box::pin(async move {
+                let s = app.receive(None).await?;
+                let r = s.report;
+                Ok(WalletReceiveReport {
+                    generation: r.cursor.generation,
+                    sequence: r.cursor.seq,
+                    stopped: r.stopped,
+                    more: r.more,
+                    held_cursor: r.held_cursor.map(Into::into),
+                    events: r.events.into_iter().map(|e| event(app, e)).collect(),
+                    applied: s.applied,
+                    resends: s.resends,
+                    resend_refused: s.resend_refused.map(|r| Arc::new(PaymentRefusal(r))),
+                    certificate_refused: s.certificate_refused.map(|r| Arc::new(PaymentRefusal(r))),
+                    records_unlisted: s.records_unlisted,
+                    scope_keys_awaited: s.scope_keys_awaited,
+                    key_epochs_awaited: s.key_epochs_awaited,
+                    account_gone: s.account_gone,
+                    divergent: s.divergent.into_iter().map(Into::into).collect(),
+                })
             })
         })
         .await
@@ -186,26 +190,33 @@ impl NativeWallet {
     pub async fn recovery_required(
         &self,
     ) -> Result<Option<crate::WalletRecoveryNotice>, WalletError> {
-        Ok(self.lock().await?.app().recovery_required().map(Into::into))
+        self.with_wallet(|app| {
+            Box::pin(async move { Ok(app.app().recovery_required().map(Into::into)) })
+        })
+        .await
     }
 
     /// Recover the outstanding Paykit-owned duties after reopening or a failed receive.
     pub async fn unacknowledged_events(&self) -> Result<Vec<WalletEvent>, WalletError> {
-        self.with_wallet(async |app| {
-            Ok(app
-                .app_mut()
-                .unacknowledged_events_for("paykit")
-                .await?
-                .into_iter()
-                .map(|e| event(app, e))
-                .collect())
+        self.with_wallet(move |app| {
+            Box::pin(async move {
+                Ok(app
+                    .app_mut()
+                    .unacknowledged_events_for("paykit")
+                    .await?
+                    .into_iter()
+                    .map(|e| event(app, e))
+                    .collect())
+            })
         })
         .await
     }
     /// Acknowledge the already handled Paykit prefix through the last duty in a successful report.
     pub async fn acknowledge_events(&self, through: Vec<u8>) -> Result<(), WalletError> {
         let id = EventId::from_bytes(&through).map_err(|_| WalletError::invalid("event id"))?;
-        self.with_wallet(async |app| Ok(app.app_mut().ack_events_for("paykit", id).await?))
-            .await
+        self.with_wallet(move |app| {
+            Box::pin(async move { Ok(app.app_mut().ack_events_for("paykit", id).await?) })
+        })
+        .await
     }
 }

@@ -1,4 +1,6 @@
 //! The payment method belongs to the host. The SDK journals and reuses its attempt ID.
+use crate::flights::Waited;
+use crate::runtime::{in_callback, HOST_CALL_LIMIT};
 use paykit_lib::{
     Asset, AttemptId, Decimal, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
 };
@@ -267,13 +269,52 @@ pub trait PaymentMethod: Send + Sync {
 }
 
 pub(crate) struct HostRail {
-    pub method: Arc<dyn PaymentMethod>,
-    pub identifiers: Vec<PaymentEndpointIdentifier>,
+    method: Arc<dyn PaymentMethod>,
+    identifiers: Vec<PaymentEndpointIdentifier>,
+    flights: crate::flights::Flights,
+    pay_limit: std::time::Duration,
+}
+
+impl HostRail {
+    /// Use the host's method for the given Payment Endpoint Identifiers. A method whose
+    /// history can't show a dispatch's outcome is refused: a payment the wallet stopped
+    /// waiting for is settled only through that lookup (Paykit spec 7.2).
+    pub(crate) fn new(
+        method: Arc<dyn PaymentMethod>,
+        identifiers: Vec<PaymentEndpointIdentifier>,
+    ) -> Result<Self, crate::WalletError> {
+        if !in_callback(|| method.declaration()).history {
+            return Err(crate::WalletError::invalid("payment method history"));
+        }
+        Ok(Self {
+            method,
+            identifiers,
+            flights: Default::default(),
+            pay_limit: crate::runtime::PAY_LIMIT,
+        })
+    }
+
+    /// Wait for the host's `pay` at most `limit` instead.
+    #[cfg(test)]
+    pub(crate) fn with_pay_limit(mut self, limit: std::time::Duration) -> Self {
+        self.pay_limit = limit;
+        self
+    }
+}
+
+/// Wait for a host lookup at most [`HOST_CALL_LIMIT`]; past it the answer is "not now".
+async fn bounded<T>(
+    call: impl std::future::Future<Output = Result<T, MethodError>>,
+) -> Result<T, RailError> {
+    tokio::time::timeout(HOST_CALL_LIMIT, call)
+        .await
+        .map_err(|_| RailError::Unavailable("payment method did not answer in time".into()))?
+        .map_err(Into::into)
 }
 
 impl Rail for HostRail {
     fn declaration(&self) -> RailDeclaration {
-        let d = self.method.declaration();
+        let d = in_callback(|| self.method.declaration());
         let mut v = RailDeclaration::new(d.longest_completion_ms)
             .with_idempotent(d.idempotent)
             .with_history(d.history)
@@ -296,17 +337,18 @@ impl Rail for HostRail {
         candidates: &[PaymentEndpointCandidate],
         amount: Option<&PaymentAmount>,
     ) -> Result<EndpointSelection, RailError> {
-        let choices = self.method.select_endpoints(
-            candidates
-                .iter()
-                .map(|c| EndpointCandidate {
-                    id: c.id.get(),
-                    identifier: c.endpoint_id.as_str().into(),
-                    payload: c.payload.as_str().into(),
-                })
-                .collect(),
-            amount.map(Amount::from),
-        )?;
+        let offered = candidates
+            .iter()
+            .map(|c| EndpointCandidate {
+                id: c.id.get(),
+                identifier: c.endpoint_id.as_str().into(),
+                payload: c.payload.as_str().into(),
+            })
+            .collect();
+        let choices = in_callback(|| {
+            self.method
+                .select_endpoints(offered, amount.map(Amount::from))
+        })?;
         let mut selected =
             EndpointSelection::new(choices.payable.into_iter().map(CandidateId::new).collect());
         for f in choices.failures {
@@ -321,35 +363,57 @@ impl Rail for HostRail {
         payload: &PaymentEndpointPayload,
         amount: &PaymentAmount,
     ) -> Transfer {
-        self.method
-            .transfer(id.as_str().into(), payload.as_str().into(), amount.into())
-            .0
-            .clone()
+        in_callback(|| {
+            self.method
+                .transfer(id.as_str().into(), payload.as_str().into(), amount.into())
+                .0
+                .clone()
+        })
     }
 
     fn fraction_digits(&self, id: &PaymentEndpointIdentifier) -> Option<u32> {
-        self.method.fraction_digits(id.as_str().into())
+        in_callback(|| self.method.fraction_digits(id.as_str().into()))
     }
 
     fn pay(&self, p: RailPayment) -> BoxFuture<'_, Result<RailOutcome, RailError>> {
         Box::pin(async move {
-            self.method
-                .pay(MethodPayment {
-                    endpoint: p.endpoint_id.as_str().into(),
-                    payload: p.payload.as_str().into(),
-                    amount: (&p.amount).into(),
-                    attempt_id: p.idempotency_key.to_text(),
-                    payment_reference: p.payment_reference,
-                })
-                .await?
-                .into_rail()
+            let attempt = p.idempotency_key.to_text();
+            let payment = MethodPayment {
+                endpoint: p.endpoint_id.as_str().into(),
+                payload: p.payload.as_str().into(),
+                amount: (&p.amount).into(),
+                attempt_id: attempt.clone(),
+                payment_reference: p.payment_reference,
+            };
+            let method = self.method.clone();
+            let pay = async move { method.pay(payment).await };
+            match self
+                .flights
+                .dispatch(attempt, pay, self.pay_limit, crate::wallet::settle_target())
+                .await
+            {
+                Waited::Answered(answer) => answer?.into_rail(),
+                // The SDK keeps the attempt open: nothing yet, possibly sent (Paykit spec 7.2).
+                Waited::StillRunning => Err(RailError::Unavailable(
+                    "payment method still paying; its answer is recorded when it comes".into(),
+                )),
+                // The same attempt's call is in flight at the host: pending, not a second payment.
+                Waited::AlreadyRunning => Ok(RailOutcome::Pending),
+            }
         })
     }
 
     fn payment(&self, id: AttemptId) -> BoxFuture<'_, Result<Option<RailOutcome>, RailError>> {
         Box::pin(async move {
-            self.method
-                .payment(id.to_text())
+            let attempt = id.to_text();
+            // In flight at the host: pending, and the host is not asked while its `pay` runs.
+            if self.flights.running(&attempt) {
+                return Ok(Some(RailOutcome::Pending));
+            }
+            if let Some(outcome) = self.flights.take_late(&attempt) {
+                return outcome.into_rail().map(Some);
+            }
+            bounded(self.method.payment(attempt))
                 .await?
                 .map(MethodOutcome::into_rail)
                 .transpose()
@@ -361,7 +425,8 @@ impl Rail for HostRail {
         payer: [u8; 32],
     ) -> BoxFuture<'_, Result<Option<Vec<AllowanceDispatch>>, RailError>> {
         Box::pin(async move {
-            let Some(history) = self.method.allowance_history(payer.to_vec()).await? else {
+            let Some(history) = bounded(self.method.allowance_history(payer.to_vec())).await?
+            else {
                 return Ok(None);
             };
             let all = history
@@ -382,21 +447,20 @@ impl Rail for HostRail {
         Box::pin(async move {
             let proof_json = serde_json::to_vec(&p.proof)
                 .map_err(|_| RailError::Unavailable("invalid proof".into()))?;
-            Ok(self
-                .method
-                .verify(MethodProof {
-                    endpoint: p.endpoint_id.as_str().into(),
-                    payload: p.payload.map(|p| p.as_str().to_owned()),
-                    amount: (&p.amount).into(),
-                    attempt_id: p.attempt_id.to_text(),
-                    proof_json,
-                })
-                .await?)
+            bounded(self.method.verify(MethodProof {
+                endpoint: p.endpoint_id.as_str().into(),
+                payload: p.payload.map(|p| p.as_str().to_owned()),
+                amount: (&p.amount).into(),
+                attempt_id: p.attempt_id.to_text(),
+                proof_json,
+            }))
+            .await
         })
     }
 
     fn settlement_id(&self, proof: &Map<String, Value>) -> Option<Vec<u8>> {
-        self.method.settlement_id(serde_json::to_vec(proof).ok()?)
+        let proof = serde_json::to_vec(proof).ok()?;
+        in_callback(|| self.method.settlement_id(proof))
     }
 }
 
