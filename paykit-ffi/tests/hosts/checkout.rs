@@ -50,6 +50,7 @@ impl Transport for CheckoutService {
 pub struct CheckoutFixture {
     world: Mutex<Option<World>>,
     host: Arc<WalletHost>,
+    method: Arc<dyn PaymentMethod>,
     signer: Mutex<Signer>,
     seller: Mutex<Paykit>,
     buyer: [u8; 32],
@@ -66,10 +67,7 @@ impl CheckoutFixture {
         let owner = world.identity("shop")?;
         let signer = Box::pin(signer::serving(&world, "buyer")).await?;
         let mut issuer = Box::pin(signer::serving(&world, "shop")).await?;
-        let rail = Arc::new(HostRail::new(
-            method,
-            vec![PaymentEndpointIdentifier::new("btc-lightning-bolt11")?],
-        )?);
+        let rail = Arc::new(device_rail(method.clone())?);
         let host = Arc::new(WalletHost {
             clock: world.clock().clone(),
             transport: Arc::new(CheckoutService(world.transport())),
@@ -97,6 +95,7 @@ impl CheckoutFixture {
         Ok(Arc::new(Self {
             world: Mutex::new(Some(world)),
             host,
+            method,
             signer: Mutex::new(signer),
             seller: Mutex::new(seller),
             buyer,
@@ -133,6 +132,18 @@ async fn harness<T: Send + 'static>(
     tokio::task::spawn_blocking(move || runtime.block_on(operation()))
         .await
         .map_err(|_| WalletError::invalid("local checkout worker"))?
+}
+
+/// How long the test wallets wait for the host's `pay` before recording it as possibly sent.
+const TEST_PAY_LIMIT: Duration = Duration::from_secs(2);
+
+fn device_rail(method: Arc<dyn PaymentMethod>) -> Result<HostRail, WalletError> {
+    Ok(HostRail::new(
+        method,
+        vec![PaymentEndpointIdentifier::new("btc-lightning-bolt11")
+            .map_err(|_| WalletError::invalid("test endpoint"))?],
+    )?
+    .with_pay_limit(TEST_PAY_LIMIT))
 }
 
 fn invoice() -> paykit_lib::Result<RequestDraft> {
@@ -179,7 +190,10 @@ impl CheckoutFixture {
             transport: self.host.transport.clone(),
             home: self.host.home.clone(),
             writer: self.host.writer.clone(),
-            rail: self.host.rail.clone(),
+            // Another device: the host's calls in progress on this one are not its own.
+            rail: Arc::new(
+                device_rail(self.method.clone()).expect("the checkout method declares history"),
+            ),
             timer: self.host.timer.clone(),
             store,
         })

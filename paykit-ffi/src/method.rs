@@ -235,8 +235,12 @@ pub struct MethodProof {
     pub proof_json: Vec<u8>,
 }
 
-/// Methods must complete without acquiring the wallet they serve. A timeout or unknown
-/// submission returns Unavailable. Refused means no submission took place or can follow.
+/// The host's payment method. Paykit calls it from its own threads, never the main thread,
+/// and a callback never calls the wallet it serves. `pay` runs as a task of its own: Paykit
+/// waits for it at most 30 seconds, then records the payment as possibly sent, and records
+/// `pay`'s answer by itself when it comes. A lookup is waited for at most 10 seconds. A
+/// timeout or unknown submission returns Unavailable. Refused means no submission took place
+/// or can follow. The synchronous calls answer at local speed, with no network.
 #[uniffi::export(with_foreign)]
 #[async_trait::async_trait]
 pub trait PaymentMethod: Send + Sync {
@@ -295,7 +299,7 @@ impl HostRail {
     }
 
     /// Wait for the host's `pay` at most `limit` instead.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-wallet"))]
     pub(crate) fn with_pay_limit(mut self, limit: std::time::Duration) -> Self {
         self.pay_limit = limit;
         self
