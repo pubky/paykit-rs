@@ -72,10 +72,10 @@ async fn published_paid_receipted_and_removed(world: &World) -> TestResult {
     assert_eq!(listed.endpoints[0].app_id, shop.app_id());
 
     // The payer pays it once; the seller credits and receipts the payment.
+    let expected = Expected::new(&rail, None, btc("0.001")?, tips.clone());
     let outcome = Box::pin(wallet.pay_without_request(public_payment(seller)?))
         .await
         .outcome?;
-    let expected = Expected::new(None, btc("0.001")?, tips.clone());
     Box::pin(paid_and_receipted(
         &mut wallet,
         &mut shop,

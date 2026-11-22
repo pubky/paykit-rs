@@ -263,9 +263,23 @@ async fn paid_by_hand(world: &World) -> TestResult {
     let refused = again.err().ok_or("a paid period was paid again")?;
     assert_eq!(refused.refusal(), Some(&Refusal::AlreadyPaid));
     assert_eq!(rail.all_executions().len(), 1);
+    assert_eq!(Box::pin(wallet.payments()).await?.len(), 1);
 
-    // At its start, the second period's details name its own invoice, and it is paid there.
+    // At its start, the second period has no destination until its details arrive; they name
+    // its own invoice, and it is paid there.
     at_start(world, periods[1]);
+    let early = Box::pin(wallet.pay_period(&request, &periods[1], PayOptions::default()))
+        .await
+        .outcome;
+    let refused = early
+        .err()
+        .ok_or("a period was paid before its details named a destination")?;
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NoDestination(_))),
+        "{refused:?}"
+    );
+    assert_eq!(rail.all_executions().len(), 1);
+    assert_eq!(Box::pin(wallet.payments()).await?.len(), 1);
     let details = PeriodDetails {
         billing_period: periods[1],
         payment_endpoints: Some(
@@ -354,6 +368,28 @@ async fn paid_by_policy(world: &World) -> TestResult {
             How::ByPolicy,
         ))
         .await?;
+        // The host's scheduler may fire again for the same period: nothing is paid twice.
+        let (executions, payments) = (
+            rail.all_executions().len(),
+            Box::pin(wallet.payments()).await?.len(),
+        );
+        let again = Box::pin(wallet.pay_period_automatically(
+            &request,
+            &period,
+            PeriodPrice::RequestedAmount,
+        ))
+        .await
+        .outcome;
+        let refused = again
+            .err()
+            .ok_or("a paid period was paid again by policy")?;
+        assert_eq!(
+            refused.refusal(),
+            Some(&Refusal::AlreadyPaid),
+            "{refused:?}"
+        );
+        assert_eq!(rail.all_executions().len(), executions);
+        assert_eq!(Box::pin(wallet.payments()).await?.len(), payments);
     }
     assert_eq!(rail.all_executions().len(), 2);
     assert_eq!(Box::pin(wallet.payments()).await?.len(), 2);

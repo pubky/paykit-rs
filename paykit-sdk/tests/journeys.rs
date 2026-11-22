@@ -318,11 +318,16 @@ struct Expected {
     paid: PaymentAmount,
     /// The rate that priced the payment, if one did.
     rate: Option<&'static str>,
+    /// How many selections the method had made before the payment.
+    selections: usize,
 }
 
 impl Expected {
-    /// A payment of `amount` to `endpoint_id`, of the request `request_hash` if any.
+    /// A payment of `amount` to `endpoint_id`, of the request `request_hash` if any, about
+    /// to be made on `rail`: made before the payment, it notes the method's selections so
+    /// far.
     fn new(
+        rail: &FakeRail,
         request_hash: Option<[u8; 32]>,
         amount: PaymentAmount,
         endpoint_id: PaymentEndpointIdentifier,
@@ -333,6 +338,7 @@ impl Expected {
             amount,
             endpoint_id,
             rate: None,
+            selections: rail.selections().len(),
         }
     }
 
@@ -346,7 +352,8 @@ impl Expected {
     }
 }
 
-/// After the payer's `outcome`: the method was called once; the payer's journal holds the
+/// After the payer's `outcome`: the method was handed one new selection, including the
+/// expected endpoint, and called once; the payer's journal holds the
 /// payment, finished; the seller holds the payer's proof, verifies it, confirms it and shows
 /// it receipted; and the payer then holds exactly that receipt, in its receipts and in its
 /// journal's entry. Returns the receipt's `msg_id`.
@@ -366,6 +373,17 @@ async fn paid_and_receipted(
         return Err(format!("not paid with a proof: {outcome:?}").into());
     };
     assert_eq!(rail.executions(&attempt_id), 1);
+    let selections = rail.selections();
+    assert_eq!(selections.len(), expected.selections + 1, "{selections:?}");
+    let (candidates, _) = selections
+        .last()
+        .ok_or("the method was handed no endpoint")?;
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.endpoint_id == expected.endpoint_id),
+        "{candidates:?}"
+    );
 
     // The payer's view: its own payment, finished.
     let payments = Box::pin(wallet.payments()).await?;

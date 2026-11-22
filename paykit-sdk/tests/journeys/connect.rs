@@ -112,17 +112,18 @@ async fn admits_the_seller_and_its_waiting_request_is_paid(world: &World) -> Tes
     );
 
     // The payer's proof reaches the seller, and the seller's receipt reaches the payer.
+    let expected = Expected::new(
+        &rail,
+        Some(request.request_hash),
+        btc("0.001")?,
+        endpoint("btc-lightning-bolt11")?,
+    );
     let outcome = Box::pin(wallet.pay_request(&request, PayOptions::default()))
         .await
         .outcome?;
     assert_eq!(
         Box::pin(wallet.request(&request)).await?.status,
         RequestStatus::Paid
-    );
-    let expected = Expected::new(
-        Some(request.request_hash),
-        btc("0.001")?,
-        endpoint("btc-lightning-bolt11")?,
     );
     Box::pin(paid_and_receipted(
         &mut wallet,

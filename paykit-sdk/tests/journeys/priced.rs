@@ -58,6 +58,7 @@ async fn paid_at_the_confirmed_rate(world: &World) -> TestResult {
 
     // Without the user's confirmation of the computed amount, nothing is paid; the refusal
     // shows what the user is asked to confirm.
+    let quoted_from = rail.selections().len();
     let unconfirmed = Box::pin(wallet.pay_request(&request, PayOptions::default()))
         .await
         .outcome;
@@ -68,26 +69,35 @@ async fn paid_at_the_confirmed_rate(world: &World) -> TestResult {
         return Err(format!("not refused as priced: {refused:?}").into());
     };
     let shown: PricedPayment = (**payment).clone();
+    // What the user's authorization binds: the payee and its signed request, the app and
+    // endpoint the payment goes to, the signed rate and its source, and the amount.
     assert_eq!(shown.request, request);
+    assert_eq!(shown.billing_period, None);
+    assert_eq!(shown.app_id, shop.app_id());
     assert_eq!(shown.endpoint_id, endpoint("btc-lightning-bolt11")?);
     assert_eq!(shown.requested, usd("10")?);
     assert_eq!(shown.source, RateSource::Request);
+    assert_eq!(shown.rate_source_hash, request.request_hash);
+    assert_eq!(shown.rate.asset(), &Asset::new("btc")?);
     assert_eq!(shown.rate.value().as_str(), "0.0000123456");
     assert_eq!(shown.amount, btc("0.00012346")?);
     assert!(rail.all_executions().is_empty());
     assert!(Box::pin(wallet.payments()).await?.is_empty());
+    // Quoting the computed amount asked the method once.
+    assert_eq!(rail.selections().len(), quoted_from + 1);
 
     // Confirmed, it is paid once at that amount, and credited and receipted.
-    let options = PayOptions::default().with_rate_authorized(shown);
-    let outcome = Box::pin(wallet.pay_request(&request, options))
-        .await
-        .outcome?;
     let expected = Expected::new(
+        &rail,
         Some(request.request_hash),
         usd("10")?,
         endpoint("btc-lightning-bolt11")?,
     )
     .at_rate("0.0000123456", btc("0.00012346")?);
+    let options = PayOptions::default().with_rate_authorized(shown);
+    let outcome = Box::pin(wallet.pay_request(&request, options))
+        .await
+        .outcome?;
     Box::pin(paid_and_receipted(
         &mut wallet,
         &mut shop,
@@ -96,6 +106,10 @@ async fn paid_at_the_confirmed_rate(world: &World) -> TestResult {
         &expected,
     ))
     .await?;
+    // The seller checked the proof for exactly the amount the rate computed.
+    let checks = rail.proof_checks();
+    let check = checks.last().ok_or("the seller checked no proof")?;
+    assert_eq!(check.amount, btc("0.00012346")?);
     assert_eq!(
         Box::pin(wallet.request(&request)).await?.status,
         RequestStatus::Paid
