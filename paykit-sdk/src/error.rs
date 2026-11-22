@@ -112,10 +112,10 @@ pub enum Refusal {
     /// The payment method verified the payment, but its verified payment time, `paid_at_ms`,
     /// lies outside what the occurrence allows: before the request's time less the method's
     /// declared tolerance, after the occurrence's deadline, or outside the validity of the
-    /// destination or the rates it was paid by (Paykit spec 7.1, 7.2, 8.2). Nothing is
+    /// destination or the rates it was paid by (Paykit spec 7.1, 8.2). Nothing is
     /// credited or receipted on this evidence: the occurrence stays unpaid, and the funds
     /// are the payee's received funds, for its user to settle with the payer.
-    #[error("Paykit spec 7.2: the verified payment time lies outside what the request allows")]
+    #[error("Paykit spec 7.1: the verified payment time lies outside what the request allows")]
     PaymentTimeOutside {
         /// The verified payment time, in Unix milliseconds.
         paid_at_ms: u64,

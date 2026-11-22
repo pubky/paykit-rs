@@ -91,12 +91,22 @@ pub struct RailDeclaration {
     /// least this plus [`crate::PRE_DISPATCH_BUDGET_MS`], so no other own app can resolve it
     /// while its payment may still run.
     pub longest_completion_ms: u64,
-    /// How far, in milliseconds, the method's verified payment time may lie before the real
-    /// time of the payment, plus the payee's clock skew (Paykit spec 7.2, "Not before the
-    /// request"): a Bitcoin block timestamp may lie well before the time it was mined. A
-    /// payee credits no evidence whose verified payment time is earlier than the request's
-    /// signed `created_at` less this. It widens only that lower bound, never a deadline,
-    /// a destination's expiry or a rate's window.
+    /// How far, in milliseconds, the method's verified payment time may lie before the
+    /// request's signed `created_at` for a payment made after the request (Paykit spec 7.1,
+    /// "Not before the request"). A payee credits no evidence dated earlier than `created_at`
+    /// less this. It widens only that lower bound, never a deadline, a destination's expiry or
+    /// a rate's window, and the SDK adds nothing to it. It must cover:
+    ///
+    /// - the method's time precision: a time in whole seconds lies up to 999 ms before the
+    ///   real time, so at least 1,000 ms for such a method;
+    /// - the clock of whatever dates the evidence against the payee's device clock, which
+    ///   dated the request: a node's settle time is that node's clock;
+    /// - the method's own timestamp rules: a Bitcoin block timestamp need only exceed the
+    ///   median time of the previous blocks, so it can lie about two hours before the block
+    ///   was mined, and an on-chain method needs at least that.
+    ///
+    /// A Lightning method reading its own node's settle time needs its precision and that
+    /// node's clock skew: a few minutes. A value reaching before 1970 disables the bound.
     pub payment_time_tolerance_ms: u64,
 }
 

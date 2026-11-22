@@ -57,11 +57,12 @@ pub struct MethodDeclaration {
     /// The longest a dispatch takes to complete or fail, in milliseconds: a day for an ordinary
     /// Lightning payment (Switch spec 10.2).
     pub longest_completion_ms: u64,
-    /// How far, in milliseconds, the method's verified payment time may lie before the real
-    /// time of the payment, plus the payee's clock skew (Paykit spec 7.2, "Not before the
-    /// request"), such as how far a Bitcoin block timestamp may lie before its mining. The
-    /// payee credits no evidence dated earlier than the request's signed `created_at` less
-    /// this.
+    /// How far, in milliseconds, the method's verified payment time may lie before the
+    /// request's signed `created_at` for a payment made after it (Paykit spec 7.1, "Not
+    /// before the request"). The payee credits no evidence dated earlier than `created_at`
+    /// less this. Cover the method's time precision (at least 1,000 ms for whole seconds),
+    /// the skew of the clock that dates the evidence, and the method's timestamp rules: a
+    /// Bitcoin block timestamp can lie about two hours before the block was mined.
     pub payment_time_tolerance_ms: u64,
 }
 

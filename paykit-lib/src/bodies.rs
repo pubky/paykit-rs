@@ -551,10 +551,10 @@ impl PaymentRequest {
         Ok(Some(deadline))
     }
 
-    /// The last payment time a one-time request allows, in milliseconds, inclusive (Paykit
-    /// spec 7.1, Paykit wire 4.5): the earlier of `proposal_expires_at` and the payment
-    /// deadline's `timestamp`. `None` for a recurring request, or a one-time request with
-    /// neither. A payee credits no evidence whose verified payment time is after it.
+    /// The last time an attempt on a one-time request may start, in milliseconds, inclusive
+    /// (Paykit spec 7.1, Paykit wire 4.5): the earlier of `proposal_expires_at` and the
+    /// payment deadline's `timestamp`. `None` for a recurring request, or a one-time request
+    /// with neither.
     pub fn one_time_deadline(&self) -> Option<u64> {
         if self.is_recurring() {
             return None;
@@ -566,6 +566,17 @@ impl PaymentRequest {
         match (self.proposal_expires_at, at) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
+        }
+    }
+
+    /// The last verified payment time a payee credits for a one-time request, in
+    /// milliseconds, inclusive: its payment deadline's `timestamp` (Paykit spec 7.1). The
+    /// proposal expiry bounds the attempt, not the settlement (Paykit wire 4.5), as in v0.1.
+    /// `None` for a recurring request, or a one-time request without a payment deadline.
+    pub fn settlement_deadline(&self) -> Option<u64> {
+        match (self.is_recurring(), self.payment_deadline) {
+            (false, Some(PaymentDeadline::At(ms))) => Some(ms),
+            _ => None,
         }
     }
 
@@ -2143,6 +2154,45 @@ mod tests {
         b["payment_deadline"] = json!(null);
         let open = PaymentRequest::from_body(&body(b)).unwrap();
         assert_eq!(open.one_time_deadline(), None);
+        let at = |text: &str| pubky_switch_core::time::parse_rfc3339(text).unwrap();
+        for (expiry, deadline, earlier) in [
+            (
+                json!("2026-01-04T00:00:00.000Z"),
+                json!({ "type": "at", "timestamp": "2026-01-03T00:00:00.000Z" }),
+                Some(at("2026-01-03T00:00:00.000Z")),
+            ),
+            (
+                json!(null),
+                json!({ "type": "at", "timestamp": "2026-01-03T00:00:00.000Z" }),
+                Some(at("2026-01-03T00:00:00.000Z")),
+            ),
+            (
+                json!("2026-01-02T00:00:00.000Z"),
+                json!(null),
+                Some(at("2026-01-02T00:00:00.000Z")),
+            ),
+        ] {
+            let mut b = request();
+            b["proposal_expires_at"] = expiry;
+            b["payment_deadline"] = deadline;
+            let r = PaymentRequest::from_body(&body(b)).unwrap();
+            assert_eq!(r.one_time_deadline(), earlier);
+            assert_eq!(r.attempt_deadline(None).unwrap(), earlier.map(|d| d + 1));
+        }
+    }
+
+    #[test]
+    fn test_request_settlement_deadline_is_the_payment_deadline_alone() {
+        let r = PaymentRequest::from_body(&body(request())).unwrap();
+        assert_eq!(
+            r.settlement_deadline(),
+            Some(pubky_switch_core::time::parse_rfc3339("2026-01-03T00:00:00.000Z").unwrap())
+        );
+        let mut b = request();
+        b["payment_deadline"] = json!(null);
+        let open = PaymentRequest::from_body(&body(b)).unwrap();
+        assert!(open.proposal_expires_at.is_some());
+        assert_eq!(open.settlement_deadline(), None);
     }
 
     #[test]
@@ -2154,6 +2204,7 @@ mod tests {
         let r = PaymentRequest::from_body(&body(b)).unwrap();
         assert!(r.proposal_expires_at.is_some());
         assert_eq!(r.one_time_deadline(), None);
+        assert_eq!(r.settlement_deadline(), None);
     }
 
     #[test]

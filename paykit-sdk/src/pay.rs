@@ -970,6 +970,10 @@ pub(crate) enum FinalCheck {
 /// be gone already. A clock now behind the journaling can't tell the age, which is outside
 /// every finite retention: an empty history proves nothing then, and a repeat may find the
 /// key forgotten. A retention kept for good holds whatever the clock.
+pub(crate) fn retained(retention: Option<u64>, journaled_at_ms: u64, now: u64) -> bool {
+    retention.is_none_or(|r| now.checked_sub(journaled_at_ms).is_some_and(|age| age < r))
+}
+
 /// Whether the Allowance an attempt was reserved under has expired by the later of the
 /// device clock `now` and the highest service time verified, `service_time`.
 fn allowance_expired(entry: &JournalEntry, now: u64, service_time: Option<u64>) -> bool {
@@ -977,10 +981,6 @@ fn allowance_expired(entry: &JournalEntry, now: u64, service_time: Option<u64>) 
         && entry
             .allowance_expires_at_ms
             .is_some_and(|expiry| expiry <= now.max(service_time.unwrap_or(0)))
-}
-
-pub(crate) fn retained(retention: Option<u64>, journaled_at_ms: u64, now: u64) -> bool {
-    retention.is_none_or(|r| now.checked_sub(journaled_at_ms).is_some_and(|age| age < r))
 }
 
 /// Whether `bound` has passed (Paykit spec 7.2, "Kept proofs"): it lies before the earlier
@@ -5084,6 +5084,12 @@ impl Paykit {
                 read_at,
             } => {
                 if !retained(idempotency_retention_ms, entry.journaled_at_ms, now) {
+                    return Ok(FinalCheck::Lapsed);
+                }
+                // An expired Allowance pays nothing more (Paykit spec 8.3): no repeat of a
+                // dispatch that may have gone, and the attempt stays open as possibly paid,
+                // for the method's history or a receipt to settle, never written failed.
+                if allowance_expired(entry, now, self.service_time()) {
                     return Ok(FinalCheck::Lapsed);
                 }
                 if !self.repeat_completes_before_orphaned(

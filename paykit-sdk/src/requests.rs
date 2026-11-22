@@ -961,7 +961,9 @@ impl Paykit {
     /// [`Refusal::MaybeCredited`] while
     /// whether another record credits the settlement can't be told;
     /// [`Refusal::PaymentTimeOutside`] for a payment the method verified at a time the
-    /// occurrence doesn't allow; the rail's errors.
+    /// occurrence doesn't allow: before the request's `created_at` less the method's declared
+    /// tolerance, after its payment deadline, or outside the validity of the destination or
+    /// rates it was paid by, unless the record holds its receipt already; the rail's errors.
     pub async fn verify_payment(&mut self, record: &[u8; 32]) -> Result<Option<u64>> {
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.verify_payment_inner(record)).await
@@ -1150,13 +1152,14 @@ impl Paykit {
                     crate::conversion::Priced::Unusable(_) => return Ok(None),
                 };
                 // The last payment time the occurrence allows, inclusive: a Billing Period's
-                // deadline, or a one-time request's earlier of its proposal expiry and payment
-                // deadline (Paykit spec 7.1).
+                // deadline, or a one-time request's payment deadline (Paykit spec 7.1). The
+                // proposal expiry bounds the attempt only (Paykit wire 4.5), so a payment
+                // started inside it and settled just after is still credited, as in v0.1.
                 let deadline = match binding {
                     RecordBinding::Period { billing_period, .. } => {
                         request.period_payment_deadline(&billing_period)?
                     }
-                    RecordBinding::Request { .. } => request.one_time_deadline(),
+                    RecordBinding::Request { .. } => request.settlement_deadline(),
                     RecordBinding::Unrequested => None,
                 };
                 // Evidence dated before the request doesn't prove it, less the tolerance the
@@ -1243,9 +1246,11 @@ impl Paykit {
                 paykit_lib::periods::rates_apply(start, expires, paid_at)
             });
         // The method verified the payment, but not within what the occurrence allows: the
-        // evidence is flagged, never credited on its own (Paykit spec 7.2, "Not before the
+        // evidence is flagged, never credited on its own (Paykit spec 7.1, "Not before the
         // request"). The funds are the payee's received funds all the same.
-        if !in_time {
+        // A record that holds the receipt already is credited: another own app's method may
+        // date the evidence differently, and the credit stands (Paykit spec 8.1 step 4).
+        if bound.receipt.is_none() && !in_time {
             return Err(Refusal::PaymentTimeOutside {
                 paid_at_ms: paid_at,
             }

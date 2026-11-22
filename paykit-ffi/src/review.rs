@@ -180,7 +180,7 @@ pub enum RefusalKind {
     MaybeCredited,
     /// The payment was verified, but its verified payment time lies outside what the request
     /// allows: before the request less the method's tolerance, or past its deadline or the
-    /// validity of its destination or rates (Paykit spec 7.1, 7.2, 8.2). Nothing is credited.
+    /// validity of its destination or rates (Paykit spec 7.1, 8.2). Nothing is credited.
     PaymentTimeOutside {
         /// The verified payment time, in Unix milliseconds.
         paid_at_ms: u64,

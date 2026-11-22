@@ -990,3 +990,32 @@ async fn test_local_state_notice_handle_of_another_entry_forgets_nothing() {
     assert_eq!(wallet.app_mut().parked_entries().await.unwrap().len(), 2);
     assert!(held(&wallet, &key).await.is_some());
 }
+
+#[tokio::test]
+async fn test_local_state_journal_expiry_without_an_allowance_is_corrupt() {
+    // An Allowance's expiry is journaled only with the Allowance it reserved under; an entry
+    // carrying one without it is a corrupt store, never read as a payment.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    let (key, raw) = wallet
+        .app()
+        .protocol_scan("paykit", b"j/")
+        .await
+        .unwrap()
+        .remove(0);
+    let mut entry: Value = serde_json::from_slice(&raw).unwrap();
+    assert!(entry["d"]["allowance"].is_null());
+    entry["d"]["allowance_expires_at_ms"] = json!(1_234);
+    put(&mut wallet, std::str::from_utf8(&key).unwrap(), &entry).await;
+    let error = wallet.resume_payments().await.unwrap_err();
+    assert!(corrupt(&error), "{error:?}");
+}

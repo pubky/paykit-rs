@@ -677,6 +677,10 @@ impl JournalEntry {
         self.destination.check()?;
         self.label()?;
         let period = self.period()?;
+        // An expiry is the reserving Allowance's, kept only with it.
+        if self.allowance.is_none() && self.allowance_expires_at_ms.is_some() {
+            return bad();
+        }
         if self.offline.is_some()
             && (request_hash.is_some()
                 || self.destination.source()? != DestinationSource::Public

@@ -1,6 +1,6 @@
 //! The payee credits a one-time request only on evidence whose verified payment time lies
 //! between the request's signed `created_at`, less the method's declared tolerance, and the
-//! request's deadline (Paykit spec 7.1; 7.2, "Not before the request").
+//! request's deadline (Paykit spec 7.1; 7.1, "Not before the request").
 
 use paykit_sdk::rail::{Behaviour, FAKE_LONGEST_COMPLETION_MS};
 use paykit_sdk::{PayOptions, PayOutcome, PayeeStatus, RailDeclaration, Refusal, RequestDraft};
@@ -73,6 +73,23 @@ async fn credit_dated(
         }
     };
     let status = shop.payee_activity().await.unwrap()[0].status.clone();
+    // Another payee app of the shop's identity reads the same record and decides alike.
+    let mut second = w
+        .join(
+            &w.bob,
+            "seller-wallet",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    second.receive(None).await.unwrap();
+    let record = second.payee_activity().await.unwrap()[0].record;
+    match second.verify_payment(&record).await {
+        Ok(credited) => assert_eq!(credited, verified),
+        Err(error) => {
+            assert_eq!(verified, None);
+            flagged(&error);
+        }
+    }
     (verified, paid_at, status)
 }
 
@@ -120,10 +137,12 @@ async fn test_payment_time_tolerance_does_not_extend_the_deadline() {
 }
 
 #[tokio::test]
-async fn test_payment_time_evidence_after_the_proposal_expiry_is_not_credited() {
-    // The test request's proposal expires a day after its creation, its only deadline.
+async fn test_payment_time_settled_after_the_proposal_expiry_is_credited() {
+    // The proposal expiry, a day after the request's creation here, bounds when the attempt
+    // may start, not when the payment settles: one started inside it and settled after it
+    // is credited (Paykit wire 4.5).
     let day = 24 * crate::common::HOUR_MS;
-    let (verified, _, status) = credit_dated(0, None, i64::try_from(day + 1).unwrap()).await;
-    assert_eq!(verified, None);
-    assert_eq!(status, PayeeStatus::ProofReceived);
+    let (verified, paid_at, status) = credit_dated(0, None, i64::try_from(day + 1).unwrap()).await;
+    assert_eq!(verified, Some(paid_at));
+    assert_eq!(status, PayeeStatus::Receipted);
 }

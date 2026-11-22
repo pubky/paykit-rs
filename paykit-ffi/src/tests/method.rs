@@ -62,7 +62,7 @@ impl PaymentMethod for Account {
             history_retention_ms: None,
             history_survives_restore: true,
             longest_completion_ms: 1000,
-            payment_time_tolerance_ms: 0,
+            payment_time_tolerance_ms: 7_200_000,
         }
     }
     fn select_endpoints(
@@ -190,4 +190,19 @@ async fn test_method_history_distinguishes_complete_empty_from_missing_and_unava
         rail.allowance_history(payer).await,
         Err(RailError::Unavailable(_))
     ));
+}
+
+#[test]
+fn test_method_declaration_forwards_the_payment_time_tolerance() {
+    use paykit_sdk::Rail;
+    let directory = tempfile::tempdir().unwrap();
+    let rail = HostRail {
+        method: Arc::new(Account::open(
+            directory.path(),
+            Arc::new(pubky_switch_client::clock::TestClock::new(0)),
+        )),
+        identifiers: Vec::new(),
+    };
+    assert_eq!(rail.declaration().payment_time_tolerance_ms, 7_200_000);
+    assert_eq!(rail.declaration().longest_completion_ms, 1000);
 }
