@@ -2813,3 +2813,158 @@ async fn test_publication_keeps_an_unknown_withdrawal_and_a_failed_resend_from_a
         ));
     }
 }
+
+#[tokio::test]
+async fn test_publication_reports_an_unknown_withdrawal_and_sends_another_only_once_confirmed() {
+    use paykit_sdk::{NoticeKind, Refusal, UserConfirmed};
+    use pubky_switch_client::testing::Fault;
+
+    let w = World::new();
+    let mut buyer = w.wallet("wallet").await;
+    let payer = buyer.identity();
+    let storage = crate::common::store();
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+            paykit_sdk::PaykitConfig::default(),
+            std::sync::Arc::clone(&storage),
+        )
+        .await;
+    shop.app_mut().invite(&payer).await.unwrap();
+    shop.set_list_endpoints(offered("lno1first")).await.unwrap();
+    shop.publish_list_to(payer).await.unwrap();
+    buyer.receive(None).await.unwrap();
+    // The inbox applies nothing and never answers: the payer keeps the nonempty list.
+    w.alice.switch().fail_next(Fault::Unanswered {
+        path: "inbox".into(),
+        after: 0,
+    });
+    shop.withdraw_list_from(payer).await.unwrap();
+    let key = shop.app().record_key(&target(&shop, &payer, 1)).unwrap();
+    let held = shop.app().shared_record(&key).await.unwrap().unwrap();
+    let empty = ListPublicationRecord::read(held.content.value().unwrap()).unwrap();
+    assert!(shop
+        .app_mut()
+        .withdraw_message("paykit", &empty.msg_id)
+        .await
+        .unwrap());
+    shop.receive(None).await.unwrap();
+    let notices = shop.notices().await.unwrap();
+    assert!(notices
+        .iter()
+        .any(|n| n.kind == NoticeKind::ListWithdrawalUnknown
+            && n.counterparty == Some(payer)
+            && n.msg_id.as_deref() == Some(empty.msg_id.as_str())
+            && n.message_hash == Some(empty.message_hash)));
+
+    let refused = shop.withdraw_list_from(payer).await.unwrap_err();
+    let Some(Refusal::ListWithdrawalUnknown(shown)) = refused.refusal() else {
+        panic!("a repeated withdrawal must report the unknown delivery: {refused:?}")
+    };
+    let shown = (**shown).clone();
+    assert_eq!(
+        (
+            shown.recipient,
+            shown.version.generation(),
+            shown.version.counter()
+        ),
+        (payer, 1, 2)
+    );
+    assert_eq!(shown.msg_id, empty.msg_id);
+    assert!(shown.earlier_list_payable_until_ms.is_some());
+
+    // No receive, retry interval or acknowledgement sends a replacement on its own.
+    let id = notices
+        .iter()
+        .find(|n| n.kind == NoticeKind::ListWithdrawalUnknown)
+        .unwrap()
+        .id
+        .clone();
+    shop.acknowledge_notice(&id).await.unwrap();
+    w.clock.advance_ms(2 * crate::common::HOUR_MS);
+    shop.receive(None).await.unwrap();
+    assert_eq!(w.record_writes(&w.bob, &key), 2);
+    // The outcome stays unknown across a restart.
+    let app_id = shop.app_id();
+    drop(shop);
+    let mut shop = w
+        .load_on_clock(&w.bob, storage, app_id, std::sync::Arc::clone(&w.clock))
+        .await;
+    shop.receive(None).await.unwrap();
+    assert!(matches!(
+        shop.withdraw_list_from(payer).await.unwrap_err().refusal(),
+        Some(Refusal::ListWithdrawalUnknown(current)) if **current == shown
+    ));
+    assert_eq!(w.record_writes(&w.bob, &key), 2);
+
+    let mut stale = shown.clone();
+    stale.version = paykit_lib::ListVersion::new(1, 1).unwrap();
+    let refused = shop
+        .withdraw_list_again(&stale, UserConfirmed::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        refused.refusal(),
+        Some(Refusal::ListWithdrawalUnknown(current)) if **current == shown
+    ));
+    assert_eq!(w.record_writes(&w.bob, &key), 2);
+
+    shop.withdraw_list_again(&shown, UserConfirmed::new())
+        .await
+        .unwrap();
+    assert_eq!(w.record_writes(&w.bob, &key), 3);
+    let held = shop.app().shared_record(&key).await.unwrap().unwrap();
+    let again = ListPublicationRecord::read(held.content.value().unwrap()).unwrap();
+    assert_eq!(again.counter, 3);
+    shop.withdraw_list_from(payer).await.unwrap();
+    buyer.receive(None).await.unwrap();
+    let pay = buyer
+        .pay_without_request(UnrequestedPayment::new(w.bob_id(), btc("0.001")))
+        .await;
+    assert!(matches!(
+        pay.outcome.as_ref().err().and_then(|e| e.refusal()),
+        Some(Refusal::NoDestination(_))
+    ));
+}
+
+#[tokio::test]
+async fn test_publication_refuses_a_confirmed_withdrawal_once_the_counterparty_is_chosen_again() {
+    use paykit_sdk::{Refusal, UserConfirmed};
+    use pubky_switch_client::testing::Fault;
+
+    let w = World::new();
+    let buyer = w.wallet("wallet").await;
+    let payer = buyer.identity();
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&payer).await.unwrap();
+    shop.set_list_endpoints(offered("lno1first")).await.unwrap();
+    shop.publish_list_to(payer).await.unwrap();
+    w.alice.switch().fail_next(Fault::Unanswered {
+        path: "inbox".into(),
+        after: 0,
+    });
+    shop.withdraw_list_from(payer).await.unwrap();
+    let key = shop.app().record_key(&target(&shop, &payer, 1)).unwrap();
+    let held = shop.app().shared_record(&key).await.unwrap().unwrap();
+    let empty = ListPublicationRecord::read(held.content.value().unwrap()).unwrap();
+    assert!(shop
+        .app_mut()
+        .withdraw_message("paykit", &empty.msg_id)
+        .await
+        .unwrap());
+    // Taken from the pending duty, before any receive.
+    let refused = shop.withdraw_list_from(payer).await.unwrap_err();
+    let Some(Refusal::ListWithdrawalUnknown(shown)) = refused.refusal() else {
+        panic!("a repeated withdrawal must report the unknown delivery: {refused:?}")
+    };
+    let shown = (**shown).clone();
+    shop.publish_list_to(payer).await.unwrap();
+    let refused = shop
+        .withdraw_list_again(&shown, UserConfirmed::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(refused.refusal(), Some(Refusal::NotNow(_))));
+    assert_eq!(w.record_writes(&w.bob, &key), 3);
+}

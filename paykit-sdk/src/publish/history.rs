@@ -412,7 +412,7 @@ mod tests {
             expires: 1000,
             publisher: actual.publisher,
             predecessors: Payable::Unknown,
-            undelivered: false,
+            delivery: crate::publish::FirstDelivery::Open,
             withdrawal: Some(Withdrawal {
                 first: 0,
                 issued: 0,

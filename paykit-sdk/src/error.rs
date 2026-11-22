@@ -177,6 +177,12 @@ pub enum Refusal {
     /// switches on its own.
     #[error("Paykit spec 8.4: waiting for the payee's Private Payment List")]
     WaitingForList,
+    /// The client gave up this counterparty's current empty Private Payment List with an
+    /// unknown outcome. The counterparty may not have it and may keep paying the earlier
+    /// list. Nothing more is sent on its own: only the user, shown `withdrawal`, can
+    /// authorize another ([`crate::Paykit::withdraw_list_again`]; Paykit spec 8.4, 8.5).
+    #[error("Paykit spec 8.5: the list withdrawal's delivery is unknown")]
+    ListWithdrawalUnknown(Box<crate::ListWithdrawal>),
     /// The payment method would transfer another amount or asset, an amount it can't tell, or
     /// a fee above the app's cap, and the user didn't choose it (Paykit spec 7.2 step 1).
     /// `quote` is what it would transfer, to show the user; paying it anyway carries it back

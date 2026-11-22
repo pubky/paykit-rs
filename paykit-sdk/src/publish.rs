@@ -12,6 +12,7 @@ mod withdrawal;
 
 use history::PublicationHistory;
 use std::collections::{BTreeMap, BTreeSet};
+pub(crate) use withdrawal::FirstDelivery;
 use withdrawal::{Payable, Withdrawal};
 
 use paykit_lib::bodies::{ListEndpoint, PrivatePaymentList, PRIVATE_LIST_MAX_AGE_MS};
@@ -21,7 +22,7 @@ use paykit_lib::{Kind, ListVersion, PaymentEndpointIdentifier, PaymentEndpointPa
 use pubky_switch_client::app::{
     Collection, DeliveryView, KeptBatchDrop, KeptBatchStatus, KeptReason, LocalWrite, OpBatch,
     OutgoingMessage, ReceiveReport, RecordContent, RecordRead, RecordTarget, SharedRecord,
-    StoreFailure,
+    StoreFailure, UserConfirmed,
 };
 use pubky_switch_core::ident::Policy;
 use pubky_switch_core::ops::Condition;
@@ -115,6 +116,23 @@ impl ListSettings {
     }
 }
 
+/// An empty Private Payment List the client gave up with an unknown outcome
+/// (Paykit spec 8.4, 8.5). The counterparty may not have it, and may keep paying the
+/// earlier list until it expires. Show it before asking the user whether to send
+/// another ([`Paykit::withdraw_list_again`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListWithdrawal {
+    /// The counterparty the list was withdrawn from.
+    pub recipient: [u8; 32],
+    /// The withdrawal's version.
+    pub version: ListVersion,
+    /// The withdrawal message's `msg_id`.
+    pub msg_id: String,
+    /// The latest time, in Unix milliseconds, an earlier nonempty list to this
+    /// counterparty can still be paid. `None` when it can't be bounded.
+    pub earlier_list_payable_until_ms: Option<u64>,
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ListRecipient {
@@ -175,7 +193,7 @@ pub(crate) struct ListReservation {
     expires: u64,
     pub(crate) publisher: [u8; 16],
     predecessors: Payable,
-    undelivered: bool,
+    delivery: FirstDelivery,
     #[serde(deserialize_with = "Option::deserialize")]
     withdrawal: Option<Withdrawal>,
     #[serde(deserialize_with = "Option::deserialize")]
@@ -302,7 +320,7 @@ impl RestoredPublications {
                 }
                 std::cmp::Ordering::Equal => {
                     held.predecessors = held.predecessors.union(issue.predecessors);
-                    held.undelivered |= issue.undelivered;
+                    held.delivery = held.delivery.with(issue.delivery);
                     if issue.withdrawal.is_none() {
                         held.withdrawal = None;
                     }
@@ -673,6 +691,15 @@ impl Paykit {
     /// If the client confirms first non-delivery, later receives can reserve a replacement
     /// after an hour, then hourly for the first day and daily while an earlier offer may be paid.
     /// Choosing the counterparty again ends this withdrawal.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::ListWithdrawalUnknown`] when the client gave up the current empty list
+    /// with an unknown outcome and the counterparty hasn't accepted it since. It may still
+    /// pay the earlier list. Nothing is sent: show the withdrawal and pass it to
+    /// [`Paykit::withdraw_list_again`] only once the user confirms another one (Paykit
+    /// spec 8.4, 8.5). [`Refusal::NotNow`] while an earlier publication is unresolved.
+    /// A store or client failure.
     pub async fn withdraw_list_from(&mut self, recipient: [u8; 32]) -> Result<()> {
         self.first_read_before_writing().await?;
         let at = key::list_recipient(&recipient);
@@ -682,10 +709,84 @@ impl Paykit {
         if prior.chosen {
             let left = ListRecipient::choose(Some(prior), recipient, false)?;
             self.local_put(&at, &left).await?;
-            Box::pin(self.publish_recipient(left, None)).await?;
-        } else {
-            Box::pin(self.publish_recipient(prior, None)).await?;
+            return Box::pin(self.publish_recipient(left, None)).await;
         }
+        Box::pin(self.publish_recipient(prior, None)).await?;
+        let Some(mut current) = self.local_get::<ListRecipient>(&at).await? else {
+            return Ok(());
+        };
+        match self.unknown_withdrawal(&mut current).await? {
+            Some((_, shown)) => Err(Refusal::ListWithdrawalUnknown(Box::new(shown)).into()),
+            None => Ok(()),
+        }
+    }
+
+    /// Send another empty list after the user confirmed `shown`, a withdrawal from
+    /// [`Refusal::ListWithdrawalUnknown`] or [`crate::NoticeKind::ListWithdrawalUnknown`]
+    /// whose delivery ended unknown. The earlier withdrawal may already have reached the
+    /// counterparty. The new one supersedes it and the earlier nonempty list alike.
+    /// The batch is conditioned on the counter `shown` names, and the counterparty must
+    /// still be withdrawn (Paykit spec 8.4, 8.5). Nothing is sent if the counterparty has
+    /// accepted the shown withdrawal since.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::ListWithdrawalUnknown`] with the current withdrawal when `shown` is no
+    /// longer it; nothing is sent. [`Refusal::NotNow`] when the counterparty was chosen
+    /// again, no withdrawal of unknown outcome is current, or the recipient's counter
+    /// changed. [`Refusal::NotFound`] for a counterparty never chosen. A store or client
+    /// failure.
+    pub async fn withdraw_list_again(
+        &mut self,
+        shown: &ListWithdrawal,
+        _confirmed: UserConfirmed,
+    ) -> Result<()> {
+        self.first_read_before_writing().await?;
+        let at = key::list_recipient(&shown.recipient);
+        let Some(mut recipient) = self.local_get::<ListRecipient>(&at).await? else {
+            return Err(Refusal::NotFound.into());
+        };
+        if recipient.chosen {
+            return Err(Refusal::NotNow(
+                "Paykit spec 8.4: the counterparty was chosen again after this withdrawal".into(),
+            )
+            .into());
+        }
+        self.resolve_publications(&shown.recipient).await?;
+        let prior = match self.unknown_withdrawal(&mut recipient).await? {
+            Some((prior, current)) if current == *shown => prior,
+            Some((_, current)) => {
+                return Err(Refusal::ListWithdrawalUnknown(Box::new(current)).into())
+            }
+            None => {
+                let accepted = match self
+                    .local_get::<ListReservation>(&key::list_reservation(&shown.recipient))
+                    .await?
+                {
+                    Some(issue) if issue.id == shown.msg_id => {
+                        recipient.answers.first(&issue).is_some()
+                    }
+                    _ => false,
+                };
+                if accepted {
+                    return Ok(());
+                }
+                return Err(Refusal::NotNow(
+                    "Paykit spec 8.5: no withdrawal of unknown outcome is current".into(),
+                )
+                .into());
+            }
+        };
+        let issue = Box::pin(self.reserve_private_list(
+            &mut recipient,
+            None,
+            &BTreeMap::new(),
+            IssueFor::RetryWithdrawal,
+            Some(&prior),
+            None,
+        ))
+        .await?;
+        self.send_message(&issue.msg_id).await?;
         Ok(())
     }
 
@@ -814,8 +915,13 @@ impl Paykit {
         }
         let endpoints = settings.map_or_else(|| Ok(BTreeMap::new()), |s| s.endpoints())?;
         if let Some(issue) = prior.as_mut() {
-            if !issue.undelivered && recipient.answers.first(issue).is_none() {
-                issue.undelivered = self.take_prior_list_nondelivery(&issue.id).await?;
+            if issue.delivery == FirstDelivery::Open
+                && recipient.answers.first(issue).is_none()
+                && self.take_prior_list_delivery(&issue.id).await?
+            {
+                if let Some(taken) = self.local_get::<ListReservation>(&at).await? {
+                    issue.delivery = taken.delivery;
+                }
             }
         }
         let issue = Box::pin(self.reserve_private_list(
@@ -1052,7 +1158,7 @@ impl Paykit {
             expires: list.expires_at,
             publisher,
             predecessors,
-            undelivered: false,
+            delivery: FirstDelivery::Open,
             withdrawal: endpoints.is_empty().then(|| Withdrawal {
                 first: previous
                     .and_then(|p| p.withdrawal)
@@ -1288,7 +1394,7 @@ mod tests {
             expires: 1000,
             publisher: issued.publisher,
             predecessors: Payable::Until(0),
-            undelivered: false,
+            delivery: FirstDelivery::Open,
             withdrawal: None,
             recipient: issued.recipient,
             choice: [7; 16],
