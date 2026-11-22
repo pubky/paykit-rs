@@ -41,6 +41,10 @@ pub enum WalletNoticeKind {
     SettlementCreditedTwice,
     /// A bounded recovery family discarded a window before a request covering it was delivered.
     DroppedMessagesLost,
+    /// The identity's block floor is held after it was seen divergent: no automatic one-time
+    /// payment goes and each request can still be paid by hand. Shown once, and again at each
+    /// reopen.
+    BlockFloorHeld,
     /// A native case that this binding does not recognize.
     Other,
 }
@@ -61,6 +65,7 @@ impl From<paykit_sdk::NoticeKind> for WalletNoticeKind {
             K::SettlementMarksChanged => Self::SettlementMarksChanged,
             K::SettlementCreditedTwice => Self::SettlementCreditedTwice,
             K::DroppedMessagesLost => Self::DroppedMessagesLost,
+            K::BlockFloorHeld => Self::BlockFloorHeld,
             _ => Self::Other,
         }
     }

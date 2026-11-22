@@ -581,7 +581,8 @@ fn came_back_from_block(
     let held = cx.record(&target)?;
     let seen = cx.record_seen(&cx.record_key(&target)?)?;
     let kept = state::cx_get::<crate::floor::FloorKept>(cx, key::FLOOR_KEPT)?.unwrap_or_default();
-    let shared = crate::floor::shared_floor_of(held.as_ref(), seen.as_deref(), kept);
+    // The receive step can't tell the loss: an absence after a live floor holds the request.
+    let shared = crate::floor::shared_floor_of(held.as_ref(), seen.as_deref(), kept, None);
     Ok(came_back_by(
         stored,
         mark.map(|mark| mark.latest_ms),
@@ -3207,7 +3208,15 @@ impl Paykit {
             }
             // Only the pending hold clears with the raise. A late answer cannot replace
             // a newer deny list or delete a block the user has made since this read.
-            Box::pin(self.commit_with_floor(pending.to_ms, tx)).await?;
+            match Box::pin(self.commit_with_floor(pending.to_ms, tx)).await {
+                Ok(()) => {}
+                // A raise that can't be written, for now or while the divergence hold stands,
+                // leaves the unblock's senders held (`bf`) and is tried again at the next
+                // read; it never leaves the lists unread, which would hold every payment,
+                // intake and send (Paykit spec 8.1; Paykit wire 5.6).
+                Err(error) if crate::floor::is_raise_unwritten(&error) => {}
+                Err(error) => return Err(error),
+            }
             self.local_put(key::LISTS_READ, &read_at).await?;
         } else {
             tx.put(key::LISTS_READ, &read_at)?.put(key::DENIED, &deny)?;

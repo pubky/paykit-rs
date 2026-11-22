@@ -60,7 +60,7 @@
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `paykit_pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
 //! | `nt/outgoing/<recipient>/<msg_id>/<hash>` | the disposition of an exact original delivery is unknown after restore. Acknowledgment is retained for repeated imports | |
-//! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
+//! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>`, `nt/<tag>` | a notice for the host about a payment, a message given up, or the identity as a whole, until acknowledged (`notices.rs`); an identity-wide one is never restored and is told again at each load while what it tells stands | |
 //! | `xm/<sender>/<msg_id>` | an extension message from `sender` of a kind the host registered, kept from its receive step until the host takes it (`extensions.rs`, Paykit spec 3.3); at most 64 per sender and 128 in all | yes |
 //! | `dl` | the deny list as the app last read it, with this app's blocks kept unanswered (`bk/`), for the views and a payment the user starts (Paykit spec 8.1) | |
 //! | `fg` | the flagged senders as the app last read them, at most `MAX_FLAGGED_COPY`; absent while not known, which holds the asks of block marks (`marks.rs`); never restored | |
@@ -2119,6 +2119,11 @@ pub(crate) mod key {
     }
 
     /// The notice of `kind` about `attempt`.
+    /// The identity-wide notice of `kind` (`crate::notices`).
+    pub(crate) fn identity_notice(kind: crate::notices::NoticeKind) -> String {
+        format!("{NOTICES}{}", kind.tag())
+    }
+
     pub(crate) fn notice(attempt: &AttemptId, kind: crate::notices::NoticeKind) -> String {
         format!("{NOTICES}{}", crate::notices::notice_id(attempt, kind))
     }
@@ -2451,6 +2456,8 @@ pub(crate) enum StateKey {
     BlockFloor,
     /// `fk`: what this app keeps of the block floor.
     FloorKept,
+    /// `nt/<tag>`: an identity-wide notice of the kind the tag names.
+    IdentityNotice(crate::notices::NoticeKind),
     /// The local identifier of an unanswered floor write.
     FloorBatch,
     /// `fo/<record key>`: a request record a read opened without `manual_only`, to check
@@ -2866,6 +2873,9 @@ impl StateKey {
                         }
                     }
                     "nt" => {
+                        if let Some(kind) = crate::notices::NoticeKind::identity_from_tag(rest) {
+                            return Some(Self::IdentityNotice(kind));
+                        }
                         if let Some(subject) = rest.strip_prefix("settlement/") {
                             return crate::notices::SettlementSubject::parse(subject)
                                 .map(Self::SettlementNotice);
@@ -3151,17 +3161,23 @@ mod tests {
     #[test]
     fn test_floor_kept_binds_to_its_key_and_is_never_empty() {
         use crate::floor::FloorKept;
-        let kept = serde_json::json!({ "seen_ms": 70, "divergent": true });
+        let kept = serde_json::json!({ "seen_ms": 70, "live_in": 2, "divergent": true });
         assert!(reads::<FloorKept>(key::FLOOR_KEPT, kept.clone()));
         assert!(reads::<FloorKept>(
             key::FLOOR_KEPT,
-            serde_json::json!({ "seen_ms": null, "divergent": true })
+            serde_json::json!({ "seen_ms": null, "live_in": null, "divergent": true })
         ));
         assert!(!reads::<FloorKept>(key::BLOCK_FLOOR, kept.clone()));
         assert!(!reads::<FloorKept>(
             key::FLOOR_KEPT,
-            serde_json::json!({ "seen_ms": null, "divergent": false })
+            serde_json::json!({ "seen_ms": null, "live_in": null, "divergent": false })
         ));
+        // Every member is present: none missing, none unknown.
+        for member in ["seen_ms", "live_in", "divergent"] {
+            let mut missing = kept.clone();
+            missing.as_object_mut().unwrap().remove(member);
+            assert!(!reads::<FloorKept>(key::FLOOR_KEPT, missing), "{member}");
+        }
         let mut unknown = kept;
         unknown["extra"] = serde_json::json!(true);
         assert!(!reads::<FloorKept>(key::FLOOR_KEPT, unknown));
@@ -3867,6 +3883,10 @@ mod tests {
                 },
             ),
             (key::FLOOR_KEPT.into(), StateKey::FloorKept),
+            (
+                key::identity_notice(crate::notices::NoticeKind::BlockFloorHeld),
+                StateKey::IdentityNotice(crate::notices::NoticeKind::BlockFloorHeld),
+            ),
             (key::BLOCK_FLOOR.into(), StateKey::BlockFloor),
             (key::FLOOR_BATCH.into(), StateKey::FloorBatch),
             (key::floor_opened(&pubky), StateKey::FloorOpened(pubky)),

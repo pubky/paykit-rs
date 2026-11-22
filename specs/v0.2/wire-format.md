@@ -813,7 +813,7 @@ Until an adopted Switch revision and its Paykit mapping and implementation provi
 | `allowance_proposals` | `paykit_allowance` | `["paykit_allowance"]` | Ordinary | `policies` |
 | `allowances` | `paykit_allowance` | `["paykit_allowance"]` | Permanent, `generation: null` | `policies` |
 | `allowance_ledgers` | `paykit_allowance` | `["paykit_allowance_execute"]` | Permanent, `generation: null` | `policies` |
-| `block_floor` | `paykit_pay` | `["paykit_pay"]` | Permanent, `generation: null` | `policies` (pending permanent update; 5.6) |
+| `block_floor` | `paykit_pay` | `["paykit_pay"]` | Permanent, `generation: null` | `policies` |
 | `settlements` | `paykit_settlements` | `["paykit_settlements"]` | Permanent, `generation: null` | `policies` |
 
 Apps ignore a record in these collections whose policy differs. The permanent Allowance key guards pending proposals (spec 8.3.1). The ledger's fixed policy has read scope `paykit_allowance`, sole write scope `paykit_allowance_execute` and permanent generation `null`. The same write scope applies to the original creation and every successor. Derive the account's single ledger key with that policy and the named collection (Switch wire 1.5, 6.2). Creation requires absence at application. The service refuses deletion of the permanent record. Paykit separately verifies the sealed value, original Q and current executor authority. A labelled request's records, its request record and its period records, have its label's policy, are sealed with the label key (Switch wire 1.5) under the AAD of Switch wire 6.2 with `scope` `paykit_request:<label>`, and bind that label (5.3).

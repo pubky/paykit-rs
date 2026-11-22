@@ -246,9 +246,12 @@ impl DivergentMark {
         self.confirmed.is_none()
     }
 
-    /// The mark's collection; a mark is read only bound, so it names one of Paykit's.
+    /// The mark's collection; a mark is read only bound, so it names one of Paykit's, never
+    /// `block_floor`, whose divergence is held for good with no mark (`crate::floor`).
     fn collection(&self) -> Result<Collection> {
-        Collection::from_name(&self.collection).ok_or_else(PaykitError::corrupt)
+        Collection::from_name(&self.collection)
+            .filter(|collection| *collection != Collection::BlockFloor)
+            .ok_or_else(PaykitError::corrupt)
     }
 
     /// The mark bound to the key it is read at, `dv/<record>` (`state::Stored`): the record
@@ -261,6 +264,7 @@ impl DivergentMark {
     /// check for a restore and for every read at runtime; a value that fails it is a corrupt
     /// store, never an absent mark, so no credit goes from it.
     pub(crate) fn bind_to(&self, record: &[u8; 32]) -> Result<()> {
+        self.collection()?;
         if self.record != *record
             || self.confirmed.is_some_and(|at| at < self.seen)
             || self.credit_confirmed.is_some_and(|at| at < self.seen)
@@ -1509,12 +1513,7 @@ impl Paykit {
                 .record_key(&crate::floor::floor_target(&self.identity()))?
         {
             // Kept before the event is taken, held or not (Paykit wire 5.6, Divergent floor).
-            return self
-                .keep_floor(crate::floor::FloorKept {
-                    seen_ms: None,
-                    divergent: true,
-                })
-                .await;
+            return self.keep_floor(crate::floor::FloorKept::divergent()).await;
         }
         let (marked, Some(view)) = self.mark_and_view(record).await? else {
             return Ok(());
@@ -1925,6 +1924,14 @@ impl Paykit {
     ) -> Result<()> {
         self.refresh_own()?;
         let record = &shown.record;
+        // The floor's divergence is no record the user confirms (`crate::floor`).
+        if *record
+            == self
+                .app
+                .record_key(&crate::floor::floor_target(&self.identity()))?
+        {
+            return Err(Refusal::FloorHeld.into());
+        }
         let (marked, view) = self.mark_and_view(record).await?;
         if marked == Marked::Clear && !view.is_some_and(|view| view.divergent) {
             return Err(Refusal::NotFound.into());

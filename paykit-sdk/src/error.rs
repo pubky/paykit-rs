@@ -229,6 +229,13 @@ pub enum Refusal {
     /// or the clocks disagreeing (Switch spec 10.1, 12.4).
     #[error("not now: {0}")]
     NotNow(String),
+    /// The identity's block floor was seen divergent after a provider loss, and nothing can
+    /// show what the hidden upload held: no raise of the floor can be written, so an unblock
+    /// or a widening that needs one waits for good, and no automatic one-time payment goes
+    /// (Paykit wire 5.6, Divergent floor). Payments by hand, Billing Periods and payments
+    /// without a request go on under their own rules. Retrying changes nothing.
+    #[error("Paykit wire 5.6: the block floor is held after it was seen divergent; no raise of it can be written")]
+    FloorHeld,
     /// A value the caller gave breaks a rule: the text names it.
     #[error("usage: {0}")]
     Usage(String),

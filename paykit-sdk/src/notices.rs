@@ -93,6 +93,12 @@ pub enum NoticeKind {
     /// A bounded recovery family discarded a window before a request covering it was
     /// delivered. Recovery of those messages is no longer tracked (Paykit spec 9).
     DroppedMessagesLost,
+    /// The identity's block floor was seen divergent after a provider loss and is held for
+    /// good (Paykit wire 5.6, Divergent floor): no automatic one-time payment goes, every
+    /// one-time request is paid only by hand, and an unblock or a widening that needs the
+    /// floor raised waits ([`crate::Refusal::FloorHeld`]). Raised when the hold is first kept
+    /// and again at each load while it stands; it names no attempt, message or counterparty.
+    BlockFloorHeld,
 }
 
 impl NoticeKind {
@@ -112,7 +118,16 @@ impl NoticeKind {
             Self::SettlementMarksChanged => "settlement_marks_changed",
             Self::SettlementCreditedTwice => "settlement_credited_twice",
             Self::DroppedMessagesLost => "dropped_lost",
+            Self::BlockFloorHeld => "floor_held",
         }
+    }
+
+    /// The identity-wide kind a key names (`nt/<tag>`): one about the identity as a whole,
+    /// at most one kept, naming no attempt, message or counterparty.
+    pub(crate) fn identity_from_tag(tag: &str) -> Option<Self> {
+        [Self::BlockFloorHeld]
+            .into_iter()
+            .find(|kind| kind.tag() == tag)
     }
 
     /// The kind a key names.
@@ -288,7 +303,8 @@ pub struct Notice {
 /// A notice as kept (`p/nt/<attempt_id>/<kind>`, `p/nt/<sender>/<msg_id>` for a message
 /// given up, or `p/nt/<counterparty>/lost-<from_ms>` for a window of messages a block
 /// dropped that can no longer come back, `from_ms` its earliest acceptance time, zero-padded
-/// to 20 digits): what its key names repeats in it, so a restore binds the value to its key.
+/// to 20 digits, or `p/nt/<tag>` for an identity-wide notice): what its key names repeats in
+/// it, so a restore binds the value to its key.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct KeptNotice {
     pub(crate) kind: NoticeKind,
@@ -375,6 +391,24 @@ pub(crate) struct StoredHandle {
 }
 
 impl KeptNotice {
+    /// The identity-wide notice of `kind`, raised at `at`.
+    pub(crate) fn identity(kind: NoticeKind, at: u64) -> Self {
+        Self {
+            kind,
+            settlement: None,
+            counterparty: None,
+            raised_at_ms: at,
+            acknowledged: false,
+            attempt_id: None,
+            msg_id: None,
+            message_hash: None,
+            request_hash: None,
+            stored: None,
+            origin: None,
+            lost: None,
+        }
+    }
+
     pub(crate) fn settlement(subject: SettlementSubject, payer: Option<[u8; 32]>, at: u64) -> Self {
         Self {
             kind: subject.kind(),
@@ -682,6 +716,7 @@ pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
             SettlementSubject::Changed { .. } | SettlementSubject::Conflicting { .. },
         )) => peer.is_none(),
         Some(StateKey::SettlementNotice(SettlementSubject::Bucket(_))) => true,
+        Some(StateKey::IdentityNotice(_)) => peer.is_none(),
         _ => peer.is_some(),
     };
     if !peer_allowed {
@@ -705,6 +740,13 @@ pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
             }
         }
         _ if notice.settlement.is_some() => Err(PaykitError::corrupt()),
+        Some(StateKey::IdentityNotice(kind)) => {
+            if *notice == KeptNotice::identity(kind, notice.raised_at_ms) {
+                Ok(())
+            } else {
+                Err(PaykitError::corrupt())
+            }
+        }
         Some(StateKey::RestoredDelivery { to, msg_id, hash }) => {
             if notice.kind != NoticeKind::PossiblyDelivered
                 || notice.counterparty.as_deref() != Some(&b64(&to))
@@ -834,6 +876,7 @@ impl Paykit {
                     | StateKey::BlockedLost { .. }
                     | StateKey::SettlementNotice(_)
                     | StateKey::DroppedLost { .. }
+                    | StateKey::IdentityNotice(_)
             )
         ) {
             return Err(Refusal::NotFound.into());
@@ -865,6 +908,40 @@ impl Paykit {
         }
         kept.acknowledged = true;
         self.local_put(&key, &kept).await
+    }
+
+    /// Tell the host of the identity-wide notice of `kind`, once per load: a notice already
+    /// shown and not yet acknowledged is left as it is.
+    ///
+    /// # Errors
+    ///
+    /// A store failure.
+    pub(crate) async fn tell_identity_notice(&mut self, kind: NoticeKind) -> Result<()> {
+        if self.identity_told.contains(&kind) {
+            return Ok(());
+        }
+        let key = key::identity_notice(kind);
+        if self.kept_notice(&key).await?.is_none() {
+            let at = self.service_time().unwrap_or(0);
+            self.local_put(&key, &KeptNotice::identity(kind, at))
+                .await?;
+        }
+        self.identity_told.push(kind);
+        Ok(())
+    }
+
+    /// Tell the host, at a load or a restore, of every identity-wide hold that stands: the
+    /// block floor held after it was seen divergent ([`NoticeKind::BlockFloorHeld`]).
+    ///
+    /// # Errors
+    ///
+    /// A store failure, or a kept floor that doesn't read.
+    pub(crate) async fn tell_identity_notices(&mut self) -> Result<()> {
+        if self.floor_kept().await?.divergent {
+            self.tell_identity_notice(NoticeKind::BlockFloorHeld)
+                .await?;
+        }
+        Ok(())
     }
 
     /// The notice kept at `key`, read whole and bound to it ([`bind_notice`]).

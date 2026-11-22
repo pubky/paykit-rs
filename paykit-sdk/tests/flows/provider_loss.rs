@@ -2952,3 +2952,47 @@ async fn test_provider_loss_reconcile_retains_journaled_orphan_after_loss() {
 async fn test_provider_loss_reconcile_retains_journaled_orphan_without_loss() {
     journaled_orphan_report(false).await;
 }
+
+#[tokio::test]
+async fn test_provider_loss_keeps_the_floor_divergence_hold() {
+    // Paykit wire 5.6, Divergent floor: the hold survives a later provider loss.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            "block_floor",
+            paykit_lib::collections::Collection::BlockFloor.fixed_policy(),
+        ),
+        &paykit_lib::derive::natural_key::block_floor(&w.alice_id()),
+    );
+    wallet
+        .app_mut()
+        .put_record(
+            &target,
+            &paykit_lib::records::BlockFloorRecord::new(1)
+                .to_json()
+                .unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let key = wallet.app().record_key(&target).unwrap();
+    w.alice
+        .switch()
+        .make_divergent([0x5a; 16], key, [1; 32])
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let held = |bytes: Option<Vec<u8>>| {
+        let value: serde_json::Value = serde_json::from_slice(&bytes.unwrap()).unwrap();
+        value["d"]["divergent"] == serde_json::json!(true)
+    };
+    assert!(held(
+        wallet.app().protocol_get("paykit", b"fk").await.unwrap()
+    ));
+    w.clock.advance_ms(60_000);
+    declare_loss(&w);
+    follow_loss(&mut wallet).await;
+    assert!(held(
+        wallet.app().protocol_get("paykit", b"fk").await.unwrap()
+    ));
+}

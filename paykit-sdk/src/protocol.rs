@@ -507,7 +507,7 @@ fn previous_floor_kept(
     for held in restoring.previous_records_of(Collection::BlockFloor.name()) {
         let held = held.map_err(|_| "the installation's block floor cannot be read")?;
         if held.key == floor_key && held.policy == policy {
-            kept = kept.with(crate::floor::FloorKept::of_view(&held));
+            kept = kept.with(crate::floor::FloorKept::of_view(&held, None));
         }
     }
     Ok(kept)
@@ -1108,6 +1108,11 @@ pub(crate) fn restore_paykit_layer(
             StateKey::ListAsk { .. } => {
                 state::restored::<ListAsk>(&key, &value, &binder).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            // Not restored: the restored app tells its host again at its load.
+            StateKey::IdentityNotice(_) => {
+                state::restored::<KeptNotice>(&key, &value, &binder).map_err(|_| unread())?;
                 continue;
             }
             StateKey::SettlementNotice(_) => {

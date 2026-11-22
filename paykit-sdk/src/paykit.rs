@@ -384,6 +384,9 @@ pub struct Paykit {
     /// The capabilities the join checked, which its first update signs as they are
     /// (`crate::own_record`); `None` otherwise.
     pub(crate) capability_snapshot: Option<Vec<paykit_lib::PaymentEndpointIdentifier>>,
+    /// The identity-wide notices this load has told the host of (`crate::notices`): each
+    /// once per load while what it tells stands.
+    pub(crate) identity_told: Vec<crate::NoticeKind>,
 }
 
 impl std::fmt::Debug for Paykit {
@@ -449,6 +452,7 @@ impl Paykit {
             first_read_summary: None,
             own_record_unknown: false,
             capability_snapshot: None,
+            identity_told: Vec::new(),
         }
     }
 
@@ -708,6 +712,8 @@ impl Paykit {
         // A divergent record pauses even when a crash came before the receive's events
         // were taken: look at each held record once (`divergent.rs`).
         Box::pin(self.sweep_divergent()).await?;
+        // The host hears again, at each load, of what holds the identity for good.
+        self.tell_identity_notices().await?;
         // A crash between the restore's commit and clock clamp leaves the clamp for the
         // next load. Nothing is written under a certificate Paykit refuses.
         if self.certificate_refused().is_none() {
@@ -781,6 +787,8 @@ impl Paykit {
             let mut paykit = Self::assemble(app, protocol, config, rail, timer);
             paykit.bound_restored_cursor_time().await?;
             paykit.stamp_restore_time().await?;
+            // An app restored opens as one loaded does.
+            paykit.tell_identity_notices().await?;
             Ok(paykit)
         })
         .await
@@ -795,6 +803,11 @@ impl Paykit {
     /// The client's errors, such as a backup over the store's sizes
     /// (`AppEvent::BackupRefused`) or a journal Paykit's layer refuses; a store failure.
     pub async fn backup(&mut self) -> Result<PaykitBackup> {
+        // A divergence of the block floor the client holds or reported goes into the backup
+        // as the hold (`crate::floor`), whatever the receive that met it got to.
+        if self.certificate_refused().is_none() {
+            Box::pin(self.keep_held_floor()).await?;
+        }
         Ok(PaykitBackup {
             app: self.app.backup_layered().await?,
         })

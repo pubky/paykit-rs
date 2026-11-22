@@ -52,7 +52,7 @@ use paykit_lib::derive::natural_key;
 use paykit_lib::records::{BlockFloorRecord, StoredMessage};
 use paykit_lib::Body;
 use pubky_switch_client::app::{
-    KeptReason, OpBatch, RecordContent, RecordRead, RecordTarget, SharedRecord,
+    AppEvent, KeptReason, OpBatch, RecordContent, RecordRead, RecordTarget, SharedRecord,
 };
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::records::CLOCK_TOLERANCE_MS;
@@ -93,38 +93,65 @@ pub(crate) enum SharedFloor {
 }
 
 /// What this app keeps of the block floor in its own state (`fk`, Paykit wire 5.6, Divergent
-/// floor and Seen floor and permanence): the highest floor it has seen and whether it has seen
-/// the record divergent. Both only grow; a backup carries them, and an in-place restore keeps
-/// the higher of the backup's and the installation's ([`FloorKept::with`]).
+/// floor and Seen floor and permanence): the highest floor it has seen, the newest generation
+/// it saw the record live in, and whether it has seen the record divergent. All only grow; a
+/// backup carries them, and an in-place restore keeps the higher of the backup's and the
+/// installation's ([`FloorKept::with`]). Every member is present in what is stored.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FloorKept {
     /// The highest floor seen, in Unix milliseconds.
+    #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) seen_ms: Option<u64>,
+    /// The newest generation the app followed while it saw the record live: an absence in
+    /// that generation, or a later one no provider loss covers, is no lawful absence (Paykit
+    /// wire 5.6, Seen floor and permanence).
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(crate) live_in: Option<u64>,
     /// The record was seen divergent: the durable divergence hold.
     pub(crate) divergent: bool,
 }
 
 impl FloorKept {
-    /// Both kept: the higher floor, and divergent if either saw it so.
+    /// Both kept: the higher of each, and divergent if either saw it so.
     pub(crate) fn with(self, other: FloorKept) -> FloorKept {
         FloorKept {
             seen_ms: self.seen_ms.max(other.seen_ms),
+            live_in: self.live_in.max(other.live_in),
             divergent: self.divergent || other.divergent,
         }
     }
 
-    /// What `held`, a view of the floor record the app read, adds: its floor when it reads,
-    /// and its divergence.
-    pub(crate) fn of_view(held: &SharedRecord) -> FloorKept {
+    /// What `held`, a view of the floor record the app read while it followed `generation`,
+    /// adds: its floor when it reads, the generation when it holds a value, and its
+    /// divergence. `None` for a generation the caller can't tell, as for an installation's
+    /// copy at a restore.
+    pub(crate) fn of_view(held: &SharedRecord, generation: Option<u64>) -> FloorKept {
+        let value = held.content.value();
         FloorKept {
-            seen_ms: held
-                .content
-                .value()
+            seen_ms: value
                 .and_then(|value| BlockFloorRecord::read(value).ok())
                 .map(|record| record.floor_ms),
+            live_in: value.and(generation),
             divergent: held.divergent,
         }
+    }
+
+    /// The divergence alone, as the client's event reports it.
+    pub(crate) fn divergent() -> FloorKept {
+        FloorKept {
+            divergent: true,
+            ..FloorKept::default()
+        }
+    }
+
+    /// Whether the record is absent with no provider loss to explain it: it was seen live in
+    /// a generation that `lost`, the generation the newest own `identity.json` names lost,
+    /// doesn't cover (Paykit wire 5.6, Seen floor and permanence). A caller that can't tell
+    /// the loss passes `None`, which takes every absence after a live floor as unlawful.
+    fn absence_unlawful(&self, lost: Option<u64>) -> bool {
+        self.live_in
+            .is_some_and(|live| lost.is_none_or(|lost| lost < live))
     }
 
     /// Whether nothing is kept: no writer stores this.
@@ -135,14 +162,16 @@ impl FloorKept {
 
 /// The floor of the record `held`, with `seen`, the mark of the newest value the app took that
 /// reads (`Protocol::record_seen`), and `kept`, what the app keeps of the floor: the highest of
-/// them. A malformed value, an unauthenticated delete and an empty answer keep the floor seen;
-/// with none seen, a malformed value or an unauthenticated delete can't be read. An
-/// authenticated delete, which the permanent policy forbids, and an unopened value hold every
-/// automatic attempt; a divergent view or a kept divergence holds it for good (module docs).
+/// them. A malformed value and an unauthenticated delete keep the floor seen; with none seen,
+/// they can't be read. No record, after the app saw one live in a generation `lost` doesn't
+/// cover, can't be read either (Paykit wire 5.6, Seen floor and permanence). An authenticated
+/// delete, which the permanent policy forbids, and an unopened value hold every automatic
+/// attempt; a divergent view or a kept divergence holds it for good (module docs).
 pub(crate) fn shared_floor_of(
     held: Option<&SharedRecord>,
     seen: Option<&[u8]>,
     kept: FloorKept,
+    lost: Option<u64>,
 ) -> SharedFloor {
     if kept.divergent || held.is_some_and(|held| held.divergent) {
         return SharedFloor::Divergent;
@@ -153,6 +182,9 @@ pub(crate) fn shared_floor_of(
         .max(kept.seen_ms);
     let seen_or_unknown = || seen.map_or(SharedFloor::Unknown, |s| SharedFloor::Known(Some(s)));
     let Some(held) = held else {
+        if kept.absence_unlawful(lost) {
+            return SharedFloor::Unknown;
+        }
         return SharedFloor::Known(seen);
     };
     match &held.content {
@@ -167,7 +199,7 @@ pub(crate) fn shared_floor_of(
 
 /// The record a raise is built on, so every member the writer doesn't know is written back
 /// as read (Paykit wire 5). For a readable floor use its current value, falling back to the
-/// mark for malformed content. The caller has already excluded an unresolved deletion.
+/// mark for malformed content.
 fn write_base(held: Option<&[u8]>, seen: Option<&[u8]>, floor: Option<u64>) -> BlockFloorRecord {
     let read = |value: &[u8]| BlockFloorRecord::read(value).ok();
     held.and_then(read)
@@ -217,7 +249,8 @@ impl Paykit {
     ) -> Result<SharedFloor> {
         let kept = self.floor_kept().await?;
         let seen = self.app.record_seen(key).await?;
-        Ok(shared_floor_of(held, seen.as_deref(), kept))
+        let lost = self.app.own_identity().body().recovery_from;
+        Ok(shared_floor_of(held, seen.as_deref(), kept, lost))
     }
 
     /// What this app keeps of the floor ([`FloorKept`]).
@@ -235,27 +268,43 @@ impl Paykit {
         if held.key != self.app.record_key(&floor_target(&self.identity()))? {
             return Ok(());
         }
-        self.keep_floor(FloorKept::of_view(held)).await
+        let generation = self.app.own_identity().generation();
+        self.keep_floor(FloorKept::of_view(held, Some(generation)))
+            .await
     }
 
-    /// Keep `more` with what this app keeps of the floor.
+    /// Keep `more` with what this app keeps of the floor. The divergence, once kept for the
+    /// first time, is told to the host ([`crate::NoticeKind::BlockFloorHeld`]).
     pub(crate) async fn keep_floor(&mut self, more: FloorKept) -> Result<()> {
         let kept = self.floor_kept().await?;
         let after = kept.with(more);
         if after == kept {
             return Ok(());
         }
-        self.local_put(key::FLOOR_KEPT, &after).await
+        self.local_put(key::FLOOR_KEPT, &after).await?;
+        if after.divergent && !kept.divergent {
+            self.tell_identity_notice(crate::NoticeKind::BlockFloorHeld)
+                .await?;
+        }
+        Ok(())
     }
 
-    /// Keep the floor record as the app holds it now, at a load and at each receive's end, so
-    /// a view the listing or the feed showed divergent, or a higher floor it took, is kept
-    /// (module docs). The divergence event keeps it as well; this keeps it even when the
-    /// event was taken before.
+    /// Keep what the app holds of the floor now: the record as the client holds it, and a
+    /// divergence the client reported that Paykit hasn't taken yet (a pending
+    /// `AppEvent::RecordDivergent`), so a view a listing, the feed or a `409` showed is kept
+    /// before any later read replaces it (module docs). Run before every floor decision that
+    /// reads the switch again, before every write, at a load, at each receive's end and
+    /// before a backup.
     pub(crate) async fn keep_held_floor(&mut self) -> Result<()> {
         let key = self.app.record_key(&floor_target(&self.identity()))?;
         if let Some(held) = self.app.shared_record(&key).await? {
-            self.keep_floor(FloorKept::of_view(&held)).await?;
+            self.keep_floor_view(&held).await?;
+        }
+        let reported = self.app.pending_duty_events().await?.iter().any(|pending| {
+            matches!(&pending.event, AppEvent::RecordDivergent { key: at, .. } if *at == key)
+        });
+        if reported {
+            self.keep_floor(FloorKept::divergent()).await?;
         }
         Ok(())
     }
@@ -288,6 +337,7 @@ impl Paykit {
     ///
     /// A store failure keeping what the read shows.
     pub(crate) async fn floor_read_now(&mut self) -> Result<Option<Option<SharedRecord>>> {
+        self.keep_held_floor().await?;
         let Ok(read) = self
             .app
             .read_record_fresh(&floor_target(&self.identity()))
@@ -340,40 +390,46 @@ impl Paykit {
         ))
     }
 
-    /// The shared floor for a write: the copy's, or, while the payer's records aren't listed
-    /// or the copy can't open it, the record as the switch holds it now, read alone. A read
-    /// that fails leaves it unknown, as does a scope key the app waits for.
+    /// The shared floor for a write of a raise to `to_ms`: the record as the switch holds it
+    /// now, read alone, with what this app holds and keeps of it, the copy's divergence kept
+    /// first ([`Paykit::floor_read_now`]), so no write goes over a divergence the app saw or
+    /// the switch shows now. When nothing read now shows the switch's write, the copy decides
+    /// a raise that is needed, whose conditional write checks its version at the service; a
+    /// raise skipped needs the switch's write. A read that fails leaves it unknown, as does a
+    /// scope key the app waits for.
     async fn floor_for_write(&mut self, to_ms: u64) -> Result<SharedFloor> {
         // Sealed under `paykit_pay` at the current data epoch: without that key nothing is written,
         // and nothing read while the copy waits for a wider certificate's keys.
         if !self.holds_scope_keys() {
             return Ok(SharedFloor::Unknown);
         }
-        let held = self.shared_floor().await?;
-        if matches!(held, SharedFloor::Known(floor) if floor.is_none_or(|value| value < to_ms)) {
-            // The conditional raise will check this version at the service.
-            return Ok(held);
-        }
-        // Skipping a raise makes no conditional write. Verify the sufficient floor is
-        // still current before letting the unblock or widening proceed.
-        let Some(read) = self.floor_read_now().await? else {
-            return Ok(SharedFloor::Unknown);
-        };
         let key = self.app.record_key(&floor_target(&self.identity()))?;
-        self.floor_of_read(&key, read.as_ref()).await
+        if let Some(read) = self.floor_read_now().await? {
+            return self.floor_of_read(&key, read.as_ref()).await;
+        }
+        let held = self.shared_floor().await?;
+        Ok(match held {
+            SharedFloor::Known(floor) if floor.is_none_or(|value| value < to_ms) => held,
+            SharedFloor::Divergent => held,
+            _ => SharedFloor::Unknown,
+        })
     }
 
     /// Prepare a conditional raise to `to_ms`. An applied floor at least as high
     /// already covers this window. No create or successor is written over a divergent
-    /// floor or while the divergence hold stands (Paykit wire 5.6, Divergent floor).
+    /// floor or while the divergence hold stands (Paykit wire 5.6, Divergent floor). A base
+    /// taken from a recovery upload names its exact application (`record_current`), which
+    /// the client adds from the write's base.
     ///
     /// # Errors
     ///
-    /// [`Refusal::NotNow`] while the floor can't be read, or is held divergent; the client's
-    /// errors.
+    /// [`Refusal::FloorHeld`] while the divergence hold stands; [`Refusal::NotNow`] while the
+    /// floor can't be read; the client's errors.
     async fn floor_batch(&mut self, to_ms: u64) -> Result<Option<OpBatch>> {
-        let SharedFloor::Known(floor) = self.floor_for_write(to_ms).await? else {
-            return Err(unreadable_floor());
+        let floor = match self.floor_for_write(to_ms).await? {
+            SharedFloor::Known(floor) => floor,
+            SharedFloor::Divergent => return Err(Refusal::FloorHeld.into()),
+            SharedFloor::Unknown => return Err(unreadable_floor()),
         };
         let target = floor_target(&self.identity());
         let key = self.app.record_key(&target)?;
@@ -597,6 +653,12 @@ pub(crate) fn is_unreadable_floor(error: &crate::error::PaykitError) -> bool {
     matches!(error.refusal(), Some(Refusal::NotNow(why)) if why == UNREADABLE_FLOOR)
 }
 
+/// Whether a raise couldn't be written: the floor can't be read now, or the divergence hold
+/// stands. Neither fails a read of the lists: the raise stays owed (module docs).
+pub(crate) fn is_raise_unwritten(error: &crate::error::PaykitError) -> bool {
+    is_unreadable_floor(error) || matches!(error.refusal(), Some(Refusal::FloorHeld))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -627,15 +689,18 @@ mod tests {
     #[test]
     fn test_floor_unknown_without_a_value_or_a_seen_floor() {
         let none = FloorKept::default();
-        assert_eq!(shared_floor_of(None, None, none), SharedFloor::Known(None));
+        assert_eq!(
+            shared_floor_of(None, None, none, None),
+            SharedFloor::Known(None)
+        );
         let seen = BlockFloorRecord::new(70).to_json().unwrap();
         assert_eq!(
-            shared_floor_of(None, Some(&seen), none),
+            shared_floor_of(None, Some(&seen), none, None),
             SharedFloor::Known(Some(70))
         );
         let malformed = RecordContent::Value(br#"{"v":1}"#.to_vec());
         assert_eq!(
-            shared_floor_of(Some(&held(malformed, true, false)), None, none),
+            shared_floor_of(Some(&held(malformed, true, false)), None, none, None),
             SharedFloor::Unknown
         );
     }
@@ -645,22 +710,52 @@ mod tests {
         let seen = BlockFloorRecord::new(70).to_json().unwrap();
         let kept = FloorKept {
             seen_ms: Some(90),
+            live_in: None,
             divergent: false,
         };
         // A later lower write, an in-place restore or a lost mark never lowers the floor.
         let current = held(value(50), true, false);
         assert_eq!(
-            shared_floor_of(Some(&current), Some(&seen), kept),
+            shared_floor_of(Some(&current), Some(&seen), kept, None),
             SharedFloor::Known(Some(90))
         );
         assert_eq!(
-            shared_floor_of(None, None, kept),
+            shared_floor_of(None, None, kept, None),
             SharedFloor::Known(Some(90))
         );
         let higher = held(value(120), true, false);
         assert_eq!(
-            shared_floor_of(Some(&higher), Some(&seen), kept),
+            shared_floor_of(Some(&higher), Some(&seen), kept, None),
             SharedFloor::Known(Some(120))
+        );
+    }
+
+    #[test]
+    fn test_floor_absence_after_a_live_floor_holds_unless_a_loss_covers_it() {
+        // Paykit wire 5.6, Seen floor and permanence: seen live in generation 3.
+        let kept = FloorKept {
+            seen_ms: Some(70),
+            live_in: Some(3),
+            divergent: false,
+        };
+        // No loss, or one before the floor was seen live: the absence is unlawful.
+        for lost in [None, Some(2)] {
+            assert_eq!(
+                shared_floor_of(None, None, kept, lost),
+                SharedFloor::Unknown
+            );
+        }
+        // A loss of that generation or a later one covers it; the floor seen stays.
+        for lost in [Some(3), Some(4)] {
+            assert_eq!(
+                shared_floor_of(None, None, kept, lost),
+                SharedFloor::Known(Some(70))
+            );
+        }
+        // A record held decides as before.
+        assert_eq!(
+            shared_floor_of(Some(&held(value(80), true, false)), None, kept, None),
+            SharedFloor::Known(Some(80))
         );
     }
 
@@ -671,17 +766,22 @@ mod tests {
         let delete = held(RecordContent::Deleted, false, false);
         let seen = BlockFloorRecord::new(70).to_json().unwrap();
         assert_eq!(
-            shared_floor_of(Some(&delete), Some(&seen), FloorKept::default()),
+            shared_floor_of(Some(&delete), Some(&seen), FloorKept::default(), None),
             SharedFloor::Known(Some(70))
         );
         assert_eq!(
-            shared_floor_of(Some(&delete), None, FloorKept::default()),
+            shared_floor_of(Some(&delete), None, FloorKept::default(), None),
             SharedFloor::Unknown
         );
         // An authenticated one, which the permanent policy forbids, holds whatever was seen.
         let authenticated = held(RecordContent::Deleted, true, false);
         assert_eq!(
-            shared_floor_of(Some(&authenticated), Some(&seen), FloorKept::default()),
+            shared_floor_of(
+                Some(&authenticated),
+                Some(&seen),
+                FloorKept::default(),
+                None
+            ),
             SharedFloor::Unknown
         );
     }
@@ -692,17 +792,18 @@ mod tests {
         // A divergent view holds, however high the floor it shows.
         let divergent = held(value(u64::MAX / 2), true, true);
         assert_eq!(
-            shared_floor_of(Some(&divergent), Some(&seen), FloorKept::default()),
+            shared_floor_of(Some(&divergent), Some(&seen), FloorKept::default(), None),
             SharedFloor::Divergent
         );
         // A kept divergence holds over a cleared view, a missing record and any later value.
         let kept = FloorKept {
             seen_ms: Some(70),
+            live_in: Some(1),
             divergent: true,
         };
         for current in [None, Some(held(value(10_000), true, false))] {
             assert_eq!(
-                shared_floor_of(current.as_ref(), Some(&seen), kept),
+                shared_floor_of(current.as_ref(), Some(&seen), kept, None),
                 SharedFloor::Divergent
             );
         }
@@ -712,14 +813,17 @@ mod tests {
     fn test_floor_kept_only_grows() {
         let a = FloorKept {
             seen_ms: Some(70),
+            live_in: Some(3),
             divergent: true,
         };
         let b = FloorKept {
             seen_ms: Some(90),
+            live_in: Some(2),
             divergent: false,
         };
         let both = FloorKept {
             seen_ms: Some(90),
+            live_in: Some(3),
             divergent: true,
         };
         assert_eq!(a.with(b), both);
@@ -728,12 +832,17 @@ mod tests {
         assert!(FloorKept::default().is_empty());
         let view = held(value(80), true, true);
         assert_eq!(
-            FloorKept::of_view(&view),
+            FloorKept::of_view(&view, Some(4)),
             FloorKept {
                 seen_ms: Some(80),
+                live_in: Some(4),
                 divergent: true
             }
         );
+        // A delete is no live floor; an installation's copy tells no generation.
+        let deleted = held(RecordContent::Deleted, false, false);
+        assert_eq!(FloorKept::of_view(&deleted, Some(4)).live_in, None);
+        assert_eq!(FloorKept::of_view(&view, None).live_in, None);
     }
 
     /// A floor value of `floor_ms` with a member no writer here knows.

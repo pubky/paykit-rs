@@ -1992,7 +1992,10 @@ async fn test_blocked_return_contacts_only_unblock_needs_no_floor() {
 }
 
 #[tokio::test]
-async fn test_blocked_return_own_unblock_rebuilds_on_a_concurrent_floor() {
+async fn test_blocked_return_own_unblock_reads_a_concurrent_floor_first() {
+    // The phone raises the floor; the wallet's copy doesn't hold it yet. The unblock reads the
+    // floor from the switch before it writes, so it builds on the phone's floor, which already
+    // covers its window: nothing is written over it, and the floor stays the phone's.
     let w = World::new();
     let mut wallet = contacts_wallet(&w, store()).await;
     wallet.block(&w.bob_id()).await.unwrap();
@@ -2010,19 +2013,6 @@ async fn test_blocked_return_own_unblock_rebuilds_on_a_concurrent_floor() {
         .await
         .unwrap();
     assert_eq!(shared_floor(&wallet).await, None);
-    let error = wallet.unblock(&w.bob_id()).await.unwrap_err();
-    assert_eq!(
-        error.code(),
-        Some(pubky_switch_core::http::ErrorCode::Conflict)
-    );
-    assert!(wallet
-        .app_mut()
-        .allow_list()
-        .await
-        .unwrap()
-        .deny
-        .contains(&w.bob_id()));
-    assert_eq!(shared_floor(&wallet).await, Some(higher));
     wallet.unblock(&w.bob_id()).await.unwrap();
     assert_eq!(shared_floor(&wallet).await, Some(higher));
     assert!(!wallet
@@ -2331,11 +2321,11 @@ async fn floor_held_divergent(app: &Paykit) -> bool {
         })
 }
 
-/// Whether `app` refuses to unblock carol for now, keeping her denied.
+/// Whether `app` refuses to unblock carol while the floor is held, keeping her denied.
 async fn unblock_held(w: &World, app: &mut Paykit) -> bool {
     let refused = matches!(
         app.unblock(&w.carol_id()).await.unwrap_err().refusal(),
-        Some(paykit_sdk::Refusal::NotNow(_))
+        Some(paykit_sdk::Refusal::FloorHeld)
     );
     refused
         && app
@@ -3382,6 +3372,341 @@ async fn paid_in_flight(
     attempt_id
 }
 
+/// Alice's wallet, holding `paykit_pay` and contacts, on `storage`, with carol blocked, a
+/// subscription of bob's accepted, and the identity's floor seen divergent: the hold stands.
+/// Returns the wallet, bob's shop and the subscription.
+async fn held_floor_wallet(
+    w: &World,
+    storage: Arc<dyn StateStore>,
+) -> (Paykit, Paykit, paykit_sdk::RequestRef) {
+    let mut wallet = contacts_wallet(w, storage).await;
+    wallet.app_mut().invite(&w.carol_id()).await.unwrap();
+    wallet.block(&w.carol_id()).await.unwrap();
+    let mut shop = w.shop().await;
+    let sent = shop
+        .send_request(
+            w.alice_id(),
+            crate::periods::monthly(w.clock.now_ms(), None),
+        )
+        .await
+        .unwrap();
+    let subscription = sent.request.unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet.accept_subscription(&subscription).await.unwrap();
+    shop.receive(None).await.unwrap();
+    let mut phone = payer_app(w, "phone").await;
+    phone
+        .app_mut()
+        .put_record(
+            &floor_record(w),
+            &paykit_lib::records::BlockFloorRecord::new(1)
+                .to_json()
+                .unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let key = floor_key(w, &wallet);
+    w.alice
+        .switch()
+        .make_divergent([0x5a; 16], key, [1; 32])
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(floor_held_divergent(&wallet).await);
+    (wallet, shop, subscription)
+}
+
+/// Under the floor's hold, after a raise the wallet owes and can't write: the lists stay
+/// read, a new request from bob is taken and paid once by hand, and a Billing Period pays
+/// by hand (Paykit wire 5.6, Divergent floor: payments by hand and Billing Periods go on
+/// under their own rules).
+async fn still_pays_by_hand(
+    w: &World,
+    wallet: &mut Paykit,
+    shop: &mut Paykit,
+    subscription: &paykit_sdk::RequestRef,
+) {
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"lr")
+        .await
+        .unwrap()
+        .is_some());
+    let request = request_from(shop, w.alice_id(), draft("9", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let options = crate::common::over_hold(wallet, &request).await;
+    let paid = wallet.pay_request(&request, options).await.outcome.unwrap();
+    assert!(
+        matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
+        "{paid:?}"
+    );
+    let options = crate::common::over_hold(wallet, subscription).await;
+    let period = wallet
+        .pay_period(subscription, &crate::periods::january(), options)
+        .await
+        .outcome
+        .unwrap();
+    assert!(
+        matches!(period, paykit_sdk::PayOutcome::Paid { .. }),
+        "{period:?}"
+    );
+    assert_eq!(w.rail.all_executions().len(), 2);
+}
+
+#[tokio::test]
+async fn test_blocked_return_held_floor_keeps_payments_after_another_apps_unblock() {
+    let w = World::new();
+    let (mut wallet, mut shop, subscription) = held_floor_wallet(&w, store()).await;
+    // A contacts app unblocks carol: the wallet owes the raise and can't write it.
+    let mut contacts = w
+        .join_with(
+            &w.alice,
+            "contacts",
+            AppScopes::new().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            store(),
+        )
+        .await;
+    contacts.unblock(&w.carol_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    // The unblock is recorded, carol's entries held with the raise owed.
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"bf")
+        .await
+        .unwrap()
+        .is_some());
+    still_pays_by_hand(&w, &mut wallet, &mut shop, &subscription).await;
+}
+
+#[tokio::test]
+async fn test_blocked_return_held_floor_keeps_payments_after_a_restore_that_is_not_clean() {
+    let w = World::new();
+    let storage = store();
+    let (wallet, mut shop, subscription) = held_floor_wallet(&w, Arc::clone(&storage)).await;
+    let mut wallet = wallet;
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    // Restored in place, its cursor not known: the widening owes a raise it can't write.
+    let mut restored = Box::pin(Paykit::restore(
+        w.env(&w.alice, storage),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    crate::common::restore_with_unknown_cursor(&mut restored).await;
+    restored.receive(None).await.unwrap();
+    assert!(floor_held_divergent(&restored).await);
+    reconciled(&mut restored).await;
+    still_pays_by_hand(&w, &mut restored, &mut shop, &subscription).await;
+}
+
+/// The reconciliation a restore owes before any payment, done.
+async fn reconciled(app: &mut Paykit) {
+    let mut done = app.reconcile().await;
+    for _ in 0..4 {
+        if done.is_ok() {
+            break;
+        }
+        app.receive(None).await.unwrap();
+        done = app.reconcile().await;
+    }
+    done.unwrap();
+    app.end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+}
+
+/// The block floor held notices `app` shows.
+async fn floor_held_notices(app: &Paykit) -> Vec<paykit_sdk::Notice> {
+    app.notices()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|notice| notice.kind == paykit_sdk::NoticeKind::BlockFloorHeld)
+        .collect()
+}
+
+#[tokio::test]
+async fn test_blocked_return_held_floor_told_to_the_host_once_and_after_reopen() {
+    let w = World::new();
+    let storage = store();
+    let (mut wallet, _shop, _subscription) = held_floor_wallet(&w, Arc::clone(&storage)).await;
+    let shown = floor_held_notices(&wallet).await;
+    assert_eq!(shown.len(), 1);
+    assert!(shown[0].counterparty.is_none() && shown[0].attempt_id.is_none());
+    wallet.acknowledge_notice(&shown[0].id).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(floor_held_notices(&wallet).await.is_empty());
+    let app_id = wallet.app().app_id();
+    drop(wallet);
+    let wallet = w
+        .load_on_clock(&w.alice, storage, app_id, Arc::clone(&w.clock))
+        .await;
+    assert_eq!(floor_held_notices(&wallet).await.len(), 1);
+}
+
+#[tokio::test]
+async fn test_blocked_return_floor_seen_then_gone_after_a_restore_holds() {
+    // Paykit wire 5.6, Seen floor and permanence: restored on a fresh device, the wallet
+    // holds no copy of the floor it saw live; the switch then answers that it has none, with
+    // no provider loss. The highest floor seen doesn't make that absence lawful: every
+    // one-time request counts as dated before the floor.
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    wallet
+        .app_mut()
+        .put_record(
+            &floor_record(&w),
+            &paykit_lib::records::BlockFloorRecord::new(1)
+                .to_json()
+                .unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    let key = floor_key(&w, &wallet);
+    drop(wallet);
+    w.alice.switch().drop_record(&key).unwrap();
+    let mut restored = Box::pin(Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    restored.receive(None).await.unwrap();
+    reconciled(&mut restored).await;
+    w.clock.advance_ms(MINUTE_MS);
+    let request = request_from(&mut shop, w.alice_id(), draft("5", w.clock.now_ms())).await;
+    restored.receive(None).await.unwrap();
+    let options = crate::common::over_hold(&restored, &request).await;
+    let outcome = restored
+        .pay_request_automatically(&request, options)
+        .await
+        .outcome;
+    assert!(
+        !matches!(outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "{outcome:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_blocked_return_held_floor_kept_over_a_missed_item() {
+    // A `missed` item widens the blocked window: its raise can't be written under the hold,
+    // so the widening stays owed, and the hold, the lists and payments by hand go on.
+    let w = World::new();
+    let (mut wallet, mut shop, subscription) = held_floor_wallet(&w, store()).await;
+    let now = w.clock.now_ms();
+    w.alice
+        .switch()
+        .push_missed(1, now - 1_000, now + MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    assert!(floor_held_divergent(&wallet).await);
+    assert!(unblock_held(&w, &mut wallet).await);
+    still_pays_by_hand(&w, &mut wallet, &mut shop, &subscription).await;
+}
+
+#[tokio::test]
+async fn test_blocked_return_divergent_floor_holds_a_repeat_the_user_started() {
+    // Paykit wire 5.6, Divergent floor: no resume repeats a one-time payment under the hold,
+    // the user's own included.
+    let w = World::new();
+    let (mut wallet, mut phone, _shop, request) = phone_paying_carol(&w).await;
+    wallet
+        .app_mut()
+        .put_record(
+            &floor_record(&w),
+            &paykit_lib::records::BlockFloorRecord::new(1)
+                .to_json()
+                .unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    phone.receive(None).await.unwrap();
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let outcome = phone
+        .pay_request(&request, paykit_sdk::PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = outcome else {
+        panic!("expected a pending payment, got {outcome:?}");
+    };
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    w.alice
+        .switch()
+        .make_divergent([0x5a; 16], floor_key(&w, &phone), [1; 32])
+        .unwrap();
+    phone.receive(None).await.unwrap();
+    assert!(floor_held_divergent(&phone).await);
+    w.clock.advance_ms(MINUTE_MS);
+    phone.resume_payments().await.unwrap();
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_blocked_return_in_place_restore_keeps_the_highest_floor_seen() {
+    // The wallet sees the floor at the hour; its backup is from before. Restored in place,
+    // it keeps the floor it saw, so a request from before the hour is paid only by hand.
+    let w = World::new();
+    let storage = store();
+    let mut wallet = contacts_wallet(&w, Arc::clone(&storage)).await;
+    let mut shop = w.shop().await;
+    let backup = wallet.backup().await.unwrap();
+    let before = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let higher = w.clock.now_ms() + crate::common::HOUR_MS;
+    wallet
+        .app_mut()
+        .put_record(
+            &floor_record(&w),
+            &paykit_lib::records::BlockFloorRecord::new(higher)
+                .to_json()
+                .unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    drop(wallet);
+    let mut restored = Box::pin(Paykit::restore(
+        w.env(&w.alice, storage),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    let kept: serde_json::Value = serde_json::from_slice(
+        &restored
+            .app()
+            .protocol_get("paykit", b"fk")
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(kept["d"]["seen_ms"], serde_json::json!(higher));
+    assert!(!floor_held_divergent(&restored).await);
+    restored.receive(None).await.unwrap();
+    assert!(restored.request(&before).await.unwrap().manual_only);
+}
+
 #[tokio::test]
 async fn test_blocked_return_divergent_floor_holds_an_automatic_repeat() {
     // Paykit wire 5.6, Divergent floor: no resume repeats a one-time payment while the
@@ -3431,7 +3756,9 @@ async fn test_blocked_return_floor_gone_in_continuous_history_holds_a_repeat() {
     // Paykit wire 5.6, Seen floor and permanence: a permanent floor the phone saw live that
     // reads absent with no provider loss is the rollback alarm, and no repeat goes.
     let w = World::new();
-    let (mut wallet, mut phone, _shop, request) = phone_paying_carol(&w).await;
+    let phone_store = store();
+    let (mut wallet, mut phone, _shop, request) =
+        Box::pin(phone_paying_carol_on(&w, Arc::clone(&phone_store))).await;
     let target = floor_record(&w);
     wallet
         .app_mut()
@@ -3461,9 +3788,24 @@ async fn test_blocked_return_floor_gone_in_continuous_history_holds_a_repeat() {
         .drop_record(&floor_key(&w, &phone))
         .unwrap();
     w.clock.advance_ms(MINUTE_MS);
-    let _ = phone.resume_payments().await;
+    // The read before the repeat meets the absence: the client's rollback alarm, and no
+    // repeat.
+    let resumed = phone.resume_payments().await;
+    assert!(
+        resumed.as_ref().map_or(true, |outcomes| !outcomes
+            .iter()
+            .any(|outcome| matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }))),
+        "{resumed:?}"
+    );
+    assert!(phone.app().alarm().is_some());
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
-    let _ = phone.receive(None).await;
+    // Reopened, the alarm and the hold stay.
+    let app_id = phone.app().app_id();
+    drop(phone);
+    let mut phone = w
+        .load_on_clock(&w.alice, phone_store, app_id, Arc::clone(&w.clock))
+        .await;
+    assert!(phone.app().alarm().is_some());
     let _ = phone.resume_payments().await;
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
