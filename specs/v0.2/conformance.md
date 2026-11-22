@@ -82,6 +82,10 @@ Period details carry rates only for a request with `per_period` conversion terms
 
 The amount to an endpoint is the request's amount times the asset-rail rate, else the asset-wide one, else 1 for an endpoint of the requested asset, rounded up once to the endpoint's smallest unit, and none for an endpoint of another asset that no rate prices (Section 7.2): `paykit-lib` computes it (`amount_for_endpoint`) and `messages.json` `conversion_amounts` checks it; that the payer pays that amount, and treats such an endpoint as unusable under conversion terms, is a rule of an app's run.
 
+### Fee cap
+
+With no fee cap configured for the payment's asset, the payer neither refuses nor asks for any fee the payment method reports, at planning or immediately before dispatch, for a payment by hand and an automatic one, an Allowance executor's payment included (Section 7.2 step 1; wire 5.5, The amount transferred). With a cap, a reported fee at or below it passes; one above it makes the destination unusable for automatic payment and needs the user's choice by hand, judged at planning and again immediately before dispatch, a repeat's included, against the cap the attempt was journaled with. In both cases the transfer's amount checks are unchanged: another amount or asset, an amount the method can't tell, and a rate-priced payment still need their confirmations.
+
 ### Details checked against the request
 
 A reader of a period record reads the period details it holds against the request record's request, ignores any invalid against it and pays by none (wire 4.9, 5.3).
