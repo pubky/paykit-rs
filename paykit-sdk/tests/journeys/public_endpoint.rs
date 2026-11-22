@@ -75,11 +75,7 @@ async fn published_paid_receipted_and_removed(world: &World) -> TestResult {
     let outcome = Box::pin(wallet.pay_without_request(public_payment(seller)?))
         .await
         .outcome?;
-    let expected = Expected {
-        request_hash: None,
-        amount: btc("0.001")?,
-        endpoint_id: tips.clone(),
-    };
+    let expected = Expected::new(None, btc("0.001")?, tips.clone());
     Box::pin(paid_and_receipted(
         &mut wallet,
         &mut shop,

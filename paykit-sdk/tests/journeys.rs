@@ -13,10 +13,16 @@
 mod connect;
 #[path = "journeys/one_time.rs"]
 mod one_time;
+#[path = "journeys/periods.rs"]
+mod periods;
+#[path = "journeys/priced.rs"]
+mod priced;
 #[path = "journeys/private_list.rs"]
 mod private_list;
 #[path = "journeys/public_endpoint.rs"]
 mod public_endpoint;
+#[path = "journeys/restore.rs"]
+mod restore;
 
 use std::error::Error;
 use std::sync::Arc;
@@ -222,6 +228,36 @@ struct Expected {
     request_hash: Option<[u8; 32]>,
     amount: PaymentAmount,
     endpoint_id: PaymentEndpointIdentifier,
+    /// The amount the method transferred: the requested one unless a rate priced it.
+    paid: PaymentAmount,
+    /// The rate that priced the payment, if one did.
+    rate: Option<&'static str>,
+}
+
+impl Expected {
+    /// A payment of `amount` to `endpoint_id`, of the request `request_hash` if any.
+    fn new(
+        request_hash: Option<[u8; 32]>,
+        amount: PaymentAmount,
+        endpoint_id: PaymentEndpointIdentifier,
+    ) -> Self {
+        Self {
+            request_hash,
+            paid: amount.clone(),
+            amount,
+            endpoint_id,
+            rate: None,
+        }
+    }
+
+    /// The same payment priced at `rate`, the method transferring `paid`.
+    fn at_rate(self, rate: &'static str, paid: PaymentAmount) -> Self {
+        Self {
+            rate: Some(rate),
+            paid,
+            ..self
+        }
+    }
 }
 
 /// After the payer's `outcome`: the method was called once; the payer's journal holds the
@@ -255,6 +291,12 @@ async fn paid_and_receipted(
     assert_eq!(payment.request_hash, expected.request_hash);
     assert_eq!(payment.amount, expected.amount);
     assert_eq!(payment.endpoint_id, expected.endpoint_id);
+    assert_eq!(payment.paid.as_ref(), Some(&expected.paid), "{payment:?}");
+    assert_eq!(
+        payment.rate.as_ref().map(|rate| rate.value().as_str()),
+        expected.rate
+    );
+    assert_eq!(rail.paid_amount(&attempt_id).as_ref(), Some(&expected.paid));
     assert_eq!(payment.stage, Stage::Finished, "{payment:?}");
 
     // The seller's view: the proof, verified, then the receipt.
@@ -281,6 +323,13 @@ async fn paid_and_receipted(
     assert_eq!(held.len(), 1, "{receipts:?}");
     assert_eq!(held[0].msg_id, receipt);
     assert_eq!(held[0].request_hash, expected.request_hash);
+    let payments = Box::pin(wallet.payments()).await?;
+    let journal = payments
+        .iter()
+        .find(|payment| payment.attempt_id == attempt_id)
+        .and_then(|payment| payment.receipt.as_ref())
+        .ok_or("the payer's journal shows no receipt")?;
+    assert_eq!(journal.msg_id, receipt);
     Ok(receipt)
 }
 

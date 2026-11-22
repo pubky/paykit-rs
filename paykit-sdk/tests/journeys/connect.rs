@@ -114,11 +114,11 @@ async fn admits_the_seller_and_its_waiting_request_is_paid(world: &World) -> Tes
     let outcome = Box::pin(wallet.pay_request(&request, PayOptions::default()))
         .await
         .outcome?;
-    let expected = Expected {
-        request_hash: Some(request.request_hash),
-        amount: btc("0.001")?,
-        endpoint_id: endpoint("btc-lightning-bolt11")?,
-    };
+    let expected = Expected::new(
+        Some(request.request_hash),
+        btc("0.001")?,
+        endpoint("btc-lightning-bolt11")?,
+    );
     Box::pin(paid_and_receipted(
         &mut wallet,
         &mut shop,

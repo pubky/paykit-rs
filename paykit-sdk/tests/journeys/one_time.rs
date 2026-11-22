@@ -49,11 +49,11 @@ async fn requested(wallet: &mut Paykit, shop: &mut Paykit) -> TestResult<Request
 }
 
 fn expected(request: &RequestRef) -> TestResult<Expected> {
-    Ok(Expected {
-        request_hash: Some(request.request_hash),
-        amount: btc("0.00025")?,
-        endpoint_id: endpoint("btc-lightning-bolt11")?,
-    })
+    Ok(Expected::new(
+        Some(request.request_hash),
+        btc("0.00025")?,
+        endpoint("btc-lightning-bolt11")?,
+    ))
 }
 
 /// Paying `request` again from `wallet` is refused, and its journal holds no new payment.

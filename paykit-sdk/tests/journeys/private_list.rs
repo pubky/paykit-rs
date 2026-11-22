@@ -30,11 +30,11 @@ fn offer(text: &str) -> TestResult<BTreeMap<PaymentEndpointIdentifier, PaymentEn
 }
 
 fn expected(value: &str) -> TestResult<Expected> {
-    Ok(Expected {
-        request_hash: None,
-        amount: btc(value)?,
-        endpoint_id: endpoint("btc-lightning-bolt12")?,
-    })
+    Ok(Expected::new(
+        None,
+        btc(value)?,
+        endpoint("btc-lightning-bolt12")?,
+    ))
 }
 
 /// The seller sets `offer` as its list's endpoints and publishes the list to the payer's
