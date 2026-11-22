@@ -19,6 +19,10 @@ fn test_payment_refusals_keep_policy_evidence_and_the_original_attempt_failure()
         RefusalKind::IdentityUnconfirmed
     ));
     assert!(matches!(
+        PaymentRefusal(Refusal::PaymentTimeOutside { paid_at_ms: 42 }).kind(),
+        RefusalKind::PaymentTimeOutside { paid_at_ms: 42 }
+    ));
+    assert!(matches!(
         PaymentRefusal(Refusal::RecordHeld("unreadable".into())).kind(),
         RefusalKind::RecordHeld
     ));
