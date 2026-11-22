@@ -2858,7 +2858,10 @@ async fn pays(w: &World, buyer: &mut Paykit) -> bool {
         Err(error)
             if matches!(
                 error.refusal(),
-                Some(paykit_sdk::Refusal::NoDestination(_) | paykit_sdk::Refusal::WaitingForList { .. })
+                Some(
+                    paykit_sdk::Refusal::NoDestination(_)
+                        | paykit_sdk::Refusal::WaitingForList { .. }
+                )
             ) =>
         {
             false
