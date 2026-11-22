@@ -704,8 +704,12 @@ async fn test_own_record_unknown_identity_refresh_stops_edits_and_upkeep() {
     // read's refresh of the own identity, which can take a renewal into the own record,
     // takes the newer copy, applied but the store can't tell.
     w.clock.advance_ms(46 * DAY_MS);
-    let _till = w
-        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+    let _seller_wallet = w
+        .join(
+            &w.bob,
+            "seller-wallet",
+            AppScopes::new().request().build().unwrap(),
+        )
         .await;
     faulty
         .armed

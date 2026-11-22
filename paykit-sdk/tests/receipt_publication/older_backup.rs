@@ -54,7 +54,7 @@ async fn older_shop_backup(world: &World, sale: IssuedSale) -> TestResult {
     let IssuedSale {
         mut buyer,
         mut shop,
-        mut till,
+        mut seller_wallet,
         store,
         rail,
         request,
@@ -73,7 +73,7 @@ async fn older_shop_backup(world: &World, sale: IssuedSale) -> TestResult {
         world,
         seller,
         "shop",
-        "repairing-till",
+        "repairing-wallet",
         AppScopes::new().request().build()?,
         Arc::new(MemoryStore::new()),
         &rail,
@@ -85,18 +85,18 @@ async fn older_shop_backup(world: &World, sale: IssuedSale) -> TestResult {
         .app()
         .shared_record(&key)
         .await?
-        .ok_or("the other till has no sale")?;
+        .ok_or("the other wallet has no sale")?;
     let prior_receipt = ActivityRecord::read(
         prior.content.value().ok_or("unreadable sale")?,
         &identity,
         ActivitySide::Payee,
     )?
     .receipt
-    .ok_or("the other till has no receipt")?;
+    .ok_or("the other wallet has no receipt")?;
     assert_eq!(prior_receipt.hash(), receipt.hash());
 
-    // The shop was offline while the other till created and deleted a different request.
-    let earlier_request = till
+    // The shop was offline while the other wallet created and deleted a different request.
+    let earlier_request = seller_wallet
         .send_request(
             buyer.identity(),
             invoice("btc-lightning-bolt11", "ln-other")?,
@@ -108,7 +108,7 @@ async fn older_shop_backup(world: &World, sale: IssuedSale) -> TestResult {
         target.collection.clone(),
         &natural_key::request_record(&identity, &earlier_request.request_hash),
     );
-    let earlier = till
+    let earlier = seller_wallet
         .app_mut()
         .delete_record(&earlier_target, vec![])
         .await?;
@@ -123,8 +123,11 @@ async fn older_shop_backup(world: &World, sale: IssuedSale) -> TestResult {
     assert_eq!(initial.put_backs[0].observation.key, earlier.key);
     assert!(initial.put_backs[0].pending.is_none());
 
-    let deleted = till.app_mut().delete_record(&target, vec![]).await?;
-    let deletion = record_op(&till, key, till.app().cert()).await?;
+    let deleted = seller_wallet
+        .app_mut()
+        .delete_record(&target, vec![])
+        .await?;
+    let deletion = record_op(&seller_wallet, key, seller_wallet.app().cert()).await?;
     let deletion_ref = ApplicationRef {
         generation: deleted.version.generation,
         seq: deleted.version.version,
@@ -133,7 +136,7 @@ async fn older_shop_backup(world: &World, sale: IssuedSale) -> TestResult {
     shop.app_mut().read_record_fresh(&target).await?;
     peer.app_mut().read_record_fresh(&target).await?;
     proof_only["proof"]["cert"]["shipping_note"] = "delivered".into();
-    let eager = till
+    let eager = seller_wallet
         .app_mut()
         .put_record(
             &target,
@@ -148,7 +151,7 @@ async fn older_shop_backup(world: &World, sale: IssuedSale) -> TestResult {
     let eager_ref = ApplicationRef {
         generation: eager.version.generation,
         seq: eager.version.version,
-        item_hash: record_op(&till, key, till.app().cert())
+        item_hash: record_op(&seller_wallet, key, seller_wallet.app().cert())
             .await?
             .item_hash()?,
     };

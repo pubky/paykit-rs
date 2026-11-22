@@ -382,10 +382,10 @@ shared record.
 For a one-time request, continue calling `receive(None)` after a restart or
 backup restore. A wallet that verifies the original deletion and the preceding
 record in the current service generation can restore its issued receipt to
-shared data. It preserves compatible fields added by another till. If that
-till has already published the complete record, the wallet accepts it without
-another write. The next scheduled poll can report the new cursor to the
-service. Acknowledging the deletion notice leaves the credit restriction in force.
+shared data. It preserves compatible fields added by the merchant's other
+wallets. If one has already published the complete record, the recovering
+wallet accepts it without another write. The next scheduled poll can report
+the new cursor to the service. Acknowledging the deletion notice leaves the credit restriction in force.
 
 | Case | What to show or do |
 |---|---|
@@ -397,7 +397,7 @@ service. Acknowledging the deletion notice leaves the credit restriction in forc
 | `NoticeKind::AllowanceWithdrawalConfirmed` | The seller returned its signed end for the proposal and acceptance this wallet withdrew. The notice identifies that end. The original Allowance stays closed after acknowledgement and reopen. |
 | `NoticeKind::PossiblyDelivered` | Reconcile the original message with its recipient using its ID and signed hash. Acknowledging the notice records that the host has seen it. It authorizes no send or replacement. |
 | `NoticeKind::BlockedMessagesLost` | Show the affected counterparty and acceptance-time range. Consult the payment method for payments that may have been among the lost messages. |
-| `NoticeKind::SettlementBucketFull` | Show that the payee cannot add a mark to this bucket. A warning from a bucket read has no payer. Explain that issuing a receipt without a mark can let another till credit the same settlement again. |
+| `NoticeKind::SettlementBucketFull` | Show that the payee cannot add a mark to this bucket. A warning from a bucket read has no payer. Explain that issuing a receipt without a mark can let the merchant's other wallets credit the same settlement again. |
 | `NoticeKind::SettlementMarksChanged` | Show the bucket and the own app that signed its current value. The wallet checks the current write again and restores the retained marks that fit. |
 | `NoticeKind::SettlementCreditedTwice` | Show the conflicting occurrence marks. Acknowledging the notice records that the user saw it. Every retained mark continues to prevent another credit. |
 | `NoticeKind::CreditNeedsUser` | Show the user which settlement or requested proof needs a credit decision. Acknowledging the warning leaves the credit decision open. |

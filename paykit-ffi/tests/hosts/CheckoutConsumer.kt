@@ -13,6 +13,8 @@ private class CheckoutMethod(private val ledger: File) : ReceiptReader() {
     val entered = CompletableDeferred<Unit>()
     val release = CompletableDeferred<Unit>()
     val calls = AtomicInteger()
+    @Volatile var pendingLookup = false
+    fun chargedAttempt(): String = checkNotNull(stored())
 
     private fun originalProof(attempt: String) = """{"settlement":"$attempt"}""".toByteArray()
     private fun outcome(attempt: String) = MethodOutcome.Paid(originalProof(attempt), null)
@@ -43,7 +45,7 @@ private class CheckoutMethod(private val ledger: File) : ReceiptReader() {
         return outcome(payment.attemptId)
     }
     override suspend fun payment(attemptId: String): MethodOutcome? =
-        if (stored() == attemptId) outcome(attemptId) else null
+        if (stored() != attemptId) null else if (pendingLookup) MethodOutcome.Pending else outcome(attemptId)
 
     override suspend fun verify(proof: MethodProof): ULong? =
         if (proof.attemptId == stored() && proof.proofJson.contentEquals(originalProof(proof.attemptId)) &&
@@ -60,6 +62,135 @@ private suspend fun NativeWallet.finishReceive() {
         if (!report.more) return
     }
     error("wallet did not complete its feed")
+}
+
+private suspend fun restoreCheckout(
+    fixture: CheckoutFixture, source: WalletHost, app: ByteArray, reference: ByteArray,
+    method: CheckoutMethod, action: String,
+) = coroutineScope {
+    check(action in setOf("confirm", "refuse", "doubt"))
+    val options = PaymentOptions(null, null, false, false, emptyList())
+    val (backup, original) = source.completeEnrollment(reference).use { wallet ->
+        wallet.finishReceive()
+        wallet.allowConnect(fixture.payee())
+        val original = fixture.sendCheckout()
+        wallet.finishReceive()
+        val snapshot = wallet.backup()
+        fixture.passRotationInterval()
+        wallet.finishReceive()
+        if (action == "doubt") {
+            val payment = async { wallet.payRequest(original, options) }
+            method.entered.await()
+            payment.cancelAndJoin()
+            method.release.complete(Unit)
+            method.pendingLookup = true
+        }
+        wallet.shutdown()
+        snapshot to original
+    }
+    val destination = EnrollmentStore()
+    fixture.hostForStore(destination).use { host ->
+        try {
+            host.restore(app, backup, BackupDevice.UNACCOUNTED_FOR)
+            error("an unaccounted source device was restored")
+        } catch (_: WalletException.SourceDeviceUnaccountedFor) {}
+        check(destination.untouched())
+        host.restore(app, backup, BackupDevice.IN_POSSESSION).use { wallet ->
+            check(wallet.appId().contentEquals(app))
+            check(wallet.restoreState().reconciling)
+            var asked = false
+            repeat(8) {
+                if (!asked) asked = wallet.receive().events.any {
+                    (it.data as? WalletEventData.RestoreQuestion)?.n == listOf(1uL)
+                }
+            }
+            check(asked && wallet.restoreState().registrations == listOf(1uL))
+            wallet.shutdown()
+        }
+        host.load(app).use { wallet ->
+            val state = wallet.restoreState()
+            check(state.reconciling && state.cursor != null && state.registrations == listOf(1uL))
+            check(state.toString() == "WalletRestoreState(<redacted>)")
+            try {
+                wallet.confirmRestoredRegistrations(emptyList())
+                error("the stale restore question was accepted")
+            } catch (error: WalletException.Refused) {
+                error.refusal.use { check(it.kind() is RefusalKind.NotNow) }
+            }
+            check(wallet.restoreState().registrations == state.registrations)
+            suspend fun interruptConfirmation(failure: EnrollmentStore.AnswerFailure) {
+                destination.interruptAnswer(failure)
+                try {
+                    wallet.confirmRestoredRegistrations(state.registrations)
+                    error("registration answer unexpectedly reported a durable result")
+                } catch (error: WalletException.Storage) {
+                    if (failure == EnrollmentStore.AnswerFailure.UNAVAILABLE) check(error.failure is StorageException.Unavailable)
+                    else check(error.failure is StorageException.Unknown)
+                }
+            }
+            if (action == "refuse") {
+                interruptConfirmation(EnrollmentStore.AnswerFailure.UNKNOWN_BEFORE_COMMIT)
+                try {
+                    wallet.refuseRestoredRegistrations(state.registrations)
+                    error("the unrecognized registration did not stop the wallet")
+                } catch (_: WalletException.Operation) {}
+                val alarm = wallet.restoreState().alarm as SwitchAlarm.Compromise
+                check(alarm.n == 1uL && method.calls.get() == 0)
+                try {
+                    wallet.confirmRestoredRegistrations(state.registrations)
+                    error("a stopped registration was confirmed")
+                } catch (_: WalletException.Operation) {}
+                check(wallet.restoreState().alarm == alarm)
+            } else {
+                if (action == "confirm") {
+                    interruptConfirmation(EnrollmentStore.AnswerFailure.UNAVAILABLE)
+                    check(wallet.restoreState().registrations == state.registrations)
+                    interruptConfirmation(EnrollmentStore.AnswerFailure.UNKNOWN_BEFORE_COMMIT)
+                    // Retry the same answer on the same handle without an intervening read.
+                    interruptConfirmation(EnrollmentStore.AnswerFailure.UNKNOWN_AFTER_COMMIT)
+                    check(wallet.restoreState().registrations.isEmpty())
+                    try {
+                        wallet.confirmRestoredRegistrations(state.registrations)
+                        error("an already committed answer was confirmed again")
+                    } catch (_: WalletException.Refused) {}
+                } else wallet.confirmRestoredRegistrations(state.registrations)
+                wallet.finishReceive()
+                val report = wallet.reconcile()
+                check(!report.payerSkipped && wallet.restoreState().registrations.isEmpty())
+                if (action == "doubt") {
+                    val charged = method.chargedAttempt()
+                    val doubt = report.doubtful.single { charged in it.attempts }
+                    wallet.resolveConfirmedAttempt(doubt.obligation, charged, ConfirmedResolution.PAID)
+                    check(wallet.reconcile().doubtful.isEmpty() && method.calls.get() == 1)
+                } else {
+                    check(report.doubtful.isEmpty() && method.calls.get() == 0)
+                }
+                wallet.endConfirmedReconciliation()
+                check(!wallet.restoreState().reconciling)
+            }
+            wallet.shutdown()
+        }
+        if (action == "confirm") {
+            host.load(app).use { wallet ->
+                check(!wallet.restoreState().reconciling)
+                wallet.finishReceive()
+                val request = wallet.requests().single { it.id.requestHash.contentEquals(original.requestHash) }
+                val refused = wallet.payRequest(original, options).decision as PaymentDecision.Error
+                val confirmation = (refused.error as WalletException.Refused).refusal
+                val hold = confirmation.kind() as RefusalKind.HeldAfterRestore
+                check(hold.record.contentEquals(request.record) && method.calls.get() == 0)
+                method.release.complete(Unit)
+                val result = wallet.payRequest(original, options.copy(confirmedRefusals = listOf(confirmation)))
+                val paid = (result.decision as PaymentDecision.Outcome).outcome as PaymentOutcome.Paid
+                val receipt = fixture.confirmPayment(original)
+                wallet.finishReceive()
+                val paidReceipt = wallet.requestReceipts(original).single()
+                check(paidReceipt.messageId == receipt && paidReceipt.attemptId == paid.attemptId)
+                check(method.calls.get() == 1)
+                wallet.shutdown()
+            }
+        }
+    }
 }
 
 private suspend fun NativeWallet.followLoss(fixture: CheckoutFixture, second: Boolean) {
@@ -120,7 +251,7 @@ private suspend fun NativeWallet.reviewLoss(
 
 private enum class CheckoutReview { ORDINARY, DIVERGENCE, PROVIDER_LOSS }
 
-private fun driveCheckout(recovery: CheckoutReview) = runBlocking {
+private fun driveCheckout(recovery: CheckoutReview, restore: String? = null) = runBlocking {
     withTimeout(60_000) {
         val directory = Files.createTempDirectory("paykit-method").toFile()
         try {
@@ -138,6 +269,11 @@ private fun driveCheckout(recovery: CheckoutReview) = runBlocking {
                     val original = owner.prepareEnrollment(reference, "wallet.example", ByteArray(32) { 8 }, info.appRecordPath + ":rw", secret)
                     owner.acceptApproval(reference, fixture.identity(), fixture.approve(original.signedRequest, secret))
                     info
+                }
+                if (restore != null) {
+                    fixture.host().use { host -> restoreCheckout(fixture, host, enrolled.appId, reference, method, restore) }
+                    fixture.finish()
+                    return@withTimeout
                 }
                 fixture.host().use { host ->
                     val (notice, duty) = host.completeEnrollment(reference).use { wallet ->
@@ -268,5 +404,9 @@ private fun driveCheckout(recovery: CheckoutReview) = runBlocking {
 }
 
 object CheckoutConsumer {
-    @JvmStatic fun main(args: Array<String>) = CheckoutReview.entries.forEach { driveCheckout(it) }
+    @JvmStatic fun main(args: Array<String>) {
+        val restore = System.getenv("PAYKIT_TEST_RESTORE")
+        if (restore == null) CheckoutReview.entries.forEach { driveCheckout(it) }
+        else driveCheckout(CheckoutReview.ORDINARY, restore)
+    }
 }

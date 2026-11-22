@@ -1324,7 +1324,7 @@ async fn test_publication_labelled_seller_can_ask_and_pay_as_a_payer() {
         )
         .await;
     let mut publisher = w.shop().await;
-    let mut shop = w.labelled_shop("till", "shop1").await;
+    let mut shop = w.labelled_shop("seller-wallet", "shop1").await;
     let asks = Kind::PrivatePaymentListRequest.as_str();
     let accepts = |app: &Paykit, kind: &str| {
         pubky_switch_core::records::AppRecord::verify(app.app().record(), &app.identity())

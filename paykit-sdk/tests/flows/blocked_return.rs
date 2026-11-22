@@ -2887,15 +2887,18 @@ impl OwnWrite {
 
 /// Carol cancels her one request to alice, from another app of hers.
 async fn carol_cancels(w: &World) {
-    let mut till = w
+    let mut seller_wallet = w
         .join(
             &w.carol,
-            "till",
+            "seller-wallet",
             AppScopes::new().request().build().unwrap(),
         )
         .await;
-    let record = till.payee_activity().await.unwrap()[0].record;
-    till.cancel_sent_request(&record, None).await.unwrap();
+    let record = seller_wallet.payee_activity().await.unwrap()[0].record;
+    seller_wallet
+        .cancel_sent_request(&record, None)
+        .await
+        .unwrap();
 }
 
 /// The phone leaves an automatic payment of carol's request in flight. At the resume, the repeat reads

@@ -169,6 +169,28 @@ impl CheckoutFixture {
     pub fn host(&self) -> Arc<WalletHost> {
         self.host.clone()
     }
+    /// Open a second device's store against the same enrolled services and payment account.
+    pub fn host_for_store(&self, store: Arc<dyn WalletStore>) -> Arc<WalletHost> {
+        Arc::new(WalletHost {
+            clock: self.host.clock.clone(),
+            transport: self.host.transport.clone(),
+            home: self.host.home.clone(),
+            writer: self.host.writer.clone(),
+            rail: self.host.rail.clone(),
+            timer: self.host.timer.clone(),
+            store,
+        })
+    }
+
+    /// Let the current device rotate its receive key on its next ordinary foreground read.
+    pub async fn pass_rotation_interval(&self) -> Result<(), WalletError> {
+        let world = self.world.lock().await;
+        let world = world
+            .as_ref()
+            .ok_or(WalletError::invalid("test service closed"))?;
+        world.advance_ms(pubky_switch_client::app::DEFAULT_ROTATION_MS + 1);
+        Ok(())
+    }
     /// The identity that signs the buyer's enrollment.
     pub fn identity(&self) -> Vec<u8> {
         self.buyer.into()

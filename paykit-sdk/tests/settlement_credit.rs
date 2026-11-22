@@ -1,4 +1,4 @@
-//! Independent tills confirm a shared invoice settlement through the ordinary wallet.
+//! Two wallets of the same seller confirm the same invoice settlement.
 #![recursion_limit = "256"]
 
 #[path = "settlement_credit/first_dispatch.rs"]
@@ -117,7 +117,7 @@ async fn paid_request(
         .await?
         .request
         .ok_or("request was not sent")?;
-    // The payer drives its own wallet task, just as each independent till does.
+    // The payer drives its own wallet task, just as each seller wallet does.
     // The shop's orchestration frame need not stay on the payer's native stack.
     let buyer = tokio::spawn(Box::pin(async move {
         buyer.receive(None).await?;
@@ -153,30 +153,30 @@ async fn paid_request(
 }
 
 #[tokio::test]
-async fn test_two_tills_confirm_one_paid_request() -> TestResult {
+async fn test_two_seller_wallets_confirm_one_paid_request() -> TestResult {
     for backend in [Backend::Scripted, Backend::Service] {
         let Some(world) = World::start(backend)? else {
             continue;
         };
-        let result = Box::pin(competing_tills(&world)).await;
+        let result = Box::pin(competing_seller_wallets(&world)).await;
         world.close().await?;
         result?;
     }
     Ok(())
 }
 
-struct Tills {
+struct SellerWallets {
     buyer: Paykit,
     other: Paykit,
-    till: Paykit,
+    seller_wallet: Paykit,
     labelled: Paykit,
     rail: Arc<FakeRail>,
-    till_store: Arc<MemoryStore>,
+    seller_wallet_store: Arc<MemoryStore>,
     labelled_store: Arc<MemoryStore>,
     signer: Box<Signer>,
 }
 
-async fn enrolled_tills(world: &World) -> TestResult<Tills> {
+async fn enrolled_seller_wallets(world: &World) -> TestResult<SellerWallets> {
     let first = setup_identity(world, "buyer", "https://buyer.payment.test").await?;
     let second = setup_identity(world, "other-buyer", "https://other-buyer.payment.test").await?;
     let shop = setup_identity(world, "shop", "https://shop.payment.test").await?;
@@ -201,14 +201,14 @@ async fn enrolled_tills(world: &World) -> TestResult<Tills> {
         &rail,
     )
     .await?;
-    let till_store = Arc::new(MemoryStore::new());
-    let (mut till, shop) = join(
+    let seller_wallet_store = Arc::new(MemoryStore::new());
+    let (mut seller_wallet, shop) = join(
         world,
         shop,
         "shop",
-        "plain-till",
+        "plain-wallet",
         AppScopes::new().request().manage_contacts().build()?,
-        till_store.clone(),
+        seller_wallet_store.clone(),
         &rail,
     )
     .await?;
@@ -217,7 +217,7 @@ async fn enrolled_tills(world: &World) -> TestResult<Tills> {
         world,
         shop,
         "shop",
-        "labelled-till",
+        "labelled-wallet",
         AppScopes::new()
             .request_label(&Label::parse("shop1")?)
             .manage_contacts()
@@ -227,34 +227,34 @@ async fn enrolled_tills(world: &World) -> TestResult<Tills> {
     )
     .await?;
     for wallet in [&mut buyer, &mut other] {
-        wallet.app_mut().invite(&till.identity()).await?;
-        till.app_mut().invite(&wallet.identity()).await?;
+        wallet.app_mut().invite(&seller_wallet.identity()).await?;
+        seller_wallet.app_mut().invite(&wallet.identity()).await?;
     }
-    Ok(Tills {
+    Ok(SellerWallets {
         buyer,
         other,
-        till,
+        seller_wallet,
         labelled,
         rail,
-        till_store,
+        seller_wallet_store,
         labelled_store,
         signer: Box::new(signer),
     })
 }
 
-async fn competing_tills(world: &World) -> TestResult {
-    let Tills {
+async fn competing_seller_wallets(world: &World) -> TestResult {
+    let SellerWallets {
         buyer,
         other,
-        mut till,
+        mut seller_wallet,
         mut labelled,
         rail,
-        till_store,
+        seller_wallet_store,
         labelled_store,
         ..
-    } = Box::pin(enrolled_tills(world)).await?;
-    let before_credit = till.backup().await?;
-    // Both authorized tills see the same legitimate purchase in the shop's labelled activity.
+    } = Box::pin(enrolled_seller_wallets(world)).await?;
+    let before_credit = seller_wallet.backup().await?;
+    // Both authorized wallets see the same legitimate purchase in the shop's labelled activity.
     let (mut buyer, winner, first_record) = Box::pin(paid_request(
         &mut labelled,
         buyer,
@@ -262,32 +262,32 @@ async fn competing_tills(world: &World) -> TestResult {
         "ln-one-invoice",
     ))
     .await?;
-    till.receive(None).await?;
+    seller_wallet.receive(None).await?;
     assert_eq!(rail.all_executions().values().sum::<u64>(), 1);
-    assert!(till.verify_payment(&first_record).await?.is_some());
+    assert!(seller_wallet.verify_payment(&first_record).await?.is_some());
     assert!(labelled.verify_payment(&first_record).await?.is_some());
     let (first_receipt, second_receipt) = tokio::join!(
-        Box::pin(till.confirm_payment(&first_record)),
+        Box::pin(seller_wallet.confirm_payment(&first_record)),
         Box::pin(labelled.confirm_payment(&first_record))
     );
-    let receipt = first_receipt?.ok_or("first till could not confirm the paid request")?;
+    let receipt = first_receipt?.ok_or("first seller wallet could not confirm the paid request")?;
     assert_eq!(second_receipt?, Some(receipt.clone()));
     buyer.receive(None).await?;
     let receipts = buyer.receipts(ReceiptsOf::Request(winner)).await?;
     assert_eq!(receipts.len(), 1);
     assert_eq!(receipts[0].msg_id, receipt);
-    let first_id = till.app_id();
+    let first_id = seller_wallet.app_id();
     let second_id = labelled.app_id();
-    drop((till, labelled));
+    drop((seller_wallet, labelled));
     let mut reopened = Paykit::load(
-        world.app_env(till_store.clone()),
+        world.app_env(seller_wallet_store.clone()),
         Default::default(),
         first_id,
         rail.clone(),
         Arc::new(TestTimer),
     )
     .await?;
-    let mut other_till = Paykit::load(
+    let mut other_wallet = Paykit::load(
         world.app_env(labelled_store),
         Default::default(),
         second_id,
@@ -296,20 +296,20 @@ async fn competing_tills(world: &World) -> TestResult {
     )
     .await?;
     reopened.receive(None).await?;
-    other_till.receive(None).await?;
+    other_wallet.receive(None).await?;
     assert_eq!(
         Box::pin(reopened.confirm_payment(&first_record)).await?,
         Some(receipt.clone())
     );
     assert_eq!(
-        Box::pin(other_till.confirm_payment(&first_record)).await?,
+        Box::pin(other_wallet.confirm_payment(&first_record)).await?,
         Some(receipt.clone())
     );
     let checks = rail.proof_checks();
     let id = rail
         .settlement_id(&checks[0].proof)
         .ok_or("verified invoice has no settlement")?;
-    for reader in [&reopened, &other_till] {
+    for reader in [&reopened, &other_wallet] {
         let naming = reader.app().naming_key();
         let tag = settlement_tag(naming, &id);
         let number = settlement_bucket(&tag);
@@ -367,24 +367,24 @@ async fn competing_tills(world: &World) -> TestResult {
     assert_eq!(rail.all_executions().values().sum::<u64>(), 2);
 
     let (mut other, independent, third_record) = Box::pin(paid_request(
-        &mut other_till,
+        &mut other_wallet,
         other,
         "btc-lightning-bolt11",
         "ln-independent-invoice",
     ))
     .await?;
-    let stored = other_till
+    let stored = other_wallet
         .confirm_payment_with(&third_record, ReceiptDetails::new().store_only())
         .await?
         .ok_or("independent credit missing")?;
-    assert!(other_till.app().delivery(&stored).await?.is_none());
+    assert!(other_wallet.app().delivery(&stored).await?.is_none());
     other.receive(None).await?;
     assert!(other
         .receipts(ReceiptsOf::Request(independent))
         .await?
         .is_empty());
-    let backup = other_till.backup().await?;
-    drop(other_till);
+    let backup = other_wallet.backup().await?;
+    drop(other_wallet);
     let mut restored = Paykit::restore(
         world.app_env(Arc::new(MemoryStore::new())),
         Default::default(),
@@ -417,7 +417,7 @@ async fn competing_tills(world: &World) -> TestResult {
     assert_eq!(marks.len(), 3);
     drop(reopened);
     let in_place = Paykit::restore(
-        world.app_env(till_store),
+        world.app_env(seller_wallet_store),
         Default::default(),
         &before_credit,
         rail.clone(),
@@ -482,9 +482,9 @@ fn transactions_in_one_bucket<const N: usize>(
 /// Two independent transactions in the same bucket. Each has two payments and one
 /// method settlement ID under Paykit wire 1.5.
 async fn two_transactions(world: &World) -> TestResult {
-    let mut wallets = Box::pin(enrolled_tills(world)).await?;
-    // Finish each buyer's authenticated seller lookup before the two tills compete.
-    let seller = wallets.till.identity();
+    let mut wallets = Box::pin(enrolled_seller_wallets(world)).await?;
+    // Finish each buyer's authenticated seller lookup before the two seller wallets compete.
+    let seller = wallets.seller_wallet.identity();
     for buyer in [&mut wallets.buyer, &mut wallets.other] {
         let identity = buyer.app_mut().identity_of(&seller, true).await?;
         assert_eq!(
@@ -492,16 +492,21 @@ async fn two_transactions(world: &World) -> TestResult {
             pubky_switch_client::app::SwitchCopy::Read
         );
     }
-    let naming = wallets.till.app().naming_key();
+    let naming = wallets.seller_wallet.app().naming_key();
     let [first, second] = transactions_in_one_bucket(naming)?;
     let number = settlement_bucket(&first.1);
     let key = SettlementBucket::record_key(number, naming)?;
-    assert!(wallets.till.app().shared_record(&key).await?.is_none());
+    assert!(wallets
+        .seller_wallet
+        .app()
+        .shared_record(&key)
+        .await?
+        .is_none());
     let mut credited = Vec::new();
     for (txid, tag) in [first, second] {
         wallets.rail.next(Behaviour::InTransaction(txid));
         let (buyer, plain, plain_key) = Box::pin(paid_request(
-            &mut wallets.till,
+            &mut wallets.seller_wallet,
             wallets.buyer,
             "btc-bitcoin-p2wpkh",
             "bcrt1qqyqszqgpqyqszqgpqyqszqgpqyqszqgpvxat9t",
@@ -519,7 +524,7 @@ async fn two_transactions(world: &World) -> TestResult {
         wallets.other = other;
         assert_ne!(plain_key, label_key);
         let (a, b) = tokio::join!(
-            Box::pin(wallets.till.confirm_payment(&plain_key)),
+            Box::pin(wallets.seller_wallet.confirm_payment(&plain_key)),
             Box::pin(wallets.labelled.confirm_payment(&label_key)),
         );
         let (a, b) = (a?, b?);
@@ -527,7 +532,7 @@ async fn two_transactions(world: &World) -> TestResult {
         let (loser, losing_key) = if a.is_some() {
             (&mut wallets.labelled, &label_key)
         } else {
-            (&mut wallets.till, &plain_key)
+            (&mut wallets.seller_wallet, &plain_key)
         };
         let original = loser
             .app()
@@ -575,17 +580,18 @@ async fn two_transactions(world: &World) -> TestResult {
         let observed = wallets.other.receipts(ReceiptsOf::Request(label)).await?;
         assert_eq!(receipt_ids(observed), b.iter().cloned().collect::<Vec<_>>());
         let winner = if a.is_some() { plain } else { label };
-        let natural = natural_key::request_record(&wallets.till.identity(), &winner.request_hash);
-        let winner_tag = occurrence_tag(wallets.till.app().naming_key(), &natural);
+        let natural =
+            natural_key::request_record(&wallets.seller_wallet.identity(), &winner.request_hash);
+        let winner_tag = occurrence_tag(wallets.seller_wallet.app().naming_key(), &natural);
         credited.push(SettlementMark::new(
             &tag,
             OccurrenceKind::OneTimeRequest,
             winner_tag,
         ));
         credited.sort();
-        for till in [&mut wallets.till, &mut wallets.labelled] {
-            till.receive(None).await?;
-            let record = till
+        for seller_wallet in [&mut wallets.seller_wallet, &mut wallets.labelled] {
+            seller_wallet.receive(None).await?;
+            let record = seller_wallet
                 .app()
                 .shared_record(&key)
                 .await?
@@ -593,7 +599,7 @@ async fn two_transactions(world: &World) -> TestResult {
             let bucket = SettlementBucket::bind(
                 record.content.value().ok_or("unreadable bucket")?,
                 number,
-                till.app().naming_key(),
+                seller_wallet.app().naming_key(),
                 &key,
             )?;
             assert_eq!(bucket.marks(), credited.as_slice());
@@ -623,35 +629,35 @@ async fn stored_receipt_over_full_bucket(world: &World) -> TestResult {
     use pubky_switch_client::app::{
         Collection as SwitchCollection, OpBatch, RecordTarget, UserConfirmed,
     };
-    let mut tills = Box::pin(enrolled_tills(world)).await?;
+    let mut seller_wallets = Box::pin(enrolled_seller_wallets(world)).await?;
     let (buyer, request, record) = Box::pin(paid_request(
-        &mut tills.till,
-        tills.buyer,
+        &mut seller_wallets.seller_wallet,
+        seller_wallets.buyer,
         "btc-lightning-bolt11",
         "ln-needs-confirmation",
     ))
     .await?;
-    tills.buyer = buyer;
-    let proof = tills
-        .till
+    seller_wallets.buyer = buyer;
+    let proof = seller_wallets
+        .seller_wallet
         .app()
         .shared_record(&record)
         .await?
         .ok_or("missing paid request")?;
     let paid = paykit_lib::records::ActivityRecord::read(
         proof.content.value().ok_or("missing paid value")?,
-        &tills.till.identity(),
+        &seller_wallets.seller_wallet.identity(),
         paykit_lib::records::ActivitySide::Payee,
     )?;
     let signed = paid.proof.as_ref().ok_or("missing signed proof")?;
     let paykit_lib::Body::PaymentProof(body) = signed.body() else {
         return Err("wrong signed role".into());
     };
-    let id = tills
+    let id = seller_wallets
         .rail
         .settlement_id(&body.proof)
         .ok_or("missing settlement")?;
-    let tag = settlement_tag(tills.till.app().naming_key(), &id);
+    let tag = settlement_tag(seller_wallets.seller_wallet.app().naming_key(), &id);
     let number = settlement_bucket(&tag);
     let mut bytes = Vec::new();
     let mut n = 0u64;
@@ -677,25 +683,29 @@ async fn stored_receipt_over_full_bucket(world: &World) -> TestResult {
     let value = serde_json::to_vec(
         &serde_json::json!({"v":1, "marks":pubky_switch_core::enc::b64(&bytes)}),
     )?;
-    let put = tills
-        .till
+    let put = seller_wallets
+        .seller_wallet
         .app_mut()
         .record_op(&target, Some(&value), Vec::new())
         .await?;
-    tills
-        .till
+    seller_wallets
+        .seller_wallet
         .app_mut()
         .submit_batch(OpBatch::for_protocol("paykit").entry(put))
         .await?;
-    let before = tills.till.backup().await?;
+    let before = seller_wallets.seller_wallet.backup().await?;
     for _ in 0..2 {
-        let error = tills.till.confirm_payment(&record).await.unwrap_err();
+        let error = seller_wallets
+            .seller_wallet
+            .confirm_payment(&record)
+            .await
+            .unwrap_err();
         assert_eq!(
             error.refusal(),
             Some(&paykit_sdk::Refusal::SettlementBucketFull { bucket: number })
         );
     }
-    let warnings = tills.till.notices().await?;
+    let warnings = seller_wallets.seller_wallet.notices().await?;
     let [warning] = warnings.as_slice() else {
         return Err("expected one bucket warning".into());
     };
@@ -705,17 +715,20 @@ async fn stored_receipt_over_full_bucket(world: &World) -> TestResult {
         Some(paykit_sdk::SettlementSubject::Bucket(number))
     );
     let notice_id = warning.id.clone();
-    tills.till.acknowledge_notice(&notice_id).await?;
-    let bucket_key = tills.till.app().record_key(&target)?;
-    let full = tills
-        .till
+    seller_wallets
+        .seller_wallet
+        .acknowledge_notice(&notice_id)
+        .await?;
+    let bucket_key = seller_wallets.seller_wallet.app().record_key(&target)?;
+    let full = seller_wallets
+        .seller_wallet
         .app()
         .shared_record(&bucket_key)
         .await?
         .ok_or("missing full bucket")?;
     assert!(full.authenticated);
-    let stored = tills
-        .till
+    let stored = seller_wallets
+        .seller_wallet
         .confirm_payment_with(
             &record,
             ReceiptDetails::new()
@@ -724,15 +737,18 @@ async fn stored_receipt_over_full_bucket(world: &World) -> TestResult {
         )
         .await?
         .ok_or("missing stored receipt")?;
-    let evidence = tills.till.app().shared_evidence().await?;
+    let evidence = seller_wallets.seller_wallet.app().shared_evidence().await?;
     let mut receipt_writes = 0;
     for kept in &evidence.ops {
         use pubky_switch_core::ops::{Condition, OpKind, SignedOp};
-        if kept.cert != *tills.till.app().cert().signed() {
+        if kept.cert != *seller_wallets.seller_wallet.app().cert().signed() {
             continue;
         }
-        let op =
-            SignedOp::verify_with_cert(&kept.op, tills.till.app().cert(), &tills.till.identity())?;
+        let op = SignedOp::verify_with_cert(
+            &kept.op,
+            seller_wallets.seller_wallet.app().cert(),
+            &seller_wallets.seller_wallet.identity(),
+        )?;
         if matches!(&op.body().kind, OpKind::RecordPut(put) if put.key == record) {
             assert!(op.body().conditions.contains(&Condition::RecordVersion {
                 key: bucket_key,
@@ -742,28 +758,33 @@ async fn stored_receipt_over_full_bucket(world: &World) -> TestResult {
         }
     }
     assert_eq!(receipt_writes, 1);
-    let current = tills
-        .till
+    let current = seller_wallets
+        .seller_wallet
         .app()
         .shared_record(&bucket_key)
         .await?
         .ok_or("missing checked bucket")?;
     assert_eq!(current.version, full.version);
     assert_eq!(current.content, full.content);
-    assert!(tills.till.app().delivery(&stored).await?.is_none());
-    assert!(tills
-        .till
+    assert!(seller_wallets
+        .seller_wallet
+        .app()
+        .delivery(&stored)
+        .await?
+        .is_none());
+    assert!(seller_wallets
+        .seller_wallet
         .app()
         .protocol_scan("paykit", b"ri/")
         .await?
         .is_empty());
-    assert!(tills.till.notices().await?.is_empty());
-    drop(tills.till);
+    assert!(seller_wallets.seller_wallet.notices().await?.is_empty());
+    drop(seller_wallets.seller_wallet);
     let mut restored = Paykit::restore(
-        world.app_env(tills.till_store),
+        world.app_env(seller_wallets.seller_wallet_store),
         Default::default(),
         &before,
-        tills.rail.clone(),
+        seller_wallets.rail.clone(),
         Arc::new(TestTimer),
     )
     .await?;
@@ -778,13 +799,16 @@ async fn stored_receipt_over_full_bucket(world: &World) -> TestResult {
         Some(stored.clone())
     );
     assert!(restored.app().delivery(&stored).await?.is_none());
-    tills.buyer.receive(None).await?;
-    assert!(tills
+    seller_wallets.buyer.receive(None).await?;
+    assert!(seller_wallets
         .buyer
         .receipts(ReceiptsOf::Request(request))
         .await?
         .is_empty());
-    assert_eq!(tills.rail.all_executions().values().sum::<u64>(), 1);
+    assert_eq!(
+        seller_wallets.rail.all_executions().values().sum::<u64>(),
+        1
+    );
     Ok(())
 }
 
@@ -846,32 +870,33 @@ async fn test_recovered_bucket_repairs_retained_marks_without_another_payment() 
 async fn repair_recovered_bucket(world: &World) -> TestResult {
     use pubky_switch_client::app::{Collection as SwitchCollection, RecordTarget};
 
-    let mut tills = Box::pin(enrolled_tills(world)).await?;
-    let [first, second] = transactions_in_one_bucket(tills.till.app().naming_key())?;
+    let mut seller_wallets = Box::pin(enrolled_seller_wallets(world)).await?;
+    let [first, second] =
+        transactions_in_one_bucket(seller_wallets.seller_wallet.app().naming_key())?;
     let number = settlement_bucket(&first.1);
     let collection = Collection::Settlements;
     let target = RecordTarget::new(
         SwitchCollection::new(collection.name(), collection.fixed_policy()),
         &natural_key::settlement_bucket(number),
     );
-    let key = tills.till.app().record_key(&target)?;
+    let key = seller_wallets.seller_wallet.app().record_key(&target)?;
     const ADDRESS: &str = "bcrt1qqyqszqgpqyqszqgpqyqszqgpqyqszqgpvxat9t";
-    tills.rail.next(Behaviour::InTransaction(first.0));
+    seller_wallets.rail.next(Behaviour::InTransaction(first.0));
     let (buyer, _, record) = Box::pin(paid_request(
-        &mut tills.till,
-        tills.buyer,
+        &mut seller_wallets.seller_wallet,
+        seller_wallets.buyer,
         "btc-bitcoin-p2wpkh",
         ADDRESS,
     ))
     .await?;
-    let receipt = tills
-        .till
+    let receipt = seller_wallets
+        .seller_wallet
         .confirm_payment(&record)
         .await?
         .ok_or("first receipt missing")?;
-    tills.labelled.receive(None).await?;
-    let prior = tills.till.backup().await?;
-    let older = tills
+    seller_wallets.labelled.receive(None).await?;
+    let prior = seller_wallets.seller_wallet.backup().await?;
+    let older = seller_wallets
         .labelled
         .app()
         .shared_record(&key)
@@ -880,27 +905,27 @@ async fn repair_recovered_bucket(world: &World) -> TestResult {
     let snapshot = SettlementBucket::bind(
         older.content.value().ok_or("first bucket unreadable")?,
         number,
-        tills.labelled.app().naming_key(),
+        seller_wallets.labelled.app().naming_key(),
         &key,
     )?;
     assert_eq!(snapshot.marks().len(), 1);
 
-    tills.rail.next(Behaviour::InTransaction(second.0));
+    seller_wallets.rail.next(Behaviour::InTransaction(second.0));
     let (_, _, record) = Box::pin(paid_request(
-        &mut tills.till,
+        &mut seller_wallets.seller_wallet,
         buyer,
         "btc-bitcoin-p2wpkh",
         ADDRESS,
     ))
     .await?;
-    let next = tills
-        .till
+    let next = seller_wallets
+        .seller_wallet
         .confirm_payment(&record)
         .await?
         .ok_or("second receipt missing")?;
     assert_ne!(receipt, next);
-    let complete = tills
-        .till
+    let complete = seller_wallets
+        .seller_wallet
         .app_mut()
         .read_record(&target)
         .await?
@@ -911,18 +936,21 @@ async fn repair_recovered_bucket(world: &World) -> TestResult {
             .value()
             .ok_or("cannot open complete bucket")?,
         number,
-        tills.till.app().naming_key(),
+        seller_wallets.seller_wallet.app().naming_key(),
         &key,
     )?;
     assert_eq!(expected.marks().len(), 2);
-    assert_eq!(tills.rail.all_executions().values().sum::<u64>(), 2);
+    assert_eq!(
+        seller_wallets.rail.all_executions().values().sum::<u64>(),
+        2
+    );
 
-    // This till selected an older native layer, but its owner layer retains both
-    // authenticated marks. The other till can upload only the genuine first write.
-    drop(tills.till);
-    Box::pin(declare_shop_loss(world, tills.signer)).await?;
-    Box::pin(follow_recovered_shop(&mut tills.labelled)).await?;
-    let upload = tills
+    // This seller wallet selected an older native layer, but its owner layer retains both
+    // authenticated marks. The other wallet can upload only the genuine first write.
+    drop(seller_wallets.seller_wallet);
+    Box::pin(declare_shop_loss(world, seller_wallets.signer)).await?;
+    Box::pin(follow_recovered_shop(&mut seller_wallets.labelled)).await?;
+    let upload = seller_wallets
         .labelled
         .app_mut()
         .read_record(&target)
@@ -934,16 +962,16 @@ async fn repair_recovered_bucket(world: &World) -> TestResult {
         revision,
         deleted: false,
         ..
-    } = tills.labelled.app().record_condition(&key).await?
+    } = seller_wallets.labelled.app().record_condition(&key).await?
     else {
         return Err("recovery upload lacks its physical application".into());
     };
 
     let mut app = Paykit::restore(
-        world.app_env(tills.till_store.clone()),
+        world.app_env(seller_wallets.seller_wallet_store.clone()),
         Default::default(),
         &prior,
-        tills.rail.clone(),
+        seller_wallets.rail.clone(),
         Arc::new(TestTimer),
     )
     .await?;
@@ -969,7 +997,7 @@ async fn repair_recovered_bucket(world: &World) -> TestResult {
     let pubky_switch_client::app::RecordRead::Fresh(before) =
         app.app_mut().read_record_fresh(&target).await?
     else {
-        return Err("the returning till must receive a current hosted bucket".into());
+        return Err("the returning seller wallet must receive a current hosted bucket".into());
     };
     assert_eq!(before.writer, upload.writer);
     assert_eq!(before.content.value(), older.content.value());
@@ -992,15 +1020,15 @@ async fn repair_recovered_bucket(world: &World) -> TestResult {
     let app_id = app.app_id();
     drop(app);
     let mut restored = Paykit::load(
-        world.app_env(tills.till_store),
+        world.app_env(seller_wallets.seller_wallet_store),
         Default::default(),
         app_id,
-        tills.rail.clone(),
+        seller_wallets.rail.clone(),
         Arc::new(TestTimer),
     )
     .await?;
     Box::pin(follow_recovered_shop(&mut restored)).await?;
-    let repaired = tills
+    let repaired = seller_wallets
         .labelled
         .app_mut()
         .read_record(&target)
@@ -1012,7 +1040,7 @@ async fn repair_recovered_bucket(world: &World) -> TestResult {
             .value()
             .ok_or("repaired bucket unreadable")?,
         number,
-        tills.labelled.app().naming_key(),
+        seller_wallets.labelled.app().naming_key(),
         &key,
     )?;
     assert_eq!(actual.marks(), expected.marks());
@@ -1033,7 +1061,7 @@ async fn repair_recovered_bucket(world: &World) -> TestResult {
     restored.acknowledge_notice(&notice.id).await?;
 
     restored.receive(None).await?;
-    let again = tills
+    let again = seller_wallets
         .labelled
         .app_mut()
         .read_record(&target)
@@ -1050,7 +1078,10 @@ async fn repair_recovered_bucket(world: &World) -> TestResult {
         2
     );
 
-    assert_eq!(tills.rail.all_executions().values().sum::<u64>(), 2);
+    assert_eq!(
+        seller_wallets.rail.all_executions().values().sum::<u64>(),
+        2
+    );
     Ok(())
 }
 
@@ -1084,30 +1115,42 @@ async fn credit_after_loss(world: &World, when: SettlementTime) -> TestResult {
     use pubky_switch_client::app::{
         Collection as SwitchCollection, KeptReason, RecordRead, RecordTarget, UserConfirmed,
     };
-    let mut tills = Box::pin(enrolled_tills(world)).await?;
-    let [original, distinct] = transactions_in_one_bucket(tills.till.app().naming_key())?;
+    let mut seller_wallets = Box::pin(enrolled_seller_wallets(world)).await?;
+    let [original, distinct] =
+        transactions_in_one_bucket(seller_wallets.seller_wallet.app().naming_key())?;
     let number = settlement_bucket(&original.1);
     let collection = Collection::Settlements;
     let target = RecordTarget::new(
         SwitchCollection::new(collection.name(), collection.fixed_policy()),
         &natural_key::settlement_bucket(number),
     );
-    let key = tills.till.app().record_key(&target)?;
-    let before = tills.labelled.backup().await?;
+    let key = seller_wallets.seller_wallet.app().record_key(&target)?;
+    let before = seller_wallets.labelled.backup().await?;
     const ADDRESS: &str = "bcrt1qqyqszqgpqyqszqgpqyqszqgpqyqszqgpvxat9t";
-    tills.rail.next(Behaviour::InTransaction(original.0));
+    seller_wallets
+        .rail
+        .next(Behaviour::InTransaction(original.0));
     let (buyer, _, paid) = Box::pin(paid_request(
-        &mut tills.till,
-        tills.buyer,
+        &mut seller_wallets.seller_wallet,
+        seller_wallets.buyer,
         "btc-bitcoin-p2wpkh",
         ADDRESS,
     ))
     .await?;
-    assert!(tills.till.confirm_payment(&paid).await?.is_some());
-    tills.labelled.receive(None).await?;
-    assert!(tills.labelled.app().shared_record(&paid).await?.is_none());
+    assert!(seller_wallets
+        .seller_wallet
+        .confirm_payment(&paid)
+        .await?
+        .is_some());
+    seller_wallets.labelled.receive(None).await?;
+    assert!(seller_wallets
+        .labelled
+        .app()
+        .shared_record(&paid)
+        .await?
+        .is_none());
     assert_eq!(
-        tills
+        seller_wallets
             .labelled
             .app()
             .protocol_scan("paykit", b"sm/")
@@ -1115,25 +1158,25 @@ async fn credit_after_loss(world: &World, when: SettlementTime) -> TestResult {
             .len(),
         1
     );
-    drop((tills.till, tills.labelled));
-    Box::pin(declare_shop_loss(world, tills.signer)).await?;
-    // This registered till retains its prior observation locally. Its selected native
+    drop((seller_wallets.seller_wallet, seller_wallets.labelled));
+    Box::pin(declare_shop_loss(world, seller_wallets.signer)).await?;
+    // This registered seller wallet retains its prior observation locally. Its selected native
     // backup has no bucket to upload, and cannot read the unlabelled sale or receipt.
     let resumed = Paykit::restore(
-        world.app_env(tills.labelled_store.clone()),
+        world.app_env(seller_wallets.labelled_store.clone()),
         Default::default(),
         &before,
-        tills.rail.clone(),
+        seller_wallets.rail.clone(),
         Arc::new(TestTimer),
     )
     .await?;
     let app_id = resumed.app_id();
     drop(resumed);
     let mut seller = Paykit::load(
-        world.app_env(tills.labelled_store),
+        world.app_env(seller_wallets.labelled_store),
         Default::default(),
         app_id,
-        tills.rail.clone(),
+        seller_wallets.rail.clone(),
         Arc::new(TestTimer),
     )
     .await?;
@@ -1154,7 +1197,9 @@ async fn credit_after_loss(world: &World, when: SettlementTime) -> TestResult {
         .await?;
     seller.app_mut().invite(&buyer.identity()).await?;
     // A second output from the same transaction is never another settlement.
-    tills.rail.next(Behaviour::InTransaction(original.0));
+    seller_wallets
+        .rail
+        .next(Behaviour::InTransaction(original.0));
     let (buyer, _, same) = Box::pin(paid_request(
         &mut seller,
         buyer,
@@ -1183,7 +1228,9 @@ async fn credit_after_loss(world: &World, when: SettlementTime) -> TestResult {
             .checked_sub(world.now_ms())
             .ok_or("unexpected recovery clock")?,
     );
-    tills.rail.next(Behaviour::InTransaction(distinct.0));
+    seller_wallets
+        .rail
+        .next(Behaviour::InTransaction(distinct.0));
     let (mut buyer, request, occurrence) = Box::pin(paid_request(
         &mut seller,
         buyer,
@@ -1227,7 +1274,10 @@ async fn credit_after_loss(world: &World, when: SettlementTime) -> TestResult {
         .iter()
         .any(|mark| mark.settlement == paykit_lib::derive::mark_settlement_tag(&distinct.1)));
     assert_eq!(seller.confirm_payment(&occurrence).await?, Some(receipt));
-    assert_eq!(tills.rail.all_executions().values().sum::<u64>(), 3);
+    assert_eq!(
+        seller_wallets.rail.all_executions().values().sum::<u64>(),
+        3
+    );
     Ok(())
 }
 
@@ -1238,8 +1288,9 @@ async fn test_absent_settlement_bucket_without_a_loss_keeps_the_wallet_stopped()
     };
 
     let world = World::start(Backend::Scripted)?.ok_or("missing scripted switch")?;
-    let mut tills = Box::pin(enrolled_tills(&world)).await?;
-    let [credited, pending] = transactions_in_one_bucket(tills.till.app().naming_key())?;
+    let mut seller_wallets = Box::pin(enrolled_seller_wallets(&world)).await?;
+    let [credited, pending] =
+        transactions_in_one_bucket(seller_wallets.seller_wallet.app().naming_key())?;
     let number = settlement_bucket(&credited.1);
     let target = RecordTarget::new(
         SwitchCollection::new(
@@ -1248,42 +1299,54 @@ async fn test_absent_settlement_bucket_without_a_loss_keeps_the_wallet_stopped()
         ),
         &natural_key::settlement_bucket(number),
     );
-    let key = tills.till.app().record_key(&target)?;
+    let key = seller_wallets.seller_wallet.app().record_key(&target)?;
     const ADDRESS: &str = "bcrt1qqyqszqgpqyqszqgpqyqszqgpqyqszqgpvxat9t";
 
-    // This backup has the pending proof but predates the other till's first credit.
-    tills.rail.next(Behaviour::InTransaction(pending.0));
+    // This backup has the pending proof but predates the other wallet's first credit.
+    seller_wallets
+        .rail
+        .next(Behaviour::InTransaction(pending.0));
     let (mut buyer, pending_request, pending_record) = Box::pin(paid_request(
-        &mut tills.labelled,
-        tills.buyer,
+        &mut seller_wallets.labelled,
+        seller_wallets.buyer,
         "btc-bitcoin-p2wpkh",
         ADDRESS,
     ))
     .await?;
-    let prior = tills.labelled.backup().await?;
-    tills.rail.next(Behaviour::InTransaction(credited.0));
+    let prior = seller_wallets.labelled.backup().await?;
+    seller_wallets
+        .rail
+        .next(Behaviour::InTransaction(credited.0));
     let (_, _, first) = Box::pin(paid_request(
-        &mut tills.till,
-        tills.other,
+        &mut seller_wallets.seller_wallet,
+        seller_wallets.other,
         "btc-bitcoin-p2wpkh",
         ADDRESS,
     ))
     .await?;
-    assert!(tills.till.confirm_payment(&first).await?.is_some());
-    tills.labelled.receive(None).await?;
-    let known = tills.labelled.app().protocol_scan("paykit", b"sm/").await?;
+    assert!(seller_wallets
+        .seller_wallet
+        .confirm_payment(&first)
+        .await?
+        .is_some());
+    seller_wallets.labelled.receive(None).await?;
+    let known = seller_wallets
+        .labelled
+        .app()
+        .protocol_scan("paykit", b"sm/")
+        .await?;
     assert_eq!(known.len(), 1);
-    drop((tills.till, tills.labelled));
+    drop((seller_wallets.seller_wallet, seller_wallets.labelled));
 
     // The faulty test service still hosts this same generation, but its answer omits the bucket.
     world
         .drop_record("https://shop.payment.test", &world.identity("shop")?, &key)
         .await?;
     let mut shop = Paykit::restore(
-        world.app_env(tills.labelled_store.clone()),
+        world.app_env(seller_wallets.labelled_store.clone()),
         Default::default(),
         &prior,
-        tills.rail.clone(),
+        seller_wallets.rail.clone(),
         Arc::new(TestTimer),
     )
     .await?;
@@ -1313,10 +1376,10 @@ async fn test_absent_settlement_bucket_without_a_loss_keeps_the_wallet_stopped()
     let id = shop.app_id();
     drop(shop);
     let mut shop = Paykit::load(
-        world.app_env(tills.labelled_store),
+        world.app_env(seller_wallets.labelled_store),
         Default::default(),
         id,
-        tills.rail.clone(),
+        seller_wallets.rail.clone(),
         Arc::new(TestTimer),
     )
     .await?;
@@ -1340,7 +1403,10 @@ async fn test_absent_settlement_bucket_without_a_loss_keeps_the_wallet_stopped()
         .await?
         .is_empty());
     assert_eq!(shop.app().protocol_scan("paykit", b"sm/").await?, known);
-    assert_eq!(tills.rail.all_executions().values().sum::<u64>(), 2);
+    assert_eq!(
+        seller_wallets.rail.all_executions().values().sum::<u64>(),
+        2
+    );
     world.close().await?;
     Ok(())
 }
@@ -1395,25 +1461,25 @@ async fn restored_receipt_delivery_after_cancellation(
     use paykit_lib::records::{ActivityRecord, ActivitySide};
     use paykit_sdk::NoticeKind;
 
-    let mut tills = Box::pin(enrolled_tills(world)).await?;
+    let mut seller_wallets = Box::pin(enrolled_seller_wallets(world)).await?;
     let (mut peer, signer) = Box::pin(join(
         world,
-        *tills.signer,
+        *seller_wallets.signer,
         "shop",
         "other-shop",
         AppScopes::new().request().manage_contacts().build()?,
         Arc::new(MemoryStore::new()),
-        &tills.rail,
+        &seller_wallets.rail,
     ))
     .await?;
     let (mut buyer, request, key) = Box::pin(paid_request(
-        &mut tills.till,
-        tills.buyer,
+        &mut seller_wallets.seller_wallet,
+        seller_wallets.buyer,
         "btc-lightning-bolt11",
         "ln-receipt-before-shop-recovery",
     ))
     .await?;
-    let shop_id = tills.till.app_id();
+    let shop_id = seller_wallets.seller_wallet.app_id();
     world.lose_answer("POST", "/ops");
     if history == ReceiptHistory::Unavailable {
         world.unreachable(
@@ -1421,16 +1487,16 @@ async fn restored_receipt_delivery_after_cancellation(
             &format!("/records/{}", pubky_switch_core::enc::b64(&key)),
         );
     }
-    let kept = tills
-        .till
+    let kept = seller_wallets
+        .seller_wallet
         .confirm_payment_with(&key, ReceiptDetails::new())
         .await
         .unwrap_err()
         .kept_batch()
         .ok_or("missing unanswered receipt batch")?;
     assert_eq!(world.faults_left(), 0);
-    let original = tills
-        .till
+    let original = seller_wallets
+        .seller_wallet
         .app()
         .queued_messages("paykit")
         .await?
@@ -1439,8 +1505,8 @@ async fn restored_receipt_delivery_after_cancellation(
         .ok_or("missing original receipt intent")?;
     assert_eq!(original.to, buyer.identity());
     assert_eq!(original.kind, paykit_lib::Kind::PaymentReceipt.as_str());
-    let backup = tills.till.backup().await?;
-    drop(tills.till);
+    let backup = seller_wallets.seller_wallet.backup().await?;
+    drop(seller_wallets.seller_wallet);
     peer.receive(None).await?;
     let first = peer
         .app()
@@ -1486,11 +1552,14 @@ async fn restored_receipt_delivery_after_cancellation(
             &historical,
             issued.cert(),
             &original,
-            &tills.rail,
+            &seller_wallets.rail,
             cutoff == written,
         ))
         .await?;
-        assert_eq!(tills.rail.all_executions().values().sum::<u64>(), 1);
+        assert_eq!(
+            seller_wallets.rail.all_executions().values().sum::<u64>(),
+            1
+        );
         return Ok(());
     }
     Box::pin(declare_shop_loss(world, Box::new(signer))).await?;
@@ -1521,7 +1590,7 @@ async fn restored_receipt_delivery_after_cancellation(
         world.app_env(store.clone()),
         Default::default(),
         &backup,
-        tills.rail.clone(),
+        seller_wallets.rail.clone(),
         Arc::new(TestTimer),
     ))
     .await?;
@@ -1555,7 +1624,7 @@ async fn restored_receipt_delivery_after_cancellation(
         world.app_env(store),
         Default::default(),
         shop_id,
-        tills.rail.clone(),
+        seller_wallets.rail.clone(),
         Arc::new(TestTimer),
     ))
     .await?;
@@ -1590,7 +1659,10 @@ async fn restored_receipt_delivery_after_cancellation(
         .receipts(ReceiptsOf::Request(request))
         .await?
         .is_empty());
-    assert_eq!(tills.rail.all_executions().values().sum::<u64>(), 1);
+    assert_eq!(
+        seller_wallets.rail.all_executions().values().sum::<u64>(),
+        1
+    );
     Ok(())
 }
 

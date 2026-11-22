@@ -1163,10 +1163,10 @@ async fn test_replies_kept_over_a_record_sealed_at_a_key_not_held_given_up_with_
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    let mut till = w
+    let mut seller_wallet = w
         .join(
             &w.bob,
-            "till",
+            "seller-wallet",
             paykit_sdk::AppScopes::new().request().build().unwrap(),
         )
         .await;
@@ -1179,12 +1179,12 @@ async fn test_replies_kept_over_a_record_sealed_at_a_key_not_held_given_up_with_
         .len();
     assert_eq!(kept, 2, "acceptance and proof kept");
     w.bob.next_doc(|body| body.data_epoch += 1).unwrap();
-    let till_cert = till.app().cert().clone();
-    bob_bundle(&w, till.app_id(), &till_cert, 1);
-    till.receive(None).await.unwrap();
-    till.receive(None).await.unwrap();
+    let seller_wallet_cert = seller_wallet.app().cert().clone();
+    bob_bundle(&w, seller_wallet.app_id(), &seller_wallet_cert, 1);
+    seller_wallet.receive(None).await.unwrap();
+    seller_wallet.receive(None).await.unwrap();
     let shop_cert = shop.app().cert().signed().clone();
-    record_request_by(&w, &mut till, &shop_cert, &request).await;
+    record_request_by(&w, &mut seller_wallet, &shop_cert, &request).await;
     shop.receive(None).await.unwrap();
     shop.receive(None).await.unwrap();
     let key = shop
@@ -1372,20 +1372,25 @@ async fn test_replies_kept_from_another_identity_never_placed_nor_stop_the_recei
 
 #[tokio::test]
 async fn test_replies_with_their_record_in_one_read_placed() {
-    // Bob's newly joined till sends alice a request and writes its record; alice pays it.
+    // Bob's newly joined seller wallet sends alice a request and writes its record; alice pays it.
     // The shop reads the record and alice's acceptance and proof in one read: both replies
     // go into the record, and none is taken unplaced (Paykit spec 8.1).
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    let mut till = w
+    let mut seller_wallet = w
         .join(
             &w.bob,
-            "till",
+            "seller-wallet",
             paykit_sdk::AppScopes::new().request().build().unwrap(),
         )
         .await;
-    let request = request_from(&mut till, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let request = request_from(
+        &mut seller_wallet,
+        w.alice_id(),
+        draft("1", w.clock.now_ms()),
+    )
+    .await;
     wallet.receive(None).await.unwrap();
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
@@ -1771,10 +1776,10 @@ async fn test_replies_dropped_past_30_days_stay_dropped_after_a_restore() {
 }
 
 /// Bob's shop holding his request record to alice as a value that opens but doesn't read as
-/// an activity record, written by bob's till, with no pause.
+/// an activity record, written by Bob's wallet, with no pause.
 struct PayeeUnread {
     shop: Paykit,
-    till: Paykit,
+    seller_wallet: Paykit,
     _wallet: Paykit,
     _carol: Paykit,
     request: RequestRef,
@@ -1798,10 +1803,10 @@ async fn payee_unread(w: &World) -> PayeeUnread {
             base,
         )
         .await;
-    let mut till = w
+    let mut seller_wallet = w
         .join(
             &w.bob,
-            "till",
+            "seller-wallet",
             paykit_sdk::AppScopes::new().request().build().unwrap(),
         )
         .await;
@@ -1814,13 +1819,13 @@ async fn payee_unread(w: &World) -> PayeeUnread {
         .await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     let record = shop.payee_activity().await.unwrap()[0].record;
-    till.receive(None).await.unwrap();
+    seller_wallet.receive(None).await.unwrap();
     let collection = Collection::PayeeActivity;
     let target = RecordTarget::new(
         SwitchCollection::new(collection.name(), collection.policy(None)),
         &natural_key::request_record(&w.bob_id(), &request.request_hash),
     );
-    let good = till
+    let good = seller_wallet
         .app()
         .shared_record(&record)
         .await
@@ -1833,7 +1838,7 @@ async fn payee_unread(w: &World) -> PayeeUnread {
     seen.armed.store(true, std::sync::atomic::Ordering::SeqCst);
     let mut s = PayeeUnread {
         shop,
-        till,
+        seller_wallet,
         _wallet: wallet,
         _carol: carol,
         request,
@@ -1841,23 +1846,23 @@ async fn payee_unread(w: &World) -> PayeeUnread {
         target,
         good,
     };
-    s.till_writes(crate::outcome_record::INVALID).await;
+    s.seller_wallet_writes(crate::outcome_record::INVALID).await;
     s.shop.receive(None).await.unwrap();
     assert_eq!(s.held().await, crate::outcome_record::INVALID);
     s
 }
 
 impl PayeeUnread {
-    /// Bob's till writes `value` at the request record.
-    async fn till_writes(&mut self, value: &[u8]) {
-        self.till.receive(None).await.unwrap();
+    /// Bob's wallet writes `value` at the request record.
+    async fn seller_wallet_writes(&mut self, value: &[u8]) {
+        self.seller_wallet.receive(None).await.unwrap();
         let op = self
-            .till
+            .seller_wallet
             .app_mut()
             .record_op(&self.target, Some(value), Vec::new())
             .await
             .unwrap();
-        self.till
+        self.seller_wallet
             .app_mut()
             .submit_batch(OpBatch::for_protocol("paykit").entry(op))
             .await
@@ -1970,7 +1975,7 @@ async fn test_replies_over_an_unread_record_counterpartys_acceptance_placed_once
         1
     );
     let good = s.good.clone();
-    s.till_writes(&good).await;
+    s.seller_wallet_writes(&good).await;
     s.shop.receive(None).await.unwrap();
     s.shop.receive(None).await.unwrap();
     assert_eq!(s.status().await, PayeeStatus::Accepted);
@@ -2023,7 +2028,7 @@ fn proof_of_settlement(
 #[tokio::test]
 async fn test_replies_proof_over_an_unread_settlement_record_writes_nothing() {
     // Carol's proof of a payment without a request opens the shop's record of its
-    // settlement; bob's till then writes there a value that doesn't read. Proofs of the same
+    // settlement; Bob's wallet then writes there a value that doesn't read. Proofs of the same
     // settlement, alice's and carol's own, aren't written over that value: the record can't
     // show its counterparty, and its key doesn't bind the sender, so each is kept as a reply
     // before its record, none held on the feed. Once the record reads again, naming carol,
@@ -2041,10 +2046,10 @@ async fn test_replies_proof_over_an_unread_settlement_record_writes_nothing() {
             base,
         )
         .await;
-    let mut till = w
+    let mut seller_wallet = w
         .join(
             &w.bob,
-            "till",
+            "seller-wallet",
             paykit_sdk::AppScopes::new().request().build().unwrap(),
         )
         .await;
@@ -2065,7 +2070,7 @@ async fn test_replies_proof_over_an_unread_settlement_record_writes_nothing() {
             b"fake:t1",
         ),
     );
-    let record = till.app().record_key(&target).unwrap();
+    let record = seller_wallet.app().record_key(&target).unwrap();
     let good = shop
         .app()
         .shared_record(&record)
@@ -2077,13 +2082,14 @@ async fn test_replies_proof_over_an_unread_settlement_record_writes_nothing() {
         .unwrap()
         .to_vec();
     seen.armed.store(true, std::sync::atomic::Ordering::SeqCst);
-    till.receive(None).await.unwrap();
-    let op = till
+    seller_wallet.receive(None).await.unwrap();
+    let op = seller_wallet
         .app_mut()
         .record_op(&target, Some(crate::outcome_record::INVALID), Vec::new())
         .await
         .unwrap();
-    till.app_mut()
+    seller_wallet
+        .app_mut()
         .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
@@ -2104,13 +2110,14 @@ async fn test_replies_proof_over_an_unread_settlement_record_writes_nothing() {
         2
     );
     assert!(shop.app_mut().parked_entries().await.unwrap().is_empty());
-    till.receive(None).await.unwrap();
-    let op = till
+    seller_wallet.receive(None).await.unwrap();
+    let op = seller_wallet
         .app_mut()
         .record_op(&target, Some(&good), Vec::new())
         .await
         .unwrap();
-    till.app_mut()
+    seller_wallet
+        .app_mut()
         .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
@@ -2151,10 +2158,10 @@ async fn test_replies_proof_over_an_unread_settlement_record_from_a_blocked_send
             base,
         )
         .await;
-    let mut till = w
+    let mut seller_wallet = w
         .join(
             &w.bob,
-            "till",
+            "seller-wallet",
             paykit_sdk::AppScopes::new().request().build().unwrap(),
         )
         .await;
@@ -2180,8 +2187,8 @@ async fn test_replies_proof_over_an_unread_settlement_record_from_a_blocked_send
         )
     };
     seen.armed.store(true, std::sync::atomic::Ordering::SeqCst);
-    till.receive(None).await.unwrap();
-    let op = till
+    seller_wallet.receive(None).await.unwrap();
+    let op = seller_wallet
         .app_mut()
         .record_op(
             &target(b"fake:t1"),
@@ -2190,7 +2197,8 @@ async fn test_replies_proof_over_an_unread_settlement_record_from_a_blocked_send
         )
         .await
         .unwrap();
-    till.app_mut()
+    seller_wallet
+        .app_mut()
         .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
