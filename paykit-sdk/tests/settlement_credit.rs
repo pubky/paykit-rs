@@ -1772,3 +1772,64 @@ fn receipt_backup_with_historical_identity(
         &selected,
     )?)?)
 }
+
+#[tokio::test]
+async fn test_payment_dated_before_its_request_is_flagged_on_both_services() -> TestResult {
+    for backend in [Backend::Scripted, Backend::Service] {
+        let Some(world) = World::start(backend)? else {
+            continue;
+        };
+        let result = Box::pin(dated_before_the_request(&world)).await;
+        world.close().await?;
+        result?;
+    }
+    Ok(())
+}
+
+/// The method dates the buyer's payment a millisecond before the request, with no tolerance:
+/// the shop's wallet flags the evidence and credits nothing (Paykit spec 7.1).
+async fn dated_before_the_request(world: &World) -> TestResult {
+    let SellerWallets {
+        mut buyer,
+        mut seller_wallet,
+        rail,
+        ..
+    } = Box::pin(enrolled_seller_wallets(world)).await?;
+    let created = world.now_ms();
+    let request = seller_wallet
+        .send_request(
+            buyer.identity(),
+            invoice("btc-lightning-bolt11", "lnbc1early")?,
+        )
+        .await?
+        .request
+        .ok_or("request was not sent")?;
+    buyer.receive(None).await?;
+    rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let pending = buyer
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome?;
+    rail.settle_at(&pending.attempt_id(), created - 1);
+    world.advance_ms(1_000);
+    buyer.resume_payments().await?;
+    seller_wallet.receive(None).await?;
+    let sale = seller_wallet
+        .payee_activity()
+        .await?
+        .into_iter()
+        .find(|a| a.request_hash == Some(request.request_hash))
+        .ok_or("request missing")?;
+    let refused = seller_wallet
+        .verify_payment(&sale.record)
+        .await
+        .expect_err("evidence dated before the request");
+    assert_eq!(
+        refused.refusal(),
+        Some(&paykit_sdk::Refusal::PaymentTimeOutside {
+            paid_at_ms: created - 1
+        })
+    );
+    assert_eq!(sale.status, PayeeStatus::ProofReceived);
+    Ok(())
+}

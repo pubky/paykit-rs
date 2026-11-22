@@ -377,7 +377,11 @@ fn revoke_shop_on_the_switch_only(w: &World) {
 /// An idempotent rail without a history: a resume repeats the dispatch, through the checks.
 fn repeatable(w: &World) {
     w.rail.set_declaration(
-        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS).with_idempotent(true),
+        RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
 }
 
@@ -1006,9 +1010,12 @@ async fn test_final_check_repeat_retention_ending_during_the_lookup_not_paid() {
     let w = World::new();
     const RETENTION_MS: u64 = 60 * 60_000;
     w.rail.set_declaration(
-        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true)
-            .with_idempotency_retention_ms(RETENTION_MS),
+        RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true)
+        .with_idempotency_retention_ms(RETENTION_MS),
     );
     let (store, app_id, request) = with_a_request(&w).await;
     let journaled = w.clock.now_ms();
@@ -1217,6 +1224,7 @@ async fn test_final_check_repeat_on_an_own_identity_read_that_errs_refused() {
 fn blind(w: &World) {
     w.rail.set_declaration(RailDeclaration::new(
         paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+        paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
     ));
 }
 
@@ -1381,8 +1389,13 @@ async fn test_fence_unchanged_seller_during_paying_completes_the_original_attemp
 
     let w = World::new();
     let (_, _, request, mut wallet) = answered_during_paying(&w, |_| {}).await;
-    w.rail
-        .set_declaration(RailDeclaration::new(FAKE_LONGEST_COMPLETION_MS).with_history(true));
+    w.rail.set_declaration(
+        RailDeclaration::new(
+            FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_history(true),
+    );
     w.rail.next(Behaviour::InTransaction([17; 32]));
     let paid = wallet
         .pay_request(&request, PayOptions::default())

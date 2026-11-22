@@ -14,6 +14,9 @@ private class CheckoutMethod(private val ledger: File) : ReceiptReader() {
     val release = CompletableDeferred<Unit>()
     val calls = AtomicInteger()
     @Volatile var pendingLookup = false
+    /// The test services' clock, which dates each payment as a real method's evidence would.
+    @Volatile var clock: (() -> ULong)? = null
+    @Volatile private var paidAt: ULong? = null
     fun chargedAttempt(): String = checkNotNull(stored())
 
     private fun originalProof(attempt: String) = """{"settlement":"$attempt"}""".toByteArray()
@@ -35,6 +38,7 @@ private class CheckoutMethod(private val ledger: File) : ReceiptReader() {
             DataOutputStream(file).writeUTF(payment.attemptId)
             file.fd.sync()
         }
+        paidAt = checkNotNull(clock)()
     }
 
     override suspend fun pay(payment: MethodPayment): MethodOutcome {
@@ -50,7 +54,7 @@ private class CheckoutMethod(private val ledger: File) : ReceiptReader() {
     override suspend fun verify(proof: MethodProof): ULong? =
         if (proof.attemptId == stored() && proof.proofJson.contentEquals(originalProof(proof.attemptId)) &&
             proof.amount.asset == "btc" && proof.amount.value == "7" &&
-            proof.endpoint == "btc-lightning-bolt11" && (proof.payload == null || proof.payload == "lnbc1checkout")) 1uL else null
+            proof.endpoint == "btc-lightning-bolt11" && (proof.payload == null || proof.payload == "lnbc1checkout")) paidAt else null
 
     override fun settlementId(proofJson: ByteArray): ByteArray? =
         stored()?.takeIf { proofJson.contentEquals(originalProof(it)) }?.toByteArray()
@@ -258,6 +262,7 @@ private fun driveCheckout(recovery: CheckoutReview, restore: String? = null) = r
             val method = CheckoutMethod(File(directory, "settled"))
             val store = EnrollmentStore()
             enrolledTestCheckout(store, method).use { fixture ->
+                method.clock = { fixture.nowMs() }
                 check(fixture.allowanceRecoveryNoticeKinds() == listOf(
                     WalletNoticeKind.ALLOWANCE_ACCEPTANCE_BEFORE_LOSS,
                     WalletNoticeKind.ALLOWANCE_WITHDRAWAL_CONFIRMED
