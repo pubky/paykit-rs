@@ -3056,6 +3056,11 @@ async fn test_publication_withdrawal_by_an_emptied_list_takes_the_same_confirmat
         unknown_shown(shop.withdraw_list_from(payer).await.unwrap_err()),
         shown
     );
+    // Choosing it again with the list still empty would send the same empty content.
+    assert_eq!(
+        unknown_shown(shop.publish_list_to(payer).await.unwrap_err()),
+        shown
+    );
     assert_eq!(w.record_writes(&w.bob, &key), 2);
     buyer.receive(None).await.unwrap();
     assert!(pays(&w, &mut buyer).await);
@@ -3113,6 +3118,49 @@ async fn test_publication_keeps_a_confirmation_until_a_receive_sends_its_list() 
     shop.publish_list_to(payer).await.unwrap();
     buyer.receive(None).await.unwrap();
     assert!(pays(&w, &mut buyer).await);
+}
+
+#[tokio::test]
+async fn test_publication_change_undone_before_it_went_sends_nothing_over_an_unknown_list() {
+    use paykit_sdk::{AppScopes, PaykitConfig};
+
+    let w = World::new();
+    let buyer = w.wallet("wallet").await;
+    let payer = buyer.identity();
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            AppScopes::new()
+                .request()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+            PaykitConfig::default(),
+            crate::common::store(),
+        )
+        .await;
+    shop.app_mut().invite(&payer).await.unwrap();
+    shop.receive(None).await.unwrap();
+    shop.set_list_endpoints(offered("lno1first")).await.unwrap();
+    let (_, key) = unknown_list(&w, &mut shop, payer, async |shop| {
+        shop.publish_list_to(payer).await.unwrap();
+    })
+    .await;
+    let shown = unknown_shown(shop.publish_list_to(payer).await.unwrap_err());
+    // While sends are held a change is reserved for no one; undoing it leaves the same list.
+    shop.block(&payer).await.unwrap();
+    shop.set_list_endpoints(offered("lno1second"))
+        .await
+        .unwrap();
+    shop.set_list_endpoints(offered("lno1first")).await.unwrap();
+    shop.unblock(&payer).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert_eq!(w.record_writes(&w.bob, &key), 1);
+    assert_eq!(
+        unknown_shown(shop.publish_list_to(payer).await.unwrap_err()),
+        shown
+    );
 }
 
 #[tokio::test]
@@ -3279,6 +3327,27 @@ async fn test_publication_takes_a_list_request_naming_the_unknown_withdrawal_as_
     let shown = unknown_shown(shop.withdraw_list_from(payer).await.unwrap_err());
     buyer.receive(None).await.unwrap();
     assert!(!pays(&w, &mut buyer).await);
+    // A request naming that version but no app may name another app's counter: no evidence.
+    let untargeted = paykit_lib::bodies::PrivatePaymentListRequest {
+        held_version: Some(shown.version),
+        app_id: None,
+    }
+    .to_body()
+    .unwrap();
+    w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        paykit_lib::Kind::PrivatePaymentListRequest.as_str(),
+        Vec::new(),
+        untargeted,
+    );
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        unknown_shown(shop.withdraw_list_from(payer).await.unwrap_err()),
+        shown
+    );
     // Its list request names the withdrawal's version: it arrived.
     let body = paykit_lib::bodies::PrivatePaymentListRequest {
         held_version: Some(shown.version),

@@ -485,17 +485,23 @@ impl Answers {
     }
 }
 
-/// A list request naming the exact version of the counterparty's current list whose
-/// delivery is unknown is evidence that it arrived (Paykit spec 9): it counts as that
+/// A list request to this app naming the exact version of the counterparty's current list,
+/// given up or still in flight, is evidence that it arrived (Paykit spec 9): it counts as that
 /// list's acceptance, at the request's acceptance time. Whether `recipient` changed.
 fn observe_named(
+    app_id: [u8; 16],
     recipient: &mut ListRecipient,
     held: Option<&ListReservation>,
     request: &PrivatePaymentListRequest,
     stored: &StoredMessage,
 ) -> std::result::Result<bool, Fail> {
+    // Only a request addressed to this app names this app's counter: versions of the
+    // payee's other apps may coincide (Paykit wire 4.14).
+    if request.app_id != Some(app_id) {
+        return Ok(false);
+    }
     let Some(issue) = held.filter(|issue| {
-        issue.delivery == super::FirstDelivery::Unknown
+        issue.delivery != super::FirstDelivery::Undelivered
             && issue.choice == recipient.choice
             && recipient.answers.first(issue).is_none()
             && request.held_version == ListVersion::new(issue.generation, issue.counter).ok()
@@ -539,7 +545,7 @@ pub(crate) fn note(
             // that it holds the current list whose delivery was unknown.
             if let Some(mut current) = other {
                 let held = state::cx_get::<ListReservation>(cx, &key::list_reservation(&sender))?;
-                if observe_named(&mut current, held.as_ref(), request, stored)? {
+                if observe_named(cx.app_id(), &mut current, held.as_ref(), request, stored)? {
                     keep_local(cx, local(&at, &current)?);
                 }
             }
@@ -547,7 +553,7 @@ pub(crate) fn note(
         }
     };
     let held = state::cx_get::<ListReservation>(cx, &key::list_reservation(&sender))?;
-    observe_named(&mut recipient, held.as_ref(), request, stored)?;
+    observe_named(cx.app_id(), &mut recipient, held.as_ref(), request, stored)?;
     let reserved = held
         .map(|r| ListVersion::new(r.generation, r.counter))
         .transpose()?;
