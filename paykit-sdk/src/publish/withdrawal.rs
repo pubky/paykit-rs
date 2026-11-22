@@ -34,10 +34,9 @@ impl Payable {
 /// What the client reported about a list's first delivery (Pubky Switch spec 11).
 /// `Undelivered` proves the recipient never got it. `Unknown` means it may have: no
 /// replacement follows without the user's confirmation (Paykit spec 8.4, 9).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum FirstDelivery {
-    #[default]
     Open,
     Undelivered,
     Unknown,
