@@ -98,10 +98,10 @@ gradle -p paykit-ffi/tests/hosts -Pbindings="$OUT/kotlin" -PnativeLibraryDir="$L
 
 swiftc -swift-version 5 -I "$OUT/swift" -Xcc "-fmodule-map-file=$OUT/swift/PaykitFFI.modulemap" \
     -emit-library -emit-module -module-name Paykit "$OUT"/swift/*.swift \
-    -emit-module-path "$OUT/Paykit.swiftmodule" -o "$OUT/libPaykit.dylib" -L "$LIB" -lpaykit
+    -emit-module-path "$OUT/Paykit.swiftmodule" -o "$OUT/libPaykitSwift.dylib" -L "$LIB" -lpaykit
 swiftc -swift-version 6 -parse-as-library -I "$OUT" -I "$OUT/swift" \
     -Xcc "-fmodule-map-file=$OUT/swift/PaykitFFI.modulemap" \
-    paykit-ffi/tests/hosts/WalletConsumer.swift -L "$OUT" -lPaykit -L "$LIB" -lpaykit \
+    paykit-ffi/tests/hosts/WalletConsumer.swift -L "$OUT" -lPaykitSwift -L "$LIB" -lpaykit \
     -o "$OUT/wallet-consumer"
 DYLD_LIBRARY_PATH="$OUT:$LIB" "$OUT/wallet-consumer"
 ```

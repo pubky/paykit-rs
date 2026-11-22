@@ -193,11 +193,11 @@ jobs:
             fi
             swiftc -swift-version 5 -I "$dir/swift" -Xcc "-fmodule-map-file=$dir/swift/PaykitFFI.modulemap" \
               -emit-library -emit-module -module-name Paykit "$dir"/swift/*.swift \
-              -emit-module-path "$dir/Paykit.swiftmodule" -o "$dir/libPaykit.dylib" \
+              -emit-module-path "$dir/Paykit.swiftmodule" -o "$dir/libPaykitSwift.dylib" \
               -L "$dir/lib" -lpaykit
             swiftc -swift-version 6 -parse-as-library "${flags[@]}" -I "$dir" -I "$dir/swift" \
               -Xcc "-fmodule-map-file=$dir/swift/PaykitFFI.modulemap" "${sources[@]}" \
-              -L "$dir" -lPaykit -L "$dir/lib" -lpaykit -o "$dir/consumer"
+              -L "$dir" -lPaykitSwift -L "$dir/lib" -lpaykit -o "$dir/consumer"
           done
       - name: Run the wallet consumer
         run: |
