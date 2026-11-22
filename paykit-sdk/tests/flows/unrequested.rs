@@ -626,7 +626,7 @@ async fn test_unrequested_list_over_a_record_that_doesnt_read_keeps_single_use_m
 }
 
 #[tokio::test]
-async fn test_unrequested_list_after_a_delete_is_held_until_placed_without_marks() {
+async fn test_unrequested_list_after_a_delete_stays_held_and_its_single_use_endpoint_unpaid() {
     use paykit_lib::collections::Collection;
     use pubky_switch_client::app::{Collection as SwitchCollection, OpBatch, RecordTarget};
 
@@ -677,22 +677,21 @@ async fn test_unrequested_list_after_a_delete_is_held_until_placed_without_marks
     assert!(refused.is_err(), "{refused:?}");
     assert_eq!(w.rail.all_executions().len(), 1);
 
-    // The host has shown the user the endpoint may be paid twice, and places it anyway.
-    wallet
-        .place_held_list_without_marks(
-            &w.bob_id(),
-            &shop.app_id(),
-            pubky_switch_client::app::UserConfirmed::new(),
-        )
-        .await
-        .unwrap();
-    assert!(wallet.held_lists().await.unwrap().is_empty());
-    let again = wallet
+    // No receive or newer list makes the single-use endpoint payable again: the delete took
+    // its mark, so the list stays held until an own app holding the mark writes it back.
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 2))
+        .await;
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let held = wallet.held_lists().await.unwrap();
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0].version, list_version(1, 2));
+    let refused = wallet
         .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
         .await
-        .outcome
-        .unwrap();
-    assert!(matches!(again, PayOutcome::Paid { .. }), "{again:?}");
+        .outcome;
+    assert!(refused.is_err(), "{refused:?}");
+    assert_eq!(w.rail.all_executions().len(), 1);
 }
 
 #[tokio::test]
@@ -865,8 +864,8 @@ async fn test_unrequested_list_over_a_value_awaiting_its_epoch_key_keeps_single_
     // The wallet paid the single-use endpoint, marked used in the record. The data epoch
     // rotates; the phone gets the new key and writes the record again, sealed at the new
     // epoch, which the wallet holds unopened for now. A newer list is held, not offered to
-    // be placed without the marks: a placement is refused as waiting for the keys. Once the
-    // wallet's key comes, late, the record opens and the list is placed with the mark.
+    // be placed without the marks. Once the wallet's key comes, late, the record opens and
+    // the list is placed with the mark.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut phone = w.wallet("phone").await;
@@ -929,18 +928,6 @@ async fn test_unrequested_list_over_a_value_awaiting_its_epoch_key_keeps_single_
         .await;
     wallet.receive(None).await.unwrap();
     assert!(wallet.held_lists().await.unwrap().is_empty());
-    let refused = wallet
-        .place_held_list_without_marks(
-            &w.bob_id(),
-            &shop.app_id(),
-            pubky_switch_client::app::UserConfirmed::new(),
-        )
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(refused.refusal(), Some(Refusal::NotNow(why)) if why.contains("scope keys")),
-        "{refused:?}"
-    );
     // The key comes late: the record opens with its mark, and the list is placed on it.
     store_bundle(&w, wallet.app_id(), &wallet.app().cert().clone());
     wallet.receive(None).await.unwrap();

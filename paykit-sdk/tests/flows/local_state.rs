@@ -798,17 +798,14 @@ async fn test_local_state_held_list_under_another_apps_key_not_listed() {
 
 #[tokio::test]
 async fn test_local_state_held_list_under_another_apps_key_never_placed_there() {
-    // Placed without its marks for app 9, the list held at app 9's key is the shop's: it is
-    // never written into app 9's record.
+    // The list held at app 9's key is the shop's: a receive that places held lists never
+    // writes it into app 9's record.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let _shop = w.shop().await;
     list_under_another_apps_key(&w, &mut wallet, &[9; 16]).await;
-    let error = wallet
-        .place_held_list_without_marks(&w.bob_id(), &[9; 16], UserConfirmed::new())
-        .await
-        .unwrap_err();
-    assert!(corrupt(&error), "{error:?}");
+    let received = wallet.receive(None).await;
+    assert!(received.as_ref().err().is_none_or(corrupt), "{received:?}");
     let record = wallet.app().record_key(&lists_of(&w, &[9; 16])).unwrap();
     assert_eq!(w.record_writes(&w.alice, &record), 0);
 }

@@ -1364,7 +1364,6 @@ mod tests {
         assert_send(&wallet.request_resend(key, ResendSelection::default()));
         assert_send(&wallet.held_lists());
         assert_send(&wallet.spam_count(&key));
-        assert_send(&wallet.place_held_list_without_marks(&key, &[0; 16], confirmed));
         assert_send(&wallet.send_request(key, draft));
         assert_send(&wallet.message_delivery(""));
         assert_send(&wallet.payee_activity());
