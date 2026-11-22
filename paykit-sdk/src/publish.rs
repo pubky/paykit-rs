@@ -12,6 +12,7 @@ mod withdrawal;
 
 use history::PublicationHistory;
 use std::collections::{BTreeMap, BTreeSet};
+pub(crate) use withdrawal::FirstDelivery;
 use withdrawal::{Payable, Withdrawal};
 
 use paykit_lib::bodies::{ListEndpoint, PrivatePaymentList, PRIVATE_LIST_MAX_AGE_MS};
@@ -21,7 +22,7 @@ use paykit_lib::{Kind, ListVersion, PaymentEndpointIdentifier, PaymentEndpointPa
 use pubky_switch_client::app::{
     Collection, DeliveryView, KeptBatchDrop, KeptBatchStatus, KeptReason, LocalWrite, OpBatch,
     OutgoingMessage, ReceiveReport, RecordContent, RecordRead, RecordTarget, SharedRecord,
-    StoreFailure,
+    StoreFailure, UserConfirmed,
 };
 use pubky_switch_core::ident::Policy;
 use pubky_switch_core::ops::Condition;
@@ -42,6 +43,9 @@ enum IssueFor {
     Change,
     Answer(ListVersion),
     RetryWithdrawal,
+    /// A new version the user confirmed after the current one's delivery ended unknown,
+    /// built on the current counter.
+    Confirmed,
 }
 
 pub(crate) fn collection() -> Collection {
@@ -90,14 +94,32 @@ fn unresolved() -> Refusal {
     Refusal::NotNow("Paykit spec 8.4.1: the recipient's previous publication is unresolved".into())
 }
 
+/// The revision of a reusable list is derived from its endpoints, so the same list set
+/// again is the same revision: a change that is undone before it went out sends nothing
+/// in place of a list of unknown delivery (Paykit spec 8.4).
+fn list_revision(endpoints: &BTreeMap<String, String>) -> [u8; 16] {
+    let mut parts: Vec<&[u8]> = vec![b"paykit/v1/list-revision"];
+    for (id, payload) in endpoints {
+        parts.extend([id.as_bytes(), payload.as_bytes()]);
+    }
+    let digest = pubky_switch_core::enc::hash(&pubky_switch_core::enc::lp(&parts));
+    let mut revision = [0; 16];
+    revision.copy_from_slice(&digest[..16]);
+    revision
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ListSettings {
-    revision: [u8; 16],
     endpoints: BTreeMap<String, String>,
 }
 
 impl ListSettings {
+    /// Derived on every read, never stored, so no stored value can disagree with it.
+    fn revision(&self) -> [u8; 16] {
+        list_revision(&self.endpoints)
+    }
+
     fn endpoints(&self) -> Result<BTreeMap<PaymentEndpointIdentifier, PaymentEndpointPayload>> {
         self.endpoints
             .iter()
@@ -113,6 +135,29 @@ impl ListSettings {
     pub(crate) fn check(&self) -> Result<()> {
         self.endpoints().map(|_| ())
     }
+}
+
+/// A counterparty's current Private Payment List that the client gave up with an
+/// unknown outcome (Paykit spec 8.4, 9). It may or may not have reached the
+/// counterparty. Show it before asking the user whether to send another
+/// ([`Paykit::send_list_again`]); it comes from [`Refusal::ListDeliveryUnknown`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct UnknownListDelivery {
+    /// The counterparty the list was sent to.
+    pub recipient: [u8; 32],
+    /// The list's version.
+    pub version: ListVersion,
+    /// The list message's `msg_id`.
+    pub msg_id: String,
+    /// Whether the list was empty: a withdrawal. If it didn't arrive, the counterparty
+    /// may keep paying the earlier list. A nonempty list that didn't arrive leaves the
+    /// counterparty without it.
+    pub withdrawal: bool,
+    /// For a withdrawal, the latest time, in Unix milliseconds, an earlier nonempty list
+    /// to this counterparty can still be paid; `None` when it can't be bounded. For a
+    /// nonempty list, when the list itself expires.
+    pub payable_until_ms: Option<u64>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -175,7 +220,10 @@ pub(crate) struct ListReservation {
     expires: u64,
     pub(crate) publisher: [u8; 16],
     predecessors: Payable,
-    undelivered: bool,
+    delivery: FirstDelivery,
+    /// The user confirmed another version after this list's delivery ended unknown. It
+    /// is kept until that version is reserved, so a receive can complete it.
+    confirmed: bool,
     #[serde(deserialize_with = "Option::deserialize")]
     withdrawal: Option<Withdrawal>,
     #[serde(deserialize_with = "Option::deserialize")]
@@ -194,6 +242,7 @@ impl ListReservation {
     pub(crate) fn check(&self) -> Result<()> {
         let version = ListVersion::new(self.generation, self.counter)?;
         if self.revision.is_some() && self.withdrawal.is_some()
+            || self.confirmed && self.delivery != FirstDelivery::Unknown
             || self.withdrawal.is_some_and(|w| w.first > w.issued)
         {
             return Err(crate::PaykitError::corrupt());
@@ -211,6 +260,14 @@ impl ListReservation {
             generation: self.generation,
             hash: self.hash,
         }
+    }
+
+    /// The same signed issue: its message and counter.
+    fn matches_issue(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.hash == other.hash
+            && self.generation == other.generation
+            && self.counter == other.counter
     }
 
     fn matches(&self, record: &ListPublicationRecord) -> bool {
@@ -283,6 +340,8 @@ impl RestoredPublications {
         binder: &state::Binder<'_>,
     ) -> Result<()> {
         let mut issue = state::restored::<ListReservation>(key, value, binder)?;
+        // A restore gives every counterparty a fresh choice: no confirmation carries over.
+        issue.confirmed = false;
         self.remember_issue(
             issue.recipient,
             issue.generation,
@@ -302,7 +361,7 @@ impl RestoredPublications {
                 }
                 std::cmp::Ordering::Equal => {
                     held.predecessors = held.predecessors.union(issue.predecessors);
-                    held.undelivered |= issue.undelivered;
+                    held.delivery = held.delivery.with(issue.delivery);
                     if issue.withdrawal.is_none() {
                         held.withdrawal = None;
                     }
@@ -424,7 +483,7 @@ pub(crate) fn may_send(view: &DeliveryView<'_>) -> std::result::Result<bool, Sto
         let settings = crate::state::view_get::<ListSettings>(local, key::LIST_SETTINGS)?;
         if !recipient.chosen
             || recipient.withdraw
-            || !settings.is_some_and(|current| Some(current.revision) == issue.revision)
+            || !settings.is_some_and(|current| Some(current.revision()) == issue.revision)
         {
             return Ok(false);
         }
@@ -624,19 +683,21 @@ impl Paykit {
         {
             return Ok(());
         }
-        self.local_put(
-            key::LIST_SETTINGS,
-            &ListSettings {
-                revision: random_bytes()?,
-                endpoints,
-            },
-        )
-        .await?;
+        self.local_put(key::LIST_SETTINGS, &ListSettings { endpoints })
+            .await?;
         Box::pin(self.tend_private_lists(None)).await
     }
 
     /// Share the current reusable list with the counterparty the host chose. If
     /// sends are held, choosing a new or withdrawn recipient requires another host call.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::ListDeliveryUnknown`] when the counterparty's current list is one the
+    /// client gave up with an unknown outcome: nothing replaces it without the user's
+    /// confirmation ([`Paykit::send_list_again`]; Paykit spec 9). [`Refusal::NotNow`]
+    /// while sends are held, before the list is set, or while an earlier publication is
+    /// unresolved. A store or client failure.
     pub async fn publish_list_to(&mut self, recipient: [u8; 32]) -> Result<()> {
         self.first_read_before_writing().await?;
         self.refresh_own()?;
@@ -659,6 +720,20 @@ impl Paykit {
         let at = key::list_recipient(&recipient);
         let choice = match self.local_get::<ListRecipient>(&at).await? {
             Some(prior) if prior.chosen => prior,
+            Some(mut prior) if self.list_is_empty().await? => {
+                // Choosing again with an empty list would send the same empty content in
+                // place of a withdrawal of unknown delivery: that takes the confirmation.
+                if let Some((_, shown)) = self.unknown_issue(&mut prior).await? {
+                    prior.chosen = true;
+                    prior.withdraw = false;
+                    self.local_put(&at, &prior).await?;
+                    return Err(Refusal::ListDeliveryUnknown(Box::new(shown)).into());
+                }
+                self.refuse_while_sends_held(&recipient).await?;
+                let chosen = ListRecipient::choose(Some(prior), recipient, true)?;
+                self.local_put(&at, &chosen).await?;
+                chosen
+            }
             prior => {
                 self.refuse_while_sends_held(&recipient).await?;
                 let chosen = ListRecipient::choose(prior, recipient, true)?;
@@ -666,27 +741,128 @@ impl Paykit {
                 chosen
             }
         };
-        Box::pin(self.publish_recipient(choice, None)).await
+        Box::pin(self.publish_recipient(choice, None)).await?;
+        self.refuse_unknown_list(&recipient).await
     }
 
     /// Stop sharing with this counterparty. A fresh, empty list supersedes what it may hold.
     /// If the client confirms first non-delivery, later receives can reserve a replacement
     /// after an hour, then hourly for the first day and daily while an earlier offer may be paid.
     /// Choosing the counterparty again ends this withdrawal.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::ListDeliveryUnknown`] when the counterparty's current list is already
+    /// an empty one whose delivery the client gave up with an unknown outcome, and the
+    /// counterparty hasn't accepted it since. The counterparty is recorded as withdrawn
+    /// all the same, but nothing is sent: pass the refusal's value to
+    /// [`Paykit::send_list_again`] only once the user confirms another withdrawal
+    /// (Paykit spec 8.4, 9). [`Refusal::NotNow`] while an earlier publication is
+    /// unresolved, or while a confirmed list can't be published yet. A store or client
+    /// failure.
     pub async fn withdraw_list_from(&mut self, recipient: [u8; 32]) -> Result<()> {
         self.first_read_before_writing().await?;
+        self.refresh_own()?;
         let at = key::list_recipient(&recipient);
-        let Some(prior) = self.local_get::<ListRecipient>(&at).await? else {
+        let Some(mut prior) = self.local_get::<ListRecipient>(&at).await? else {
             return Ok(());
         };
         if prior.chosen {
-            let left = ListRecipient::choose(Some(prior), recipient, false)?;
+            // An empty current list of unknown outcome already withdraws it, as one emptied
+            // by `set_list_endpoints`: the counterparty stops being chosen under the same
+            // choice, and nothing replaces that list without the user's confirmation.
+            let unknown = self.unknown_issue(&mut prior).await?;
+            let choice = prior.choice;
+            let mut left = ListRecipient::choose(Some(prior), recipient, false)?;
+            if let Some((_, shown)) = unknown.filter(|(_, shown)| shown.withdrawal) {
+                left.choice = choice;
+                left.withdraw = false;
+                self.local_put(&at, &left).await?;
+                return Err(Refusal::ListDeliveryUnknown(Box::new(shown)).into());
+            }
             self.local_put(&at, &left).await?;
-            Box::pin(self.publish_recipient(left, None)).await?;
-        } else {
-            Box::pin(self.publish_recipient(prior, None)).await?;
+            return Box::pin(self.publish_recipient(left, None)).await;
         }
-        Ok(())
+        Box::pin(self.publish_recipient(prior, None)).await?;
+        self.refuse_unknown_list(&recipient).await
+    }
+
+    /// Whether the reusable list has no endpoints: sharing it sends an empty list.
+    async fn list_is_empty(&self) -> Result<bool> {
+        Ok(self
+            .local_get::<ListSettings>(key::LIST_SETTINGS)
+            .await?
+            .is_some_and(|settings| settings.endpoints.is_empty()))
+    }
+
+    /// Report the counterparty's current list whose delivery is unknown, after a call
+    /// that would otherwise answer without sending anything (Paykit spec 9).
+    async fn refuse_unknown_list(&mut self, recipient: &[u8; 32]) -> Result<()> {
+        let at = key::list_recipient(recipient);
+        let Some(mut current) = self.local_get::<ListRecipient>(&at).await? else {
+            return Ok(());
+        };
+        // A kept confirmation needs no check here: the publication before this tries it,
+        // and either reserves its version or fails the call.
+        match self.unknown_issue(&mut current).await? {
+            Some((_, shown)) => Err(Refusal::ListDeliveryUnknown(Box::new(shown)).into()),
+            None => Ok(()),
+        }
+    }
+
+    /// Send the counterparty a newly signed version of its list after the user confirmed
+    /// `shown`, from [`Refusal::ListDeliveryUnknown`]. The earlier list may already have
+    /// reached the counterparty; the new one supersedes it. It is what the counterparty's
+    /// current choice calls for: the reusable list if it is chosen and the list has
+    /// endpoints, otherwise an empty one. The confirmation is kept with the shown list, and
+    /// the version is built on the counter as read when it is reserved, whatever another
+    /// installation or a move did to it since (Paykit spec 8.4, 8.4.1, 9).
+    ///
+    /// Returns once nothing of unknown outcome is left for the counterparty: the new
+    /// version is queued, or the shown list was accepted, superseded or can no longer be
+    /// paid since.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::ListDeliveryUnknown`] with the current list when `shown` is no longer
+    /// it; nothing is sent. [`Refusal::NotNow`] while the publication can't be made now,
+    /// such as an unresolved earlier publication or held sends for a nonempty list: the
+    /// confirmation is kept, and a later call or receive sends the list once it can.
+    /// [`Refusal::NotFound`] for a
+    /// counterparty never chosen. [`Refusal::ScopeMissing`] without `paykit_request`. A
+    /// store or client failure.
+    pub async fn send_list_again(
+        &mut self,
+        shown: &UnknownListDelivery,
+        _confirmed: UserConfirmed,
+    ) -> Result<()> {
+        self.first_read_before_writing().await?;
+        self.refresh_own()?;
+        if !self.holds(SCOPE) {
+            return Err(Refusal::ScopeMissing(SCOPE.into()).into());
+        }
+        let at = key::list_recipient(&shown.recipient);
+        let Some(mut recipient) = self.local_get::<ListRecipient>(&at).await? else {
+            return Err(Refusal::NotFound.into());
+        };
+        match self.unknown_issue(&mut recipient).await? {
+            Some((mut prior, current)) if current == *shown => {
+                prior.confirmed = true;
+                self.local_put(&key::list_reservation(&shown.recipient), &prior)
+                    .await?;
+            }
+            Some((_, current)) => {
+                return Err(Refusal::ListDeliveryUnknown(Box::new(current)).into())
+            }
+            // Accepted, superseded or no longer payable: the publication follows the
+            // current choice as at any call, and a kept confirmation completes.
+            None => {}
+        }
+        // Kept first: an unresolved earlier publication answers "not now", and a later
+        // call or receive sends the confirmed version.
+        self.resolve_publications(&shown.recipient).await?;
+        Box::pin(self.publish_recipient(recipient, None)).await?;
+        self.refuse_unknown_list(&shown.recipient).await
     }
 
     pub(crate) async fn tend_private_lists(
@@ -746,7 +922,7 @@ impl Paykit {
         }
         let settings =
             settings.filter(|s| recipient.chosen && !recipient.withdraw && !s.endpoints.is_empty());
-        let revision = settings.as_ref().map(|s| s.revision);
+        let revision = settings.as_ref().map(ListSettings::revision);
         let at = key::list_reservation(&recipient.recipient);
         // Only the original batch's outcome or its atomic applied write settles it.
         // An equal readable counter can outlive an undecided batch.
@@ -761,7 +937,19 @@ impl Paykit {
                 self.send_message(&prior.id).await?;
             }
             let accepted = self.observe_list_acceptance(&mut recipient, prior).await?;
-            if same_list {
+            if same_list && prior.confirmed && accepted.is_none() {
+                // The user confirmed another version after this one's delivery ended
+                // unknown (Paykit spec 8.4, 9). It is built on the counter as read now,
+                // whatever another installation or a move did to it since.
+                reason = IssueFor::Confirmed;
+            } else if same_list {
+                if prior.confirmed {
+                    let mut settled = self.local_get::<ListReservation>(&at).await?;
+                    if let Some(held) = settled.as_mut().filter(|held| held.matches_issue(prior)) {
+                        held.confirmed = false;
+                        self.local_put(&at, held).await?;
+                    }
+                }
                 if recipient.withdraw {
                     recipient.withdraw = false;
                     self.local_put(&key::list_recipient(&recipient.recipient), &recipient)
@@ -785,7 +973,10 @@ impl Paykit {
                     } else {
                         (local, prior.missing)
                     };
-                    if version == local && accepted.is_none() {
+                    // A version the client gave up never blocks an answer: the newest can't
+                    // go again, and the answer reconciles it (Paykit spec 8.4, 9).
+                    let given_up = prior.delivery != FirstDelivery::Open;
+                    if version == local && accepted.is_none() && (!requests || !given_up) {
                         return Ok(());
                     }
                     let Some(now) = self.service_time() else {
@@ -809,13 +1000,21 @@ impl Paykit {
                 }
             }
         }
-        if !recipient.chosen && !recipient.withdraw && reason != IssueFor::RetryWithdrawal {
+        if !recipient.chosen
+            && !recipient.withdraw
+            && !matches!(reason, IssueFor::RetryWithdrawal | IssueFor::Confirmed)
+        {
             return Ok(());
         }
         let endpoints = settings.map_or_else(|| Ok(BTreeMap::new()), |s| s.endpoints())?;
         if let Some(issue) = prior.as_mut() {
-            if !issue.undelivered && recipient.answers.first(issue).is_none() {
-                issue.undelivered = self.take_prior_list_nondelivery(&issue.id).await?;
+            if issue.delivery == FirstDelivery::Open
+                && recipient.answers.first(issue).is_none()
+                && self.take_prior_list_delivery(&issue.id).await?
+            {
+                if let Some(taken) = self.local_get::<ListReservation>(&at).await? {
+                    issue.delivery = taken.delivery;
+                }
             }
         }
         let issue = Box::pin(self.reserve_private_list(
@@ -1052,11 +1251,12 @@ impl Paykit {
             expires: list.expires_at,
             publisher,
             predecessors,
-            undelivered: false,
+            delivery: FirstDelivery::Open,
+            confirmed: false,
             withdrawal: endpoints.is_empty().then(|| Withdrawal {
                 first: previous
                     .and_then(|p| p.withdrawal)
-                    .filter(|_| reason == IssueFor::RetryWithdrawal)
+                    .filter(|_| matches!(reason, IssueFor::RetryWithdrawal | IssueFor::Confirmed))
                     .map_or(now, |w| w.first),
                 issued: now,
             }),
@@ -1071,6 +1271,20 @@ impl Paykit {
         let marker = reservation.original().key();
         let mut applied = Tx::default();
         applied.put(&at, &reservation)?.delete(&marker);
+        // The new version supersedes an earlier one whose delivery was unknown: its notice
+        // no longer stands for a list any call reports.
+        if let Some(prior) = previous {
+            let notice = key::restored_delivery(&prior.recipient, &prior.id, &prior.hash);
+            if self
+                .kept_notice(&notice)
+                .await?
+                // Also when none is kept yet: the earlier version's duty can be taken while
+                // this batch is pending. A notice of another kind at that key stays.
+                .is_none_or(|kept| kept.kind == crate::notices::NoticeKind::ListDeliveryUnknown)
+            {
+                applied.delete(&notice);
+            }
+        }
         let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
             .entry(put)
             .queue(signed)
@@ -1080,12 +1294,13 @@ impl Paykit {
         if self.app.own_identity().generation() != generation || !self.holds(SCOPE) {
             return Err(counter_unavailable().into());
         }
-        if reason == IssueFor::RetryWithdrawal {
+        if matches!(reason, IssueFor::RetryWithdrawal | IssueFor::Confirmed) {
             let current = self
                 .local_get::<ListRecipient>(&key::list_recipient(&recipient))
                 .await?;
             if current.is_none_or(|r| r.choice != choice.choice)
                 || (choice.chosen
+                    && reason == IssueFor::RetryWithdrawal
                     && self
                         .local_get::<ListSettings>(key::LIST_SETTINGS)
                         .await?
@@ -1288,7 +1503,8 @@ mod tests {
             expires: 1000,
             publisher: issued.publisher,
             predecessors: Payable::Until(0),
-            undelivered: false,
+            delivery: FirstDelivery::Open,
+            confirmed: false,
             withdrawal: None,
             recipient: issued.recipient,
             choice: [7; 16],
