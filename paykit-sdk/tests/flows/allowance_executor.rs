@@ -3464,4 +3464,5 @@ async fn test_executor_holds_a_period_whose_record_diverges_after_paying_is_jour
         "{outcome:?}"
     );
     assert!(world.rail.all_executions().is_empty());
+    assert!(base.fired(), "the record diverged after Paying");
 }

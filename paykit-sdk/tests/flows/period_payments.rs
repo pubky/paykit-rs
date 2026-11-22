@@ -2205,6 +2205,11 @@ impl StageStore {
     fn on_stage(&self, stage: &'static str, hook: impl FnOnce() + Send + 'static) {
         *self.hook.lock().unwrap() = Some((stage, Box::new(hook)));
     }
+
+    /// Whether the hook armed last has run.
+    pub(super) fn fired(&self) -> bool {
+        self.hook.lock().unwrap().is_none()
+    }
 }
 
 impl StateStore for StageStore {
@@ -2502,6 +2507,10 @@ async fn test_period_payments_period_record_divergent_after_the_paying_commit_ho
             "automatic {automatic}: {outcome:?}"
         );
         assert!(w.rail.all_executions().is_empty(), "automatic {automatic}");
+        assert!(
+            base.fired(),
+            "automatic {automatic}: the record diverged after Paying"
+        );
     }
 }
 
