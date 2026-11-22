@@ -5,3 +5,7 @@
 /paykit-ffi/tests/hosts/.gradle/
 /paykit-ffi/tests/hosts/.kotlin/
 /paykit-ffi/tests/hosts/build/
+/paykit-ffi/tests/.swiftpm/
+/paykit-ffi/tests/android/.gradle/
+/paykit-ffi/tests/android/.kotlin/
+/paykit-ffi/tests/android/build/
