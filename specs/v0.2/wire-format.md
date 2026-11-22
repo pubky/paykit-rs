@@ -74,7 +74,7 @@ Paykit's identifiers, beside the Switch's (Switch wire 1.7):
 | Message hash (`refs`, request hash) | `hash(message JSON bytes)` |
 | Terms hash | `hash(lp(proposal message JSON bytes, acceptance message JSON bytes))` |
 | Obligation of a request | `derive("paykit/v1/obligation", "request", blind(payee identity), blind(request hash), u64(period start in Unix seconds, or 0 for a one-time request))` |
-| Obligation of a payment without a request | `derive("paykit/v1/obligation", "payment", attempt ID (16 bytes))`; it names no payee, so a former holder of the naming key can't test guesses of the payee against it (Switch spec 14, 15) |
+| Obligation of a payment without a request | `derive("paykit/v1/obligation", "payment", blind(attempt ID))`, where the input to `blind` is the original 16 attempt-ID bytes and the naming key is the payer’s (Switch wire 1.5) |
 
 **Natural keys** (Switch spec 13.3), each an `lp()`:
 
@@ -92,7 +92,7 @@ Paykit's identifiers, beside the Switch's (Switch wire 1.7):
 | `block_floor` | the one record | `lp(own identity)` |
 | `settlements` | one per bucket of settlements | `lp(u64(bucket))`, the bucket a number from 0 to 1023, below |
 
-- **Whose naming key** is the Switch's rule (Switch wire 1.5), for obligations too. The obligation of a payment without a request is the exception: it isn't blinded, and is derived from the attempt ID alone (its row in the first table).
+- **Whose naming key** is the Switch's rule (Switch wire 1.5), for obligations too. For a payment without a request, the payer uses the same naming key for a public endpoint and a Private Payment List. The claim operation, payment method, proof and receipt retain the original attempt ID. Computing the obligation from that ID requires the payer’s naming key. The service sees both the obligation and the attempt ID in the claim.
 - **Period start** in a derivation is the Billing Period's `starts_at` in Unix seconds, rounded down; periods start on whole seconds whenever the recurrence's `anchor` does, and an anchor with milliseconds is rounded down the same way.
 - **Settlement ID** (spec 8.4): the bytes the payment method defines to name one settlement, the same in every proof of it, such as a Lightning payment hash or an on-chain transaction ID. The payee works it out from the proof's `proof` object and the `payment_endpoint_identifier` (4.10). For a payment without a request at the same endpoint, a second proof of that settlement names the same payee record. Its valid prior receipt makes it a replay. The settlement's mark (5.7) derives from the settlement ID alone, whatever the endpoint, the counterparty or the occurrence. Among credits that write a mark, only one can apply across them all. For a hand-confirmed credit without a mark, each app checks the receipts it can verify (spec 8.1 step 4). Settlement IDs must be distinct across methods. A method whose IDs could coincide with another's prefixes them with its own name. A payment without a request receives no credit if its proof gives no settlement ID. An otherwise valid proof for a request or Billing Period whose method supplies no ID can be credited only by hand under spec 8.1 step 4. Each proof `type` has one spelling of its settlement ID, so the same settlement written another way (an upper-case `txid`, say) can't name a second record. A proof with an invalid encoding for its declared method is refused, including for a request or Billing Period. The encodings are:
 
