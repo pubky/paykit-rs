@@ -569,9 +569,9 @@ pub(crate) struct Plan {
     pub(crate) unconfirmed: Option<UserConfirmed>,
     /// The blocked payment the user confirmed, checked against the selected payment.
     pub(crate) blocked_confirmed: Option<BlockedPayment>,
-    /// The request record whose restore hold the user's confirmation ends, in the attempt's
-    /// batch: a call refused before it keeps the hold.
-    pub(crate) end_hold: Option<[u8; 32]>,
+    /// The restore or `missed` hold the user's confirmation ends, in the attempt's batch: a
+    /// call refused before it keeps the hold.
+    pub(crate) end_hold: Option<crate::hold::HoldEnd>,
     /// More conditions of the attempt, such as a Billing Period's `server_time_in`.
     pub(crate) conditions: Vec<Condition>,
     /// Record writes of the attempt's batch, such as a Billing Period's `attempted_periods`
@@ -2866,10 +2866,11 @@ impl Paykit {
         for write in record_writes {
             batch = batch.entry(write);
         }
-        if let Some(record_key) = end_hold {
+        if let Some(end) = end_hold {
             // The user saw the payee may have cancelled it (Paykit spec 7.2): the hold ends
-            // with the attempt, and stays when the attempt isn't made.
-            batch = batch.local(state::local_put(&key::hold_confirmed(&record_key), &true)?);
+            // with the attempt, and stays when the attempt isn't made. A batch kept to send
+            // again may be applied after a newer hold, which this confirmation doesn't end.
+            batch = batch.local(state::local_put(&end.confirmation(), &true)?);
         }
         if let Some(under) = allowance {
             batch = Box::pin(under.reserve(self, &mut entry, batch)).await?;
