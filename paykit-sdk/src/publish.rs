@@ -729,8 +729,8 @@ impl Paykit {
     /// counterparty hasn't accepted it since. Nothing is sent: pass the refusal's value
     /// to [`Paykit::send_list_again`] only once the user confirms another withdrawal
     /// (Paykit spec 8.4, 9). [`Refusal::NotNow`] while an earlier publication is
-    /// unresolved, or while a confirmed list waits for the next receive. A store or
-    /// client failure.
+    /// unresolved, or while a confirmed list can't be published yet. A store or client
+    /// failure.
     pub async fn withdraw_list_from(&mut self, recipient: [u8; 32]) -> Result<()> {
         self.first_read_before_writing().await?;
         let at = key::list_recipient(&recipient);
@@ -764,21 +764,12 @@ impl Paykit {
         let Some(mut current) = self.local_get::<ListRecipient>(&at).await? else {
             return Ok(());
         };
-        if let Some((_, shown)) = self.unknown_issue(&mut current).await? {
-            return Err(Refusal::ListDeliveryUnknown(Box::new(shown)).into());
+        // A kept confirmation needs no check here: the publication before this tries it,
+        // and either reserves its version or fails the call.
+        match self.unknown_issue(&mut current).await? {
+            Some((_, shown)) => Err(Refusal::ListDeliveryUnknown(Box::new(shown)).into()),
+            None => Ok(()),
         }
-        // A confirmed list not yet sent is still owed: never a plain answer.
-        if self
-            .local_get::<ListReservation>(&key::list_reservation(recipient))
-            .await?
-            .is_some_and(|issue| issue.confirmed && issue.choice == current.choice)
-        {
-            return Err(Refusal::NotNow(
-                "Paykit spec 9: the confirmed list goes at the next receive".into(),
-            )
-            .into());
-        }
-        Ok(())
     }
 
     /// Send the counterparty a newly signed version of its list after the user confirmed
