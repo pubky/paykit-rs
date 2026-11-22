@@ -2214,8 +2214,11 @@ async fn test_journal_entry_with_no_carrier_holds_its_payment() {
     // payment unchecked.
     let w = World::new();
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let mut wallet = w
         .wallet_with("wallet", store(), crate::common::day_window())
