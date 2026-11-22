@@ -3591,8 +3591,9 @@ async fn test_blocked_return_floor_seen_then_gone_after_a_restore_holds() {
     let key = floor_key(&w, &wallet);
     drop(wallet);
     w.alice.switch().drop_record(&key).unwrap();
+    let storage = store();
     let mut restored = Box::pin(Paykit::restore(
-        w.env(&w.alice, store()),
+        w.env(&w.alice, Arc::clone(&storage)),
         PaykitConfig::default(),
         &backup,
         Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
@@ -3600,14 +3601,14 @@ async fn test_blocked_return_floor_seen_then_gone_after_a_restore_holds() {
     ))
     .await
     .unwrap();
-    restored.receive(None).await.unwrap();
-    reconciled(&mut restored).await;
-    w.clock.advance_ms(MINUTE_MS);
+    // Listed after the restore, the floor seen live is gone: the rollback alarm. The app
+    // stops, so no one-time request is paid automatically, and the alarm is kept across a
+    // reopen.
+    let _ = restored.receive(None).await;
+    assert!(restored.app().alarm().is_some());
     let request = request_from(&mut shop, w.alice_id(), draft("5", w.clock.now_ms())).await;
-    restored.receive(None).await.unwrap();
-    let options = crate::common::over_hold(&restored, &request).await;
     let outcome = restored
-        .pay_request_automatically(&request, options)
+        .pay_request_automatically(&request, paykit_sdk::PayOptions::default())
         .await
         .outcome;
     assert!(
@@ -3615,6 +3616,12 @@ async fn test_blocked_return_floor_seen_then_gone_after_a_restore_holds() {
         "{outcome:?}"
     );
     assert!(w.rail.all_executions().is_empty());
+    let app_id = restored.app().app_id();
+    drop(restored);
+    let reopened = w
+        .load_on_clock(&w.alice, storage, app_id, Arc::clone(&w.clock))
+        .await;
+    assert!(reopened.app().alarm().is_some());
 }
 
 #[tokio::test]

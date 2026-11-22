@@ -1303,7 +1303,7 @@ impl Paykit {
     pub(crate) async fn pause_of(&mut self, held: &SharedRecord) -> Result<Pause> {
         if held.collection == Collection::BlockFloor.name() {
             // No mark the user could confirm: the floor's divergence is held for good.
-            self.keep_floor_view(held).await?;
+            self.keep_floor_view(held, false).await?;
             return Ok(Pause::default());
         }
         let Some(view) = View::of(held) else {

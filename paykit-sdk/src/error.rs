@@ -256,7 +256,7 @@ pub enum Refusal {
     /// or a widening that needs one waits for good, and no automatic one-time payment goes
     /// (Paykit wire 5.6, Divergent floor). Payments by hand, Billing Periods and payments
     /// without a request go on under their own rules. Retrying changes nothing.
-    #[error("Paykit wire 5.6: the block floor is held after it was seen divergent; no raise of it can be written")]
+    #[error("Paykit wire 5.6: the block floor is held for good after it was seen divergent, so no raise of it can be written and this waits; each request can still be paid by hand, and Billing Periods and payments without a request go on")]
     FloorHeld,
     /// A value the caller gave breaks a rule: the text names it.
     #[error("usage: {0}")]

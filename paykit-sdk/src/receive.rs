@@ -3072,7 +3072,8 @@ impl Paykit {
         }
         let now = self.now();
         let last = self.local_get::<u64>(key::LISTS_READ).await?;
-        if last.is_some_and(|read| lists_read_is_fresh(read, now)) {
+        // A raise owed that can be written goes at the next receive, whatever the copy's age.
+        if last.is_some_and(|read| lists_read_is_fresh(read, now)) && !self.raise_owed().await? {
             return Ok(());
         }
         if self.floor_write_is_kept().await? {

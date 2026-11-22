@@ -149,7 +149,7 @@ impl FloorKept {
     /// a generation that `lost`, the generation the newest own `identity.json` names lost,
     /// doesn't cover (Paykit wire 5.6, Seen floor and permanence). A caller that can't tell
     /// the loss passes `None`, which takes every absence after a live floor as unlawful.
-    fn absence_unlawful(&self, lost: Option<u64>) -> bool {
+    pub(crate) fn absence_unlawful(&self, lost: Option<u64>) -> bool {
         self.live_in
             .is_some_and(|live| lost.is_none_or(|lost| lost < live))
     }
@@ -264,13 +264,23 @@ impl Paykit {
     /// Keep what `held`, a view of the floor record this app read, adds to what it keeps:
     /// a higher floor, or the divergence it shows, durably, before the view is acted on
     /// (module docs). Writes nothing when it adds nothing.
-    pub(crate) async fn keep_floor_view(&mut self, held: &SharedRecord) -> Result<()> {
+    /// `live` says the view is the switch's current write, read now: an authenticated one shows
+    /// the record live in the generation the app follows. A copy the app holds or keeps shows it
+    /// live only in the generation its authenticated write was made in, so a copy taken before a
+    /// provider loss stays covered by that loss (Paykit wire 5.6, Seen floor and permanence); an
+    /// upload, which carries no proof of its write, shows no generation.
+    pub(crate) async fn keep_floor_view(&mut self, held: &SharedRecord, live: bool) -> Result<()> {
         if held.key != self.app.record_key(&floor_target(&self.identity()))? {
             return Ok(());
         }
-        let generation = self.app.own_identity().generation();
-        self.keep_floor(FloorKept::of_view(held, Some(generation)))
-            .await
+        let generation = held.authenticated.then(|| {
+            if live {
+                self.app.own_identity().generation()
+            } else {
+                held.version.generation
+            }
+        });
+        self.keep_floor(FloorKept::of_view(held, generation)).await
     }
 
     /// Keep `more` with what this app keeps of the floor. The divergence, once kept for the
@@ -298,7 +308,17 @@ impl Paykit {
     pub(crate) async fn keep_held_floor(&mut self) -> Result<()> {
         let key = self.app.record_key(&floor_target(&self.identity()))?;
         if let Some(held) = self.app.shared_record(&key).await? {
-            self.keep_floor_view(&held).await?;
+            self.keep_floor_view(&held, false).await?;
+        } else if self.app.alarm().is_none() && !self.side_unlisted(RecordSide::Payer).await? {
+            // Listed and absent, after a floor seen live with no provider loss to explain it:
+            // the rollback alarm (Paykit wire 5.6, Seen floor and permanence). The alarm then
+            // holds what it holds; this keep goes on.
+            let lost = self.app.own_identity().body().recovery_from;
+            if self.floor_kept().await?.absence_unlawful(lost) {
+                self.app
+                    .raise_rollback(crate::protocol::BACKUP_NAME, ABSENT_FLOOR)
+                    .await?;
+            }
         }
         let reported = self.app.pending_duty_events().await?.iter().any(|pending| {
             matches!(&pending.event, AppEvent::RecordDivergent { key: at, .. } if *at == key)
@@ -307,6 +327,35 @@ impl Paykit {
             self.keep_floor(FloorKept::divergent()).await?;
         }
         Ok(())
+    }
+
+    /// The highest floor this app has seen, from the copy it holds, its mark and what it
+    /// keeps, whatever their divergence.
+    async fn floor_seen(&self) -> Result<Option<u64>> {
+        let key = self.app.record_key(&floor_target(&self.identity()))?;
+        let read = |value: &[u8]| BlockFloorRecord::read(value).ok().map(|r| r.floor_ms);
+        let held = self.app.shared_record(&key).await?;
+        let held = held.as_ref().and_then(|h| h.content.value()).and_then(read);
+        let seen = self.app.record_seen(&key).await?;
+        let seen = seen.as_deref().and_then(read);
+        Ok(held.max(seen).max(self.floor_kept().await?.seen_ms))
+    }
+
+    /// Whether the app owes a raise it can write now: an unblock's (`bf`) or a widening's,
+    /// while the floor isn't held divergent. The lists are then read at each receive, so the
+    /// raise goes at the next one (Paykit wire 5.6, Raising).
+    pub(crate) async fn raise_owed(&self) -> Result<bool> {
+        if self.floor_kept().await?.divergent {
+            return Ok(false);
+        }
+        Ok(self
+            .local_get::<PendingUnblocks>(key::BLOCK_FLOOR)
+            .await?
+            .is_some()
+            || !self
+                .local_scan::<crate::marks::MissedWidening>(key::BLOCKED_WIDENINGS)
+                .await?
+                .is_empty())
     }
 
     /// Whether `stored` is a one-time request dated before the floor, shared or owed, as this
@@ -347,19 +396,32 @@ impl Paykit {
         };
         Ok(match read {
             RecordRead::Fresh(record) => {
-                self.keep_floor_view(&record).await?;
+                self.keep_floor_view(&record, true).await?;
                 Some(Some(record))
             }
             RecordRead::Kept {
                 record: None,
                 reason: KeptReason::NotFound,
-            } => Some(None),
+            } => {
+                // A floor seen live that the switch now says it holds no record of, with no
+                // provider loss to explain it, is the rollback alarm (Paykit wire 5.6, Seen
+                // floor and permanence), as the client raises it for a copy it still holds.
+                let lost = self.app.own_identity().body().recovery_from;
+                if self.floor_kept().await?.absence_unlawful(lost) {
+                    let alarm = self
+                        .app
+                        .raise_rollback(crate::protocol::BACKUP_NAME, ABSENT_FLOOR)
+                        .await?;
+                    return Err(pubky_switch_client::app::AppError::Alarm(alarm).into());
+                }
+                Some(None)
+            }
             RecordRead::Kept {
                 record: Some(record),
                 ..
             } => {
                 // Not the switch's write, but a divergence it shows is kept all the same.
-                self.keep_floor_view(&record).await?;
+                self.keep_floor_view(&record, false).await?;
                 None
             }
             _ => None,
@@ -428,6 +490,13 @@ impl Paykit {
     async fn floor_batch(&mut self, to_ms: u64) -> Result<Option<OpBatch>> {
         let floor = match self.floor_for_write(to_ms).await? {
             SharedFloor::Known(floor) => floor,
+            // A floor seen at least as high already covers the window: nothing to write, the
+            // hold notwithstanding (Paykit wire 5.6: it holds what must raise the floor).
+            SharedFloor::Divergent
+                if self.floor_seen().await?.is_some_and(|seen| seen >= to_ms) =>
+            {
+                return Ok(None);
+            }
             SharedFloor::Divergent => return Err(Refusal::FloorHeld.into()),
             SharedFloor::Unknown => return Err(unreadable_floor()),
         };
@@ -464,7 +533,7 @@ impl Paykit {
                 if error.code() == Some(ErrorCode::Conflict) {
                     let target = floor_target(&self.identity());
                     if let Some(read) = self.app.read_record(&target).await? {
-                        self.keep_floor_view(&read).await?;
+                        self.keep_floor_view(&read, false).await?;
                     }
                 }
                 Err(error.into())
@@ -618,6 +687,10 @@ impl Paykit {
 }
 
 const UNREADABLE_FLOOR: &str = "Paykit wire 5.6: the block floor can't be read now";
+
+/// The rollback alarm's reason for a floor seen live that reads absent with no provider loss.
+const ABSENT_FLOOR: &str =
+    "Paykit wire 5.6: a permanent block floor seen live reads absent with no provider loss";
 
 /// The refusal while the floor a raise builds on can't be read.
 pub(crate) fn unreadable_floor() -> crate::error::PaykitError {

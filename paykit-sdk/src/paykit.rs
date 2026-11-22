@@ -804,10 +804,9 @@ impl Paykit {
     /// (`AppEvent::BackupRefused`) or a journal Paykit's layer refuses; a store failure.
     pub async fn backup(&mut self) -> Result<PaykitBackup> {
         // A divergence of the block floor the client holds or reported goes into the backup
-        // as the hold (`crate::floor`), whatever the receive that met it got to.
-        if self.certificate_refused().is_none() {
-            Box::pin(self.keep_held_floor()).await?;
-        }
+        // as the hold (`crate::floor`), whatever the receive that met it got to, under a
+        // refused certificate too: it is this app's own state.
+        Box::pin(self.keep_held_floor()).await?;
         Ok(PaykitBackup {
             app: self.app.backup_layered().await?,
         })
