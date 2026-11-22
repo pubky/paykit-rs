@@ -9,7 +9,7 @@ repository.workspace = true
 publish = false
 
 [lib]
-name = "paykit_v2"
+name = "paykit"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [features]

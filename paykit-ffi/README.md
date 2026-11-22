@@ -1,6 +1,6 @@
 # Paykit wallets for Kotlin and Swift
 
-`WalletEnrollment` prepares a payer application for the signer and keeps the selected approval on the device. Both languages use the same native implementation. The Kotlin package is `com.synonym.paykit.v2`. The Swift module is `PaykitV2`.
+`WalletEnrollment` prepares a payer application for the signer and keeps the selected approval on the device. Both languages use the same native implementation. The Kotlin package is `com.synonym.paykit`. The Swift module is `Paykit`.
 
 Use a host-owned, protected store with process-wide and cross-process writer exclusion for each physical namespace. Implement key reads and an atomic, durable commit that verifies the exact owner in the same transaction. Report an unknown outcome when a commit may have applied. If acquisition may have applied before its answer was lost, report an unknown outcome. A release can be retried with the original token. It must leave a newer owner intact. A process exit must release its ownership. Keep signing material and the protected approval out of system backups and logs.
 
@@ -54,10 +54,10 @@ From the workspace root, build the generator and native library from this same c
 ```sh
 cargo build --locked --release -p paykit-ffi --features bindgen
 paykit-ffi/generate-bindings.sh target/release/paykit-bindgen \
-    target/release/libpaykit_v2.dylib "$OUT"
+    target/release/libpaykit.dylib "$OUT"
 ```
 
-On Linux use `libpaykit_v2.so` for generation. Use the generated Swift support files and Kotlin source together with their matching native library. Default descriptions redact approval requests, protected store values, payment journal entries and their related payment data. Read typed fields explicitly when displaying a payment to the user.
+On Linux use `libpaykit.so` for generation. Use the generated Swift support files and Kotlin source together with their matching native library. Default descriptions redact approval requests, protected store values, payment journal entries and their related payment data. Read typed fields explicitly when displaying a payment to the user.
 
 ### Android
 
@@ -67,7 +67,7 @@ Build each ABI required by the host with the Android NDK and `cargo-ndk`. For an
 cargo ndk -t arm64-v8a -p 28 -o "$OUT/jniLibs" build --locked --release -p paykit-ffi --lib
 ```
 
-Add `$OUT/kotlin` to a Kotlin Android library's sources and `$OUT/jniLibs` to its main JNI library sources. Package JNA's Android AAR and Kotlin coroutines in the consuming application. Keep the library name `paykit_v2`. The enrollment and typed-error consumer in `tests/hosts/WalletConsumer.kt` uses these same Kotlin calls on the JVM.
+Add `$OUT/kotlin` to a Kotlin Android library's sources and `$OUT/jniLibs` to its main JNI library sources. Package JNA's Android AAR and Kotlin coroutines in the consuming application. Keep the library name `paykit`. The enrollment and typed-error consumer in `tests/hosts/WalletConsumer.kt` uses these same Kotlin calls on the JVM.
 
 ### Apple
 
@@ -77,11 +77,11 @@ Build arm64 device and simulator archives from the same checkout. Use a fresh de
 cargo build --locked --release -p paykit-ffi --lib --target aarch64-apple-ios
 cargo build --locked --release -p paykit-ffi --lib --target aarch64-apple-ios-sim
 paykit-ffi/package-apple.sh "$OUT" \
-    target/aarch64-apple-ios/release/libpaykit_v2.a \
-    target/aarch64-apple-ios-sim/release/libpaykit_v2.a "$OUT/apple"
+    target/aarch64-apple-ios/release/libpaykit.a \
+    target/aarch64-apple-ios-sim/release/libpaykit.a "$OUT/apple"
 ```
 
-Add the resulting local package to Xcode and import `PaykitV2`. The generated UniFFI module builds in Swift 5 language mode and can be imported from a Swift 6 host. `tests/hosts/WalletConsumer.swift` exercises that combination.
+Add the resulting local package to Xcode and import `Paykit`. The generated UniFFI module builds in Swift 5 language mode and can be imported from a Swift 6 host. `tests/hosts/WalletConsumer.swift` exercises that combination.
 
 The native enrollment cases use the actual signer, SQLite-backed device storage, Scripted and PostgreSQL. Set the Switch harness PostgreSQL environment to require the service case.
 
@@ -89,19 +89,19 @@ The native enrollment cases use the actual signer, SQLite-backed device storage,
 
 The test issuer and enrolled checkout use Scripted by default. Set `PUBKY_SWITCH_REQUIRE_DB=1` and `PUBKY_SWITCH_TEST_DATABASE_URL` to run the signer, checkout, paid-wallet and recovery fixtures against the PostgreSQL-backed service.
 
-On macOS, use the host library and the sources generated above. Set `LIB` to the absolute directory containing `libpaykit_v2.dylib`, and use an absolute `OUT` path. The Kotlin consumer runs with a local Gradle installation. The Swift consumer imports the generated module from a host compiled in Swift 6 mode.
+On macOS, use the host library and the sources generated above. Set `LIB` to the absolute directory containing `libpaykit.dylib`, and use an absolute `OUT` path. The Kotlin consumer runs with a local Gradle installation. The Swift consumer imports the generated module from a host compiled in Swift 6 mode.
 
 ```sh
 cargo build --locked -p paykit-ffi --example wallet-test-issuer
 export PAYKIT_TEST_ISSUER="$LIB/examples/wallet-test-issuer"
 gradle -p paykit-ffi/tests/hosts -Pbindings="$OUT/kotlin" -PnativeLibraryDir="$LIB" run
 
-swiftc -swift-version 5 -I "$OUT/swift" -Xcc "-fmodule-map-file=$OUT/swift/PaykitV2FFI.modulemap" \
-    -emit-library -emit-module -module-name PaykitV2 "$OUT"/swift/*.swift \
-    -emit-module-path "$OUT/PaykitV2.swiftmodule" -o "$OUT/libPaykitV2.dylib" -L "$LIB" -lpaykit_v2
+swiftc -swift-version 5 -I "$OUT/swift" -Xcc "-fmodule-map-file=$OUT/swift/PaykitFFI.modulemap" \
+    -emit-library -emit-module -module-name Paykit "$OUT"/swift/*.swift \
+    -emit-module-path "$OUT/Paykit.swiftmodule" -o "$OUT/libPaykit.dylib" -L "$LIB" -lpaykit
 swiftc -swift-version 6 -parse-as-library -I "$OUT" -I "$OUT/swift" \
-    -Xcc "-fmodule-map-file=$OUT/swift/PaykitV2FFI.modulemap" \
-    paykit-ffi/tests/hosts/WalletConsumer.swift -L "$OUT" -lPaykitV2 -L "$LIB" -lpaykit_v2 \
+    -Xcc "-fmodule-map-file=$OUT/swift/PaykitFFI.modulemap" \
+    paykit-ffi/tests/hosts/WalletConsumer.swift -L "$OUT" -lPaykit -L "$LIB" -lpaykit \
     -o "$OUT/wallet-consumer"
 DYLD_LIBRARY_PATH="$OUT:$LIB" "$OUT/wallet-consumer"
 ```

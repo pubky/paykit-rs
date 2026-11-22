@@ -1,6 +1,6 @@
-package com.synonym.paykit.v2.tests
+package com.synonym.paykit.tests
 
-import com.synonym.paykit.v2.*
+import com.synonym.paykit.*
 import kotlinx.coroutines.*
 import java.io.DataInputStream
 import java.io.DataOutputStream

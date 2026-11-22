@@ -1,5 +1,5 @@
 import Foundation
-import PaykitV2
+import Paykit
 
 private actor PaymentGate {
     private var open = false
