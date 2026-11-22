@@ -4026,7 +4026,7 @@ async fn test_divergent_list_of_a_removed_app_waits_for_a_current_list() {
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert!(w.rail.all_executions().is_empty());
@@ -4065,7 +4065,7 @@ async fn test_divergent_list_of_a_removed_app_leaves_an_expired_current_list_ask
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert!(w.rail.all_executions().is_empty());
@@ -4503,7 +4503,7 @@ async fn test_divergent_paused_list_above_the_payees_generation_pauses_nothing()
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert!(w.rail.all_executions().is_empty());
@@ -4546,7 +4546,7 @@ async fn test_divergent_request_to_an_app_whose_list_certificate_no_longer_count
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert!(w.rail.all_executions().is_empty());

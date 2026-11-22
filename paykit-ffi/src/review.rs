@@ -200,7 +200,11 @@ pub enum RefusalKind {
     /// The method cannot pay the selected endpoint.
     UnsupportedEndpoint,
     /// A usable Private Payment List is required.
-    WaitingForList,
+    WaitingForList {
+        /// Whether a list expired only by the service's time: the device clock is behind it,
+        /// and the user is told so.
+        device_clock_behind: bool,
+    },
     /// The wallet could not read or revalidate the identity required for payment.
     IdentityUnavailable,
     /// The payee identity needs explicit confirmation.
@@ -315,7 +319,11 @@ impl PaymentRefusal {
             Refusal::AttemptFailed(_) => D::AttemptFailed,
             Refusal::NoDestination(_) => D::NoDestination,
             Refusal::UnsupportedEndpoint(_) => D::UnsupportedEndpoint,
-            Refusal::WaitingForList => D::WaitingForList,
+            Refusal::WaitingForList {
+                device_clock_behind,
+            } => D::WaitingForList {
+                device_clock_behind: *device_clock_behind,
+            },
             Refusal::IdentityUnavailable(_) => D::IdentityUnavailable,
             Refusal::IdentityUnconfirmed => D::IdentityUnconfirmed,
             Refusal::PaymentInProgress => D::PaymentInProgress,

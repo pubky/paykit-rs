@@ -1,5 +1,5 @@
-//! `periods.json`: Billing Periods (Paykit spec 8.2, Paykit wire 4.4) and `details_rates`
-//! (Paykit wire 4.9).
+//! `periods.json`: Billing Periods (Paykit spec 8.2, Paykit wire 4.4), `details_rates`
+//! (Paykit wire 4.9) and `destination_expiry` (Paykit spec 7.2, check the destination).
 
 use paykit_lib::periods::{
     destination_expired, evidence_seconds, payer_may_use_rates, rates_apply, BillingPeriod,

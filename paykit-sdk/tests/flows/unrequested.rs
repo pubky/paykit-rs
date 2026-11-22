@@ -114,7 +114,7 @@ async fn test_unrequested_single_use_endpoint_used_once() {
         .outcome
         .unwrap_err();
     assert!(
-        matches!(used.refusal(), Some(Refusal::WaitingForList)),
+        matches!(used.refusal(), Some(Refusal::WaitingForList { .. })),
         "{used:?}"
     );
     let used = wallet
@@ -123,7 +123,7 @@ async fn test_unrequested_single_use_endpoint_used_once() {
         .outcome
         .unwrap_err();
     assert!(
-        matches!(used.refusal(), Some(Refusal::WaitingForList)),
+        matches!(used.refusal(), Some(Refusal::WaitingForList { .. })),
         "{used:?}"
     );
     assert_eq!(w.rail.all_executions().len(), 1);
@@ -151,7 +151,7 @@ async fn test_unrequested_without_a_list_refused() {
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     let public = wallet
@@ -187,7 +187,7 @@ async fn test_unrequested_expired_list_refused() {
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     // An expired list is treated as missing: the payee is asked for its current one
@@ -213,14 +213,14 @@ async fn test_unrequested_without_a_list_asks_the_payee_once_while_outstanding()
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
     let refused = pay_lightning(&w, &mut wallet).await;
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert_eq!(list_requests(&mut shop).await, 1);
     // Asked again while that request is outstanding, nothing more is sent.
     let refused = pay_lightning(&w, &mut wallet).await;
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert_eq!(list_requests(&mut shop).await, 0);
@@ -253,7 +253,7 @@ async fn test_unrequested_used_up_list_asks_again_for_each_newer_version() {
         .outcome
         .unwrap_err();
     assert!(
-        matches!(used.refusal(), Some(Refusal::WaitingForList)),
+        matches!(used.refusal(), Some(Refusal::WaitingForList { .. })),
         "{used:?}"
     );
     assert_eq!(list_requests(&mut shop).await, 1);
@@ -280,7 +280,7 @@ async fn test_unrequested_used_up_list_asks_again_for_each_newer_version() {
         .outcome
         .unwrap_err();
     assert!(
-        matches!(used.refusal(), Some(Refusal::WaitingForList)),
+        matches!(used.refusal(), Some(Refusal::WaitingForList { .. })),
         "{used:?}"
     );
     assert_eq!(list_requests(&mut shop).await, 1);
@@ -795,7 +795,7 @@ async fn test_unrequested_list_ask_mark_backs_up_and_restores() {
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
     let refused = pay_lightning(&w, &mut wallet).await;
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     let backup = wallet.backup().await.expect("a backup with an lq/ mark");
@@ -1179,7 +1179,7 @@ async fn test_unrequested_list_above_the_payees_generation_not_paid() {
             .outcome
             .unwrap_err();
         assert!(
-            matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+            matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
             "{refused:?}"
         );
     }
@@ -1262,7 +1262,7 @@ async fn test_unrequested_single_use_endpoint_used_consumes_the_whole_version() 
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert_eq!(list_requests(&mut shop).await, 1);
@@ -1272,7 +1272,7 @@ async fn test_unrequested_single_use_endpoint_used_consumes_the_whole_version() 
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert_eq!(w.rail.all_executions().len(), 1);
@@ -1427,7 +1427,7 @@ async fn test_unrequested_reusable_endpoint_of_a_version_used_elsewhere_not_paid
         .outcome
         .unwrap_err();
     assert!(
-        matches!(used.refusal(), Some(Refusal::WaitingForList)),
+        matches!(used.refusal(), Some(Refusal::WaitingForList { .. })),
         "{used:?}"
     );
     assert_eq!(w.rail.all_executions().len(), 1);

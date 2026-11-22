@@ -1753,7 +1753,12 @@ async fn test_period_payments_quote_for_leaves_restore_and_list_requests_to_the_
     let payment = by_policy(&mut wallet, &request, january())
         .await
         .unwrap_err();
-    assert_eq!(refusal(&payment), Refusal::WaitingForList);
+    assert_eq!(
+        refusal(&payment),
+        Refusal::WaitingForList {
+            device_clock_behind: false
+        }
+    );
     assert!(wallet
         .app()
         .sent_to(&request.payee, 0, u64::MAX)

@@ -2091,8 +2091,9 @@ impl Paykit {
         }
         // Taken after the read of the payee's identity.json: a list that expired while it
         // was read is expired here, and the payee asked for its current one, rather than
-        // chosen and then refused by the destination check.
-        let now = self.now();
+        // chosen and then refused by the destination check. Expiry is judged by the later of
+        // the device clock and the highest verified service time (Paykit spec 7.2).
+        let clocks = self.clocks();
         // Highest version first, then by App ID, so every payer device hands the method the
         // same for the same lists. Versions of two publishing apps count apart (Paykit wire
         // 4.13), so this order says nothing about which list is newer.
@@ -2106,8 +2107,10 @@ impl Paykit {
         // may use, and whether there is such a list.
         let mut offered = false;
         let mut live = false;
-        // Whether some app's list has expired, which its current one may replace.
+        // Whether some app's list has expired, which its current one may replace, and whether
+        // one expired only by the service's time, the device clock behind it.
         let mut expired = false;
+        let mut device_clock_behind = false;
         // The endpoints of the lists in use that the payment may use, in the order above and
         // then by identifier. A single-use endpoint used at a list's version consumes that
         // whole version (Paykit wire 5.4, spec 8.4): every endpoint of the list, single-use or
@@ -2129,8 +2132,10 @@ impl Paykit {
                 continue;
             }
             let accepted = record.list.accepted_at().unwrap_or(0);
-            if now >= list.usable_until(accepted) {
+            let until = list.usable_until(accepted);
+            if clocks.past(until) {
                 expired = true;
+                device_clock_behind |= until > clocks.device;
                 continue;
             }
             live = true;
@@ -2222,7 +2227,10 @@ impl Paykit {
             .into());
         }
         self.ask_for_lists(payee, app, &held, &installed).await?;
-        Err(Refusal::WaitingForList.into())
+        Err(Refusal::WaitingForList {
+            device_clock_behind,
+        }
+        .into())
     }
 
     /// The payment method's choice among `gathered` ([`crate::Rail::select_endpoints`]): each one

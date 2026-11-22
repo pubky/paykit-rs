@@ -451,7 +451,7 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `Refusal::AttemptFailed` | The attempt was recorded failed before dispatch. Show its enclosed refusal. |
 | `Refusal::NoDestination` | Show why no endpoint could be used, including failed public app reads if available. |
 | `Refusal::UnsupportedEndpoint` | Ask the user to choose a compatible endpoint or payment method. |
-| `Refusal::WaitingForList` | Show that a newer Private Payment List was requested. A public destination is a separate user choice. |
+| `Refusal::WaitingForList` | Show that a newer Private Payment List was requested. A public destination is a separate user choice. When `device_clock_behind` is set, a list expired by the service's time while the device clock is behind it: tell the user the device clock is behind. |
 | `Refusal::Transfer` | Show the actual transfer or fee quote and return that exact quote only on confirmation. |
 | `Refusal::PricedByRate` | Obtain authorization for this exact quote from the user or their bounded policy (Scheduling a Billing Period). |
 | `Refusal::IdentityUnavailable` | Refresh the required identity before retrying. |

@@ -2657,7 +2657,7 @@ async fn no_list_asked_while_held(held: Held) {
             "{refused:?}"
         ),
         Held::Unknown => assert!(
-            !matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+            !matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
             "{refused:?}"
         ),
     }
@@ -2672,7 +2672,7 @@ async fn no_list_asked_while_held(held: Held) {
         .outcome
         .unwrap_err();
     assert!(
-        matches!(waits.refusal(), Some(Refusal::WaitingForList)),
+        matches!(waits.refusal(), Some(Refusal::WaitingForList { .. })),
         "{waits:?}"
     );
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries + 1);

@@ -304,7 +304,7 @@ async fn test_publication_restore_lists_former_and_current_recipients() {
     assert!(
         matches!(
             stopped.as_ref().err().and_then(|e| e.refusal()),
-            Some(paykit_sdk::Refusal::WaitingForList)
+            Some(paykit_sdk::Refusal::WaitingForList { .. })
         ),
         "{stopped:?}"
     );
@@ -1364,7 +1364,7 @@ async fn test_publication_labelled_seller_can_ask_and_pay_as_a_payer() {
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refusal.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refusal.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refusal}"
     );
     let received =

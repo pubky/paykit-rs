@@ -713,7 +713,7 @@ async fn test_destinations_unsupported_live_list_beside_an_expired_one_asks_for_
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     let got = seller_wallet.receive(None).await.unwrap();
@@ -1425,7 +1425,7 @@ async fn test_destinations_used_up_list_asked_for_whatever_the_method_pays() {
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert!(asked_for_a_list(&mut shop).await);
@@ -1748,7 +1748,12 @@ async fn test_destinations_list_expiring_while_the_payee_is_read_asked_for_again
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(
+            refused.refusal(),
+            Some(Refusal::WaitingForList {
+                device_clock_behind: false
+            })
+        ),
         "{refused:?}"
     );
     assert!(asked_for_a_list(&mut shop).await);
@@ -1795,7 +1800,7 @@ async fn test_destinations_used_up_list_asked_for_an_endpoint_it_lacks() {
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert!(asked_for_a_list(&mut shop).await);
@@ -1827,7 +1832,7 @@ async fn test_destinations_used_up_list_asked_for_a_request_accepting_what_it_la
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert!(asked_for_a_list(&mut shop).await);
@@ -1894,7 +1899,7 @@ async fn test_destinations_used_up_list_beside_a_list_without_the_endpoint_asked
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert!(asked_for_a_list(&mut shop).await);
@@ -1921,7 +1926,7 @@ async fn test_destinations_used_up_and_expired_list_beside_a_list_without_the_en
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert!(asked_for_a_list(&mut shop).await);
@@ -1953,7 +1958,7 @@ async fn test_destinations_used_up_list_beside_a_list_the_method_doesnt_pay_aske
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert!(asked_for_a_list(&mut shop).await);
@@ -1961,11 +1966,11 @@ async fn test_destinations_used_up_list_beside_a_list_the_method_doesnt_pay_aske
 }
 
 #[tokio::test]
-async fn test_destinations_list_expired_by_the_service_time_alone_is_refused() {
+async fn test_destinations_list_expired_by_the_service_time_alone_asks_for_the_current_one() {
     // The wallet's device clock runs ten seconds behind the service. Once the service time
     // it verified reaches the list's expiry, 30 days after its inbox accepted the list, the
-    // destination has expired, also for a payment by hand, and the refusal says the device
-    // clock is behind (Paykit spec 7.2, check the destination).
+    // list has expired, also for a payment by hand: it isn't chosen, and the wallet asks bob
+    // for his current list and waits for it (Paykit spec 7.2, check the destination; 8.4).
     let w = World::new();
     let wallet_store = crate::common::store();
     let mut wallet = w.wallet_on("wallet", Arc::clone(&wallet_store)).await;
@@ -1996,8 +2001,14 @@ async fn test_destinations_list_expired_by_the_service_time_alone_is_refused() {
         .outcome
         .unwrap_err();
     assert!(
-        format!("{refused:?}").contains("the device clock is behind"),
+        matches!(
+            refused.refusal(),
+            Some(Refusal::WaitingForList {
+                device_clock_behind: true
+            })
+        ),
         "{refused:?}"
     );
+    assert!(asked_for_a_list(&mut shop).await);
     assert!(w.rail.all_executions().is_empty());
 }

@@ -677,7 +677,7 @@ async fn test_conversion_unusable_list_endpoints_beside_an_expired_list_ask_for_
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     // Each app whose list is held is asked for its current one.
@@ -746,7 +746,7 @@ async fn test_conversion_unusable_list_endpoints_beside_a_used_up_list_ask_for_i
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert!(list_asks(&wallet, &w.bob_id()).await > asked);
