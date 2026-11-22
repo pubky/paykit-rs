@@ -555,7 +555,7 @@ impl PaymentRequest {
     /// (Paykit spec 7.1, Paykit wire 4.5): the earlier of `proposal_expires_at` and the
     /// payment deadline's `timestamp`. `None` for a recurring request, or a one-time request
     /// with neither.
-    pub fn one_time_deadline(&self) -> Option<u64> {
+    fn one_time_deadline(&self) -> Option<u64> {
         if self.is_recurring() {
             return None;
         }
@@ -569,11 +569,11 @@ impl PaymentRequest {
         }
     }
 
-    /// The last verified payment time a payee credits for a one-time request, in
-    /// milliseconds, inclusive: its payment deadline's `timestamp` (Paykit spec 7.1). The
+    /// The payment deadline of a one-time request, in milliseconds: the last verified payment
+    /// time a payee credits for it, inclusive (Paykit spec 7.1, Paykit wire 4.5). The
     /// proposal expiry bounds the attempt, not the settlement (Paykit wire 4.5), as in v0.1.
     /// `None` for a recurring request, or a one-time request without a payment deadline.
-    pub fn settlement_deadline(&self) -> Option<u64> {
+    pub fn payment_deadline_ms(&self) -> Option<u64> {
         match (self.is_recurring(), self.payment_deadline) {
             (false, Some(PaymentDeadline::At(ms))) => Some(ms),
             _ => None,
@@ -2182,17 +2182,17 @@ mod tests {
     }
 
     #[test]
-    fn test_request_settlement_deadline_is_the_payment_deadline_alone() {
+    fn test_request_payment_deadline_is_the_payment_deadline_alone() {
         let r = PaymentRequest::from_body(&body(request())).unwrap();
         assert_eq!(
-            r.settlement_deadline(),
+            r.payment_deadline_ms(),
             Some(pubky_switch_core::time::parse_rfc3339("2026-01-03T00:00:00.000Z").unwrap())
         );
         let mut b = request();
         b["payment_deadline"] = json!(null);
         let open = PaymentRequest::from_body(&body(b)).unwrap();
         assert!(open.proposal_expires_at.is_some());
-        assert_eq!(open.settlement_deadline(), None);
+        assert_eq!(open.payment_deadline_ms(), None);
     }
 
     #[test]
@@ -2204,7 +2204,7 @@ mod tests {
         let r = PaymentRequest::from_body(&body(b)).unwrap();
         assert!(r.proposal_expires_at.is_some());
         assert_eq!(r.one_time_deadline(), None);
-        assert_eq!(r.settlement_deadline(), None);
+        assert_eq!(r.payment_deadline_ms(), None);
     }
 
     #[test]

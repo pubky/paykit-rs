@@ -3429,6 +3429,16 @@ async fn resume_seller_proposal(lose_answer: bool) {
 /// answer taking `delay_ms`, so the first dispatch is judged at `expires - 5_000 + delay_ms`.
 /// Returns the payment's outcome, the executions and the ledger entry's outcome.
 async fn dispatch_at_expiry(delay_ms: u64) -> (paykit_sdk::PayResult, usize, String) {
+    Box::pin(dispatch_at_expiry_on(delay_ms, false)).await
+}
+
+/// As [`dispatch_at_expiry`]; with `device_stopped`, the payer's device clock stays at the
+/// reservation's time while the service's runs on, so only the verified service time can
+/// pass the expiry.
+async fn dispatch_at_expiry_on(
+    delay_ms: u64,
+    device_stopped: bool,
+) -> (paykit_sdk::PayResult, usize, String) {
     let expires = pubky_switch_client::testing::START_MS + 60 * 60_000;
     let terms = AllowanceTerms::from_json(&json!({
         "asset": "btc", "lifetime_amount_limit": "100", "period_limits": [],
@@ -3445,16 +3455,23 @@ async fn dispatch_at_expiry(delay_ms: u64) -> (paykit_sdk::PayResult, usize, Str
     let slow = std::sync::Arc::new(crate::common::SlowOps::new(std::sync::Arc::clone(
         &world.router,
     )));
-    let mut payer = world
-        .load_with_transport(
-            &world.alice,
-            storage,
-            app_id,
-            std::sync::Arc::clone(&slow)
-                as std::sync::Arc<dyn pubky_switch_client::transport::Transport>,
-        )
-        .await;
     world.clock.set_ms(expires - 5_000);
+    let mut env = world.env(&world.alice, storage);
+    env.transport = std::sync::Arc::clone(&slow)
+        as std::sync::Arc<dyn pubky_switch_client::transport::Transport>;
+    if device_stopped {
+        env.clock = std::sync::Arc::new(pubky_switch_client::clock::TestClock::new(expires - 5_000))
+            as std::sync::Arc<dyn pubky_switch_client::clock::Clock>;
+    }
+    let mut payer = paykit_sdk::Paykit::load(
+        env,
+        paykit_sdk::PaykitConfig::default(),
+        app_id,
+        std::sync::Arc::clone(&world.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        world.timer(),
+    )
+    .await
+    .unwrap();
     let request = Box::pin(request_from(
         &mut shop,
         payer.identity(),
@@ -3486,9 +3503,36 @@ async fn test_executor_expiry_after_the_reservation_refuses_the_first_dispatch()
 
 #[tokio::test]
 async fn test_executor_dispatch_at_the_expiry_is_refused() {
-    let (result, executions, _) = Box::pin(dispatch_at_expiry(5_000)).await;
-    assert!(result.outcome.is_err());
+    let (result, executions, outcome) = Box::pin(dispatch_at_expiry(5_000)).await;
+    let refused = result.outcome.unwrap_err();
+    assert!(
+        format!("{refused:?}").contains("the Allowance expired before dispatch"),
+        "{refused:?}"
+    );
     assert_eq!(executions, 0);
+    assert!(outcome.contains("Failed"), "{outcome}");
+}
+
+#[tokio::test]
+async fn test_executor_dispatch_refused_by_the_service_time_alone() {
+    // The device clock stays 5 s before the expiry; the reservation's answer carries a
+    // service time at it. The later of the two clocks has reached the expiry, so the first
+    // dispatch pays nothing; a millisecond earlier it pays.
+    let (result, executions, outcome) = Box::pin(dispatch_at_expiry_on(5_000, true)).await;
+    let refused = result.outcome.unwrap_err();
+    assert!(
+        format!("{refused:?}").contains("the Allowance expired before dispatch"),
+        "{refused:?}"
+    );
+    assert_eq!(executions, 0);
+    assert!(outcome.contains("Failed"), "{outcome}");
+    let (result, executions, _) = Box::pin(dispatch_at_expiry_on(4_999, true)).await;
+    assert!(
+        matches!(result.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "{:?}",
+        result.outcome
+    );
+    assert_eq!(executions, 1);
 }
 
 #[tokio::test]
@@ -3504,10 +3548,12 @@ async fn test_executor_dispatch_a_millisecond_before_the_expiry_pays() {
 
 #[tokio::test]
 async fn test_executor_expired_allowance_repeats_no_dispatch() {
-    // The first call's answer is lost and the method's history can't tell whether it went;
-    // the Allowance then expires. A resume makes no further call: nothing more is paid under
-    // an expired Allowance (Paykit spec 8.3). An executor pays only on a method with complete
-    // history, which then settles the attempt, so this resume never reaches a repeat.
+    // The first call went out and hung. The method then keeps no history for it, and its
+    // idempotency lets the SDK repeat the call. Once the Allowance has expired, a resume
+    // makes no further call: nothing more is paid under an expired Allowance (Paykit spec
+    // 8.3). The attempt stays open as possibly paid, and its ledger entry stays reserved.
+    use paykit_sdk::rail::Behaviour;
+    use paykit_sdk::PayOutcome;
     let start = pubky_switch_client::testing::START_MS;
     let expires = start + 60 * 60_000;
     let terms = AllowanceTerms::from_json(&json!({
@@ -3520,7 +3566,6 @@ async fn test_executor_expired_allowance_repeats_no_dispatch() {
     let (world, mut payer, mut shop, key) =
         Box::pin(first_grant_in(crate::common::store(), terms)).await;
     world.rail.set_history_payer(payer.identity());
-    world.rail.set_idempotent(true);
     world.clock.set_ms(expires - 30_000);
     let request = Box::pin(request_from(
         &mut shop,
@@ -3529,24 +3574,50 @@ async fn test_executor_expired_allowance_repeats_no_dispatch() {
     ))
     .await;
     Box::pin(payer.receive(None)).await.unwrap();
-    world.rail.next(paykit_sdk::rail::Behaviour::LoseAnswer);
-    let lost = Box::pin(payer.pay_under_allowance(&request, &key))
-        .await
-        .outcome;
-    let attempt = match &lost {
-        Ok(outcome) => outcome.attempt_id(),
-        Err(error) => {
-            let payments = payer.payments().await.unwrap();
-            payments
-                .first()
-                .unwrap_or_else(|| panic!("no payment journaled: {error:?}"))
-                .attempt_id
-        }
+    world.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } =
+        Box::pin(payer.pay_under_allowance(&request, &key))
+            .await
+            .outcome
+            .unwrap()
+    else {
+        panic!("the Allowance payment was not pending")
     };
-    assert_eq!(world.rail.pay_calls(&attempt), 1, "{lost:?}");
-    // The history can't tell whether the dispatch went.
-    world.rail.forget_history(&attempt);
+    assert_eq!(world.rail.pay_calls(&attempt_id), 1);
+    // The method's history can't tell whether the call went, and its idempotency allows a
+    // repeat: only the Allowance's expiry stops it.
+    world.rail.forget_history(&attempt_id);
+    repeat_without_method_history(&world);
     world.clock.set_ms(expires + 1);
     let resumed = Box::pin(payer.resume_payments()).await.unwrap();
-    assert_eq!(world.rail.pay_calls(&attempt), 1, "{resumed:?}");
+    assert_eq!(world.rail.pay_calls(&attempt_id), 1, "{resumed:?}");
+    assert!(
+        resumed.iter().any(|outcome| matches!(
+            outcome,
+            PayOutcome::Uncertain { attempt_id: id, .. } if *id == attempt_id
+        )),
+        "{resumed:?}"
+    );
+    let payment = payer
+        .payments()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|p| p.attempt_id == attempt_id)
+        .unwrap();
+    assert_ne!(payment.stage, paykit_sdk::Stage::Finished);
+    let ledger = payer
+        .app()
+        .records_of("allowance_ledgers")
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let ledger = Ledger::from_json(ledger.content.value().unwrap()).unwrap();
+    let entry = ledger
+        .entries
+        .iter()
+        .find(|entry| entry.attempt_id == attempt_id)
+        .unwrap();
+    assert_eq!(entry.outcome, None);
 }

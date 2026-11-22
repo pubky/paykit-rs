@@ -1159,11 +1159,11 @@ impl Paykit {
                     RecordBinding::Period { billing_period, .. } => {
                         request.period_payment_deadline(&billing_period)?
                     }
-                    RecordBinding::Request { .. } => request.settlement_deadline(),
+                    RecordBinding::Request { .. } => request.payment_deadline_ms(),
                     RecordBinding::Unrequested => None,
                 };
                 // Evidence dated before the request doesn't prove it, less the tolerance the
-                // payment method declares for evidence dated early (Paykit spec 7.2, "Not
+                // payment method declares for evidence dated early (Paykit spec 7.1, "Not
                 // before the request"): the request's signed `created_at`, which every own app
                 // reads alike, is the time the payee recorded it.
                 let not_before = stored_request

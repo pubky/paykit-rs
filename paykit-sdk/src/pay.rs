@@ -955,8 +955,9 @@ pub(crate) enum FinalCheck {
     Pay,
     /// Not now: nothing is paid and the attempt stays open.
     Hold,
-    /// A repeat past the idempotency retention, or one that might not complete before its
-    /// attempt is orphaned: never made.
+    /// A repeat past the idempotency retention, one that might not complete before its
+    /// attempt is orphaned, or one under an Allowance that has expired: never made, and the
+    /// attempt stays "may be paid".
     Lapsed,
     /// The client refused the payee's late switch answer, such as an equivocation (Switch
     /// wire 3.3): nothing is paid, and the refusal is the caller's.
@@ -3352,8 +3353,9 @@ impl Paykit {
         match check {
             FinalCheck::Pay => {}
             FinalCheck::Hold => return Ok(PayOutcome::Pending { attempt_id }),
-            // The method may have forgotten the key: the repeat isn't made, and the attempt
-            // stays "may be paid" (Paykit spec 7.2).
+            // The method may have forgotten the key, the repeat may not complete in time, or
+            // its Allowance has expired: the repeat isn't made, and the attempt stays "may be
+            // paid" (Paykit spec 7.2, 8.3).
             FinalCheck::Lapsed => return Ok(PayOutcome::Uncertain { attempt_id }),
             // A refused answer stops the payment. A first dispatch submitted nothing, so it
             // is written `failed` and refused with the answer's refusal; a repeat may follow
@@ -4565,9 +4567,10 @@ impl Paykit {
     ///    request's or a list's endpoint, by the switch's rules for a public endpoint;
     /// 4. the own `identity.json` is confirmed in the last 60 s, and lists this app at the
     ///    attempt's service and generation;
-    /// 5. for a repeat, the method's idempotency retention hasn't ended, and the repeat can
-    ///    complete before its attempt is orphaned ([`FinalCheck::Lapsed`]); for a first
-    ///    dispatch, the attempt is within its pre-dispatch budget;
+    /// 5. for a repeat, the method's idempotency retention hasn't ended, the Allowance it
+    ///    was reserved under hasn't expired, and the repeat can complete before its attempt
+    ///    is orphaned ([`FinalCheck::Lapsed`]); for a first dispatch, the attempt is within
+    ///    its pre-dispatch budget and the Allowance it was reserved under hasn't expired;
     /// 6. the app may still make the attempt: no alarm or restore question raised meanwhile,
     ///    for an automatic payment the clocks within the tolerance, and its certificate
     ///    holds `paykit_pay`, so an app a renewal reduced moves no money on any path, a repeat at a
@@ -5109,7 +5112,8 @@ impl Paykit {
                 }
                 // An expired Allowance pays nothing more (Paykit spec 8.3): the reservation's
                 // window bounds when the attempt was written, this when its first dispatch
-                // goes. A repeat isn't refused for it, since the first call may have paid.
+                // goes. Nothing was submitted, so the attempt is written `failed`; a repeat is
+                // stopped above instead, as `Lapsed`, since the first call may have paid.
                 if allowance_expired(entry, now, self.service_time()) {
                     return Ok(FinalCheck::Refused(Refusal::NotAutomatic(
                         "the Allowance expired before dispatch".into(),

@@ -101,9 +101,10 @@ pub struct RailDeclaration {
     ///   real time, so at least 1,000 ms for such a method;
     /// - the clock of whatever dates the evidence against the payee's device clock, which
     ///   dated the request: a node's settle time is that node's clock;
-    /// - the method's own timestamp rules: a Bitcoin block timestamp need only exceed the
-    ///   median time of the previous blocks, so it can lie about two hours before the block
-    ///   was mined, and an on-chain method needs at least that.
+    /// - the method's own timestamp rules: a Bitcoin block timestamp can lie well before the
+    ///   block was mined, so two hours is a conservative early tolerance for an on-chain
+    ///   method. A block timestamp can also lie ahead of real time, which can put a payment
+    ///   made in time past a deadline; no tolerance covers that.
     ///
     /// A Lightning method reading its own node's settle time needs its precision and that
     /// node's clock skew: a few minutes. A value reaching before 1970 disables the bound.
@@ -563,9 +564,11 @@ pub trait Rail: Send + Sync {
         Box::pin(async { Ok(None) })
     }
 
-    /// The payee's own check of a proof (Paykit spec 8.1 step 4): the verified payment time
-    /// when the method confirms the payment reached the endpoint for the amount; `None` when
-    /// it doesn't.
+    /// The payee's own check of a proof (Paykit spec 8.1 step 4): the verified payment time,
+    /// in Unix milliseconds, when the method confirms the payment reached the endpoint for the
+    /// amount; `None` when it doesn't. That time decides credit: the payee credits the
+    /// occurrence only when it lies within the occurrence's times (Paykit spec 7.1), so it is
+    /// the time the payment's evidence dates it, never a placeholder.
     ///
     /// # Errors
     ///

@@ -422,7 +422,7 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 
 ## The payment method's time tolerance
 
-The method declares `payment_time_tolerance_ms` with its declaration. The payee credits a request only on evidence dated at or after the request's `created_at` less this tolerance. Choose it to cover the method's time precision (at least 1,000 ms for times in whole seconds), the skew of the clock that dates the evidence, and the method's own timestamp rules. A Bitcoin block timestamp can lie about two hours before the block was mined, so an on-chain method needs at least that. A Lightning method that reads its own node's settle time needs a few minutes. The tolerance never widens a deadline.
+The method declares `payment_time_tolerance_ms` with its declaration. The payee credits a request only on evidence dated at or after the request's `created_at` less this tolerance. Choose it to cover the method's time precision (at least 1,000 ms for times in whole seconds), the skew of the clock that dates the evidence, and the method's own timestamp rules. Two hours is a conservative early tolerance for a Bitcoin block timestamp. A block timestamp ahead of real time can also put a payment made in time past a deadline, and no tolerance covers that. A Lightning method that reads its own node's settle time needs a few minutes. The tolerance never widens a deadline. The time `verify` returns decides credit, so return the time the payment's evidence dates it, never a placeholder.
 
 ## Refusals
 

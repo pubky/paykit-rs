@@ -145,9 +145,11 @@ pub enum Refusal {
     /// The occurrence carries a manual-only mark or is funded under an Allowance.
     #[error("Paykit spec 8.2, 8.3: this occurrence cannot be paid by the wallet's own policy")]
     ManualOnly,
-    /// The authenticated subscription and service time do not authorize this automatic
-    /// Billing Period. At an open attempt's first dispatch this is an [`Self::AttemptFailed`].
-    #[error("Paykit spec 8.2: not paid automatically: {0}")]
+    /// Not paid automatically: the authenticated subscription and service time do not
+    /// authorize this automatic Billing Period (Paykit spec 8.2), or the Allowance the
+    /// payment was reserved under expired before its first dispatch (Paykit spec 8.3). At an
+    /// open attempt's first dispatch this is an [`Self::AttemptFailed`].
+    #[error("Paykit spec 8.2, 8.3: not paid automatically: {0}")]
     NotAutomatic(String),
     /// The request record lists 16 Billing Periods that may have an open attempt and none of
     /// them has finished: no attempt is made on another period until one does (Paykit spec

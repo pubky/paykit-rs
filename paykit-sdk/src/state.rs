@@ -1171,9 +1171,6 @@ impl Stored for JournalEntry {
             if self.user_started || self.request_hash()?.is_none() || !under.valid() {
                 return corrupt();
             }
-        } else if self.allowance_expires_at_ms.is_some() {
-            // An expiry is the reserving Allowance's, kept only with it.
-            return corrupt();
         }
         if self.attempt()? != *attempt {
             return corrupt();
