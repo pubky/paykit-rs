@@ -164,8 +164,11 @@ async fn check_subscription_periods(
         world.advance_ms(period.starts_at.saturating_sub(world.now_ms()));
         if paid.is_empty() {
             rail.set_declaration(
-                paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-                    .with_idempotent(true),
+                paykit_sdk::RailDeclaration::new(
+                    paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+                    paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+                )
+                .with_idempotent(true),
             );
             rail.next(paykit_sdk::rail::Behaviour::Hang);
         }
