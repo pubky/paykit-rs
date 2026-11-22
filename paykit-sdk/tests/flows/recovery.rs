@@ -50,10 +50,13 @@ async fn test_recovery_clock_gone_back_empty_history_stays_uncertain() {
     // A history kept for a day: empty, it shows a dispatch never started only within that
     // day of the journaling, which a clock now behind it can't tell.
     w.rail.set_declaration(
-        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_history(true)
-            .with_history_retention_ms(DAY_MS)
-            .with_history_survives_restore(true),
+        RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_history(true)
+        .with_history_retention_ms(DAY_MS)
+        .with_history_survives_restore(true),
     );
     w.rail.forget_history(&attempt_id);
     let mut wallet = w
@@ -86,9 +89,12 @@ async fn test_recovery_clock_gone_back_idempotent_rail_not_dispatched_again() {
     // Idempotent for a day, without a history: a repeat is harmless only while the method
     // still remembers the key, which a clock now behind the journaling can't tell.
     w.rail.set_declaration(
-        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true)
-            .with_idempotency_retention_ms(DAY_MS),
+        RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true)
+        .with_idempotency_retention_ms(DAY_MS),
     );
     let mut wallet = w
         .load_on_clock(&w.alice, Arc::clone(&base), app_id, clock_gone_back(&w))
@@ -108,9 +114,12 @@ async fn test_recovery_within_retention_idempotent_rail_asked_again() {
     let base = store();
     let (attempt_id, app_id) = in_flight(&w, &base).await;
     w.rail.set_declaration(
-        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true)
-            .with_idempotency_retention_ms(DAY_MS),
+        RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true)
+        .with_idempotency_retention_ms(DAY_MS),
     );
     // The clock moved on, within the day: the method still remembers the key, and every
     // check before paying passes again.
@@ -177,7 +186,11 @@ async fn test_recovery_clock_gone_back_own_identity_read_again() {
 /// An idempotent rail without a history, remembering keys for good: only the claim can tell
 /// a resume that an attempt was resolved.
 fn idempotent_without_history() -> RailDeclaration {
-    RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS).with_idempotent(true)
+    RailDeclaration::new(
+        paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+        paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+    )
+    .with_idempotent(true)
 }
 
 #[tokio::test]
@@ -614,11 +627,14 @@ async fn test_recovery_failure_that_completed_after_all_sends_its_proof() {
 async fn test_recovery_failure_past_the_history_window_not_asked_again() {
     let w = World::new();
     w.rail.set_declaration(
-        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true)
-            .with_history(true)
-            .with_history_retention_ms(DAY_MS)
-            .with_history_survives_restore(true),
+        RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true)
+        .with_history(true)
+        .with_history_retention_ms(DAY_MS)
+        .with_history_survives_restore(true),
     );
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -735,10 +751,13 @@ async fn test_recovery_empty_history_proves_nothing_from_the_retention_end() {
         let journaled = w.clock.now_ms();
         let (attempt_id, app_id) = in_flight(&w, &base).await;
         w.rail.set_declaration(
-            RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-                .with_history(true)
-                .with_history_retention_ms(RETENTION_MS)
-                .with_history_survives_restore(true),
+            RailDeclaration::new(
+                paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+                paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+            )
+            .with_history(true)
+            .with_history_retention_ms(RETENTION_MS)
+            .with_history_survives_restore(true),
         );
         w.rail.forget_history(&attempt_id);
         let mut wallet = w
@@ -775,9 +794,12 @@ async fn test_recovery_repeat_only_before_the_idempotency_retention_end() {
         let journaled = w.clock.now_ms();
         let (attempt_id, app_id) = in_flight(&w, &base).await;
         w.rail.set_declaration(
-            RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-                .with_idempotent(true)
-                .with_idempotency_retention_ms(RETENTION_MS),
+            RailDeclaration::new(
+                paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+                paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+            )
+            .with_idempotent(true)
+            .with_idempotency_retention_ms(RETENTION_MS),
         );
         w.clock.set_ms(journaled + age);
         let mut wallet = w
@@ -814,11 +836,14 @@ async fn test_recovery_failure_asked_about_only_before_the_history_retention_end
         let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
         wallet.receive(None).await.unwrap();
         w.rail.set_declaration(
-            RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-                .with_idempotent(true)
-                .with_history(true)
-                .with_history_retention_ms(RETENTION_MS)
-                .with_history_survives_restore(true),
+            RailDeclaration::new(
+                paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+                paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+            )
+            .with_idempotent(true)
+            .with_history(true)
+            .with_history_retention_ms(RETENTION_MS)
+            .with_history_survives_restore(true),
         );
         let journaled = w.clock.now_ms();
         w.rail.next(Behaviour::Fail);
@@ -914,9 +939,12 @@ async fn test_recovery_repeat_of_a_request_cancelled_since_withheld_and_paid_onc
     // The method's history now shows the payment made.
     w.rail.settle(&attempt_id, true);
     w.rail.set_declaration(
-        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true)
-            .with_history(true),
+        RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true)
+        .with_history(true),
     );
     let resumed = wallet.resume_payments().await.unwrap();
     assert!(
