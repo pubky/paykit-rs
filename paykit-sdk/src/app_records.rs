@@ -1018,8 +1018,14 @@ mod tests {
     #[test]
     fn test_discovery_state_records_empty_is_not_persisted() {
         let (bob, _) = discovery_records();
-        let records: SeenRecords = serde_json::from_value(json!({"records": []})).unwrap();
+        let records: SeenRecords =
+            serde_json::from_value(json!({"records": [], "unkept_at": null})).unwrap();
         assert!(!records.verifies(&bob.id(), &bob.app_id()));
+        // A group too large to keep is kept as its time alone.
+        let held: SeenRecords =
+            serde_json::from_value(json!({"records": [], "unkept_at": 5})).unwrap();
+        assert!(held.verifies(&bob.id(), &bob.app_id()));
+        assert!(serde_json::from_value::<SeenRecords>(json!({"records": []})).is_err());
     }
 
     #[test]
