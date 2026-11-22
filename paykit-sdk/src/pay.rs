@@ -4871,7 +4871,7 @@ impl Paykit {
             }));
         }
         let stored = stored.clone();
-        let Some(floor) = self.floor_read_now().await else {
+        let Some(floor) = self.floor_read_now().await? else {
             return Ok(None);
         };
         if judge && self.floor_holds_read(&stored, floor.as_ref()).await? {

@@ -65,7 +65,7 @@
 //! | `dl` | the deny list as the app last read it, with this app's blocks kept unanswered (`bk/`), for the views and a payment the user starts (Paykit spec 8.1) | |
 //! | `fg` | the flagged senders as the app last read them, at most `MAX_FLAGGED_COPY`; absent while not known, which holds the asks of block marks (`marks.rs`); never restored | |
 //! | `bf` | the raise of the identity's block floor this app owes: the latest of the latest times of the block marks gone for the bound or their own expiry, and of a restore's first read of the lists; written to the shared `block_floor` record before the block marks ask and with any ask, and deleted in that batch; applied as a floor meanwhile (`crate::floor`) | yes |
-//! | `fd` | unresolved deletion of the identity's block floor (Paykit wire 5.6) | yes |
+//! | `fk` | what this app keeps of the identity's block floor: the highest floor it has seen and whether it has seen the record divergent, the durable divergence hold; both only grow, and an in-place restore keeps the higher of the backup's and the installation's (`crate::floor::FloorKept`, Paykit wire 5.6) | yes |
 //! | `fo/<record key>` | a request record a read opened without `manual_only`, checked against the block floor once the read is done and marked if dated before it (`crate::floor`); never restored | |
 //! | `bk/<pubky>` | this app's block or unblock of `pubky` not yet shown by the list (`OwnBlockMark`): a block from before the switch is asked, an unblock only with the batch the client keeps; a block counts until a read of the list shows it, and is written again at a receive while the client neither keeps nor applied its batch, a restored one too, since the kept batch stays with the device that kept it; an unblock counts for payments and held sends only while the client still keeps its batch, never for the spam rule, and isn't restored (Paykit spec 8.1) | |
 //! | `ra/<sender>` | signed recovery requests for dropped replies, their first-delivery outcomes and any unresolved original missing from a restore | |
@@ -538,6 +538,19 @@ impl Stored for [u8; 16] {
     }
 }
 
+impl sealed::Sealed for crate::floor::FloorKept {}
+
+impl Stored for crate::floor::FloorKept {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        // No writer keeps an empty one.
+        if matches!(family, StateKey::FloorKept) && !self.is_empty() {
+            Ok(())
+        } else {
+            corrupt()
+        }
+    }
+}
+
 impl sealed::Sealed for crate::floor::PendingUnblocks {}
 
 impl Stored for crate::floor::PendingUnblocks {
@@ -704,7 +717,6 @@ impl Stored for bool {
             | StateKey::HoldConfirmedBefore { .. }
             | StateKey::RestoreConsent(_)
             | StateKey::NotPaidBeforeLoss(_)
-            | StateKey::FloorDeleted
             | StateKey::FloorOpened(_)
             | StateKey::Taken(_)
                 if *self =>
@@ -1855,7 +1867,8 @@ pub(crate) mod key {
     pub(crate) const FLAGGED: &str = "fg";
     /// The raise of the block floor this app owes (`crate::floor`).
     pub(crate) const FLOOR_BATCH: &str = "fb";
-    pub(crate) const FLOOR_DELETED: &str = "fd";
+    /// What this app keeps of the block floor (`crate::floor::FloorKept`).
+    pub(crate) const FLOOR_KEPT: &str = "fk";
     pub(crate) const BLOCK_FLOOR: &str = "bf";
     /// The request records this read opened without `manual_only`, to check against the
     /// block floor once it is done (`crate::floor`).
@@ -2436,8 +2449,8 @@ pub(crate) enum StateKey {
     Flagged,
     /// `bf`: the raise of the block floor this app owes.
     BlockFloor,
-    /// A deletion of the identity's block floor still needs a verified protective write.
-    FloorDeleted,
+    /// `fk`: what this app keeps of the block floor.
+    FloorKept,
     /// The local identifier of an unanswered floor write.
     FloorBatch,
     /// `fo/<record key>`: a request record a read opened without `manual_only`, to check
@@ -2596,7 +2609,7 @@ impl StateKey {
             "lr" => Self::ListsRead,
             "dl" => Self::Denied,
             "fg" => Self::Flagged,
-            "fd" => Self::FloorDeleted,
+            "fk" => Self::FloorKept,
             "bf" => Self::BlockFloor,
             "fb" => Self::FloorBatch,
             _ => {
@@ -3133,6 +3146,25 @@ mod tests {
             )
             .is_err());
         }
+    }
+
+    #[test]
+    fn test_floor_kept_binds_to_its_key_and_is_never_empty() {
+        use crate::floor::FloorKept;
+        let kept = serde_json::json!({ "seen_ms": 70, "divergent": true });
+        assert!(reads::<FloorKept>(key::FLOOR_KEPT, kept.clone()));
+        assert!(reads::<FloorKept>(
+            key::FLOOR_KEPT,
+            serde_json::json!({ "seen_ms": null, "divergent": true })
+        ));
+        assert!(!reads::<FloorKept>(key::BLOCK_FLOOR, kept.clone()));
+        assert!(!reads::<FloorKept>(
+            key::FLOOR_KEPT,
+            serde_json::json!({ "seen_ms": null, "divergent": false })
+        ));
+        let mut unknown = kept;
+        unknown["extra"] = serde_json::json!(true);
+        assert!(!reads::<FloorKept>(key::FLOOR_KEPT, unknown));
     }
 
     #[test]
@@ -3834,7 +3866,7 @@ mod tests {
                     from_ms: 7,
                 },
             ),
-            (key::FLOOR_DELETED.into(), StateKey::FloorDeleted),
+            (key::FLOOR_KEPT.into(), StateKey::FloorKept),
             (key::BLOCK_FLOOR.into(), StateKey::BlockFloor),
             (key::FLOOR_BATCH.into(), StateKey::FloorBatch),
             (key::floor_opened(&pubky), StateKey::FloorOpened(pubky)),

@@ -473,6 +473,46 @@ impl BoundedFamilies {
 /// The name of Paykit's layer in app backups (Switch spec 12.4).
 pub const BACKUP_NAME: &str = "paykit";
 
+/// What the installation an in-place restore replaces keeps of the block floor: its kept
+/// floor (`fk`) with its held floor record's floor and divergence, so a backup taken before
+/// either never lowers the floor or drops the hold (Paykit wire 5.6, Divergent floor). A fresh
+/// destination has none.
+fn previous_floor_kept(
+    restoring: &RestoreContext<'_>,
+    binder: &state::Binder<'_>,
+) -> Result<crate::floor::FloorKept, String> {
+    let mut kept = crate::floor::FloorKept::default();
+    for (k, value) in restoring
+        .previous_local_scan(key::FLOOR_KEPT.as_bytes())
+        .map_err(|_| "the installation's block floor hold cannot be read")?
+    {
+        if k == key::FLOOR_KEPT.as_bytes() {
+            kept = kept.with(
+                state::restored::<crate::floor::FloorKept>(&k, &value, binder)
+                    .map_err(|_| "invalid retained block floor hold")?,
+            );
+        }
+    }
+    let policy = Collection::BlockFloor.fixed_policy();
+    let hash = policy
+        .hash()
+        .map_err(|_| "the block floor policy cannot be hashed")?;
+    let floor_key = pubky_switch_core::ident::record_key_from_blinded(
+        Collection::BlockFloor.name(),
+        &restoring.blind(&paykit_lib::derive::natural_key::block_floor(
+            &restoring.identity(),
+        )),
+        &hash,
+    );
+    for held in restoring.previous_records_of(Collection::BlockFloor.name()) {
+        let held = held.map_err(|_| "the installation's block floor cannot be read")?;
+        if held.key == floor_key && held.policy == policy {
+            kept = kept.with(crate::floor::FloorKept::of_view(&held));
+        }
+    }
+    Ok(kept)
+}
+
 /// The writes that install Paykit's backup layer (Switch spec 12.4): every key of its local
 /// state, as the default layer holds it, with the payment journal checked whole first and
 /// its entries marked restored (Paykit spec 7.2). The journal's checks are
@@ -674,17 +714,9 @@ pub(crate) fn restore_paykit_layer(
     let mut journaled = std::collections::BTreeSet::new();
     let mut acknowledged = Vec::new();
     let mut writes = crate::reply_asks::restore(restoring, &binder, &state)?;
-    // A backup taken before the floor was deleted cannot discharge the installation's hold.
-    let mut floor_deleted = false;
-    for (k, value) in restoring
-        .previous_local_scan(key::FLOOR_DELETED.as_bytes())
-        .map_err(|_| "the installation's block floor hold cannot be read")?
-    {
-        if k == key::FLOOR_DELETED.as_bytes() {
-            floor_deleted = state::restored::<bool>(&k, &value, &binder)
-                .map_err(|_| "invalid retained block floor hold")?;
-        }
-    }
+    // An in-place restore from an earlier backup keeps the installation's divergence hold
+    // and highest floor seen, its held floor record's included (Paykit wire 5.6).
+    let mut floor_kept = previous_floor_kept(restoring, &binder)?;
     let mut cursor_time_ms = 0;
     let mut bounded = BoundedFamilies::default();
     for (key, value) in state {
@@ -824,9 +856,10 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::FloorDeleted => {
-                floor_deleted =
-                    state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
+            StateKey::FloorKept => {
+                let backup = state::restored::<crate::floor::FloorKept>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                floor_kept = floor_kept.with(backup);
                 continue;
             }
             StateKey::BlockFloor => {
@@ -1251,9 +1284,9 @@ pub(crate) fn restore_paykit_layer(
         &mut writes,
     )
     .map_err(|_| "the pending Allowance replies cannot be retained")?;
-    if floor_deleted {
+    if !floor_kept.is_empty() {
         writes.push(
-            state::local_put(key::FLOOR_DELETED, &true)
+            state::local_put(key::FLOOR_KEPT, &floor_kept)
                 .map_err(|_| "the block floor hold cannot be written")?,
         );
     }
@@ -1930,17 +1963,8 @@ impl Protocol for PaykitProtocol {
         deletion: &RecordDeletion<'_>,
         cx: &ReceiveContext<'_>,
     ) -> Result<Option<PutBack>, StoreFailure> {
-        if deletion.collection == Collection::BlockFloor.name() {
-            let target = crate::floor::floor_target(&cx.identity());
-            if cx.record_key(&target).map_err(store_failure)? != *deletion.key {
-                return Ok(None);
-            }
-            // Paykit wire 5 and 5.6: this revision cannot verify a protective floor
-            // publication. Keep the service cursor and the payment hold together.
-            return Ok(Some(PutBack::Prepare {
-                observed: vec![local_write(key::FLOOR_DELETED, &true)?],
-            }));
-        }
+        // `block_floor` is permanent (Paykit wire 5.1, 5.6): the client refuses a delete of it,
+        // so none comes here.
         crate::deletions::observe_payee_deletion(deletion, cx, &|proof| self.settlement_id(proof))
     }
 

@@ -1203,8 +1203,10 @@ impl Paykit {
         Box::pin(self.forget_blocked_pairs()).await?;
         let mut resend_refused = None;
         let marked = Box::pin(self.ask_on_marks(&mut resend_refused)).await?;
-        // The payer's records opened before this app held the block floor they fall under
-        // carry `manual_only` from now on (`crate::floor`), unless the payer's side waits.
+        // A higher floor or a divergence the reads showed is kept (`crate::floor`). The
+        // payer's records opened before this app held the block floor they fall under carry
+        // `manual_only` from now on, unless the payer's side waits.
+        Box::pin(self.keep_held_floor()).await?;
         if !Box::pin(self.payer_waits(keys)).await? {
             Box::pin(self.sweep_floor()).await?;
         }
