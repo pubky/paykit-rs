@@ -18,8 +18,14 @@ mod private_list;
 #[path = "journeys/public_endpoint.rs"]
 mod public_endpoint;
 
+use std::any::Any;
 use std::error::Error;
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use paykit_lib::bodies::RequestDestination;
@@ -73,28 +79,94 @@ fn on_backend(world: &World, transport: Arc<dyn Transport>) -> Arc<dyn Transport
 }
 
 /// Run `journey` on a fresh world of each backend, closing each world after its run, and
-/// fail with every backend's failure, by name.
+/// fail with every backend's failure, by name. A panic, as a failed assertion raises, is
+/// caught as that backend's failure, so the other backend still runs and reports.
 async fn on_both_backends<F>(journey: F) -> TestResult
 where
     F: AsyncFn(&World) -> TestResult,
 {
     let mut failures = Vec::new();
     for backend in [Backend::Scripted, Backend::Service] {
-        let Some(world) = World::start(backend)? else {
-            continue;
+        let world = match std::panic::catch_unwind(|| World::start(backend)) {
+            Ok(Ok(Some(world))) => world,
+            Ok(Ok(None)) => continue,
+            Ok(Err(error)) => {
+                failures.push(format!("{backend:?}: starting the world: {error}"));
+                continue;
+            }
+            Err(panic) => {
+                failures.push(format!(
+                    "{backend:?}: starting the world: {}",
+                    message(&*panic)
+                ));
+                continue;
+            }
         };
-        let result = Box::pin(journey(&world)).await;
-        let closed = world.close().await;
-        if let Err(error) = result {
-            failures.push(format!("{backend:?}: {error}"));
+        let result = Caught(Box::pin(journey(&world))).await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => failures.push(format!("{backend:?}: {error}")),
+            Err(panic) => failures.push(format!("{backend:?}: panicked: {panic}")),
         }
-        closed?;
+        if let Err(error) = world.close().await {
+            failures.push(format!("{backend:?}: closing the world: {error}"));
+        }
     }
     if failures.is_empty() {
         Ok(())
     } else {
         Err(failures.join("; ").into())
     }
+}
+
+#[tokio::test]
+async fn test_journeys_report_a_failed_assertion_on_each_backend() -> TestResult {
+    let runs = AtomicUsize::new(0);
+    let result = on_both_backends(async |world: &World| {
+        runs.fetch_add(1, Ordering::SeqCst);
+        assert!(world.backend() != Backend::Scripted, "a failed assertion");
+        Err("a failure the journey returned".into())
+    })
+    .await;
+    let failure = result.err().ok_or("a failing journey passed")?.to_string();
+    // Scripted fails its assertion, and the run goes on: the service backend, when it is
+    // configured, still runs and reports the failure it returned.
+    assert!(failure.contains("Scripted: panicked: "), "{failure}");
+    assert!(failure.contains("a failed assertion"), "{failure}");
+    match runs.load(Ordering::SeqCst) {
+        1 => assert!(!failure.contains("Service"), "{failure}"),
+        2 => assert!(
+            failure.contains("Service: a failure the journey returned"),
+            "{failure}"
+        ),
+        other => return Err(format!("the journey ran {other} times").into()),
+    }
+    Ok(())
+}
+
+/// A future whose panic is caught and returned as its message.
+struct Caught<F>(Pin<Box<F>>);
+
+impl<F: Future> Future for Caught<F> {
+    type Output = Result<F::Output, String>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let inner = self.0.as_mut();
+        match std::panic::catch_unwind(AssertUnwindSafe(|| inner.poll(cx))) {
+            Ok(Poll::Pending) => Poll::Pending,
+            Ok(Poll::Ready(output)) => Poll::Ready(Ok(output)),
+            Err(panic) => Poll::Ready(Err(message(&*panic))),
+        }
+    }
+}
+
+/// The message a panic carried.
+fn message(panic: &(dyn Any + Send)) -> String {
+    panic
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| panic.downcast_ref::<&str>().map(|text| (*text).to_owned()))
+        .unwrap_or_else(|| "a panic without a message".to_owned())
 }
 
 /// An identity with its own switch and its own signer.
@@ -156,9 +228,21 @@ impl Owner {
             Arc::new(HostTimer),
         ))
         .await?;
-        Box::pin(wallet.receive(None)).await?;
+        Box::pin(finish_listing(&mut wallet)).await?;
         Ok(wallet)
     }
+}
+
+/// Read the inbox until the app's first listing is done, as a joined wallet does.
+async fn finish_listing(wallet: &mut Paykit) -> TestResult {
+    for _ in 0..8 {
+        let read = Box::pin(wallet.receive(None)).await?;
+        if !read.report.more && read.records_unlisted.is_none() {
+            assert!(!wallet.app().listing_owed().await?);
+            return Ok(());
+        }
+    }
+    Err("the wallet's first listing did not finish".into())
 }
 
 /// The environment of an app on `world`, with its own store.
@@ -210,10 +294,12 @@ async fn checkout(world: &World, shop_config: PaykitConfig) -> TestResult<Checko
     })
 }
 
-/// Both sides admit each other: each invites the other, as a payer does at a checkout.
+/// Both sides admit each other, each allowing the other to connect, as a payer and a seller
+/// do at a checkout.
 async fn connect(a: &mut Paykit, b: &mut Paykit) -> TestResult {
-    Box::pin(a.app_mut().invite(&b.identity())).await?;
-    Box::pin(b.app_mut().invite(&a.identity())).await?;
+    let (a_id, b_id) = (a.identity(), b.identity());
+    Box::pin(a.allow_connect(&b_id)).await?;
+    Box::pin(b.allow_connect(&a_id)).await?;
     Ok(())
 }
 
@@ -226,8 +312,8 @@ struct Expected {
 
 /// After the payer's `outcome`: the method was called once; the payer's journal holds the
 /// payment, finished; the seller holds the payer's proof, verifies it, confirms it and shows
-/// it receipted; and the payer then holds exactly that receipt. Returns the receipt's
-/// `msg_id`.
+/// it receipted; and the payer then holds exactly that receipt, in its receipts and in its
+/// journal's entry. Returns the receipt's `msg_id`.
 async fn paid_and_receipted(
     wallet: &mut Paykit,
     shop: &mut Paykit,
@@ -281,6 +367,13 @@ async fn paid_and_receipted(
     assert_eq!(held.len(), 1, "{receipts:?}");
     assert_eq!(held[0].msg_id, receipt);
     assert_eq!(held[0].request_hash, expected.request_hash);
+    let payments = Box::pin(wallet.payments()).await?;
+    let journal = payments
+        .iter()
+        .find(|payment| payment.attempt_id == attempt_id)
+        .and_then(|payment| payment.receipt.as_ref())
+        .ok_or("the payer's journal shows no receipt")?;
+    assert_eq!(journal.msg_id, receipt);
     Ok(receipt)
 }
 
