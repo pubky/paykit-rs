@@ -345,7 +345,8 @@ impl Paykit {
     /// while the floor isn't held divergent. The lists are then read at each receive, so the
     /// raise goes at the next one (Paykit wire 5.6, Raising).
     pub(crate) async fn raise_owed(&self) -> Result<bool> {
-        if self.floor_kept().await?.divergent {
+        // Only an app holding `paykit_pay` raises the floor (Paykit wire 5.1, 5.6).
+        if !self.holds("paykit_pay") || self.floor_kept().await?.divergent {
             return Ok(false);
         }
         Ok(self
