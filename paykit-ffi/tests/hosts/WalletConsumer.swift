@@ -280,6 +280,7 @@ private func recoverReceipt(_ issuer: String) async throws -> RequestId {
         (selection, "SelectedEndpoints"), (failure, "EndpointFailure"), (failure.error, "MethodError"),
         (method.declaration(), "MethodDeclaration"),
         (WalletError.Operation(kind: .client, detail: "operation failed", serviceCode: nil, keptBatch: Data([1]), switchRefusal: nil), "WalletError"),
+        (WalletError.SettlementNoticeUnavailable(bucket: 1, storage: .Unavailable, detail: "warning unsaved", serviceCode: nil, keptBatch: Data([1]), switchRefusal: nil), "WalletError"),
         (WalletError.UnknownMethod, "WalletError"),
     ]
     for (value, name) in descriptions {

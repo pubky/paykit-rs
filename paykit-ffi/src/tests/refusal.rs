@@ -1,4 +1,6 @@
-use crate::{PaymentRefusal, RefusalKind, SwitchRefusalKind, WalletError, WalletFailureKind};
+use crate::{
+    PaymentRefusal, RefusalKind, StorageError, SwitchRefusalKind, WalletError, WalletFailureKind,
+};
 use paykit_sdk::{PaykitError, Refusal};
 use pubky_switch_client::app::{AppError, Refusal as AppRefusal};
 
@@ -95,24 +97,49 @@ fn test_kept_switch_refusals_retain_the_original_batch_and_recovery_generation()
 }
 
 #[test]
-fn test_unsaved_settlement_warning_preserves_the_service_error_and_kept_id() {
-    let answer = pubky_switch_client::ClientError::Switch {
-        status: 429,
-        code: pubky_switch_core::http::ErrorCode::QuotaExceeded,
-        current: serde_json::json!({ "limit": "record_keys" }),
-        message: "record slot limit".into(),
-        known_version: None,
-        retry_after: None,
+fn test_unsaved_settlement_warning_keeps_its_bucket_storage_and_kept_batch() {
+    let error = |storage: PaykitError| {
+        let answer = pubky_switch_client::ClientError::Switch {
+            status: 429,
+            code: pubky_switch_core::http::ErrorCode::QuotaExceeded,
+            current: serde_json::json!({ "limit": "record_keys" }),
+            message: "record slot limit".into(),
+            known_version: None,
+            retry_after: None,
+        };
+        WalletError::from(PaykitError::SettlementNoticeUnavailable {
+            bucket: 176,
+            submission: Box::new(AppError::Kept {
+                batch_id: [4; 16],
+                error: Box::new(AppError::Switch(answer)),
+            }),
+            storage: Box::new(storage),
+        })
     };
-    let error = PaykitError::SettlementNoticeUnavailable {
+    let unavailable = error(pubky_switch_client::StoreError::Unavailable.into());
+    assert!(
+        matches!(&unavailable, WalletError::SettlementNoticeUnavailable {
         bucket: 176,
-        submission: Box::new(AppError::Kept {
-            batch_id: [4; 16],
-            error: Box::new(AppError::Switch(answer)),
-        }),
-        storage: Box::new(pubky_switch_client::StoreError::Unavailable.into()),
-    };
-    assert!(matches!(WalletError::from(error), WalletError::Operation {
-        kind: WalletFailureKind::Client, service_code: Some(code), kept_batch: Some(id), detail, ..
-    } if code == "quota_exceeded" && id == [4; 16] && detail.contains("bucket 176")));
+        storage: StorageError::Unavailable,
+        service_code: Some(code),
+        kept_batch: Some(id),
+        switch_refusal: None,
+        detail,
+    } if code == "quota_exceeded" && id == &[4; 16] && detail.contains("bucket 176"))
+    );
+    assert!(matches!(
+        error(pubky_switch_client::StoreError::Unknown.into()),
+        WalletError::SettlementNoticeUnavailable {
+            storage: StorageError::Unknown,
+            ..
+        }
+    ));
+    assert!(matches!(
+        error(PaykitError::Conflict("notice".into())),
+        WalletError::SettlementNoticeUnavailable {
+            storage: StorageError::Other,
+            kept_batch: Some(_),
+            ..
+        }
+    ));
 }

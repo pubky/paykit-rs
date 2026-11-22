@@ -56,6 +56,26 @@ pub enum WalletError {
     /// The native payment method returned a failure this binding cannot classify.
     #[error("unknown payment method failure")]
     UnknownMethod,
+    /// The Switch refused a new settlement bucket for lack of a record slot and the
+    /// wallet could not save or check that bucket's warning. The original marked
+    /// receipt and its requested delivery are still kept under `kept_batch`, and the
+    /// kept batch may still apply. Show the warning for `bucket` if the host has yet to
+    /// show it. The warning grants no consent to issue another receipt.
+    #[error("settlement bucket {bucket} warning unsaved: {detail}")]
+    SettlementNoticeUnavailable {
+        /// The settlement bucket to which the record-slot refusal applies.
+        bucket: u16,
+        /// Why the warning could not be saved or its existing status checked.
+        storage: crate::StorageError,
+        /// The native explanation suitable for reporting the failure.
+        detail: String,
+        /// The service error code of the original submission, when returned.
+        service_code: Option<String>,
+        /// The Switch batch ID of the kept merchant submission, when available.
+        kept_batch: Option<Vec<u8>>,
+        /// The Switch rule that held the original submission or a batch ahead of it.
+        switch_refusal: Option<Arc<crate::SwitchRefusal>>,
+    },
     /// A Paykit or Switch operation failed.
     #[error("wallet operation failed: {detail}")]
     Operation {
@@ -94,18 +114,30 @@ pub enum WalletFailureKind {
 }
 impl From<StoreError> for WalletError {
     fn from(e: StoreError) -> Self {
-        use crate::StorageError as S;
-        let failure = match e {
-            StoreError::InUse => S::InUse,
-            StoreError::NotOwner => S::NotOwner,
-            StoreError::Unavailable => S::Unavailable,
-            StoreError::Unknown => S::Unknown,
-            StoreError::Full => S::Full,
-            StoreError::Corrupt => S::Corrupt,
-            StoreError::TooLarge { size, cap, .. } => S::TooLarge { size, cap },
-            _ => S::Other,
-        };
-        Self::Storage { failure }
+        Self::Storage {
+            failure: storage_failure(&e),
+        }
+    }
+}
+fn storage_failure(e: &StoreError) -> crate::StorageError {
+    use crate::StorageError as S;
+    match *e {
+        StoreError::InUse => S::InUse,
+        StoreError::NotOwner => S::NotOwner,
+        StoreError::Unavailable => S::Unavailable,
+        StoreError::Unknown => S::Unknown,
+        StoreError::Full => S::Full,
+        StoreError::Corrupt => S::Corrupt,
+        StoreError::TooLarge { size, cap, .. } => S::TooLarge { size, cap },
+        _ => S::Other,
+    }
+}
+/// The warning is a local store write. Any failure that isn't the store's own is
+/// reported as `Other`, with its explanation in `detail`.
+fn notice_storage_failure(e: &PaykitError) -> crate::StorageError {
+    match e {
+        PaykitError::Client(AppError::Store(e)) => storage_failure(e),
+        _ => crate::StorageError::Other,
     }
 }
 impl From<AppError> for WalletError {
@@ -131,9 +163,21 @@ impl From<PaykitError> for WalletError {
             PaykitError::Client(AppError::Protocol(failure)) => {
                 return failure.error().clone().into()
             }
-            PaykitError::Client(_) | PaykitError::SettlementNoticeUnavailable { .. } => {
-                WalletFailureKind::Client
+            PaykitError::SettlementNoticeUnavailable {
+                bucket,
+                submission,
+                storage,
+            } => {
+                return Self::SettlementNoticeUnavailable {
+                    bucket: *bucket,
+                    storage: notice_storage_failure(storage),
+                    detail: e.to_string(),
+                    service_code: submission.code().map(|code| code.as_str().into()),
+                    kept_batch: submission.kept_batch().map(Vec::from),
+                    switch_refusal: crate::SwitchRefusal::from_error(submission),
+                }
             }
+            PaykitError::Client(_) => WalletFailureKind::Client,
             PaykitError::PublicEndpointChangePending(_) => {
                 WalletFailureKind::PublicEndpointChangePending
             }
@@ -161,9 +205,6 @@ impl From<PaykitError> for WalletError {
         let client = match &e {
             PaykitError::Client(error) | PaykitError::PublicEndpointChangePending(error) => {
                 Some(error)
-            }
-            PaykitError::SettlementNoticeUnavailable { submission, .. } => {
-                Some(submission.as_ref())
             }
             _ => None,
         };

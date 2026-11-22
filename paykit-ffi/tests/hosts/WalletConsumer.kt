@@ -193,6 +193,8 @@ private suspend fun recoverReceipt(issuer: String): RequestId {
             check(unavailable.message == "MethodException(<redacted>)")
             val walletError = WalletException.Operation(WalletFailureKind.CLIENT, "operation failed", null, byteArrayOf(1), null)
             check(walletError.message == "WalletException(<redacted>)" && walletError.detail == "operation failed")
+            val unsaved = WalletException.SettlementNoticeUnavailable(1u, StorageException.Unavailable(), "warning unsaved", null, byteArrayOf(1), null)
+            check(unsaved.message == "WalletException(<redacted>)" && unsaved.bucket == 1.toUShort() && unsaved.storage is StorageException.Unavailable)
             val unknown: WalletException = WalletException.UnknownMethod()
             check(unknown is WalletException.UnknownMethod && unknown.toString() == "WalletException(<redacted>)")
             val descriptions: List<Pair<Any, String>> = listOf(
