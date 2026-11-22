@@ -15,7 +15,7 @@ fn required(events: &[WalletEvent], notice: &WalletRecoveryNotice) -> TestResult
 
 async fn recovery(world: &World) -> TestResult {
     let root = tempfile::tempdir()?;
-    let account = Arc::new(Account::open(root.path()));
+    let account = Arc::new(Account::open(root.path(), world.clock().clone()));
     let (host, payer, app, mut signer) =
         Box::pin(enrolled_payer(world, root.path(), account.clone())).await?;
     let generation = loop {

@@ -1185,6 +1185,51 @@ impl Transport for SlowSwitch {
     }
 }
 
+/// The world's switches, where the next answer to an operation batch (`/ops`), once armed,
+/// takes `ms` on the clock: the call returns after the batch was applied, the clock moved on.
+pub struct SlowOps {
+    pub inner: Arc<Router>,
+    delay: std::sync::Mutex<Option<(Arc<TestClock>, u64)>>,
+}
+
+impl SlowOps {
+    pub fn new(inner: Arc<Router>) -> Self {
+        Self {
+            inner,
+            delay: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// The next batch's answer takes `ms` on `clock`.
+    pub fn delay_next(&self, clock: Arc<TestClock>, ms: u64) {
+        *self.delay.lock().unwrap() = Some((clock, ms));
+    }
+}
+
+impl Transport for SlowOps {
+    fn send(
+        &self,
+        request: pubky_switch_client::transport::Request,
+    ) -> pubky_switch_client::transport::BoxFuture<
+        '_,
+        Result<
+            pubky_switch_client::transport::Response,
+            pubky_switch_client::error::TransportError,
+        >,
+    > {
+        let ops = request.method == "POST" && request.path_and_query.ends_with("/ops");
+        Box::pin(async move {
+            let answer = self.inner.send(request).await;
+            if ops {
+                if let Some((clock, ms)) = self.delay.lock().unwrap().take() {
+                    clock.advance_ms(ms);
+                }
+            }
+            answer
+        })
+    }
+}
+
 impl World {
     /// Load app `app_id` of `signer` from `store`, its requests going through `transport`.
     pub async fn load_with_transport(

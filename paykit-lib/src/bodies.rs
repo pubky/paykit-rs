@@ -551,6 +551,35 @@ impl PaymentRequest {
         Ok(Some(deadline))
     }
 
+    /// The last time an attempt on a one-time request may start, in milliseconds, inclusive
+    /// (Paykit spec 7.1, Paykit wire 4.5): the earlier of `proposal_expires_at` and the
+    /// payment deadline's `timestamp`. `None` for a recurring request, or a one-time request
+    /// with neither.
+    fn one_time_deadline(&self) -> Option<u64> {
+        if self.is_recurring() {
+            return None;
+        }
+        let at = match self.payment_deadline {
+            Some(PaymentDeadline::At(ms)) => Some(ms),
+            _ => None,
+        };
+        match (self.proposal_expires_at, at) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// The payment deadline of a one-time request, in milliseconds: the last verified payment
+    /// time a payee credits for it, inclusive (Paykit spec 7.1, Paykit wire 4.5). The
+    /// proposal expiry bounds the attempt, not the settlement (Paykit wire 4.5), as in v0.1.
+    /// `None` for a recurring request, or a one-time request without a payment deadline.
+    pub fn payment_deadline_ms(&self) -> Option<u64> {
+        match (self.is_recurring(), self.payment_deadline) {
+            (false, Some(PaymentDeadline::At(ms))) => Some(ms),
+            _ => None,
+        }
+    }
+
     /// The `deadline` an `attempt` carries (Paykit spec 7.1, Paykit wire 4.5): `d + 1 ms`,
     /// where for a one-time request `d` is the earlier of `proposal_expires_at` and the
     /// payment deadline's `timestamp`, and for a Billing Period of a recurring request the
@@ -568,16 +597,7 @@ impl PaymentRequest {
     /// integers are at most 2^53 - 1).
     pub fn attempt_deadline(&self, period: Option<&BillingPeriod>) -> Result<Option<u64>> {
         let d = match (self.is_recurring(), period) {
-            (false, None) => {
-                let at = match self.payment_deadline {
-                    Some(PaymentDeadline::At(ms)) => Some(ms),
-                    _ => None,
-                };
-                match (self.proposal_expires_at, at) {
-                    (Some(a), Some(b)) => Some(a.min(b)),
-                    (a, b) => a.or(b),
-                }
-            }
+            (false, None) => self.one_time_deadline(),
             (true, Some(period)) => self.period_payment_deadline(&PeriodRef::from(*period))?,
             (true, None) => {
                 return invalid(
@@ -2118,6 +2138,73 @@ mod tests {
         assert!(proof.to_body(0).is_err());
         // The body of a kind with the wrong number of refs.
         assert!(Body::PaymentProof(proof).to_body(3).is_err());
+    }
+
+    #[test]
+    fn test_request_one_time_deadline_is_the_inclusive_earlier_time() {
+        let r = PaymentRequest::from_body(&body(request())).unwrap();
+        let d = r.one_time_deadline().unwrap();
+        assert_eq!(
+            d,
+            pubky_switch_core::time::parse_rfc3339("2026-01-02T00:00:00.000Z").unwrap()
+        );
+        assert_eq!(r.attempt_deadline(None).unwrap(), Some(d + 1));
+        let mut b = request();
+        b["proposal_expires_at"] = json!(null);
+        b["payment_deadline"] = json!(null);
+        let open = PaymentRequest::from_body(&body(b)).unwrap();
+        assert_eq!(open.one_time_deadline(), None);
+        let at = |text: &str| pubky_switch_core::time::parse_rfc3339(text).unwrap();
+        for (expiry, deadline, earlier) in [
+            (
+                json!("2026-01-04T00:00:00.000Z"),
+                json!({ "type": "at", "timestamp": "2026-01-03T00:00:00.000Z" }),
+                Some(at("2026-01-03T00:00:00.000Z")),
+            ),
+            (
+                json!(null),
+                json!({ "type": "at", "timestamp": "2026-01-03T00:00:00.000Z" }),
+                Some(at("2026-01-03T00:00:00.000Z")),
+            ),
+            (
+                json!("2026-01-02T00:00:00.000Z"),
+                json!(null),
+                Some(at("2026-01-02T00:00:00.000Z")),
+            ),
+        ] {
+            let mut b = request();
+            b["proposal_expires_at"] = expiry;
+            b["payment_deadline"] = deadline;
+            let r = PaymentRequest::from_body(&body(b)).unwrap();
+            assert_eq!(r.one_time_deadline(), earlier);
+            assert_eq!(r.attempt_deadline(None).unwrap(), earlier.map(|d| d + 1));
+        }
+    }
+
+    #[test]
+    fn test_request_payment_deadline_is_the_payment_deadline_alone() {
+        let r = PaymentRequest::from_body(&body(request())).unwrap();
+        assert_eq!(
+            r.payment_deadline_ms(),
+            Some(pubky_switch_core::time::parse_rfc3339("2026-01-03T00:00:00.000Z").unwrap())
+        );
+        let mut b = request();
+        b["payment_deadline"] = json!(null);
+        let open = PaymentRequest::from_body(&body(b)).unwrap();
+        assert!(open.proposal_expires_at.is_some());
+        assert_eq!(open.payment_deadline_ms(), None);
+    }
+
+    #[test]
+    fn test_request_one_time_deadline_none_for_a_recurring_request() {
+        let mut b = request();
+        b["payment_deadline"] = json!({ "type": "period_start", "seconds": 86400 });
+        b["recurrence"] = json!({ "anchor": "2026-01-31T00:00:00.000Z", "every": 1, "unit": "month",
+            "starts_at": "2026-01-31T00:00:00.000Z", "ends_at": null });
+        let r = PaymentRequest::from_body(&body(b)).unwrap();
+        assert!(r.proposal_expires_at.is_some());
+        assert_eq!(r.one_time_deadline(), None);
+        assert_eq!(r.payment_deadline_ms(), None);
     }
 
     #[test]
