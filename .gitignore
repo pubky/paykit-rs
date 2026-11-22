@@ -2,3 +2,6 @@
 .idea/
 .DS_Store
 *.swp
+/paykit-ffi/tests/hosts/.gradle/
+/paykit-ffi/tests/hosts/.kotlin/
+/paykit-ffi/tests/hosts/build/
