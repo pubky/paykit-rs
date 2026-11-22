@@ -3515,9 +3515,10 @@ async fn test_executor_dispatch_at_the_expiry_is_refused() {
 
 #[tokio::test]
 async fn test_executor_dispatch_refused_by_the_service_time_alone() {
-    // The device clock stays 5 s before the expiry; the reservation's answer carries a
-    // service time at it. The later of the two clocks has reached the expiry, so the first
-    // dispatch pays nothing; a millisecond earlier it pays.
+    // The device clock stays 5 s before the expiry. The reservation's answer takes 5 s on
+    // the service's clock, so the reads after it carry a service time at the expiry. The
+    // later of the two clocks has reached the expiry, so the first dispatch pays nothing; a
+    // millisecond earlier it pays.
     let (result, executions, outcome) = Box::pin(dispatch_at_expiry_on(5_000, true)).await;
     let refused = result.outcome.unwrap_err();
     assert!(
