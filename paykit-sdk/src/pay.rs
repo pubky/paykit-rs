@@ -2086,19 +2086,10 @@ impl Paykit {
         // certificate it was signed under passes, and counts in the same copy of the payee's
         // `identity.json`.
         if let Some(identity) = &identity {
-            let now = self.now();
+            let clocks = self.clocks();
             lists.retain(|l| {
                 let carrier = Carrier::Message(Box::new(l.list.clone()));
-                crate::destination::current(
-                    &identity.doc,
-                    &l.app_id,
-                    &carrier,
-                    crate::destination::Clocks {
-                        device: now,
-                        service: self.service_time(),
-                    },
-                )
-                .is_ok()
+                crate::destination::current(&identity.doc, &l.app_id, &carrier, clocks).is_ok()
             });
         }
         // Taken after the read of the payee's identity.json: a list that expired while it
@@ -2224,18 +2215,24 @@ impl Paykit {
         if unsupported_only {
             return Err(unsupported("the payee's Private Payment List endpoints"));
         }
+        // A list expired only by the service's time tells the user the device clock is
+        // behind it, on every way out (Paykit spec 7.2).
+        let note = if device_clock_behind {
+            "; a list expired by the service's time: the device clock is behind it"
+        } else {
+            ""
+        };
         if unusable {
-            return Err(Refusal::NoDestination(
+            return Err(Refusal::NoDestination(format!(
                 "Paykit spec 8.4: the payee's Private Payment List has no endpoint this payment \
-                 may use"
-                    .into(),
-            )
+                 may use{note}"
+            ))
             .into());
         }
         if options.quote_only {
-            return Err(Refusal::NotNow(
-                "a current Private Payment List is needed to quote this endpoint".into(),
-            )
+            return Err(Refusal::NotNow(format!(
+                "a current Private Payment List is needed to quote this endpoint{note}"
+            ))
             .into());
         }
         self.ask_for_lists(payee, app, &held, &installed).await?;

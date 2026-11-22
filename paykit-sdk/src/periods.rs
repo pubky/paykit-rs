@@ -1256,10 +1256,19 @@ impl Paykit {
         let mut details = held_period
             .as_ref()
             .map_or_else(Vec::new, |held| valid_details(held, &body));
+        // Whether a period details' destination expired only by the service's time: the user
+        // is told the device clock is behind it (Paykit spec 7.2).
+        let mut device_clock_behind = false;
         let mut destinations = if per_period_destination {
             // A period details' destination is used while neither clock is at its expiry
             // (Paykit spec 7.2).
             let clocks = self.clocks();
+            device_clock_behind = details.iter().any(|signed| {
+                matches!(signed.body(), Body::PaymentPeriodDetails(detail)
+                    if detail.payment_endpoints.is_some()
+                        && clocks.past(detail.expires_at)
+                        && detail.expires_at > clocks.device)
+            });
             let named = options.selected_period_rate();
             let mut destinations: Vec<_> = details
                 .iter()
@@ -1279,10 +1288,14 @@ impl Paykit {
         } else {
             vec![&stored]
         };
-        let mut unavailable = Refusal::NoDestination(
-            "Paykit spec 8.2: no current signed details carry an eligible period destination"
-                .into(),
-        )
+        let mut unavailable = Refusal::NoDestination(format!(
+            "Paykit spec 8.2: no current signed details carry an eligible period destination{}",
+            if device_clock_behind {
+                "; details expired by the service's time: the device clock is behind it"
+            } else {
+                ""
+            }
+        ))
         .into();
         let mut payee_identity = None;
         let Chosen {

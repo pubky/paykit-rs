@@ -643,6 +643,55 @@ async fn test_period_payments_later_period_with_per_period_endpoints_has_no_dest
 }
 
 #[tokio::test]
+async fn test_period_payments_details_expired_by_the_service_time_at_planning_say_so() {
+    // The wallet's device clock runs ten seconds behind the service, whose time it verified
+    // has reached February's period details' expiry before the payment is planned. Their
+    // destination isn't used, and the refusal says the device clock is behind (Paykit spec
+    // 7.2, check the destination).
+    let w = World::new();
+    let base = Arc::new(StageStore::default());
+    let mut shop = w.shop().await;
+    let mut wallet = w
+        .wallet_on("wallet", Arc::clone(&base) as Arc<dyn StateStore>)
+        .await;
+    let app_id = wallet.app_id();
+    let (request, sale) = subscribed_to(
+        &w,
+        &mut shop,
+        &mut wallet,
+        monthly().with_per_period_endpoints(),
+    )
+    .await;
+    let period = february();
+    w.clock.set_ms(period.starts_at);
+    let expires = period.starts_at + 120_000;
+    shop.send_period_details(&sale, details(period, "lnbc1february", expires))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    drop(wallet);
+    w.clock.set_ms(expires);
+    let behind = Arc::new(pubky_switch_client::clock::TestClock::new(expires - 10_000));
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&base) as Arc<dyn StateStore>,
+            app_id,
+            behind,
+        )
+        .await;
+    wallet.receive(None).await.unwrap();
+    let refused = by_user(&mut wallet, &request, period, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refusal(&refused), Refusal::NoDestination(why) if why.contains("the device clock is behind")),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
 async fn test_period_payments_details_expired_by_the_attempt_answer_not_paid() {
     // The wallet's device clock runs ten seconds behind the service. February is paid only
     // to its period details' destination. The service time first reaches their expiry in
