@@ -2330,6 +2330,14 @@ fn list_effect(cx: &mut ReceiveContext<'_>, stored: &StoredMessage, seq: u64) ->
         }
     }
     let held = match cx.record(&target)?.map(|r| r.content) {
+        // A list held at the key shows its record was deleted or didn't read: an absence
+        // now, such as a delete the service forgot or a restore into a fresh store, says
+        // nothing of the marks it held, so the list is held too (Paykit spec 6).
+        None if state::cx_get::<KeptMessage>(cx, &key::held_list(&cx.record_key(&target)?))?
+            .is_some() =>
+        {
+            return hold_list(cx, &target, stored)
+        }
         None => None,
         Some(RecordContent::Value(value)) => match PaymentListRecord::read(&value, &own) {
             Ok(held) => Some(held),
@@ -2775,7 +2783,10 @@ impl Paykit {
             // or a restore before the first listing: the absence decides nothing yet, so the
             // list stays held (Paykit spec 8.1, "Records not listed yet").
             None if self.side_unlisted(RecordSide::Payer).await? => return Ok(()),
-            None => None,
+            // Held because its record was deleted or didn't read: an absence now, such as a
+            // delete the service forgot or a restore into a fresh store, says nothing of the
+            // marks the record held. The list stays held (Paykit spec 6).
+            None => return Ok(()),
             Some(RecordContent::Value(value)) => match PaymentListRecord::read(&value, &own) {
                 Ok(held) => Some(held),
                 Err(_) => return Ok(()),

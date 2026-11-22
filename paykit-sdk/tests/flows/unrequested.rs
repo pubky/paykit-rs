@@ -1419,3 +1419,98 @@ async fn test_unrequested_reusable_endpoint_of_a_version_used_elsewhere_not_paid
     );
     assert_eq!(w.rail.all_executions().len(), 1);
 }
+
+#[tokio::test]
+async fn test_unrequested_list_held_over_a_forgotten_delete_stays_held_after_a_fresh_restore() {
+    use paykit_lib::collections::Collection;
+    use pubky_switch_client::app::{Collection as SwitchCollection, OpBatch, RecordTarget};
+
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    let collection = Collection::PaymentLists;
+    let target = RecordTarget::new(
+        SwitchCollection::new(collection.name(), collection.policy(None)),
+        &paykit_lib::derive::natural_key::payment_list(&w.bob_id(), &shop.app_id()),
+    );
+    phone.app_mut().read_record(&target).await.unwrap();
+    let op = phone
+        .app_mut()
+        .record_op(&target, None, Vec::new())
+        .await
+        .unwrap();
+    phone
+        .app_mut()
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
+    // The service forgets the delete, as it does once every own app's cursor passed it:
+    // the key reads as absent and a create there starts afresh.
+    let key = wallet.app().record_key(&target).unwrap();
+    w.alice.switch().drop_record(&key).unwrap();
+    let writes = w.record_writes(&w.alice, &key);
+
+    // A fresh store restored from a backup holds the held list but not the delete.
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    crate::common::finish_listing(&mut restored).await;
+    restored.reconcile().await.unwrap();
+    restored
+        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+    restored.receive(None).await.unwrap();
+    let again = restored
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome;
+    assert!(
+        !matches!(again, Ok(PayOutcome::Paid { .. })),
+        "the paid single-use endpoint was paid again: {again:?}"
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
+    assert_eq!(w.record_writes(&w.alice, &key), writes);
+    assert_eq!(restored.held_lists().await.unwrap().len(), 1);
+    // A newer list over the absent key is held too: the deleted write's version is unknown.
+    w.list_to_alice(&mut shop, &[restored.app_id()], list_version(1, 2))
+        .await;
+    restored.receive(None).await.unwrap();
+    let held = restored.held_lists().await.unwrap();
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0].version, list_version(1, 2));
+    let refused = restored
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        "{refused:?}"
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
+    assert_eq!(w.record_writes(&w.alice, &key), writes);
+}
