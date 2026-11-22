@@ -3300,3 +3300,172 @@ async fn test_blocked_restore_reports_a_held_rejection_once_its_record_reads() {
     wallet.receive(None).await.unwrap();
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), after_asks);
 }
+
+/// The protocol's verdict on each message the client's outbox holds, by kind and `msg_id`.
+async fn verdicts(app: &Paykit) -> Vec<(String, String, bool)> {
+    app.app()
+        .queued_messages("paykit")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|m| (m.kind, m.msg_id, m.may_send))
+        .collect()
+}
+
+/// A monthly subscription starting now.
+fn monthly(now: u64) -> paykit_sdk::RequestDraft {
+    use paykit_lib::periods::{AnchoredRule, Recurrence, Unit};
+    draft("1", now).with_recurrence(
+        Recurrence::new(AnchoredRule::new(now, 1, Unit::Month).unwrap(), now, None).unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn test_blocked_answers_queued_before_a_block_wait_and_a_payments_report_goes() {
+    use paykit_lib::Kind;
+
+    let w = World::new();
+    let (mut wallet, mut shop, one_time) = received(&w, PaykitConfig::default()).await;
+    let rejected = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    let recurring = request_from(&mut shop, w.alice_id(), monthly(w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    // Bob's inbox takes nothing yet: every answer is queued while he isn't blocked.
+    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    wallet
+        .pay_request(&one_time, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    wallet.reject_request(&rejected, None).await.unwrap();
+    let subscription = wallet.accept_subscription(&recurring).await.unwrap().msg_id;
+    // No list of bob's is held: paying him without a request asks him for one.
+    let waiting = wallet
+        .pay_without_request(UnrequestedPayment::new(w.bob_id(), btc("0.001")))
+        .await
+        .outcome;
+    assert!(
+        matches!(
+            waiting.as_ref().err().and_then(|e| e.refusal()),
+            Some(Refusal::WaitingForList)
+        ),
+        "{waiting:?}"
+    );
+    let queued = verdicts(&wallet).await;
+    let kinds: Vec<_> = queued.iter().map(|(kind, ..)| kind.as_str()).collect();
+    for kind in [
+        Kind::PaymentRequestAcceptance,
+        Kind::PaymentProof,
+        Kind::PaymentRequestRejection,
+        Kind::PrivatePaymentListRequest,
+    ] {
+        assert!(kinds.contains(&kind.as_str()), "{kind:?} in {queued:?}");
+    }
+    assert!(queued.iter().all(|(.., go)| *go), "{queued:?}");
+
+    wallet.block(&w.bob_id()).await.unwrap();
+    for (kind, msg_id, go) in verdicts(&wallet).await {
+        // Only the acceptance and the proof of the payment already dispatched still go.
+        let reports_payment = kind == Kind::PaymentProof.as_str()
+            || (kind == Kind::PaymentRequestAcceptance.as_str() && msg_id != subscription);
+        assert_eq!(go, reports_payment, "{kind} {msg_id}");
+    }
+    wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
+    wallet.flush().await.unwrap();
+    shop.receive(None).await.unwrap();
+    let status = |sales: &[paykit_sdk::PayeeActivity], request: &RequestRef| {
+        sales
+            .iter()
+            .find(|sale| sale.request_hash == Some(request.request_hash))
+            .map(|sale| sale.status.clone())
+    };
+    let sales = shop.payee_activity().await.unwrap();
+    assert!(matches!(
+        status(&sales, &one_time),
+        Some(paykit_sdk::PayeeStatus::ProofReceived | paykit_sdk::PayeeStatus::Receipted)
+    ));
+    assert_eq!(
+        status(&sales, &rejected),
+        Some(paykit_sdk::PayeeStatus::Requested)
+    );
+    assert_eq!(
+        status(&sales, &recurring),
+        Some(paykit_sdk::PayeeStatus::Requested)
+    );
+}
+
+#[tokio::test]
+async fn test_blocked_confirmed_subscription_goes_only_on_a_known_deny_list() {
+    let w = World::new();
+    let (mut wallet, mut shop, _) = received(&w, PaykitConfig::default()).await;
+    let recurring = request_from(&mut shop, w.alice_id(), monthly(w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet.block(&w.bob_id()).await.unwrap();
+    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    let refused = wallet.accept_subscription(&recurring).await.unwrap_err();
+    let shown = shown(refused);
+    let accepted = wallet
+        .accept_subscription_with(
+            &recurring,
+            paykit_sdk::AcceptOptions::default().with_blocked_confirmed(shown),
+        )
+        .await
+        .unwrap()
+        .msg_id;
+    let verdict = |queued: Vec<(String, String, bool)>| {
+        queued
+            .into_iter()
+            .find(|(_, id, _)| *id == accepted)
+            .map(|(.., go)| go)
+    };
+    assert_eq!(verdict(verdicts(&wallet).await), Some(true));
+    // Past the refresh interval the deny decision isn't known: the acceptance waits.
+    w.clock.advance_ms(11 * 60_000);
+    assert_eq!(verdict(verdicts(&wallet).await), Some(false));
+}
+
+#[tokio::test]
+async fn test_blocked_payee_request_waits_and_its_cancellation_goes() {
+    let w = World::new();
+    let wallet = w.wallet("wallet").await;
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            AppScopes::new()
+                .request()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+            PaykitConfig::default(),
+            store(),
+        )
+        .await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    shop.receive(None).await.unwrap();
+    let first = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    shop.app_mut().hold_queued(&w.alice_id()).await.unwrap();
+    let second = shop
+        .send_request(w.alice_id(), draft("2", w.clock.now_ms()))
+        .await
+        .unwrap()
+        .msg_id;
+    let record = shop
+        .payee_activity()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|sale| sale.request_hash == Some(first.request_hash))
+        .unwrap()
+        .record;
+    shop.cancel_sent_request(&record, None).await.unwrap();
+    assert!(verdicts(&shop).await.iter().all(|(.., go)| *go));
+    shop.block(&w.alice_id()).await.unwrap();
+    for (kind, msg_id, go) in verdicts(&shop).await {
+        let cancellation = kind == paykit_lib::Kind::PaymentRequestCancellation.as_str();
+        assert_eq!(go, cancellation, "{kind} {msg_id}");
+        if msg_id == second {
+            assert!(!go);
+        }
+    }
+    drop(wallet);
+}

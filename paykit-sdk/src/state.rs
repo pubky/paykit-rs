@@ -799,6 +799,18 @@ impl Stored for KeptSide {
     }
 }
 
+impl sealed::Sealed for crate::send_holds::SendExemption {}
+
+/// Why an acceptance may go while sends are held: of the message its key names.
+impl Stored for crate::send_holds::SendExemption {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::SendExemption(msg_id) if self.msg_id == *msg_id => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
 impl sealed::Sealed for SeenRecords {}
 
 /// A payee app's records seen (Switch spec 4.2): each the payee's, as it signed it, of the
@@ -2144,6 +2156,10 @@ pub(crate) mod key {
         format!("side/{msg_id}")
     }
 
+    pub(crate) fn send_exemption(msg_id: &str) -> String {
+        format!("ex/{msg_id}")
+    }
+
     pub(crate) fn seen_records(payee: &[u8; 32], app_id: &[u8; 16]) -> String {
         format!("ar/{}/{}", b64(payee), b64(app_id))
     }
@@ -2357,6 +2373,8 @@ pub(crate) enum StateKey {
     HeldList([u8; 32]),
     /// `side/<msg_id>`: the side of a message the app sent.
     Side(String),
+    /// `ex/<msg_id>`: why an acceptance the app sent may go while sends are held.
+    SendExemption(String),
     /// `ar/<payee>/<app>`: a payee app's records a reader has seen.
     SeenRecords {
         payee: [u8; 32],
@@ -2677,6 +2695,7 @@ impl StateKey {
                     "fo" => Self::FloorOpened(b64_32(rest)?),
                     "lh" => Self::HeldList(b64_32(rest)?),
                     "side" => Self::Side(msg_id(rest)?),
+                    "ex" => Self::SendExemption(msg_id(rest)?),
                     "ha" => {
                         let (payee, id) = rest.split_once('/')?;
                         Self::HeldAnswer {
@@ -3673,6 +3692,7 @@ mod tests {
             ),
             (key::held_list(&pubky), StateKey::HeldList(pubky)),
             (key::side(id), StateKey::Side(id.into())),
+            (key::send_exemption(id), StateKey::SendExemption(id.into())),
             (
                 key::held_answer(&pubky, id),
                 StateKey::HeldAnswer {

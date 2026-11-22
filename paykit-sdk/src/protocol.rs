@@ -371,8 +371,6 @@ pub(crate) fn view_failure(error: crate::PaykitError) -> StoreFailure {
 pub(crate) fn may_deliver_to_contact(
     delivery: &pubky_switch_client::app::DeliveryView<'_>,
 ) -> crate::error::Result<bool> {
-    use pubky_switch_client::app::KeptBatchStatus;
-
     let cert = delivery.cert();
     if check_certificate(cert).is_err()
         || !receive::reads_lists(cert.scopes())
@@ -380,25 +378,7 @@ pub(crate) fn may_deliver_to_contact(
     {
         return Ok(false);
     }
-    let read = state::delivery_get::<u64>(delivery, key::LISTS_READ)?;
-    if !read.is_some_and(|at| receive::lists_read_is_fresh(at, delivery.now_ms())) {
-        return Ok(false);
-    }
-    let Some(denied) = state::delivery_get::<Vec<[u8; 32]>>(delivery, key::DENIED)? else {
-        return Ok(false);
-    };
-    let to = &delivery.message().to;
-    if let Some(mark) = state::delivery_get::<state::OwnBlockMark>(delivery, &key::own_block(to))? {
-        let kept = match mark.unblock_batch() {
-            Some(batch) => matches!(
-                delivery.kept_batch(batch)?,
-                Some(KeptBatchStatus::Kept { .. })
-            ),
-            None => false,
-        };
-        return Ok(mark.counts(kept) == Some(false));
-    }
-    Ok(!denied.contains(to))
+    Ok(crate::send_holds::deny_decision(delivery)? == crate::send_holds::DenyDecision::Permits)
 }
 
 /// How many keys of each family whose size the runtime bounds a restored layer holds
@@ -866,6 +846,12 @@ pub(crate) fn restore_paykit_layer(
             }
             StateKey::Side(_) => {
                 state::restored::<KeptSide>(&key, &value, &binder).map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::SendExemption(_) => {
+                state::restored::<crate::send_holds::SendExemption>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -1458,6 +1444,10 @@ impl Protocol for PaykitProtocol {
     /// re-send requests and extensions require current sender scopes and a permitting
     /// deny copy. An original user end has its own delivery rule (Paykit spec 3.1).
     /// A Private Payment List must still match the current sharing choice (Paykit spec 8.4).
+    /// Requests, period details, list requests, rejections, payer cancellations and
+    /// subscription acceptances go only while the deny decision permits them, however
+    /// long ago they were queued; a payee's cancellation and a payment's acceptance, proof
+    /// and receipt still go (Paykit spec 8.1, [`crate::send_holds`]).
     fn may_send(
         &self,
         delivery: &pubky_switch_client::app::DeliveryView<'_>,
@@ -1487,6 +1477,15 @@ impl Protocol for PaykitProtocol {
                 )
                 | MessageKind::Extension(_),
             ) => may_deliver_to_contact(delivery).map_err(view_failure),
+            Ok(MessageKind::Paykit(
+                kind @ (Kind::PaymentRequest
+                | Kind::PaymentPeriodDetails
+                | Kind::PaymentRequestAcceptance
+                | Kind::PaymentRequestRejection
+                | Kind::PaymentRequestCancellation
+                | Kind::PrivatePaymentListRequest),
+            )) => crate::send_holds::may_deliver(delivery, kind).map_err(view_failure),
+            // A proof and a receipt report a payment already made (Paykit spec 8.1).
             _ => Ok(true),
         }
     }

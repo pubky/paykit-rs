@@ -2496,9 +2496,9 @@ impl Paykit {
         } else if answer == Answer::Accept {
             (self.denied_for_user(&request.payee).await?, false)
         } else {
-            if !self.deny_copy_known().await? {
-                self.refresh_lists_when_due().await?;
-            }
+            // A copy past its refresh interval is read first: its delivery is judged on a
+            // fresh one (Paykit spec 8.1, "Messages already queued").
+            self.refresh_lists_when_due().await?;
             (false, self.sends_held(&request.payee).await?)
         };
         let (target, mut record) = self.payer_request(request).await?;
@@ -2590,6 +2590,19 @@ impl Paykit {
         if let Some(record_key) = end_hold {
             // The hold ends with the acceptance, and stays when it isn't recorded.
             tx.put(&key::hold_confirmed(&record_key), &true)?;
+        }
+        if answer == Answer::Accept && blocked {
+            // The user confirmed accepting this blocked payee's subscription: its original
+            // delivery may go while sends to the payee are held, written with the response
+            // and its queued message (Paykit spec 8.1, 8.2).
+            tx.put(
+                &key::send_exemption(signed.msg_id()),
+                &crate::send_holds::SendExemption::confirmed_while_blocked(
+                    signed.msg_id(),
+                    request.payee,
+                    request.request_hash,
+                ),
+            )?;
         }
         if answer == Answer::Cancel {
             tx.put(

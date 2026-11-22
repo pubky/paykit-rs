@@ -3235,8 +3235,16 @@ impl Paykit {
             };
             // Journaled, queued, then marked: a crash before the mark leaves it journaled and
             // queued, and the outbox shows it at the next release, so it is never signed
-            // twice once it can be sent.
-            self.save(entry).await?;
+            // twice once it can be sent. It reports a dispatched payment, so it goes while
+            // sends to the payee are held; that evidence is kept with the journal entry,
+            // before the message can be queued (Paykit spec 8.1).
+            entry.check()?;
+            let mut tx = state::Tx::default();
+            tx.put(&key::journal(&entry.attempt()?), entry)?.put(
+                &key::send_exemption(signed.msg_id()),
+                &crate::send_holds::SendExemption::dispatched(signed.msg_id()),
+            )?;
+            self.local_commit(tx).await?;
             self.app.queue_signed(signed).await?;
         }
         entry.acceptance_released = true;
