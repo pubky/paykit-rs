@@ -140,6 +140,23 @@ pub enum RefusalKind {
         /// The settlement bucket that could not accept the mark.
         bucket: u16,
     },
+    /// The delivery of the counterparty's current Private Payment List is unknown. Only the
+    /// user can authorize another version.
+    ListDeliveryUnknown {
+        /// The counterparty the list was sent to.
+        recipient: Vec<u8>,
+        /// The publishing identity generation of the list's version.
+        generation: u64,
+        /// The list version's counter.
+        counter: u64,
+        /// The list message's ID.
+        msg_id: String,
+        /// Whether the list was empty, withdrawing an earlier one.
+        withdrawal: bool,
+        /// For a withdrawal, when an earlier list may last be paid; otherwise when the list
+        /// expires. `None` when it can't be bounded.
+        payable_until_ms: Option<u64>,
+    },
     /// The host must show the affected records and their observed versions before asking for confirmation.
     Divergent {
         /// The records the user is asked to confirm.
@@ -294,6 +311,14 @@ impl PaymentRefusal {
                 amount: (&p.amount).into(),
             },
             Refusal::SettlementBucketFull { bucket } => D::SettlementBucketFull { bucket: *bucket },
+            Refusal::ListDeliveryUnknown(list) => D::ListDeliveryUnknown {
+                recipient: list.recipient.into(),
+                generation: list.version.generation(),
+                counter: list.version.counter(),
+                msg_id: list.msg_id.clone(),
+                withdrawal: list.withdrawal,
+                payable_until_ms: list.payable_until_ms,
+            },
             Refusal::Divergent { records } => D::Divergent {
                 records: records.iter().cloned().map(Into::into).collect(),
             },
