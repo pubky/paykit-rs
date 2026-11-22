@@ -959,7 +959,11 @@ impl Paykit {
     /// [`Refusal::NotFound`] for a record without a proof; [`Refusal::NotNow`] for a Billing
     /// Period's record whose request record the app holds but can't open or bind yet;
     /// [`Refusal::MaybeCredited`] while
-    /// whether another record credits the settlement can't be told; the rail's errors.
+    /// whether another record credits the settlement can't be told;
+    /// [`Refusal::PaymentTimeOutside`] for a payment the method verified at a time the
+    /// occurrence doesn't allow: before the request's `created_at` less the method's declared
+    /// tolerance, after its payment deadline, or outside the validity of the destination or
+    /// rates it was paid by, unless the record holds its receipt already; the rail's errors.
     pub async fn verify_payment(&mut self, record: &[u8; 32]) -> Result<Option<u64>> {
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.verify_payment_inner(record)).await
@@ -1147,18 +1151,32 @@ impl Paykit {
                     }
                     crate::conversion::Priced::Unusable(_) => return Ok(None),
                 };
-                let period_deadline = match binding {
+                // The last payment time the occurrence allows, inclusive: a Billing Period's
+                // deadline, or a one-time request's payment deadline (Paykit spec 7.1). The
+                // proposal expiry bounds the attempt only (Paykit wire 4.5), so a payment
+                // started inside it and settled just after is still credited, as in v0.1.
+                let deadline = match binding {
                     RecordBinding::Period { billing_period, .. } => {
                         request.period_payment_deadline(&billing_period)?
                     }
-                    _ => None,
+                    RecordBinding::Request { .. } => request.payment_deadline_ms(),
+                    RecordBinding::Unrequested => None,
                 };
+                // Evidence dated before the request doesn't prove it, less the tolerance the
+                // payment method declares for evidence dated early (Paykit spec 7.1, "Not
+                // before the request"): the request's signed `created_at`, which every own app
+                // reads alike, is the time the payee recorded it.
+                let not_before = stored_request
+                    .message()
+                    .created_at_ms
+                    .saturating_sub(self.rail.declaration().payment_time_tolerance_ms);
                 (
                     amount,
                     payload,
                     destination_expires,
                     rate_window,
-                    period_deadline,
+                    deadline,
+                    Some(not_before),
                 )
             }
             // A period record whose request record the app holds but can't open or bind yet,
@@ -1177,10 +1195,11 @@ impl Paykit {
                 None,
                 None,
                 None,
+                None,
             ),
             None => return Err(Refusal::NotFound.into()),
         };
-        let (amount, payload, destination_expires, rate_window, period_deadline) = payment;
+        let (amount, payload, destination_expires, rate_window, deadline, not_before) = payment;
         let settlement_id = self.rail.settlement_id(&proof.proof);
         let typed = proof.proof.get("type").filter(|value| !value.is_null());
         let known_method = typed.and_then(Value::as_str) == Some("bitcoin-txid")
@@ -1212,19 +1231,31 @@ impl Paykit {
             attempt_id: proof.attempt_id,
             proof: proof.proof.clone(),
         };
-        // The method's evidence dates the payment, never this proof's arrival. A details
-        // destination must be unexpired; rates include both signed interval boundaries
-        // (Paykit spec 8.2, Paykit wire 4.9). Same-asset payments use no rate interval.
-        let verified = self.rail.verify(check).await?.filter(|paid_at| {
-            period_deadline.is_none_or(|deadline| *paid_at <= deadline)
-                && destination_expires.is_none_or(|expires| *paid_at < expires)
-                && rate_window.is_none_or(|(start, expires)| {
-                    paykit_lib::periods::rates_apply(start, expires, *paid_at)
-                })
-        });
-        let Some(paid_at) = verified else {
+        // The method's evidence dates the payment, never this proof's arrival. It must be
+        // no earlier than the request, within the method's tolerance, and no later than the
+        // occurrence's deadline. A details destination must be unexpired; rates include both
+        // signed interval boundaries (Paykit spec 7.1, 7.2, 8.2, Paykit wire 4.9). Same-asset
+        // payments use no rate interval. The tolerance widens only the lower bound.
+        let Some(paid_at) = self.rail.verify(check).await? else {
             return Ok(None);
         };
+        let in_time = not_before.is_none_or(|earliest| paid_at >= earliest)
+            && deadline.is_none_or(|deadline| paid_at <= deadline)
+            && destination_expires.is_none_or(|expires| paid_at < expires)
+            && rate_window.is_none_or(|(start, expires)| {
+                paykit_lib::periods::rates_apply(start, expires, paid_at)
+            });
+        // The method verified the payment, but not within what the occurrence allows: the
+        // evidence is flagged, never credited on its own (Paykit spec 7.1, "Not before the
+        // request"). The funds are the payee's received funds all the same.
+        // A record that holds the receipt already is credited: another own app's method may
+        // date the evidence differently, and the credit stands (Paykit spec 8.1 step 4).
+        if bound.receipt.is_none() && !in_time {
+            return Err(Refusal::PaymentTimeOutside {
+                paid_at_ms: paid_at,
+            }
+            .into());
+        }
         let settlement = if bound.receipt.is_some() {
             None
         } else {
