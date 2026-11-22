@@ -77,10 +77,14 @@ pub enum NoticeKind {
     PossiblyDelivered,
     /// The client gave up a counterparty's current Private Payment List, and its delivery
     /// is unknown. `counterparty` is the recipient, `msg_id` and `message_hash` the list.
-    /// Nothing more is sent on its own. Acknowledging the notice authorizes nothing:
-    /// [`Paykit::publish_list_to`] and [`Paykit::withdraw_list_from`] report the list as
+    /// Nothing more is sent on its own, but an answer to the counterparty's list request
+    /// still goes. Acknowledging the notice authorizes nothing. A call that would otherwise
+    /// send nothing for that counterparty reports the list as
     /// [`crate::Refusal::ListDeliveryUnknown`], whose value the user confirms another
-    /// version with (Paykit spec 8.4, 9).
+    /// version with: [`Paykit::publish_list_to`] for a chosen counterparty and
+    /// [`Paykit::withdraw_list_from`] for a withdrawn one or for an emptied list. A call
+    /// that changes what the counterparty gets, such as withdrawing a nonempty list, sends
+    /// the new version instead, and the notice is removed (Paykit spec 8.4, 9).
     ListDeliveryUnknown,
     /// Messages a blocked counterparty's inbox accepted from
     /// [`Notice::lost_from_ms`] to [`Notice::lost_until_ms`], which the app dropped for the

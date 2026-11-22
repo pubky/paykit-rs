@@ -26,8 +26,9 @@ pub enum WalletNoticeKind {
     AllowanceWithdrawalConfirmed,
     /// An original outgoing message found after restore may have reached its recipient.
     PossiblyDelivered,
-    /// An empty Private Payment List withdrawing a counterparty's list was given up with an
-    /// unknown outcome. The counterparty may keep paying the earlier list.
+    /// A counterparty's current Private Payment List was given up with an unknown outcome.
+    /// For a withdrawal the counterparty may keep paying the earlier list; otherwise it may
+    /// lack the list. Only the user can authorize another version.
     ListDeliveryUnknown,
     /// Messages a blocked counterparty's inbox accepted from `Notice::lost_from_ms` to
     /// `Notice::lost_until_ms`, which the app dropped for the user's block to ask for again once

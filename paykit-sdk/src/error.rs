@@ -181,7 +181,9 @@ pub enum Refusal {
     /// unknown outcome. If it was a withdrawal, the counterparty may keep paying the
     /// earlier list; if not, it may lack the list. Nothing more is sent on its own: only
     /// the user, shown this value, can authorize another version
-    /// ([`crate::Paykit::send_list_again`]; Paykit spec 8.4, 9).
+    /// ([`crate::Paykit::send_list_again`]; Paykit spec 8.4, 9). Unlike other refusals, the
+    /// call that returns it may have recorded the host's choice first:
+    /// [`crate::Paykit::withdraw_list_from`] records the counterparty as withdrawn.
     #[error("Paykit spec 9: the delivery of the counterparty's current list is unknown")]
     ListDeliveryUnknown(Box<crate::UnknownListDelivery>),
     /// The payment method would transfer another amount or asset, an amount it can't tell, or
