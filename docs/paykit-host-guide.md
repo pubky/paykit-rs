@@ -485,3 +485,126 @@ The method declares `payment_time_tolerance_ms` with its declaration. The payee 
 | `Refusal::SwitchUnavailable` | Show the own Switch as unavailable and keep payment actions waiting. From a payment, directly or as an `AttemptFailed` cause, it means nothing was paid, not a payment in flight: retry the payment once the switch answers. If the retry is refused with `PaymentInProgress`, call `Paykit::resume_payments` and retry once the earlier attempt is resolved; the resume records it failed when the switch takes that write. |
 | `Refusal::Blocked` | Show the blocked recipient and the exact payment to the user before any supported override. |
 | `Refusal::Divergent` | Show the returned records and the exact confirmation asked for. Run receive while the record still has writes waiting. |
+
+## Wallet errors
+
+The Kotlin and Swift wallets report a failed call as one of six cases, each carrying a `WalletFailure` with a stable `code`. The enrollment, restore and store failures keep their own cases (`InvalidInput`, `NotJoined`, `RestoreQuestionOpen`, `Storage` and the enrollment cases) and are not in this table.
+
+| Case | What it means |
+|---|---|
+| `NeedsUser` | The user must see it and decide. Only `held_after_restore`, `blocked`, `may_be_paid`, `transfer` and `priced_by_rate` are confirmed by passing the same `failure.refusal` back in `confirmedRefusals`; every other code names its own call. |
+| `RetryLater` | Waiting, or a later call such as `receive`, changes it with no user action. Wait `retryAfterMs` when it is set. |
+| `OutcomeUnknown` | The call may have taken effect. Reconcile before trying again. |
+| `NotSent` | Nothing applied. Fix the cause, then make the call again. |
+| `Permanent` | Final: trying again gives the same answer. Never confirmed. |
+| `Recovery` | Stop Paykit actions and follow the recovery steps. |
+
+Four codes are provisional: `not_now`, `usage`, `not_automatic` and `client_not_now`. The SDK and the Switch client give these refusals a text reason only, and one variant covers reasons of different cases, from a wait to an alarm. Until each carries a typed reason, they take the case that never retries by itself and never pays twice. `not_now` and `client_not_now` come as `NeedsUser`, `usage` as `NotSent` and `not_automatic` as `Permanent`. Their codes stay, and the typed reasons will add codes.
+
+Two rules override a code's case. A failure with a `keptBatch` comes as `OutcomeUnknown`, unless its case is `Recovery`: the wallet sends that batch again by itself, and the outcome shows once it is answered. A pay that may have been sent never comes as an error: it comes as a pending or uncertain outcome.
+
+| Code | From | Case | What the host does |
+|---|---|---|---|
+| `held_after_restore` | `Refusal::HeldAfterRestore` | `NeedsUser` | Show the hold and that the request may be cancelled; on the user's yes pass the refusal back. |
+| `blocked` | `Refusal::Blocked` | `NeedsUser` | Show the blocked payee and the exact payment; on the user's yes pass the refusal back. |
+| `may_be_paid` | `Refusal::MayBePaid` with a doubt | `NeedsUser` | Show the doubt; on the user's yes pass the refusal back. |
+| `may_be_paid_reconcile` | `Refusal::MayBePaid` without a doubt | `NeedsUser` | Show that an earlier payment may be paid; `reconcile` and answer its doubtful payments, then pay again. |
+| `transfer` | `Refusal::Transfer` | `NeedsUser` | Show the transfer and fee quote; on the user's yes pass the refusal back. |
+| `priced_by_rate` | `Refusal::PricedByRate` | `NeedsUser` | Get the user's authorization for this quote; then pass the refusal back. |
+| `loss_changed` | `Refusal::LossChanged` | `NeedsUser` | Show the current provider-loss boundary and ask again with it. |
+| `list_delivery_unknown` | `Refusal::ListDeliveryUnknown` | `NeedsUser` | Show the counterparty and list; call `sendListAgain` only after the user confirms. |
+| `divergent` | `Refusal::Divergent` | `NeedsUser` | Show the records; `confirmDivergent` with the observation shown, then `receive`. |
+| `maybe_credited` | `Refusal::MaybeCredited` | `NeedsUser` | Show that the occurrence may already be credited; credit only on the user's explicit confirmation. |
+| `settlement_bucket_full` | `Refusal::SettlementBucketFull` | `NeedsUser` | Ask the payee whether to issue a receipt without a mark. |
+| `period_not_started` | `Refusal::PeriodNotStarted` | `NeedsUser` | Show when the period starts; pay early only on the user's choice. |
+| `identity_unconfirmed` | `Refusal::IdentityUnconfirmed` | `NeedsUser` | Ask before paying a payee whose switch couldn't confirm its apps; then set `unconfirmedIdentityConfirmed`. |
+| `scope_missing` | `Refusal::ScopeMissing` | `NeedsUser` | Ask the user to approve the missing scope in their signer. |
+| `not_subscribed` | `Refusal::NotSubscribed` | `NeedsUser` | The recurring request isn't accepted: the payer accepts it, and the payee waits for that. |
+| `waiting_for_list` | `Refusal::WaitingForList` | `RetryLater` | A newer Private Payment List was asked for: pay once it arrives. Paying a public destination is a separate choice. |
+| `payment_in_progress` | `Refusal::PaymentInProgress` | `RetryLater` | Wait for the open attempt, or `resumePayments`, then call again. |
+| `being_handled_by_other_wallet` | `Refusal::BeingHandledByOtherWallet` | `RetryLater` | Another own wallet holds the attempt; read again later. |
+| `identity_unavailable` | `Refusal::IdentityUnavailable` | `RetryLater` | `receive` refreshes the identity; call again after it. |
+| `attempted_periods_full` | `Refusal::AttemptedPeriodsFull` | `RetryLater` | Wait for an open period attempt to finish. |
+| `no_destination` | `Refusal::NoDestination` | `NotSent` | Show why no endpoint could be used; pay again when the payee has one, or choose another destination. |
+| `unsupported_endpoint` | `Refusal::UnsupportedEndpoint` | `NotSent` | Choose an endpoint or method that pays it. |
+| `destination` | `Refusal::Destination` | `NotSent` | Show the failed destination check; pay again when the payee has a usable endpoint. |
+| `label` | `Refusal::Label` | `NotSent` | Send under a selling label the app holds. |
+| `recurring` | `Refusal::Recurring` | `NotSent` | Pay a recurring request by its Billing Periods. |
+| `attempt_failed` | `Refusal::AttemptFailed` | `Permanent` | The attempt was written and failed before money moved: show `attemptedFailure()`. A new payment may follow. |
+| `not_found` | `Refusal::NotFound` | `Permanent` | Refresh the view. |
+| `rejected` | `Refusal::Rejected` | `Permanent` | Show that the request is rejected. |
+| `cancelled` | `Refusal::Cancelled` | `Permanent` | Show that the request is cancelled. |
+| `allowance_ended` | `Refusal::AllowanceEnded` | `Permanent` | Show the Allowance's stop and close actions. |
+| `allowance_conflicted` | `Refusal::AllowanceConflicted` | `Permanent` | Show the conflict and the Allowance's close actions. |
+| `credit_history_lost` | `Refusal::CreditHistoryLost` | `Permanent` | Show that credit is held because the earlier credit history is lost. |
+| `already_paid` | `Refusal::AlreadyPaid` | `Permanent` | Show the paid state. |
+| `deadline_passed` | `Refusal::DeadlinePassed` | `Permanent` | Show the expired deadline. |
+| `payment_time_outside` | `Refusal::PaymentTimeOutside` | `Permanent` | Show the funds as received and the request as unpaid, to settle with the payer. |
+| `subscribed` | `Refusal::Subscribed` | `Permanent` | The recurring request is already accepted; only cancelling is left. |
+| `manual_only` | `Refusal::ManualOnly` | `Permanent` | Leave the period to the payer or to the executor its Allowance names. |
+| `unknown` | a refusal the bindings don't recognize | `Permanent` | Show it; never retry or confirm it. |
+| `not_current` | `Refusal::NotCurrent` | `Recovery` | Refresh authority and reconcile the attempt under the current provider and certificate. |
+| `record_held` | `Refusal::RecordHeld` | `Recovery` | Show the held record; it resumes once it can be read or repaired. |
+| `certificate_refused` | `Refusal::CertificateRefused`, `AppRefusal::Certificate` | `Recovery` | Get a suitable certificate from the signer; keep Paykit actions paused. |
+| `not_now` | `Refusal::NotNow` | `NeedsUser` | Provisional. Show `refusal.reason()`. Its reasons range from a wait to an alarm, so never retry it by itself; call again after `receive` or once the user acts on the reason. |
+| `usage` | `Refusal::Usage` | `NotSent` | Provisional. A value given breaks a Paykit rule: fix the call. |
+| `not_automatic` | `Refusal::NotAutomatic` | `Permanent` | Provisional. Not paid automatically: the user can still pay it by hand. |
+| `stopped` | `AppRefusal::Stopped`, from a payment too | `Recovery` | The wallet stopped on an alarm: show `restoreState().alarm` and recover. |
+| `left` | `AppRefusal::Left`, from a payment too | `Recovery` | The app left its identity: enroll again. |
+| `gone` | `AppRefusal::Gone` | `Recovery` | The app isn't current or its account is gone: enroll again. |
+| `recovery_required` | `AppRefusal::RecoveryRequired`, from a payment too | `Recovery` | A recovery notice forbids writes: recover to the next generation. |
+| `alarm` | `AppError::Alarm` | `Recovery` | Show the alarm and recover. |
+| `chain` | `ClientError::Chain` | `Recovery` | The service signed a head that doesn't verify: handled as a rollback alarm. |
+| `own_recovery_required` | `ClientError::OwnRecoveryRequired` | `Recovery` | A recovery notice forbids writes to this service: recover. |
+| `approval_refused` | `AppRefusal::Approval` | `Permanent` | The approval doesn't pass its checks: ask for a new one. |
+| `not_joined` | `AppRefusal::NotJoined` | `Permanent` | No wallet under this App ID: enroll. |
+| `restore_question_open` | `AppRefusal::RestoreQuestionOpen` | `NeedsUser` | Ask the user the restore question. |
+| `client_not_now` | `AppRefusal::NotNow`: reconcile mode, the clocks disagreeing | `NeedsUser` | Provisional. Show the reason: finish the reconciliation, or correct the device clock, then call again. |
+| `kept_batches_ahead` | `AppRefusal::KeptBatchesAhead` | `RetryLater` | Earlier kept batches go first: `receive`, then call again. |
+| `client_usage` | `AppRefusal::Usage`, `ClientError::Usage` | `NotSent` | A value given breaks a Switch rule: fix the call. |
+| `carried_too_large` | `AppRefusal::CarriedTooLarge` | `NotSent` | Acknowledge the duty events acted on, then restore again. |
+| `wont_deliver` | `AppRefusal::WontDeliver` | `Permanent` | The message can no longer be delivered safely. |
+| `expired_unsent` | `AppError::ExpiredUnsent` | `NotSent` | The batch was retired before it was sent: make the call again. |
+| `transport` | `AppError::Transport`, `ClientError::Transport` | `RetryLater` | The Switch couldn't be reached: call again later. |
+| `protocol_store` | `AppError::Protocol` | `RetryLater` | Paykit's store failed in a Switch callback: call again. |
+| `account_not_answering` | `AppError::NotAnsweringAsAccount` | `RetryLater` | The service doesn't answer for the account yet: call again later. |
+| `invalid_data` | `AppError::InvalidData`, `ClientError::Core` | `Permanent` | Data from the network or the store doesn't verify. |
+| `display_read_pending` | `ClientError::DisplayReadPending` | `RetryLater` | Wait for the signed display read in progress. |
+| `bad_service_signature` | `ClientError::BadServiceSignature` | `RetryLater` | An answer the pinned key doesn't verify: call again later. |
+| `stale_answer` | `ClientError::StaleAnswer` | `RetryLater` | A public read outside its window: call again. |
+| `body_unread` | `ClientError::BodyUnread` | `RetryLater` | The service answered before reading the request: call again later. |
+| `invalid_response` | `ClientError::InvalidResponse` | `RetryLater` | The answer doesn't read: call again later. |
+| `body_over_cap` | `ClientError::BodyOverCap` | `NotSent` | The request is over its cap: make a smaller one. |
+| `unpinned` | `ClientError::Unpinned` | `NotSent` | No pinned service key: enroll first. |
+| `switch_bad_request` | Switch answer `bad_request` | `Permanent` | The service refused the request as malformed. |
+| `switch_bad_signature` | Switch answer `bad_signature` | `Permanent` | The service refused the request signature. |
+| `switch_stale_timestamp` | Switch answer `stale_timestamp` | `RetryLater` | Call again: it is signed with a new timestamp. |
+| `switch_not_admitted` | Switch answer `not_admitted` | `Permanent` | The recipient doesn't admit this sender. |
+| `switch_permission_missing` | Switch answer `permission_missing` | `Permanent` | The certificate lacks the permission: approve a wider one. |
+| `switch_not_current` | Switch answer `not_current` | `Recovery` | The app isn't current any more: recover. |
+| `switch_cert_expired` | Switch answer `cert_expired` | `Recovery` | The certificate expired: get a new one from the signer. |
+| `switch_not_found` | Switch answer `not_found` | `Permanent` | The service holds no such object. |
+| `switch_conflict` | Switch answer `conflict` | `NotSent` | The state changed: read again, decide again, then call again. |
+| `switch_stale_epoch` | Switch answer `stale_epoch` | `RetryLater` | Call again after `receive`. |
+| `switch_stale_generation` | Switch answer `stale_generation` | `RetryLater` | Call again after `receive`. |
+| `switch_stale_key` | Switch answer `stale_key` | `RetryLater` | Call again after `receive`. |
+| `switch_stale_identity` | Switch answer `stale_identity` | `Permanent` | The identity the call named is not the current one. |
+| `switch_identity_needed` | Switch answer `identity_needed` | `RetryLater` | Call again after `receive`. |
+| `switch_moved` | Switch answer `moved` | `RetryLater` | The account moved: call again after `receive`. |
+| `switch_too_large` | Switch answer `too_large` | `Permanent` | The request is over the service's limit. |
+| `switch_rate_limited` | Switch answer `rate_limited` | `RetryLater` | Wait `retryAfterMs`, then call again. |
+| `switch_quota_exceeded` | Switch answer `quota_exceeded` | `RetryLater` | Call again once the limit frees. |
+| `switch_staged` | Switch answer `staged` | `RetryLater` | Call again later. |
+| `switch_unavailable` | `Refusal::SwitchUnavailable`, Switch answer `unavailable` | `RetryLater` | The own Switch is unavailable: nothing was paid. Call again once it answers. |
+| `switch_recovery_required` | Switch answer `recovery_required` | `Recovery` | A recovery notice holds the account for its next generation: recover. |
+| `public_endpoint_change_pending` | `PaykitError::PublicEndpointChangePending` | `RetryLater` | The edit is saved and is published once what stopped its signing clears; `Recovery` when that is a recovery. |
+| `method_unknown` | `RailError::Unavailable` from a lookup or endpoint selection | `RetryLater` | The method couldn't answer now: call again later. |
+| `method_not_submitted` | `RailError::Refused` | `NotSent` | The method refused the call. |
+| `method_invalid_selection` | `RailError::InvalidSelection` | `Permanent` | Fix the method's endpoint selection. |
+| `invalid_input` | `paykit_lib::Error::Validation` | `NotSent` | A value given breaks a Paykit rule: fix the call. |
+| `invalid_protocol_data` | other `paykit_lib::Error` | `Permanent` | Network or stored data breaks a Paykit rule. |
+| `conflict` | `PaykitError::Conflict` | `NotSent` | Read the current state, decide again, then call again. |
+| `homeserver` | `PaykitError::Homeserver` | `RetryLater` | The Homeserver couldn't be read now: call again later. |
+| `unclassified` | a Paykit failure the bindings don't know | `OutcomeUnknown` | Reconcile before trying again. |
+| `client_unclassified` | a Switch client failure the bindings don't know | `OutcomeUnknown` | Reconcile before trying again. |
+| `method_unclassified` | a method failure the bindings don't know | `OutcomeUnknown` | Reconcile before trying again. |

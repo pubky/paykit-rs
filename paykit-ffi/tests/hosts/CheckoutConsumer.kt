@@ -120,8 +120,8 @@ private suspend fun restoreCheckout(
             try {
                 wallet.confirmRestoredRegistrations(emptyList())
                 error("the stale restore question was accepted")
-            } catch (error: WalletException.Refused) {
-                error.refusal.use { check(it.kind() is RefusalKind.NotNow) }
+            } catch (error: WalletException.NeedsUser) {
+                checkNotNull(error.failure.refusal()).use { check(it.kind() is RefusalKind.NotNow) }
             }
             check(wallet.restoreState().registrations == state.registrations)
             suspend fun interruptConfirmation(failure: EnrollmentStore.AnswerFailure) {
@@ -139,13 +139,13 @@ private suspend fun restoreCheckout(
                 try {
                     wallet.refuseRestoredRegistrations(state.registrations)
                     error("the unrecognized registration did not stop the wallet")
-                } catch (_: WalletException.Operation) {}
+                } catch (_: WalletException.Recovery) {}
                 val alarm = wallet.restoreState().alarm as SwitchAlarm.Compromise
                 check(alarm.n == 1uL && method.calls.get() == 0)
                 try {
                     wallet.confirmRestoredRegistrations(state.registrations)
                     error("a stopped registration was confirmed")
-                } catch (_: WalletException.Operation) {}
+                } catch (_: WalletException.Recovery) {}
                 check(wallet.restoreState().alarm == alarm)
             } else {
                 if (action == "confirm") {
@@ -158,7 +158,9 @@ private suspend fun restoreCheckout(
                     try {
                         wallet.confirmRestoredRegistrations(state.registrations)
                         error("an already committed answer was confirmed again")
-                    } catch (_: WalletException.Refused) {}
+                    } catch (error: WalletException) {
+                        checkNotNull(error.categorized?.refusal())
+                    }
                 } else wallet.confirmRestoredRegistrations(state.registrations)
                 wallet.finishReceive()
                 val report = wallet.reconcile()
@@ -182,7 +184,7 @@ private suspend fun restoreCheckout(
                 wallet.finishReceive()
                 val request = wallet.requests().single { it.id.requestHash.contentEquals(original.requestHash) }
                 val refused = wallet.payRequest(original, options).decision as PaymentDecision.Error
-                val confirmation = (refused.error as WalletException.Refused).refusal
+                val confirmation = checkNotNull((refused.error as WalletException.NeedsUser).failure.refusal())
                 val hold = confirmation.kind() as RefusalKind.HeldAfterRestore
                 check(hold.record.contentEquals(request.record) && method.calls.get() == 0)
                 method.release.complete(Unit)
@@ -213,8 +215,8 @@ private suspend fun NativeWallet.lossReport(): WalletReconciliation {
     repeat(12) {
         try {
             return reconcile()
-        } catch (error: WalletException.Refused) {
-            if (error.refusal.kind() !is RefusalKind.NotNow) throw error
+        } catch (error: WalletException.NeedsUser) {
+            if (error.failure.refusal()?.kind() !is RefusalKind.NotNow) throw error
         }
     }
     error("reconciliation did not finish its listing")
@@ -241,13 +243,14 @@ private suspend fun NativeWallet.reviewLoss(
     try {
         confirmNotPaidBeforeLoss(checkNotNull(earlier.payment))
         error("the earlier loss was accepted")
-    } catch (error: WalletException.Refused) {
-        val changed = checkNotNull((error.refusal.kind() as RefusalKind.LossChanged).boundary)
+    } catch (error: WalletException.NeedsUser) {
+        check(error.failure.code() == "loss_changed")
+        val changed = checkNotNull((checkNotNull(error.failure.refusal()).kind() as RefusalKind.LossChanged).boundary)
         check(changed.generation == latest.generation && changed.declaredAtMs == latest.declaredAtMs &&
             changed.uncertainUntilMs == latest.uncertainUntilMs && changed.payment == null)
     }
     val refused = payRequest(request, PaymentOptions(null, null, false, false, emptyList())).decision as PaymentDecision.Error
-    val doubt = checkNotNull(((refused.error as WalletException.Refused).refusal.kind() as RefusalKind.MayBePaid).doubt)
+    val doubt = checkNotNull((checkNotNull((refused.error as WalletException.NeedsUser).failure.refusal()).kind() as RefusalKind.MayBePaid).doubt)
     check(doubt.obligation.contentEquals(first.obligation) && doubt.beforeLoss?.generation == latest.generation)
     check(method.calls.get() == 0)
     confirmNotPaidBeforeLoss(checkNotNull(latest.payment))
@@ -263,7 +266,7 @@ private fun driveCheckout(recovery: CheckoutReview, restore: String? = null) = r
         try {
             val method = CheckoutMethod(File(directory, "settled"))
             val store = EnrollmentStore()
-            enrolledTestCheckout(store, method).use { fixture ->
+            enrolledTestCheckout(store, method, testDeclaration, testEndpoints).use { fixture ->
                 method.clock = { fixture.nowMs() }
                 check(fixture.allowanceRecoveryNoticeKinds() == listOf(
                     WalletNoticeKind.ALLOWANCE_ACCEPTANCE_BEFORE_LOSS,
@@ -324,8 +327,9 @@ private fun driveCheckout(recovery: CheckoutReview, restore: String? = null) = r
                         val missing = RequestId(sent.payee, ByteArray(32))
                         val skipped = wallet.payRequest(missing, options)
                         val failure = skipped.decision as PaymentDecision.Error
-                        val refused = failure.error as WalletException.Refused
-                        refused.refusal.use { check(it.kind() is RefusalKind.NotFound) }
+                        val refused = failure.error as WalletException.Permanent
+                        check(refused.failure.code() == "not_found")
+                        checkNotNull(refused.failure.refusal()).use { check(it.kind() is RefusalKind.NotFound) }
                         check(skipped.publicFailures.isEmpty() && method.calls.get() == 0)
                         when (recovery) {
                             CheckoutReview.DIVERGENCE -> {
@@ -333,7 +337,7 @@ private fun driveCheckout(recovery: CheckoutReview, restore: String? = null) = r
                                 fixture.markDivergent(enrolled.appId, view.record)
                                 wallet = host.load(enrolled.appId)
                                 val held = wallet.payRequest(sent, options).decision as PaymentDecision.Error
-                                val refusedRecord = ((held.error as WalletException.Refused).refusal.kind() as RefusalKind.Divergent).records.single()
+                                val refusedRecord = (checkNotNull((held.error as WalletException.NeedsUser).failure.refusal()).kind() as RefusalKind.Divergent).records.single()
                                 val listed = wallet.divergentRecords().single()
                                 check(refusedRecord.record.contentEquals(view.record) && listed.record.contentEquals(view.record))
                                 check(refusedRecord.version != null && refusedRecord.version == listed.version && refusedRecord.paused &&
@@ -388,8 +392,8 @@ private fun driveCheckout(recovery: CheckoutReview, restore: String? = null) = r
                             try {
                                 payer.confirmDivergent(old.observation)
                                 error("the earlier divergent write was accepted")
-                            } catch (error: WalletException.Operation) {
-                                check(error.kind == WalletFailureKind.CONFLICT)
+                            } catch (error: WalletException.NotSent) {
+                                check(error.failure.code() == "conflict")
                             }
                             check(payer.divergentRecords().single().paused)
                             payer.confirmDivergent(latest.observation)
@@ -413,9 +417,30 @@ private fun driveCheckout(recovery: CheckoutReview, restore: String? = null) = r
     }
 }
 
+/// A method whose synchronous callbacks throw: a declared failure or any other exception.
+private class ThrowingMethod(private val declared: Boolean) : ReceiptReader() {
+    private fun fail(): Nothing =
+        if (declared) throw MethodException.Unknown("callback failed") else error("callback crashed")
+    override fun selectEndpoints(candidates: List<EndpointCandidate>, amount: Amount?): SelectedEndpoints = fail()
+    override fun transfer(endpoint: String, payload: String, amount: Amount): MethodTransfer = fail()
+    override fun settlementId(proofJson: ByteArray): ByteArray? = fail()
+}
+
+/// A callback that throws reads as no answer: no endpoint, an amount to confirm, no settlement.
+private fun throwingCallbacks() {
+    val proof = """{"settlement":"a1"}""".toByteArray()
+    val answered = testMethodAnswers(ReceiptReader(), testDeclaration, testEndpoints, proof)
+    check(answered.selected == listOf(1u) && answered.transferAmount?.value == "7" && answered.settlementId == null)
+    for (declared in listOf(true, false)) {
+        val thrown = testMethodAnswers(ThrowingMethod(declared), testDeclaration, testEndpoints, proof)
+        check(thrown.selected == null && thrown.transferAmount == null && thrown.settlementId == null)
+    }
+}
+
 object CheckoutConsumer {
     @JvmStatic fun main(args: Array<String>) {
         val restore = System.getenv("PAYKIT_TEST_RESTORE")
+        if (restore == null) throwingCallbacks()
         if (restore == null) CheckoutReview.entries.forEach { driveCheckout(it) }
         else driveCheckout(CheckoutReview.ORDINARY, restore)
     }

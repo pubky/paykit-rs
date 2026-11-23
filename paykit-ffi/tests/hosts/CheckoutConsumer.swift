@@ -86,7 +86,7 @@ class CheckoutMethod: ReceiptReader, @unchecked Sendable {
             return paidAt
         }
     }
-    override func settlementId(proofJson: Data) -> Data? {
+    override func settlementId(proofJson: Data) throws -> Data? {
         guardLock.withLock {
             guard let attempt = try? stored(), proofJson == originalProof(attempt) else { return nil }
             return Data(attempt.utf8)
@@ -158,8 +158,8 @@ private func restoreCheckout(
     do {
         try await reopen.confirmRestoredRegistrations(registrations: [])
         preconditionFailure("the stale restore question was accepted")
-    } catch let WalletError.Refused(refusal) {
-        guard case .notNow = refusal.kind() else { preconditionFailure("unexpected restore refusal") }
+    } catch let WalletError.NeedsUser(failure) {
+        guard case .notNow? = failure.refusal()?.kind() else { preconditionFailure("unexpected restore refusal") }
     }
     let stillPending = try await reopen.restoreState()
     precondition(stillPending.registrations == state.registrations)
@@ -167,7 +167,7 @@ private func restoreCheckout(
         do {
             try await reopen.refuseRestoredRegistrations(registrations: state.registrations)
             preconditionFailure("the unrecognized registration did not stop the wallet")
-        } catch WalletError.Operation {}
+        } catch WalletError.Recovery {}
         let stopped = try await reopen.restoreState()
         guard case let .compromise(n, _)? = stopped.alarm else { preconditionFailure("missing compromise alarm") }
         precondition(n == 1 && method.calls == 0)
@@ -200,7 +200,7 @@ private func restoreCheckout(
         let requests = try await payer.requests().filter { $0.id.requestHash == original.requestHash }
         precondition(requests.count == 1)
         let refused = try await payer.payRequest(id: original, options: options)
-        guard case let .error(.Refused(confirmation)) = refused.decision,
+        guard case let .error(.NeedsUser(failure)) = refused.decision, let confirmation = failure.refusal(),
               case let .heldAfterRestore(record) = confirmation.kind() else {
             preconditionFailure("missing original request hold")
         }
@@ -286,8 +286,8 @@ private extension NativeWallet {
     func lossReport() async throws -> WalletReconciliation {
         for _ in 0..<12 {
             do { return try await reconcile() }
-            catch WalletError.Refused(let refusal) {
-                guard case .notNow = refusal.kind() else { throw WalletError.Refused(refusal: refusal) }
+            catch let WalletError.NeedsUser(failure) {
+                guard case .notNow? = failure.refusal()?.kind() else { throw WalletError.NeedsUser(failure: failure) }
             }
         }
         preconditionFailure("reconciliation did not finish its listing")
@@ -316,14 +316,16 @@ private func reviewLoss(_ wallet: NativeWallet, _ fixture: CheckoutFixture, _ re
     do {
         try await wallet.confirmNotPaidBeforeLoss(payment: oldPayment)
         preconditionFailure("the earlier loss was accepted")
-    } catch WalletError.Refused(let refusal) {
-        guard case let .lossChanged(changed?) = refusal.kind() else { throw WalletError.Refused(refusal: refusal) }
+    } catch let WalletError.NeedsUser(failure) {
+        guard failure.code() == "loss_changed", case let .lossChanged(changed?)? = failure.refusal()?.kind() else {
+            throw WalletError.NeedsUser(failure: failure)
+        }
         precondition(changed.generation == latest.generation && changed.declaredAtMs == latest.declaredAtMs &&
             changed.uncertainUntilMs == latest.uncertainUntilMs && changed.payment == nil)
     }
     let options = PaymentOptions(endpoint: nil, listApp: nil, publicEndpointsConfirmed: false, unconfirmedIdentityConfirmed: false, confirmedRefusals: [])
     let held = try await wallet.payRequest(id: request, options: options)
-    guard case let .error(.Refused(reason)) = held.decision, case let .mayBePaid(doubt?) = reason.kind() else {
+    guard case let .error(.NeedsUser(failure)) = held.decision, case let .mayBePaid(doubt?)? = failure.refusal()?.kind() else {
         preconditionFailure("payment should still need its current loss statement")
     }
     precondition(doubt.obligation == first.obligation && doubt.beforeLoss?.generation == latest.generation && method.calls == 0)
@@ -335,10 +337,33 @@ private func reviewLoss(_ wallet: NativeWallet, _ fixture: CheckoutFixture, _ re
 
 private enum CheckoutReview: CaseIterable { case ordinary, divergence, providerLoss }
 
+/// A method whose synchronous callbacks throw: a declared failure or any other error.
+private final class ThrowingMethod: ReceiptReader, @unchecked Sendable {
+    struct Crash: Error {}
+    let declared: Bool
+    init(declared: Bool) { self.declared = declared }
+    private func fail() -> Error { declared ? MethodError.Unknown(reason: "callback failed") : Crash() }
+    override func selectEndpoints(candidates: [EndpointCandidate], amount: Amount?) throws -> SelectedEndpoints { throw fail() }
+    override func transfer(endpoint: String, payload: String, amount: Amount) throws -> MethodTransfer { throw fail() }
+    override func settlementId(proofJson: Data) throws -> Data? { throw fail() }
+}
+
+/// A callback that throws reads as no answer: no endpoint, an amount to confirm, no settlement.
+private func throwingCallbacks() throws {
+    let proof = Data(#"{"settlement":"a1"}"#.utf8)
+    let answered = try testMethodAnswers(method: ReceiptReader(), declaration: testDeclaration, endpoints: testEndpoints, proofJson: proof)
+    precondition(answered.selected == [1] && answered.transferAmount?.value == "7" && answered.settlementId == nil)
+    for declared in [true, false] {
+        let thrown = try testMethodAnswers(method: ThrowingMethod(declared: declared), declaration: testDeclaration, endpoints: testEndpoints, proofJson: proof)
+        precondition(thrown.selected == nil && thrown.transferAmount == nil && thrown.settlementId == nil)
+    }
+}
+
 func driveCheckout() async throws {
     if let action = ProcessInfo.processInfo.environment["PAYKIT_TEST_RESTORE"] {
         try await driveCheckout(.ordinary, restore: action)
     } else {
+        try throwingCallbacks()
         for review in CheckoutReview.allCases { try await driveCheckout(review) }
     }
 }
@@ -349,7 +374,7 @@ private func driveCheckout(_ recovery: CheckoutReview, restore: String? = nil) a
     defer { try? FileManager.default.removeItem(at: directory) }
     let method = CheckoutMethod(ledger: directory.appendingPathComponent("settled"))
     let store = EnrollmentStore()
-    let fixture = try await enrolledTestCheckout(store: store, method: method)
+    let fixture = try await enrolledTestCheckout(store: store, method: method, declaration: testDeclaration, endpoints: testEndpoints)
     method.useClock { fixture.nowMs() }
     precondition(fixture.allowanceRecoveryNoticeKinds() == [.allowanceAcceptanceBeforeLoss, .allowanceWithdrawalConfirmed])
     let reference = Data(repeating: 23, count: 16)
@@ -404,8 +429,8 @@ private func driveCheckout(_ recovery: CheckoutReview, restore: String? = nil) a
     let options = PaymentOptions(endpoint: nil, listApp: nil, publicEndpointsConfirmed: false, unconfirmedIdentityConfirmed: false, confirmedRefusals: [])
     let missing = RequestId(payee: request.payee, requestHash: Data(repeating: 0, count: 32))
     let skipped = try await payer.payRequest(id: missing, options: options)
-    guard case let .error(.Refused(refusal)) = skipped.decision,
-          case .notFound = refusal.kind() else { preconditionFailure("missing request was not refused") }
+    guard case let .error(.Permanent(failure)) = skipped.decision, failure.code() == "not_found",
+          case .notFound? = failure.refusal()?.kind() else { preconditionFailure("missing request was not refused") }
     precondition(skipped.publicFailures.isEmpty && method.calls == 0)
     var shown: Divergence?
     switch recovery {
@@ -414,7 +439,7 @@ private func driveCheckout(_ recovery: CheckoutReview, restore: String? = nil) a
         try await fixture.markDivergent(appId: enrolled.appId, record: views[0].record)
         payer = try await host.load(appId: enrolled.appId)
         let held = try await payer.payRequest(id: request, options: options)
-        guard case let .error(.Refused(refusal)) = held.decision, case let .divergent(records) = refusal.kind(),
+        guard case let .error(.NeedsUser(failure)) = held.decision, case let .divergent(records)? = failure.refusal()?.kind(),
               records.count == 1, let observation = records.first else { preconditionFailure("expected a divergent checkout") }
         let listed = try await payer.divergentRecords()
         precondition(listed.count == 1 && listed[0].record == observation.record && observation.record == views[0].record)
@@ -454,8 +479,8 @@ private func driveCheckout(_ recovery: CheckoutReview, restore: String? = nil) a
         do {
             try await reopened.confirmDivergent(observation: shown.observation)
             preconditionFailure("the earlier divergent write was accepted")
-        } catch WalletError.Operation(let kind, _, _, _, _) {
-            guard case .conflict = kind else { preconditionFailure("expected a changed write") }
+        } catch let WalletError.NotSent(failure) {
+            guard failure.code() == "conflict" else { preconditionFailure("expected a changed write") }
         }
         let paused = try await reopened.divergentRecords()
         precondition(paused.count == 1 && paused[0].paused)
