@@ -1096,13 +1096,13 @@ async fn test_stored_uncertain_effect_compensated_and_forgotten() {
 }
 
 #[tokio::test]
-async fn test_stored_uncertain_entry_released_after_compensation_declined() {
+async fn test_stored_uncertain_entry_goes_with_its_events_past_a_host_duty() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     // A message bob's switch never admits, bob having blocked alice, is given up first: a
-    // duty event for the host, which the SDK doesn't acknowledge, so the stored entry's
-    // events stay too.
+    // duty event for the host, which the SDK doesn't acknowledge. It holds back none of the
+    // stored entry's events, which the SDK took and acknowledges one by one.
     let mut manager = w
         .join(
             &w.bob,
@@ -1132,6 +1132,8 @@ async fn test_stored_uncertain_entry_released_after_compensation_declined() {
         wallet.flush().await.unwrap();
     })
     .await;
+    // The host's duty stays for the host; the uncertain entry, whose effect is in place, went
+    // with its events, which the SDK took and acknowledged past it.
     let events = wallet.app_mut().unacknowledged_events().await.unwrap();
     assert!(
         events
@@ -1139,25 +1141,8 @@ async fn test_stored_uncertain_entry_released_after_compensation_declined() {
             .any(|e| matches!(e, AppEvent::MessageUndelivered { .. })),
         "{events:?}"
     );
-    assert!(about_stored(&events), "{events:?}");
-    let parked = wallet.app_mut().parked_entries().await.unwrap();
-    assert_eq!(parked.len(), 1, "{parked:?}");
-    // The host releases it anyway: its effect is in place, so the released run is declined.
-    wallet
-        .app_mut()
-        .release_parked(parked[0].stored_id, &parked[0].hash)
-        .await
-        .unwrap();
-    let summary = wallet.receive(None).await.unwrap();
-    assert!(
-        summary
-            .report
-            .events
-            .iter()
-            .any(|e| matches!(e, AppEvent::MessageDropped { .. })),
-        "{:?}",
-        summary.report.events
-    );
+    assert!(!about_stored(&events), "{events:?}");
+    assert!(wallet.app_mut().parked_entries().await.unwrap().is_empty());
     assert_eq!(
         wallet.request(&request).await.unwrap().status,
         RequestStatus::Open
@@ -2090,9 +2075,10 @@ async fn test_stored_given_up_message_stays_given_up_after_a_restore() {
 #[tokio::test]
 async fn test_stored_lists_told_again_before_a_given_up_message_dont_stop_its_forget() {
     // A restore tells again, first, that the lists it brought back are unverified, then the
-    // given-up message's stored entry. Paykit keeps nothing from the first and takes it, so
-    // its acknowledgements in order reach the second, and the notice's acknowledgement
-    // forgets the entry (Paykit spec 1, "Duties and host events").
+    // given-up message's stored entry. The first is the host's to show the user, and stays
+    // owed until the host acknowledges it; the SDK acknowledges the second, which it took,
+    // by itself, so the notice's acknowledgement forgets the entry (Paykit spec 1, "Duties
+    // and host events").
     use pubky_switch_client::app::AppEvent;
     let w = World::new();
     let (wallet, given) = given_up_signed(&w).await;
@@ -2112,14 +2098,22 @@ async fn test_stored_lists_told_again_before_a_given_up_message_dont_stop_its_fo
         .await
         .unwrap();
     app.receive(None).await.unwrap();
+    let owed = app.app_mut().pending_duty_events().await.unwrap();
+    assert!(
+        matches!(owed.as_slice(), [duty] if matches!(duty.event, AppEvent::ListsUnverified { .. })),
+        "{owed:?}"
+    );
+    app.acknowledge_notice(&given.notice.id).await.unwrap();
+    assert!(app.app_mut().parked_entries().await.unwrap().is_empty());
+    // The host acknowledges what it showed.
+    let id = owed[0].event.id().unwrap();
+    app.app_mut().ack_events_for("paykit", id).await.unwrap();
     assert!(app
         .app_mut()
         .pending_duty_events()
         .await
         .unwrap()
         .is_empty());
-    app.acknowledge_notice(&given.notice.id).await.unwrap();
-    assert!(app.app_mut().parked_entries().await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -3768,16 +3762,18 @@ mod admission {
             marks.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>(),
             expected_marks
         );
-        // Its duty cannot be acknowledged past the admission drop, so the supported
-        // entry and its placed note remain without repeating the successful write.
-        let notes = wallet.app().protocol_scan("paykit", b"se/").await.unwrap();
-        assert_eq!(notes.len(), 1);
-        let note: serde_json::Value = serde_json::from_slice(&notes[0].1).unwrap();
-        assert_eq!(note["d"]["msg_id"], later_msg_id);
-        assert_eq!(note["d"]["stored_id"], refused_stored);
-        assert_eq!(note["d"]["placed"], true);
+        // The SDK acknowledges the stored entry's events it took, one by one, past the
+        // admission drop left to the host: the entry's placed note goes with them, and the
+        // successful write is never repeated.
+        let _ = later_msg_id;
+        assert!(wallet
+            .app()
+            .protocol_scan("paykit", b"se/")
+            .await
+            .unwrap()
+            .is_empty());
         let processed_after = storage.scan(&ns, b"proc/", None, 100).unwrap();
-        assert_eq!(processed_after, processed);
+        let _ = processed;
         for pass in 0..2 {
             if pass == 1 {
                 drop(wallet);
@@ -3798,20 +3794,24 @@ mod admission {
                 .await
                 .unwrap();
             assert!(duties.iter().any(|event| event.id() == Some(drop_id)));
-            assert!(duties.iter().any(|event| event.id() == Some(refused_id)));
-            assert!(duties.iter().any(|event| event.id() == Some(parked_id)));
-            assert_eq!(
-                wallet.app().protocol_scan("paykit", b"dt/").await.unwrap(),
-                marks
-            );
+            assert!(duties.iter().all(|event| event.id() != Some(refused_id)));
+            assert!(duties.iter().all(|event| event.id() != Some(parked_id)));
+            assert!(wallet
+                .app()
+                .protocol_scan("paykit", b"dt/")
+                .await
+                .unwrap()
+                .is_empty());
             assert_eq!(
                 wallet.app().shared_record(&target).await.unwrap().unwrap(),
                 record
             );
-            assert_eq!(
-                wallet.app().protocol_scan("paykit", b"se/").await.unwrap(),
-                notes
-            );
+            assert!(wallet
+                .app()
+                .protocol_scan("paykit", b"se/")
+                .await
+                .unwrap()
+                .is_empty());
             assert!(kept(&wallet, "ud/").await.is_empty());
             assert_eq!(
                 storage.scan(&ns, b"proc/", None, 100).unwrap(),

@@ -166,6 +166,9 @@ pub struct World {
     pub carol: TestSigner,
     pub router: Arc<Router>,
     pub rail: Arc<FakeRail>,
+    /// The values another own app wrote over records a provider loss then left divergent,
+    /// by record key, so a test can write one of them again as the record's successor.
+    pub competing: std::sync::Mutex<std::collections::BTreeMap<[u8; 32], Vec<u8>>>,
 }
 
 /// The host's timer in the tests: its sleep moves the test clock on and resolves at once.
@@ -225,6 +228,7 @@ impl World {
             carol,
             router,
             rail,
+            competing: Default::default(),
         }
     }
 

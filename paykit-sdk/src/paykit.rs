@@ -988,9 +988,10 @@ impl Paykit {
     /// gone, or not: the SDK has kept what it needs of the events about stored entries
     /// before it returns. The app-wide [`App::ack_events`] acknowledges each event for every
     /// protocol it is for, so in an app with other protocols the host calls it only once
-    /// each of those has handled the event too. The SDK itself acknowledges for Paykit
-    /// ([`App::ack_events_for`]), in order, the events it took up to the first it didn't;
-    /// the rest wait for the host. An entry dropped unverified
+    /// each of those has handled the event too. The SDK itself acknowledges for Paykit each
+    /// event it took, one by one ([`App::ack_event_with`]); the rest wait for the host, such
+    /// as `AppEvent::ListsUnverified`, which the host shows the user, and none of them holds
+    /// back an event the SDK took. An entry dropped unverified
     /// (`AppEvent::StoredEntryDropped`) counts in its sender's mark, which asks that sender
     /// to send it again (`marks.rs`).
     ///

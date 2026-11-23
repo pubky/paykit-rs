@@ -106,3 +106,58 @@ fn test_kept_switch_refusals_retain_the_original_batch_and_recovery_generation()
         } if matches!(refusal.kind(), SwitchRefusalKind::Gone)
     ));
 }
+
+#[test]
+fn test_switch_refusals_name_the_backup_and_deny_list_rules() {
+    use crate::SwitchRefusal;
+    assert!(matches!(
+        SwitchRefusal(AppRefusal::DutiesTooLarge { duty_events: 7 }).kind(),
+        SwitchRefusalKind::DutiesTooLarge { duty_events: 7 }
+    ));
+    assert!(matches!(
+        SwitchRefusal(AppRefusal::DenyListFull { over: 3 }).kind(),
+        SwitchRefusalKind::DenyListFull { over: 3 }
+    ));
+    // A rule the bindings don't name is held, never taken for one they do.
+    assert!(matches!(
+        SwitchRefusal(AppRefusal::NotNow("later".into())).kind(),
+        SwitchRefusalKind::NotNow
+    ));
+}
+
+#[test]
+fn test_switch_events_carry_the_lists_and_backup_evidence() {
+    use crate::{BackupRefusal, ListsLeftOut, WalletEventData};
+    use pubky_switch_client::app::{self as app, AppEvent};
+    let id = app::EventId::from_bytes(&[1; app::EVENT_ID_LEN]).unwrap();
+    let event = WalletEventData::from(AppEvent::ListsUnverified {
+        id,
+        kept: 2,
+        replies: 1,
+        contributed: true,
+        left_out: app::ListsLeftOut::KeptAndReplies,
+    });
+    assert!(matches!(
+        event,
+        WalletEventData::ListsUnverified {
+            kept: 2,
+            replies: 1,
+            contributed: true,
+            left_out: ListsLeftOut::KeptAndReplies,
+        }
+    ));
+    assert!(matches!(
+        WalletEventData::from(AppEvent::RecoveryDenyListFull {
+            generation: 3,
+            over: 4
+        }),
+        WalletEventData::RecoveryDenyListFull {
+            generation: 3,
+            over: 4
+        }
+    ));
+    assert!(matches!(
+        BackupRefusal::from(app::BackupRefusal::DutiesTooLarge { duty_events: 5 }),
+        BackupRefusal::DutiesTooLarge { duty_events: 5 }
+    ));
+}

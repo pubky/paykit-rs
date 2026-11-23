@@ -4581,3 +4581,86 @@ async fn test_divergent_request_to_an_app_whose_list_certificate_no_longer_count
         serde_json::to_value(list_version(1, 1)).unwrap()
     );
 }
+
+#[tokio::test]
+async fn test_divergent_stored_entry_never_reopens_a_divergent_delete() {
+    // The payer's acceptance and proof are stored entries at the shop: their steps' writes
+    // were refused. Another of bob's apps then deletes the record, and the delete shows
+    // divergent: its upload may hold what the delete lacks. The shop holds no mark of having
+    // seen the record, as after a restore of an older backup. Confirmed or not, the entries
+    // are never written over the delete, so the record isn't opened again, and they are given
+    // up at their 30 days with the host's notice (Paykit spec 6, 8.1 "Stored entries").
+    let w = World::new();
+    let seen = Arc::new(crate::outcome_record::NoSeenMarks::default());
+    let base = Arc::clone(&seen) as Arc<dyn StateStore>;
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = shop_on(&w, Arc::clone(&base)).await;
+    let mut seller_wallet = w
+        .join(
+            &w.bob,
+            "seller-wallet",
+            AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let record = sale(&shop, &request).await.record;
+    wallet.receive(None).await.unwrap();
+    wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    crate::common::refuse_writes(&w.bob, 4);
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"se/")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    seen.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    seller_wallet.receive(None).await.unwrap();
+    let target = RecordTarget::new(
+        SwitchCollection::new(
+            Collection::PayeeActivity.name(),
+            Collection::PayeeActivity.policy(None),
+        ),
+        &natural_key::request_record(&w.bob_id(), &request.request_hash),
+    );
+    seller_wallet
+        .app_mut()
+        .delete_record(&target, Vec::new())
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    set_divergent(&base, &shop, &record, true);
+    shop.receive(None).await.unwrap();
+    confirm(&mut shop, &record).await.unwrap();
+    shop.receive(None).await.unwrap();
+    let held = shop.app().shared_record(&record).await.unwrap().unwrap();
+    assert_eq!(
+        held.content,
+        pubky_switch_client::app::RecordContent::Deleted
+    );
+    w.clock.advance_ms(31 * 24 * HOUR_MS);
+    shop.receive(None).await.unwrap();
+    let held = shop.app().shared_record(&record).await.unwrap().unwrap();
+    assert_eq!(
+        held.content,
+        pubky_switch_client::app::RecordContent::Deleted
+    );
+    assert!(shop
+        .app()
+        .protocol_scan("paykit", b"se/")
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(shop
+        .notices()
+        .await
+        .unwrap()
+        .iter()
+        .any(|n| n.kind == paykit_sdk::NoticeKind::MessageGivenUp));
+}

@@ -389,11 +389,11 @@ collections after the Switch has finished its feed read. An explicit `reconcile`
 read and retain committed duties from `wallet.app_mut().unacknowledged_events()`.
 Wait for a later successful `receive` so the SDK can process its duties, then
 acknowledge for `"paykit"` with `App::ack_events_for` up to the last duty in
-that successful report. After every successful `receive`, acknowledge the duties the SDK leaves to the
-host: the SDK acknowledges its own in order, so one left unacknowledged, such as
-one a restore tells again, stops it before every later duty, and dismissing a
-notice whose stored entry such a later duty names is refused with `Usage` until
-then. Use the app-wide `App::ack_events` only after the
+that successful report. The SDK acknowledges each duty it takes by itself, so a duty left to the host
+never holds back one the SDK took. Show the host's duties, such as
+`AppEvent::ListsUnverified` after a restore or a provider loss (kept peers or
+reply grants not verified yet, or lists the backup left out), and acknowledge
+each once the user has seen it. Use the app-wide `App::ack_events` only after the
 other responsible protocols have handled their duties too. Keep the deletion
 notice and any surviving confirmed receipt together when showing a missing
 shared record.

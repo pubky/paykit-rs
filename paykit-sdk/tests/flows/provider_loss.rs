@@ -189,7 +189,7 @@ async fn recover_activity_writes(
     targets: &[(&pubky_switch_client::app::RecordTarget, bool)],
 ) -> Arc<ScriptedSwitch> {
     let writes = competing_activity_writes(w, wallet, phone, targets).await;
-    recover_competing_writes(w, wallet, phone, targets, writes, false).await
+    recover_competing_writes(w, wallet, phone, targets, writes).await
 }
 
 struct CompetingWrites {
@@ -223,13 +223,11 @@ async fn competing_activity_writes(
         if target.collection.name == paykit_lib::collections::Collection::PayerActivity.name() {
             alternate["manual_only"] = true.into();
         }
+        let alternate = serde_json::to_vec(&alternate).unwrap();
+        w.competing.lock().unwrap().insert(key, alternate.clone());
         let op = phone
             .app_mut()
-            .record_op(
-                target,
-                Some(&serde_json::to_vec(&alternate).unwrap()),
-                vec![],
-            )
+            .record_op(target, Some(&alternate), vec![])
             .await
             .unwrap();
         batch = batch.entry(op);
@@ -287,7 +285,6 @@ async fn recover_competing_writes(
     phone: &mut Paykit,
     targets: &[(&pubky_switch_client::app::RecordTarget, bool)],
     writes: CompetingWrites,
-    divergent: bool,
 ) -> Arc<ScriptedSwitch> {
     use pubky_switch_client::client::answers::RecoveryUpload;
     use pubky_switch_client::client::{Credentials, SwitchClient};
@@ -326,18 +323,13 @@ async fn recover_competing_writes(
         assert_eq!(held.version, version);
         // An honest lost service: the wallet's proved write stays current, and the other
         // app's write on the same base is divergent (Pubky Switch wire 7.4.14).
-        if divergent {
-            assert!(held.divergent && !held.different_write_at_held_version);
-            continue;
-        }
-        assert!(held.different_write_at_held_version);
+        assert!(held.divergent && !held.different_write_at_held_version);
         assert_eq!(next.record(&key).unwrap().state.version, held.version);
     }
     next
 }
 
 #[tokio::test]
-#[ignore = "the pinned Switch keeps a proved write current and reports a same-version upload as divergent (Switch wire 7.4.14): this setup no longer reaches a different write at the held version"]
 async fn test_provider_loss_activity_with_another_write_at_its_version_survives_reload() {
     let w = World::new();
     let disk = store();
@@ -357,7 +349,7 @@ async fn test_provider_loss_activity_with_another_write_at_its_version_survives_
     drop(wallet);
     let mut wallet = w.load_on_clock(&w.alice, disk, id, w.clock.clone()).await;
     let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
-    assert!(held.different_write_at_held_version);
+    assert!(held.divergent && !held.different_write_at_held_version);
     assert_eq!(next.record(&key).unwrap().state.version, held.version);
     follow_loss(&mut wallet).await;
     let refused = wallet
@@ -365,39 +357,41 @@ async fn test_provider_loss_activity_with_another_write_at_its_version_survives_
         .await
         .outcome
         .unwrap_err();
+    // The record is paused for the user's confirmation of what it shows (Paykit spec 6).
     assert!(
-        matches!(refused.refusal(), Some(Refusal::NotNow(reason)) if reason.contains("another write at the held activity")),
+        matches!(refused.refusal(), Some(Refusal::Divergent { records }) if records.iter().any(|r| r.record == key && r.paused && r.divergent)),
         "{refused:?}"
     );
     assert_eq!(executions(&w), 0);
-    assert_eq!(
-        wallet.app().protocol_scan("paykit", b"fo/").await.unwrap(),
-        owed_floor
-    );
-    accept_activity_successor(&mut wallet, &mut phone, &target).await;
-    wallet.receive(None).await.unwrap();
+    // The floor's check ran over the paused record's current write, which reads: a
+    // `manual_only` mark it owed would be a stop, written over a divergent record all the
+    // same (Paykit spec 6). The record stays paused.
+    let _ = owed_floor;
     assert!(wallet
         .app()
         .protocol_scan("paykit", b"fo/")
         .await
         .unwrap()
         .is_empty());
+    assert!(wallet
+        .divergent_records()
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.record == key && r.paused));
 }
 
 #[tokio::test]
-#[ignore = "the pinned Switch keeps a proved write current and reports a same-version upload as divergent (Switch wire 7.4.14): this setup no longer reaches a different write at the held version"]
 async fn test_provider_loss_receipt_waits_for_an_accepted_activity_successor() {
     disputed_receipt(false, false).await;
 }
 
 #[tokio::test]
-#[ignore = "the pinned Switch keeps a proved write current and reports a same-version upload as divergent (Switch wire 7.4.14): this setup no longer reaches a different write at the held version"]
 async fn test_provider_loss_disputed_receipt_expires_with_its_notice() {
     disputed_receipt(true, false).await;
 }
 
 #[tokio::test]
-#[ignore = "the pinned Switch keeps a proved write current and reports a same-version upload as divergent (Switch wire 7.4.14): this setup no longer reaches a different write at the held version"]
 async fn test_provider_loss_receipt_waits_over_a_disputed_signed_delete() {
     disputed_receipt(false, true).await;
 }
@@ -430,17 +424,22 @@ async fn disputed_receipt(expires: bool, delete: bool) {
         recover_activity_with_phone_write(&w, &mut wallet, &mut phone, &target, delete).await;
     let key = wallet.app().record_key(&target).unwrap();
     follow_loss(&mut wallet).await;
-    if let Some(shown) = wallet
-        .divergent_records()
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|r| r.record == key)
-    {
-        wallet
-            .confirm_divergent(&shown, UserConfirmed::new())
+    // A divergent value waits for the user's confirmation, which this user doesn't give. A
+    // divergent delete shows nothing to confirm: confirmed or not, it holds the receipt as
+    // another write at its version does (Paykit spec 6).
+    if delete {
+        if let Some(shown) = wallet
+            .divergent_records()
             .await
-            .unwrap();
+            .unwrap()
+            .into_iter()
+            .find(|r| r.record == key)
+        {
+            wallet
+                .confirm_divergent(&shown, UserConfirmed::new())
+                .await
+                .unwrap();
+        }
     }
     assert!(
         wallet
@@ -449,7 +448,7 @@ async fn disputed_receipt(expires: bool, delete: bool) {
             .await
             .unwrap()
             .unwrap()
-            .different_write_at_held_version
+            .divergent
     );
     w.clock.advance_ms(11 * 60_000);
     wallet.app_mut().invite(&w.bob_id()).await.unwrap();
@@ -457,45 +456,31 @@ async fn disputed_receipt(expires: bool, delete: bool) {
     let receipt = shop.confirm_payment(&sale).await.unwrap().unwrap();
     let delivery = shop.app_mut().flush_message(&receipt).await;
     let read = wallet.receive(None).await.unwrap();
-    let kept = wallet.app().protocol_scan("paykit", b"pr/").await.unwrap();
+    let kept = kept_over(&wallet, &key).await;
     assert_eq!(
         kept.len(),
         1,
         "keep the original receipt: {delivery:?} {read:?}"
     );
-    assert!(kept[0].0.ends_with(receipt.as_bytes()));
+    assert!(kept[0].0.ends_with(receipt.as_str()));
     assert_eq!(next.record(&key).unwrap().revision, before);
     let id = wallet.app_id();
     drop(wallet);
     let mut wallet = w.load_on_clock(&w.alice, disk, id, w.clock.clone()).await;
     wallet.receive(None).await.unwrap();
-    assert_eq!(
-        wallet.app().protocol_scan("paykit", b"pr/").await.unwrap(),
-        kept
-    );
+    assert_eq!(kept_over(&wallet, &key).await, kept);
     let other = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     assert_eq!(wallet.request(&other).await.unwrap().request, other);
-    assert_eq!(
-        wallet.app().protocol_scan("paykit", b"pr/").await.unwrap(),
-        kept
-    );
+    assert_eq!(kept_over(&wallet, &key).await, kept);
 
     if expires {
         w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS - 1);
         wallet.receive(None).await.unwrap();
-        assert_eq!(
-            wallet.app().protocol_scan("paykit", b"pr/").await.unwrap(),
-            kept
-        );
+        assert_eq!(kept_over(&wallet, &key).await, kept);
         w.clock.advance_ms(1);
         wallet.receive(None).await.unwrap();
-        assert!(wallet
-            .app()
-            .protocol_scan("paykit", b"pr/")
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(kept_over(&wallet, &key).await.is_empty());
         let given_up = wallet
             .notices()
             .await
@@ -519,44 +504,64 @@ async fn disputed_receipt(expires: bool, delete: bool) {
         assert_eq!(next.record(&key).unwrap().revision, before);
         return;
     }
-    accept_activity_successor(&mut wallet, &mut phone, &target).await;
+    // A successor ends the divergence; the pause ends with the user's confirmation.
+    accept_activity_successor(&w, &mut wallet, &mut phone, &target).await;
+    confirm_reported_pauses(&mut wallet).await;
     wallet.receive(None).await.unwrap();
-    assert!(wallet
-        .app()
-        .protocol_scan("paykit", b"pr/")
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(kept_over(&wallet, &key).await.is_empty());
     assert!(wallet.request(&request).await.unwrap().receipt.is_some());
     assert_eq!(executions(&w), 1);
 }
 
-/// The phone writes a successor preserving the accepted activity and its restriction.
+/// The messages `app` keeps for `record`: over its pause (`dw/`) or as replies before a
+/// record it can't read (`pr/`), each by its key.
+async fn kept_over(app: &Paykit, record: &[u8; 32]) -> Vec<(String, Vec<u8>)> {
+    use pubky_switch_core::enc::b64;
+    let mut kept = Vec::new();
+    for prefix in [format!("dw/{}/", b64(record)), "pr/".to_string()] {
+        for (key, value) in app
+            .app()
+            .protocol_scan("paykit", prefix.as_bytes())
+            .await
+            .unwrap()
+        {
+            let key = String::from_utf8(key).unwrap();
+            if prefix.starts_with("dw/") || key.contains(&b64(record)) {
+                kept.push((key, value));
+            }
+        }
+    }
+    kept
+}
+
+/// The phone writes its divergent write again, as the record's successor: the activity it
+/// wrote, with its restriction, becomes the current write, and the record is no longer
+/// divergent.
 async fn accept_activity_successor(
+    w: &World,
     wallet: &mut Paykit,
     phone: &mut Paykit,
     target: &pubky_switch_client::app::RecordTarget,
 ) {
     let current = phone.app_mut().read_record(target).await.unwrap().unwrap();
-    assert!(!current.different_write_at_held_version);
-    let content = current.content.value().unwrap();
+    assert!(current.divergent && !current.different_write_at_held_version);
+    let content = w.competing.lock().unwrap()[&current.key].clone();
     if target.collection.name == paykit_lib::collections::Collection::PayerActivity.name() {
         assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(content).unwrap()["manual_only"],
+            serde_json::from_slice::<serde_json::Value>(&content).unwrap()["manual_only"],
             true
         );
     }
     phone
         .app_mut()
-        .put_record(target, content, vec![])
+        .put_record(target, &content, vec![])
         .await
         .unwrap();
     let successor = wallet.app_mut().read_record(target).await.unwrap().unwrap();
-    assert!(!successor.different_write_at_held_version);
+    assert!(!successor.divergent && !successor.different_write_at_held_version);
 }
 
 #[tokio::test]
-#[ignore = "the pinned Switch keeps a proved write current and reports a same-version upload as divergent (Switch wire 7.4.14): this setup no longer reaches a different write at the held version"]
 async fn test_provider_loss_completed_rail_waits_for_an_accepted_activity_successor() {
     let w = World::new();
     let disk = store();
@@ -588,32 +593,27 @@ async fn test_provider_loss_completed_rail_waits_for_an_accepted_activity_succes
         .with_idempotent(true)
         .with_history(true),
     );
+    // The record is divergent: the completed payment's write waits for the user or a
+    // successor, across a reload, and nothing is paid again (Paykit spec 6).
     let held = wallet.resume_payments().await.unwrap();
     assert!(
-        matches!(held.as_slice(), [PayOutcome::RecordHeld { .. }]),
+        matches!(held.as_slice(), [PayOutcome::RecordDivergent { .. }]),
         "{held:?}"
     );
     assert_eq!(next.record(&key).unwrap().revision, before);
-    if let Some(shown) = wallet
-        .divergent_records()
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|r| r.record == key)
-    {
-        wallet
-            .confirm_divergent(&shown, UserConfirmed::new())
-            .await
-            .unwrap();
-    }
     let id = wallet.app_id();
     drop(wallet);
     let mut wallet = w.load_on_clock(&w.alice, disk, id, w.clock.clone()).await;
-    let held = wallet.repair_activity_record(&attempt_id).await.unwrap();
-    assert!(matches!(held, PayOutcome::RecordHeld { .. }), "{held:?}");
+    let held = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(held.as_slice(), [PayOutcome::RecordDivergent { .. }]),
+        "{held:?}"
+    );
     assert_eq!(next.record(&key).unwrap().revision, before);
     assert_eq!(w.rail.executions(&attempt_id), 1);
-    accept_activity_successor(&mut wallet, &mut phone, &target).await;
+    // A successor ends the divergence; the pause ends with the user's confirmation.
+    accept_activity_successor(&w, &mut wallet, &mut phone, &target).await;
+    confirm_reported_pauses(&mut wallet).await;
     let finished = wallet.resume_payments().await.unwrap();
     assert!(
         matches!(finished.as_slice(), [PayOutcome::Paid { .. }]),
@@ -623,7 +623,6 @@ async fn test_provider_loss_completed_rail_waits_for_an_accepted_activity_succes
 }
 
 #[tokio::test]
-#[ignore = "the pinned Switch keeps a proved write current and reports a same-version upload as divergent (Switch wire 7.4.14): this setup no longer reaches a different write at the held version"]
 async fn test_provider_loss_restore_first_reads_the_current_activity() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -640,18 +639,26 @@ async fn test_provider_loss_restore_first_reads_the_current_activity() {
     assert!(wallet.app().shared_record(&key).await.unwrap().is_none());
     wallet.app_mut().refresh_identity().await.unwrap();
     wallet.receive(None).await.unwrap();
+    // The restored app reads the service's current write, the wallet's own proved one, and
+    // the other app's write beside it divergent: the record is paused for the user, and
+    // nothing is paid (Paykit spec 6).
     let first = wallet.app().shared_record(&key).await.unwrap().unwrap();
-    assert!(!first.different_write_at_held_version);
-    assert_eq!(
+    assert!(first.divergent && !first.different_write_at_held_version);
+    assert!(
         serde_json::from_slice::<serde_json::Value>(first.content.value().unwrap()).unwrap()
-            ["manual_only"],
-        true
+            ["manual_only"]
+            .is_null()
     );
+    assert!(wallet
+        .divergent_records()
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.record == key && r.paused));
     assert_eq!(executions(&w), 0);
 }
 
 #[tokio::test]
-#[ignore = "the pinned Switch keeps a proved write current and reports a same-version upload as divergent (Switch wire 7.4.14): this setup no longer reaches a different write at the held version"]
 async fn test_provider_loss_disputed_delete_protects_its_cancellation_from_expiry_and_eviction() {
     let w = World::new();
     let lists = Arc::new(crate::common::ListsStore::default());
@@ -741,7 +748,7 @@ async fn test_provider_loss_disputed_delete_protects_its_cancellation_from_expir
         [&stop],
         "the stop survives ordinary expiry"
     );
-    accept_activity_successor(&mut wallet, &mut phone, &target).await;
+    accept_activity_successor(&w, &mut wallet, &mut phone, &target).await;
     wallet.receive(None).await.unwrap();
     assert_eq!(
         wallet.request(&request).await.unwrap().status,
@@ -750,7 +757,6 @@ async fn test_provider_loss_disputed_delete_protects_its_cancellation_from_expir
 }
 
 #[tokio::test]
-#[ignore = "the pinned Switch keeps a proved write current and reports a same-version upload as divergent (Switch wire 7.4.14): this setup no longer reaches a different write at the held version"]
 async fn test_provider_loss_disputed_request_keeps_its_known_payers_proof() {
     let w = World::new();
     let lists = Arc::new(crate::common::ListsStore::default());
@@ -815,25 +821,34 @@ async fn test_provider_loss_disputed_request_keeps_its_known_payers_proof() {
     )
     .unwrap();
     shop.receive(None).await.unwrap();
-    let kept = shop.app().protocol_scan("paykit", b"pr/").await.unwrap();
+    // The record is divergent: the proof from the signed request's recipient is kept over it
+    // for the user's confirmation, not dropped as the flagged sender's spam (Paykit spec 6).
+    let key = shop.app().record_key(&target).unwrap();
+    let kept = kept_over(&shop, &key).await;
     assert!(
-        kept.iter().any(|(key, _)| key.ends_with(proof.as_bytes())),
-        "keep the original proof from the signed request's recipient"
+        kept.iter().any(|(id, _)| id.ends_with(proof.as_str())),
+        "keep the original proof from the signed request's recipient: {kept:?}"
     );
     assert_eq!(shop.spam_count(&w.bob_id()).await.unwrap(), 0);
-    let key = shop.app().record_key(&target).unwrap();
+    // The credit waits; a cancellation, a stop, would go over the divergent record.
     for refusal in [
         shop.verify_payment(&key).await.unwrap_err(),
         shop.confirm_payment(&key).await.unwrap_err(),
-        shop.cancel_sent_request(&key, None).await.unwrap_err(),
     ] {
+        // Nothing is credited: the record holds no proof while the proof is kept, or the
+        // record is paused for the user.
         assert!(
-            matches!(refusal.refusal(), Some(Refusal::NotNow(why)) if why.contains("another write at the held activity")),
+            matches!(
+                refusal.refusal(),
+                Some(Refusal::NotFound) | Some(Refusal::Divergent { .. })
+            ),
             "{refusal:?}"
         );
     }
-    accept_activity_successor(&mut shop, &mut phone, &target).await;
+    accept_activity_successor(&w, &mut shop, &mut phone, &target).await;
+    confirm_reported_pauses(&mut shop).await;
     shop.receive(None).await.unwrap();
+    assert!(kept_over(&shop, &key).await.is_empty());
     let sale = shop
         .payee_activity()
         .await
@@ -851,7 +866,6 @@ async fn test_provider_loss_disputed_request_keeps_its_known_payers_proof() {
 }
 
 #[tokio::test]
-#[ignore = "the pinned Switch keeps a proved write current and reports a same-version upload as divergent (Switch wire 7.4.14): this setup no longer reaches a different write at the held version"]
 async fn test_provider_loss_disputed_subscription_classifies_replies_by_its_signed_payer() {
     use crate::periods::{january_details, monthly, period_proof};
     use paykit_lib::collections::Collection;
@@ -945,7 +959,7 @@ async fn test_provider_loss_disputed_subscription_classifies_replies_by_its_sign
             );
         }
         assert_eq!(shop.spam_count(&w.carol_id()).await.unwrap(), 1);
-        accept_activity_successor(&mut shop, &mut phone, &target).await;
+        accept_activity_successor(&w, &mut shop, &mut phone, &target).await;
         shop.receive(None).await.unwrap();
         let sale = shop
             .payee_activity()
@@ -959,7 +973,6 @@ async fn test_provider_loss_disputed_subscription_classifies_replies_by_its_sign
 }
 
 #[tokio::test]
-#[ignore = "the pinned Switch keeps a proved write current and reports a same-version upload as divergent (Switch wire 7.4.14): this setup no longer reaches a different write at the held version"]
 async fn test_provider_loss_credit_uses_the_signed_payer_of_a_disputed_period() {
     use crate::periods::{january_details, monthly};
     use paykit_lib::collections::Collection;
@@ -1018,9 +1031,22 @@ async fn test_provider_loss_credit_uses_the_signed_payer_of_a_disputed_period() 
         follow_loss(&mut shop).await;
         let verified = shop.verify_payment(&credit).await;
         if same_payer || delete_parent {
+            // The same payer's divergent sale, or a divergent delete whose payer can't be
+            // told, holds the credit for the user, also with the consent that the payment may
+            // be credited already (Paykit spec 8.1 step 4).
+            assert!(matches!(
+                verified.unwrap_err().refusal(),
+                Some(Refusal::MaybeCredited)
+            ));
+            let details = paykit_sdk::ReceiptDetails::default()
+                .with_maybe_credited_confirmed(UserConfirmed::new());
+            let refused = shop
+                .confirm_payment_with(&credit, details)
+                .await
+                .unwrap_err();
             assert!(
-                matches!(verified.as_ref().err().and_then(PaykitError::refusal), Some(Refusal::NotNow(why)) if why.contains("another write at the held activity")),
-                "{verified:?}"
+                matches!(refused.refusal(), Some(Refusal::Divergent { records }) if records.iter().any(|r| r.record == sale && r.may_hold_credit)),
+                "{refused:?}"
             );
         } else {
             // The other payer's disputed period doesn't withhold this purchase. Its
@@ -1037,21 +1063,26 @@ async fn test_provider_loss_credit_uses_the_signed_payer_of_a_disputed_period() 
                 .unwrap()
                 .is_some());
         }
-        for (target, _) in targets {
-            let reason = if target == &parent {
-                "another write at the held activity"
-            } else {
-                "period record held doesn't read"
-            };
+        for (target, deleted) in targets {
             let refused = shop
                 .send_period_details(&sale, details.clone())
                 .await
                 .unwrap_err();
-            assert!(
-                matches!(refused.refusal(), Some(Refusal::NotNow(why)) if why.contains(reason)),
-                "{refused:?}"
-            );
-            accept_activity_successor(&mut shop, &mut phone, target).await;
+            let key = shop.app().record_key(target).unwrap();
+            // Nothing is sent: over a divergent delete the sale is gone as the copy holds it;
+            // over a divergent value the record is paused for the user (Paykit spec 6).
+            if deleted {
+                assert!(
+                    matches!(refused.refusal(), Some(Refusal::NotFound)),
+                    "{refused:?}"
+                );
+            } else {
+                assert!(
+                    matches!(refused.refusal(), Some(Refusal::Divergent { records }) if records.iter().any(|r| r.record == key)),
+                    "{refused:?}"
+                );
+            }
+            accept_activity_successor(&w, &mut shop, &mut phone, target).await;
         }
         confirm_reported_pauses(&mut shop).await;
         // The same period can take another signed set of details after both successors.
@@ -1060,7 +1091,6 @@ async fn test_provider_loss_credit_uses_the_signed_payer_of_a_disputed_period() 
 }
 
 #[tokio::test]
-#[ignore = "the pinned Switch keeps a proved write current and reports a same-version upload as divergent (Switch wire 7.4.14): this setup no longer reaches a different write at the held version"]
 async fn test_provider_loss_restore_keeps_its_held_answer_over_a_disputed_delete() {
     use crate::periods::queued;
     let w = World::new();
@@ -1088,7 +1118,8 @@ async fn test_provider_loss_restore_keeps_its_held_answer_over_a_disputed_delete
     let target = request_target(&request);
     recover_activity_with_phone_write(&w, &mut wallet, &mut phone, &target, true).await;
     follow_loss(&mut wallet).await;
-    confirm_reported_pauses(&mut wallet).await;
+    // The delete is divergent and the user hasn't confirmed it: its upload may still hold the
+    // request, so nothing is decided on it, and the answer stays held (Paykit spec 6).
     wallet.unblock(&w.bob_id()).await.unwrap();
     wallet.receive(None).await.unwrap();
     let answers = wallet.app().protocol_scan("paykit", b"ha/").await.unwrap();
@@ -1111,7 +1142,9 @@ async fn test_provider_loss_restore_keeps_its_held_answer_over_a_disputed_delete
         .unwrap()
         .iter()
         .any(|n| n.msg_id.as_deref() == Some(&answer)));
-    accept_activity_successor(&mut wallet, &mut phone, &target).await;
+    // A successor brings the request back; with the user's confirmation, the answer goes.
+    accept_activity_successor(&w, &mut wallet, &mut phone, &target).await;
+    confirm_reported_pauses(&mut wallet).await;
     wallet.receive(None).await.unwrap();
     assert!(wallet
         .app()
@@ -1129,7 +1162,6 @@ async fn test_provider_loss_restore_keeps_its_held_answer_over_a_disputed_delete
 }
 
 #[tokio::test]
-#[ignore = "the pinned Switch keeps a proved write current and reports a same-version upload as divergent (Switch wire 7.4.14): this setup no longer reaches a different write at the held version"]
 async fn test_provider_loss_restore_waits_for_the_parent_before_resending_period_details() {
     use crate::periods::{january_details, monthly, queued};
     use paykit_lib::collections::Collection;
@@ -1169,7 +1201,7 @@ async fn test_provider_loss_restore_waits_for_the_parent_before_resending_period
         .unwrap()
         .is_some());
     assert!(!queued(&shop, &sent.msg_id).await);
-    accept_activity_successor(&mut shop, &mut phone, &target).await;
+    accept_activity_successor(&w, &mut shop, &mut phone, &target).await;
     shop.receive(None).await.unwrap();
     assert!(crate::common::possibly_delivered(&shop, &sent.msg_id).await);
     assert!(shop
@@ -1181,7 +1213,6 @@ async fn test_provider_loss_restore_waits_for_the_parent_before_resending_period
 }
 
 #[tokio::test]
-#[ignore = "the pinned Switch keeps a proved write current and reports a same-version upload as divergent (Switch wire 7.4.14): this setup no longer reaches a different write at the held version"]
 async fn test_provider_loss_restore_reconciles_history_after_an_activity_successor() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -1221,8 +1252,15 @@ async fn test_provider_loss_restore_reconciles_history_after_an_activity_success
             .any(|d| d.attempts.contains(&attempt_id)),
         "{report:?}"
     );
-    assert!(wallet.payments().await.unwrap().is_empty(), "{report:?}");
-    accept_activity_successor(&mut wallet, &mut phone, &target).await;
+    // The restored attempt waits on its divergent record, paid once (Paykit spec 6).
+    assert!(
+        report.resolved.iter().any(
+            |p| matches!(p, PayOutcome::RecordDivergent { attempt_id: id, .. } if *id == attempt_id)
+        ),
+        "{report:?}"
+    );
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+    accept_activity_successor(&w, &mut wallet, &mut phone, &target).await;
     confirm_reported_pauses(&mut wallet).await;
     let report = wallet.reconcile().await.unwrap();
     assert!(
@@ -1236,7 +1274,6 @@ async fn test_provider_loss_restore_reconciles_history_after_an_activity_success
 }
 
 #[tokio::test]
-#[ignore = "the pinned Switch keeps a proved write current and reports a same-version upload as divergent (Switch wire 7.4.14): this setup no longer reaches a different write at the held version"]
 async fn test_provider_loss_kept_and_stored_details_wait_for_each_disputed_record() {
     use crate::periods::{january_details, monthly};
     use pubky_switch_client::testing::Fault;
@@ -1302,10 +1339,18 @@ async fn test_provider_loss_kept_and_stored_details_wait_for_each_disputed_recor
         next.send_plaintext(w.bob_id(), shop.app().cert(), &message, &[wallet.app_id()])
             .unwrap();
         wallet.app_mut().receive(None).await.unwrap();
-        let kept = wallet.app().protocol_scan("paykit", b"pr/").await.unwrap();
+        // The details wait for the user's confirmation of the divergent record, held on the
+        // feed, never written into the period record (Paykit spec 6); the notices below show
+        // they are given up, not dropped, once they are 30 days old.
+        let held = wallet
+            .app_mut()
+            .read_record(&period)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(
-            kept.iter().any(|(key, _)| key.ends_with(id.as_bytes())),
-            "parent={dispute_parent} {kept:?}"
+            !String::from_utf8_lossy(held.content.value().unwrap()).contains(id.as_str()),
+            "parent={dispute_parent}: the details wait over the divergent record"
         );
         wallet.receive(None).await.unwrap();
         assert!(!wallet
@@ -1330,7 +1375,6 @@ async fn test_provider_loss_kept_and_stored_details_wait_for_each_disputed_recor
 }
 
 #[tokio::test]
-#[ignore = "the pinned Switch keeps a proved write current and reports a same-version upload as divergent (Switch wire 7.4.14): this setup no longer reaches a different write at the held version"]
 async fn test_provider_loss_another_apps_request_stays_in_custody_during_a_dispute() {
     use paykit_lib::collections::Collection;
     use paykit_lib::records::{ActivityRecord, ActivitySide};
@@ -1382,6 +1426,14 @@ async fn test_provider_loss_another_apps_request_stays_in_custody_during_a_dispu
     });
     let read = wallet.receive(None).await.unwrap();
     assert!(read.records_unlisted.is_some(), "{read:?}");
+    // A delete the copy holds while it may lack records decides nothing (Paykit spec 8.1,
+    // "Records not listed yet"): the request stays kept, neither written nor given up.
+    assert_eq!(
+        wallet.app().protocol_scan("paykit", b"dw/").await.unwrap(),
+        kept
+    );
+    // Listed again, it is given up with the host's notice, 30 days old.
+    wallet.receive(None).await.unwrap();
     assert!(wallet
         .app()
         .protocol_scan("paykit", b"dw/")
@@ -1398,7 +1450,6 @@ async fn test_provider_loss_another_apps_request_stays_in_custody_during_a_dispu
 }
 
 #[tokio::test]
-#[ignore = "the pinned Switch keeps a proved write current and reports a same-version upload as divergent (Switch wire 7.4.14): this setup no longer reaches a different write at the held version"]
 async fn test_provider_loss_missing_record_epoch_holds_the_original_request_proof_and_receipt() {
     use crate::unrequested::{store_bundle, store_bundle_at, store_bundle_from};
     use paykit_lib::collections::Collection;
@@ -1522,8 +1573,7 @@ async fn test_provider_loss_missing_record_epoch_holds_the_original_request_proo
             "older epoch {sealed_at}, current {current}: {held:?}"
         );
     }
-    let next =
-        recover_competing_writes(&w, &mut observer, &mut phone, &targets, writes, false).await;
+    let next = recover_competing_writes(&w, &mut observer, &mut phone, &targets, writes).await;
     for &(target, _) in &targets {
         let held = observer
             .app_mut()
@@ -1531,7 +1581,7 @@ async fn test_provider_loss_missing_record_epoch_holds_the_original_request_proo
             .await
             .unwrap()
             .unwrap();
-        assert!(held.different_write_at_held_version);
+        assert!(held.divergent && !held.different_write_at_held_version);
         assert!(
             matches!(held.content, RecordContent::Unreadable(Unopened::KeyNotHeld { data_epoch }) if data_epoch==sealed_at),
             "older epoch {sealed_at}, current {current}: {held:?}"
@@ -1614,25 +1664,34 @@ async fn test_provider_loss_missing_record_epoch_holds_the_original_request_proo
         );
     }
     assert_eq!(observer.spam_count(&w.bob_id()).await.unwrap(), 0);
-    let replies = observer
-        .app()
-        .protocol_scan("paykit", b"pr/")
-        .await
-        .unwrap();
-    for message in [&messages[0], &messages[2]] {
-        assert!(replies
-            .iter()
-            .any(|(key, _)| key.ends_with(message.message().msg_id.as_bytes())));
-    }
-    assert_eq!(
-        observer
-            .app()
-            .protocol_scan("paykit", b"dw/")
+    // Read now, the records show what arrived before the loss, and each is paused for the
+    // user (Paykit spec 6): the proof the sale record holds already, and the receipt kept
+    // over the paused purchase record. Neither is dropped.
+    let mut kept = Vec::new();
+    let mut held = String::new();
+    for &(target, _) in &targets {
+        kept.extend(kept_over(&observer, &observer.app().record_key(target).unwrap()).await);
+        let record = observer
+            .app_mut()
+            .read_record(target)
             .await
             .unwrap()
-            .len(),
-        1
-    );
+            .unwrap();
+        held.push_str(&String::from_utf8_lossy(record.content.value().unwrap()));
+    }
+    for message in [&messages[0], &messages[2]] {
+        let id = message.message().msg_id.as_str();
+        assert!(
+            kept.iter().any(|(key, _)| key.ends_with(id)) || held.contains(id),
+            "{kept:?}"
+        );
+    }
+    assert!(observer
+        .divergent_records()
+        .await
+        .unwrap()
+        .iter()
+        .all(|shown| shown.paused));
 }
 
 #[tokio::test]
@@ -3571,15 +3630,8 @@ async fn test_provider_loss_competing_upload_is_divergent_and_the_receipt_waits_
         .record;
     let target = request_target(&request);
     let writes = competing_activity_writes(&w, &mut wallet, &mut phone, &[(&target, false)]).await;
-    let _next = recover_competing_writes(
-        &w,
-        &mut wallet,
-        &mut phone,
-        &[(&target, false)],
-        writes,
-        true,
-    )
-    .await;
+    let _next =
+        recover_competing_writes(&w, &mut wallet, &mut phone, &[(&target, false)], writes).await;
     let key = wallet.app().record_key(&target).unwrap();
     follow_loss(&mut wallet).await;
     let shown = wallet
@@ -3631,7 +3683,7 @@ async fn recover_with_divergent_phone_writes(
     targets: &[(&pubky_switch_client::app::RecordTarget, bool)],
 ) -> Arc<ScriptedSwitch> {
     let writes = competing_activity_writes(w, wallet, phone, targets).await;
-    recover_competing_writes(w, wallet, phone, targets, writes, true).await
+    recover_competing_writes(w, wallet, phone, targets, writes).await
 }
 
 #[tokio::test]
@@ -3786,4 +3838,256 @@ async fn test_provider_loss_competing_upload_is_divergent_and_the_credit_waits_f
     assert!(view.receipt.is_some(), "{view:?}");
     assert_eq!(view.status, RequestStatus::Paid);
     assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+/// Alice's wallet, holding `paykit_pay` and `paykit_manage_contacts`, with bob's request
+/// received and bob blocked; then her provider is lost, and the new service has no room for
+/// bob's deny entry, so the list upload that carries it stays owed: the recovery waits at its
+/// list step, while writes and receiving go on (Switch wire 7.4.14, "Lists"). Alice's phone, holding `paykit_pay` alone, follows the
+/// loss too. Returns the wallet, the phone and the request.
+async fn loss_with_an_owed_deny_entry(w: &World) -> (Paykit, Paykit, RequestRef) {
+    loss_with_an_owed_deny_entry_after(w, false).await
+}
+
+/// [`loss_with_an_owed_deny_entry`], the wallet's first evidence upload unanswered when
+/// `interrupted`, so a receive reads the lists before the list step.
+async fn loss_with_an_owed_deny_entry_after(
+    w: &World,
+    interrupted: bool,
+) -> (Paykit, Paykit, RequestRef) {
+    let mut wallet = w
+        .join(
+            &w.alice,
+            "wallet",
+            paykit_sdk::AppScopes::new()
+                .pay()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+        )
+        .await;
+    let mut phone = w
+        .join(
+            &w.alice,
+            "phone",
+            paykit_sdk::AppScopes::new().pay().build().unwrap(),
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet.block(&w.bob_id()).await.unwrap();
+    // Each app's copy of the lists holds the block when the provider is lost: that copy is
+    // what the loss's list upload carries.
+    for app in [&mut wallet, &mut phone] {
+        assert!(app
+            .app_mut()
+            .allow_list()
+            .await
+            .unwrap()
+            .deny
+            .contains(&w.bob_id()));
+    }
+    let next = declare_loss(w);
+    if interrupted {
+        next.fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/recovery/upload".into(),
+            after: 0,
+        });
+    }
+    // The new service's deny list has no room for bob's entry: each list upload is refused
+    // for it (Switch wire 7.4.14, `429 quota_exceeded` with `limit` `deny`).
+    for _ in 0..64 {
+        next.fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/recovery/upload".into(),
+            code: pubky_switch_core::http::ErrorCode::QuotaExceeded,
+            current: serde_json::json!({ "limit": "deny", "over": 1 }),
+        });
+    }
+    for app in [&mut wallet, &mut phone] {
+        app.app_mut().refresh_identity().await.unwrap();
+        for _ in 0..4 {
+            let _ = app.receive(None).await;
+        }
+        assert_lists_step_owes_bob(w, app).await;
+    }
+    (wallet, phone, request)
+}
+
+/// The recovery waits at its list step, its upload still carrying bob's deny entry.
+async fn assert_lists_step_owes_bob(w: &World, app: &Paykit) {
+    let info = app.app().recovery_info().await.unwrap().unwrap();
+    assert_eq!(
+        info.step,
+        pubky_switch_client::app::RecoveryStep::Lists,
+        "{info:?}"
+    );
+    let owed = app.app().recovery_deny_entries().await.unwrap();
+    assert!(
+        owed.iter().any(|entry| entry.pubky == w.bob_id()),
+        "{owed:?}"
+    );
+}
+
+/// Reconcile and end it as the user, as [`follow_loss`] does once the steps are done.
+async fn reconcile_and_end(app: &mut Paykit) {
+    let mut reconciled = app.reconcile().await;
+    for _ in 0..4 {
+        let Err(error) = &reconciled else { break };
+        assert!(
+            matches!(error.refusal(), Some(Refusal::NotNow(_))),
+            "{error}"
+        );
+        reconciled = app.reconcile().await;
+    }
+    reconciled.unwrap();
+    app.end_reconcile(UserConfirmed::new()).await.unwrap();
+}
+
+/// The block floor `app` holds in the identity's `block_floor` record (Paykit wire 5.6).
+async fn block_floor(app: &Paykit) -> Option<u64> {
+    app.app()
+        .records_of("block_floor")
+        .await
+        .unwrap()
+        .iter()
+        .find_map(|record| {
+            let value = record.content.value()?;
+            paykit_lib::records::BlockFloorRecord::read(value)
+                .ok()
+                .map(|record| record.floor_ms)
+        })
+}
+
+#[tokio::test]
+async fn test_provider_loss_owed_deny_entry_keeps_its_peer_blocked_for_payments() {
+    // The new service doesn't hold bob's deny entry until the list upload lands; the lists
+    // Paykit reads during the list step still count him blocked, also once the user ends the
+    // reconciliation, so his request isn't paid without the user's confirmation.
+    let w = World::new();
+    let (mut wallet, _phone, request) = loss_with_an_owed_deny_entry(&w).await;
+    reconcile_and_end(&mut wallet).await;
+    // Well within the copy's refresh interval: a copy read before the list step lacks bob's
+    // entry, and is not taken as fresh while the upload is owed.
+    assert_lists_step_owes_bob(&w, &wallet).await;
+    // Payable before the loss, the request asks first whether it was paid then.
+    let doubted = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome;
+    let refused = wallet
+        .pay_request(
+            &request,
+            PayOptions::default().with_may_be_paid_confirmed(doubt_of(&doubted)),
+        )
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::Blocked { .. })),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_provider_loss_unblock_leaves_an_owed_deny_entry_out_of_the_upload() {
+    // The user unblocks bob while his deny entry waits in the list upload: the unblock takes
+    // him out of that upload, after raising the shared floor, rather than finding nothing to
+    // remove at the new service.
+    let w = World::new();
+    let (mut wallet, _phone, _request) = loss_with_an_owed_deny_entry(&w).await;
+    assert_eq!(block_floor(&wallet).await, None);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    let owed = wallet.app().recovery_deny_entries().await.unwrap();
+    assert!(
+        owed.iter().all(|entry| entry.pubky != w.bob_id()),
+        "{owed:?}"
+    );
+    assert!(block_floor(&wallet).await.is_some());
+}
+
+#[tokio::test]
+async fn test_provider_loss_unblock_with_lists_read_alone_raises_the_floor_first() {
+    // An app holding `paykit_pay` without `paykit_manage_contacts` may still leave an owed
+    // deny entry out of the upload, which unblocks its peer: it raises the shared floor
+    // first, as every payer's unblock does.
+    let w = World::new();
+    let (_wallet, mut phone, _request) = loss_with_an_owed_deny_entry(&w).await;
+    assert!(!phone
+        .app()
+        .cert()
+        .has_permission(pubky_switch_core::scopes::Permission::ListsManage));
+    assert_lists_step_owes_bob(&w, &phone).await;
+    assert_eq!(block_floor(&phone).await, None);
+    phone.unblock(&w.bob_id()).await.unwrap();
+    let owed = phone.app().recovery_deny_entries().await.unwrap();
+    assert!(
+        owed.iter().all(|entry| entry.pubky != w.bob_id()),
+        "{owed:?}"
+    );
+    assert!(block_floor(&phone).await.is_some());
+}
+
+#[tokio::test]
+async fn test_provider_loss_unblock_with_lists_read_alone_keeps_a_peer_the_service_denies() {
+    // The phone may only leave bob out of its own owed upload, but another own app's block
+    // already holds him at the new service: he stays blocked for the phone's payments.
+    let w = World::new();
+    let (mut wallet, mut phone, _request) = loss_with_an_owed_deny_entry(&w).await;
+    wallet.app_mut().deny(&w.bob_id()).await.unwrap();
+    phone.unblock(&w.bob_id()).await.unwrap();
+    let owed = phone.app().recovery_deny_entries().await.unwrap();
+    assert!(
+        owed.iter().all(|entry| entry.pubky != w.bob_id()),
+        "{owed:?}"
+    );
+    assert!(phone
+        .app_mut()
+        .allow_list()
+        .await
+        .unwrap()
+        .deny
+        .contains(&w.bob_id()));
+    // The phone's copy of the deny list, which its payments are judged by, still holds him.
+    let copy: serde_json::Value = serde_json::from_slice(
+        &phone
+            .app()
+            .protocol_get("paykit", b"dl")
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    let copy: Vec<[u8; 32]> = serde_json::from_value(copy["d"].clone()).unwrap();
+    assert!(copy.contains(&w.bob_id()));
+}
+
+#[tokio::test]
+async fn test_provider_loss_list_read_before_the_list_step_isnt_taken_as_fresh() {
+    // The evidence upload is interrupted once, and a receive reads the lists meanwhile, when
+    // the new service holds none of the loss's deny entries and the client owes them all.
+    // At the list step, seconds later, that copy isn't taken as fresh: bob stays blocked for
+    // payments (Switch wire 7.4.14, "Lists"; Paykit spec 8.1).
+    let w = World::new();
+    let (mut wallet, _phone, request) = loss_with_an_owed_deny_entry_after(&w, true).await;
+    reconcile_and_end(&mut wallet).await;
+    let doubted = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome;
+    let refused = wallet
+        .pay_request(
+            &request,
+            PayOptions::default().with_may_be_paid_confirmed(doubt_of(&doubted)),
+        )
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::Blocked { .. })),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
 }
