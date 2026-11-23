@@ -461,7 +461,7 @@ The method declares `payment_time_tolerance_ms` with its declaration. The payee 
 | `Refusal::UnsupportedEndpoint` | Ask the user to choose a compatible endpoint or payment method. |
 | `Refusal::WaitingForList` | Show that a newer Private Payment List was requested. A public destination is a separate user choice. |
 | `Refusal::ListDeliveryUnknown` | Show the counterparty, whether the list was a withdrawal and how long the earlier or current list may be paid. `withdraw_list_from` has already recorded the counterparty as withdrawn. Pass the same value to `send_list_again` only after the user confirms another version. `Ok` means nothing of unknown outcome is left. `NotNow` keeps the confirmation: a later call or receive sends the list once it can, which for a nonempty list to a blocked counterparty is after the block ends. |
-| `Refusal::Transfer` | Show the actual transfer or fee quote and return that exact quote only on confirmation. |
+| `Refusal::Transfer` | Show the actual transfer or fee quote and return that exact quote only on confirmation. The confirmation binds the fee shown when it is above the cap the quote was judged under, or when the method can't tell what it transfers; a quote judged under another cap is refused again with a new one. |
 | `Refusal::PricedByRate` | Obtain authorization for this exact quote from the user or their bounded policy (Scheduling a Billing Period). |
 | `Refusal::IdentityUnavailable` | Refresh the required identity before retrying. |
 | `Refusal::IdentityUnconfirmed` | Ask for explicit confirmation before using a public destination without Switch confirmation. |
