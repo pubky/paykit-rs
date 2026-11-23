@@ -104,8 +104,8 @@ impl Retired {
 }
 
 impl CompactionRead<'_> {
-    /// Verify the full successor in the same grant and generation, then identify the
-    /// paid entries it removed. The aggregate amount alone cannot identify a payment.
+    /// Verify the full successor in the same grant, then identify the paid entries it
+    /// removed. The aggregate amount alone cannot identify a payment.
     fn retired(&self, app: &App, receipt: &LedgerCompaction) -> Option<Vec<Retired>> {
         let before = AppliedRecord::retained(app, self.target, &receipt.before)?;
         let after = AppliedRecord::retained(app, self.target, &receipt.after)?;
@@ -124,8 +124,11 @@ impl CompactionRead<'_> {
         };
         let held = bind(&before)?;
         let newer = bind(&after)?;
-        if before.revision.generation != self.current.revision.generation
-            || after.revision.generation != self.current.revision.generation
+        // Both writes are evidence of what happened, of generations in the grant's history
+        // (`AppliedRecord::retained`); an orderly generation change continues the sequence, so
+        // a receipt from before it still orders against the ledger written after it.
+        if before.revision.generation > after.revision.generation
+            || after.revision.generation > self.current.revision.generation
             || before.revision.seq <= self.accepted.grant.revision.seq
             || after.revision.seq <= before.revision.seq
             || after.revision.seq > self.current.revision.seq

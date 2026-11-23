@@ -17,6 +17,15 @@ use std::collections::{HashMap, HashSet};
 
 use super::ReservationClaim;
 
+/// What an applied operation is verified for ([`AppliedOperation::applied`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Purpose {
+    /// Evidence of what happened: of a generation in the grant's history.
+    Evidence,
+    /// It authorizes or dispatches a new attempt: of the current generation.
+    Authorizes,
+}
+
 struct AppliedOperation {
     op: SignedOp,
     proof: TransitionProof,
@@ -24,26 +33,36 @@ struct AppliedOperation {
 }
 
 impl AppliedOperation {
-    /// A claim operation, which an app acts on only in the generation its own
-    /// `identity.json` names (Pubky Switch spec, Section 12.5).
-    fn verify(app: &App, kept: &KeptOp) -> Option<Self> {
-        let applied = Self::verify_original(app, kept)?;
-        (applied.op.body().generation == app.own_identity().generation()).then_some(applied)
+    /// `kept` verified for `purpose`: the one place the executor decides which generation an
+    /// applied operation must be of.
+    ///
+    /// - **Evidence of what happened** ([`Purpose::Evidence`]): a record write, an attempt's
+    ///   opening or outcome, a compaction receipt. Its transition proof keeps dating it,
+    ///   verified with its own generation's key as the current `identity.json` lists it,
+    ///   through an orderly generation change or a cooperative move (Pubky Switch spec,
+    ///   Sections 4.3 and 12.5). It counts while that generation is in the grant's history,
+    ///   after the last provider loss, which nothing carries across (Paykit spec 8.3, "After
+    ///   provider loss").
+    /// - **What authorizes or dispatches a new attempt** ([`Purpose::Authorizes`]): acted on
+    ///   only in the current generation, so a stale instance of an earlier generation
+    ///   authorizes nothing (Pubky Switch spec, Section 12.5).
+    fn applied(app: &App, kept: &KeptOp, purpose: Purpose) -> Option<Self> {
+        Self::verify_original(app, kept)?.fit_for(app, purpose)
     }
 
-    /// A record write, whose transition proof keeps dating it, with its generation's key,
-    /// through an orderly generation change or a cooperative move (Pubky Switch spec,
-    /// Section 12.5): it counts when its generation is in the grant history, after the last
-    /// provider loss, which nothing carries across (Paykit spec 8.3, "After provider loss").
-    fn verify_record(app: &App, kept: &KeptOp) -> Option<Self> {
-        let applied = Self::verify_original(app, kept)?;
+    /// Whether this applied operation's generation fits `purpose` ([`Self::applied`]).
+    fn fit_for(self, app: &App, purpose: Purpose) -> Option<Self> {
         let current = app.own_identity();
-        super::in_grant_history(
-            applied.op.body().generation,
-            current.generation(),
-            current.body().recovery_from,
-        )
-        .then_some(applied)
+        let generation = self.op.body().generation;
+        match purpose {
+            Purpose::Evidence => super::in_grant_history(
+                generation,
+                current.generation(),
+                current.body().recovery_from,
+            ),
+            Purpose::Authorizes => generation == current.generation(),
+        }
+        .then_some(self)
     }
 
     fn verify_original(app: &App, kept: &KeptOp) -> Option<Self> {
@@ -107,17 +126,16 @@ impl AppliedOperation {
             EntryOutcome::Failed if fields.kind == ClaimType::Failed => Outcome::Failed,
             _ => return None,
         };
-        if &claim.claim_key != obligation
-            || claim.attempt_id != id.to_bytes()
-            || body.generation != app.own_identity().generation()
-        {
+        if &claim.claim_key != obligation || claim.attempt_id != id.to_bytes() {
             return None;
         }
-        let applied = Self::verify(app, kept).or_else(|| {
+        // An outcome is evidence of what happened to the attempt.
+        let applied = Self::applied(app, kept, Purpose::Evidence).or_else(|| {
             certificates
                 .iter()
                 .filter(|c| c.app_id() == writer && c.signed() != &kept.cert)
                 .find_map(|c| Self::with_certificate(app, kept, c.clone()))
+                .and_then(|applied| applied.fit_for(app, Purpose::Evidence))
         })?;
         let proof = applied.proof.body();
         let view = ClaimView::from_value(&proof.state).ok()?;
@@ -217,8 +235,9 @@ impl<'a> ClaimResults<'a> {
                 let owner = result.cert.app_id() == self.app.app_id();
                 !matches!(claim.state, ClaimState::Failed { by_owner } if owner != by_owner)
                     && opened < proof.seq
+                    // The sequence continues across an orderly generation change.
                     && before.is_none_or(|copy| {
-                        proof.generation == copy.revision.generation
+                        proof.generation <= copy.revision.generation
                             && proof.seq < copy.revision.seq
                             && proof.server_time <= copy.at_ms
                     })
@@ -288,7 +307,7 @@ impl AppliedRecord {
         entry: &LedgerEntry,
         grant: &Condition,
     ) -> bool {
-        let Some(applied) = AppliedOperation::verify(app, kept) else {
+        let Some(applied) = AppliedOperation::applied(app, kept, Purpose::Evidence) else {
             return false;
         };
         let b = applied.op.body();
@@ -319,7 +338,7 @@ impl AppliedRecord {
         obligation: &[u8; 32],
         id: paykit_lib::AttemptId,
     ) -> bool {
-        let Some(applied) = AppliedOperation::verify(app, kept) else {
+        let Some(applied) = AppliedOperation::applied(app, kept, Purpose::Evidence) else {
             return false;
         };
         let b = applied.op.body();
@@ -329,10 +348,11 @@ impl AppliedRecord {
         let Ok(claim) = fields.check() else {
             return false;
         };
+        // The sequence continues across an orderly generation change.
         b.app_id == Some(app.app_id())
             && b.conditions.contains(grant)
             && applied.proof.envelope().seq > self.revision.seq
-            && b.generation == self.revision.generation
+            && b.generation >= self.revision.generation
             && fields.kind == ClaimType::Attempt
             && &claim.claim_key == obligation
             && claim.attempt_id == id.to_bytes()
@@ -340,7 +360,11 @@ impl AppliedRecord {
     }
 
     pub(super) fn retained(app: &App, target: &RecordTarget, kept: &KeptOp) -> Option<Self> {
-        Self::from_operation(app, target, AppliedOperation::verify_record(app, kept)?)
+        Self::from_operation(
+            app,
+            target,
+            AppliedOperation::applied(app, kept, Purpose::Evidence)?,
+        )
     }
 
     /// A selected proposal may retain its original signed write after a cooperative move.
@@ -462,7 +486,7 @@ impl AppliedRecord {
         selected_condition: &Condition,
         kept: &KeptOp,
     ) -> Option<ApplicationRef> {
-        let deleted = AppliedOperation::verify_record(app, kept)?;
+        let deleted = AppliedOperation::applied(app, kept, Purpose::Evidence)?;
         let RecordValue::Delete = deleted.open_record(app, pending)? else {
             return None;
         };
@@ -571,10 +595,16 @@ impl AppliedRecord {
         // The native upload inventory can attach a renewed certificate with the same
         // signing key. The certificate of the accepted ledger also proves an opening
         // only when it verifies that operation and was in force at its proved time.
-        let applied = AppliedOperation::verify(app, kept).or_else(|| {
-            let applied = AppliedOperation::with_certificate(app, kept, self.cert.clone())?;
-            (applied.op.body().generation == app.own_identity().generation()
-                && applied.op.body().batch == self.op.body().batch
+        // An opening a complete ledger accepted is evidence of what happened; the opening of
+        // the reservation being made now authorizes its dispatch.
+        let purpose = match accepted_under {
+            Some(_) => Purpose::Evidence,
+            None => Purpose::Authorizes,
+        };
+        let applied = AppliedOperation::applied(app, kept, purpose).or_else(|| {
+            let applied = AppliedOperation::with_certificate(app, kept, self.cert.clone())?
+                .fit_for(app, purpose)?;
+            (applied.op.body().batch == self.op.body().batch
                 && applied.proof.envelope().server_time == self.at_ms)
                 .then_some(applied)
         })?;

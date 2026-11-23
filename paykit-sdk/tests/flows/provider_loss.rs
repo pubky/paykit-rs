@@ -44,8 +44,29 @@ pub(super) fn declare_third_loss(w: &World) -> Arc<ScriptedSwitch> {
     declare_loss_of(w, SWITCH_ORIGIN, [123; 32])
 }
 
+/// [`declare_loss`], with the next `identity.json` still listing the lost generation's
+/// service key, as a signer could: only the rule that nothing from before a loss carries
+/// across then refuses the lost generation's evidence.
+pub(super) fn declare_loss_keeping_key(w: &World) -> Arc<ScriptedSwitch> {
+    let lost = w.homeserver.identity_doc(&w.alice_id()).unwrap();
+    let entry = pubky_switch_core::records::ServiceKeyEntry {
+        generation: lost.generation(),
+        key: lost.inbox().service_key,
+    };
+    declare_loss_with(w, ALICE_ORIGIN, NEXT_SECRET, Some(entry))
+}
+
 /// [`declare_loss`] of the service at `lost_origin`, the new one under `secret`.
 fn declare_loss_of(w: &World, lost_origin: &str, secret: [u8; 32]) -> Arc<ScriptedSwitch> {
+    declare_loss_with(w, lost_origin, secret, None)
+}
+
+fn declare_loss_with(
+    w: &World,
+    lost_origin: &str,
+    secret: [u8; 32],
+    kept_key: Option<pubky_switch_core::records::ServiceKeyEntry>,
+) -> Arc<ScriptedSwitch> {
     let lost_generation = w
         .homeserver
         .identity_doc(&w.alice_id())
@@ -65,6 +86,7 @@ fn declare_loss_of(w: &World, lost_origin: &str, secret: [u8; 32]) -> Arc<Script
             body.generation = lost_generation + 1;
             body.inbox = Inbox::new(SWITCH_ORIGIN, next.service_key());
             body.recovery_from = Some(lost_generation);
+            body.service_keys.extend(kept_key);
         })
         .unwrap();
     next.deliver_identity(&doc).unwrap();
