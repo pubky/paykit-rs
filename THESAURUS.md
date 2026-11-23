@@ -154,7 +154,7 @@
 - **Related terms**: Payment Method, Attempt, Payment Proof, Settlement ID
 
 ### Settlement ID
-- **Definition**: The bytes a payment method defines to name one settlement, the same in every proof of it, such as a Lightning payment hash or an on-chain transaction ID, in one spelling per proof type. It keys the payee's record of a payment without a request (Paykit spec 8.4, Paykit wire 1.5).
+- **Definition**: The bytes the payment method defines to name one settlement, the same in every proof of it. The payee's payment method works it out from the proof's `proof` object and the Payment Endpoint Identifier; Paykit defines no settlement ID and no proof format, and whether a method names a settlement by a whole transaction or by one part of it is the method's. It keys the payee's record of a payment without a request (Paykit spec 8.4, Paykit wire 1.5).
 - **Related terms**: Payment Proof, Payment without a request
 
 ### Payer

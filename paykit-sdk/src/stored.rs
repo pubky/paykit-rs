@@ -647,7 +647,10 @@ impl Paykit {
             Body::PaymentProof(proof)
                 if first.is_none() && crate::protocol::writes_payee_label(&scopes, None) =>
             {
-                let Some(settlement) = self.rail.settlement_id(&proof.proof) else {
+                let Some(settlement) = self
+                    .rail
+                    .settlement_id(&proof.payment_endpoint_identifier, &proof.proof)
+                else {
                     return Ok(None);
                 };
                 record(
