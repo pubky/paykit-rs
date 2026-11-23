@@ -205,9 +205,10 @@ async fn reopen_held_payer(
         matches!(&blocked, paykit_sdk::PaykitError::Client(AppError::Refused(refused)) if refused == &reason),
         "{blocked}"
     );
-    // A resume under the notice returns the recovery, and no entry's refusal stops it
-    // before the others: the payment the method reports made after the first resume is
-    // journaled paid by the second, behind a failed entry whose outcome the notice holds.
+    // A recovery notice the client holds stops the wallet as a whole: a resume under it
+    // returns the recovery at the first entry whose step the notice refuses, and nothing
+    // after it is written or looked up, so the payment the method reports made later waits
+    // for the resume after the notice clears.
     let [first, later] = held;
     let refused = |resumed: &paykit_sdk::Result<Vec<PayOutcome>>| {
         matches!(resumed, Err(paykit_sdk::PaykitError::Client(AppError::Refused(refused))) if refused == &reason)
@@ -215,7 +216,7 @@ async fn reopen_held_payer(
     };
     let resumed = Box::pin(payer.resume_payments()).await;
     assert!(refused(&resumed), "{resumed:?}");
-    // The method reports the later payment made only now: the next resume must reach it.
+    // The method reports the later payment made only now; under the notice it still waits.
     rail.settle(&later, true);
     let resumed = Box::pin(payer.resume_payments()).await;
     assert!(refused(&resumed), "{resumed:?}");
@@ -227,7 +228,7 @@ async fn reopen_held_payer(
     };
     let payments = payer.payments().await?;
     assert_eq!(stage(first, &payments), Some(paykit_sdk::Stage::RailFailed));
-    assert_eq!(stage(later, &payments), Some(paykit_sdk::Stage::RailPaid));
+    assert_eq!(stage(later, &payments), Some(paykit_sdk::Stage::Paying));
     assert_eq!(
         rail.all_pay_calls(),
         BTreeMap::from([(first, 1), (later, 1)])

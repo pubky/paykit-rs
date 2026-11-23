@@ -2371,7 +2371,7 @@ async fn test_acceptance_never_sent_for_an_unsubmitted_payment_the_user_resolves
 }
 
 #[tokio::test]
-async fn test_resume_an_owed_acceptance_that_fails_stops_no_later_entry() {
+async fn test_resume_an_owed_acceptance_whose_store_fails_ends_the_resume() {
     // The journal is in attempt-ID order, which is random: worlds are made until the owed
     // entry comes first, so the resume meets its failure before the other entry.
     for _ in 0..40 {
@@ -2406,9 +2406,20 @@ async fn test_resume_an_owed_acceptance_that_fails_stops_no_later_entry() {
             continue;
         }
         assert_eq!(order[0].stage, paykit_sdk::Stage::AcceptanceOwed);
-        // The method shows the second paid; the first's acceptance still can't be queued.
+        // The method shows the second paid; the first's acceptance still can't be queued, as
+        // the store fails. A failing store stops the wallet: the resume returns it and goes
+        // no further, so the second waits for the next resume.
         w.rail.settle(&attempt_id, true);
-        wallet.resume_payments().await.unwrap();
+        let resumed = wallet.resume_payments().await;
+        assert!(
+            matches!(
+                &resumed,
+                Err(paykit_sdk::PaykitError::Client(
+                    pubky_switch_client::app::AppError::Store(_)
+                ))
+            ),
+            "{resumed:?}"
+        );
         let second = wallet
             .payments()
             .await
@@ -2416,14 +2427,7 @@ async fn test_resume_an_owed_acceptance_that_fails_stops_no_later_entry() {
             .into_iter()
             .find(|p| p.attempt_id == attempt_id)
             .unwrap();
-        assert!(
-            matches!(
-                second.stage,
-                paykit_sdk::Stage::RailPaid | paykit_sdk::Stage::AcceptanceOwed
-            ),
-            "{:?}",
-            second.stage
-        );
+        assert_eq!(second.stage, paykit_sdk::Stage::Paying);
         assert_eq!(w.rail.executions(&attempt_id), 1);
         return;
     }

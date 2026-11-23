@@ -913,15 +913,73 @@ fn repeat_hold(held: Held, attempt_id: AttemptId) -> Result<PayOutcome> {
     }
 }
 
+/// Whether `error` stops the wallet as a whole: an alarm, the local store failing, or the
+/// Switch client's word that the app stopped, left or is gone, holds a recovery notice, or
+/// has a restore question open (Switch spec 3.6, 12.2, 12.3, 12.4). A resume ends at it at
+/// once and returns it: nothing more is written, looked up or pruned.
+pub(crate) fn stops_resume(error: &PaykitError) -> bool {
+    let PaykitError::Client(client) = error else {
+        return false;
+    };
+    matches!(
+        client.unkept(),
+        AppError::Alarm(_)
+            | AppError::Store(_)
+            | AppError::Protocol(_)
+            | AppError::Refused(
+                ClientRefusal::Stopped
+                    | ClientRefusal::Left
+                    | ClientRefusal::Gone
+                    | ClientRefusal::RecoveryRequired { .. }
+                    | ClientRefusal::RestoreQuestionOpen
+            )
+    )
+}
+
 /// Whether a resume goes on past an entry that failed with `error`, and returns it after the
 /// other entries: the Switch client's refusal of that entry's step, kept or not, a wait
 /// included, or the switch's answer that the account awaits a recovery (Switch spec 12.4,
-/// 12.6, Switch wire 7.6).
+/// 12.6, Switch wire 7.6). A wallet-wide stop ([`stops_resume`]) is never deferred. Any other
+/// failure, such as the network or a service answer that isn't a refusal, still ends the
+/// resume.
 fn deferred(error: &PaykitError) -> bool {
+    if stops_resume(error) {
+        return false;
+    }
     if error.code() == Some(pubky_switch_core::http::ErrorCode::RecoveryRequired) {
         return true;
     }
     matches!(error, PaykitError::Client(client) if matches!(client.unkept(), AppError::Refused(_)))
+}
+
+/// How severe one entry's failure is, for the one a resume returns when several entries were
+/// left: higher wins, a tie keeps the first. In order: the switch's answer that the account
+/// awaits a recovery, which the host handles as a recovery; the Switch client's refusal of
+/// the entry's step; its wait, kept batches ahead included; `409 conflict`; the switch busy or unreachable (`429`, `503`,
+/// the network); the payment method that can't tell now; the own identity not readable or the
+/// SDK's own wait. A paid entry whose outcome record couldn't be written is an outcome, not an
+/// error, and ranks above all of these. A wallet-wide stop ([`stops_resume`]) is never ranked:
+/// it ends the resume.
+pub(crate) fn entry_failure_rank(error: &PaykitError) -> u8 {
+    use pubky_switch_core::http::ErrorCode as E;
+    if error.code() == Some(E::RecoveryRequired) {
+        return 7;
+    }
+    match error {
+        PaykitError::Client(client) => match client.unkept() {
+            AppError::Refused(ClientRefusal::NotNow(_) | ClientRefusal::KeptBatchesAhead(_)) => 5,
+            AppError::Refused(_) => 6,
+            _ => match error.code() {
+                Some(E::Conflict) => 4,
+                Some(E::RateLimited | E::QuotaExceeded | E::Unavailable | E::Staged) => 3,
+                _ => 3,
+            },
+        },
+        PaykitError::Conflict(_) => 4,
+        PaykitError::Rail(_) => 2,
+        PaykitError::Refused(Refusal::IdentityUnavailable(_) | Refusal::NotNow(_)) => 1,
+        _ => 0,
+    }
 }
 
 /// The Switch client's refusal of an attempt (Switch spec 3.6, 10.1, 12.3, 12.4), carried as
@@ -4338,14 +4396,35 @@ impl Paykit {
             // those after it are still resolved from the method's history.
             if entry.stage == Stage::AcceptanceOwed {
                 if !payer_waits {
-                    let _ = self.finish_owed_acceptance(&mut entry).await;
+                    // A wallet-wide stop ends the resume, and a refusal of the Switch client
+                    // is kept like any entry's; anything else, such as the network, leaves
+                    // the acceptance owed for the next resume, best effort.
+                    if let Err(error) = self.finish_owed_acceptance(&mut entry).await {
+                        if stops_resume(&error) {
+                            return Err(error);
+                        }
+                        if deferred(&error)
+                            && held_back.as_ref().is_none_or(|held| {
+                                entry_failure_rank(&error) > entry_failure_rank(held)
+                            })
+                        {
+                            held_back = Some(error);
+                        }
+                    }
                 }
                 continue;
             }
             match Box::pin(self.resume_entry(entry, payer_waits, &mut out)).await {
                 Ok(()) => {}
                 Err(error) if deferred(&error) => {
-                    held_back.get_or_insert(error);
+                    // The most severe refusal is what the caller gets: a recovery before a
+                    // wait.
+                    if held_back
+                        .as_ref()
+                        .is_none_or(|held| entry_failure_rank(&error) > entry_failure_rank(held))
+                    {
+                        held_back = Some(error);
+                    }
                 }
                 Err(error) => return Err(error),
             }
@@ -4463,7 +4542,13 @@ impl Paykit {
             && outcome == Outcome::Done
             && entry.may_place_acceptance()?
         {
-            let _ = self.finish_owed_acceptance(entry).await;
+            if let Err(error) = self.finish_owed_acceptance(entry).await {
+                // The resume's loop ends at a stop and keeps a refusal of the Switch client;
+                // anything else leaves the acceptance owed, best effort.
+                if stops_resume(&error) || deferred(&error) {
+                    return Err(error);
+                }
+            }
             return Ok(());
         }
         self.set_stage(entry, Stage::Finished).await
@@ -5684,7 +5769,7 @@ struct SharedState {
 
 #[cfg(test)]
 mod tests {
-    use pubky_switch_client::error::{ClientError, TransportError};
+    use pubky_switch_client::error::{ClientError, StoreError, TransportError};
 
     use super::*;
 
@@ -5749,8 +5834,54 @@ mod tests {
 
     #[test]
     fn test_pay_gate_resume_defers_the_clients_refusal_and_recovery() {
-        assert!(deferred(&held_back(ClientRefusal::Stopped)));
-        assert!(deferred(&held_back(ClientRefusal::RecoveryRequired {
+        // A wallet-wide stop is never deferred: the resume ends at it.
+        for stop in [
+            ClientRefusal::Stopped,
+            ClientRefusal::Left,
+            ClientRefusal::Gone,
+        ] {
+            assert!(!deferred(&held_back(stop.clone())), "{stop:?}");
+            assert!(stops_resume(&held_back(stop)));
+        }
+        let alarm = AppError::Alarm(pubky_switch_client::app::Alarm::Rollback {
+            reason: "seen".into(),
+        });
+        assert!(stops_resume(&PaykitError::Client(alarm)));
+        assert!(stops_resume(&PaykitError::Client(AppError::Store(
+            StoreError::Unavailable
+        ))));
+        // The most severe entry failure wins: the switch's recovery answer first, then the
+        // client's refusal, its wait, a conflict, the switch down, the method, the identity.
+        let answer = |code: pubky_switch_core::http::ErrorCode| {
+            PaykitError::Client(AppError::Switch(ClientError::Switch {
+                status: code.status(),
+                code,
+                message: String::new(),
+                current: serde_json::Value::Null,
+                known_version: None,
+                retry_after: None,
+            }))
+        };
+        use pubky_switch_core::http::ErrorCode as E;
+        let ranked = [
+            answer(E::RecoveryRequired),
+            held_back(ClientRefusal::Usage("bound".into())),
+            held_back(ClientRefusal::NotNow("kept batches".into())),
+            answer(E::Conflict),
+            answer(E::Unavailable),
+            PaykitError::Rail(crate::RailError::Unavailable("busy".into())),
+            PaykitError::Refused(Refusal::IdentityUnavailable("refresh".into())),
+        ];
+        for pair in ranked.windows(2) {
+            assert!(
+                entry_failure_rank(&pair[0]) > entry_failure_rank(&pair[1]),
+                "{:?} over {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+        // A held recovery notice stops the wallet; the switch's own answer defers the entry.
+        assert!(!deferred(&held_back(ClientRefusal::RecoveryRequired {
             generation: 3
         })));
         // A wait, such as every batch held before a provider loss's upload, defers its entry
@@ -5771,11 +5902,16 @@ mod tests {
             retry_after: None,
         });
         assert!(deferred(&PaykitError::Client(recovery)));
-        let kept = AppError::Kept {
-            batch_id: [1; 16],
-            error: Box::new(AppError::Refused(ClientRefusal::Left)),
+        let kept = |refusal| {
+            PaykitError::Client(AppError::Kept {
+                batch_id: [1; 16],
+                error: Box::new(AppError::Refused(refusal)),
+            })
         };
-        assert!(deferred(&PaykitError::Client(kept)));
+        assert!(deferred(&kept(ClientRefusal::Usage("bound".into()))));
+        // Kept or not, a stop ends the resume.
+        assert!(!deferred(&kept(ClientRefusal::Left)));
+        assert!(stops_resume(&kept(ClientRefusal::Left)));
     }
 
     #[test]
