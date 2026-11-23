@@ -295,6 +295,16 @@ impl Paykit {
     }
 
     /// Delete one record and commit it.
+    /// Whether a value is kept at `key`, unread: for one that only paces work and is
+    /// deleted whether or not it reads.
+    pub(crate) async fn local_holds(&self, key: &str) -> Result<bool> {
+        Ok(self
+            .app
+            .protocol_get(crate::protocol::BACKUP_NAME, key.as_bytes())
+            .await?
+            .is_some())
+    }
+
     pub(crate) async fn local_delete(&mut self, key: &str) -> Result<()> {
         let mut tx = Tx::default();
         tx.delete(key);

@@ -173,12 +173,14 @@ impl OwedRaises {
 /// is). A change to the floor record the app holds, or the floor becoming readable, ends the
 /// wait and the tries in a row (Paykit wire 5.6, Raising), as does a raise owed to another
 /// time, a new unblock's or widening's: `to_ms` is the time of the raise the tries were for.
+/// The wait is counted from `tried_at_ms`, the last try's time on this device's clock, and
+/// derived from `tries`; a clock that went back since ends it, so no wait outlasts its own
+/// length. The record only paces the tries: one that doesn't read is taken as none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RaiseRetry {
     tries: u32,
-    after_ms: u64,
-    wait_ms: u64,
+    tried_at_ms: u64,
     to_ms: u64,
     #[serde(deserialize_with = "Option::deserialize")]
     floor: Option<(u64, u64)>,
@@ -204,10 +206,17 @@ impl RaiseRetry {
             .min(LAST_RAISE_WAIT_MS)
     }
 
-    /// Whether the record reads as a writer keeps it: at least one try, waiting exactly as
-    /// long as its tries give.
+    /// Whether the record reads as a writer keeps it: at least one try.
     pub(crate) fn reads(&self) -> bool {
-        self.tries > 0 && self.wait_ms == Self::wait_after(self.tries)
+        self.tries > 0
+    }
+
+    /// Whether the wait after the last try is over at `now_ms`: at least the wait has passed
+    /// since it, or the time since can't be told, the clock having gone back.
+    fn waited(&self, now_ms: u64) -> bool {
+        now_ms
+            .checked_sub(self.tried_at_ms)
+            .is_none_or(|elapsed| elapsed >= Self::wait_after(self.tries))
     }
 }
 
@@ -642,7 +651,12 @@ impl Paykit {
 
     /// The raise this app left unwritten, as kept (`rr`).
     async fn raise_retry(&self) -> Result<Option<RaiseRetry>> {
-        self.local_get(key::RAISE_RETRY).await
+        match self.local_get(key::RAISE_RETRY).await {
+            // It only paces the tries: one that doesn't read is none, so the raise is tried
+            // at once and a fresh record written.
+            Err(error) if error.is_corrupt_state() => Ok(None),
+            result => result,
+        }
     }
 
     /// The version of the floor record the app holds, if any.
@@ -656,9 +670,17 @@ impl Paykit {
     }
 
     /// Whether the floor reads now for a raise: the scope keys of the current data epoch held,
-    /// its payer records listed and its value open (`floor_for_write`).
+    /// its payer records listed, its value open and taken, and not divergent
+    /// (`floor_for_write`).
     async fn floor_readable(&self) -> Result<bool> {
-        Ok(self.holds_scope_keys() && self.shared_floor().await? != SharedFloor::Unknown)
+        if !self.holds_scope_keys() {
+            return Ok(false);
+        }
+        let key = self.app.record_key(&floor_target(&self.identity()))?;
+        if write_not_taken(self.app.shared_record(&key).await?.as_ref()) {
+            return Ok(false);
+        }
+        Ok(matches!(self.shared_floor().await?, SharedFloor::Known(_)))
     }
 
     /// Whether the tries in a row of `retry` ended: the record the app holds changed, the
@@ -673,7 +695,7 @@ impl Paykit {
     /// which after one such try is at once, or once the floor changed (Paykit wire 5.6,
     /// Raising).
     async fn retry_due(&self, retry: &RaiseRetry) -> Result<bool> {
-        Ok(self.now() >= retry.after_ms || self.floor_changed_since(retry).await?)
+        Ok(retry.waited(self.now()) || self.floor_changed_since(retry).await?)
     }
 
     /// Note a try that left the raise unwritten: one more in a row, or the first after the
@@ -695,11 +717,9 @@ impl Paykit {
             _ => None,
         };
         let tries = previous.map_or(1, |retry| retry.tries.saturating_add(1));
-        let wait_ms = RaiseRetry::wait_after(tries);
         let retry = RaiseRetry {
             tries,
-            after_ms: self.now().saturating_add(wait_ms),
-            wait_ms,
+            tried_at_ms: self.now(),
             to_ms,
             floor: self.held_floor_version().await?,
             readable: self.floor_readable().await?,
@@ -718,7 +738,8 @@ impl Paykit {
         if !owed || self.floor_kept().await?.divergent {
             if !owed {
                 self.raise_unwritten = false;
-                if self.raise_retry().await?.is_some() {
+                // Deleted unread: nothing it holds matters once nothing is owed.
+                if self.local_holds(key::RAISE_RETRY).await? {
                     self.local_delete(key::RAISE_RETRY).await?;
                 }
             }
@@ -1472,18 +1493,24 @@ mod tests {
             [0, 60_000, 120_000, 240_000, 480_000, 600_000, 600_000, 600_000]
         );
         assert_eq!(RaiseRetry::wait_after(u32::MAX), 600_000);
-        let kept = |tries, wait_ms| RaiseRetry {
+        let kept = |tries| RaiseRetry {
             tries,
-            after_ms: 0,
-            wait_ms,
+            tried_at_ms: 1_000_000,
             to_ms: 5,
             floor: None,
             readable: false,
         };
-        assert!(kept(1, 0).reads() && kept(2, 60_000).reads() && kept(9, 600_000).reads());
-        assert!(!kept(0, 0).reads() && !kept(1, 60_000).reads());
-        assert!(!kept(2, 0).reads() && !kept(2, 60_001).reads());
-        assert!(!kept(2, 600_000).reads() && !kept(3, 600_001).reads());
+        assert!(kept(1).reads() && kept(9).reads() && !kept(0).reads());
+        // The wait counts from the try; a clock that went back since ends it at once.
+        assert!(kept(1).waited(1_000_000));
+        assert!(!kept(2).waited(1_059_999) && kept(2).waited(1_060_000));
+        assert!(!kept(9).waited(1_599_999) && kept(9).waited(1_600_000));
+        assert!(kept(9).waited(999_999) && kept(2).waited(0));
+        let future = RaiseRetry {
+            tried_at_ms: u64::MAX,
+            ..kept(9)
+        };
+        assert!(future.waited(1_000_000));
     }
 
     #[test]

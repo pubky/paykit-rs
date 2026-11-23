@@ -4366,7 +4366,16 @@ async fn test_blocked_return_raise_waiting_for_the_current_scope_key_tried_once_
 /// read, left unwritten twice in a row: it waits a minute (Paykit wire 5.6, Raising). Carol is
 /// invited and, with `carol_blocked`, blocked, as the wallet's lists show.
 async fn waiting_raise(w: &World, carol_blocked: bool) -> (Paykit, Paykit, Paykit, Paykit) {
-    let mut wallet = contacts_wallet(w, store()).await;
+    waiting_raise_in(w, carol_blocked, store()).await
+}
+
+/// [`waiting_raise`], the wallet's state in `storage`.
+async fn waiting_raise_in(
+    w: &World,
+    carol_blocked: bool,
+    storage: Arc<dyn StateStore>,
+) -> (Paykit, Paykit, Paykit, Paykit) {
+    let mut wallet = contacts_wallet(w, storage).await;
     wallet.app_mut().invite(&w.carol_id()).await.unwrap();
     let mut shop = w.shop().await;
     dropped_for_the_block(w, &mut wallet, &mut shop).await;
@@ -4507,6 +4516,163 @@ async fn test_blocked_return_one_read_leaving_two_raises_unwritten_counts_one_tr
 }
 
 #[tokio::test]
+async fn test_blocked_return_waiting_raise_tried_once_the_clock_goes_back() {
+    // Paykit wire 5.6, Raising: the raise waits a minute; the wallet's device clock then goes
+    // back two hours. The time since the last try can't be told, so the wait is over: the
+    // raise is tried at the next receive, and no wait outlasts its own length.
+    let w = World::new();
+    let storage = store();
+    let (wallet, _shop, _phone, _contacts) =
+        waiting_raise_in(&w, false, Arc::clone(&storage)).await;
+    let app_id = wallet.app_id();
+    drop(wallet);
+    let behind = Arc::new(pubky_switch_client::clock::TestClock::new(
+        w.clock.now_ms() - 2 * 60 * MINUTE_MS,
+    ));
+    let mut wallet = w.load_on_clock(&w.alice, storage, app_id, behind).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(raise_retry(&wallet).await, Some((3, 120_000)));
+}
+
+#[tokio::test]
+async fn test_blocked_return_raise_retry_that_does_not_read_is_taken_as_none() {
+    // The retry record only paces the tries: one that doesn't read fails no receive; the
+    // raise is tried at once and a fresh record written. Once nothing is owed, a record that
+    // doesn't read is deleted.
+    let w = World::new();
+    let (mut wallet, _shop, mut phone, _contacts) = waiting_raise(&w, false).await;
+    let damage = |value: &'static [u8]| {
+        vec![pubky_switch_client::app::LocalWrite::Put {
+            key: b"rr".to_vec(),
+            value: value.to_vec(),
+        }]
+    };
+    wallet
+        .app_mut()
+        .protocol_commit("paykit", &damage(br#"{"v":1,"d":{"tries":"many"}}"#))
+        .await
+        .unwrap();
+    w.clock.advance_ms(5_000);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(raise_retry(&wallet).await, Some((1, 0)));
+    wallet
+        .app_mut()
+        .protocol_commit("paykit", &damage(b"not a record"))
+        .await
+        .unwrap();
+    phone
+        .app_mut()
+        .put_record(
+            &floor_record(&w),
+            &paykit_lib::records::BlockFloorRecord::new(1)
+                .to_json()
+                .unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        w.clock.advance_ms(5_000);
+        wallet.receive(None).await.unwrap();
+    }
+    assert!(!unblock_raise_owed(&wallet).await);
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"rr")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn test_blocked_return_raise_retry_not_restored() {
+    // The retry record is the installation's alone: neither a restore into a fresh store
+    // nor one in place brings it back, and the owed raise is tried at once.
+    for in_place in [false, true] {
+        let w = World::new();
+        let storage = store();
+        let (mut wallet, _shop, _phone, _contacts) =
+            waiting_raise_in(&w, false, Arc::clone(&storage)).await;
+        let backup = wallet.backup().await.unwrap();
+        drop(wallet);
+        let target = if in_place { storage } else { store() };
+        let restored = Box::pin(Paykit::restore(
+            w.env(&w.alice, target),
+            PaykitConfig::default(),
+            &backup,
+            Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+            w.timer(),
+        ))
+        .await
+        .unwrap();
+        assert!(unblock_raise_owed(&restored).await, "in place: {in_place}");
+        assert_eq!(raise_retry(&restored).await, None, "in place: {in_place}");
+    }
+}
+
+#[tokio::test]
+async fn test_blocked_return_conflict_leaves_the_retry_record_as_it_is() {
+    // Paykit wire 5.6, Raising: the wallet waits for the current data epoch's scope key, so
+    // its raise waits from its second try. The key arrives, ending the wait, and the try that
+    // follows meets `409 conflict` on its write and its retry: it neither counts nor starts a
+    // new series, the record stays as it was, and the next receive writes the raise.
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    dropped_for_the_block(&w, &mut wallet, &mut shop).await;
+    let mut phone = payer_app(&w, "phone").await;
+    phone
+        .app_mut()
+        .put_record(
+            &floor_record(&w),
+            &paykit_lib::records::BlockFloorRecord::new(1)
+                .to_json()
+                .unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    w.alice.next_doc(|doc| doc.data_epoch += 1).unwrap();
+    let epoch = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let mut contacts = w
+        .join_with(
+            &w.alice,
+            "contacts",
+            AppScopes::new().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            store(),
+        )
+        .await;
+    contacts.unblock(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(5_000);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(raise_retry(&wallet).await, Some((2, 60_000)));
+    crate::unrequested::store_bundle_from(&w, wallet.app_id(), &wallet.app().cert().clone(), epoch);
+    for _ in 0..4 {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "/ops".into(),
+                code: pubky_switch_core::http::ErrorCode::Conflict,
+                current: serde_json::Value::Null,
+            });
+    }
+    w.clock.advance_ms(5_000);
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert!(unblock_raise_owed(&wallet).await);
+    assert_eq!(raise_retry(&wallet).await, Some((2, 60_000)));
+    w.clock.advance_ms(5_000);
+    wallet.receive(None).await.unwrap();
+    assert!(!unblock_raise_owed(&wallet).await);
+    assert_eq!(raise_retry(&wallet).await, None);
+}
+
+#[tokio::test]
 async fn test_blocked_return_conflicting_raise_starts_no_wait() {
     // Paykit wire 5.6, Raising: a `409 conflict` on the raise neither starts nor ends a wait:
     // the wallet has read the newer record, and builds anew at its next receive.
@@ -4559,10 +4725,13 @@ async fn test_blocked_return_conflicting_raise_starts_no_wait() {
 async fn raise_retry(app: &Paykit) -> Option<(u64, u64)> {
     let bytes = app.app().protocol_get("paykit", b"rr").await.unwrap()?;
     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    Some((
-        value["d"]["tries"].as_u64().unwrap(),
-        value["d"]["wait_ms"].as_u64().unwrap(),
-    ))
+    let tries = value["d"]["tries"].as_u64().unwrap();
+    // The wait its tries give (Paykit wire 5.6, Raising).
+    let wait = match tries {
+        0 | 1 => 0,
+        tries => (60_000u64 << (tries - 2).min(8)).min(600_000),
+    };
+    Some((tries, wait))
 }
 
 /// How many floor raise waiting notices `app` shows.
