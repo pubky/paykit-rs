@@ -424,3 +424,84 @@ async fn test_shared_hold_with_a_divergent_floor_unblocks_without_a_raise() {
     // No floor write by the wallet.
     assert_eq!(next.record(&key).map(|held| held.revision), floor_before);
 }
+
+#[tokio::test]
+async fn test_shared_hold_lets_an_owed_unblock_go_once_it_stands() {
+    // Paykit wire 5.6, Unblocking under the divergence hold: the floor is held divergent and
+    // another app unblocks carol, so the wallet owes a raise it can't write. Once a declared
+    // loss adds the shared post-loss hold, the owed unblock goes without the raise at the next
+    // receive, and nothing waits for it any more.
+    let w = World::new();
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            paykit_sdk::AppScopes::new()
+                .pay()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+            PaykitConfig::default(),
+            store(),
+        )
+        .await;
+    wallet.app_mut().invite(&w.carol_id()).await.unwrap();
+    wallet.block(&w.carol_id()).await.unwrap();
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            "block_floor",
+            paykit_lib::collections::Collection::BlockFloor.fixed_policy(),
+        ),
+        &paykit_lib::derive::natural_key::block_floor(&w.alice_id()),
+    );
+    wallet
+        .app_mut()
+        .put_record(
+            &target,
+            &paykit_lib::records::BlockFloorRecord::new(1)
+                .to_json()
+                .unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let key = wallet.app().record_key(&target).unwrap();
+    w.alice
+        .switch()
+        .make_divergent([0x5b; 16], key, [2; 32])
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let mut contacts = w
+        .join_with(
+            &w.alice,
+            "contacts",
+            paykit_sdk::AppScopes::new()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+            PaykitConfig::default(),
+            store(),
+        )
+        .await;
+    contacts.unblock(&w.carol_id()).await.unwrap();
+    for _ in 0..2 {
+        w.clock.advance_ms(11 * 60_000);
+        wallet.receive(None).await.unwrap();
+    }
+    assert!(unblock_owed(&wallet).await);
+    w.clock.advance_ms(60_000);
+    declare_loss(&w);
+    follow_loss(&mut wallet).await;
+    w.clock.advance_ms(5_000);
+    wallet.receive(None).await.unwrap();
+    assert!(!unblock_owed(&wallet).await);
+}
+
+/// Whether `app` owes the raise of an unblock (`bf`).
+async fn unblock_owed(app: &Paykit) -> bool {
+    app.app()
+        .protocol_get("paykit", b"bf")
+        .await
+        .unwrap()
+        .is_some()
+}

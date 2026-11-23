@@ -119,6 +119,33 @@ async fn held_after_loss(world: &World) -> TestResult {
     }
     assert!(rail.all_pay_calls().is_empty());
 
+    // A wallet that joins after the loss follows no loss and holds none recorded: the newest
+    // own `identity.json` it verified, whose `recovery_from` stays set, holds it alone.
+    let mut laptop = Box::pin(payer.join(
+        world,
+        "laptop",
+        AppScopes::new().pay().build()?,
+        PaykitConfig::default(),
+        Arc::new(MemoryStore::new()),
+        &rail,
+    ))
+    .await?;
+    for _ in 0..2 {
+        Box::pin(laptop.receive(None)).await?;
+    }
+    assert!(laptop.app().own_identity().body().recovery_from.is_some());
+    assert!(Box::pin(laptop.app().recovery_info()).await?.is_none());
+    let refused = Box::pin(laptop.pay_request_automatically(&request, PayOptions::default()))
+        .await
+        .outcome
+        .err()
+        .ok_or("a wallet joined after the loss paid automatically")?;
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotAutomatic(_))),
+        "{refused}"
+    );
+    assert!(rail.all_pay_calls().is_empty());
+
     // By hand, it goes once.
     let outcome = Box::pin(wallet.pay_request(&request, PayOptions::default()))
         .await

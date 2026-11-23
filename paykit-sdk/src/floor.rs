@@ -555,8 +555,7 @@ impl Paykit {
         if owed.unread() {
             return Ok(true);
         }
-        Ok(owed.any()
-            && (!self.floor_kept().await?.divergent || self.shared_loss_hold().await?))
+        Ok(owed.any() && (!self.floor_kept().await?.divergent || self.shared_loss_hold().await?))
     }
 
     /// At a receive's end: while a raise this app owes is tried and left unwritten, with no
