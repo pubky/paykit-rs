@@ -302,7 +302,7 @@ impl ExecutorCheckpoint {
         let GrantEvidence::Verified { write } = &self.grant else {
             return None;
         };
-        let grant = AppliedRecord::retained(app, &target, write)?;
+        let grant = AppliedRecord::established(app, &target, write)?;
         let initial = &opening.ledger;
         let predecessor = &opening.permanent;
         if !grant.follows(predecessor) || !opening.grant_pins_pending(&grant) {
@@ -361,7 +361,7 @@ impl ExecutorCheckpoint {
         let mut ledger = opening.zero.clone();
         let mut application = initial.clone();
         if let Some(held) = &self.later {
-            let newer = AppliedRecord::retained(app, &ledger_target, held)?;
+            let newer = AppliedRecord::established(app, &ledger_target, held)?;
             if !newer.cert.holds_scope("paykit_allowance_execute")
                 || !newer
                     .op

@@ -24,6 +24,14 @@ enum Purpose {
     Evidence,
     /// It authorizes or dispatches a new attempt: of the current generation.
     Authorizes,
+    /// Evidence this installation retained and verified when its grant was established
+    /// (the original writes of an established opening, a checkpoint's writes): as
+    /// [`Self::Evidence`], but once the signer has dropped its generation's service key,
+    /// as it may when no current record or live claim needs it (Pubky Switch spec, Section
+    /// 4.3, `service_keys`), its retained proof is read without that key. The writer's
+    /// signature, the proof's binding to the operation, the certificate in force and the
+    /// grant's history are all still checked.
+    Established,
 }
 
 impl Purpose {
@@ -31,7 +39,9 @@ impl Purpose {
     /// `current` with the last provider loss at `recovery_from` ([`AppliedOperation::applied`]).
     fn admits(self, generation: u64, current: u64, recovery_from: Option<u64>) -> bool {
         match self {
-            Self::Evidence => super::in_grant_history(generation, current, recovery_from),
+            Self::Evidence | Self::Established => {
+                super::in_grant_history(generation, current, recovery_from)
+            }
             Self::Authorizes => generation == current,
         }
     }
@@ -58,7 +68,7 @@ impl AppliedOperation {
     ///   only in the current generation, so a stale instance of an earlier generation
     ///   authorizes nothing (Pubky Switch spec, Section 12.5).
     fn applied(app: &App, kept: &KeptOp, purpose: Purpose) -> Option<Self> {
-        Self::verify_original(app, kept)?.fit_for(app, purpose)
+        Self::verify_for(app, kept, purpose)?.fit_for(app, purpose)
     }
 
     /// Whether this applied operation's generation fits `purpose` ([`Self::applied`]).
@@ -73,18 +83,31 @@ impl AppliedOperation {
             .then_some(self)
     }
 
-    fn verify_original(app: &App, kept: &KeptOp) -> Option<Self> {
+    fn verify_for(app: &App, kept: &KeptOp, purpose: Purpose) -> Option<Self> {
         let cert = verify_certificate(&kept.cert, &app.identity()).ok()?;
-        Self::with_certificate(app, kept, cert)
+        Self::with_certificate_for(app, kept, cert, purpose)
     }
 
     fn with_certificate(app: &App, kept: &KeptOp, cert: AppCert) -> Option<Self> {
+        Self::with_certificate_for(app, kept, cert, Purpose::Evidence)
+    }
+
+    fn with_certificate_for(
+        app: &App,
+        kept: &KeptOp,
+        cert: AppCert,
+        purpose: Purpose,
+    ) -> Option<Self> {
         let own = app.identity();
         let op = SignedOp::verify_with_cert(&kept.op, &cert, &own).ok()?;
         check_shape(op.body()).ok()?;
         check_permission(&op.body().kind, Writer::App(&cert)).ok()?;
-        let key = app.own_identity().service_key_of(op.body().generation)?;
-        let proof = TransitionProof::verify(kept.proof.as_ref()?, &key, &own).ok()?;
+        let signed = kept.proof.as_ref()?;
+        let proof = match app.own_identity().service_key_of(op.body().generation) {
+            Some(key) => TransitionProof::verify(signed, &key, &own).ok()?,
+            None if purpose == Purpose::Established => TransitionProof::peek(signed).ok()?,
+            None => return None,
+        };
         proof.check_binds(&op).ok()?;
         let at = proof.envelope().server_time;
         if !certificate_in_force_at_write(app.own_identity(), &cert, at) {
@@ -317,13 +340,12 @@ impl OwnWrite {
         })
     }
 
-    /// Whether the read `held` shows this write: its version authenticated by the client, or
-    /// exactly this write's version, time and writer.
+    /// Whether the read `held` shows this write: exactly this write's version, time and
+    /// writer, whether or not the client authenticated the version.
     pub(crate) fn stands_for(&self, held: &SharedRecord) -> bool {
-        held.authenticated
-            || (held.version == self.version
-                && held.written_at_ms == Some(self.at_ms)
-                && held.writer == self.writer)
+        held.version == self.version
+            && held.written_at_ms == Some(self.at_ms)
+            && held.writer == self.writer
     }
 }
 
@@ -412,6 +434,28 @@ impl AppliedRecord {
             && check_attempt_proof(&applied.proof, &claim, &app.app_id(), b.generation).is_ok()
     }
 
+    /// As [`Self::retained`], for evidence of an established grant ([`Purpose::Established`]).
+    pub(super) fn established(app: &App, target: &RecordTarget, kept: &KeptOp) -> Option<Self> {
+        Self::from_operation(
+            app,
+            target,
+            AppliedOperation::applied(app, kept, Purpose::Established)?,
+        )
+    }
+
+    /// `kept` verified for `purpose`: [`Self::retained`] or [`Self::established`].
+    pub(super) fn retained_for(
+        app: &App,
+        target: &RecordTarget,
+        kept: &KeptOp,
+        established: bool,
+    ) -> Option<Self> {
+        match established {
+            true => Self::established(app, target, kept),
+            false => Self::retained(app, target, kept),
+        }
+    }
+
     pub(super) fn retained(app: &App, target: &RecordTarget, kept: &KeptOp) -> Option<Self> {
         Self::from_operation(
             app,
@@ -425,8 +469,13 @@ impl AppliedRecord {
         app: &App,
         target: &RecordTarget,
         kept: &KeptOp,
+        established: bool,
     ) -> Option<Self> {
-        let applied = AppliedOperation::verify_original(app, kept)?;
+        let purpose = match established {
+            true => Purpose::Established,
+            false => Purpose::Evidence,
+        };
+        let applied = AppliedOperation::verify_for(app, kept, purpose)?;
         let current = app.own_identity();
         if !super::in_grant_history(
             applied.op.body().generation,
@@ -553,8 +602,13 @@ impl AppliedRecord {
         selected: &Self,
         selected_condition: &Condition,
         kept: &KeptOp,
+        established: bool,
     ) -> Option<(ApplicationRef, OwnWrite)> {
-        let deleted = AppliedOperation::applied(app, kept, Purpose::Evidence)?;
+        let purpose = match established {
+            true => Purpose::Established,
+            false => Purpose::Evidence,
+        };
+        let deleted = AppliedOperation::applied(app, kept, purpose)?;
         let RecordValue::Delete = deleted.open_record(app, pending)? else {
             return None;
         };
@@ -834,9 +888,8 @@ mod tests {
 
     #[test]
     fn test_evidence_own_write_stands_only_for_its_exact_read() {
-        // A read the client didn't authenticate shows this app's own write only when it
-        // names exactly its version, time and writer; an authenticated read stands as the
-        // client checked it.
+        // A read shows this app's own write only when it names exactly its version, time
+        // and writer, whether the client authenticated the version or not.
         let own = OwnWrite {
             version: RecordVersion::new(1, 7),
             at_ms: 1_000,
@@ -858,7 +911,8 @@ mod tests {
             divergent: false,
         };
         assert!(own.stands_for(&read(false, RecordVersion::new(1, 7), Some(1_000), [3; 16])));
-        assert!(own.stands_for(&read(true, RecordVersion::new(2, 9), Some(5), [4; 16])));
+        assert!(own.stands_for(&read(true, RecordVersion::new(1, 7), Some(1_000), [3; 16])));
+        assert!(!own.stands_for(&read(true, RecordVersion::new(2, 9), Some(5), [4; 16])));
         for (version, at, writer) in [
             (RecordVersion::new(1, 8), Some(1_000), [3; 16]),
             (RecordVersion::new(1, 6), Some(1_000), [3; 16]),

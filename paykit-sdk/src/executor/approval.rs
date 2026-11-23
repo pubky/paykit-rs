@@ -27,7 +27,15 @@ pub(super) struct ApprovedOpening {
 }
 
 impl ApprovedOpening {
-    fn verify(app: &App, key: &[u8; 32], source: OriginalAllowanceApplication) -> Option<Self> {
+    /// `established`: this installation holds the checkpoint of the grant made on this
+    /// opening, so its original writes count as evidence it verified then, read without a
+    /// generation key the signer has since dropped ([`AppliedRecord::established`]).
+    fn verify(
+        app: &App,
+        key: &[u8; 32],
+        source: OriginalAllowanceApplication,
+        established: bool,
+    ) -> Option<Self> {
         if !source.confirmed_for_execution {
             return None;
         }
@@ -36,7 +44,7 @@ impl ApprovedOpening {
         if &app.record_key(&target).ok()? != key {
             return None;
         }
-        let permanent = AppliedRecord::retained(app, &target, &source.permanent)?;
+        let permanent = AppliedRecord::retained_for(app, &target, &source.permanent, established)?;
         let own = app.identity();
         let record = AllowanceRecord::bind(&permanent.value, &own, app.naming_key(), key).ok()?;
         let Body::AllowanceProposal(p) = record.proposal.body() else {
@@ -64,7 +72,7 @@ impl ApprovedOpening {
             return None;
         }
         let target = ledger_target(&source.counterparty, &id);
-        let ledger = AppliedRecord::retained(app, &target, &source.ledger)?;
+        let ledger = AppliedRecord::retained_for(app, &target, &source.ledger, established)?;
         let zero = bind_ledger(
             &ledger.value,
             app.naming_key(),
@@ -81,7 +89,8 @@ impl ApprovedOpening {
 
         let pending =
             allowance_record_target(Collection::AllowanceProposals, &source.counterparty, &id);
-        let selected = AppliedRecord::selected_proposal(app, &pending, &source.selected)?;
+        let selected =
+            AppliedRecord::selected_proposal(app, &pending, &source.selected, established)?;
         let pending_key = app.record_key(&pending).ok()?;
         let placed =
             PendingAllowanceRecord::bind(&selected.value, &own, app.naming_key(), &pending_key)
@@ -99,6 +108,7 @@ impl ApprovedOpening {
             &selected,
             &source.selected_condition,
             &source.deletion,
+            established,
         )?;
         Some(Self {
             record,
@@ -134,6 +144,12 @@ impl Paykit {
         record: &[u8; 32],
     ) -> Result<Option<ApprovedOpening>> {
         let source = self.original_allowance_application(record).await?;
-        Ok(source.and_then(|s| ApprovedOpening::verify(&self.app, record, s)))
+        let established = self
+            .local_get::<super::checkpoint::ExecutorHistory>(
+                &crate::state::key::executor_checkpoint(record),
+            )
+            .await?
+            .is_some();
+        Ok(source.and_then(|s| ApprovedOpening::verify(&self.app, record, s, established)))
     }
 }
