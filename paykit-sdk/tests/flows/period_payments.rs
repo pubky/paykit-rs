@@ -177,7 +177,7 @@ fn period_natural(request: &RequestRef, period: PeriodRef) -> Vec<u8> {
 }
 
 /// The shared record key of `request`'s period record of `period`, as `app` keys it.
-fn period_key(app: &Paykit, request: &RequestRef, period: PeriodRef) -> [u8; 32] {
+pub(super) fn period_key(app: &Paykit, request: &RequestRef, period: PeriodRef) -> [u8; 32] {
     app.app()
         .record_key(&natural_target(&period_natural(request, period)))
         .unwrap()
@@ -2219,7 +2219,7 @@ type StageHook = Box<dyn FnOnce() + Send>;
 /// A store that runs a hook once, right after the commit of the first journal write at a
 /// stage.
 #[derive(Default)]
-struct StageStore {
+pub(super) struct StageStore {
     inner: MemoryStore,
     hook: std::sync::Mutex<Option<(&'static str, StageHook)>>,
 }
@@ -2227,6 +2227,11 @@ struct StageStore {
 impl StageStore {
     fn on_stage(&self, stage: &'static str, hook: impl FnOnce() + Send + 'static) {
         *self.hook.lock().unwrap() = Some((stage, Box::new(hook)));
+    }
+
+    /// Whether the hook armed last has run.
+    pub(super) fn fired(&self) -> bool {
+        self.hook.lock().unwrap().is_none()
     }
 }
 
@@ -2484,21 +2489,10 @@ async fn seller_stop_after_attempt(stop_at: StopAt) {
     assert_eq!(w.rail.all_executions().len(), 1);
 }
 
-#[tokio::test]
-async fn test_period_payments_period_record_divergent_after_the_paying_commit_holds_it() {
-    // Right after the wallet journals January's `Paying` by hand, a view shows January's
-    // period record divergent: the dispatch is held, nothing paid, as the check before it
-    // judges every pause after its last read (Paykit spec 6).
-    let w = World::new();
-    let base = Arc::new(StageStore::default());
-    let mut shop = w.shop().await;
-    let mut wallet = w
-        .wallet_on("wallet", Arc::clone(&base) as Arc<dyn StateStore>)
-        .await;
-    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
-    let record = period_key(&wallet, &request, january());
-    let store = Arc::clone(&base) as Arc<dyn StateStore>;
-    let app = wallet.app_id();
+/// Right after the first journal write at `Paying`, a view shows `record` divergent, as a
+/// conflicting write would: the stage hook marks it in `app`'s namespace of `base`.
+pub(super) fn diverge_at_paying(base: &Arc<StageStore>, app: [u8; 16], record: [u8; 32]) {
+    let store = Arc::clone(base) as Arc<dyn StateStore>;
     base.on_stage("paying", move || {
         let ns = pubky_switch_client::store::client_namespace(&app);
         let key = format!("rcdiv/{}", pubky_switch_core::enc::b64(&record));
@@ -2508,11 +2502,39 @@ async fn test_period_payments_period_record_divergent_after_the_paying_commit_ho
             .unwrap();
         store.commit(batch).unwrap();
     });
-    let outcome = by_user(&mut wallet, &request, january(), PayOptions::default())
-        .await
+}
+
+#[tokio::test]
+async fn test_period_payments_period_record_divergent_after_the_paying_commit_holds_it() {
+    // Right after the wallet journals January's `Paying`, by hand or by its policy, a view
+    // shows January's period record divergent: the dispatch is held, nothing paid, as the
+    // check before it judges every pause after its last read (Paykit spec 6).
+    for automatic in [false, true] {
+        let w = World::new();
+        let base = Arc::new(StageStore::default());
+        let mut shop = w.shop().await;
+        let mut wallet = w
+            .wallet_on("wallet", Arc::clone(&base) as Arc<dyn StateStore>)
+            .await;
+        let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+        let record = period_key(&wallet, &request, january());
+        diverge_at_paying(&base, wallet.app_id(), record);
+        let outcome = if automatic {
+            by_policy(&mut wallet, &request, january()).await
+        } else {
+            by_user(&mut wallet, &request, january(), PayOptions::default()).await
+        }
         .unwrap();
-    assert!(matches!(outcome, PayOutcome::Pending { .. }), "{outcome:?}");
-    assert!(w.rail.all_executions().is_empty());
+        assert!(
+            matches!(outcome, PayOutcome::Pending { .. }),
+            "automatic {automatic}: {outcome:?}"
+        );
+        assert!(w.rail.all_executions().is_empty(), "automatic {automatic}");
+        assert!(
+            base.fired(),
+            "automatic {automatic}: the record diverged after Paying"
+        );
+    }
 }
 
 #[tokio::test]
