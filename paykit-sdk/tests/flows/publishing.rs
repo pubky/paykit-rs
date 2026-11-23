@@ -3398,6 +3398,42 @@ async fn test_publication_stops_reporting_an_unknown_withdrawal_once_nothing_is_
 }
 
 #[tokio::test]
+async fn test_publication_takes_a_proof_paid_from_the_unknown_list_as_its_arrival() {
+    use pubky_switch_client::testing::Fault;
+
+    let w = World::new();
+    let mut buyer = w.wallet("wallet").await;
+    let payer = buyer.identity();
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&payer).await.unwrap();
+    shop.set_list_endpoints(offered("lno1first")).await.unwrap();
+    // The inbox takes the list but its answer is lost: the payer holds it, and the shop
+    // can't tell.
+    w.alice.switch().fail_next(Fault::LoseAnswer {
+        path: "inbox".into(),
+    });
+    shop.publish_list_to(payer).await.unwrap();
+    let key = shop.app().record_key(&target(&shop, &payer, 1)).unwrap();
+    let held = shop.app().shared_record(&key).await.unwrap().unwrap();
+    let list = ListPublicationRecord::read(held.content.value().unwrap()).unwrap();
+    assert!(shop
+        .app_mut()
+        .withdraw_message("paykit", &list.msg_id)
+        .await
+        .unwrap());
+    shop.receive(None).await.unwrap();
+    let shown = unknown_shown(shop.publish_list_to(payer).await.unwrap_err());
+    assert!(!shown.withdrawal);
+    // The buyer pays from that list; its proof names the version it paid from.
+    buyer.receive(None).await.unwrap();
+    assert!(pays(&w, &mut buyer).await);
+    shop.receive(None).await.unwrap();
+    // It arrived: nothing is left of unknown outcome, and nothing is sent in its place.
+    shop.publish_list_to(payer).await.unwrap();
+    assert_eq!(w.record_writes(&w.bob, &key), 1);
+}
+
+#[tokio::test]
 async fn test_publication_takes_a_list_request_naming_the_unknown_withdrawal_as_its_arrival() {
     use pubky_switch_client::testing::Fault;
 

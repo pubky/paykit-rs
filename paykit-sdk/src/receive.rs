@@ -1659,6 +1659,7 @@ fn payer_reply(
             let Body::PaymentProof(proof) = stored.body() else {
                 return Ok(false);
             };
+            crate::publish::answers::note_proof(cx, stored, proof)?;
             let Some(settled) = settlement(&proof.proof) else {
                 return Ok(false);
             };

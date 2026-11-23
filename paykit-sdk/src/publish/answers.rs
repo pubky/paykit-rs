@@ -8,7 +8,7 @@ use crate::error::{PaykitError, Result};
 use crate::receive::{keep_local, local, Fail};
 use crate::state::{self, key};
 use crate::Paykit;
-use paykit_lib::bodies::{PrivatePaymentListRequest, PRIVATE_LIST_MAX_AGE_MS};
+use paykit_lib::bodies::{PaymentProof, PrivatePaymentListRequest, PRIVATE_LIST_MAX_AGE_MS};
 use paykit_lib::records::StoredMessage;
 use paykit_lib::{Kind, ListVersion};
 use pubky_switch_client::app::{
@@ -500,11 +500,51 @@ fn observe_named(
     if request.app_id != Some(app_id) {
         return Ok(false);
     }
+    observe_version(recipient, held, request.held_version, stored)
+}
+
+/// A payer's proof of a payment to an endpoint of this app's list names the exact version
+/// it paid from, bound to this app and that payer (Paykit wire 4.10): like a list request
+/// naming it, it shows that version arrived (Paykit spec 9, "Deliveries of unknown
+/// outcome"), whether or not the payment is credited.
+pub(crate) fn note_proof(
+    cx: &mut ReceiveContext<'_>,
+    stored: &StoredMessage,
+    proof: &PaymentProof,
+) -> std::result::Result<(), Fail> {
+    let Some(version) = proof.list_version else {
+        return Ok(());
+    };
+    if proof.payment_app_id != cx.app_id() || !cx.cert().holds_scope(SCOPE) {
+        return Ok(());
+    }
+    let sender = stored.sender();
+    let at = key::list_recipient(&sender);
+    let Some(mut recipient) = state::cx_get::<ListRecipient>(cx, &at)? else {
+        return Ok(());
+    };
+    let held = state::cx_get::<ListReservation>(cx, &key::list_reservation(&sender))?;
+    if observe_version(&mut recipient, held.as_ref(), Some(version), stored)? {
+        keep_local(cx, local(&at, &recipient)?);
+    }
+    Ok(())
+}
+
+/// The counterparty's message `stored` names `version` of this app's list to it: when that
+/// is its current list, given up or still in flight, it counts as that list's acceptance,
+/// at the message's acceptance time. Whether `recipient` changed.
+fn observe_version(
+    recipient: &mut ListRecipient,
+    held: Option<&ListReservation>,
+    version: Option<ListVersion>,
+    stored: &StoredMessage,
+) -> std::result::Result<bool, Fail> {
     let Some(issue) = held.filter(|issue| {
         issue.delivery != super::FirstDelivery::Undelivered
             && issue.choice == recipient.choice
             && recipient.answers.first(issue).is_none()
-            && request.held_version == ListVersion::new(issue.generation, issue.counter).ok()
+            && version.is_some()
+            && version == ListVersion::new(issue.generation, issue.counter).ok()
     }) else {
         return Ok(false);
     };
