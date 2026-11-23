@@ -254,7 +254,8 @@ pub(crate) fn refusal_category(kind: &crate::RefusalKind) -> (Category, &'static
         K::Label => (NotSent, "label"),
         K::Recurring => (NotSent, "recurring"),
         K::Usage => (NotSent, "usage"),
-        // The attempt was written and then failed before money moved: it is closed.
+        // The attempt was written and then failed before money moved: it is closed. A
+        // failure with its cause comes as the cause's case.
         K::AttemptFailed => (Permanent, "attempt_failed"),
         K::NotFound => (Permanent, "not_found"),
         K::Rejected => (Permanent, "rejected"),
@@ -418,7 +419,11 @@ impl From<PaykitError> for WalletError {
         let categorized = match &e {
             PaykitError::Refused(r) => {
                 let refusal = Arc::new(PaymentRefusal(r.clone()));
-                let (category, code) = refusal_category(&refusal.kind());
+                let (mut category, code) = refusal_category(&refusal.kind());
+                // The attempt was closed and nothing paid: what to do next is its cause's.
+                if let paykit_sdk::Refusal::AttemptFailed(cause) = r {
+                    category = refusal_category(&PaymentRefusal((**cause).clone()).kind()).0;
+                }
                 let (category, mut failure) = failure(category, code, context);
                 failure.refusal = Some(refusal);
                 (category, failure)

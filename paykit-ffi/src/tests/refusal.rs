@@ -650,6 +650,14 @@ fn test_wallet_errors_match_the_host_guide_table() {
     let rows = guide_rows();
     let guide: BTreeMap<_, _> = rows.iter().cloned().collect();
     assert_eq!(guide.len(), rows.len(), "a code has two rows in the guide");
+    // An attempt that failed comes as its cause's case, which the table says in words.
+    assert_eq!(
+        guide.get("attempt_failed").map(String::as_str),
+        Some("as its cause")
+    );
+    produced.remove("attempt_failed");
+    let mut guide = guide;
+    guide.remove("attempt_failed");
     for (code, case) in &produced {
         assert_eq!(
             guide.get(code).map(String::as_str),
@@ -703,5 +711,26 @@ fn test_wallet_host_refuses_repeated_endpoints_and_too_many_fraction_digits() {
             supported_endpoints(refused),
             Err(WalletError::InvalidInput { .. })
         ));
+    }
+}
+
+#[test]
+fn test_wallet_errors_attempt_failed_comes_as_its_cause() {
+    for (cause, case) in [
+        (
+            Refusal::IdentityUnavailable("refresh".into()),
+            "retry_later",
+        ),
+        (Refusal::Destination("expired".into()), "not_sent"),
+        (Refusal::NotCurrent("removed".into()), "recovery"),
+        (Refusal::DeadlinePassed, "permanent"),
+    ] {
+        let error = PaykitError::Refused(Refusal::AttemptFailed(Box::new(cause)));
+        let (found, failure) = categorized(error.into()).expect("a categorized failure");
+        assert_eq!((found, failure.code.as_str()), (case, "attempt_failed"));
+        assert!(failure
+            .refusal
+            .as_ref()
+            .is_some_and(|r| r.attempted_failure().is_some()));
     }
 }

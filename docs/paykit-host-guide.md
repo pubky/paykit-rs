@@ -533,7 +533,7 @@ Two rules override a code's case. A failure with a `keptBatch` comes as `Outcome
 | `destination` | `Refusal::Destination` | `NotSent` | Show the failed destination check; pay again when the payee has a usable endpoint. |
 | `label` | `Refusal::Label` | `NotSent` | Send under a selling label the app holds. |
 | `recurring` | `Refusal::Recurring` | `NotSent` | Pay a recurring request by its Billing Periods. |
-| `attempt_failed` | `Refusal::AttemptFailed` | `Permanent` | The attempt was written and failed before money moved: show `attemptedFailure()`. A new payment may follow. |
+| `attempt_failed` | `Refusal::AttemptFailed` | as its cause | The attempt was written and failed before money moved, and nothing was paid. It comes as the case of `attemptedFailure()`, and follows that refusal's row; a confirmation passes `attemptedFailure()` back. |
 | `not_found` | `Refusal::NotFound` | `Permanent` | Refresh the view. |
 | `rejected` | `Refusal::Rejected` | `Permanent` | Show that the request is rejected. |
 | `cancelled` | `Refusal::Cancelled` | `Permanent` | Show that the request is cancelled. |
@@ -555,14 +555,14 @@ Two rules override a code's case. A failure with a `keptBatch` comes as `Outcome
 | `stopped` | `AppRefusal::Stopped`, from a payment too | `Recovery` | The wallet stopped on an alarm: show `restoreState().alarm` and recover. |
 | `left` | `AppRefusal::Left`, from a payment too | `Recovery` | The app left its identity: enroll again. |
 | `gone` | `AppRefusal::Gone` | `Recovery` | The app isn't current or its account is gone: enroll again. |
-| `recovery_required` | `AppRefusal::RecoveryRequired`, from a payment too | `Recovery` | A recovery notice forbids writes: recover to the next generation. |
+| `recovery_required` | `AppRefusal::RecoveryRequired`, from a payment too | `Recovery` | A recovery notice holds writes. `receive` clears a notice that isn't permanent; one that stays needs the recovery to the next generation. |
 | `alarm` | `AppError::Alarm` | `Recovery` | Show the alarm and recover. |
 | `chain` | `ClientError::Chain` | `Recovery` | The service signed a head that doesn't verify: handled as a rollback alarm. |
-| `own_recovery_required` | `ClientError::OwnRecoveryRequired` | `Recovery` | A recovery notice forbids writes to this service: recover. |
+| `own_recovery_required` | `ClientError::OwnRecoveryRequired` | `Recovery` | A recovery notice holds writes to this service. `receive` clears one that isn't permanent; one that stays needs the recovery. |
 | `approval_refused` | `AppRefusal::Approval` | `Permanent` | The approval doesn't pass its checks: ask for a new one. |
 | `not_joined` | `AppRefusal::NotJoined` | `Permanent` | No wallet under this App ID: enroll. |
 | `restore_question_open` | `AppRefusal::RestoreQuestionOpen` | `NeedsUser` | Ask the user the restore question. |
-| `client_not_now` | `AppRefusal::NotNow`: reconcile mode, the clocks disagreeing | `NeedsUser` | Provisional. Show the reason: finish the reconciliation, or correct the device clock, then call again. |
+| `client_not_now` | `AppRefusal::NotNow`: reconcile mode, the clocks apart, a read still owed | `NeedsUser` | Provisional. Show the reason and act on it: finish the reconciliation, correct the device clock, or `receive`; then call again. |
 | `kept_batches_ahead` | `AppRefusal::KeptBatchesAhead` | `RetryLater` | Earlier kept batches go first: `receive`, then call again. |
 | `client_usage` | `AppRefusal::Usage`, `ClientError::Usage` | `NotSent` | A value given breaks a Switch rule: fix the call. |
 | `carried_too_large` | `AppRefusal::CarriedTooLarge` | `NotSent` | Acknowledge the duty events acted on, then restore again. |
@@ -599,7 +599,7 @@ Two rules override a code's case. A failure with a `keptBatch` comes as `Outcome
 | `switch_quota_exceeded` | Switch answer `quota_exceeded` | `RetryLater` | Call again once the limit frees. |
 | `switch_staged` | Switch answer `staged` | `RetryLater` | Call again later. |
 | `switch_unavailable` | `Refusal::SwitchUnavailable`, Switch answer `unavailable` | `RetryLater` | The own Switch is unavailable: nothing was paid. Call again once it answers. |
-| `switch_recovery_required` | Switch answer `recovery_required` | `Recovery` | A recovery notice holds the account for its next generation: recover. |
+| `switch_recovery_required` | Switch answer `recovery_required` | `Recovery` | The account awaits a recovery. `receive` clears a notice that isn't permanent; one that stays needs the recovery to the next generation. |
 | `public_endpoint_change_pending` | `PaykitError::PublicEndpointChangePending` | `RetryLater` | The edit is saved and is published once what stopped its signing clears; `Recovery` when that is a recovery. |
 | `method_unknown` | `RailError::Unavailable` from a lookup or endpoint selection | `RetryLater` | The method couldn't answer now: call again later. |
 | `method_not_submitted` | `RailError::Refused` | `NotSent` | The method refused the call. |

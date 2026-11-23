@@ -304,8 +304,9 @@ pub trait PaymentMethod: Send + Sync {
     /// the payee credits the request only when it lies within the request's times, so
     /// return the time the payment's evidence dates it, never a placeholder.
     async fn verify(&self, proof: MethodProof) -> Result<Option<u64>, MethodError>;
-    /// Extract the method-defined settlement ID for deduplication, when available.
-    /// A failure reads as no settlement ID.
+    /// Extract the method-defined settlement ID for deduplication, when available. A failure
+    /// reads as no settlement ID, which credits nothing for this proof, so fail only for a
+    /// proof that names no settlement, never for a fault that may pass.
     fn settlement_id(&self, proof_json: Vec<u8>) -> Result<Option<Vec<u8>>, MethodError>;
 }
 
