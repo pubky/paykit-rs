@@ -733,8 +733,8 @@ impl DivergentWrite {
         {
             return Err(PaykitError::corrupt());
         }
-        let target =
-            write_target(&stored, own, &|_| settlement.clone()).ok_or_else(PaykitError::corrupt)?;
+        let target = write_target(&stored, own, &|_, _| settlement.clone())
+            .ok_or_else(PaykitError::corrupt)?;
         if target.collection().is_none() || record_key(&target.record_target())? != *record {
             return Err(PaykitError::corrupt());
         }
@@ -753,7 +753,10 @@ impl DivergentWrite {
     ) -> Result<Option<KeptWrite>> {
         let message = self.message.stored(own)?;
         if let Body::PaymentProof(proof) = message.body() {
-            if message.message().refs.is_empty() && settlement(&proof.proof) != self.settlement()? {
+            if message.message().refs.is_empty()
+                && settlement(&proof.payment_endpoint_identifier, &proof.proof)
+                    != self.settlement()?
+            {
                 return Ok(None);
             }
         }
@@ -836,7 +839,7 @@ pub(crate) fn write_target(
             true,
         ),
         Body::PaymentProof(proof) if first.is_none() => {
-            let settlement = settlement(&proof.proof)?;
+            let settlement = settlement(&proof.payment_endpoint_identifier, &proof.proof)?;
             activity(
                 ActivityTarget::payee(
                     natural_key::payee_payment_record(
@@ -1196,9 +1199,12 @@ pub(crate) fn step_keep(
     }
     let kept_key = key::divergent_write(&record, role, &stored.sender(), &stored.message().msg_id);
     let kept_settlement = match stored.body() {
-        Body::PaymentProof(proof) if stored.message().refs.is_empty() => Some(
-            pubky_switch_core::enc::b64(&settlement(&proof.proof).ok_or_else(Fail::corrupt)?),
-        ),
+        Body::PaymentProof(proof) if stored.message().refs.is_empty() => {
+            Some(pubky_switch_core::enc::b64(
+                &settlement(&proof.payment_endpoint_identifier, &proof.proof)
+                    .ok_or_else(Fail::corrupt)?,
+            ))
+        }
         _ => None,
     };
     let kept = DivergentWrite {
@@ -1279,7 +1285,7 @@ impl Paykit {
         waits_behind(
             kept.into_iter().map(|(_, kept)| kept),
             &self.identity(),
-            &|proof| self.rail.settlement_id(proof),
+            &|endpoint, proof| self.rail.settlement_id(endpoint, proof),
             view,
             behind,
         )
@@ -1618,7 +1624,9 @@ impl Paykit {
             let stored = value.message.stored(&own)?;
             // `None` for one of another settlement than the rail's names now: it doesn't
             // point to its record.
-            let kept = value.kept(&own, &|proof| self.rail.settlement_id(proof))?;
+            let kept = value.kept(&own, &|endpoint, proof| {
+                self.rail.settlement_id(endpoint, proof)
+            })?;
             let order = value.order()?;
             all.push((value.record, order, value.role, kept_key, stored, kept));
         }
@@ -1735,7 +1743,10 @@ impl Paykit {
             .await?;
         let mut held_messages = Vec::new();
         for (_, kept) in values.iter().filter(|(_, kept)| kept.role == role) {
-            let Some(kept) = kept.kept(&own, &|proof| self.rail.settlement_id(proof))? else {
+            let Some(kept) = kept.kept(&own, &|endpoint, proof| {
+                self.rail.settlement_id(endpoint, proof)
+            })?
+            else {
                 continue;
             };
             let collection = kept.target.collection().ok_or_else(PaykitError::corrupt)?;
@@ -1777,7 +1788,7 @@ impl Paykit {
                 Body::PaymentProof(proof) if stored.message().refs.is_empty() => {
                     let settled = self
                         .rail
-                        .settlement_id(&proof.proof)
+                        .settlement_id(&proof.payment_endpoint_identifier, &proof.proof)
                         .ok_or_else(PaykitError::corrupt)?;
                     Some(pubky_switch_core::enc::b64(&settled))
                 }
@@ -1924,6 +1935,8 @@ impl Paykit {
         shown: &DivergentRecord,
         _confirmed: UserConfirmed,
     ) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.refresh_own()?;
         let record = &shown.record;
         // The floor's divergence is no record the user confirms (`crate::floor`).
@@ -2341,16 +2354,17 @@ mod tests {
             settlement: Some(pubky_switch_core::enc::b64(b"fake:t1")),
             message: KeptMessage::taken(&proof, 0),
         };
-        let rail = |proof: &serde_json::Map<String, serde_json::Value>| {
-            paykit_lib::derive::settlement_id(proof)
+        let rail = |_: &paykit_lib::PaymentEndpointIdentifier,
+                    proof: &serde_json::Map<String, serde_json::Value>| {
+            crate::rail::fake_settlement_id(proof)
         };
         assert!(kept.kept(&bob.id(), &rail).unwrap().is_some());
         // The rail names another settlement now, or none: it doesn't point, no error.
         assert!(kept
-            .kept(&bob.id(), &|_| Some(b"t2".to_vec()))
+            .kept(&bob.id(), &|_, _| Some(b"t2".to_vec()))
             .unwrap()
             .is_none());
-        assert!(kept.kept(&bob.id(), &|_| None).unwrap().is_none());
+        assert!(kept.kept(&bob.id(), &|_, _| None).unwrap().is_none());
     }
 
     #[test]
@@ -2438,7 +2452,8 @@ mod tests {
             vec![[4; 32]],
             crate::testkit::object(serde_json::json!({})),
         );
-        let Some(WriteTarget::Activity { target, .. }) = write_target(&reply, &bob.id(), &|_| None)
+        let Some(WriteTarget::Activity { target, .. }) =
+            write_target(&reply, &bob.id(), &|_, _| None)
         else {
             panic!("an acceptance goes into an activity record");
         };

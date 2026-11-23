@@ -430,7 +430,7 @@ impl Paykit {
             label,
             &held.key,
             |t| self.app.record_key(t).ok(),
-            &|p| self.rail.settlement_id(p),
+            &|endpoint, proof| self.rail.settlement_id(endpoint, proof),
             Some(&mut certs.memo),
         )
     }
@@ -658,15 +658,13 @@ impl Paykit {
             .locals(local.clone());
         match write {
             Some(entry) => batch = batch.entry(entry),
-            // The record reflects it already: the message is queued alone, with the local
-            // writes.
+            // The record reflects it already: the message is queued alone, in one commit with
+            // the local writes, so its delivery is never judged without them, such as a
+            // payee's cancellation without its kept side (Paykit spec 8.1).
             None => {
-                self.app.queue_signed(signed).await?;
-                if !local.is_empty() {
-                    self.app
-                        .protocol_commit(crate::protocol::BACKUP_NAME, &local)
-                        .await?;
-                }
+                self.app
+                    .queue_signed_with(crate::protocol::BACKUP_NAME, signed, &local)
+                    .await?;
                 return Ok(msg_id);
             }
         }
@@ -1039,7 +1037,10 @@ mod own_message_tests {
         assert!(send.contains("self.queue_activity_write(signed, target, write, local)"));
         let queue = body(text("records.rs"), "queue_activity_write");
         assert!(queue.contains(".queue(signed.clone())"));
-        assert!(queue.contains("self.app.queue_signed(signed)"));
+        // A message queued alone goes into the outbox in the commit of its local writes, such
+        // as the side a cancellation is sent from, which its delivery is judged by.
+        assert!(queue.contains(".queue_signed_with(crate::protocol::BACKUP_NAME, signed, &local)"));
+        assert!(!queue.contains("self.app.queue_signed(signed)"));
         // The held path queues nothing and owes the message in the same batch.
         let held = body(text("records.rs"), "record_held");
         assert!(held.contains("self.own_copy(&signed)"));

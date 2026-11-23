@@ -105,6 +105,9 @@ fn invoice(endpoint_id: &str, payload: &str) -> TestResult<RequestDraft> {
     ))
 }
 
+/// How many times [`paid_request`]'s buyer pays again after a payment held at the last check.
+const MAX_HELD_PAYMENTS: usize = 3;
+
 async fn paid_request(
     shop: &mut Paykit,
     mut buyer: Paykit,
@@ -121,16 +124,27 @@ async fn paid_request(
     // The shop's orchestration frame need not stay on the payer's native stack.
     let buyer = tokio::spawn(Box::pin(async move {
         buyer.receive(None).await?;
-        let payment = buyer
-            .pay_request(&request, PayOptions::default())
-            .await
-            .outcome?;
-        let PayOutcome::Paid {
-            proof_msg_id: Some(id),
-            ..
-        } = payment
-        else {
-            panic!("the wallet must report its actual proof, got {payment:?}");
+        // The buyer follows its attempt as a host does. A lookup of the seller that ends at
+        // the last check before money moves can hold a payment by hand there: the payment
+        // answers Pending, and the next resume closes the attempt unpaid. The host then pays
+        // again. A few rounds at most; a payment that never goes through still fails here.
+        let mut held = 0;
+        let id = loop {
+            let payment = buyer
+                .pay_request(&request, PayOptions::default())
+                .await
+                .outcome?;
+            match payment {
+                PayOutcome::Paid {
+                    proof_msg_id: Some(id),
+                    ..
+                } => break id,
+                PayOutcome::Pending { .. } if held < MAX_HELD_PAYMENTS => {
+                    held += 1;
+                    buyer.resume_payments().await?;
+                }
+                payment => panic!("the wallet must report its actual proof, got {payment:?}"),
+            }
         };
         Ok::<_, paykit_sdk::PaykitError>((buyer, id))
     }))
@@ -307,7 +321,7 @@ async fn competing_seller_wallets(world: &World) -> TestResult {
     );
     let checks = rail.proof_checks();
     let id = rail
-        .settlement_id(&checks[0].proof)
+        .settlement_id(&checks[0].endpoint_id, &checks[0].proof)
         .ok_or("verified invoice has no settlement")?;
     for reader in [&reopened, &other_wallet] {
         let naming = reader.app().naming_key();
@@ -458,14 +472,21 @@ async fn test_different_requests_compete_for_one_transaction_in_a_new_and_curren
     Ok(())
 }
 
-/// Distinct method transactions whose marks share a physical bucket.
+/// Distinct fake rail settlements whose marks share a physical bucket, each with the
+/// settlement ID the fake rail names it by.
 fn transactions_in_one_bucket<const N: usize>(
     naming: &pubky_switch_core::ident::NamingKey,
 ) -> TestResult<[([u8; 32], [u8; 32]); N]> {
-    let first = settlement_tag(naming, format!("{:064x}", 1).as_bytes());
+    let fake_id = |number: u64| {
+        let mut proof = serde_json::Map::new();
+        proof.insert("rail".into(), "fake".into());
+        proof.insert("tx".into(), format!("{number:064x}").into());
+        paykit_sdk::rail::fake_settlement_id(&proof).ok_or("no fake settlement")
+    };
+    let first = settlement_tag(naming, &fake_id(1)?);
     let mut same = Vec::new();
     for number in 1..100_000u64 {
-        let tag = settlement_tag(naming, format!("{number:064x}").as_bytes());
+        let tag = settlement_tag(naming, &fake_id(number)?);
         if settlement_bucket(&tag) == settlement_bucket(&first) {
             let mut id = [0; 32];
             id[24..].copy_from_slice(&number.to_be_bytes());
@@ -479,8 +500,8 @@ fn transactions_in_one_bucket<const N: usize>(
         .map_err(|_| "too few test transactions in the bucket".into())
 }
 
-/// Two independent transactions in the same bucket. Each has two payments and one
-/// method settlement ID under Paykit wire 1.5.
+/// Two independent transactions in the same bucket. Each has two payments, which the fake
+/// rail names in one settlement.
 async fn two_transactions(world: &World) -> TestResult {
     let mut wallets = Box::pin(enrolled_seller_wallets(world)).await?;
     // Finish each buyer's authenticated seller lookup before the two seller wallets compete.
@@ -504,7 +525,7 @@ async fn two_transactions(world: &World) -> TestResult {
         .is_none());
     let mut credited = Vec::new();
     for (txid, tag) in [first, second] {
-        wallets.rail.next(Behaviour::InTransaction(txid));
+        wallets.rail.next(Behaviour::InSettlement(txid));
         let (buyer, plain, plain_key) = Box::pin(paid_request(
             &mut wallets.seller_wallet,
             wallets.buyer,
@@ -512,7 +533,7 @@ async fn two_transactions(world: &World) -> TestResult {
             "bcrt1qqyqszqgpqyqszqgpqyqszqgpqyqszqgpvxat9t",
         ))
         .await?;
-        wallets.rail.next(Behaviour::InTransaction(txid));
+        wallets.rail.next(Behaviour::InSettlement(txid));
         wallets.buyer = buyer;
         let (other, label, label_key) = Box::pin(paid_request(
             &mut wallets.labelled,
@@ -655,7 +676,7 @@ async fn stored_receipt_over_full_bucket(world: &World) -> TestResult {
     };
     let id = seller_wallets
         .rail
-        .settlement_id(&body.proof)
+        .settlement_id(&body.payment_endpoint_identifier, &body.proof)
         .ok_or("missing settlement")?;
     let tag = settlement_tag(seller_wallets.seller_wallet.app().naming_key(), &id);
     let number = settlement_bucket(&tag);
@@ -881,7 +902,7 @@ async fn repair_recovered_bucket(world: &World) -> TestResult {
     );
     let key = seller_wallets.seller_wallet.app().record_key(&target)?;
     const ADDRESS: &str = "bcrt1qqyqszqgpqyqszqgpqyqszqgpqyqszqgpvxat9t";
-    seller_wallets.rail.next(Behaviour::InTransaction(first.0));
+    seller_wallets.rail.next(Behaviour::InSettlement(first.0));
     let (buyer, _, record) = Box::pin(paid_request(
         &mut seller_wallets.seller_wallet,
         seller_wallets.buyer,
@@ -910,7 +931,7 @@ async fn repair_recovered_bucket(world: &World) -> TestResult {
     )?;
     assert_eq!(snapshot.marks().len(), 1);
 
-    seller_wallets.rail.next(Behaviour::InTransaction(second.0));
+    seller_wallets.rail.next(Behaviour::InSettlement(second.0));
     let (_, _, record) = Box::pin(paid_request(
         &mut seller_wallets.seller_wallet,
         buyer,
@@ -1129,7 +1150,7 @@ async fn credit_after_loss(world: &World, when: SettlementTime) -> TestResult {
     const ADDRESS: &str = "bcrt1qqyqszqgpqyqszqgpqyqszqgpqyqszqgpvxat9t";
     seller_wallets
         .rail
-        .next(Behaviour::InTransaction(original.0));
+        .next(Behaviour::InSettlement(original.0));
     let (buyer, _, paid) = Box::pin(paid_request(
         &mut seller_wallets.seller_wallet,
         seller_wallets.buyer,
@@ -1196,10 +1217,10 @@ async fn credit_after_loss(world: &World, when: SettlementTime) -> TestResult {
         .identity_of(&seller.identity(), true)
         .await?;
     seller.app_mut().invite(&buyer.identity()).await?;
-    // A second output from the same transaction is never another settlement.
+    // A second proof the fake rail names in the same settlement is that settlement again.
     seller_wallets
         .rail
-        .next(Behaviour::InTransaction(original.0));
+        .next(Behaviour::InSettlement(original.0));
     let (buyer, _, same) = Box::pin(paid_request(
         &mut seller,
         buyer,
@@ -1230,7 +1251,7 @@ async fn credit_after_loss(world: &World, when: SettlementTime) -> TestResult {
     );
     seller_wallets
         .rail
-        .next(Behaviour::InTransaction(distinct.0));
+        .next(Behaviour::InSettlement(distinct.0));
     let (mut buyer, request, occurrence) = Box::pin(paid_request(
         &mut seller,
         buyer,
@@ -1303,9 +1324,7 @@ async fn test_absent_settlement_bucket_without_a_loss_keeps_the_wallet_stopped()
     const ADDRESS: &str = "bcrt1qqyqszqgpqyqszqgpqyqszqgpqyqszqgpvxat9t";
 
     // This backup has the pending proof but predates the other wallet's first credit.
-    seller_wallets
-        .rail
-        .next(Behaviour::InTransaction(pending.0));
+    seller_wallets.rail.next(Behaviour::InSettlement(pending.0));
     let (mut buyer, pending_request, pending_record) = Box::pin(paid_request(
         &mut seller_wallets.labelled,
         seller_wallets.buyer,
@@ -1316,7 +1335,7 @@ async fn test_absent_settlement_bucket_without_a_loss_keeps_the_wallet_stopped()
     let prior = seller_wallets.labelled.backup().await?;
     seller_wallets
         .rail
-        .next(Behaviour::InTransaction(credited.0));
+        .next(Behaviour::InSettlement(credited.0));
     let (_, _, first) = Box::pin(paid_request(
         &mut seller_wallets.seller_wallet,
         seller_wallets.other,

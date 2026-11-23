@@ -45,6 +45,7 @@ async fn marked_request(_world: &World, sale: IssuedSale) -> TestResult {
         buyer.app().naming_key(),
         &paid_view.record,
         None,
+        &|_, proof| paykit_sdk::rail::fake_settlement_id(proof),
     )?;
     assert_eq!(
         paid_record
@@ -82,6 +83,7 @@ async fn marked_request(_world: &World, sale: IssuedSale) -> TestResult {
         buyer.app().naming_key(),
         &view.record,
         None,
+        &|_, proof| paykit_sdk::rail::fake_settlement_id(proof),
     )?;
     marked.lost_to_delete = Some([36; 32]);
     buyer

@@ -627,6 +627,8 @@ impl Paykit {
         record: &[u8; 32],
         details: PeriodDetails,
     ) -> Result<SentMessage> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.send_period_details_inner(record, details)).await
     }
@@ -977,6 +979,8 @@ impl Paykit {
         period: &PeriodRef,
         options: PayOptions,
     ) -> PayResult {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.pay_selected_period(request, period, PeriodPayer::User, options)
             .await
     }
@@ -1004,6 +1008,8 @@ impl Paykit {
         period: &PeriodRef,
         price: PeriodPrice<'_>,
     ) -> PayResult {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         let options = match price {
             PeriodPrice::RequestedAmount => PayOptions::default(),
             PeriodPrice::QuoteFor(endpoint) => PayOptions {
@@ -1032,6 +1038,8 @@ impl Paykit {
         request: &RequestRef,
         period: &PeriodRef,
     ) -> PayResult {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.pay_selected_period(
             request,
             period,

@@ -949,6 +949,8 @@ impl Paykit {
         payee: &[u8; 32],
         confirmed: Option<UserConfirmed>,
     ) -> Result<PublicPaymentList> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.public_endpoints_inner(payee, confirmed)).await
     }
