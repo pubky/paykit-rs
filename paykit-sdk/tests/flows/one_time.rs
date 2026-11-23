@@ -657,6 +657,20 @@ async fn record_uncancelled(wallet: &paykit_sdk::Paykit, request: &paykit_sdk::R
 }
 
 #[tokio::test]
+async fn test_one_time_kept_stop_reads_its_record_again_only_with_a_kept_copy() {
+    // The request's view reads the record for a kept stop only when a kept copy exists: here
+    // one does, so the list binds the record twice, and shows the request cancelled.
+    let w = World::new();
+    let (wallet, request) = cancelled_unplaced(&w, crate::common::store()).await;
+    record_uncancelled(&wallet, &request).await;
+    let before = wallet.activity_binds();
+    let shown = wallet.requests().await.unwrap();
+    assert_eq!(wallet.activity_binds() - before, 2);
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].status, RequestStatus::Cancelled);
+}
+
+#[tokio::test]
 async fn test_one_time_kept_stop_refuses_a_first_payment_it_couldnt_place() {
     let w = World::new();
     let (mut wallet, request) = cancelled_unplaced(&w, crate::common::store()).await;

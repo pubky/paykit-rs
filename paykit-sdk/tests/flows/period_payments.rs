@@ -3852,3 +3852,30 @@ async fn test_period_payments_required_app_rejects_explicit_other_same_asset_det
 async fn test_period_payments_required_app_rejects_explicit_other_priced_details() {
     Box::pin(required_app_period(true, false, true)).await;
 }
+
+#[tokio::test]
+async fn test_period_payments_lists_bind_each_record_once() {
+    // A subscription with one paid period: each list binds the request record and the
+    // period record once each, and shows the period with its request.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    let outcome = by_user(&mut wallet, &request, january(), PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    shop.receive(None).await.unwrap();
+
+    let before = wallet.activity_binds();
+    let shown = wallet.requests().await.unwrap();
+    assert_eq!(wallet.activity_binds() - before, 2);
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].periods.len(), 1, "{shown:?}");
+
+    let before = shop.activity_binds();
+    let sales = shop.payee_activity().await.unwrap();
+    assert_eq!(shop.activity_binds() - before, 2);
+    assert_eq!(sales.len(), 1);
+    assert_eq!(sales[0].periods.len(), 1, "{sales:?}");
+}

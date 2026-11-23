@@ -422,16 +422,21 @@ impl Paykit {
         #[cfg(feature = "test-support")]
         self.activity_binds
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut certs = self.certificates();
-        bind_activity_with(
-            value,
-            &self.identity(),
+        let own = self.identity();
+        // The memo is held only while the record is read: the binding after it calls the
+        // host's rail, which may call this handle again.
+        let record = {
+            let mut certs = self.certificates();
+            ActivityRecord::read_with(value, &own, side, &mut certs.memo).ok()?
+        };
+        bind_read(
+            record,
+            &own,
             side,
             label,
             &held.key,
             |t| self.app.record_key(t).ok(),
             &|p| self.rail.settlement_id(p),
-            Some(&mut certs.memo),
         )
     }
 
@@ -755,28 +760,20 @@ pub(crate) fn bind_activity(
     record_key: impl Fn(&RecordTarget) -> Option<[u8; 32]>,
     settlement: Settlement<'_>,
 ) -> Option<ActivityRecord> {
-    bind_activity_with(value, own, side, label, key, record_key, settlement, None)
+    let record = ActivityRecord::read(value, own, side).ok()?;
+    bind_read(record, own, side, label, key, record_key, settlement)
 }
 
-/// [`bind_activity`], with the stored messages' certificates verified through `certs`
-/// ([`CertificateMemo`]) when given: every other check runs in full.
-// The binding's inputs, named as `bind_activity` names them, and the memo.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn bind_activity_with(
-    value: &[u8],
+/// The binding of [`bind_activity`] for `record`, read already from the value held at `key`.
+fn bind_read(
+    record: ActivityRecord,
     own: &[u8; 32],
     side: ActivitySide,
     label: Option<&Label>,
     key: &[u8; 32],
     record_key: impl Fn(&RecordTarget) -> Option<[u8; 32]>,
     settlement: Settlement<'_>,
-    certs: Option<&mut CertificateMemo>,
 ) -> Option<ActivityRecord> {
-    let record = match certs {
-        Some(certs) => ActivityRecord::read_with(value, own, side, certs),
-        None => ActivityRecord::read(value, own, side),
-    }
-    .ok()?;
     record.check_label(label).ok()?;
     let natural = record.natural_key_with(own, settlement).ok()?;
     let target = RecordTarget::new(
@@ -851,6 +848,73 @@ mod extension_tests {
     use crate::testkit::{object, Party, NOW};
     use pubky_switch_core::message::Sender;
     use serde_json::json;
+
+    /// The stored value of `plaintext` from `sender`'s app, as a record holds it.
+    fn stored_value(
+        sender: &Party,
+        plaintext: &pubky_switch_core::message::MessagePlaintext,
+    ) -> serde_json::Value {
+        use pubky_switch_core::enc::{b64, pubky_id};
+        json!({
+            "sender": pubky_id(&sender.id()),
+            "cert": { "body": sender.cert.signed().body, "sig": sender.cert.signed().sig },
+            "plaintext": {
+                "sender_app": b64(&plaintext.sender_app_id()),
+                "signature": b64(&plaintext.signature()),
+                "json": b64(plaintext.json()),
+            },
+            "accepted_at": null,
+        })
+    }
+
+    #[test]
+    fn test_records_certificate_memo_hit_runs_every_other_check() {
+        // With the sender's certificate already verified, a stored message still fails for
+        // an expired `accepted_at`, a signature that doesn't verify and a kind its sender
+        // may not send (Paykit wire 5.2), as it does without the memo.
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = Party::new(
+            "bob",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
+        let signed = |kind: &str, body: serde_json::Value| {
+            Message::new(
+                kind,
+                Sender::of_app(bob.id(), &bob.keys),
+                alice.id(),
+                NOW,
+                vec![],
+                object(body),
+            )
+            .unwrap()
+            .sign(&bob.keys)
+            .unwrap()
+        };
+        let request = json!({
+            "amount": { "asset": "btc", "value": "1" },
+            "payment_reference": "invoice-7",
+            "proposal_expires_at": null
+        });
+        let good = stored_value(&bob, &signed("paykit.payment_request", request.clone()));
+        let mut memo = CertificateMemo::default();
+        StoredMessage::read_with(&good, &alice.id(), &mut memo).unwrap();
+        assert_eq!(memo.verifications(), 1);
+
+        let mut expired = good.clone();
+        expired["accepted_at"] = json!("2100-01-01T00:00:00Z");
+        let plaintext = signed("paykit.payment_request", request);
+        let mut signature = plaintext.signature();
+        signature[0] ^= 1;
+        let mut tampered = good.clone();
+        tampered["plaintext"]["signature"] = json!(pubky_switch_core::enc::b64(&signature));
+        let not_its_kind = stored_value(&bob, &signed("paykit.payment_proof", json!({})));
+        for bad in [expired, tampered, not_its_kind] {
+            assert!(StoredMessage::read(&bad, &alice.id()).is_err());
+            assert!(StoredMessage::read_with(&bad, &alice.id(), &mut memo).is_err());
+        }
+        assert_eq!(memo.verifications(), 1, "each was a hit");
+    }
 
     #[test]
     fn test_extension_signature_covers_sender_app_kind_refs_and_body_for_the_recipient() {

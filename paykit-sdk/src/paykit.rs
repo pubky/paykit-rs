@@ -242,10 +242,12 @@ pub struct ReceiveSummary {
     /// delivery. This service observation does not authorize a payment or replace the
     /// signed request and its seller-scope checks.
     ///
-    /// The read is bounded. While `report.more` is set, it stopped on one of its per-call
-    /// budgets, such as its feed pages, with more to read now, and the host calls
-    /// [`Paykit::receive`] again without waiting, until a summary has it unset: nothing it
-    /// left is lost or reordered.
+    /// The read is bounded. `report.more` says it stopped on one of its per-call budgets,
+    /// such as its feed pages or the kept batches it sends again, with more to do now;
+    /// nothing it left is lost or reordered. The host handles the summary's events, then,
+    /// while `report.more` is set and `report.stopped` is not, calls [`Paykit::receive`]
+    /// again without waiting. With `report.stopped` set it inspects the reported event
+    /// instead: reading again does nothing until that is dealt with.
     pub report: ReceiveReport,
     /// The `msg_id`s of the messages received, each with its effect committed with the
     /// cursor move (Switch spec 8.2).
