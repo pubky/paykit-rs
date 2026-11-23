@@ -28,9 +28,9 @@ private final class DeviceMethod: CheckoutMethod, @unchecked Sendable {
         threads.record()
         return super.fractionDigits(endpoint: endpoint)
     }
-    override func settlementId(proofJson: Data) -> Data? {
+    override func settlementId(endpoint: String, proofJson: Data) -> Data? {
         threads.record()
-        return super.settlementId(proofJson: proofJson)
+        return super.settlementId(endpoint: endpoint, proofJson: proofJson)
     }
 }
 

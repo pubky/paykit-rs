@@ -1707,12 +1707,15 @@ fn payer_reply(
             // A payment without a request: keyed by its settlement, so every proof of one
             // settlement names one record and is credited once (Paykit spec 8.4). The app's
             // rail gives the settlement ID, so a method of its own is credited too; a proof
-            // whose method gives none isn't credited.
+            // whose method gives none isn't credited, and is dropped with that reason rather
+            // than applied, so the host sees it wasn't taken (Paykit wire 1.5).
             let Body::PaymentProof(proof) = stored.body() else {
                 return Ok(false);
             };
             let Some(settled) = settlement(&proof.payment_endpoint_identifier, &proof.proof) else {
-                return Ok(false);
+                return Err(Fail::Drop(
+                    "Paykit wire 1.5: the payment method names no settlement for this proof".into(),
+                ));
             };
             let target = ActivityTarget::payee(
                 natural_key::payee_payment_record(&proof.payment_endpoint_identifier, &settled),
