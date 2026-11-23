@@ -782,3 +782,45 @@ async fn test_shared_hold_recorded_loss_kept_across_a_scope_change() {
     assert!(held(&outcome), "{outcome:?}");
     assert_eq!(executions(&w), 0);
 }
+
+#[tokio::test]
+async fn test_shared_hold_lets_payments_by_hand_go_on() {
+    // Paykit wire 5.6, Shared post-loss hold: past the loss's window, a one-time request
+    // created after the loss is paid by hand, and a payment without a request goes, each
+    // under its own rules. (A Billing Period from before the loss meets the loss's own doubt,
+    // Paykit spec 7.3, not this hold.)
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    earlier_request(&w, &mut wallet, &mut shop).await;
+    w.clock.advance_ms(60_000);
+    declare_loss(&w);
+    let until = follow_loss(&mut wallet).await;
+    past_the_window(&w, until);
+    let request = request_from(&mut shop, w.alice_id(), draft("9", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    crate::public::publish(
+        &w,
+        serde_json::json!({
+            "capabilities": { "endpoint_identifiers": ["btc-lightning-bolt12"] },
+            "public_endpoints": { "btc-lightning-bolt12": "lno1tips" }
+        }),
+        Some(w.clock.now_ms() + 30 * 24 * 3_600_000),
+    );
+    let payment = paykit_sdk::UnrequestedPayment::new(w.bob_id(), crate::common::btc("0.001"))
+        .with_options(
+            PayOptions::default().with_mode(paykit_sdk::PaymentMode::Public(UserConfirmed::new())),
+        );
+    let unrequested = wallet.pay_without_request(payment).await.outcome.unwrap();
+    assert!(
+        matches!(unrequested, PayOutcome::Paid { .. }),
+        "{unrequested:?}"
+    );
+    assert_eq!(executions(&w), 2);
+}
