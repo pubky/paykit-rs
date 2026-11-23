@@ -2068,11 +2068,42 @@ impl Paykit {
             read.iter().map(|(l, v)| (l.app_id, *v)).collect();
         let mut lists: Vec<PaymentListRecord> = read.into_iter().map(|(l, _)| l).collect();
         lists.retain(|l| app.is_none_or(|a| a == l.app_id));
-        // The pair installed of each app's list, whether or not it may be paid: a request
-        // naming the app names it (Paykit wire 4.14).
+        // A list held over its record, as when the record didn't read when it came, replaces
+        // the record's list once placed (Paykit wire 5.4), by the test placement uses: the
+        // pair of each app's list held over its record, where it is newer.
+        let own = self.identity();
+        let mut held_over: Vec<([u8; 16], ListVersion)> = Vec::new();
+        for list in &lists {
+            let record = self
+                .app
+                .record_key(&list_target(&list.payee, &list.app_id))?;
+            let Some(kept) = self
+                .local_get::<KeptMessage>(&key::held_list(&record))
+                .await?
+            else {
+                continue;
+            };
+            let stored = kept.stored(&own)?;
+            if crate::receive::next_list_record(Some(list.clone()), &stored).is_some() {
+                if let Some(version) = crate::receive::list_version(&stored) {
+                    held_over.push((list.app_id, version));
+                }
+            }
+        }
+        // The newest pair the wallet holds of each app's list, installed or held over its
+        // record, whether or not it may be paid: a request naming the app names it, and
+        // every way of asking takes it from here (Paykit wire 4.14).
+        let newest = |app_id: [u8; 16], installed: ListVersion| {
+            held_over
+                .iter()
+                .find(|(app, _)| *app == app_id)
+                .map_or(installed, |(_, held)| (*held).max(installed))
+        };
         let installed: Vec<([u8; 16], ListVersion)> = lists
             .iter()
-            .filter_map(|l| crate::receive::list_version(&l.list).map(|v| (l.app_id, v)))
+            .filter_map(|l| {
+                crate::receive::list_version(&l.list).map(|v| (l.app_id, newest(l.app_id, v)))
+            })
             .collect();
         // Only a current app's list counts (Paykit spec 8.4, 7.2): a removed app's list, of
         // whatever version it chose, would shadow the current apps' and then be refused by
@@ -2113,7 +2144,7 @@ impl Paykit {
                 match crate::receive::list_version(&l.list) {
                     Some(v) if v.generation() <= identity.doc.generation() => true,
                     Some(v) => {
-                        ahead.push((l.app_id, v));
+                        ahead.push((l.app_id, newest(l.app_id, v)));
                         false
                     }
                     None => false,
@@ -2132,10 +2163,13 @@ impl Paykit {
         // nothing goes to a list a later one, a withdrawal included, replaces (Paykit wire
         // 5.4). A hold the record already holds, placed and not yet cleared, stops nothing:
         // the test is the one placement takes. A divergent record is named first: its held
-        // list is placed only once the user confirms it. Its pair stays installed above.
-        let own = self.identity();
+        // list is placed only once the user confirms it. The pair each app is asked for is
+        // the newest it holds, resolved above.
         let mut paused_lists = Vec::new();
         let mut usable = Vec::with_capacity(lists.len());
+        // The apps whose list a newer one held over its record replaces: not paid to, and
+        // asked naming the held pair.
+        let mut replaced: Vec<([u8; 16], ListVersion)> = Vec::new();
         for list in lists {
             let record = self
                 .app
@@ -2144,15 +2178,9 @@ impl Paykit {
                 paused_lists.push(record);
                 continue;
             }
-            if let Some(kept) = self
-                .local_get::<KeptMessage>(&key::held_list(&record))
-                .await?
-            {
-                if crate::receive::next_list_record(Some(list.clone()), &kept.stored(&own)?)
-                    .is_some()
-                {
-                    continue;
-                }
+            if let Some(pair) = held_over.iter().find(|(app, _)| *app == list.app_id) {
+                replaced.push(*pair);
+                continue;
             }
             usable.push(list);
         }
@@ -2247,6 +2275,11 @@ impl Paykit {
                     carrier,
                     reserve,
                 ));
+            }
+        }
+        for pair in replaced {
+            if !held.iter().any(|(app, _)| *app == pair.0) {
+                held.push(pair);
             }
         }
         held.extend(ahead);

@@ -1296,3 +1296,153 @@ async fn test_local_state_list_held_over_a_divergent_record_refused_as_divergent
     );
     assert!(w.rail.all_executions().is_empty());
 }
+
+/// Alice's wallet on `base` holding the shop's list at `installed`, with a later list of the
+/// shop's at `held` held over its record, as when the record didn't read when it came.
+async fn shop_list_held_over(
+    w: &World,
+    base: Arc<dyn StateStore>,
+    installed: paykit_lib::ListVersion,
+    held: paykit_lib::ListVersion,
+) -> (Paykit, Paykit) {
+    let mut wallet = w.wallet_on("wallet", base).await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], installed)
+        .await;
+    wallet.receive(None).await.unwrap();
+    let record = wallet
+        .app()
+        .record_key(&lists_of(w, &shop.app_id()))
+        .unwrap();
+    put(
+        &mut wallet,
+        &format!("lh/{}", b64(&record)),
+        &shop_list_at(w, held),
+    )
+    .await;
+    (wallet, shop)
+}
+
+#[tokio::test]
+async fn test_local_state_list_request_names_the_held_list_not_the_installed_one() {
+    // The shop's list 1/1 is installed and its 1/2 held over the record: a payment asks the
+    // shop for its current list naming 1/2, the pair the wallet holds, whether the payment
+    // names the shop's app or not (Paykit wire 4.14).
+    for targeted in [false, true] {
+        let w = World::new();
+        let (mut wallet, shop) = shop_list_held_over(
+            &w,
+            crate::common::store(),
+            list_version(1, 1),
+            list_version(1, 2),
+        )
+        .await;
+        let options = if targeted {
+            PayOptions::default().with_list_app(shop.app_id())
+        } else {
+            PayOptions::default()
+        };
+        let refused = wallet
+            .pay_without_request(
+                UnrequestedPayment::new(w.bob_id(), crate::common::btc("1")).with_options(options),
+            )
+            .await
+            .outcome
+            .unwrap_err();
+        assert!(
+            matches!(
+                refused.refusal(),
+                Some(paykit_sdk::Refusal::WaitingForList { .. })
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(
+            crate::destinations::list_requests_sent(&w, &wallet).await,
+            [(Some(shop.app_id()), Some(list_version(1, 2)))],
+            "targeted: {targeted}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_local_state_list_request_names_the_held_list_of_one_ahead_of_the_identity() {
+    // The shop's installed list is of a generation the payee's identity.json doesn't reach
+    // yet, and a later one is held over it: the request names the held pair (Paykit wire
+    // 4.13, 4.14).
+    let w = World::new();
+    let (mut wallet, shop) = shop_list_held_over(
+        &w,
+        crate::common::store(),
+        list_version(9, 1),
+        list_version(9, 2),
+    )
+    .await;
+    let _ = wallet
+        .pay_without_request(UnrequestedPayment::new(w.bob_id(), crate::common::btc("1")))
+        .await;
+    assert_eq!(
+        crate::destinations::list_requests_sent(&w, &wallet).await,
+        [(Some(shop.app_id()), Some(list_version(9, 2)))]
+    );
+}
+
+#[tokio::test]
+async fn test_local_state_list_request_asks_the_held_app_beside_a_paused_one() {
+    // The shop's list 1/1 is installed with its 1/2 held over it, and the seller wallet's
+    // list is paused as divergent: the payment waits for the user's confirmation of the
+    // paused record, and the shop is still asked, naming 1/2 (Paykit spec 8.4, wire 4.14).
+    let w = World::new();
+    let base = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let mut shop = w.shop().await;
+    let mut seller = w
+        .join(
+            &w.bob,
+            "seller-wallet",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    seller.app_mut().invite(&w.alice_id()).await.unwrap();
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
+    crate::destinations::list_from(
+        &w,
+        "seller-wallet",
+        wallet.app_id(),
+        list_version(1, 1),
+        "btc-lightning-bolt11",
+        "lnbc1wallet",
+    );
+    wallet.receive(None).await.unwrap();
+    let record = wallet
+        .app()
+        .record_key(&lists_of(&w, &shop.app_id()))
+        .unwrap();
+    put(
+        &mut wallet,
+        &format!("lh/{}", b64(&record)),
+        &shop_list_at(&w, list_version(1, 2)),
+    )
+    .await;
+    let paused = wallet
+        .app()
+        .record_key(&lists_of(&w, &seller.app_id()))
+        .unwrap();
+    crate::divergent::set_divergent(&base, &wallet, &paused, true);
+    let refused = wallet
+        .pay_without_request(UnrequestedPayment::new(w.bob_id(), crate::common::btc("1")))
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::Divergent { .. })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(
+        crate::destinations::list_requests_sent(&w, &wallet).await,
+        [(Some(shop.app_id()), Some(list_version(1, 2)))]
+    );
+}

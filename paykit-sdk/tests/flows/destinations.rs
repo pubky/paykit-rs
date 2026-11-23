@@ -730,7 +730,7 @@ async fn test_destinations_unsupported_live_list_beside_an_expired_one_asks_for_
 
 /// Bob's app `app` sends alice's `wallet` its list at `version`, offering the one reusable
 /// endpoint `id`, entered at her switch directly.
-fn list_from(
+pub(crate) fn list_from(
     w: &World,
     app: &str,
     wallet: [u8; 16],
@@ -1304,7 +1304,7 @@ pub(crate) async fn held_versions(
 }
 
 /// The app asked about and the `held_version` of each list request `wallet` sent bob.
-async fn list_requests_sent(
+pub(crate) async fn list_requests_sent(
     w: &World,
     wallet: &paykit_sdk::Paykit,
 ) -> Vec<(Option<[u8; 16]>, Option<paykit_lib::ListVersion>)> {
