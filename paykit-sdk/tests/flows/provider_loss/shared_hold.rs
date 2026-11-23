@@ -608,3 +608,89 @@ async fn test_shared_hold_unblocks_under_both_holds_while_the_floor_cant_be_read
         .deny
         .contains(&w.carol_id()));
 }
+
+#[tokio::test]
+async fn test_shared_hold_applies_a_restore_widening_without_the_raise() {
+    // Paykit wire 5.6, Unblocking under the divergence hold: under both holds, the widening of
+    // an in-place restore that isn't clean applies at once with no `block_floor` write, so it
+    // owes nothing and holds no ask.
+    let w = World::new();
+    let storage = store();
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            paykit_sdk::AppScopes::new()
+                .pay()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+            PaykitConfig::default(),
+            Arc::clone(&storage),
+        )
+        .await;
+    wallet.app_mut().invite(&w.carol_id()).await.unwrap();
+    wallet.block(&w.carol_id()).await.unwrap();
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            "block_floor",
+            paykit_lib::collections::Collection::BlockFloor.fixed_policy(),
+        ),
+        &paykit_lib::derive::natural_key::block_floor(&w.alice_id()),
+    );
+    wallet
+        .app_mut()
+        .put_record(
+            &target,
+            &paykit_lib::records::BlockFloorRecord::new(1)
+                .to_json()
+                .unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let key = wallet.app().record_key(&target).unwrap();
+    w.alice
+        .switch()
+        .make_divergent([0x5d; 16], key, [4; 32])
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(60_000);
+    let next = declare_loss(&w);
+    follow_loss(&mut wallet).await;
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut restored = Box::pin(Paykit::restore(
+        w.env(&w.alice, storage),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    crate::common::restore_with_unknown_cursor(&mut restored).await;
+    let floor_before = next.record(&key).map(|held| held.revision);
+    for _ in 0..2 {
+        w.clock.advance_ms(11 * 60_000);
+        restored.receive(None).await.unwrap();
+    }
+    // The widening applied: carol, whom the deny list holds, is marked as blocked.
+    assert!(!restored
+        .app()
+        .protocol_scan("paykit", b"bd/")
+        .await
+        .unwrap()
+        .is_empty());
+    let widening_owed = restored
+        .app()
+        .protocol_get("paykit", b"rh")
+        .await
+        .unwrap()
+        .is_some_and(|bytes| {
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            !value["d"]["widening_read"].is_null() || !value["d"]["earlier_widening"].is_null()
+        });
+    assert!(!widening_owed);
+    assert_eq!(next.record(&key).map(|held| held.revision), floor_before);
+}
