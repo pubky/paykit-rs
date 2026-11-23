@@ -625,6 +625,97 @@ async fn test_unrequested_list_over_a_record_that_doesnt_read_keeps_single_use_m
     assert_eq!(w.rail.all_executions().len(), 1);
 }
 
+/// A store whose reads of Paykit's kept list deletes (`lgone/`) fail once armed.
+#[derive(Default)]
+struct FailLostReads {
+    inner: pubky_switch_client::store::MemoryStore,
+    armed: std::sync::atomic::AtomicBool,
+}
+
+impl pubky_switch_client::store::StateStore for FailLostReads {
+    fn get(
+        &self,
+        ns: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+        if self.armed.load(std::sync::atomic::Ordering::SeqCst)
+            && key.windows(6).any(|part| part == b"lgone/")
+        {
+            return Err(pubky_switch_client::error::StoreError::Unavailable);
+        }
+        self.inner.get(ns, key)
+    }
+
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    {
+        self.inner.scan(ns, prefix, after, limit)
+    }
+
+    fn commit(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        self.inner.commit(batch)
+    }
+
+    fn acquire(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.inner.acquire(ns, owner)
+    }
+
+    fn commit_if(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.inner.commit_if(ns, owner, batch)
+    }
+}
+
+#[tokio::test]
+async fn test_unrequested_held_list_placement_reports_a_store_failure_keeping_its_hold() {
+    let w = World::new();
+    let failing = std::sync::Arc::new(FailLostReads::default());
+    let mut wallet = w
+        .wallet_on(
+            "wallet",
+            std::sync::Arc::clone(&failing)
+                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    pay_single_use_then_delete_elsewhere(&w, &mut wallet, &mut phone, &mut shop).await;
+    wallet.receive(None).await.unwrap();
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
+    // The store fails reading the kept delete while the held list is placed: the receive
+    // reports it, rather than end as if the hold were checked (Paykit spec 6).
+    failing
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(wallet.receive(None).await.is_err());
+    failing
+        .armed
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn test_unrequested_list_after_a_delete_stays_held_and_its_single_use_endpoint_unpaid() {
     use paykit_lib::collections::Collection;

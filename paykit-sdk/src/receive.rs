@@ -2643,6 +2643,17 @@ pub(crate) fn lost_over(
     LostListRecord::over_exact(version, item, exact.as_ref(), seen.as_ref())
 }
 
+/// Whether `error`, from placing a held list, is a remote outcome the next receive tries
+/// again: the switch's answer, a request that didn't reach it, or a refusal of the write.
+fn placement_retryable(error: &crate::error::PaykitError) -> bool {
+    use pubky_switch_client::app::AppError;
+    matches!(
+        error,
+        crate::error::PaykitError::Client(AppError::Switch(_) | AppError::Transport(_))
+            | crate::error::PaykitError::Refused(_)
+    )
+}
+
 /// The outer `payee` and `app_id` of a `payment_lists` value, as written, if both decode
 /// (Paykit wire 5.4).
 fn outer_list_owner(value: &[u8]) -> Option<([u8; 32], [u8; 16])> {
@@ -3071,12 +3082,14 @@ impl Paykit {
     pub(crate) async fn place_held_lists(&mut self) -> crate::error::Result<()> {
         self.keep_list_loss_markers().await?;
         for (rest, kept) in self.local_scan::<KeptMessage>(key::HELD_LISTS).await? {
-            // One that can't be placed now stays held, for the next receive; the others are
-            // still placed, and the receive goes on. A held list that doesn't read or isn't
-            // at its own record's key is a corrupt store, which is surfaced.
+            // One the switch can't take now, or a refusal of its write, stays held for the next
+            // receive; the others are still placed, and the receive goes on. Any other
+            // failure, a local read, write or commit of its hold above all, is the receive's:
+            // a hold not kept must not pass for one kept (Paykit spec 6).
             match self.place_held_list(&rest, &kept).await {
-                Err(error) if error == crate::error::PaykitError::corrupt() => return Err(error),
-                _ => {}
+                Ok(()) => {}
+                Err(error) if placement_retryable(&error) => {}
+                Err(error) => return Err(error),
             }
         }
         Ok(())
