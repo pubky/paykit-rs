@@ -450,6 +450,65 @@ pub(crate) fn admits_new_state(
     )
 }
 
+/// What the app's copy of the lists says of a sender of new state ([`admits_new_state`]),
+/// read only.
+enum SenderHold {
+    /// The copy isn't known to be complete.
+    Unknown,
+    /// Neither blocked nor flagged, or the app can't read the lists.
+    Admitted,
+    /// Blocked by the user's list or this app's own block mark.
+    Blocked,
+    /// Flagged by the service only.
+    Flagged,
+}
+
+fn sender_hold(
+    cx: &mut ReceiveContext<'_>,
+    sender: &[u8; 32],
+    scopes: &[String],
+) -> Result<SenderHold, Fail> {
+    if !reads_lists(scopes) {
+        return Ok(SenderHold::Admitted);
+    }
+    if state::cx_get::<u64>(cx, key::LISTS_READ)?.is_none() {
+        return Ok(SenderHold::Unknown);
+    }
+    let standing = cx.sender_disposition(sender)?;
+    if standing.lists_as_of_ms.is_none() {
+        return Ok(SenderHold::Unknown);
+    }
+    let own_block = state::cx_get::<OwnBlockMark>(cx, &key::own_block(sender))?
+        .is_some_and(|mark| mark.blocked());
+    Ok(if own_block || standing.blocked {
+        SenderHold::Blocked
+    } else if standing.flagged {
+        SenderHold::Flagged
+    } else {
+        SenderHold::Admitted
+    })
+}
+
+/// Whether [`admits_new_state`] would let `sender`'s new state through, read only: nothing
+/// is counted or written. `Some(true)` at an app that can't read the lists or for a sender
+/// neither blocked (by the user's list or this app's own block mark) nor flagged;
+/// `Some(false)` for one blocked or flagged; `None` while the app's copy of the lists isn't
+/// known to be complete. A caller that takes a message without asking admission, because it
+/// updates a record the app holds, asks this before treating the message as evidence from
+/// an admitted sender: a message a blocked or flagged sender sends shows nothing new
+/// (Paykit spec 8.1, 9).
+pub(crate) fn sender_admitted(
+    cx: &mut ReceiveContext<'_>,
+    sender: &[u8; 32],
+    scopes: &[String],
+) -> Result<Option<bool>, Fail> {
+    Ok(match sender_hold(cx, sender, scopes)? {
+        SenderHold::Unknown => None,
+        SenderHold::Admitted => Some(true),
+        SenderHold::Blocked | SenderHold::Flagged => Some(false),
+    })
+}
+
 pub(crate) fn admits_new_state_of(
     cx: &mut ReceiveContext<'_>,
     sender: &[u8; 32],
@@ -457,22 +516,12 @@ pub(crate) fn admits_new_state_of(
     msg_id: &str,
     accepted_at_ms: u64,
 ) -> Result<bool, Fail> {
-    if !reads_lists(scopes) {
-        return Ok(true);
-    }
-    if state::cx_get::<u64>(cx, key::LISTS_READ)?.is_none() {
-        return Err(Fail::wait_for("sender lists unknown"));
-    }
-    let standing = cx.sender_disposition(sender)?;
-    if standing.lists_as_of_ms.is_none() {
-        return Err(Fail::wait_for("sender lists unknown"));
-    }
-    let own_block = state::cx_get::<OwnBlockMark>(cx, &key::own_block(sender))?
-        .is_some_and(|mark| mark.blocked());
-    let blocked = own_block || standing.blocked;
-    if !(blocked || standing.flagged) {
-        return Ok(true);
-    }
+    let blocked = match sender_hold(cx, sender, scopes)? {
+        SenderHold::Unknown => return Err(Fail::wait_for("sender lists unknown")),
+        SenderHold::Admitted => return Ok(true),
+        SenderHold::Blocked => true,
+        SenderHold::Flagged => false,
+    };
     // Counted because the user blocked the sender: dropped as one never processed, to ask
     // for again once it is unblocked (`marks.rs`, Paykit spec 8.1). One counted only because
     // the service flagged its sender is counted, its pair kept.
@@ -1673,14 +1722,34 @@ fn payer_reply(
             // proof's sender: the proof is new state, under the spam rule first, and one
             // admitted is kept as a reply before its record (`pr/`), within those bounds,
             // never written over the value (Paykit spec 8.1, "Replies before their record").
+            // A proof kept or placed, its sender admitted, also shows which list version the
+            // payer held; one dropped as never processed shows nothing (Paykit spec 9). It is
+            // judged when the proof is taken: a kept proof evicted later for room leaves the
+            // evidence, which was genuine.
             if held_request(cx, &target)? && held_bound(cx, &target, settlement)?.is_none() {
                 if admits_new_state(cx, &sender, scopes, stored)? {
                     keep_reply(cx, &target, stored, position)?;
+                    crate::publish::answers::note_proof(cx, stored, proof)?;
                 }
                 return Ok(true);
             }
-            if held.is_some() || admits_new_state(cx, &sender, scopes, stored)? {
-                place(cx, &target, sender, role, stored, seq, settlement)?;
+            // A proof updating a held record is placed without asking admission, but it shows
+            // which list version the payer held only from a sender admitted now: one blocked
+            // or flagged, or whose standing isn't known yet, gives no evidence (Paykit spec
+            // 8.1, 9).
+            let evidence = match held {
+                Some(_) => {
+                    place(cx, &target, sender, role, stored, seq, settlement)?;
+                    sender_admitted(cx, &sender, scopes)? == Some(true)
+                }
+                None if admits_new_state(cx, &sender, scopes, stored)? => {
+                    place(cx, &target, sender, role, stored, seq, settlement)?;
+                    true
+                }
+                None => false,
+            };
+            if evidence {
+                crate::publish::answers::note_proof(cx, stored, proof)?;
             }
             Ok(true)
         }
@@ -3668,6 +3737,16 @@ impl Paykit {
     /// ([`Paykit::block`]), and a receive reads it again first once it is
     /// [`LISTS_REFRESH_MS`] old.
     pub(crate) async fn denied_as_last_read(&self, pubky: &[u8; 32]) -> crate::error::Result<bool> {
+        self.denied_with(&mut None, pubky).await
+    }
+
+    /// [`Paykit::denied_as_last_read`], with the copy of the deny list taken from `denied`,
+    /// read into it once when first needed: a list read shares it across its records.
+    pub(crate) async fn denied_with(
+        &self,
+        denied: &mut Option<std::collections::HashSet<[u8; 32]>>,
+        pubky: &[u8; 32],
+    ) -> crate::error::Result<bool> {
         if !reads_lists(self.app.cert().scopes()) {
             return Ok(false);
         }
@@ -3679,10 +3758,16 @@ impl Paykit {
         {
             return Ok(self.own_change(&mark).await?.unwrap_or(true));
         }
-        Ok(self
-            .local_get::<Vec<[u8; 32]>>(key::DENIED)
-            .await?
-            .is_some_and(|denied| denied.contains(pubky)))
+        if denied.is_none() {
+            *denied = Some(
+                self.local_get::<Vec<[u8; 32]>>(key::DENIED)
+                    .await?
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect(),
+            );
+        }
+        Ok(denied.as_ref().is_some_and(|denied| denied.contains(pubky)))
     }
 
     /// Answer the `resend_request`s the receive step kept, oldest first, each once (Paykit
