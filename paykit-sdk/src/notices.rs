@@ -889,6 +889,16 @@ impl Paykit {
         if self.app.delivery(&message.msg_id).await?.is_some() {
             return Ok(());
         }
+        // So does a held send this installation gave up and told the host of, which an
+        // in-place restore keeps with its notice: it never went (Paykit spec 8.1,
+        // "Undelivered messages").
+        if self
+            .local_get::<crate::send_holds::QueuedStop>(&key::queued_stop(&message.msg_id))
+            .await?
+            .is_some_and(|stop| stop.told)
+        {
+            return Ok(());
+        }
         let key = key::restored_delivery(&message.to, &message.msg_id, &stored.hash());
         if self.kept_notice(&key).await?.is_none() {
             self.local_put(

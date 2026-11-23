@@ -5438,6 +5438,68 @@ async fn test_blocked_unacknowledged_give_up_notice_kept_across_an_older_in_plac
 }
 
 #[tokio::test]
+async fn test_blocked_give_up_notice_kept_across_an_in_place_restore_once_its_report_is_acknowledged(
+) {
+    let w = World::new();
+    let storage = store();
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new().pay().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            storage.clone(),
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    let rejection = wallet.reject_request(&request, None).await.unwrap();
+    let older = wallet.backup().await.unwrap();
+    w.clock.advance_ms(31 * 24 * HOUR_MS);
+    // The client's report of the give-up is taken and acknowledged; the host hasn't seen
+    // the notice yet.
+    for _ in 0..3 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(duties_of(&mut wallet, &rejection).await, 0);
+    let notice = wallet
+        .notices()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|n| n.msg_id.as_deref() == Some(rejection.as_str()))
+        .unwrap();
+    drop(wallet);
+    // Restored in place from the older backup, the host still holds that one notice, told
+    // once (Paykit spec 8.1, "Undelivered messages").
+    let mut wallet = Paykit::restore(
+        w.env(&w.alice, storage),
+        PaykitConfig::default(),
+        &older,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    for _ in 0..3 {
+        wallet.receive(None).await.unwrap();
+    }
+    let kept: Vec<_> = wallet
+        .notices()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|n| n.msg_id.as_deref() == Some(rejection.as_str()))
+        .collect();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(kept[0].id, notice.id);
+    assert_eq!(given_up_notices(&w, &wallet, &rejection, &request).await, 1);
+}
+
+#[tokio::test]
 async fn test_blocked_told_stop_keeps_its_decision_while_its_record_is_undecided() {
     let (w, mut wallet, _, _, rejection) =
         rejection_queued_then(async |_, _, _, _| Some(b"{}".to_vec())).await;
@@ -5687,7 +5749,7 @@ async fn test_blocked_flush_reads_the_time_only_for_a_waiting_governed_message()
     wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
     let before = w.router.log().len();
     wallet.flush().await.unwrap();
-    assert!(list_reads(&w.router.log(), before) <= 1);
+    assert_eq!(list_reads(&w.router.log(), before), 1);
     assert_eq!(
         sent_of(
             &wallet,
