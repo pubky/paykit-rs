@@ -1747,8 +1747,8 @@ async fn test_local_state_payment_naming_a_paused_held_publisher_asks_nothing() 
 async fn test_local_state_paused_held_publisher_leaves_a_seller_with_an_uncounted_list_asked() {
     // The shop's list is held over its paused record, and the seller wallet's list was
     // signed under a certificate bob's identity.json no longer lists: the seller wallet is
-    // asked by name, as it would be with no list at all, and the shop isn't asked (Paykit
-    // spec 8.4, wire 4.14).
+    // asked by name, naming the pair held, and the shop isn't asked (Paykit spec 8.4, wire
+    // 4.14).
     let w = World::new();
     let (mut wallet, _shop, seller) = paused_held_list(&w).await;
     crate::destinations::list_from(
@@ -1782,7 +1782,7 @@ async fn test_local_state_paused_held_publisher_leaves_a_seller_with_an_uncounte
         .await;
     assert_eq!(
         crate::destinations::list_requests_sent(&w, &wallet).await,
-        [(Some(seller.app_id()), None)]
+        [(Some(seller.app_id()), Some(list_version(1, 1)))]
     );
 }
 
@@ -1824,12 +1824,38 @@ async fn test_local_state_paused_held_list_above_the_payees_generation_pauses_no
     let _ = wallet
         .pay_without_request(UnrequestedPayment::new(w.bob_id(), crate::common::btc("1")))
         .await;
+    let mut asks = crate::destinations::list_requests_sent(&w, &wallet).await;
+    asks.sort();
+    let mut expected = vec![
+        (Some(shop.app_id()), Some(ahead)),
+        (Some(seller.app_id()), None),
+    ];
+    expected.sort();
+    assert_eq!(asks, expected);
+}
+
+#[tokio::test]
+async fn test_local_state_paused_held_list_above_the_generation_asks_the_newest_pair_kept() {
+    // The shop's list held over its paused record is of a generation bob's identity.json
+    // hasn't reached, and a newer one came after the pause and is kept for the user's
+    // confirmation: the shop is asked naming the newer pair (Paykit spec 8.4; wire 4.13,
+    // 4.14).
+    let w = World::new();
+    let (mut wallet, mut shop, _seller) =
+        paused_held_list_at(&w, |at| list_version(at + 1, 1)).await;
+    let generation = w.homeserver.identity_doc(&w.bob_id()).unwrap().generation();
+    let newer = list_version(generation + 1, 2);
+    w.list_to_alice(&mut shop, &[wallet.app_id()], newer).await;
+    wallet.receive(None).await.unwrap();
+    let _ = wallet
+        .pay_without_request(
+            UnrequestedPayment::new(w.bob_id(), crate::common::btc("1"))
+                .with_options(PayOptions::default().with_list_app(shop.app_id())),
+        )
+        .await;
     assert_eq!(
         crate::destinations::list_requests_sent(&w, &wallet).await,
-        [
-            (Some(shop.app_id()), Some(ahead)),
-            (Some(seller.app_id()), None)
-        ]
+        [(Some(shop.app_id()), Some(newer))]
     );
 }
 

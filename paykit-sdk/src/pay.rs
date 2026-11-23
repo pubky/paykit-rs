@@ -2133,8 +2133,12 @@ impl Paykit {
             if app.is_some_and(|a| a != app_id)
                 || lists.iter().any(|l| l.app_id == app_id)
                 || held_only.iter().any(|(a, _)| *a == app_id)
-                || paused_held.iter().any(|(a, _, _)| *a == app_id)
             {
+                continue;
+            }
+            // Held over the same paused record too: the newer pair is the one asked for.
+            if let Some(held) = paused_held.iter_mut().find(|(a, _, _)| *a == app_id) {
+                held.1 = held.1.max(version);
                 continue;
             }
             if Box::pin(self.pause_at(&record)).await?.blocks_by_hand() {
@@ -2728,9 +2732,10 @@ impl Paykit {
     /// `paykit.private_payment_list_request` naming the version held (Paykit wire 4.14). With
     /// `app`, of that app, naming the pair `installed` holds of it whether or not that list
     /// may be paid; without, of each app in `held`, and of each app in `others`, a current
-    /// app of the payee's with no list held, naming no pair, or one request naming no app
-    /// when none is held. An app in `paused`, whose record is paused, is never asked, and
-    /// while one is, no request names no app (Paykit spec 8.4, wire 4.14). A request already asked of the same app at the same held version is
+    /// app of the payee's with no list held that counts, naming the pair `installed` holds of
+    /// it if any, or one request naming no app when none is held. An app in `paused`, whose
+    /// record is paused, is never asked, and while one is, no request names no app (Paykit
+    /// spec 8.4, wire 4.14). A request already asked of the same app at the same held version is
     /// outstanding, and not asked again, until a day has passed: the payee can't be forced to
     /// answer, and a request it dropped is asked once more after that, so a payer waits at
     /// most a day for one more chance. The request is queued before its mark is kept: a crash
@@ -2751,14 +2756,15 @@ impl Paykit {
             Some(app) if paused.contains(&app) => Vec::new(),
             Some(app) => vec![(Some(app), held_of(app))],
             // A request naming no app would reach a paused app too: the others are named.
-            None if held.is_empty() && !paused.is_empty() => {
-                others.iter().map(|app| (Some(*app), None)).collect()
-            }
+            None if held.is_empty() && !paused.is_empty() => others
+                .iter()
+                .map(|app| (Some(*app), held_of(*app)))
+                .collect(),
             None if held.is_empty() => vec![(None, None)],
             None => held
                 .iter()
                 .map(|(app, v)| (Some(*app), Some(*v)))
-                .chain(others.iter().map(|app| (Some(*app), None)))
+                .chain(others.iter().map(|app| (Some(*app), held_of(*app))))
                 .collect(),
         };
         let now = self.now();
