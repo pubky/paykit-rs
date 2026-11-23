@@ -1746,3 +1746,54 @@ async fn test_public_read_app_without_record_has_none_whatever_was_seen() {
         "{refused:?}"
     );
 }
+
+#[tokio::test]
+async fn test_public_read_unretained_conflict_member_never_the_fallback_of_a_later_conflict() {
+    // The shop's record has a second body at its time too large to keep, so that time's
+    // group is unknown. A later record replaces it, and then conflicts with a body at its
+    // own time: the earlier record, which may itself be in conflict, is never the record
+    // used meanwhile (Switch spec 4.2).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let apps = bob_apps(&w, &["shop", "seller-wallet"]).await;
+    let original_time = w.clock.now_ms();
+    let expiry = Some(original_time + DAY_MS);
+    publish_app_at(
+        &w,
+        apps[0].0,
+        one_endpoint("btc-lightning-bolt11", "lnbc1shop"),
+        original_time,
+        expiry,
+    );
+    publish_now(
+        &w,
+        apps[1].0,
+        one_endpoint("btc-lightning-bolt12", "lno1wallet"),
+    );
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(offering(&read), [apps[0].1, apps[1].1]);
+    w.clock.advance_ms(1000);
+    publish_app_at(&w, apps[0].0, many(3, 3 * MIB), original_time, expiry);
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(offering(&read), [apps[1].1]);
+    // A later record is kept and used; then a body at its own time conflicts with it.
+    let later = w.clock.now_ms();
+    publish_app_at(
+        &w,
+        apps[0].0,
+        one_endpoint("btc-bitcoin-p2wpkh", "bc1qlater"),
+        later,
+        expiry,
+    );
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(offering(&read), [apps[0].1, apps[1].1]);
+    publish_app_at(
+        &w,
+        apps[0].0,
+        one_endpoint("btc-bitcoin-p2tr", "bc1plater"),
+        later,
+        expiry,
+    );
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(offering(&read), [apps[1].1], "{read:?}");
+}

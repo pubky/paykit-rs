@@ -1868,11 +1868,10 @@ async fn test_public_conflict_dropped_ahead_of_the_clock_kept_by_a_newer_in_plac
 #[tokio::test]
 async fn test_public_floor_ahead_of_the_clock_holds_only_the_public_endpoints() {
     // The payer's clock runs a day fast and it reads more of bob's records, dated within it,
-    // than the history keeps, which raises the floor a day ahead. Back at real time the floor
-    // holds nothing, and the history full of records ahead of the clock keeps bob's record
-    // from before them out, as it would without the floor, until the clock reaches them or
-    // he publishes a newer one; a payment to his Private Payment List goes as usual (Switch
-    // spec 4.2; Paykit spec 4).
+    // than the history keeps, which raises the floor a day ahead. Back at real time bob's
+    // record from before them is at or before the floor and isn't used, until the clock
+    // reaches the floor and he publishes a newer one; a payment to his Private Payment List
+    // goes as usual (Switch spec 4.2; Paykit spec 4).
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -1900,7 +1899,7 @@ async fn test_public_floor_ahead_of_the_clock_holds_only_the_public_endpoints() 
         let list = read(&mut wallet, &w).await;
         assert!(ids(&list).is_empty());
         assert!(
-            fails_with(&list, shop_app, &["exceeds the history a reader keeps"]),
+            fails_with(&list, shop_app, &["made ahead of the payer's clock"]),
             "{list:?}"
         );
     }
@@ -1956,4 +1955,53 @@ async fn test_public_stale_copy_of_a_dropped_record_answered_from_the_newest() {
     serve(&w, &oldest);
     assert_eq!(listed(&mut wallet, &w).await, ["btc-bitcoin-p2wpkh"]);
     assert_eq!(listed(&mut wallet, &w).await, ["btc-bitcoin-p2wpkh"]);
+}
+
+#[tokio::test]
+async fn test_public_conflict_kept_across_a_restore_of_itself_after_a_small_clock_step() {
+    // One device, its clock never fast: bob's records dated within the clock tolerance are
+    // read, and one is dropped from the history, so the floor sits up to the tolerance
+    // ahead. The clock then steps back three minutes, a routine correction, and bob's two
+    // records at one time conflict. Restoring a backup of this very state in place keeps
+    // the conflict: a side of it served again is never used (Switch spec 4.2).
+    let w = World::new();
+    let storage = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", std::sync::Arc::clone(&storage)).await;
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let tolerance = pubky_switch_core::records::CLOCK_TOLERANCE_MS;
+    let expiry = Some(t0 + 30 * DAY_MS);
+    for at in [t0 + tolerance - 1, t0 + tolerance] {
+        publish_padded(
+            &w,
+            one_endpoint("btc-bitcoin-p2wpkh", "bc1qahead"),
+            3_400_000,
+            at,
+            expiry,
+        );
+        listed(&mut wallet, &w).await;
+    }
+    w.clock.set_ms(t0 - 3 * 60_000);
+    let now = w.clock.now_ms();
+    let first = publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1a"),
+        now,
+        expiry,
+    );
+    listed(&mut wallet, &w).await;
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1b"),
+        now,
+        expiry,
+    );
+    assert!(listed(&mut wallet, &w).await.is_empty());
+    serve(&w, &first);
+    assert!(listed(&mut wallet, &w).await.is_empty());
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut wallet = restored_over(&w, storage, &backup).await;
+    serve(&w, &first);
+    assert!(listed(&mut wallet, &w).await.is_empty());
 }
