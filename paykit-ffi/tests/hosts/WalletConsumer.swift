@@ -197,6 +197,8 @@ class ReceiptReader: WalletHomeserver, PaymentMethod, @unchecked Sendable {
     func settlementId(proofJson: Data) -> Data? { nil }
 }
 
+// The issuer runs as a separate process, which a device test can't start.
+#if !PAYKIT_DEVICE_TEST
 private func walletRows(_ issuer: String, _ mode: String) throws -> [String] {
     let producer = Process()
     producer.executableURL = URL(fileURLWithPath: issuer)
@@ -479,3 +481,4 @@ private enum WalletConsumer {
         try await acknowledgeRecovery(issuer, cleared: true)
     }
 }
+#endif
