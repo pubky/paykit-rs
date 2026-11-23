@@ -23,7 +23,7 @@ use pubky_switch_core::records::CLOCK_TOLERANCE_MS;
 use serde::{Deserialize, Serialize};
 
 use crate::activity::{KeptSide, SideTag};
-use crate::error::Result;
+use crate::error::{PaykitError, Result};
 use crate::hold::AnswerRecord;
 use crate::notices::{GivenUpFrom, GivenUpOrigin, KeptNotice};
 use crate::paykit::Paykit;
@@ -546,10 +546,15 @@ impl Paykit {
                 self.observe_service_time();
                 if !Box::pin(self.floor_write_is_kept()).await? {
                     match Box::pin(self.record_lists(lists, now)).await {
-                        Err(error) if crate::floor::is_unreadable_floor(&error) => {}
-                        result => {
-                            result?;
-                        }
+                        Ok(_) => {}
+                        Err(
+                            error @ PaykitError::Client(AppError::Alarm(_) | AppError::Store(_)),
+                        ) => return Err(error),
+                        // Any other failure, such as an unreadable floor or a refusal,
+                        // records nothing: the copy of the lists stays as it was, and a
+                        // governed message waits on it as before (Paykit spec 8.1). The
+                        // receive step reports it.
+                        Err(_) => {}
                     }
                 }
             }
@@ -603,6 +608,17 @@ impl Paykit {
                 .get(&stop.msg_id)
                 .is_some_and(|copy| copy.hash == stop.hash && copy.to == stop.payee);
             if !owed {
+                // One told keeps its entry while the host hasn't acknowledged its notice,
+                // so an in-place restore keeps that notice with it (Paykit spec 8.1,
+                // "Undelivered messages").
+                if stop.told
+                    && self
+                        .local_get::<KeptNotice>(&key::message_notice(&stop.payee, &stop.msg_id))
+                        .await?
+                        .is_some()
+                {
+                    continue;
+                }
                 // One given up keeps its entry while a report of its end isn't
                 // acknowledged, which is taken, or taken again after a restore, as it was
                 // decided.
