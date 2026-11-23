@@ -4322,15 +4322,23 @@ impl Paykit {
     /// receipt the user is told about. A bound passes as [`bound_passed`] says. An entry's
     /// acknowledged notices go with it.
     ///
-    /// Two of those have no bound of their own: a payment made after `failed` was written
-    /// waits for its receipt for as long as no receipt comes, and a dispatch the method
+    /// Three of those have no bound of their own: a payment made after `failed` was written
+    /// waits for its receipt for as long as no receipt comes, a dispatch the method
     /// reported failed is asked about for as long as the method's history keeps it, without
-    /// end for a method whose history is kept for good. Each is one small entry.
+    /// end for a method whose history is kept for good, and a restored dispatch the user
+    /// resolved as paid with no claim to settle, whose obligation has no deadline, is the
+    /// only thing that stops it being paid again (Paykit spec 7.2, 8.4). Each is one small
+    /// entry.
     async fn prune_journal(&mut self) -> Result<()> {
         let service = self.service_time();
         let now = self.now();
         let mut tx = state::Tx::default();
         for entry in self.journal().await? {
+            // A user's `done` that no claim settled: with a deadline, the request is refused
+            // past it; without one, nothing else stops a second payment.
+            if entry.user_paid && entry.deadline.is_none() {
+                continue;
+            }
             let Some(bound) = prune_bound(
                 entry.stage,
                 entry.failed_by_method
