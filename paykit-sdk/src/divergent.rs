@@ -1414,13 +1414,6 @@ impl Paykit {
         .into())
     }
 
-    /// Refused while an own write of another kind than a stop over the record at `record`
-    /// waits, by the one rule of writes that add no stop ([`Pause::adds_no_stop_waits`]).
-    pub(crate) async fn refuse_while_write_waits(&mut self, record: &[u8; 32]) -> Result<()> {
-        self.refuse_where(&[*record], Pause::adds_no_stop_waits, false)
-            .await
-    }
-
     /// Whether a write that records a payment already dispatched, its acceptance owed, its
     /// outcome and its proof, over the record at `record` waits
     /// ([`Pause::dispatched_write_waits`]): the one gate of every path that writes one.
