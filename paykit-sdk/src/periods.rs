@@ -145,6 +145,22 @@ pub(crate) fn destination_app_permitted(request: &PaymentRequest, app: [u8; 16])
     !matches!(&request.destination, paykit_lib::bodies::RequestDestination::RequiredApp(required) if *required != app)
 }
 
+/// `error`, the refusal of a period's last destination, with the note, when
+/// `device_clock_behind`, that eligible period details expired only by the service's time,
+/// so their destination wasn't tried (Paykit spec 7.2).
+fn with_clock_note(error: PaykitError, device_clock_behind: bool) -> PaykitError {
+    const NOTE: &str = "; details expired by the service's time: the device clock is behind it";
+    match error.refusal() {
+        Some(Refusal::NoDestination(why)) if device_clock_behind => {
+            Refusal::NoDestination(format!("{why}{NOTE}")).into()
+        }
+        Some(Refusal::UnsupportedEndpoint(why)) if device_clock_behind => {
+            Refusal::UnsupportedEndpoint(format!("{why}{NOTE}")).into()
+        }
+        _ => error,
+    }
+}
+
 /// The signed rate interval of period details (Paykit wire 4.9), without a payer or
 /// payee time policy. Callers first validate the details against their request and use
 /// the interval only when the selected payment is priced by these rates.
@@ -1259,21 +1275,33 @@ impl Paykit {
         let mut details = held_period
             .as_ref()
             .map_or_else(Vec::new, |held| valid_details(held, &body));
+        // Whether a period details' destination expired only by the service's time: the user
+        // is told the device clock is behind it (Paykit spec 7.2).
+        let mut device_clock_behind = false;
         let mut destinations = if per_period_destination {
-            let now = self.now();
+            // A period details' destination is used while neither clock is at its expiry
+            // (Paykit spec 7.2).
+            let clocks = self.clocks();
             let named = options.selected_period_rate();
+            // The details eligible as this period's destination, expired or not.
+            let eligible = |signed: &StoredMessage| {
+                matches!(signed.body(), Body::PaymentPeriodDetails(detail)
+                    if detail.payment_endpoints.is_some()
+                        && destination_app_permitted(&body, signed.cert().app_id())
+                        && named.is_none_or(|id| id == signed.message().msg_id))
+            };
+            let expires_at = |signed: &StoredMessage| match signed.body() {
+                Body::PaymentPeriodDetails(detail) => detail.expires_at,
+                _ => 0,
+            };
+            device_clock_behind = details.iter().any(|signed| {
+                let at = expires_at(signed);
+                eligible(signed) && clocks.past(at) && at > clocks.device
+            });
             let mut destinations: Vec<_> = details
                 .iter()
                 .copied()
-                .filter(|signed| {
-                    let Body::PaymentPeriodDetails(detail) = signed.body() else {
-                        return false;
-                    };
-                    detail.payment_endpoints.is_some()
-                        && now < detail.expires_at
-                        && destination_app_permitted(&body, signed.cert().app_id())
-                        && named.is_none_or(|id| id == signed.message().msg_id)
-                })
+                .filter(|signed| eligible(signed) && !clocks.past(expires_at(signed)))
                 .collect();
             destinations.sort_by(|a, b| period_details_order(a.message(), b.message()));
             destinations
@@ -1296,7 +1324,7 @@ impl Paykit {
             price,
         } = loop {
             let Some(candidate) = destinations.pop() else {
-                return Err(unavailable);
+                return Err(with_clock_note(unavailable, device_clock_behind));
             };
             // For a later destination its own signed details must supply any per-period rate.
             let (rates, named) = if per_period_destination {
@@ -1401,6 +1429,7 @@ impl Paykit {
             attempt_proof: None,
             failed_by_method: false,
             never_dispatched: false,
+            user_paid: false,
             request: Some(KeptMessage::of(&stored)),
             record_held: false,
             transfer_bound: Some(bound),

@@ -84,6 +84,7 @@ struct Inner {
     fraction_digits: BTreeMap<PaymentEndpointIdentifier, Option<u32>>,
     proof_checks: Vec<ProofCheck>,
     transfer_amount: Option<Option<PaymentAmount>>,
+    next_transfer_amounts: VecDeque<Option<PaymentAmount>>,
 }
 
 /// An in-memory payment rail shared by payers and payees. Tests only.
@@ -228,6 +229,13 @@ impl FakeRail {
     /// the method cannot determine the amount. Actual execution keeps its payload's amount.
     pub fn set_transfer_amount(&self, amount: Option<PaymentAmount>) {
         self.lock().transfer_amount = Some(amount);
+    }
+
+    /// Report `amounts` for the next transfer estimates, one each, in order, then the one
+    /// [`FakeRail::set_transfer_amount`] set: an estimate whose spelling or value changes
+    /// between calls.
+    pub fn next_transfer_amounts(&self, amounts: Vec<Option<PaymentAmount>>) {
+        self.lock().next_transfer_amounts.extend(amounts);
     }
 
     /// Every proof handed to [`Rail::verify`], in the order of the calls.
@@ -461,10 +469,12 @@ impl Rail for FakeRail {
             let max_fee = inner.max_fee.clone();
             inner.next_fees.pop_front().unwrap_or(max_fee)
         };
+        let next = self.lock().next_transfer_amounts.pop_front();
         Transfer::new(
-            self.lock().transfer_amount.clone().unwrap_or_else(|| {
-                Self::fixed_amount(payload.as_str(), amount).unwrap_or(Some(amount.clone()))
-            }),
+            next.or_else(|| self.lock().transfer_amount.clone())
+                .unwrap_or_else(|| {
+                    Self::fixed_amount(payload.as_str(), amount).unwrap_or(Some(amount.clone()))
+                }),
             fee,
         )
     }

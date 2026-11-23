@@ -39,6 +39,15 @@ fn test_payment_refusals_keep_policy_evidence_and_the_original_attempt_failure()
         PaymentRefusal(Refusal::SettlementBucketFull { bucket: 23 }).kind(),
         RefusalKind::SettlementBucketFull { bucket: 23 }
     ));
+    for behind in [false, true] {
+        assert!(matches!(
+            PaymentRefusal(Refusal::WaitingForList {
+                device_clock_behind: behind
+            })
+            .kind(),
+            RefusalKind::WaitingForList { device_clock_behind } if device_clock_behind == behind
+        ));
+    }
     let mut doubt = paykit_sdk::PaymentDoubt::default();
     doubt.obligation = [9; 32];
     doubt.step = Some(4);

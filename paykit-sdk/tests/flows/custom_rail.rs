@@ -304,39 +304,29 @@ async fn pay_through_with(
 }
 
 #[tokio::test]
-async fn test_custom_rail_zero_fee_needs_no_cap() {
-    // A method that charges nothing pays under the default config, which sets no fee cap.
-    let w = World::new();
-    let rail = Arc::new(LedgerRail {
-        fake: Arc::clone(&w.rail),
-        last: Mutex::new(None),
-        supplies_id: true,
-        fee: Some(paykit_lib::Decimal::zero()),
-    });
-    let outcome = pay_through(&w, &rail).await.unwrap();
-    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
-    // One that may charge something is refused without a cap.
-    let w = World::new();
-    let rail = Arc::new(LedgerRail {
-        fake: Arc::clone(&w.rail),
-        last: Mutex::new(None),
-        supplies_id: true,
-        fee: Some(paykit_lib::Decimal::parse("0.00000001").unwrap()),
-    });
-    let refused = pay_through(&w, &rail).await.unwrap_err();
-    assert!(
-        matches!(
-            refused.refusal(),
-            Some(paykit_sdk::Refusal::Transfer { .. })
-        ),
-        "{refused:?}"
-    );
+async fn test_custom_rail_any_fee_paid_with_no_cap() {
+    // With no fee cap, the default, Paykit makes no check of the fee (Paykit spec 7.2 step
+    // 1): a method that charges nothing pays, and so does one that may charge something.
+    for fee in ["0", "0.00000001"] {
+        let w = World::new();
+        let rail = Arc::new(LedgerRail {
+            fake: Arc::clone(&w.rail),
+            last: Mutex::new(None),
+            supplies_id: true,
+            fee: Some(paykit_lib::Decimal::parse(fee).unwrap()),
+        });
+        let outcome = pay_through(&w, &rail).await.unwrap();
+        assert!(
+            matches!(outcome, PayOutcome::Paid { .. }),
+            "{fee}: {outcome:?}"
+        );
+    }
 }
 
 #[tokio::test]
 async fn test_custom_rail_fee_cap_is_per_asset() {
     // A fee of 0.00000010 BTC: paid under a BTC cap at least that, refused under one below
-    // it, and refused under a cap of another asset only.
+    // it, and paid under a cap of another asset only, which leaves BTC uncapped.
     let fee = || Some(paykit_lib::Decimal::parse("0.0000001").unwrap());
     let btc = || paykit_lib::Asset::new("btc").unwrap();
     let cap = |value: &str| paykit_lib::Decimal::parse(value).unwrap();
@@ -351,7 +341,7 @@ async fn test_custom_rail_fee_cap_is_per_asset() {
         ),
         (
             PaykitConfig::default().with_fee_cap(paykit_lib::Asset::new("usd").unwrap(), cap("1")),
-            false,
+            true,
         ),
     ] {
         let w = World::new();
