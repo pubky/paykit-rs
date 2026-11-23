@@ -874,15 +874,12 @@ pub(crate) fn restore_paykit_layer(
                 continue;
             }
             // A restored outbox can hold the stop's copy, which the receive step still ends
-            // past its window. One the previous installation gave up is not given up here:
-            // the client's report of that end isn't restored, and the copy, if the restored
-            // outbox holds it, is ended again (Paykit spec 8.1).
+            // past its window, and the restored client can hold an unacknowledged report of
+            // its end, which is taken again as it was decided, told once (Paykit spec 8.1,
+            // 9): the entry is restored whole.
             StateKey::QueuedStop(_) => {
-                let mut stop =
-                    state::restored::<crate::send_holds::QueuedStop>(&key, &value, &binder)
-                        .map_err(|_| unread())?;
-                stop.given_up = None;
-                let value = state::encode(&stop).map_err(|_| unread())?;
+                state::restored::<crate::send_holds::QueuedStop>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -1546,7 +1543,9 @@ impl Protocol for PaykitProtocol {
                 | Kind::PaymentReceipt),
             )) => crate::send_holds::may_deliver(delivery, kind).map_err(view_failure),
             // An `executor_notice` goes to an own app, not a counterparty (Paykit spec 8.1).
-            _ => Ok(true),
+            Ok(MessageKind::Paykit(Kind::ExecutorNotice)) => Ok(true),
+            // A message whose role can't be established waits (Paykit spec 8.1).
+            Err(_) => Ok(false),
         }
     }
 

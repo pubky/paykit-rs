@@ -3703,8 +3703,10 @@ impl Paykit {
     /// already queued"). An answer released from its record on this judgement is never
     /// queued only to wait as one not known.
     pub(crate) async fn delivery_held(&self, pubky: &[u8; 32]) -> crate::error::Result<bool> {
+        // An app that doesn't read the lists can never decide `pubky` isn't blocked
+        // (Paykit spec 3.1).
         if !reads_lists(self.app.cert().scopes()) {
-            return Ok(false);
+            return Ok(true);
         }
         let fresh = self
             .local_get::<u64>(key::LISTS_READ)

@@ -118,8 +118,12 @@ pub(crate) fn deny_decision(delivery: &DeliveryView<'_>) -> Result<DenyDecision>
     })
 }
 
-/// Whether a message of `kind` that the counterparty hold governs may go now. An app
-/// whose certificate doesn't read the lists judges no deny list, so holds no first delivery.
+/// Whether a message of `kind` that the counterparty hold governs may go now. Every
+/// delivery needs a certificate Paykit takes that still sends the kind, an exception
+/// included: the exceptions bypass the send hold only (Paykit spec 3.1, 8.1, "Messages
+/// already queued"). An app whose certificate doesn't read the lists can never decide that
+/// the counterparty isn't blocked, so it holds every message the hold governs; the
+/// exceptions still go, under a certificate that sends them, which reads the lists.
 ///
 /// What ends a message held here:
 /// - a rejection or a payer's cancellation is never sent once 30 days have passed since
@@ -132,37 +136,30 @@ pub(crate) fn deny_decision(delivery: &DeliveryView<'_>) -> Result<DenyDecision>
 /// - a re-send ends at the client's replay deadline, its first acceptance plus 30 days
 ///   (Switch spec 11);
 /// - a request, period details, a list request and a subscription acceptance not
-///   confirmed while blocked have no deadline in the outbox, where an original carries
-///   none: each waits until the deny decision permits its counterparty, and then goes.
+///   confirmed while blocked are never sent past the same window either. Until the
+///   receive step gives them up with their notices, the host sees the copy stay queued,
+///   with nothing sent or paid and no notice yet.
 pub(crate) fn may_deliver(delivery: &DeliveryView<'_>, kind: Kind) -> Result<bool> {
-    let reads_lists = receive::reads_lists(delivery.cert().scopes());
+    let cert = delivery.cert();
+    if paykit_lib::scopes::check_certificate(cert).is_err()
+        || paykit_lib::kinds::check_sender_scopes(delivery.message(), cert.scopes()).is_err()
+    {
+        return Ok(false);
+    }
+    let reads_lists = receive::reads_lists(cert.scopes());
     // Re-sending an answer requires `paykit_contacts` and a known deny copy that permits
     // the counterparty, what settles a payment included (Paykit spec 3.1, 8.1, 9).
     if delivery.resend() {
         return Ok(reads_lists && deny_decision(delivery)? == DenyDecision::Permits);
     }
-    if !reads_lists {
-        return Ok(true);
-    }
     let message = delivery.message();
     match kind {
         // A proof and a receipt report a payment already made (Paykit spec 8.1).
         Kind::PaymentProof | Kind::PaymentReceipt => return Ok(true),
-        Kind::PaymentRequestRejection => {
-            if past_replay_window(message.created_at_ms, delivery.now_ms()) {
-                return Ok(false);
-            }
-        }
         Kind::PaymentRequestCancellation => {
             let side = state::delivery_get::<KeptSide>(delivery, &key::side(&message.msg_id))?;
-            match side.map(|kept| kept.side) {
-                Some(SideTag::Payee) => return Ok(true),
-                Some(SideTag::Payer)
-                    if past_replay_window(message.created_at_ms, delivery.now_ms()) =>
-                {
-                    return Ok(false);
-                }
-                _ => {}
+            if side.is_some_and(|kept| kept.side == SideTag::Payee) {
+                return Ok(true);
             }
         }
         Kind::PaymentRequestAcceptance => {
@@ -186,12 +183,18 @@ pub(crate) fn may_deliver(delivery: &DeliveryView<'_>, kind: Kind) -> Result<boo
         }
         _ => {}
     }
+    // Held, it is never sent past its window (Paykit spec 8.1). A certificate that sends
+    // it holds `paykit_contacts` (Paykit spec 3.1, checked above), so its deny decision
+    // below is never taken without the lists.
+    if past_replay_window(message.created_at_ms, delivery.now_ms()) {
+        return Ok(false);
+    }
     Ok(deny_decision(delivery)? == DenyDecision::Permits)
 }
 
-/// Whether a stop signed at `created_at_ms` is past its 30 days, less the clock tolerance,
-/// at `now_ms`: held until then, it is never sent (Paykit spec 8.1, "Blocked
-/// counterparties").
+/// Whether a message signed at `created_at_ms` is past its 30 days, less the clock
+/// tolerance, at `now_ms`: held until then, it is never sent (Paykit spec 8.1, "Blocked
+/// counterparties", "Messages already queued").
 pub(crate) fn past_replay_window(created_at_ms: u64, now_ms: u64) -> bool {
     now_ms
         > created_at_ms
@@ -203,8 +206,11 @@ pub(crate) fn past_replay_window(created_at_ms: u64, now_ms: u64) -> bool {
 /// commit that queues it, for as long as its outbox copy is owed: what the receive step
 /// needs to end that copy past its 30 days and tell the host, which the outbox doesn't
 /// show (Paykit spec 8.1). `given_up` is set before the client ends the copy, with whether
-/// the host is told, and the entry goes once the client's report of the end is taken, so
-/// the host is told once, crash or not.
+/// the host is told. The entry stays, a backup and restore included, until neither the
+/// outbox nor an unacknowledged report names its message, so a report a restore carries
+/// is taken again as it was decided, and acknowledged (Paykit spec 9). Taking it again
+/// tells the host nothing twice: its notice is kept at the message's key, and one of a
+/// possible delivery stays acknowledged once the host has seen it.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct QueuedStop {
@@ -216,6 +222,7 @@ pub(crate) struct QueuedStop {
     #[serde(with = "serde_b64")]
     pub(crate) hash: [u8; 32],
     pub(crate) created_at_ms: u64,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) given_up: Option<GivenUp>,
 }
 
@@ -302,6 +309,7 @@ impl Paykit {
             .map(|queued| (queued.msg_id.clone(), queued))
             .collect();
         let now = self.window_now();
+        let mut reported: Option<std::collections::BTreeSet<String>> = None;
         let mut gone = Tx::default();
         let mut expired = Vec::new();
         for (_, stop) in kept {
@@ -310,11 +318,21 @@ impl Paykit {
                 .get(&stop.msg_id)
                 .is_some_and(|copy| copy.hash == stop.hash && copy.to == stop.payee);
             if !owed {
-                // One given up keeps its entry until the client's report of the end is
-                // taken, which tells the host as it was decided.
-                if stop.given_up.is_none() {
-                    gone.delete(&at);
+                // One given up keeps its entry while a report of its end isn't
+                // acknowledged, which is taken, or taken again after a restore, as it was
+                // decided.
+                if stop.given_up.is_some() {
+                    if reported.is_none() {
+                        reported = Some(self.reported_ends().await?);
+                    }
+                    if reported
+                        .as_ref()
+                        .is_some_and(|ids| ids.contains(&stop.msg_id))
+                    {
+                        continue;
+                    }
                 }
+                gone.delete(&at);
                 continue;
             }
             if past_replay_window(stop.created_at_ms, now)
@@ -355,6 +373,26 @@ impl Paykit {
         Ok(())
     }
 
+    /// The messages Paykit owns whose end a report the host hasn't acknowledged names.
+    async fn reported_ends(&mut self) -> Result<std::collections::BTreeSet<String>> {
+        Ok(self
+            .app
+            .pending_duty_events()
+            .await?
+            .into_iter()
+            .filter(|duty| {
+                duty.owners
+                    .iter()
+                    .any(|owner| owner == crate::protocol::BACKUP_NAME)
+            })
+            .filter_map(|duty| match duty.event {
+                AppEvent::MessageUndelivered { msg_id, .. }
+                | AppEvent::DeliveryUnknown { msg_id, .. } => Some(msg_id),
+                _ => None,
+            })
+            .collect())
+    }
+
     /// Take, in `tx`, the client's report that the outbox copy of a stop ended past its 30
     /// days ([`Paykit::give_up_expired_stops`]): the host is told it was given up when no
     /// try of it can have reached the payee's switch, unless its record left nothing to tell
@@ -378,7 +416,6 @@ impl Paykit {
         else {
             return Ok(false);
         };
-        tx.delete(&at);
         // Only a stop never delivered goes untold once its record is gone or covered: one
         // that may have been delivered is always told, with or without a record (Paykit spec
         // 8.1, "Undelivered messages"; 9).
@@ -437,5 +474,34 @@ mod tests {
                 .insert("extra".into(), serde_json::json!(1));
             assert!(serde_json::from_value::<SendExemption>(extra).is_err());
         }
+    }
+
+    #[test]
+    fn test_send_holds_queued_stop_names_its_decision() {
+        let stop = QueuedStop {
+            msg_id: "123e4567-e89b-42d3-a456-426614174000".into(),
+            payee: [1; 32],
+            request_hash: [2; 32],
+            hash: [3; 32],
+            created_at_ms: 4,
+            given_up: Some(GivenUp::Silent),
+        };
+        let json = serde_json::to_value(&stop).unwrap();
+        assert_eq!(
+            serde_json::from_value::<QueuedStop>(json.clone()).unwrap(),
+            stop
+        );
+        // A decision is always written, `null` for none: one missing is refused.
+        let mut missing = json.clone();
+        missing.as_object_mut().unwrap().remove("given_up");
+        assert!(serde_json::from_value::<QueuedStop>(missing).is_err());
+        let mut undecided = json;
+        undecided["given_up"] = serde_json::Value::Null;
+        assert_eq!(
+            serde_json::from_value::<QueuedStop>(undecided)
+                .unwrap()
+                .given_up,
+            None
+        );
     }
 }

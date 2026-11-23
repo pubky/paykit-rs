@@ -33,7 +33,8 @@
 //! | `off/<attempt_id>` | the original batch ID for an unresolved offline recording, committed with its signed operations before first submission (Paykit spec 8.4) | yes |
 //! | `j/<attempt_id>` | the payment journal: one payment, from before its `attempt` | yes |
 //! | `side/<msg_id>` | the side a cancellation is sent from, kept with the batch that queues it | |
-//! | `qs/<msg_id>` | a rejection or payer's cancellation this app queued: its payee, request, signed hash and `created_at`, written in the commit that queues it, so the receive step ends its outbox copy past 30 days and tells the host whatever its record holds; gone once the copy leaves the outbox, or, once given up, with the client's report of the end taken with the host's notice (`send_holds.rs`); restored, not given up, since a restored outbox can hold the copy | |
+//! | `ex/<msg_id>` | why an acceptance this app sent may go while sends to its payee are held: a payment dispatched, or the user's confirmation of that blocked subscription, bound to its payee and request; kept before or with the batch that queues it (`send_holds.rs`) | |
+//! | `qs/<msg_id>` | a rejection or payer's cancellation this app queued: its payee, request, signed hash and `created_at`, written in the commit that queues it, so the receive step ends its outbox copy past 30 days, telling the host as its request record decides, with that decision; gone once neither the outbox nor a report of its end the host hasn't acknowledged names it (`send_holds.rs`); restored whole, since a restored outbox can hold the copy and a restored client an unacknowledged report of its end | |
 //! | `ar/<payee>/<app_id>` | a payee app's records that took part in its comparison, for its public endpoints | |
 //! | `ct` | the acceptance time of the last Paykit entry the receive step passed | |
 //! | `rh` | the cursor verdict, earlier holds and block windows for restored requests (`hold.rs`) | |

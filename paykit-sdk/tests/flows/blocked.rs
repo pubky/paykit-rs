@@ -4438,3 +4438,331 @@ async fn test_blocked_stop_undecided_drops_an_earlier_decision() {
     wallet.receive(None).await.unwrap();
     assert_eq!(given_up_notices(&w, &wallet, &rejection, &request).await, 0);
 }
+
+/// Renew alice's wallet certificate to `scopes`, `after_ms` from now, and take it with a
+/// receive.
+async fn renew_wallet(w: &World, wallet: &mut Paykit, scopes: AppScopes, after_ms: u64) {
+    let app_id = wallet.app_id();
+    let old = wallet.app().cert().clone();
+    let renewed = crate::certificate::renew(w, app_id, &scopes.build().unwrap(), after_ms);
+    crate::certificate::list(w, app_id, &old, &renewed);
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().cert().hash(), renewed.hash());
+}
+
+#[tokio::test]
+async fn test_blocked_stop_under_a_certificate_without_contacts_waits_for_the_ordinary_rule() {
+    for past in [false, true] {
+        let w = World::new();
+        let full = || AppScopes::new().pay().manage_contacts().allowance();
+        let mut wallet = w
+            .join_with(
+                &w.alice,
+                "wallet",
+                full().build().unwrap(),
+                PaykitConfig::default(),
+                store(),
+            )
+            .await;
+        wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+        let mut shop = w.shop().await;
+        let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        wallet.receive(None).await.unwrap();
+        wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+        let rejection = wallet.reject_request(&request, None).await.unwrap();
+        wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
+        // Renewed without `paykit_contacts`, the app can't decide bob isn't blocked: the stop
+        // is neither sent, nor given up, nor announced (Paykit spec 3.1, 8.1).
+        let before = w.bob.switch().entries_from(&w.alice_id());
+        renew_wallet(&w, &mut wallet, AppScopes::new().allowance(), 1_000).await;
+        if past {
+            w.clock.advance_ms(31 * 24 * HOUR_MS);
+        }
+        wallet.receive(None).await.unwrap();
+        wallet.flush().await.unwrap();
+        wallet.app_mut().flush_outbox().await.unwrap();
+        assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before, "{past}");
+        assert_eq!(verdict(&wallet, &rejection).await, Some(false), "{past}");
+        assert_eq!(notices_of(&wallet, &rejection).await, 0, "{past}");
+        // The scope back, the ordinary rule runs: sent in its window, else given up and told
+        // once.
+        renew_wallet(&w, &mut wallet, full(), 2_000).await;
+        // The wider certificate lists the shared records again over a few receives.
+        for _ in 0..4 {
+            wallet.receive(None).await.unwrap();
+        }
+        wallet.flush().await.unwrap();
+        wallet.receive(None).await.unwrap();
+        shop.receive(None).await.unwrap();
+        if past {
+            assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+            assert_eq!(verdict(&wallet, &rejection).await, None);
+            assert_eq!(given_up_notices(&w, &wallet, &rejection, &request).await, 1);
+        } else {
+            assert_eq!(
+                sale_status(&shop, &request).await,
+                Some(paykit_sdk::PayeeStatus::Rejected)
+            );
+            assert_eq!(notices_of(&wallet, &rejection).await, 0);
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_blocked_payment_reports_wait_under_a_certificate_without_their_scope() {
+    use paykit_lib::Kind;
+
+    let w = World::new();
+    let (mut wallet, _shop, request) = received(&w, PaykitConfig::default()).await;
+    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    let queued = verdicts(&wallet).await;
+    let reports: Vec<_> = queued
+        .iter()
+        .filter(|(kind, ..)| {
+            kind == Kind::PaymentProof.as_str() || kind == Kind::PaymentRequestAcceptance.as_str()
+        })
+        .map(|(_, msg_id, _)| msg_id.clone())
+        .collect();
+    assert_eq!(reports.len(), 2, "{queued:?}");
+    // Exempt from the send hold only: a certificate that no longer sends them holds them
+    // (Paykit spec 3.1, 8.1, "Messages already queued").
+    renew_wallet(&w, &mut wallet, AppScopes::new().allowance(), 1_000).await;
+    for msg_id in &reports {
+        assert_eq!(verdict(&wallet, msg_id).await, Some(false), "{msg_id}");
+    }
+}
+
+#[tokio::test]
+async fn test_blocked_payers_held_messages_never_go_past_their_replay_window() {
+    use paykit_lib::Kind;
+
+    let w = World::new();
+    let (mut wallet, mut shop, _) = received(&w, PaykitConfig::default()).await;
+    let recurring = request_from(&mut shop, w.alice_id(), monthly(w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    let acceptance = wallet.accept_subscription(&recurring).await.unwrap().msg_id;
+    // No list of bob's is held: paying him without a request asks him for one.
+    let _ = wallet
+        .pay_without_request(UnrequestedPayment::new(w.bob_id(), btc("0.001")))
+        .await;
+    let ask = verdicts(&wallet)
+        .await
+        .into_iter()
+        .find(|(kind, ..)| kind == Kind::PrivatePaymentListRequest.as_str())
+        .map(|(_, msg_id, _)| msg_id)
+        .unwrap();
+    // On a fresh copy that permits bob, past 30 days from its `created_at`, less the clock
+    // tolerance, neither goes (Paykit spec 8.1, "Messages already queued").
+    w.clock.advance_ms(31 * 24 * HOUR_MS);
+    wallet.flush().await.unwrap();
+    for msg_id in [&acceptance, &ask] {
+        assert_eq!(verdict(&wallet, msg_id).await, Some(false), "{msg_id}");
+    }
+}
+
+#[tokio::test]
+async fn test_blocked_payees_held_messages_never_go_past_their_replay_window() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = contacts_shop(&w).await;
+    let subscription = request_from(
+        &mut shop,
+        w.alice_id(),
+        crate::periods::monthly(w.clock.now_ms(), None),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    wallet.accept_subscription(&subscription).await.unwrap();
+    shop.receive(None).await.unwrap();
+    let sale = shop.payee_activity().await.unwrap()[0].record;
+    shop.app_mut().hold_queued(&w.alice_id()).await.unwrap();
+    let request = shop
+        .send_request(w.alice_id(), draft("2", w.clock.now_ms()))
+        .await
+        .unwrap()
+        .msg_id;
+    let details = shop
+        .send_period_details(
+            &sale,
+            crate::periods::january_details(w.clock.now_ms() + 24 * HOUR_MS),
+        )
+        .await
+        .unwrap()
+        .msg_id;
+    w.clock.advance_ms(31 * 24 * HOUR_MS);
+    shop.flush().await.unwrap();
+    for msg_id in [&request, &details] {
+        assert_eq!(verdict(&shop, msg_id).await, Some(false), "{msg_id}");
+    }
+}
+
+/// The unacknowledged duties of `app` that name `msg_id`.
+async fn duties_of(app: &mut Paykit, msg_id: &str) -> usize {
+    use pubky_switch_client::app::AppEvent;
+
+    app.app_mut()
+        .pending_duty_events()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|duty| {
+            matches!(&duty.event,
+                AppEvent::MessageUndelivered { msg_id: id, .. }
+                | AppEvent::DeliveryUnknown { msg_id: id, .. } if id == msg_id)
+        })
+        .count()
+}
+
+/// The `qs/` entries `app` keeps.
+async fn kept_stops(app: &Paykit) -> usize {
+    app.app()
+        .protocol_scan("paykit", b"qs/")
+        .await
+        .unwrap()
+        .len()
+}
+
+/// Restore `wallet` from a backup taken now.
+async fn restored(w: &World, mut wallet: Paykit) -> Paykit {
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_blocked_tried_stop_report_taken_again_after_a_restore() {
+    let w = World::new();
+    let (mut wallet, mut shop, first) = received(&w, PaykitConfig::default()).await;
+    let second = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    let withdrawn = wallet.reject_request(&first, None).await.unwrap();
+    let tried = wallet.reject_request(&second, None).await.unwrap();
+    // The host ends one copy itself: the client's report of it stays the host's, so the
+    // reports after it stay unacknowledged too.
+    assert!(wallet
+        .app_mut()
+        .withdraw_message("paykit", &withdrawn)
+        .await
+        .unwrap());
+    // The other's one try reaches bob's switch, its answer lost.
+    wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
+    w.bob.switch().fail_next(Fault::LoseAnswer {
+        path: "/inbox".into(),
+    });
+    wallet.app_mut().flush_outbox().await.unwrap();
+    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(31 * 24 * HOUR_MS);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(crate::common::possibly_delivered(&wallet, &tried).await);
+    // Its report isn't acknowledged yet, so its stop is kept, with its decision.
+    assert_eq!(duties_of(&mut wallet, &tried).await, 1);
+    assert_eq!(kept_stops(&wallet).await, 1);
+    // A restore carries the report of a delivery of unknown outcome: it is taken again as
+    // it was decided, told once, and acknowledged (Paykit spec 9).
+    let mut wallet = restored(&w, wallet).await;
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(duties_of(&mut wallet, &tried).await, 0);
+    assert_eq!(notices_of(&wallet, &tried).await, 1);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(kept_stops(&wallet).await, 0);
+}
+
+#[tokio::test]
+async fn test_blocked_possibly_delivered_stop_kept_across_a_restart_and_a_restore() {
+    let w = World::new();
+    let storage = store();
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new().pay().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            storage.clone(),
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    let rejection = wallet.reject_request(&request, None).await.unwrap();
+    wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
+    w.bob.switch().fail_next(Fault::LoseAnswer {
+        path: "/inbox".into(),
+    });
+    wallet.app_mut().flush_outbox().await.unwrap();
+    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(31 * 24 * HOUR_MS);
+    wallet.receive(None).await.unwrap();
+    assert!(crate::common::possibly_delivered(&wallet, &rejection).await);
+    let app_id = wallet.app_id();
+    drop(wallet);
+    let mut wallet = w
+        .load_on_clock(&w.alice, storage, app_id, std::sync::Arc::clone(&w.clock))
+        .await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(notices_of(&wallet, &rejection).await, 1);
+    let mut wallet = restored(&w, wallet).await;
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(notices_of(&wallet, &rejection).await, 1);
+    assert_eq!(duties_of(&mut wallet, &rejection).await, 0);
+}
+
+#[tokio::test]
+async fn test_blocked_dispatch_exemption_kept_across_a_backup_and_restore() {
+    let w = World::new();
+    let (mut wallet, _shop, request) = received(&w, PaykitConfig::default()).await;
+    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    let kept = wallet.app().protocol_scan("paykit", b"ex/").await.unwrap();
+    assert_eq!(kept.len(), 1);
+    let wallet = restored(&w, wallet).await;
+    assert_eq!(
+        wallet.app().protocol_scan("paykit", b"ex/").await.unwrap(),
+        kept
+    );
+}
+
+#[tokio::test]
+async fn test_blocked_message_of_a_kind_that_does_not_parse_waits() {
+    use pubky_switch_client::app::OutgoingMessage;
+
+    let w = World::new();
+    let (mut wallet, _shop, _) = received(&w, PaykitConfig::default()).await;
+    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    // A message whose role can't be established is no exception: it waits (Paykit spec
+    // 8.1, "Messages already queued").
+    let msg_id = wallet
+        .app_mut()
+        .queue(OutgoingMessage::new(
+            w.bob_id(),
+            "paykit.no_such_kind",
+            serde_json::Map::new(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(verdict(&wallet, &msg_id).await, Some(false));
+}

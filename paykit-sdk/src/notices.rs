@@ -359,7 +359,7 @@ pub(crate) enum GivenUpOrigin {
     /// The original proposing app cannot open a budget from this pre-loss proposal.
     AllowanceBeforeLoss,
     /// This app's own rejection or payer's cancellation, recorded while sends to the payee
-    /// were held (`ha/`) or held in the outbox (`gs/`), passed its replay window unsent, or
+    /// were held (`ha/`) or held in the outbox (`qs/`), passed its replay window unsent, or
     /// was lost with a write of its request record that holds neither it nor any stop.
     HeldAnswer,
     /// A received message whose entry was held unprocessed while the record it goes into
