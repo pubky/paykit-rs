@@ -3440,8 +3440,8 @@ impl Paykit {
     ///
     /// A first dispatch submitted nothing: it is written back to `Attempted`, known
     /// unsubmitted, then written `failed`, as a refusal at the fence writes it (Paykit spec
-    /// 7.2 step 1), so the refusal names the attempt failed with the error as its cause and
-    /// a new payment may be made at once. The failed write needs the switch too: when it
+    /// 7.2 step 1), so a new payment may be made at once. A refusal is returned as the
+    /// failed attempt's cause; any other error as it is. The failed write needs the switch too: when it
     /// can't be made, the entry stays `Attempted` and the fence's error is returned; a
     /// resume writes the attempt `failed` later, and until then a new payment of the same
     /// obligation is refused as in progress.
@@ -3455,17 +3455,16 @@ impl Paykit {
             return Err(error);
         }
         self.set_stage(&mut entry, Stage::Attempted).await?;
-        let why = error.refusal().cloned().unwrap_or_else(|| {
-            Refusal::NotNow(format!(
-                "Paykit spec 7.2: the checks before the payment method's call failed: {error}"
-            ))
-        });
-        match self.fail_attempt(&mut entry, why).await {
-            Err(failed) if matches!(failed.refusal(), Some(Refusal::AttemptFailed(_))) => {
-                Err(failed)
-            }
+        match self.write_outcome(&mut entry, false, false).await {
+            // Written failed: a refusal is the failed attempt's cause; any other error, such
+            // as the switch's own answer with its code and retry time, or a store failure, is
+            // returned as it is.
+            Ok(_) => match error.refusal() {
+                Some(why) => Err(Refusal::AttemptFailed(Box::new(why.clone())).into()),
+                None => Err(error),
+            },
             // The failed write didn't go: the entry is `Attempted` still.
-            _ => Err(error),
+            Err(_) => Err(error),
         }
     }
 
@@ -4951,8 +4950,9 @@ impl Paykit {
     ) -> Result<FinalCheck> {
         let mut may_take_answer = matches!(kind, Dispatch::First { .. });
         loop {
-            // A read that fails here is the caller's error, not a hold: the switch may answer
-            // the next try ([`Paykit::unread_at_the_fence`]).
+            // A check that fails here, a payment by hand's fresh reads or the store, is the
+            // caller's error, not a hold ([`Paykit::unread_at_the_fence`]). An automatic
+            // payment's checks take a read that fails as a hold themselves.
             if self.dispatch_held(entry, by, kind).await?
                 || Box::pin(self.period_recovery_held(entry)).await?
             {

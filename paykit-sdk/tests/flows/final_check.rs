@@ -1666,34 +1666,49 @@ async fn test_acceptance_queued_once_the_call_is_made() {
 }
 
 /// Alice's wallet holding bob's one-time request, its payment's fence unable to read the
-/// request record: the planning read and the final check's read go through, the fence's
-/// can't reach the switch. With `failed_write_fails`, the switch is unreachable for the
-/// write that would record the attempt failed too.
+/// request record: once `Paying` is journaled, the next record read, the fence's, can't
+/// reach the switch. With `failed_write_fails`, the next write, the one that would record
+/// the attempt failed, can't either. Returns the wallet, the request, the refusal and
+/// whether `Paying` was journaled before it.
 async fn fence_unread(
     w: &World,
     failed_write_fails: bool,
 ) -> (paykit_sdk::Paykit, RequestRef, paykit_sdk::PaykitError) {
     use pubky_switch_client::testing::Fault;
-    let mut wallet = w.wallet("wallet").await;
-    let mut shop = w.shop().await;
-    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
-    wallet.receive(None).await.unwrap();
-    w.alice.switch().fail_next(Fault::Unreachable {
-        path: "/records/".into(),
-        after: 2,
-    });
-    if failed_write_fails {
-        // The attempt's own batch goes through; the failed write's doesn't.
-        w.alice.switch().fail_next(Fault::Unreachable {
-            path: "/ops".into(),
-            after: 1,
+    let (store, app_id, request) = with_a_request(w).await;
+    let paying = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = Arc::clone(&paying);
+    let switch = w.alice.switch().clone();
+    store.on_paying(Box::new(move || {
+        seen.store(true, std::sync::atomic::Ordering::SeqCst);
+        switch.fail_next(Fault::Unreachable {
+            path: "/records/".into(),
+            after: 0,
         });
-    }
+        if failed_write_fails {
+            switch.fail_next(Fault::Unreachable {
+                path: "/ops".into(),
+                after: 0,
+            });
+        }
+    }));
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&store) as Arc<dyn StateStore>,
+            app_id,
+            Arc::clone(&w.clock),
+        )
+        .await;
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
         .outcome
         .unwrap_err();
+    assert!(
+        paying.load(std::sync::atomic::Ordering::SeqCst),
+        "the fence was reached: {refused:?}"
+    );
     assert!(w.rail.all_pay_calls().is_empty(), "{refused:?}");
     (wallet, request, refused)
 }
