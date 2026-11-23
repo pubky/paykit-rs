@@ -3214,8 +3214,14 @@ impl Paykit {
                 result => result.map(|_| ()),
             },
             Err(error @ (AppError::Alarm(_) | AppError::Store(_))) => Err(error.into()),
-            Err(_) if last.is_some() => self.local_delete(key::LISTS_READ).await,
-            Err(_) => Ok(()),
+            Err(_) => {
+                // The call reads the time no more ([`crate::send_holds::DeliveryClock`]).
+                self.protocol.delivery.read_failed();
+                if last.is_some() {
+                    self.local_delete(key::LISTS_READ).await?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -3243,6 +3249,7 @@ impl Paykit {
             },
             Err(error @ (AppError::Alarm(_) | AppError::Store(_))) => Err(error.into()),
             Err(_) => {
+                self.protocol.delivery.read_failed();
                 self.local_delete(key::LISTS_READ).await?;
                 Ok(false)
             }

@@ -1898,6 +1898,8 @@ pub(crate) mod key {
     pub(crate) const HELD_ANSWERS: &str = "ha/";
     /// `qs/<msg_id>`: the rejections and payer's cancellations this app queued.
     pub(crate) const QUEUED_STOPS: &str = "qs/";
+    /// `ex/<msg_id>`: why an outgoing acceptance may go while sends are held.
+    pub(crate) const SEND_EXEMPTIONS: &str = "ex/";
     pub(crate) const LISTED_CERT: &str = "lc";
     pub(crate) const NOTICES: &str = "nt/";
     pub(crate) const RESTORED_DELIVERIES: &str = "nt/outgoing/";
