@@ -889,8 +889,9 @@ impl Paykit {
 
     /// The counterparties whose list the user confirmed sending again
     /// ([`Paykit::send_list_again`]) and which hasn't been sent yet: a later call or receive
-    /// sends it once it can. Empty once each is sent, or its earlier list was accepted,
-    /// superseded or can no longer be paid.
+    /// sends it once it can. One leaves the list once its newer version is reserved, or the
+    /// earlier list is known to have arrived; a confirmation is kept, and still sent, after
+    /// the earlier list expired.
     ///
     /// # Errors
     ///

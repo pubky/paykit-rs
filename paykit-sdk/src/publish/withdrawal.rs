@@ -196,7 +196,8 @@ impl Paykit {
     /// superseded by a newer version, or the recipient is known to hold it, or nothing it
     /// offered or withdrew can be paid any more (Paykit spec 9, "Deliveries of unknown
     /// outcome"). None of these raises it again ([`Paykit::take_list_delivery`]), so an
-    /// acknowledged notice needn't be kept for good.
+    /// acknowledged notice needn't be kept for good. A backup taken before the prune can
+    /// bring the notice back, unacknowledged, until the next receive prunes it again.
     pub(super) async fn prune_list_notices(&mut self) -> Result<()> {
         let now = self.service_time().unwrap_or(0);
         let held = self
