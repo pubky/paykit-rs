@@ -3660,6 +3660,16 @@ impl Paykit {
     /// ([`Paykit::block`]), and a receive reads it again first once it is
     /// [`LISTS_REFRESH_MS`] old.
     pub(crate) async fn denied_as_last_read(&self, pubky: &[u8; 32]) -> crate::error::Result<bool> {
+        self.denied_with(&mut None, pubky).await
+    }
+
+    /// [`Paykit::denied_as_last_read`], with the copy of the deny list taken from `denied`,
+    /// read into it once when first needed: a list read shares it across its records.
+    pub(crate) async fn denied_with(
+        &self,
+        denied: &mut Option<std::collections::HashSet<[u8; 32]>>,
+        pubky: &[u8; 32],
+    ) -> crate::error::Result<bool> {
         if !reads_lists(self.app.cert().scopes()) {
             return Ok(false);
         }
@@ -3671,10 +3681,16 @@ impl Paykit {
         {
             return Ok(self.own_change(&mark).await?.unwrap_or(true));
         }
-        Ok(self
-            .local_get::<Vec<[u8; 32]>>(key::DENIED)
-            .await?
-            .is_some_and(|denied| denied.contains(pubky)))
+        if denied.is_none() {
+            *denied = Some(
+                self.local_get::<Vec<[u8; 32]>>(key::DENIED)
+                    .await?
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect(),
+            );
+        }
+        Ok(denied.as_ref().is_some_and(|denied| denied.contains(pubky)))
     }
 
     /// Answer the `resend_request`s the receive step kept, oldest first, each once (Paykit

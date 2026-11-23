@@ -635,7 +635,19 @@ impl Paykit {
         record_key: &[u8; 32],
         record: &ActivityRecord,
     ) -> Result<bool> {
-        self.held_across_payee_stop(record_key, record, None).await
+        self.held_with(&mut HoldReads::default(), record_key, record)
+            .await
+    }
+
+    /// [`Paykit::held`], with the hold's own values taken from `reads`, which a list read
+    /// shares across its records so it reads each of them once.
+    pub(crate) async fn held_with(
+        &self,
+        reads: &mut HoldReads,
+        record_key: &[u8; 32],
+        record: &ActivityRecord,
+    ) -> Result<bool> {
+        self.held_across_with(reads, record_key, record, None).await
     }
 
     /// A seller stop crossing an accepted first dispatch leaves any restore or missed-item
@@ -646,15 +658,28 @@ impl Paykit {
         record: &ActivityRecord,
         crossing_payee: Option<[u8; 32]>,
     ) -> Result<bool> {
-        let hold = self.local_get::<RestoreHold>(key::RESTORE_HOLD).await?;
+        self.held_across_with(
+            &mut HoldReads::default(),
+            record_key,
+            record,
+            crossing_payee,
+        )
+        .await
+    }
+
+    async fn held_across_with(
+        &self,
+        reads: &mut HoldReads,
+        record_key: &[u8; 32],
+        record: &ActivityRecord,
+        crossing_payee: Option<[u8; 32]>,
+    ) -> Result<bool> {
+        let hold = reads.restore_hold(self).await?;
         let own = hold.as_ref().is_some_and(RestoreHold::in_force);
         let unbounded = hold.as_ref().is_some_and(RestoreHold::holds_all)
-            || self
-                .local_get::<bool>(key::MISSED_END_UNKNOWN)
-                .await?
-                .is_some();
+            || reads.missed_end_unknown(self).await?;
         if !unbounded {
-            let Some(missed) = self.local_get::<MissedHold>(key::MISSED_HOLD).await? else {
+            let Some(missed) = reads.missed_hold(self).await? else {
                 return Ok(false);
             };
             let Some((request, _)) = crate::requests::request_of(record) else {
@@ -667,7 +692,7 @@ impl Paykit {
         if payment_ended(record, crossing_payee) {
             return Ok(false);
         }
-        let Some(epoch) = self.local_get::<HoldEpoch>(key::HOLD_EPOCH).await? else {
+        let Some(epoch) = reads.epoch(self).await? else {
             // A hold with no identifier is one no confirmation can be matched to.
             return Ok(true);
         };
@@ -689,28 +714,24 @@ impl Paykit {
     /// [`Paykit::held`] holds it by now. Every restore and every `missed` item changes it,
     /// and so does a clean verdict a later report ends.
     pub(crate) async fn held_request(&self, record_key: &[u8; 32]) -> Result<HeldRequest> {
-        let hold = self.local_get::<RestoreHold>(key::RESTORE_HOLD).await?;
-        let newest_missed_item_ms = self
-            .local_scan::<crate::protocol::MissedItemMark>(key::MISSED_ITEMS)
-            .await?
-            .iter()
-            .map(|(_, mark)| mark.from_ms)
-            .max();
+        self.held_request_with(&mut HoldReads::default(), record_key)
+            .await
+    }
+
+    /// [`Paykit::held_request`], with the hold's own values taken from `reads`.
+    pub(crate) async fn held_request_with(
+        &self,
+        reads: &mut HoldReads,
+        record_key: &[u8; 32],
+    ) -> Result<HeldRequest> {
+        let hold = reads.restore_hold(self).await?;
+        let newest_missed_item_ms = reads.newest_missed_item(self).await?;
         Ok(HeldRequest {
             record: *record_key,
-            epoch: self
-                .local_get(key::HOLD_EPOCH)
-                .await?
-                .ok_or_else(PaykitError::corrupt)?,
+            epoch: reads.epoch(self).await?.ok_or_else(PaykitError::corrupt)?,
             restored: hold.as_ref().is_some_and(RestoreHold::in_force),
-            missed_bound_ms: self
-                .local_get::<MissedHold>(key::MISSED_HOLD)
-                .await?
-                .map(|missed| missed.bound_ms),
-            missed_end_unknown: self
-                .local_get::<bool>(key::MISSED_END_UNKNOWN)
-                .await?
-                .is_some(),
+            missed_bound_ms: reads.missed_hold(self).await?.map(|missed| missed.bound_ms),
+            missed_end_unknown: reads.missed_end_unknown(self).await?,
             newest_missed_item_ms,
         })
     }
@@ -1850,6 +1871,66 @@ fn unanswered(error: &PaykitError) -> bool {
 /// A failure of this app's own: its store or an alarm.
 pub(crate) fn local_failure(error: &PaykitError) -> bool {
     matches!(error, PaykitError::Client(client) if matches!(client.unkept(), AppError::Store(_) | AppError::Alarm(_)))
+}
+
+/// The hold's own values, each read from the store at most once, when first needed: a list
+/// read shares one across its records, so it reads them once rather than once per record,
+/// and reads none it didn't need. Nothing is written between its reads (the list reads
+/// take `&self`), so each is the value the store holds for the whole read.
+#[derive(Default)]
+pub(crate) struct HoldReads {
+    restore_hold: Option<Option<RestoreHold>>,
+    missed_end_unknown: Option<bool>,
+    missed_hold: Option<Option<MissedHold>>,
+    epoch: Option<Option<HoldEpoch>>,
+    newest_missed_item: Option<Option<u64>>,
+}
+
+impl HoldReads {
+    async fn restore_hold(&mut self, app: &Paykit) -> Result<Option<RestoreHold>> {
+        if self.restore_hold.is_none() {
+            self.restore_hold = Some(app.local_get::<RestoreHold>(key::RESTORE_HOLD).await?);
+        }
+        Ok(self.restore_hold.clone().flatten())
+    }
+
+    async fn missed_end_unknown(&mut self, app: &Paykit) -> Result<bool> {
+        if self.missed_end_unknown.is_none() {
+            self.missed_end_unknown = Some(
+                app.local_get::<bool>(key::MISSED_END_UNKNOWN)
+                    .await?
+                    .is_some(),
+            );
+        }
+        Ok(self.missed_end_unknown.unwrap_or_default())
+    }
+
+    async fn missed_hold(&mut self, app: &Paykit) -> Result<Option<MissedHold>> {
+        if self.missed_hold.is_none() {
+            self.missed_hold = Some(app.local_get::<MissedHold>(key::MISSED_HOLD).await?);
+        }
+        Ok(self.missed_hold.flatten())
+    }
+
+    async fn epoch(&mut self, app: &Paykit) -> Result<Option<HoldEpoch>> {
+        if self.epoch.is_none() {
+            self.epoch = Some(app.local_get::<HoldEpoch>(key::HOLD_EPOCH).await?);
+        }
+        Ok(self.epoch.flatten())
+    }
+
+    async fn newest_missed_item(&mut self, app: &Paykit) -> Result<Option<u64>> {
+        if self.newest_missed_item.is_none() {
+            self.newest_missed_item = Some(
+                app.local_scan::<crate::protocol::MissedItemMark>(key::MISSED_ITEMS)
+                    .await?
+                    .iter()
+                    .map(|(_, mark)| mark.from_ms)
+                    .max(),
+            );
+        }
+        Ok(self.newest_missed_item.flatten())
+    }
 }
 
 #[cfg(test)]

@@ -461,6 +461,8 @@ pub struct FailingRecordReads {
     capped_record: std::sync::Mutex<Option<String>>,
     /// While set, every journal entry reads back as bytes that don't read.
     corrupt_journal: std::sync::atomic::AtomicBool,
+    /// While set, every listing of the held records fails.
+    scans_armed: std::sync::atomic::AtomicBool,
 }
 
 impl FailingRecordReads {
@@ -484,9 +486,17 @@ impl FailingRecordReads {
         self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Fail every listing of the held records from now on.
+    pub fn arm_scans(&self) {
+        self.scans_armed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// The store heals: reads pass again.
     pub fn heal(&self) {
         self.armed.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.scans_armed
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         self.countdown.store(0, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -561,6 +571,10 @@ impl StateStore for FailingRecordReads {
         limit: u32,
     ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
     {
+        if prefix.starts_with(b"rec/") && self.scans_armed.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(pubky_switch_client::error::StoreError::Unavailable);
+        }
         self.inner.scan(ns, prefix, after, limit)
     }
 

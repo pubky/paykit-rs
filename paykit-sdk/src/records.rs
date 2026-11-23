@@ -397,12 +397,27 @@ impl Paykit {
         target: &ActivityTarget,
         held: Option<&SharedRecord>,
     ) -> Option<ActivityRecord> {
-        let held = held?;
+        self.bind_held(held?, target.side.side(), target.label().as_ref())
+    }
+
+    /// The value of `held` bound at its key as an activity record of `side` under `label`
+    /// ([`bind_activity`]); `None` for no value, or one the reader doesn't act on. The list
+    /// reads bind each record they show through here, once per read.
+    pub(crate) fn bind_held(
+        &self,
+        held: &SharedRecord,
+        side: ActivitySide,
+        label: Option<&Label>,
+    ) -> Option<ActivityRecord> {
+        let value = held.content.value()?;
+        #[cfg(feature = "test-support")]
+        self.activity_binds
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         bind_activity(
-            held.content.value()?,
+            value,
             &self.identity(),
-            target.side.side(),
-            target.label().as_ref(),
+            side,
+            label,
             &held.key,
             |t| self.app.record_key(t).ok(),
             &|p| self.rail.settlement_id(p),

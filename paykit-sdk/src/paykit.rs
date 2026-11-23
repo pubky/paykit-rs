@@ -384,6 +384,9 @@ pub struct Paykit {
     /// The capabilities the join checked, which its first update signs as they are
     /// (`crate::own_record`); `None` otherwise.
     pub(crate) capability_snapshot: Option<Vec<paykit_lib::PaymentEndpointIdentifier>>,
+    /// How many activity records this handle bound ([`Paykit::activity_binds`]).
+    #[cfg(feature = "test-support")]
+    pub(crate) activity_binds: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for Paykit {
@@ -449,7 +452,18 @@ impl Paykit {
             first_read_summary: None,
             own_record_unknown: false,
             capability_snapshot: None,
+            #[cfg(feature = "test-support")]
+            activity_binds: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// How many activity records this handle has bound since it was built: each bind checks
+    /// every stored message the record holds (Paykit wire 5.3). For tests that guard how
+    /// often a read binds a record.
+    #[cfg(feature = "test-support")]
+    pub fn activity_binds(&self) -> u64 {
+        self.activity_binds
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Join from an approval (Switch spec 12.1), as a Paykit App: the client's join, with
