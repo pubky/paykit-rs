@@ -783,9 +783,7 @@ fn list_of(w: &World, app: &str) -> Value {
 /// The shop's list, held at the key of bob's app `app_id`'s record.
 async fn list_under_another_apps_key(w: &World, wallet: &mut Paykit, app_id: &[u8; 16]) {
     let record = wallet.app().record_key(&lists_of(w, app_id)).unwrap();
-    let list = list_of(w, "shop");
-    let key = format!("lh/{}/{}", b64(&record), crate::restore::kept_msg_id(&list));
-    put(wallet, &key, &list).await;
+    put(wallet, &format!("lh/{}", b64(&record)), &list_of(w, "shop")).await;
 }
 
 #[tokio::test]
@@ -800,16 +798,13 @@ async fn test_local_state_held_list_under_another_apps_key_not_listed() {
 
 #[tokio::test]
 async fn test_local_state_held_list_under_another_apps_key_never_placed_there() {
-    // Placed without its marks for app 9, the list held at app 9's key is the shop's: it is
-    // never written into app 9's record.
+    // The list held at app 9's key is the shop's: a receive that places held lists never
+    // writes it into app 9's record.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let _shop = w.shop().await;
     list_under_another_apps_key(&w, &mut wallet, &[9; 16]).await;
-    let error = wallet
-        .place_held_list_without_marks(&w.bob_id(), &[9; 16], UserConfirmed::new())
-        .await
-        .unwrap_err();
+    let error = wallet.receive(None).await.unwrap_err();
     assert!(corrupt(&error), "{error:?}");
     let record = wallet.app().record_key(&lists_of(&w, &[9; 16])).unwrap();
     assert_eq!(w.record_writes(&w.alice, &record), 0);
@@ -842,9 +837,12 @@ async fn test_local_state_held_list_of_another_app_parks_a_list_to_hold() {
         .unwrap();
     wallet.receive(None).await.unwrap();
     let record = wallet.app().record_key(&target).unwrap();
-    let list = list_of(&w, "shop2");
-    let key = format!("lh/{}/{}", b64(&record), crate::restore::kept_msg_id(&list));
-    put(&mut wallet, &key, &list).await;
+    put(
+        &mut wallet,
+        &format!("lh/{}", b64(&record)),
+        &list_of(&w, "shop2"),
+    )
+    .await;
     w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 2))
         .await;
     let _ = wallet.receive(None).await;
@@ -864,9 +862,8 @@ async fn test_local_state_held_list_of_another_app_refuses_a_stored_lists_write(
         .app()
         .record_key(&lists_of(&w, &shop.app_id()))
         .unwrap();
-    let list = list_of(&w, "shop2");
-    let key = format!("lh/{}/{}", b64(&record), crate::restore::kept_msg_id(&list));
-    put(&mut wallet, &key, &list).await;
+    let key = format!("lh/{}", b64(&record));
+    put(&mut wallet, &key, &list_of(&w, "shop2")).await;
     w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     refuse_writes(&w.alice, 1);
@@ -1028,8 +1025,9 @@ async fn recorded_list(wallet: &Paykit, record: &[u8; 32]) -> String {
 #[tokio::test]
 async fn test_local_state_late_held_list_placement_keeps_a_newer_held_list() {
     // The placement of a held list v3 is kept to send again; meanwhile a newer list v4 is
-    // held at its own key, as the receive step holds one. When the kept placement lands, its
-    // delete takes only v3's key: v4 is still placed after it, never lost.
+    // held over the record in its place, as the receive step holds one. The kept placement
+    // carries no delete of the hold, so when it lands v4 stays held, and is placed after it,
+    // never lost.
     use pubky_switch_client::testing::Fault;
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -1071,20 +1069,14 @@ async fn test_local_state_late_held_list_placement_keeps_a_newer_held_list() {
     let _ = wallet.receive(None).await;
     let v4 = shop_list_at(&w, list_version(1, 4));
     let v4_id = crate::restore::kept_msg_id(&v4);
-    let prefix = format!("lh/{}/", b64(&record));
     wallet
         .app_mut()
         .protocol_commit(
             "paykit",
-            &[
-                LocalWrite::Delete {
-                    key: format!("{prefix}{}", v3.msg_id).into_bytes(),
-                },
-                LocalWrite::Put {
-                    key: format!("{prefix}{v4_id}").into_bytes(),
-                    value: serde_json::to_vec(&v4).unwrap(),
-                },
-            ],
+            &[LocalWrite::Put {
+                key: format!("lh/{}", b64(&record)).into_bytes(),
+                value: serde_json::to_vec(&v4).unwrap(),
+            }],
         )
         .await
         .unwrap();

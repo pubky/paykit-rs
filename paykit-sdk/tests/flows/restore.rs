@@ -1470,14 +1470,10 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
     let cases: [(&str, String, serde_json::Value); 20] = [
         (
             "held list of another kind",
-            format!("{}/{}", key_of("lh/"), kept_msg_id(&kept(request.clone()))),
+            key_of("lh/"),
             kept(request.clone()),
         ),
-        (
-            "held list under another key",
-            format!("{}/{}", key_of("lh/"), kept_msg_id(&kept(list.clone()))),
-            kept(list),
-        ),
+        ("held list under another key", key_of("lh/"), kept(list)),
         (
             "queued answer of another's certificate",
             answer_key.clone(),

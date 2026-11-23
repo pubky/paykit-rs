@@ -11,7 +11,8 @@
 //!   a request into the record of its settlement, a receipt beside the proof it names, and
 //!   period details and a Billing Period's proof into the period record, once the request
 //!   record they are checked against is held.
-//!   Meanwhile a Private Payment List is held over its record (`lh/`), the newer kept, and a
+//!   Meanwhile a Private Payment List is held over its record (`lh/`), the newer kept, and
+//!   placed as any held list is ([`Paykit::place_held_lists`]); a
 //!   request is shown unrecorded ([`crate::RequestStatus::Unrecorded`]). A payee's
 //!   cancellation needs nothing here: its stop is kept with the cursor move, with no write
 //!   at the switch (`kc/`, Paykit spec 8.1). An Allowance proposal or answer is tried
@@ -268,7 +269,7 @@ enum Place {
         creates: bool,
     },
     /// A list, held over its record: the hold to keep, `None` when a list as new is held.
-    List(Option<crate::receive::HeldListWrite>),
+    List(Option<(String, KeptMessage)>),
     /// An Allowance proposal or answer to place in its record later. An acceptance that
     /// would fill the empty `response` stays unplaced (Paykit spec 8.3.1).
     Allowance,
@@ -565,8 +566,8 @@ impl Paykit {
             // Held as a list whose record doesn't read is held at its first read, and its
             // sender noted with the hold, as there.
             Some(Place::List(hold)) => {
-                if let Some(hold) = hold {
-                    hold.stage(tx)?;
+                if let Some((held, kept)) = hold {
+                    tx.put(&held, &kept)?;
                 }
                 let (peer, at) = crate::receive::peer_note(&entry.sender, &stored);
                 tx.put(&peer, &at)?;
@@ -681,13 +682,15 @@ impl Paykit {
             ),
             Body::PrivatePaymentList(_) if pay => {
                 let target = list_target(&sender, &stored.message().from.app_id);
-                let record_key = self.app.record_key(&target)?;
-                let held = self.held_lists_over(&record_key).await?;
-                Some(Place::List(crate::receive::HeldListWrite::newer(
-                    &record_key,
-                    stored,
-                    &held,
-                )))
+                let held = key::held_list(&self.app.record_key(&target)?);
+                let newer = match self.local_get::<KeptMessage>(&held).await? {
+                    None => true,
+                    Some(kept) => {
+                        crate::receive::list_version(&kept.stored(&own)?)
+                            < crate::receive::list_version(stored)
+                    }
+                };
+                Some(Place::List(newer.then(|| (held, KeptMessage::of(stored)))))
             }
             Body::AllowanceProposal(_)
             | Body::AllowanceAcceptance(_)
@@ -870,15 +873,7 @@ impl Paykit {
                 // corrupt store, never a message past its window.
                 let accepted_at = stored.accepted_at().ok_or_else(PaykitError::corrupt)?;
                 let placed = match self.place_of(&stored, order.1).await? {
-                    Some(Place::List(hold)) => {
-                        if let Some(hold) = hold {
-                            let mut tx = Tx::default();
-                            hold.stage(&mut tx)?;
-                            self.local_commit(tx).await?;
-                        }
-                        Placed::Done
-                    }
-                    Some(Place::Stop(hold)) => {
+                    Some(Place::List(hold)) | Some(Place::Stop(hold)) => {
                         if let Some((held, kept)) = hold {
                             self.local_put(&held, &kept).await?;
                         }

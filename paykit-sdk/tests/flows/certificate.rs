@@ -2003,16 +2003,6 @@ async fn test_certificate_wider_without_keys_holds_a_new_payment_and_a_reconcile
         .await
         .unwrap_err();
     assert!(waits_for_keys(&refused), "{refused:?}");
-    // A list placed over a record the app can't open would drop its single-use marks.
-    let refused = wallet
-        .place_held_list_without_marks(
-            &w.bob_id(),
-            &[9; 16],
-            pubky_switch_client::app::UserConfirmed::new(),
-        )
-        .await
-        .unwrap_err();
-    assert!(waits_for_keys(&refused), "{refused:?}");
     assert_eq!(w.rail.all_executions().len(), 1);
 }
 

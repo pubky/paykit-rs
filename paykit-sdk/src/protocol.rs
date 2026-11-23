@@ -676,6 +676,20 @@ pub(crate) fn restore_paykit_layer(
     let mut journaled = std::collections::BTreeSet::new();
     let mut acknowledged = Vec::new();
     let mut writes = crate::reply_asks::restore(restoring, &binder, &state)?;
+    // A backup taken before a `payment_lists` delete was seen cannot discharge the
+    // installation's knowledge of it either (Paykit spec 6).
+    let mut lists_lost = std::collections::BTreeSet::new();
+    for (k, value) in restoring
+        .previous_local_scan(key::LISTS_LOST.as_bytes())
+        .map_err(|_| "the installation's deleted list records cannot be read")?
+    {
+        if !matches!(StateKey::parse(&k), Some(StateKey::ListRecordLost(_))) {
+            return Err("the installation holds an invalid deleted list record".into());
+        }
+        state::restored::<bool>(&k, &value, &binder)
+            .map_err(|_| "the installation holds an invalid deleted list record")?;
+        lists_lost.insert(k);
+    }
     // A backup taken before the floor was deleted cannot discharge the installation's hold.
     let mut floor_deleted = false;
     for (k, value) in restoring
@@ -1046,7 +1060,12 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::HeldList { .. } => {
+            StateKey::ListRecordLost(_) => {
+                state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
+                lists_lost.insert(key);
+                continue;
+            }
+            StateKey::HeldList(_) => {
                 state::restored::<KeptMessage>(&key, &value, &binder).map_err(|_| {
                     String::from("Paykit wire 5.4: a held list in the backup doesn't verify")
                 })?;
@@ -1274,6 +1293,12 @@ pub(crate) fn restore_paykit_layer(
         &mut writes,
     )
     .map_err(|_| "the pending Allowance replies cannot be retained")?;
+    for key in lists_lost {
+        writes.push(LocalWrite::Put {
+            key,
+            value: state::encode(&true).map_err(|_| "a deleted list record cannot be written")?,
+        });
+    }
     if floor_deleted {
         writes.push(
             state::local_put(key::FLOOR_DELETED, &true)
@@ -1978,6 +2003,15 @@ impl Protocol for PaykitProtocol {
             // publication. Keep the service cursor and the payment hold together.
             return Ok(Some(PutBack::Prepare {
                 observed: vec![local_write(key::FLOOR_DELETED, &true)?],
+            }));
+        }
+        if deletion.collection == paykit_lib::collections::Collection::PaymentLists.name() {
+            // The delete is kept as seen in the commit that observes it, from the feed or a
+            // read: a later absence, such as the service forgetting it or a restore that
+            // empties the copy of records, never places a list there without the single-use
+            // marks the deleted record held (Paykit spec 6, Paykit wire 4.13 and 5).
+            return Ok(Some(PutBack::Observe {
+                observed: vec![local_write(&key::list_record_lost(deletion.key), &true)?],
             }));
         }
         crate::deletions::observe_payee_deletion(deletion, cx, &|proof| self.settlement_id(proof))
@@ -3577,12 +3611,9 @@ mod receive_tests {
             })),
         );
         let target = crate::records::list_target(&bob.id(), &list.message().from.app_id);
-        let at = key::held_list(&fake_key(&target), &list.message().msg_id);
+        let at = key::held_list(&fake_key(&target));
         let value = state::encode(&KeptMessage::of(&list)).unwrap();
         assert!(restores::<KeptMessage>(&alice, at.as_bytes(), &value));
-        // Held under the key of another list message, it doesn't bind.
-        let other = key::held_list(&fake_key(&target), "0b9cb2f3-5a52-4d0a-8b8e-31a1f4a0c6d2");
-        assert!(!restores::<KeptMessage>(&alice, other.as_bytes(), &value));
         assert!(!restores::<KeptMessage>(
             &alice,
             at.as_bytes(),

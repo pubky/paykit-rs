@@ -2304,11 +2304,17 @@ pub(crate) fn obligation(
 /// would let an endpoint already paid be paid again. A record whose current write is a
 /// delete is held the same way: the delete took the marks with it. The list is held
 /// instead ([`key::held_list`], the newest version kept), a durable notice
-/// ([`Paykit::held_lists`]), and placed once another own app that holds the marks writes
-/// the record again ([`Paykit::place_held_lists`]), or when the host, having shown the user
-/// that single-use endpoints may be paid twice, places it without them
-/// ([`Paykit::place_held_list_without_marks`]). Payments meanwhile don't use the record:
-/// lists that don't read, or are held, are never paid to. The SDK never deletes a record.
+/// ([`Paykit::held_lists`]), and placed only onto a readable write that keeps the marks
+/// this app saw ([`Paykit::place_held_lists`]). Nothing places it without them, by
+/// confirmation or otherwise, and an absence of the record later, as after the service
+/// forgot the delete, keeps it held. Payments meanwhile don't use the record: lists that
+/// don't read, or are held, are never paid to. The SDK never deletes a record.
+///
+/// So after a delete, that payee app's lists stay held at every SDK app, the one holding
+/// every mark included: no SDK path writes this record over a delete, as this revision
+/// withholds the put-back (Paykit wire 5, "Incomplete protected-record contract"; spec 6).
+/// Only a readable write over the delete from outside the SDK, that keeps the marks this
+/// app saw, places the list.
 ///
 /// The limit: a delete is seen only by an app that holds the record's delete write, from
 /// its feed or a read. To an app that never held the record, a deleted one looks absent,
@@ -2330,6 +2336,14 @@ fn list_effect(cx: &mut ReceiveContext<'_>, stored: &StoredMessage, seq: u64) ->
         }
     }
     let held = match cx.record(&target)?.map(|r| r.content) {
+        // A record this app saw deleted or unreadable: an absence now, such as a delete the
+        // service forgot or a restore into a fresh store, says nothing of the marks it held,
+        // so the list is held too (Paykit spec 6).
+        None if state::cx_get::<bool>(cx, &key::list_record_lost(&cx.record_key(&target)?))?
+            .is_some() =>
+        {
+            return hold_list(cx, &target, stored)
+        }
         None => None,
         Some(RecordContent::Value(value)) => match PaymentListRecord::read(&value, &own) {
             Ok(held) => Some(held),
@@ -2389,82 +2403,6 @@ pub(crate) fn list_version(stored: &StoredMessage) -> Option<ListVersion> {
     }
 }
 
-/// A list to hold over its record (`lh/<record key>/<msg_id>`), with the keys of the lists
-/// held there already, all older, which the same commit deletes: every commit that holds a
-/// list leaves one held per record. A list's own key names its message, so a placement the
-/// client applies only later, from a batch kept to send again, deletes only its own list and
-/// never a newer one held meanwhile.
-#[derive(Clone)]
-pub(crate) struct HeldListWrite {
-    key: String,
-    kept: KeptMessage,
-    older: Vec<String>,
-}
-
-impl HeldListWrite {
-    /// `stored` to hold over the record at `record_key`, of the lists held there, `held`;
-    /// `None` when one of them is as new or newer.
-    pub(crate) fn newer(
-        record_key: &[u8; 32],
-        stored: &StoredMessage,
-        held: &[(String, StoredMessage)],
-    ) -> Option<Self> {
-        if held
-            .iter()
-            .any(|(_, list)| list_version(list) >= list_version(stored))
-        {
-            return None;
-        }
-        Some(Self {
-            key: key::held_list(record_key, &stored.message().msg_id),
-            kept: KeptMessage::of(stored),
-            older: held.iter().map(|(key, _)| key.clone()).collect(),
-        })
-    }
-
-    pub(crate) fn writes(&self) -> crate::error::Result<Vec<LocalWrite>> {
-        let mut writes: Vec<LocalWrite> = self
-            .older
-            .iter()
-            .map(|key| LocalWrite::Delete {
-                key: key.as_bytes().to_vec(),
-            })
-            .collect();
-        writes.push(state::local_put(&self.key, &self.kept)?);
-        Ok(writes)
-    }
-
-    pub(crate) fn stage(&self, tx: &mut Tx) -> crate::error::Result<()> {
-        for key in &self.older {
-            tx.delete(key);
-        }
-        tx.put(&self.key, &self.kept)?;
-        Ok(())
-    }
-}
-
-impl Paykit {
-    /// The lists held over the record at `record_key`, each with its full key, read bound
-    /// to its key (`state::Stored`).
-    pub(crate) async fn held_lists_over(
-        &self,
-        record_key: &[u8; 32],
-    ) -> crate::error::Result<Vec<(String, StoredMessage)>> {
-        let own = self.identity();
-        let prefix = key::held_lists_of(record_key);
-        let mut held = Vec::new();
-        for (rest, kept) in self.local_scan::<KeptMessage>(&prefix).await? {
-            held.push((format!("{prefix}{rest}"), kept.stored(&own)?));
-        }
-        Ok(held)
-    }
-}
-
-/// The newest of `held`, the lists held over one record, by list version.
-pub(crate) fn newest_held(held: Vec<(String, StoredMessage)>) -> Option<(String, StoredMessage)> {
-    held.into_iter().max_by_key(|(_, list)| list_version(list))
-}
-
 /// Hold `stored`, a list whose `payment_lists` record doesn't read, with the cursor move,
 /// unless a newer list is held already ([`list_effect`]).
 fn hold_list(
@@ -2472,20 +2410,18 @@ fn hold_list(
     target: &pubky_switch_client::app::RecordTarget,
     stored: &StoredMessage,
 ) -> Result<(), Fail> {
-    let record_key = cx.record_key(target)?;
-    let mut held = Vec::new();
-    for (key, kept) in state::cx_scan::<KeptMessage>(cx, &key::held_lists_of(&record_key))? {
-        held.push((
-            key,
-            kept.stored(&cx.identity()).map_err(|_| Fail::corrupt())?,
-        ));
+    let kept = key::held_list(&cx.record_key(target)?);
+    if let Some(held) = state::cx_get::<KeptMessage>(cx, &kept)? {
+        let held = held.stored(&cx.identity()).map_err(|_| Fail::corrupt())?;
+        if list_version(&held) >= list_version(stored) {
+            return Ok(());
+        }
     }
-    let Some(write) = HeldListWrite::newer(&record_key, stored, &held) else {
-        return Ok(());
-    };
-    for write in write.writes().map_err(|_| Fail::corrupt())? {
-        keep_local(cx, write);
-    }
+    keep_local(cx, local(&kept, &KeptMessage::of(stored))?);
+    // Kept apart from the list: only a record seen lost keeps a later absence from ending
+    // the hold, not a first write that was refused.
+    let lost = key::list_record_lost(&cx.record_key(target)?);
+    keep_local(cx, local(&lost, &true)?);
     Ok(())
 }
 
@@ -2758,9 +2694,11 @@ pub(crate) fn lists_read_is_fresh(read: u64, now: u64) -> bool {
 
 /// A Private Payment List held because its `payment_lists` record doesn't read, or is
 /// deleted ([`Paykit::held_lists`]): never written over it, which could drop the single-use
-/// marks it holds or held, until the record reads again or the host places it without them
-/// ([`Paykit::place_held_list_without_marks`]). No payment uses that payee app's list
-/// meanwhile.
+/// marks it holds or held, until the record reads again with those marks. After a delete
+/// it has seen, an SDK app never writes the record again itself: only another writer's
+/// readable write that keeps the marks places the list. No payment uses that payee app's
+/// list meanwhile; its public endpoints remain a separate choice of the user, as does a
+/// list the payee shares from another app.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct HeldList {
@@ -2777,11 +2715,10 @@ pub struct HeldList {
 impl Paykit {
     /// The Private Payment Lists held because their `payment_lists` record doesn't read or
     /// is deleted (Paykit wire 5.4): a durable notice for the host. Each is placed once the
-    /// record reads again, at a receive, or by
-    /// [`Paykit::place_held_list_without_marks`]; until then no payment uses the payee app's
-    /// list. A list held over a value only waiting for its scope key isn't listed: that
-    /// value opens once the key comes, and the list is placed with its marks then, so
-    /// nothing offers to place it without them.
+    /// record reads again with the marks this app saw, at a receive; until then no payment
+    /// uses the payee app's list. A list held over a value only waiting for its scope key
+    /// isn't listed: that value opens once the key comes, and the list is placed with its
+    /// marks then.
     ///
     /// # Errors
     ///
@@ -2790,10 +2727,7 @@ impl Paykit {
         let own = self.identity();
         let mut out = Vec::new();
         for (rest, kept) in self.local_scan::<KeptMessage>(key::HELD_LISTS).await? {
-            let (record, _) = rest
-                .split_once('/')
-                .ok_or_else(crate::error::PaykitError::corrupt)?;
-            let record_key = pubky_switch_core::enc::unb64_array::<32>(record)
+            let record_key = pubky_switch_core::enc::unb64_array::<32>(&rest)
                 .map_err(|_| crate::error::PaykitError::corrupt())?;
             if self
                 .app
@@ -2814,14 +2748,15 @@ impl Paykit {
         Ok(out)
     }
 
-    /// Place the lists held because their record didn't read or was deleted, once another
-    /// own app has written it again so it reads (Paykit wire 5.4): the record's update,
-    /// built on the version held with its marks kept, and the notice's delete, in one batch.
-    /// A record that still doesn't read, or is still deleted, keeps its list held, as does
-    /// one absent while the payer's side isn't listed yet; a list no newer than the
-    /// record's is dropped. A placement that fails now is tried again at the
-    /// next receive, with no bound in time: one held list per payee app, replaced by a
-    /// newer one, and one write of it per receive.
+    /// Place the held lists once their record reads (Paykit wire 5.4): the record's update,
+    /// built on the version held with its marks kept, and, at a later pass once the record
+    /// holds the list, the hold's delete in a commit of its own. A record that still doesn't
+    /// read, or is still deleted, keeps its list held, as does one absent while the payer's
+    /// side isn't listed yet, or absent after this app saw it deleted or unreadable
+    /// (`lgone/`, never cleared). A list held because its first write was refused is written
+    /// onto the absent key. A list no newer than the record's is dropped. A placement that
+    /// fails now is tried again at the next receive, with no bound in time: one held list
+    /// per payee app, replaced by a newer one, and one write of it per receive.
     pub(crate) async fn place_held_lists(&mut self) -> crate::error::Result<()> {
         for (rest, kept) in self.local_scan::<KeptMessage>(key::HELD_LISTS).await? {
             // One that can't be placed now stays held, for the next receive; the others are
@@ -2845,8 +2780,7 @@ impl Paykit {
         let list = kept.stored(&own)?;
         let target = list_target(&list.sender(), &list.message().from.app_id);
         let record_key = self.app.record_key(&target)?;
-        let own_key = key::held_list(&record_key, &list.message().msg_id);
-        if format!("{}{rest}", key::HELD_LISTS) != own_key {
+        if format!("{}{rest}", key::HELD_LISTS) != key::held_list(&record_key) {
             return Err(crate::error::PaykitError::corrupt());
         }
         // A newer list over a divergent record its user hasn't confirmed stays held (Paykit
@@ -2864,18 +2798,29 @@ impl Paykit {
             // or a restore before the first listing: the absence decides nothing yet, so the
             // list stays held (Paykit spec 8.1, "Records not listed yet").
             None if self.side_unlisted(RecordSide::Payer).await? => return Ok(()),
+            // Seen deleted or unreadable: an absence now, such as a delete the service forgot
+            // or a restore into a fresh store, says nothing of the marks the record held. The
+            // list stays held (Paykit spec 6). A list held because its first write was refused
+            // is placed on the absent key once a write of it lands.
+            None if self
+                .local_get::<bool>(&key::list_record_lost(&record_key))
+                .await?
+                .is_some() =>
+            {
+                return Ok(())
+            }
             None => None,
             Some(RecordContent::Value(value)) => match PaymentListRecord::read(&value, &own) {
                 Ok(held) => Some(held),
-                Err(_) => return Ok(()),
+                Err(_) => return self.note_list_record_lost(&record_key).await,
             },
-            Some(RecordContent::Deleted | RecordContent::Unreadable(_)) => return Ok(()),
+            Some(RecordContent::Deleted | RecordContent::Unreadable(_)) => {
+                return self.note_list_record_lost(&record_key).await
+            }
         };
-        // Only this list's own key: a newer list held meanwhile, at its own key, stays held
-        // when this batch is kept and applied later.
-        let mut tx = Tx::default();
-        tx.delete(&own_key);
         match next_list_record(held, &list) {
+            // The write carries no local write: a batch that settles late could otherwise
+            // drop a newer hold. The hold goes at a later pass, once the record holds the list.
             Some(record) => {
                 let value = record.to_json()?;
                 let op = self
@@ -2884,11 +2829,24 @@ impl Paykit {
                     .await?;
                 let batch =
                     pubky_switch_client::app::OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
-                        .entry(op)
-                        .locals(tx.into_writes());
+                        .entry(op);
                 let _ = self.submit(batch).await;
             }
-            None => self.local_commit(tx).await?,
+            None => {
+                let mut tx = Tx::default();
+                tx.delete(&key::held_list(&record_key));
+                self.local_commit(tx).await?
+            }
+        }
+        Ok(())
+    }
+
+    /// Keep that the `payment_lists` record at `record_key` was seen deleted or unreadable,
+    /// so a later absence of it doesn't place a list held there without its marks.
+    async fn note_list_record_lost(&mut self, record_key: &[u8; 32]) -> crate::error::Result<()> {
+        let lost = key::list_record_lost(record_key);
+        if self.local_get::<bool>(&lost).await?.is_none() {
+            self.local_put(&lost, &true).await?;
         }
         Ok(())
     }
@@ -3717,75 +3675,6 @@ impl Paykit {
             .local_get::<Vec<[u8; 32]>>(key::DENIED)
             .await?
             .is_some_and(|denied| denied.contains(pubky)))
-    }
-
-    /// Place the list held for payee `payee`'s app `app_id` although its `payment_lists`
-    /// record is deleted or doesn't read, accepting that the single-use marks it held are
-    /// gone (Paykit wire 5.4): the list is written afresh, built on the version this app
-    /// holds, with no endpoint marked used, so a single-use endpoint another own app already
-    /// paid can be paid again. The host must show the user exactly that before calling it,
-    /// with `confirmed` as the proof the user saw it. A record that changed since is read
-    /// again and refused with [`crate::PaykitError::Conflict`]; one that reads by then has
-    /// the list placed with its marks, as at a receive.
-    ///
-    /// # Errors
-    ///
-    /// [`crate::Refusal::NotFound`] when no list is held for that app;
-    /// [`crate::Refusal::NotNow`] naming the scope keys while the record's value is sealed
-    /// under a key the app doesn't hold yet: the list is placed with its marks once the
-    /// value opens, at a receive; the client's errors.
-    pub async fn place_held_list_without_marks(
-        &mut self,
-        payee: &[u8; 32],
-        app_id: &[u8; 16],
-        _confirmed: pubky_switch_client::app::UserConfirmed,
-    ) -> crate::error::Result<()> {
-        self.refresh_own()?;
-        Box::pin(self.first_read_before_writing()).await?;
-        self.refresh_own()?;
-        self.records_known().await?;
-        let own = self.identity();
-        let target = list_target(payee, app_id);
-        let record_key = self.app.record_key(&target)?;
-        let (notice, list) = newest_held(self.held_lists_over(&record_key).await?)
-            .ok_or(crate::error::Refusal::NotFound)?;
-        // Over a divergent record the user confirms that record first (Paykit spec 6).
-        Box::pin(self.refuse_while_write_waits(&record_key)).await?;
-        let held = self.app.shared_record(&record_key).await?;
-        // A value only waiting for its scope key holds marks this app can't see yet: it is
-        // never written over without them, and the list is placed with them once it opens.
-        if held
-            .as_ref()
-            .is_some_and(|r| crate::hold::awaits_key(&r.content))
-        {
-            return Err(crate::hold::value_awaits_key());
-        }
-        let held = held
-            .and_then(|r| r.content.value().map(<[u8]>::to_vec))
-            .and_then(|value| PaymentListRecord::read(&value, &own).ok());
-        let mut tx = Tx::default();
-        tx.delete(&notice);
-        let Some(record) = next_list_record(held, &list) else {
-            return self.local_commit(tx).await;
-        };
-        let value = record.to_json()?;
-        let op = self
-            .app
-            .record_op(&target, Some(&value), Vec::new())
-            .await?;
-        let batch = pubky_switch_client::app::OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
-            .entry(op)
-            .locals(tx.into_writes());
-        if let Err(error) = self.submit(batch).await {
-            if error.code() == Some(pubky_switch_core::http::ErrorCode::Conflict) {
-                self.app.read_record(&target).await?;
-                return Err(crate::error::PaykitError::Conflict(
-                    "the payment_lists record changed since it was seen".into(),
-                ));
-            }
-            return Err(error.into());
-        }
-        Ok(())
     }
 
     /// Answer the `resend_request`s the receive step kept, oldest first, each once (Paykit

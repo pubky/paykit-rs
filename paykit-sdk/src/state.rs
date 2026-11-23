@@ -48,7 +48,8 @@
 //! | `ml` | set by a `missed` item: the shared records aren't listed by Paykit since, so a record's absence means nothing yet; cleared by Paykit's next listing (`hold.rs`); never restored | |
 //! | `lp/<recipient>/<generation>/<message hash>` | outstanding original publication batch IDs, kept atomically before submission and retained across restore | yes |
 //! | `lres/<recipient>` | the applied list, its publisher and original signed message, its first delivery outcome (open, undelivered or unknown) and any kept confirmation of another version, prior offers' latest possible expiry, and the interval of an outstanding withdrawal | yes |
-//! | `lh/<record key>/<msg_id>` | a Private Payment List held because its `payment_lists` record doesn't read: never written over it, which could drop its single-use marks, until the record reads; keyed by the list's message, so a placement applied late deletes only its own list | |
+//! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read: never written over it, which could drop its single-use marks, until the record reads again with them, or reads absent and was never seen lost (`lgone/`); deleted once the record holds the list | |
+//! | `lgone/<record key>` | set in the commit in which this app sees the `payment_lists` record deleted, or holds a list over it while it doesn't read: a later absence of it, as after a forgotten delete or a restore, keeps a list held there; never cleared, and a restore keeps the installation's own as well as the backup's | yes |
 //! | `kc/<record key>/<certificate hash>/<feed generation>` | a payee's cancellation of a request, kept until it is placed in the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
 //! | `lr` | when the app last read the lists, on the device clock; absent before the first read and after a due read failed, when new activity waits (Paykit wire 4.1); never restored, so a restored app reads the deny list again before any payment | |
@@ -713,6 +714,7 @@ impl Stored for bool {
             | StateKey::NotPaidBeforeLoss(_)
             | StateKey::FloorDeleted
             | StateKey::FloorOpened(_)
+            | StateKey::ListRecordLost(_)
             | StateKey::Taken(_)
                 if *self =>
             {
@@ -905,9 +907,8 @@ impl sealed::Sealed for KeptMessage {}
 ///   ([`crate::receive::receipt_target`]); or a proof of a payment without a request, from
 ///   that sender and of that `msg_id`, whose record, the payee's of its settlement, is
 ///   proven against the rail before it is placed.
-/// - At `lh/<record key>/<msg_id>`, a `paykit.private_payment_list` of that `msg_id`, kept
-///   under the record key of its payee app's `payment_lists` record, from its sender and App
-///   ID (Paykit wire 5.4).
+/// - At `lh/<record key>`, a `paykit.private_payment_list`, kept under the record key of its
+///   payee app's `payment_lists` record, from its sender and App ID (Paykit wire 5.4).
 /// - At `pr/<sender>/<record key>/<msg_id>` too, an Allowance's acceptance or rejection the
 ///   receive step took, from that sender and of that `msg_id`, kept under the record key of
 ///   the Allowance record it names, with its feed `seq`. The app tries to place the answer
@@ -1029,16 +1030,14 @@ impl Stored for KeptMessage {
                     crate::receive::receipt_target(&message, &binder.own, &receipt.attempt_id);
                 (target.record_target(), record)
             }
-            (
-                StateKey::HeldList {
-                    record: record_key,
-                    msg_id,
-                },
-                Body::PrivatePaymentList(_),
-            ) if message.accepted_at().is_some() && message.message().msg_id == *msg_id => (
-                list_target(&message.sender(), &message.message().from.app_id),
-                record_key,
-            ),
+            (StateKey::HeldList(record_key), Body::PrivatePaymentList(_))
+                if message.accepted_at().is_some() =>
+            {
+                (
+                    list_target(&message.sender(), &message.message().from.app_id),
+                    record_key,
+                )
+            }
             (
                 StateKey::KeptReply {
                     sender,
@@ -1844,6 +1843,7 @@ pub(crate) mod key {
     pub(crate) const LIST_DISCOVERY: &str = "ld";
     pub(crate) const LISTS_READ: &str = "lr";
     pub(crate) const HELD_LISTS: &str = "lh/";
+    pub(crate) const LISTS_LOST: &str = "lgone/";
     pub(crate) const RECORDS_UNLISTED: &str = "nl";
     pub(crate) const MISSED_UNLISTED: &str = "ml";
     pub(crate) const MISSED_CONSENTS: &str = "mc";
@@ -2211,14 +2211,15 @@ pub(crate) mod key {
         format!("{RESTORE_CONSENTS}{}", b64(record_key))
     }
 
-    /// `lh/<record key>/<msg_id>`: the list `msg_id` held over the record at `record_key`.
-    pub(crate) fn held_list(record_key: &[u8; 32], msg_id: &str) -> String {
-        format!("{HELD_LISTS}{}/{msg_id}", b64(record_key))
+    pub(crate) fn held_list(record_key: &[u8; 32]) -> String {
+        format!("{HELD_LISTS}{}", b64(record_key))
     }
 
-    /// The prefix of every list held over the record at `record_key`.
-    pub(crate) fn held_lists_of(record_key: &[u8; 32]) -> String {
-        format!("{HELD_LISTS}{}/", b64(record_key))
+    /// Set once this app has seen the `payment_lists` record at `record_key` deleted or
+    /// unreadable, and never cleared: a later absence of it says nothing of the marks it
+    /// held.
+    pub(crate) fn list_record_lost(record_key: &[u8; 32]) -> String {
+        format!("{LISTS_LOST}{}", b64(record_key))
     }
 
     /// This app's block or unblock of `pubky` not yet shown by a read of the lists
@@ -2429,13 +2430,10 @@ pub(crate) enum StateKey {
     },
     /// `lr`: when the lists were last read.
     ListsRead,
-    /// `lh/<record key>/<msg_id>`: a list held over a record that didn't read.
-    HeldList {
-        /// The `payment_lists` record's key.
-        record: [u8; 32],
-        /// The held list message's `msg_id`.
-        msg_id: String,
-    },
+    /// `lh/<record key>`: a list held over a record that didn't read.
+    HeldList([u8; 32]),
+    /// `lgone/<record key>`: a `payment_lists` record seen deleted or unreadable.
+    ListRecordLost([u8; 32]),
     /// `side/<msg_id>`: the side of a message the app sent.
     Side(String),
     /// `ar/<payee>/<app>`: a payee app's records a reader has seen.
@@ -2777,13 +2775,8 @@ impl StateKey {
                     }
                     "pn" => Self::NotPaidBeforeLoss(b64_32(rest)?),
                     "fo" => Self::FloorOpened(b64_32(rest)?),
-                    "lh" => {
-                        let (record, id) = rest.split_once('/')?;
-                        Self::HeldList {
-                            record: b64_32(record)?,
-                            msg_id: msg_id(id)?,
-                        }
-                    }
+                    "lh" => Self::HeldList(b64_32(rest)?),
+                    "lgone" => Self::ListRecordLost(b64_32(rest)?),
                     "side" => Self::Side(msg_id(rest)?),
                     "ha" => {
                         let (payee, id) = rest.split_once('/')?;
@@ -3842,12 +3835,10 @@ mod tests {
                 format!("{}{}-7", key::TAKEN, "05".repeat(16)),
                 StateKey::Taken(format!("{}-7", "05".repeat(16))),
             ),
+            (key::held_list(&pubky), StateKey::HeldList(pubky)),
             (
-                key::held_list(&pubky, id),
-                StateKey::HeldList {
-                    record: pubky,
-                    msg_id: id.into(),
-                },
+                key::list_record_lost(&pubky),
+                StateKey::ListRecordLost(pubky),
             ),
             (key::side(id), StateKey::Side(id.into())),
             (

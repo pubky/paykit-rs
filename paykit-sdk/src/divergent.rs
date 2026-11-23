@@ -1401,13 +1401,6 @@ impl Paykit {
         .into())
     }
 
-    /// Refused while an own write of another kind than a stop over the record at `record`
-    /// waits, by the one rule of writes that add no stop ([`Pause::adds_no_stop_waits`]).
-    pub(crate) async fn refuse_while_write_waits(&mut self, record: &[u8; 32]) -> Result<()> {
-        self.refuse_where(&[*record], Pause::adds_no_stop_waits, false)
-            .await
-    }
-
     /// Whether a write that records a payment already dispatched, its acceptance owed, its
     /// outcome and its proof, over the record at `record` waits
     /// ([`Pause::dispatched_write_waits`]): the one gate of every path that writes one.
@@ -1780,11 +1773,18 @@ impl Paykit {
         list: &StoredMessage,
         mut tx: Tx,
     ) -> Result<()> {
+        let held_key = key::held_list(&record);
         // A list held already is read bound to its key: a list of the payee app whose
         // `payment_lists` record the key names (`state::Stored`).
-        let held = self.held_lists_over(&record).await?;
-        if let Some(hold) = crate::receive::HeldListWrite::newer(&record, list, &held) {
-            hold.stage(&mut tx)?;
+        let newer = match self.local_get::<KeptMessage>(&held_key).await? {
+            None => true,
+            Some(kept) => {
+                crate::receive::list_version(&kept.stored(&self.identity())?)
+                    < crate::receive::list_version(list)
+            }
+        };
+        if newer {
+            tx.put(&held_key, &KeptMessage::of(list))?;
         }
         self.local_commit(tx).await
     }
