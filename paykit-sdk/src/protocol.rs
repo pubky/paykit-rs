@@ -1548,7 +1548,7 @@ fn keep_installation_stops(
                     .map_err(|_| "the backup's seen app records don't verify")?;
                 let merged = seen
                     .merged(&backup, &payee)
-                    .ok_or("the installation holds seen app records that don't verify")?;
+                    .ok_or("the seen app records don't verify")?;
                 let value =
                     state::encode(&merged).map_err(|_| "seen app records cannot be retained")?;
                 writes[i] = LocalWrite::Put { key: at, value };

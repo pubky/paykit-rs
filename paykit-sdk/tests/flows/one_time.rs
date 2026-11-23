@@ -2667,9 +2667,9 @@ async fn test_one_time_credit_requires_the_fixed_endpoint_owner() {
 async fn test_one_time_cancellation_kept_after_an_old_backup_survives_its_in_place_restore() {
     // The wallet is backed up, and over a month later bob's cancellation of a request it
     // holds no record of yet arrives: the installation keeps it as the stop. Restored in
-    // place from the month-old backup, the stop is kept with its own acceptance time, not
-    // the backup's, so it isn't given up as stale at the first read: once the request is
-    // delivered it is cancelled, never payable (Paykit spec 8.1).
+    // place from the month-old backup, the stop keeps the time it was accepted at, a month
+    // after the backup, so it isn't given up as stale at the first read: once the request
+    // is delivered it is cancelled, never payable (Paykit spec 8.1).
     let w = World::new();
     let storage = crate::common::store();
     let mut wallet = w.wallet_on("wallet", std::sync::Arc::clone(&storage)).await;

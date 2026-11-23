@@ -416,8 +416,10 @@ impl SeenRecords {
     /// The union of these seen records and `other`'s, both of one app of `payee` (Switch spec
     /// 4.2): every record of either, once, kept as a read keeps them
     /// ([`SeenRecords::kept_from`]), so a conflict either saw stays one. The unkept bound is
-    /// the later of the two, or the newest group's if none fits, and a kept record later
-    /// than it lifts it, as at a read. `None` when a record doesn't verify as `payee`'s.
+    /// the later of the two, or the newest group's if none fits; a merge never lifts it, as
+    /// a copy may hold a later record beside it once the clock went back, and the next
+    /// record a read keeps past it lifts it as usual. `None` when a record doesn't verify as
+    /// `payee`'s.
     pub(crate) fn merged(&self, other: &Self, payee: &[u8; 32]) -> Option<Self> {
         let mut all: Vec<AppRecord> = Vec::new();
         let mut docs: Vec<Vec<u8>> = Vec::new();
@@ -432,12 +434,8 @@ impl SeenRecords {
         all.sort_by_key(AppRecord::updated_at);
         let start = Self::kept_from(&all);
         let mut unkept_at = self.unkept_at.max(other.unkept_at);
-        if let Some(newest) = all.last() {
-            if start == all.len() {
-                unkept_at = unkept_at.max(Some(newest.updated_at()));
-            } else if unkept_at.is_some_and(|at| newest.updated_at() > at) {
-                unkept_at = None;
-            }
+        if start == all.len() {
+            unkept_at = unkept_at.max(all.last().map(AppRecord::updated_at));
         }
         Some(Self {
             records: all.into_iter().skip(start).map(SignedDoc::from).collect(),
@@ -1102,9 +1100,21 @@ mod tests {
         let merged = held.merged(&first, &bob.id()).unwrap();
         assert_eq!(merged.unkept_at, Some(NOW + 5));
         assert_eq!(times(&merged), [0, 1]);
-        // A later record either holds lifts it, as at a read.
+        // A merge never lifts it, also beside a later record, which stays kept.
         let later = seen(vec![signed(6, tip_jar())], None);
-        assert_eq!(held.merged(&later, &bob.id()).unwrap().unkept_at, None);
+        let merged = held.merged(&later, &bob.id()).unwrap();
+        assert_eq!(merged.unkept_at, Some(NOW + 5));
+        assert_eq!(times(&merged), [6]);
+        // A group too large to keep leaves its time alone.
+        let crowd = seen(
+            (0..=SEEN_RECORDS)
+                .map(|i| signed(9, json!({ "n": i })))
+                .collect(),
+            None,
+        );
+        let merged = crowd.merged(&first, &bob.id()).unwrap();
+        assert_eq!(merged.unkept_at, Some(NOW + 9));
+        assert!(times(&merged).is_empty());
 
         // A record of another identity refuses the merge.
         assert!(first.merged(&second, &[9; 32]).is_none());
