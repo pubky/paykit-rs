@@ -466,11 +466,11 @@ The method declares `payment_time_tolerance_ms` with its declaration. The payee 
 | `Refusal::NotAutomatic` | Show why the current automatic window or dated subscription does not permit this payment. |
 | `Refusal::PeriodNotStarted` | Show when this Billing Period starts. If the payer chooses to pay early, call `pay_period` for that period with `PayOptions::with_early_payment_confirmed`. After a payer-provider loss, an older subscription may already have paid this period early. Keep it pending while that history is incomplete. |
 | `Refusal::AttemptedPeriodsFull` | Wait for an existing period attempt to finish or reconcile its outcome before starting another. |
-| `Refusal::Destination` | Show the failed destination check and refresh when the payee has a usable endpoint. |
+| `Refusal::Destination` | Show the failed destination check and refresh when the payee has a usable endpoint. When its text says the device clock is behind, the destination expired by the service's time: tell the user the device clock is behind. |
 | `Refusal::AttemptFailed` | The attempt was recorded failed before dispatch. Show its enclosed refusal. |
-| `Refusal::NoDestination` | Show why no endpoint could be used, including failed public app reads if available. |
+| `Refusal::NoDestination` | Show why no endpoint could be used, including failed public app reads if available. When its text says the device clock is behind, a destination expired by the service's time: tell the user the device clock is behind. |
 | `Refusal::UnsupportedEndpoint` | Ask the user to choose a compatible endpoint or payment method. |
-| `Refusal::WaitingForList` | Show that a newer Private Payment List was requested. A public destination is a separate user choice. |
+| `Refusal::WaitingForList` | Show that a newer Private Payment List was requested. A public destination is a separate user choice. When `device_clock_behind` is set, a list expired by the service's time while the device clock is behind it: tell the user the device clock is behind. |
 | `Refusal::ListDeliveryUnknown` | Show the counterparty, whether the list was a withdrawal and how long the earlier or current list may be paid. `withdraw_list_from` has already recorded the counterparty as withdrawn. Pass the same value to `send_list_again` only after the user confirms another version. `Ok` means nothing of unknown outcome is left. `NotNow` keeps the confirmation: a later call or receive sends the list once it can, which for a nonempty list to a blocked counterparty is after the block ends; `lists_waiting_to_send_again` lists the counterparties still waiting. |
 | `Refusal::Transfer` | Show the actual transfer or fee quote and return that exact quote only on confirmation. |
 | `Refusal::PricedByRate` | Obtain authorization for this exact quote from the user or their bounded policy (Scheduling a Billing Period). |
