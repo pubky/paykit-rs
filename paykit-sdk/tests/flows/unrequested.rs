@@ -2155,6 +2155,10 @@ async fn test_unrequested_put_back_of_the_known_history_after_a_newer_recreation
         restored.receive(None).await.unwrap();
     }
     assert_eq!(restored.held_lists().await.unwrap().len(), 0);
+    // The record now holds the newer list with both marks.
+    let (_, placed) = list_record(&restored, &w).await;
+    assert_eq!(placed["used"], both["used"], "{placed}");
+    assert_ne!(placed["list"], both["list"], "{placed}");
 }
 
 #[tokio::test]
@@ -2736,6 +2740,164 @@ async fn test_unrequested_delete_over_a_refused_write_keeps_no_copy() {
     assert_eq!(w.rail.all_executions().len(), 1);
 }
 
+/// The `lgone/` entries of `backup`'s Paykit layer, each as stored.
+fn lost_entries(backup: &paykit_sdk::PaykitBackup) -> Vec<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_slice(&backup.to_bytes().unwrap()).unwrap();
+    let data = value["layers"][0]["data"].as_str().unwrap();
+    let bytes = pubky_switch_core::enc::unb64(data).unwrap();
+    pubky_switch_client::app::decode_local_state(&bytes)
+        .unwrap()
+        .into_iter()
+        .filter(|(key, _)| key.starts_with(b"lgone/"))
+        .map(|(_, value)| {
+            let stored: serde_json::Value = serde_json::from_slice(&value).unwrap();
+            stored.get("d").cloned().unwrap_or(stored)
+        })
+        .collect()
+}
+
+/// `marked` with its `used` emptied and `lost_to_delete` naming the delete `named`.
+fn marked_put_back(marked: &serde_json::Value, named: u8) -> serde_json::Value {
+    let mut put_back = marked.clone();
+    put_back["used"] = serde_json::json!([]);
+    put_back["lost_to_delete"] = serde_json::json!(pubky_switch_core::enc::b64(&[named; 32]));
+    put_back
+}
+
+#[tokio::test]
+async fn test_unrequested_loss_marker_kept_only_for_a_list_bound_to_its_key() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let second = w
+        .join(
+            &w.bob,
+            "second",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    w.list_to_alice(&mut shop, &[phone.app_id()], list_version(1, 1))
+        .await;
+    phone.receive(None).await.unwrap();
+    let (_, foreign) = list_record(&phone, &w).await;
+    // The shop's list, marked, written at the second shop app's key, and the shop's own
+    // record with its outer payee changed: neither is that key's, so neither keeps a mark of
+    // a delete there (Paykit wire 5.4).
+    let target = payment_list_target(&w.bob_id(), &second.app_id());
+    put_list_record(&mut phone, &target, Some(&marked_put_back(&foreign, 5))).await;
+    wallet.receive(None).await.unwrap();
+    assert!(lost_entries(&wallet.backup().await.unwrap()).is_empty());
+    let own = shop_list_target(&w, &shop);
+    let mut payee = marked_put_back(&foreign, 6);
+    payee["payee"] = serde_json::json!(pubky_switch_core::enc::b64(&w.alice_id()));
+    phone.app_mut().read_record(&own).await.unwrap();
+    put_list_record(&mut phone, &own, Some(&payee)).await;
+    wallet.receive(None).await.unwrap();
+    assert!(lost_entries(&wallet.backup().await.unwrap()).is_empty());
+}
+
+#[tokio::test]
+async fn test_unrequested_loss_marker_over_a_kept_copy_keeps_both_through_restores() {
+    let w = World::new();
+    let storage = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", storage.clone()).await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let (_, marked) =
+        pay_single_use_then_delete_elsewhere(&w, &mut wallet, &mut phone, &mut shop).await;
+    let target = shop_list_target(&w, &shop);
+    // The wallet sees the delete with its copy: one mark, and the list.
+    wallet.receive(None).await.unwrap();
+    let copy_only = wallet.backup().await.unwrap();
+    let kept = lost_entries(&copy_only);
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(kept[0]["marked"], false);
+    let copy = kept[0]["copy"].clone();
+    assert_eq!(copy["marks"].as_array().unwrap().len(), 1, "{copy}");
+    // A put-back that keeps the mark names the delete: the entry is marked and keeps the
+    // copy.
+    let mut put_back = marked.clone();
+    put_back["lost_to_delete"] = serde_json::json!(pubky_switch_core::enc::b64(&[5u8; 32]));
+    put_list_record(&mut phone, &target, Some(&put_back)).await;
+    wallet.receive(None).await.unwrap();
+    let both = wallet.backup().await.unwrap();
+    let held = lost_entries(&both);
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0]["marked"], true);
+    assert_eq!(held[0]["copy"], copy);
+    // Restored in place from the backup that held only the copy, and onto a fresh store from
+    // the one that held both: each keeps the mark and the copy (Paykit spec 6).
+    drop(wallet);
+    let mut in_place = restored_onto(&w, storage, &copy_only).await;
+    let after = lost_entries(&in_place.backup().await.unwrap());
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_eq!(after[0]["marked"], true);
+    assert_eq!(after[0]["copy"], copy);
+    drop(in_place);
+    // A later write drops the marker but keeps every mark of the copy. Restored onto a fresh
+    // store, the wallet reads only that write, and still doesn't take it: once marked, no
+    // value is (Paykit spec 6; wire 5). A newer list then stays held over it.
+    phone.app_mut().read_record(&target).await.unwrap();
+    put_list_record(&mut phone, &target, Some(&marked)).await;
+    let mut fresh = restored_onto(&w, crate::common::store(), &both).await;
+    assert_eq!(lost_entries(&fresh.backup().await.unwrap()), held);
+    w.list_to_alice(&mut shop, &[fresh.app_id()], list_version(1, 2))
+        .await;
+    for _ in 0..2 {
+        fresh.receive(None).await.unwrap();
+    }
+    assert_eq!(fresh.held_lists().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_unrequested_two_loss_markers_keep_the_newer_write() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let (key, marked) =
+        pay_single_use_then_delete_elsewhere(&w, &mut wallet, &mut phone, &mut shop).await;
+    let target = shop_list_target(&w, &shop);
+    let mut tablet = w.wallet("tablet").await;
+    put_list_record(&mut phone, &target, Some(&marked_put_back(&marked, 5))).await;
+    tablet.receive(None).await.unwrap();
+    phone.app_mut().read_record(&target).await.unwrap();
+    put_list_record(&mut phone, &target, Some(&marked_put_back(&marked, 6))).await;
+    tablet.receive(None).await.unwrap();
+    let held = tablet.app().shared_record(&key).await.unwrap().unwrap();
+    let kept = lost_entries(&tablet.backup().await.unwrap());
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(kept[0]["marked"], true);
+    assert_eq!(
+        kept[0]["deleted"],
+        serde_json::json!([held.version.generation, held.version.version])
+    );
+}
+
+#[tokio::test]
+async fn test_unrequested_loss_marker_written_by_another_installation_of_the_app_kept() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let (_, marked) =
+        pay_single_use_then_delete_elsewhere(&w, &mut wallet, &mut phone, &mut shop).await;
+    let target = shop_list_target(&w, &shop);
+    // A second installation of the tablet's app, restored onto another store, writes the
+    // put-back; the tablet reads it.
+    let mut tablet = w.wallet("tablet").await;
+    let mut other =
+        restored_onto(&w, crate::common::store(), &tablet.backup().await.unwrap()).await;
+    assert_eq!(other.app_id(), tablet.app_id());
+    other.app_mut().read_record(&target).await.unwrap();
+    put_list_record(&mut other, &target, Some(&marked_put_back(&marked, 5))).await;
+    tablet.receive(None).await.unwrap();
+    let kept = lost_entries(&tablet.backup().await.unwrap());
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(kept[0]["marked"], true);
+}
+
 #[tokio::test]
 async fn test_unrequested_loss_marker_read_first_kept_through_a_fresh_restore() {
     let w = World::new();
@@ -2857,7 +3019,10 @@ async fn test_unrequested_write_dropping_a_loss_marker_after_a_fresh_restore_sho
     assert_eq!(w.rail.all_executions().len(), 1);
     assert_eq!(restored.held_lists().await.unwrap().len(), 1);
     // The write that dropped the marker is shown with its writer (Paykit wire 5).
-    assert_eq!(restored.app().flagged_writes().await.unwrap().len(), 1);
+    let flagged = restored.app().flagged_writes().await.unwrap();
+    assert_eq!(flagged.len(), 1, "{flagged:?}");
+    assert_eq!(flagged[0].key, key);
+    assert_eq!(flagged[0].writer, laptop.app_id());
 }
 
 #[tokio::test]

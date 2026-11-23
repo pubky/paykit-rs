@@ -738,6 +738,10 @@ pub(crate) struct LostListRecord {
     /// The copy's marks and list; `None` for a delete seen with no copy.
     #[serde(deserialize_with = "Option::deserialize")]
     copy: Option<LostCopy>,
+    /// Whether a value carrying `lost_to_delete` was read at the key: then no later value
+    /// is taken, whatever the copy, which is kept as what was known of the record (Paykit
+    /// spec 6; wire 5).
+    marked: bool,
 }
 
 /// The fewest bytes a `used` entry takes in a `payment_lists` value, with the comma after it:
@@ -882,6 +886,7 @@ impl LostListRecord {
         Self {
             deleted: [deleted.generation, deleted.version],
             copy: copy.and_then(LostCopy::of).and_then(LostCopy::bounded),
+            marked: false,
         }
     }
 
@@ -906,18 +911,20 @@ impl LostListRecord {
         Self {
             deleted: [deleted.generation, deleted.version],
             copy,
+            marked: false,
         }
     }
 
     /// A value at the key carrying `lost_to_delete`, written at record version `written`:
-    /// it names a delete that lost content, which this app may never have seen, so it is
-    /// kept as a delete with no copy, and no later value at the key is taken (Paykit spec
-    /// 6; wire 5). Its version is the write's, at or after the delete it answers; with no
-    /// copy, a later report of that delete changes nothing.
+    /// it names a delete that lost content, which this app may never have seen, so no
+    /// later value at the key is taken (Paykit spec 6; wire 5). Its version is the write's,
+    /// at or after the delete it answers. Merged with an entry that holds a copy, the copy
+    /// is kept ([`Self::merge`]).
     pub(crate) fn marked(written: pubky_switch_core::ops::RecordVersion) -> Self {
         Self {
             deleted: [written.generation, written.version],
             copy: None,
+            marked: true,
         }
     }
 
@@ -933,6 +940,7 @@ impl LostListRecord {
         Self {
             deleted: std::cmp::max(self.deleted, [deleted.generation, deleted.version]),
             copy: self.copy,
+            marked: self.marked,
         }
     }
 
@@ -948,22 +956,26 @@ impl LostListRecord {
 
     /// Both kept, as after a restore: a value is then taken only under the rules of each,
     /// and none is when either knew no copy, or when their marks together pass
-    /// [`MAX_LOST_MARKS`].
+    /// [`MAX_LOST_MARKS`]. Once either was marked, none is taken anyway, so the copy one
+    /// side knew is kept with it rather than lost: what either side knew survives.
     pub(crate) fn merge(self, other: Self) -> Self {
+        let marked = self.marked || other.marked;
         let copy = match (self.copy, other.copy) {
             (Some(one), Some(other)) => one.merge(other),
+            (Some(one), None) | (None, Some(one)) if marked => Some(one),
             _ => None,
         };
         Self {
             deleted: std::cmp::max(self.deleted, other.deleted),
             copy,
+            marked,
         }
     }
 
     /// Whether `record`, a value read at the key, may be taken: it holds every mark known,
     /// and its list is the copy's or newer (Paykit wire 4.13, 5.4).
     pub(crate) fn admits(&self, record: &paykit_lib::records::PaymentListRecord) -> bool {
-        self.copy.as_ref().is_some_and(|copy| copy.admits(record))
+        !self.marked && self.copy.as_ref().is_some_and(|copy| copy.admits(record))
     }
 
     /// The entry once `record`, which it admits, was read: its marks, a superset of those
@@ -972,6 +984,7 @@ impl LostListRecord {
         let grown = Self {
             deleted: self.deleted,
             copy: LostCopy::of(record).and_then(LostCopy::bounded),
+            marked: self.marked,
         };
         (self.admits(record) && grown != *self).then_some(grown)
     }
@@ -3755,7 +3768,7 @@ mod tests {
                 "marks": marks, "generation": 1, "counter": counter, "hash": vec![9u8; 32],
             })
         };
-        let lost = |copy: serde_json::Value| serde_json::json!({ "deleted": [1, 4], "copy": copy });
+        let lost = |copy: serde_json::Value| serde_json::json!({ "deleted": [1, 4], "copy": copy, "marked": false });
         assert!(reads::<LostListRecord>(&at, lost(serde_json::Value::Null)));
         assert!(reads::<LostListRecord>(
             &at,
@@ -3794,7 +3807,8 @@ mod tests {
             serde_json::json!([0, 5]),
             serde_json::json!([1, 9_007_199_254_740_992u64]),
         ] {
-            let at_version = serde_json::json!({ "deleted": deleted, "copy": null });
+            let at_version =
+                serde_json::json!({ "deleted": deleted, "copy": null, "marked": false });
             assert!(!reads::<LostListRecord>(&at, at_version));
         }
         // Every member is written, and a bare mark is no value of this family.
@@ -3830,6 +3844,7 @@ mod tests {
         let lost = |deleted: u64, copy: Option<LostCopy>| LostListRecord {
             deleted: [1, deleted],
             copy,
+            marked: false,
         };
         let one = lost(4, Some(copy(2, 1, vec![mark(1)])));
         let two = lost(6, Some(copy(1, 2, vec![mark(2)])));
@@ -3848,6 +3863,7 @@ mod tests {
                 hash: None,
                 ..copy(2, 1, vec![mark(1)])
             }),
+            marked: false,
         };
         assert_eq!(low.clone().merge(high.clone()), neither);
         assert_eq!(high.clone().merge(low.clone()), neither);
@@ -3883,6 +3899,7 @@ mod tests {
                 counter: 1,
                 hash: Some([1; 32]),
             }),
+            marked: false,
         }
     }
 
@@ -3912,7 +3929,8 @@ mod tests {
             all,
             LostListRecord {
                 deleted: [1, 6],
-                copy: None
+                copy: None,
+                marked: false,
             }
         );
         // It stays so through every later merge or delete, and stays small.
@@ -3923,7 +3941,8 @@ mod tests {
             later,
             LostListRecord {
                 deleted: [1, 10],
-                copy: None
+                copy: None,
+                marked: false,
             }
         );
         let stored = serde_json::to_vec(&later).expect("a lost record serializes");
@@ -3931,7 +3950,7 @@ mod tests {
     }
 
     #[test]
-    fn test_state_lost_list_record_marked_keeps_no_copy() {
+    fn test_state_lost_list_record_marked_keeps_what_either_side_knew() {
         let written = pubky_switch_core::ops::RecordVersion {
             generation: 1,
             version: 9,
@@ -3941,21 +3960,46 @@ mod tests {
             marked,
             LostListRecord {
                 deleted: [1, 9],
-                copy: None
+                copy: None,
+                marked: true
             }
         );
-        // Over a delete seen with a copy, the marker leaves no copy, whichever is newer.
-        let held = lost_with(4, lost_marks(1, 2));
-        assert_eq!(held.clone().merge(marked.clone()).copy, None);
-        assert_eq!(marked.clone().merge(held).deleted, [1, 9]);
-        let newer = lost_with(12, lost_marks(1, 2));
+        // Over a delete seen with a copy, in either order and whichever is newer, the
+        // entry is marked and keeps the copy: no value is taken, and nothing known is lost.
+        for deleted in [4, 12] {
+            let held = lost_with(deleted, lost_marks(1, 2));
+            let kept = LostListRecord {
+                deleted: [1, deleted.max(9)],
+                marked: true,
+                ..held.clone()
+            };
+            assert_eq!(held.clone().merge(marked.clone()), kept);
+            assert_eq!(marked.clone().merge(held), kept);
+        }
+        // Two markers keep the newer version; two copies under a marker their union.
+        let older = LostListRecord::marked(pubky_switch_core::ops::RecordVersion {
+            generation: 1,
+            version: 3,
+        });
+        assert_eq!(older.merge(marked.clone()), marked);
+        let both = lost_with(4, lost_marks(1, 1))
+            .merge(marked.clone())
+            .merge(lost_with(5, lost_marks(2, 1)));
         assert_eq!(
-            newer.merge(marked.clone()),
+            both,
             LostListRecord {
-                deleted: [1, 12],
-                copy: None
+                deleted: [1, 9],
+                marked: true,
+                ..lost_with(9, lost_marks(1, 2))
             }
         );
+        // A delete seen without a copy, unmarked, still keeps none.
+        let unknown = LostListRecord {
+            deleted: [1, 4],
+            copy: None,
+            marked: false,
+        };
+        assert_eq!(lost_with(4, lost_marks(1, 2)).merge(unknown).copy, None);
         let at = key::list_record_lost(&[1; 32]);
         let value = serde_json::to_value(&marked).expect("a lost record serializes");
         assert!(reads::<LostListRecord>(&at, value));
