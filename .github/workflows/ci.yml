@@ -239,8 +239,8 @@ jobs:
           for target in aarch64-apple-ios aarch64-apple-ios-sim; do
             cargo build --locked --release -p paykit-ffi --features test-wallet --lib --target "$target"
           done
-          paykit-ffi/package-apple.sh "$OUT/checkout" target/aarch64-apple-ios/release/libpaykit_v2.a \
-            target/aarch64-apple-ios-sim/release/libpaykit_v2.a "$OUT/apple"
+          paykit-ffi/package-apple.sh "$OUT/checkout" target/aarch64-apple-ios/release/libpaykit.a \
+            target/aarch64-apple-ios-sim/release/libpaykit.a "$OUT/apple"
       # A checkout from the main actor, on the runtime's 4 MiB threads.
       - name: Run the wallet on an iOS simulator
         working-directory: paykit-ffi/tests

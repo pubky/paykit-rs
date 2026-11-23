@@ -17,7 +17,7 @@ let package = Package(
         .testTarget(
             name: "WalletOnDevice",
             dependencies: [
-                .product(name: "PaykitV2", package: URL(fileURLWithPath: bindings).lastPathComponent)
+                .product(name: "Paykit", package: URL(fileURLWithPath: bindings).lastPathComponent)
             ],
             path: ".",
             exclude: ["android", "hosts/backup.rs", "hosts/build.gradle.kts", "hosts/checkout.rs",
