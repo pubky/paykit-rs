@@ -909,7 +909,9 @@ impl Paykit {
     /// Acknowledge `id` once the user has seen the notice. The wallet stops listing it.
     /// A payment notice keeps its acknowledgment while the journal holds the payment.
     /// For a possibly delivered message, the acknowledgment survives repeated imports
-    /// into this store and never triggers delivery.
+    /// into this store and never triggers delivery. A notice of a list whose delivery ended
+    /// unknown goes once that list's outcome is settled; a backup taken before then can
+    /// bring it back, unacknowledged, until the next receive.
     ///
     /// # Errors
     ///

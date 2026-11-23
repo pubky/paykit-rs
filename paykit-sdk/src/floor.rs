@@ -586,11 +586,27 @@ impl Paykit {
     /// Whether `stored` is a one-time request dated before the floor, shared or owed, as this
     /// app holds them now ([`dated_before`]): it is paid only by hand.
     pub(crate) async fn floor_holds(&self, stored: &StoredMessage) -> Result<bool> {
+        self.floor_holds_with(&mut None, stored).await
+    }
+
+    /// [`Paykit::floor_holds`], with the floor and the raise owed taken from `floor`, read
+    /// into it once when first needed: a list read shares it across its records.
+    pub(crate) async fn floor_holds_with(
+        &self,
+        floor: &mut Option<(SharedFloor, Option<u64>)>,
+        stored: &StoredMessage,
+    ) -> Result<bool> {
         if !matches!(stored.body(), Body::PaymentRequest(r) if !r.is_recurring()) {
             return Ok(false);
         }
-        let owed = self.owed_floor().await?;
-        Ok(dated_before(stored, self.shared_floor().await?, owed))
+        if floor.is_none() {
+            let owed = self.owed_floor().await?;
+            *floor = Some((self.shared_floor().await?, owed));
+        }
+        let Some((shared, owed)) = *floor else {
+            return Ok(true);
+        };
+        Ok(dated_before(stored, shared, owed))
     }
 
     /// The floor record as the switch holds it now (`GET /records/{key}`, Switch wire 7.4.9):

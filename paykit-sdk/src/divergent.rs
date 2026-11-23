@@ -1334,6 +1334,15 @@ impl Paykit {
         self.pause_with(record, &marked, view.as_ref()).await
     }
 
+    /// [`Paykit::pause_seen`] for the record `held`, as a list read took it from the client
+    /// a moment before: the same record [`pubky_switch_client::app::App::shared_record`]
+    /// returns, as nothing is written between them.
+    pub(crate) async fn pause_seen_held(&self, held: &SharedRecord) -> Result<Pause> {
+        let view = View::of(held);
+        let marked = self.marked(&held.key, view.as_ref()).await?;
+        self.pause_with(&held.key, &marked, view.as_ref()).await
+    }
+
     /// The host's view of the record at `record`, `pause` as it allows, shown for a credit
     /// when `credit` ([`DivergentRecord::may_hold_credit`]).
     async fn shown(&self, record: [u8; 32], pause: Pause, credit: bool) -> Result<DivergentRecord> {

@@ -315,12 +315,12 @@ impl PaymentRefusal {
             },
             Refusal::SettlementBucketFull { bucket } => D::SettlementBucketFull { bucket: *bucket },
             Refusal::ListDeliveryUnknown(list) => D::ListDeliveryUnknown {
-                recipient: list.recipient.into(),
-                generation: list.version.generation(),
-                counter: list.version.counter(),
-                msg_id: list.msg_id.clone(),
-                withdrawal: list.withdrawal,
-                payable_until_ms: list.payable_until_ms,
+                recipient: list.recipient().into(),
+                generation: list.version().generation(),
+                counter: list.version().counter(),
+                msg_id: list.msg_id().to_owned(),
+                withdrawal: list.withdrawal(),
+                payable_until_ms: list.payable_until_ms(),
             },
             Refusal::Divergent { records } => D::Divergent {
                 records: records.iter().cloned().map(Into::into).collect(),
