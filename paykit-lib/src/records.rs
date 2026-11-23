@@ -1937,22 +1937,13 @@ impl ActivityRecord {
     /// request record at `lp(payee, request hash)`, a period record at `lp(payee, request
     /// hash, u64(period start))`, a payer's payment without a request at `lp(own, attempt
     /// ID)`, and a payee's at `lp(Payment Endpoint Identifier, settlement ID)` of its proof.
+    /// The settlement ID is read from the proof's `proof` object by `settlement`, the reader
+    /// of the payment method's rail: Paykit reads no proof itself (Paykit wire 1.5).
     ///
     /// # Errors
     ///
     /// [`Error::Invalid`] for a record without what its key needs, such as a proof whose
     /// method gives no settlement ID, which isn't credited.
-    pub fn natural_key(&self, own: &[u8; 32]) -> Result<Vec<u8>> {
-        self.natural_key_with(own, &crate::derive::settlement_id)
-    }
-
-    /// [`ActivityRecord::natural_key`], with a payee's settlement ID read from its proof's
-    /// `proof` object by `settlement`: the reader of the payment method's rail, so a method
-    /// this crate doesn't know names its settlement too (Paykit wire 1.5).
-    ///
-    /// # Errors
-    ///
-    /// As [`ActivityRecord::natural_key`].
     pub fn natural_key_with(
         &self,
         own: &[u8; 32],
@@ -1984,7 +1975,7 @@ impl ActivityRecord {
                             "Paykit wire 5.3: a payee's record of a payment without a request holds its proof",
                         );
                     };
-                    let settlement = settlement(&proof.proof).ok_or_else(|| {
+                    let settlement = settlement(&proof.payment_endpoint_identifier, &proof.proof).ok_or_else(|| {
                         Error::Invalid(
                             "Paykit wire 1.5: a proof whose method gives no settlement ID isn't credited".into(),
                         )
@@ -2004,16 +1995,19 @@ impl ActivityRecord {
     ///
     /// # Errors
     ///
-    /// As [`ActivityRecord::natural_key`].
+    /// As [`ActivityRecord::natural_key_with`], whose `settlement` this takes.
     pub fn record_key(
         &self,
         own: &[u8; 32],
         naming_key: &NamingKey,
         label: Option<&Label>,
+        settlement: &crate::derive::SettlementIdReader<'_>,
     ) -> Result<[u8; 32]> {
-        self.side
-            .collection()
-            .record_key(naming_key, &self.natural_key(own)?, label)
+        self.side.collection().record_key(
+            naming_key,
+            &self.natural_key_with(own, settlement)?,
+            label,
+        )
     }
 
     /// "Labels" (Paykit spec 6, Paykit wire 5.3): in a `payee_activity` record under the
@@ -2042,7 +2036,8 @@ impl ActivityRecord {
 
     /// Read an activity record at `key` under `policy_label` (Paykit wire 5.1, 5.3): the
     /// record reads, its labels are its policy's, and it sits at the key recomputed with the
-    /// reader's own naming key.
+    /// reader's own naming key, a payee's settlement ID read by `settlement` (Paykit wire
+    /// 1.5).
     ///
     /// # Errors
     ///
@@ -2054,11 +2049,12 @@ impl ActivityRecord {
         naming_key: &NamingKey,
         key: &[u8; 32],
         policy_label: Option<&Label>,
+        settlement: &crate::derive::SettlementIdReader<'_>,
     ) -> Result<Self> {
         let record = Self::read(json, own, side)?;
         record.check_label(policy_label)?;
         ensure(
-            &record.record_key(own, naming_key, policy_label)? == key,
+            &record.record_key(own, naming_key, policy_label, settlement)? == key,
             "Paykit wire 5.3: the record isn't at the key its messages name",
         )?;
         Ok(record)

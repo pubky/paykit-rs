@@ -40,8 +40,8 @@ mod fake;
 
 #[cfg(feature = "test-support")]
 pub use fake::{
-    Behaviour, FakeRail, FAKE_ENDPOINT_IDENTIFIERS, FAKE_LONGEST_COMPLETION_MS,
-    FAKE_PAYMENT_TIME_TOLERANCE_MS,
+    fake_settlement_id, Behaviour, FakeRail, FAKE_ENDPOINT_IDENTIFIERS, FAKE_LONGEST_COMPLETION_MS,
+    FAKE_PAYMENT_TIME_TOLERANCE_MS, FAKE_SETTLEMENT_PREFIX,
 };
 
 /// A failure of the payment method's call (Paykit spec 7.2). [`RailError::Unavailable`] is
@@ -572,15 +572,19 @@ pub trait Rail: Send + Sync {
     /// A [`RailError`] when the method can't check now.
     fn verify(&self, check: ProofCheck) -> BoxFuture<'_, Result<Option<u64>, RailError>>;
 
-    /// The settlement ID of a proof's `proof` object made by this method (Paykit wire 1.5):
-    /// the bytes the method defines to name one settlement, the same for every proof of it,
-    /// read from the proof alone and deterministic, so a payee credits a payment without a
+    /// The settlement ID of a proof's `proof` object made by this method, paid to
+    /// `endpoint_id` (Paykit wire 1.5): the bytes the method defines to name one settlement,
+    /// the same for every proof of it, read from the endpoint and the proof alone and
+    /// deterministic, so a payee credits a payment without a
     /// request once whoever sends its proof (Paykit spec 8.4). `None` for a proof that names
-    /// none, which isn't credited. The default reads the methods `paykit-lib` knows
-    /// ([`paykit_lib::derive::settlement_id`]); a rail of another method overrides it.
-    fn settlement_id(&self, proof: &Map<String, Value>) -> Option<Vec<u8>> {
-        paykit_lib::derive::settlement_id(proof)
-    }
+    /// none, which isn't credited. Paykit defines no settlement ID and reads no proof
+    /// itself: whether a method names one settlement per transaction, per output or
+    /// otherwise is the method's own rule, and this answer is the answer.
+    fn settlement_id(
+        &self,
+        endpoint_id: &PaymentEndpointIdentifier,
+        proof: &Map<String, Value>,
+    ) -> Option<Vec<u8>>;
 }
 
 #[cfg(test)]

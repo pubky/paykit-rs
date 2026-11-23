@@ -177,13 +177,47 @@ impl PaymentMethod for Account {
         let found=Connection::open(&self.file).unwrap().query_row("SELECT paid_at FROM payments WHERE attempt=?1 AND asset=?2 AND amount=?3 AND endpoint=?4 AND (?5 IS NULL OR payload=?5)",params![p.attempt_id,p.amount.asset,p.amount.value,p.endpoint,p.payload],|r|r.get::<_,i64>(0)).optional().unwrap();
         Ok(found.map(|at| u64::try_from(at).unwrap()))
     }
-    fn settlement_id(&self, proof: Vec<u8>) -> Option<Vec<u8>> {
+    /// The account names a settlement by the endpoint paid and the proof's `payment`, so
+    /// two endpoints whose proofs carry the same value are two settlements.
+    fn settlement_id(&self, endpoint: String, proof: Vec<u8>) -> Option<Vec<u8>> {
         serde_json::from_slice::<serde_json::Value>(&proof)
             .ok()?
             .get("payment")?
             .as_str()
-            .map(|s| s.as_bytes().to_vec())
+            .map(|s| format!("{endpoint}/{s}").into_bytes())
     }
+}
+
+#[test]
+fn test_method_settlement_id_gets_the_endpoint_through_the_host_callback() {
+    use paykit_sdk::Rail;
+    let directory = tempfile::tempdir().unwrap();
+    let account = Arc::new(Account::open(
+        directory.path(),
+        Arc::new(pubky_switch_client::clock::TestClock::new(0)),
+    ));
+    let rail = HostRail::new(account, Vec::new());
+    let proof = serde_json::json!({ "payment": "same" })
+        .as_object()
+        .cloned()
+        .unwrap();
+    let first = paykit_lib::PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
+    let second = paykit_lib::PaymentEndpointIdentifier::new("btc-bitcoin-p2wpkh").unwrap();
+    // The same inner value at two endpoints is two settlements, as the method names them.
+    assert_eq!(
+        rail.settlement_id(&first, &proof),
+        Some(b"btc-lightning-bolt11/same".to_vec())
+    );
+    assert_eq!(
+        rail.settlement_id(&second, &proof),
+        Some(b"btc-bitcoin-p2wpkh/same".to_vec())
+    );
+    // A proof the method names no settlement for stays unnamed.
+    let none = serde_json::json!({ "other": "same" })
+        .as_object()
+        .cloned()
+        .unwrap();
+    assert_eq!(rail.settlement_id(&first, &none), None);
 }
 
 #[tokio::test]

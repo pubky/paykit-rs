@@ -52,6 +52,8 @@ async fn issue() -> Payment {
         fake: w.rail.clone(),
         last: Mutex::new(None),
         supplies_id: true,
+        lookalike: false,
+        outputs: Mutex::new(None),
     });
     let mut wallet = joined(
         &w,
@@ -102,7 +104,10 @@ async fn issue() -> Payment {
         .unwrap()
         .to_vec();
     let id = rail
-        .settlement_id(rail.last.lock().unwrap().as_ref().unwrap())
+        .settlement_id(
+            &crate::common::endpoint("btc-lightning-bolt12"),
+            rail.last.lock().unwrap().as_ref().unwrap(),
+        )
         .unwrap();
     let target = target(&paykit_lib::derive::natural_key::payee_payment_record(
         &endpoint("btc-lightning-bolt12"),

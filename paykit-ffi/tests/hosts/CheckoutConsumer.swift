@@ -86,7 +86,7 @@ class CheckoutMethod: ReceiptReader, @unchecked Sendable {
             return paidAt
         }
     }
-    override func settlementId(proofJson: Data) -> Data? {
+    override func settlementId(endpoint: String, proofJson: Data) -> Data? {
         guardLock.withLock {
             guard let attempt = try? stored(), proofJson == originalProof(attempt) else { return nil }
             return Data(attempt.utf8)

@@ -59,7 +59,7 @@ impl PaymentMethod for Stalled {
     async fn verify(&self, _: MethodProof) -> Result<Option<u64>, MethodError> {
         std::future::pending().await
     }
-    fn settlement_id(&self, _: Vec<u8>) -> Option<Vec<u8>> {
+    fn settlement_id(&self, _: String, _: Vec<u8>) -> Option<Vec<u8>> {
         None
     }
 }
