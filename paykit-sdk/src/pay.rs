@@ -2086,6 +2086,9 @@ impl Paykit {
         let own = self.identity();
         let mut held_over: Vec<([u8; 16], ListVersion)> = Vec::new();
         let mut held_only: Vec<([u8; 16], ListVersion)> = Vec::new();
+        // The apps whose list record is paused: never asked for a newer list, by name or by
+        // a request naming no app, which they could answer (Paykit spec 8.4, wire 4.14).
+        let mut paused_apps: Vec<[u8; 16]> = Vec::new();
         // A held list that doesn't read, or is kept under another record's key, gives no
         // hint here and stops nothing: placing it reports it (Paykit wire 5.4).
         for (rest, kept) in self
@@ -2112,8 +2115,9 @@ impl Paykit {
                         held_over.push((app_id, version));
                     }
                 }
-                // No app whose record is paused is asked for a newer list (Paykit spec 8.4).
-                None if Box::pin(self.pause_at(&record)).await?.blocks_by_hand() => {}
+                None if Box::pin(self.pause_at(&record)).await?.blocks_by_hand() => {
+                    paused_apps.push(app_id);
+                }
                 None => held_only.push((app_id, version)),
             }
         }
@@ -2142,7 +2146,7 @@ impl Paykit {
         // so it plays no part, paused or not, and only a list that would otherwise be usable
         // pauses the payment (Paykit spec 8.4). A read that fails is the payment's refusal:
         // without it, no list is taken as a current app's, nor as a removed app's.
-        let identity = if lists.is_empty() && held_only.is_empty() {
+        let identity = if lists.is_empty() && held_only.is_empty() && paused_apps.is_empty() {
             None
         } else {
             match self
@@ -2204,6 +2208,7 @@ impl Paykit {
                 .record_key(&list_target(&list.payee, &list.app_id))?;
             if Box::pin(self.pause_at(&record)).await?.blocks_by_hand() {
                 paused_lists.push(record);
+                paused_apps.push(list.app_id);
                 continue;
             }
             if let Some(pair) = held_over.iter().find(|(app, _)| *app == list.app_id) {
@@ -2325,7 +2330,7 @@ impl Paykit {
         // a request naming it, with no pair, asks it too, beside the ones naming a pair, so a
         // list that can be paid may come (Paykit spec 8.4, wire 4.14).
         let others: Vec<[u8; 16]> = match (&identity, app) {
-            (Some(identity), None) if !held.is_empty() => identity
+            (Some(identity), None) if !held.is_empty() || !paused_apps.is_empty() => identity
                 .doc
                 .body()
                 .apps
@@ -2335,6 +2340,7 @@ impl Paykit {
                     !identity.doc.lists_removed(app_id)
                         && !installed.iter().any(|(a, _)| a == app_id)
                         && !held.iter().any(|(a, _)| a == app_id)
+                        && !paused_apps.contains(app_id)
                 })
                 .collect(),
             _ => Vec::new(),
@@ -2372,7 +2378,7 @@ impl Paykit {
         // list.
         if !paused_lists.is_empty() {
             if !options.quote_only && !held.is_empty() && !unsupported_only && !unusable {
-                self.ask_for_lists(payee, app, &held, &installed, &[])
+                self.ask_for_lists(payee, app, &held, &installed, &[], &paused_apps)
                     .await?;
             }
             Box::pin(self.refuse_while_paused(&paused_lists)).await?;
@@ -2400,7 +2406,7 @@ impl Paykit {
             ))
             .into());
         }
-        self.ask_for_lists(payee, app, &held, &installed, &others)
+        self.ask_for_lists(payee, app, &held, &installed, &others, &paused_apps)
             .await?;
         Err(Refusal::WaitingForList {
             device_clock_behind,
@@ -2673,7 +2679,8 @@ impl Paykit {
     /// `app`, of that app, naming the pair `installed` holds of it whether or not that list
     /// may be paid; without, of each app in `held`, and of each app in `others`, a current
     /// app of the payee's with no list held, naming no pair, or one request naming no app
-    /// when none is held. A request already asked of the same app at the same held version is
+    /// when none is held. An app in `paused`, whose record is paused, is never asked, and
+    /// while one is, no request names no app (Paykit spec 8.4, wire 4.14). A request already asked of the same app at the same held version is
     /// outstanding, and not asked again, until a day has passed: the payee can't be forced to
     /// answer, and a request it dropped is asked once more after that, so a payer waits at
     /// most a day for one more chance. The request is queued before its mark is kept: a crash
@@ -2685,11 +2692,18 @@ impl Paykit {
         held: &[([u8; 16], ListVersion)],
         installed: &[([u8; 16], ListVersion)],
         others: &[[u8; 16]],
+        paused: &[[u8; 16]],
     ) -> Result<()> {
         self.refuse_while_sends_held(payee).await?;
         let held_of = |app: [u8; 16]| installed.iter().find(|(a, _)| *a == app).map(|(_, v)| *v);
         let asks: Vec<(Option<[u8; 16]>, Option<ListVersion>)> = match app {
+            // An app whose record is paused is never asked (Paykit spec 8.4).
+            Some(app) if paused.contains(&app) => Vec::new(),
             Some(app) => vec![(Some(app), held_of(app))],
+            // A request naming no app would reach a paused app too: the others are named.
+            None if held.is_empty() && !paused.is_empty() => {
+                others.iter().map(|app| (Some(*app), None)).collect()
+            }
             None if held.is_empty() => vec![(None, None)],
             None => held
                 .iter()
