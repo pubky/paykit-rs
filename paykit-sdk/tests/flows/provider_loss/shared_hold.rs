@@ -694,3 +694,91 @@ async fn test_shared_hold_applies_a_restore_widening_without_the_raise() {
     assert!(!widening_owed);
     assert_eq!(next.record(&key).map(|held| held.revision), floor_before);
 }
+
+#[tokio::test]
+async fn test_shared_hold_recorded_loss_kept_across_a_scope_change() {
+    // Paykit wire 5.6, Shared post-loss hold: the recorded loss stays through a renewal to
+    // other scopes, and the hold with it.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let me = wallet.app_id();
+    let mut shop = w.shop().await;
+    earlier_request(&w, &mut wallet, &mut shop).await;
+    w.clock.advance_ms(60_000);
+    let next = declare_loss(&w);
+    let until = follow_loss(&mut wallet).await;
+    let before = recorded(&wallet).await;
+    assert!(before.is_some());
+    let first = wallet.app().cert().clone();
+    let scopes = paykit_sdk::AppScopes::new()
+        .pay()
+        .request()
+        .build()
+        .unwrap();
+    let names: Vec<&str> = scopes.scopes.iter().map(String::as_str).collect();
+    let wider = pubky_switch_client::testing::issue_cert(
+        w.alice.identity().key(),
+        &w.alice.identity().app_keys("wallet"),
+        &pubky_switch_client::testing::AppSpec::new(&names).with_permissions(&scopes.permissions),
+        w.clock.now_ms() + 1_000,
+    )
+    .unwrap();
+    next.signer_op(pubky_switch_core::ops::OpKind::CertPut {
+        target_app_id: me,
+        cert: wider.signed().clone(),
+    })
+    .unwrap();
+    // The signer stores a bundle with the scope keys the renewed certificate needs.
+    let epoch = next.identity_doc().unwrap().data_epoch();
+    for part in pubky_switch_core::records::seal_bundle_parts(
+        w.alice.identity().key(),
+        &wider,
+        1,
+        epoch,
+        &|scope| crate::common::spec().has_keys(scope),
+    )
+    .unwrap()
+    {
+        next.signer_op(pubky_switch_core::ops::OpKind::KeyBundlePut(
+            pubky_switch_core::ops::KeyBundlePut {
+                target_app_id: me,
+                bundle: part.bundle,
+                first_epoch: part.first_epoch,
+                last_epoch: part.last_epoch,
+            },
+        ))
+        .unwrap();
+    }
+    let _ = wallet.receive(None).await;
+    let doc = w
+        .alice
+        .sign_next(|body| {
+            body.apps.retain(|listed| listed.app_id != me);
+            body.apps.push(pubky_switch_core::records::ListedApp {
+                app_id: me,
+                cert: wider.hash(),
+            });
+            body.renewed.push(pubky_switch_core::records::RenewedCert {
+                app_id: me,
+                cert: first.hash(),
+                until: None,
+            });
+        })
+        .unwrap();
+    next.deliver_identity(&doc).unwrap();
+    for _ in 0..3 {
+        let _ = wallet.receive(None).await;
+    }
+    assert_eq!(wallet.app().cert().hash(), wider.hash());
+    assert_eq!(recorded(&wallet).await, before);
+    past_the_window(&w, until);
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    crate::common::finish_listing(&mut wallet).await;
+    wallet.receive(None).await.unwrap();
+    let outcome = wallet
+        .pay_request_automatically(&request, PayOptions::default())
+        .await
+        .outcome;
+    assert!(held(&outcome), "{outcome:?}");
+    assert_eq!(executions(&w), 0);
+}
