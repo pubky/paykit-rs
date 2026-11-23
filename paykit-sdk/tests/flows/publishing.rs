@@ -3476,6 +3476,86 @@ async fn test_publication_stops_reporting_an_unknown_withdrawal_once_nothing_is_
 }
 
 #[tokio::test]
+async fn test_publication_takes_only_a_proof_naming_its_own_unknown_list_as_its_arrival() {
+    use pubky_switch_client::testing::Fault;
+
+    let w = World::new();
+    let buyer = w.wallet("wallet").await;
+    let payer = buyer.identity();
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&payer).await.unwrap();
+    shop.set_list_endpoints(offered("lno1first")).await.unwrap();
+    w.alice.switch().fail_next(Fault::LoseAnswer {
+        path: "inbox".into(),
+    });
+    shop.publish_list_to(payer).await.unwrap();
+    let key = shop.app().record_key(&target(&shop, &payer, 1)).unwrap();
+    let held = shop.app().shared_record(&key).await.unwrap().unwrap();
+    let list = ListPublicationRecord::read(held.content.value().unwrap()).unwrap();
+    assert!(shop
+        .app_mut()
+        .withdraw_message("paykit", &list.msg_id)
+        .await
+        .unwrap());
+    shop.receive(None).await.unwrap();
+    let shown = unknown_shown(shop.publish_list_to(payer).await.unwrap_err());
+    let shop_app = shop.app_id();
+    let proof = |app: [u8; 16], version: Option<paykit_sdk::ListVersion>| {
+        let body = paykit_lib::bodies::PaymentProof {
+            attempt_id: paykit_lib::AttemptId::generate().unwrap(),
+            billing_period: None,
+            payment_endpoint_identifier: crate::common::endpoint("btc-lightning-bolt12"),
+            payment_app_id: app,
+            list_version: version,
+            amount: Some(btc("0.001")),
+            allowance_id: None,
+            label: None,
+            payment_reference: None,
+            proof: serde_json::json!({ "rail": "fake", "tx": "t1" })
+                .as_object()
+                .cloned()
+                .unwrap(),
+        }
+        .to_body(0)
+        .unwrap();
+        w.inject(
+            &w.alice,
+            "wallet",
+            &w.bob,
+            &[shop_app],
+            "paykit.payment_proof",
+            Vec::new(),
+            body,
+        );
+    };
+    // A proof naming no version, another version, or that version of another app's list
+    // shows nothing of this list.
+    for (app, version) in [
+        (shop_app, None),
+        (
+            shop.app_id(),
+            Some(paykit_sdk::ListVersion::new(1, 2).unwrap()),
+        ),
+        ([9; 16], Some(shown.version())),
+    ] {
+        proof(app, version);
+        w.clock.advance_ms(1);
+        shop.receive(None).await.unwrap();
+        assert_eq!(
+            unknown_shown(shop.publish_list_to(payer).await.unwrap_err()),
+            shown,
+            "{app:?} {version:?}"
+        );
+    }
+    // One naming this app's list at that version does.
+    proof(shop_app, Some(shown.version()));
+    shop.receive(None).await.unwrap();
+    shop.publish_list_to(payer).await.unwrap();
+    assert_eq!(w.record_writes(&w.bob, &key), 1);
+    drop(buyer);
+}
+
+#[tokio::test]
 async fn test_publication_takes_a_proof_paid_from_the_unknown_list_as_its_arrival() {
     use pubky_switch_client::testing::Fault;
 
