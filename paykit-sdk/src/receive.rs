@@ -1841,9 +1841,12 @@ fn receipt_effect(
     // or consuming it (Switch spec 8.2): the store is corrupt. It is read as
     // `Paykit::journal_entry_on` reads it: bound to its key, and to the claim the receipt
     // settles, so an entry of the attempt on another claim parks the receipt too.
-    let claim = receipt_claim(stored, &attempt_id, |request, start| {
-        obligation(cx, &sender, request, start)
-    });
+    let claim = receipt_claim(
+        stored,
+        &attempt_id,
+        |request, start| obligation(cx, &sender, request, start),
+        |attempt| paykit_lib::derive::payment_obligation_blinded(&cx.blind(&attempt.to_bytes())),
+    );
     let journaled = JournalEntry::on_claim(
         state::cx_get::<JournalEntry>(cx, &key::journal(&attempt_id))?,
         &claim,
@@ -1896,6 +1899,9 @@ fn receipt_effect(
         }
     }
     if let Some(entry) = settles.received {
+        entry
+            .check_bound(|input| cx.blind(input))
+            .map_err(|_| Fail::corrupt())?;
         keep_local(cx, local(&key::journal(&attempt_id), &entry)?);
     }
     Ok(())
@@ -2128,11 +2134,13 @@ pub(crate) fn receipt_on_record(
 }
 
 /// The claim a receipt settles: its request's obligation, blinded by `request_obligation`;
-/// or, for a payment without a request, the attempt's own obligation.
+/// or, for a payment without a request, the attempt's own obligation, blinded by
+/// `payment_obligation` (Paykit wire 1.5).
 pub(crate) fn receipt_claim(
     stored: &StoredMessage,
     attempt_id: &AttemptId,
     request_obligation: impl FnOnce(&[u8; 32], u64) -> [u8; 32],
+    payment_obligation: impl FnOnce(&AttemptId) -> [u8; 32],
 ) -> [u8; 32] {
     match stored.message().refs.get(1) {
         Some(request) => request_obligation(
@@ -2142,7 +2150,7 @@ pub(crate) fn receipt_claim(
                 .billing_period()
                 .map_or(0, |period| period.start_secs()),
         ),
-        None => paykit_lib::derive::payment_obligation(attempt_id),
+        None => payment_obligation(attempt_id),
     }
 }
 
