@@ -58,6 +58,7 @@ use pubky_switch_client::app::{
 };
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::records::CLOCK_TOLERANCE_MS;
+use std::sync::atomic::Ordering;
 
 use crate::activity;
 use crate::error::{Refusal, Result};
@@ -99,6 +100,9 @@ pub(crate) struct OwedRaises {
     unread: bool,
     /// The highest time a raise is owed to, applied as a floor meanwhile.
     to_ms: Option<u64>,
+    /// The time of each raise owed, an unblock's and each widening's, in increasing order and
+    /// once each: which raises a retry record was tried for ([`RaiseRetry`]).
+    times: Vec<u64>,
 }
 
 impl OwedRaises {
@@ -132,11 +136,16 @@ impl OwedRaises {
             Some(pending) => (Some(pending.to_ms), pending.senders),
             None => (None, Vec::new()),
         };
+        let widening = !widenings.is_empty();
+        let mut times: Vec<u64> = unblock_ms.into_iter().chain(widenings).collect();
+        times.sort_unstable();
+        times.dedup();
         Self {
             senders,
-            widening: !widenings.is_empty(),
+            widening,
             unread,
-            to_ms: unblock_ms.into_iter().chain(widenings).max(),
+            to_ms: times.last().copied(),
+            times,
         }
     }
 
@@ -148,6 +157,11 @@ impl OwedRaises {
     /// The highest time a raise is owed to, applied as a floor meanwhile.
     pub(crate) fn to_ms(&self) -> Option<u64> {
         self.to_ms
+    }
+
+    /// The time of each raise owed, in increasing order and once each.
+    pub(crate) fn times(&self) -> &[u64] {
+        &self.times
     }
 
     /// Whether a `missed` item's widening waits for its read of the lists.
@@ -171,17 +185,20 @@ impl OwedRaises {
 /// waits, one minute, doubling after each further such try, up to 10 minutes, the age the deny
 /// list may have before a payment the user starts (Paykit spec 8.1, How fresh the deny list
 /// is). A change to the floor record the app holds, or the floor becoming readable, ends the
-/// wait and the tries in a row (Paykit wire 5.6, Raising), as does a raise owed to another
-/// time, a new unblock's or widening's: `to_ms` is the time of the raise the tries were for.
-/// The wait is counted from `tried_at_ms`, the last try's time on this device's clock, and
-/// derived from `tries`; a clock that went back since ends it, so no wait outlasts its own
-/// length. The record only paces the tries: one that doesn't read is taken as none.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// wait and the tries in a row (Paykit wire 5.6, Raising). The wait paces only raises already
+/// tried: `tried` holds the time of each raise owed at the last try ([`OwedRaises::times`]),
+/// and a raise owed since, a new unblock's or a new widening's, whatever its time, is tried at
+/// the read of the lists it needs, starting the tries anew. The wait is counted from
+/// `tried_at_ms`, the last try's time on this device's clock, and derived from `tries`; a
+/// clock that went back since ends it, so no wait outlasts its own length (and, across a
+/// restart, a clock put back part of the way lengthens it by at most that much). The record
+/// only paces the tries: one that doesn't read is taken as none.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RaiseRetry {
     tries: u32,
     tried_at_ms: u64,
-    to_ms: u64,
+    tried: Vec<u64>,
     #[serde(deserialize_with = "Option::deserialize")]
     floor: Option<(u64, u64)>,
     readable: bool,
@@ -206,9 +223,10 @@ impl RaiseRetry {
             .min(LAST_RAISE_WAIT_MS)
     }
 
-    /// Whether the record reads as a writer keeps it: at least one try.
+    /// Whether the record reads as a writer keeps it: at least one try, for raises named once
+    /// each in increasing order.
     pub(crate) fn reads(&self) -> bool {
-        self.tries > 0
+        self.tries > 0 && self.tried.windows(2).all(|pair| pair[0] < pair[1])
     }
 
     /// Whether the wait after the last try is over at `now_ms`: at least the wait has passed
@@ -688,26 +706,37 @@ impl Paykit {
     async fn floor_changed_since(&self, retry: &RaiseRetry) -> Result<bool> {
         Ok(self.held_floor_version().await? != retry.floor
             || (!retry.readable && self.floor_readable().await?)
-            || self.owed_raises().await?.to_ms().unwrap_or(0) != retry.to_ms)
+            || self
+                .owed_raises()
+                .await?
+                .times()
+                .iter()
+                .any(|time| retry.tried.binary_search(time).is_err()))
     }
 
     /// Whether a raise left unwritten is tried again at this receive: once its wait passed,
     /// which after one such try is at once, or once the floor changed (Paykit wire 5.6,
     /// Raising).
     async fn retry_due(&self, retry: &RaiseRetry) -> Result<bool> {
-        Ok(retry.waited(self.now()) || self.floor_changed_since(retry).await?)
+        let now = self.now();
+        // A clock this handle saw at a later time went back since, part of the way included:
+        // the wait is over (the stored time alone can't tell a partial step back).
+        let seen = self.raise_clock_seen.fetch_max(now, Ordering::SeqCst);
+        Ok(now < seen || retry.waited(now) || self.floor_changed_since(retry).await?)
     }
 
     /// Note a try that left the raise unwritten: one more in a row, or the first after the
     /// floor changed ([`RaiseRetry`]).
     async fn note_raise_unwritten(&mut self) -> Result<()> {
-        let to_ms = self.owed_raises().await?.to_ms().unwrap_or(0);
+        let tried = self.owed_raises().await?.times().to_vec();
+        // The wait counts from this try: the device times seen start from it.
+        self.raise_clock_seen.store(self.now(), Ordering::SeqCst);
         // One read of the lists counts one try: a second raise it leaves unwritten, a
         // widening's and an unblock's say, keeps the tries and the wait.
         if self.raise_tried_in_read {
             if let Some(retry) = self.raise_retry().await? {
                 return self
-                    .local_put(key::RAISE_RETRY, &RaiseRetry { to_ms, ..retry })
+                    .local_put(key::RAISE_RETRY, &RaiseRetry { tried, ..retry })
                     .await;
             }
         }
@@ -720,7 +749,7 @@ impl Paykit {
         let retry = RaiseRetry {
             tries,
             tried_at_ms: self.now(),
-            to_ms,
+            tried,
             floor: self.held_floor_version().await?,
             readable: self.floor_readable().await?,
         };
@@ -1496,7 +1525,7 @@ mod tests {
         let kept = |tries| RaiseRetry {
             tries,
             tried_at_ms: 1_000_000,
-            to_ms: 5,
+            tried: vec![5],
             floor: None,
             readable: false,
         };
