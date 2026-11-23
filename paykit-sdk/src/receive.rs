@@ -3279,11 +3279,13 @@ impl Paykit {
     }
 
     /// Record a payer's observed unblock together with the shared floor it requires.
-    async fn record_lists(
+    pub(crate) async fn record_lists(
         &mut self,
         lists: pubky_switch_client::client::answers::AllowList,
         read_at: u64,
     ) -> crate::error::Result<Vec<[u8; 32]>> {
+        // The read's answer verified a service time: the current delivery operation's.
+        self.observe_service_time();
         let (mut deny, mut tx) = self.judged_deny(lists.deny).await?;
         deny.sort_unstable();
         deny.dedup();
@@ -3335,10 +3337,14 @@ impl Paykit {
             // Only the pending hold clears with the raise. A late answer cannot replace
             // a newer deny list or delete a block the user has made since this read.
             Box::pin(self.commit_with_floor(pending.to_ms, tx)).await?;
-            self.local_put(key::LISTS_READ, &read_at).await?;
+            let mut read = Tx::default();
+            read.put(key::LISTS_READ, &read_at)?;
+            self.put_service_time(&mut read).await?;
+            self.local_commit(read).await?;
         } else {
             tx.put(key::LISTS_READ, &read_at)?.put(key::DENIED, &deny)?;
             put_flagged(&mut tx, &lists.flagged)?;
+            self.put_service_time(&mut tx).await?;
             self.local_commit(tx).await?;
         }
         Ok(deny)
@@ -3459,6 +3465,8 @@ impl Paykit {
     /// block's error; otherwise the original error is returned and the completed read's
     /// summary remains for the next [`Paykit::receive`].
     pub async fn block(&mut self, pubky: &[u8; 32]) -> crate::error::Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.refresh_own()?;
         self.list_own(pubky, true).await
     }
@@ -3484,6 +3492,8 @@ impl Paykit {
     ///
     /// As [`Paykit::block`].
     pub async fn unblock(&mut self, pubky: &[u8; 32]) -> crate::error::Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;

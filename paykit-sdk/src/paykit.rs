@@ -999,6 +999,7 @@ impl Paykit {
     /// handed over (Switch spec 8.2): a listing that fails there fails the read, and this
     /// call returns its error; the next receive lists first.
     pub async fn receive(&mut self, wait: Option<u32>) -> Result<ReceiveSummary> {
+        let _delivery = self.delivery_operation();
         // The read's future goes on the heap: the client's read nests deep, and a host
         // polling it on a small stack, such as a test thread's 2 MiB, keeps room for it.
         let summary = Box::pin(self.receive_inner(wait)).await?;
@@ -1062,6 +1063,9 @@ impl Paykit {
         // Whether the client may list at this read's start ([`Paykit::records_listed`]).
         let keys_held_before = self.holds_scope_keys();
         let received = Box::pin(self.app.receive(wait)).await;
+        if received.is_ok() {
+            self.observe_service_time();
+        }
         // A read can take another device's record or a renewal into the own record.
         self.note_own_record_write(&received);
         let report = match received {
@@ -1312,6 +1316,7 @@ impl Paykit {
     ///
     /// The client's errors.
     pub async fn flush(&mut self) -> Result<()> {
+        let _delivery = self.delivery_operation();
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;

@@ -1902,6 +1902,8 @@ impl Paykit {
         shown: &DivergentRecord,
         _confirmed: UserConfirmed,
     ) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.refresh_own()?;
         let record = &shown.record;
         let (marked, view) = self.mark_and_view(record).await?;

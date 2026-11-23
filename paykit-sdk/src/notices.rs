@@ -875,6 +875,8 @@ impl Paykit {
     ///
     /// [`Refusal::NotFound`] for an ID no notice has; a store failure.
     pub async fn acknowledge_notice(&mut self, id: &str) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         let key = format!("{}{id}", key::NOTICES);
         if !matches!(
             StateKey::parse(key.as_bytes()),

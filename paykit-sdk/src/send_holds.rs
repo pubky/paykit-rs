@@ -15,7 +15,8 @@ use std::collections::BTreeMap;
 
 use paykit_lib::kinds::Kind;
 use pubky_switch_client::app::{
-    AppEvent, DeliveryOrigin, DeliveryView, KeptBatchStatus, QueuedMessage, SENT_RETENTION_MS,
+    AppError, AppEvent, DeliveryOrigin, DeliveryView, KeptBatchStatus, QueuedMessage,
+    SENT_RETENTION_MS,
 };
 use pubky_switch_core::enc::serde_b64;
 use pubky_switch_core::records::CLOCK_TOLERANCE_MS;
@@ -187,6 +188,87 @@ pub(crate) fn may_deliver(delivery: &DeliveryView<'_>, kind: Kind) -> Result<boo
     Ok(deny_decision(delivery)? == DenyDecision::Permits)
 }
 
+/// The service time a Paykit delivery operation observed from a response it got, shared in
+/// memory between [`Paykit`] and its protocol's delivery hook and never stored: a message
+/// the counterparty hold governs goes only inside such an operation, on the time it observed
+/// (Paykit spec 8.1, "Messages already queued"). A flush no Paykit operation started, by
+/// another protocol or through the client directly, observed nothing, so such a message
+/// waits, kept, for the next one.
+#[derive(Debug, Default)]
+pub(crate) struct DeliveryClock {
+    state: std::sync::Mutex<ClockState>,
+}
+
+#[derive(Debug, Default)]
+struct ClockState {
+    /// The operations begun so far, which names each.
+    begun: u64,
+    /// The operation under way, if any.
+    current: Option<u64>,
+    /// The operation that observed a service time, and that time.
+    observed: Option<(u64, u64)>,
+}
+
+impl DeliveryClock {
+    /// Begin an operation unless one is under way. Whether this call began it.
+    fn begin(&self) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if state.current.is_some() {
+            return false;
+        }
+        state.begun = state.begun.saturating_add(1);
+        state.current = Some(state.begun);
+        true
+    }
+
+    fn end(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.current = None;
+            state.observed = None;
+        }
+    }
+
+    /// Keep `at_ms`, a service time from a response, as the current operation's.
+    pub(crate) fn observe(&self, at_ms: u64) {
+        if let Ok(mut state) = self.state.lock() {
+            if let Some(op) = state.current {
+                let at_ms = match state.observed {
+                    Some((seen, earlier)) if seen == op => earlier.max(at_ms),
+                    _ => at_ms,
+                };
+                state.observed = Some((op, at_ms));
+            }
+        }
+    }
+
+    /// The service time the current operation observed; `None` outside an operation, or
+    /// before it observed one, which holds every governed message.
+    pub(crate) fn observed(&self) -> Option<u64> {
+        let state = self.state.lock().ok()?;
+        match (state.current, state.observed) {
+            (Some(op), Some((seen, at_ms))) if op == seen => Some(at_ms),
+            _ => None,
+        }
+    }
+}
+
+/// A Paykit delivery operation under way ([`DeliveryClock`]); it ends when dropped, on every
+/// path out of the call that began it. One begun inside another is the outer one's.
+pub(crate) struct DeliveryOperation {
+    protocol: std::sync::Arc<crate::protocol::PaykitProtocol>,
+    began: bool,
+}
+
+impl Drop for DeliveryOperation {
+    fn drop(&mut self) {
+        if self.began {
+            self.protocol.delivery.end();
+        }
+    }
+}
+
 /// Whether `delivery` is the first delivery, or a retry of it, of a message the
 /// counterparty hold governs that is past its window: 30 days past its `created_at`, less
 /// the clock tolerance, by the highest service time the app verified that its state holds
@@ -205,16 +287,11 @@ pub(crate) fn may_deliver(delivery: &DeliveryView<'_>, kind: Kind) -> Result<boo
 /// ([`Paykit::queue_own_again`]), by the later of the device clock and the service time,
 /// as `window_now` mirrors. Under a fast device clock such an answer can be given up while
 /// a stop already queued still goes.
-pub(crate) fn held_past_window(delivery: &DeliveryView<'_>) -> Result<bool> {
+pub(crate) fn held_past_window(delivery: &DeliveryView<'_>, observed: Option<u64>) -> Result<bool> {
     if delivery.resend() {
         return Ok(false);
     }
     let message = delivery.message();
-    let now = state::delivery_get::<u64>(delivery, key::SERVICE_TIME)?
-        .unwrap_or_else(|| delivery.now_ms());
-    if !past_replay_window(message.created_at_ms, now) {
-        return Ok(false);
-    }
     let goes = match paykit_lib::kinds::MessageKind::parse(&message.kind) {
         Ok(paykit_lib::kinds::MessageKind::Paykit(kind)) => match kind {
             Kind::PaymentProof | Kind::PaymentReceipt | Kind::ExecutorNotice => true,
@@ -236,7 +313,19 @@ pub(crate) fn held_past_window(delivery: &DeliveryView<'_>) -> Result<bool> {
         },
         _ => false,
     };
-    Ok(!goes)
+    if goes {
+        return Ok(false);
+    }
+    // Governed, it goes only on a service time its delivery operation observed, never
+    // below the one kept (Paykit spec 8.1).
+    let Some(observed) = observed else {
+        return Ok(true);
+    };
+    let kept = state::delivery_get::<u64>(delivery, key::SERVICE_TIME)?.unwrap_or(0);
+    Ok(past_replay_window(
+        message.created_at_ms,
+        observed.max(kept),
+    ))
 }
 
 /// Whether a message signed at `created_at_ms` is past its 30 days, less the clock
@@ -337,6 +426,14 @@ impl Paykit {
     /// (`sv`), so a held message's window is judged by it ([`held_past_window`]). It only
     /// goes up.
     pub(crate) async fn note_service_time(&mut self) -> Result<()> {
+        let mut tx = Tx::default();
+        self.put_service_time(&mut tx).await?;
+        self.local_commit(tx).await
+    }
+
+    /// Put in `tx` the highest service time verified as `sv`, when it is higher than the one
+    /// kept: the one writer of `sv`.
+    pub(crate) async fn put_service_time(&self, tx: &mut Tx) -> Result<()> {
         let Some(at) = self.service_time() else {
             return Ok(());
         };
@@ -347,7 +444,121 @@ impl Paykit {
         {
             return Ok(());
         }
-        self.local_put(key::SERVICE_TIME, &at).await
+        tx.put(key::SERVICE_TIME, &at)?;
+        Ok(())
+    }
+
+    /// Begin a delivery operation, unless one is under way ([`DeliveryClock`]).
+    pub(crate) fn delivery_operation(&self) -> DeliveryOperation {
+        DeliveryOperation {
+            protocol: std::sync::Arc::clone(&self.protocol),
+            began: self.protocol.delivery.begin(),
+        }
+    }
+
+    /// The client's owed deliveries of Paykit's kinds, with the protocol's verdict on each as
+    /// a delivery operation that observed the highest service time verified gives it, with
+    /// no read: test builds only.
+    ///
+    /// # Errors
+    ///
+    /// The client's errors, as for `App::queued_messages`.
+    #[cfg(feature = "test-support")]
+    pub async fn queued_in_delivery(
+        &self,
+    ) -> std::result::Result<Vec<QueuedMessage>, pubky_switch_client::app::AppError> {
+        let _delivery = self.delivery_operation();
+        self.observe_service_time();
+        self.app.queued_messages(crate::protocol::BACKUP_NAME).await
+    }
+
+    /// Try the queued message `msg_id` once, as `App::flush_message` does, inside a Paykit
+    /// delivery operation, which observes a service time first when a held message waits:
+    /// test builds only.
+    ///
+    /// # Errors
+    ///
+    /// The client's errors.
+    #[cfg(feature = "test-support")]
+    pub async fn flush_message_in_delivery(
+        &mut self,
+        msg_id: &str,
+    ) -> std::result::Result<
+        Option<pubky_switch_client::app::Delivery>,
+        pubky_switch_client::app::AppError,
+    > {
+        self.send_message(msg_id).await
+    }
+
+    /// Try every queued message once, as `App::flush_outbox` does, inside a Paykit delivery
+    /// operation: test builds only.
+    ///
+    /// # Errors
+    ///
+    /// The client's errors.
+    #[cfg(feature = "test-support")]
+    pub async fn flush_outbox_in_delivery(
+        &mut self,
+    ) -> std::result::Result<
+        pubky_switch_client::app::OutboxReport,
+        pubky_switch_client::app::AppError,
+    > {
+        self.send_outbox().await
+    }
+
+    /// Keep the highest service time verified, which a response just brought, as the current
+    /// delivery operation's.
+    pub(crate) fn observe_service_time(&self) {
+        if let Some(at) = self.service_time() {
+            self.protocol.delivery.observe(at);
+        }
+    }
+
+    /// Make the current delivery operation observe a service time before a held message
+    /// can go, when it hasn't yet and one waits: one read of the lists, which a response
+    /// answers (Paykit spec 8.1). A read that fails observes nothing, and such messages
+    /// wait for the next operation.
+    pub(crate) async fn observe_for_delivery(&mut self) -> Result<()> {
+        if self.protocol.delivery.observed().is_some() {
+            return Ok(());
+        }
+        // A listing the client can't give now observes nothing: what waits keeps waiting.
+        let waiting = self
+            .app
+            .queued_messages(crate::protocol::BACKUP_NAME)
+            .await
+            .is_ok_and(|queued| {
+                queued
+                    .iter()
+                    .any(|queued| !queued.resend && !queued.may_send)
+            });
+        if !waiting
+            || self.certificate_refused().is_some()
+            || !receive::reads_lists(self.app.cert().scopes())
+        {
+            return Ok(());
+        }
+        // The lists read is the cheap authenticated read: its answer is observed whatever
+        // becomes of the copy it carries, which a kept floor write leaves as it is.
+        let now = self.now();
+        match self.app.allow_list().await {
+            Ok(lists) => {
+                self.observe_service_time();
+                if !Box::pin(self.floor_write_is_kept()).await? {
+                    match Box::pin(self.record_lists(lists, now)).await {
+                        Err(error) if crate::floor::is_unreadable_floor(&error) => {}
+                        result => {
+                            result?;
+                        }
+                    }
+                }
+            }
+            Err(error @ (AppError::Alarm(_) | AppError::Store(_))) => return Err(error.into()),
+            // A read that fails observes nothing, and leaves the copy of the lists not
+            // known, as any failed read of them does (Paykit wire 4.1).
+            Err(_) => self.local_delete(key::LISTS_READ).await?,
+        }
+        Ok(())
     }
 
     /// End the outbox copies of this app's rejections and payer's cancellations that are
@@ -424,8 +635,10 @@ impl Paykit {
                 {
                     // Nothing is decided, and no decision left by an end that didn't happen
                     // applies to a report the host causes meanwhile.
+                    // One told keeps its decision: its notice is out, and a report of its
+                    // end is still taken by it.
                     AnswerRecord::Undecided => {
-                        if stop.given_up.take().is_some() {
+                        if !stop.told && stop.given_up.take().is_some() {
                             self.local_put(&at, &stop).await?;
                         }
                         continue;

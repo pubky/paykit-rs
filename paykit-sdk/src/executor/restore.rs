@@ -294,6 +294,8 @@ impl Paykit {
     /// or the service or storage operation fails. A successful reconciliation durably
     /// accepts the complete current ledger before reporting its usage.
     pub async fn reconcile_allowance(&mut self, record: &[u8; 32]) -> Result<Option<Usage>> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         Ok(Box::pin(self.executor_base(record, LedgerRead::Inventory))
             .await?
             .map(|checked| checked.usage))

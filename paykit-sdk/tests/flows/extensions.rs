@@ -582,7 +582,7 @@ async fn test_extensions_restored_sender_waits_for_its_first_feed_read() {
     )
     .await
     .unwrap();
-    let before = restored.app().queued_messages("paykit").await.unwrap();
+    let before = restored.queued_in_delivery().await.unwrap();
     reads.then(w.alice_id(), 0, true);
     let error = restored
         .send_extension(w.bob_id(), &offer(), Vec::new(), body(1))
@@ -592,10 +592,7 @@ async fn test_extensions_restored_sender_waits_for_its_first_feed_read() {
         error.refusal(),
         Some(Refusal::IdentityUnavailable(_))
     ));
-    assert_eq!(
-        restored.app().queued_messages("paykit").await.unwrap(),
-        before
-    );
+    assert_eq!(restored.queued_in_delivery().await.unwrap(), before);
     shop.receive(None).await.unwrap();
     assert!(shop.extension_messages().await.unwrap().is_empty());
 
@@ -720,7 +717,7 @@ async fn test_extensions_send_requires_the_extension_scope_and_contacts() {
         (wallet, "paykit_ext:paykit-cap"),
         (extension, "paykit_contacts"),
     ] {
-        let before = app.app().queued_messages("paykit").await.unwrap();
+        let before = app.queued_in_delivery().await.unwrap();
         let refused = app
             .send_extension(w.bob_id(), &offer(), Vec::new(), body(1))
             .await
@@ -729,7 +726,7 @@ async fn test_extensions_send_requires_the_extension_scope_and_contacts() {
             matches!(refused.refusal(), Some(Refusal::ScopeMissing(scope)) if scope == missing),
             "{refused:?}"
         );
-        assert_eq!(app.app().queued_messages("paykit").await.unwrap(), before);
+        assert_eq!(app.queued_in_delivery().await.unwrap(), before);
     }
     shop.receive(None).await.unwrap();
     assert!(shop.extension_messages().await.unwrap().is_empty());
@@ -753,8 +750,7 @@ async fn test_extensions_queued_delivery_checks_the_block_and_the_current_certif
         .unwrap();
     async fn eligible(wallet: &Paykit, id: &str) -> bool {
         wallet
-            .app()
-            .queued_messages("paykit")
+            .queued_in_delivery()
             .await
             .unwrap()
             .into_iter()

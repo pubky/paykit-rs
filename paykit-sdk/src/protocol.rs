@@ -140,6 +140,8 @@ pub struct PaykitProtocol {
     rail: Option<Arc<dyn Rail>>,
     /// The extension kinds the host's extension handles (Paykit spec 3.3).
     extensions: Vec<ExtensionKind>,
+    /// The service time the current Paykit delivery operation observed (Paykit spec 8.1).
+    pub(crate) delivery: crate::send_holds::DeliveryClock,
 }
 
 /// [`PaykitProtocol`]'s publishing setting: not told yet.
@@ -169,6 +171,7 @@ impl PaykitProtocol {
             publishes_record: std::sync::atomic::AtomicU8::new(PUBLISHES_UNKNOWN),
             rail: None,
             extensions: Vec::new(),
+            delivery: crate::send_holds::DeliveryClock::default(),
         }
     }
 
@@ -693,6 +696,25 @@ pub(crate) fn restore_paykit_layer(
         let stop = state::restored::<crate::send_holds::QueuedStop>(&k, &value, &binder)
             .map_err(|_| "the installation holds an invalid queued stop")?;
         previous_stops.insert(k, stop);
+    }
+    // A stop told is told with its notice: the installation's notice of a stop it gave up
+    // stays with the stop, and one the host has acknowledged, which deleted it, stays gone
+    // whatever the backup holds (Paykit spec 8.1, "Undelivered messages").
+    let mut stop_notices = std::collections::BTreeMap::new();
+    for stop in previous_stops.values().filter(|stop| stop.told) {
+        let at = key::message_notice(&stop.payee, &stop.msg_id);
+        let mut held = None;
+        for (k, value) in restoring
+            .previous_local_scan(at.as_bytes())
+            .map_err(|_| "the installation's notices cannot be read")?
+        {
+            if k == at.as_bytes() {
+                state::restored::<KeptNotice>(&k, &value, &binder)
+                    .map_err(|_| "the installation holds an invalid notice")?;
+                held = Some(value);
+            }
+        }
+        stop_notices.insert(at.into_bytes(), held);
     }
     let mut cursor_time_ms = 0;
     let mut bounded = BoundedFamilies::default();
@@ -1268,6 +1290,10 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::BlockedLost { .. } => {
                 let notice =
                     state::restored::<KeptNotice>(&key, &value, &binder).map_err(|_| unread())?;
+                // The installation's notice of a stop it told wins (`stop_notices`).
+                if stop_notices.contains_key(&key) {
+                    continue;
+                }
                 // An acknowledged notice of an attempt is kept only while the journal holds
                 // the attempt (`Paykit::acknowledge_notice`): one without its entry is a
                 // state no run leaves.
@@ -1335,6 +1361,11 @@ pub(crate) fn restore_paykit_layer(
     for (key, stop) in previous_stops {
         let value = state::encode(&stop).map_err(|_| "a queued stop cannot be written")?;
         writes.push(LocalWrite::Put { key, value });
+    }
+    for (key, value) in stop_notices {
+        if let Some(value) = value {
+            writes.push(LocalWrite::Put { key, value });
+        }
     }
     if !recordings.is_subset(&awaiting_recording) {
         return Err("an offline recording has no matching payment journal entry".into());
@@ -1573,7 +1604,9 @@ impl Protocol for PaykitProtocol {
         }
         // No message the counterparty hold governs goes past its window, whichever rules
         // its kind has besides (Paykit spec 8.1, "Messages already queued").
-        if crate::send_holds::held_past_window(delivery).map_err(view_failure)? {
+        if crate::send_holds::held_past_window(delivery, self.delivery.observed())
+            .map_err(view_failure)?
+        {
             return Ok(false);
         }
         match kind {

@@ -1094,6 +1094,8 @@ impl Paykit {
     /// The call returns a [`PayResult`]: these errors are its `outcome`'s, and its
     /// `public_failures` come with them, as with any outcome.
     pub async fn pay_request(&mut self, request: &RequestRef, options: PayOptions) -> PayResult {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         let mut public_failures = Vec::new();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         let outcome = Box::pin(self.pay_request_inner(
@@ -1125,6 +1127,8 @@ impl Paykit {
         request: &RequestRef,
         options: PayOptions,
     ) -> PayResult {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         let mut public_failures = Vec::new();
         let outcome = Box::pin(self.pay_request_inner(
             request,
@@ -1154,6 +1158,8 @@ impl Paykit {
         request: &RequestRef,
         allowance: &[u8; 32],
     ) -> PayResult {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         let mut public_failures = Vec::new();
         let outcome = Box::pin(self.pay_request_inner(
             request,
@@ -1510,6 +1516,8 @@ impl Paykit {
     /// changed meanwhile, after which the caller pays to the next usable endpoint. As there,
     /// they are the [`PayResult`]'s `outcome`.
     pub async fn pay_without_request(&mut self, payment: UnrequestedPayment) -> PayResult {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         let mut public_failures = Vec::new();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         let outcome = Box::pin(self.pay_without_request_inner(payment, &mut public_failures)).await;
@@ -1705,6 +1713,8 @@ impl Paykit {
     /// the record's value is sealed under a key the app doesn't hold yet, which opens once
     /// it comes and is never replaced meanwhile; the client's errors.
     pub async fn repair_activity_record(&mut self, attempt_id: &AttemptId) -> Result<PayOutcome> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.repair_activity_record_inner(attempt_id)).await
     }
@@ -4219,6 +4229,7 @@ impl Paykit {
     /// [`Refusal::IdentityUnavailable`] when a repeat is due and the own `identity.json`
     /// isn't confirmed in the last 60 s; the client's errors; the rail's errors.
     pub async fn resume_payments(&mut self) -> Result<Vec<PayOutcome>> {
+        let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.resume_payments_inner()).await
     }
