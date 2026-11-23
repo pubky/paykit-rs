@@ -481,7 +481,12 @@ impl SeenRecords {
                 _ => return false,
             }
         }
+        // A group too large to keep raises the floor to its time with it, so the floor is
+        // never below `unkept_at`.
         (newest.is_some() || self.unkept_at.is_some())
+            && self
+                .unkept_at
+                .is_none_or(|unkept| self.dropped_at.is_some_and(|at| at >= unkept))
             && self.dropped_at.is_none_or(|at| {
                 newest.is_some_and(|newest| newest > at)
                     || self.unkept_at.is_some_and(|unkept| at <= unkept)
@@ -1391,17 +1396,16 @@ mod tests {
             serde_json::from_value(json!({"records": [], "unkept_at": null, "dropped_at": null}))
                 .unwrap();
         assert!(!records.verifies(&bob.id(), &bob.app_id()));
-        // A group too large to keep is kept as its time alone, with a floor at or before it.
+        // A group too large to keep is kept as its time alone, with the floor at it.
+        let held: SeenRecords =
+            serde_json::from_value(json!({"records": [], "unkept_at": 5, "dropped_at": 5}))
+                .unwrap();
+        assert!(held.verifies(&bob.id(), &bob.app_id()));
+        // A floor past everything kept, or at the newest record kept, or below a group too
+        // large to keep, is no value a reader writes.
         for value in [
             json!({"records": [], "unkept_at": 5, "dropped_at": null}),
-            json!({"records": [], "unkept_at": 5, "dropped_at": 5}),
-        ] {
-            let held: SeenRecords = serde_json::from_value(value).unwrap();
-            assert!(held.verifies(&bob.id(), &bob.app_id()));
-        }
-        // A floor past everything kept, or at the newest record kept, is no value a reader
-        // writes: a merge would drop that record and keep the floor alone.
-        for value in [
+            json!({"records": [], "unkept_at": 5, "dropped_at": 4}),
             json!({"records": [], "unkept_at": null, "dropped_at": 5}),
             json!({"records": [], "unkept_at": 5, "dropped_at": 6}),
             json!({"records": [], "unkept_at": null, "dropped_at": u64::MAX}),
