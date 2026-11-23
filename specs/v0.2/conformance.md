@@ -84,7 +84,7 @@ The amount to an endpoint is the request's amount times the asset-rail rate, els
 
 ### Fees are the payment method's
 
-The payer configures, reports and checks no fee: a payment by hand, an automatic one and an Allowance executor's are each paid whatever fee the payment method would charge, with no confirmation asked for it and no fee journaled (Section 7.2 step 1; wire 5.5, The amount transferred). The transfer's amount check stays: a destination that transfers another amount or asset, or an amount the method can't tell, is unusable for automatic payment and needs the user's choice by hand. Required cases include an automatic payment, an Allowance executor's included, that proceeds with a non-zero fee the method reports, and a destination that transfers another amount or asset refused for automatic payment.
+The payer configures, reports and checks no fee: a payment by hand, an automatic one and an Allowance executor's are each paid whatever fee the payment method would charge, with no confirmation asked for it and no fee journaled (Section 7.2 step 1; wire 5.5, The amount transferred). The transfer's amount check stays: a destination that transfers another amount or asset, or an amount the method can't tell, is unusable for automatic payment and needs the user's choice by hand. Required cases include an automatic payment, an Allowance executor's included, that proceeds while the payment method charges a non-zero fee it bounds internally, with no fee reported to Paykit, and a destination that transfers another amount or asset refused for automatic payment.
 
 ### Details checked against the request
 
