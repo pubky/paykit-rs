@@ -112,22 +112,7 @@ async fn test_host_calls_lookup_past_its_limit_is_not_now() {
         within(rail.allowance_history([4; 32])).await,
         Err(RailError::Unavailable(_))
     ));
-    // `verify` waits through the same bound; its proof check is the SDK's own type.
-    let stalled = Stalled { history: true };
-    let proof = MethodProof {
-        endpoint: "btc-lightning-bolt11".into(),
-        payload: None,
-        amount: Amount {
-            asset: "btc".into(),
-            value: "7".into(),
-        },
-        attempt_id: attempt.to_text(),
-        proof_json: b"{}".to_vec(),
-    };
-    assert!(matches!(
-        within(crate::method::bounded(stalled.verify(proof))).await,
-        Err(RailError::Unavailable(_))
-    ));
+    // `verify` goes through the same bound in the wallet journey, where a payee checks a proof.
 }
 
 #[tokio::test(start_paused = true)]

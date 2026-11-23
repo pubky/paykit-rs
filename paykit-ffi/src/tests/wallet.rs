@@ -51,7 +51,8 @@ fn host(world: &World, root: &Path, account: Arc<Account>) -> Arc<WalletHost> {
         account,
         vec![PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap()],
     )
-    .with_pay_limit(std::time::Duration::from_millis(300));
+    .with_pay_limit(std::time::Duration::from_millis(300))
+    .with_lookup_limit(std::time::Duration::from_secs(2));
     host.rail = Arc::new(rail);
     let env = world.app_env(Arc::new(MemoryStore::new()));
     host.clock = env.clock;
@@ -432,6 +433,16 @@ async fn payment(
         .into_iter()
         .find(|a| a.request_hash == Some(request.request_hash))
         .ok_or("missing signed payer proof")?;
+    // A proof check that never answers is cut off at the lookup limit; the payee tries again.
+    account.stall_verify.store(true, Ordering::SeqCst);
+    let stalled = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        Box::pin(seller.confirm_payment(&activity.record)),
+    )
+    .await
+    .map_err(|_| "a stalled proof check was not cut off")?;
+    assert!(stalled.is_err());
+    account.stall_verify.store(false, Ordering::SeqCst);
     let receipt = Box::pin(seller.confirm_payment(&activity.record))
         .await?
         .ok_or("missing seller receipt")?;
@@ -546,10 +557,10 @@ async fn later_checkout(
         .lend(async |app| app.pay_request(&request, options).await)
         .await?
         .into();
-    assert!(!matches!(
+    assert!(matches!(
         dispatched.decision,
         PaymentDecision::Outcome {
-            outcome: PaymentOutcome::Paid { .. }
+            outcome: PaymentOutcome::Failed { .. }
         }
     ));
     assert_eq!(account.calls.load(Ordering::SeqCst), calls);
