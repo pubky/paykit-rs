@@ -11,12 +11,12 @@
 //! Recurring requests' Billing Periods have theirs (`periods.rs`); Allowances and publishing
 //! Private Payment Lists add their own the same way.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use paykit_lib::derive::request_obligation_blinded;
 use paykit_lib::scopes::{acts_as_payee, check_certificate};
-use paykit_lib::{Asset, Decimal, Label};
+use paykit_lib::Label;
 use pubky_switch_client::app::{
     App, AppBackup, AppConfig, AppEnv, AppError, AppEvent, HeldCursor, HomeserverReader,
     IdentityRefresh, JoinRequest, ProtocolSet, ReceiveReport,
@@ -87,15 +87,6 @@ pub struct PaykitConfig {
     /// at the floor that leaves only the pre-dispatch budget, less the clock tolerance, so
     /// an app that wants later repeats sets a larger value.
     pub orphan_after_s: Option<u64>,
-    /// The largest fee the payee can influence through its destination that the app pays
-    /// without asking, per asset, in whole units of the asset the payment method transfers,
-    /// which its fee is in (Paykit spec 7.2 step 1). A fee above an asset's cap makes the destination unusable for automatic
-    /// payment and needs the user's choice by hand. With no cap for an asset, the default,
-    /// Paykit makes no check of the fee and asks nothing for it: the fee is left to the
-    /// payment method, whose own limit, if any, is the only bound on it, an Allowance
-    /// executor's payments included. Set a cap when the payment method enforces no fee limit
-    /// of its own, or for a tighter bound on unattended payments.
-    pub fee_caps: BTreeMap<Asset, Decimal>,
     /// The label a payee app sends its requests under (Paykit spec 3.1, 8.1). An app holding
     /// only labelled selling scopes needs one unless it holds exactly one label.
     pub selling_label: Option<Label>,
@@ -126,16 +117,6 @@ impl PaykitConfig {
     #[must_use]
     pub fn with_orphan_after_s(mut self, orphan_after_s: u64) -> Self {
         self.orphan_after_s = Some(orphan_after_s);
-        self
-    }
-
-    /// The largest fee the payee can influence through its destination that the app pays
-    /// without asking when the payment method transfers `asset` (Paykit spec 7.2 step 1),
-    /// replacing any cap set for that asset before. Without a cap for an asset, Paykit makes no check of the
-    /// fee ([`PaykitConfig::fee_caps`]).
-    #[must_use]
-    pub fn with_fee_cap(mut self, asset: Asset, fee_cap: Decimal) -> Self {
-        self.fee_caps.insert(asset, fee_cap);
         self
     }
 
@@ -182,7 +163,6 @@ impl Default for PaykitConfig {
         Self {
             app: AppConfig::default(),
             orphan_after_s: None,
-            fee_caps: BTreeMap::new(),
             selling_label: None,
             resend_budget: DEFAULT_RESEND_BUDGET,
             extension_kinds: Vec::new(),

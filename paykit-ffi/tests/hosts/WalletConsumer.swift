@@ -184,7 +184,7 @@ class ReceiptReader: WalletHomeserver, PaymentMethod, @unchecked Sendable {
         return SelectedEndpoints(payable: payable, failures: failures)
     }
     func transfer(endpoint: String, payload: String, amount: Amount) -> MethodTransfer {
-        try! MethodTransfer(amount: amount, maxFee: nil)
+        try! MethodTransfer(amount: amount)
     }
     func fractionDigits(endpoint: String) -> UInt32? { 8 }
     func pay(payment: MethodPayment) async throws -> MethodOutcome {

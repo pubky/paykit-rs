@@ -39,7 +39,7 @@ impl PaymentMethod for Stalled {
         })
     }
     fn transfer(&self, _: String, _: String, amount: Amount) -> Arc<MethodTransfer> {
-        MethodTransfer::new(Some(amount), None).unwrap()
+        MethodTransfer::new(Some(amount)).unwrap()
     }
     fn fraction_digits(&self, _: String) -> Option<u32> {
         None

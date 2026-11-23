@@ -114,7 +114,7 @@ internal open class ReceiptReader : WalletHomeserver, PaymentMethod {
             EndpointFailure(it.id, MethodException.Unavailable("route unavailable"))
         })
     }
-    override fun transfer(endpoint: String, payload: String, amount: Amount) = MethodTransfer(amount, null)
+    override fun transfer(endpoint: String, payload: String, amount: Amount) = MethodTransfer(amount)
     override fun fractionDigits(endpoint: String): UInt? = 8u
     override suspend fun pay(payment: MethodPayment): MethodOutcome {
         transfers += 1

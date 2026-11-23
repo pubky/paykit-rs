@@ -145,22 +145,16 @@ pub struct MethodTransfer(Transfer);
 
 #[uniffi::export]
 impl MethodTransfer {
-    /// Validate the exact amount and maximum fee the payment method would submit. The fee
-    /// is the largest the payee can influence through the destination it chose. The SDK
-    /// checks it only against a fee cap, and these bindings set none: the payment method's
-    /// own limit, if it has one, is the only bound on the fee (Paykit spec 7.2 step 1).
+    /// Validate the exact amount the payment method would submit. The fee is the payment
+    /// method's, which must bound it: the SDK configures, reports and checks none (Paykit
+    /// spec 7.2 step 1).
     #[uniffi::constructor]
-    pub fn new(amount: Option<Amount>, max_fee: Option<String>) -> Result<Arc<Self>, MethodError> {
+    pub fn new(amount: Option<Amount>) -> Result<Arc<Self>, MethodError> {
         let amount = amount
             .map(PaymentAmount::try_from)
             .transpose()
             .map_err(invalid_answer)?;
-        let fee = max_fee
-            .as_deref()
-            .map(Decimal::new)
-            .transpose()
-            .map_err(invalid_answer)?;
-        Ok(Arc::new(Self(Transfer::new(amount, fee))))
+        Ok(Arc::new(Self(Transfer::new(amount))))
     }
 }
 

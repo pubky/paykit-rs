@@ -52,7 +52,6 @@ async fn issue() -> Payment {
         fake: w.rail.clone(),
         last: Mutex::new(None),
         supplies_id: true,
-        fee: None,
     });
     let mut wallet = joined(
         &w,
