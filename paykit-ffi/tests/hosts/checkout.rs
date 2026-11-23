@@ -492,7 +492,7 @@ pub fn test_method_answers(
             .amount
             .as_ref()
             .map(Amount::from),
-        settlement_id: rail.settlement_id(&proof),
+        settlement_id: rail.settlement_id(&endpoint, &proof),
     })
 }
 

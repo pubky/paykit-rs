@@ -201,7 +201,13 @@ impl PaymentMethod for Account {
         let found=Connection::open(&self.file).unwrap().query_row("SELECT paid_at FROM payments WHERE attempt=?1 AND asset=?2 AND amount=?3 AND endpoint=?4 AND (?5 IS NULL OR payload=?5)",params![p.attempt_id,p.amount.asset,p.amount.value,p.endpoint,p.payload],|r|r.get::<_,i64>(0)).optional().unwrap();
         Ok(found.map(|at| u64::try_from(at).unwrap()))
     }
-    fn settlement_id(&self, proof: Vec<u8>) -> Result<Option<Vec<u8>>, MethodError> {
+    /// The account names a settlement by the endpoint paid and the proof's `payment`, so
+    /// two endpoints whose proofs carry the same value are two settlements.
+    fn settlement_id(
+        &self,
+        endpoint: String,
+        proof: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, MethodError> {
         if self.throw_callbacks.load(Ordering::SeqCst) {
             return Err(MethodError::Unknown {
                 reason: "settlement id threw".into(),
@@ -209,8 +215,41 @@ impl PaymentMethod for Account {
         }
         Ok(serde_json::from_slice::<serde_json::Value>(&proof)
             .ok()
-            .and_then(|proof| Some(proof.get("payment")?.as_str()?.as_bytes().to_vec())))
+            .and_then(|proof| Some(proof.get("payment")?.as_str()?.to_owned()))
+            .map(|payment| format!("{endpoint}/{payment}").into_bytes()))
     }
+}
+
+#[test]
+fn test_method_settlement_id_gets_the_endpoint_through_the_host_callback() {
+    use paykit_sdk::Rail;
+    let directory = tempfile::tempdir().unwrap();
+    let account = Arc::new(Account::open(
+        directory.path(),
+        Arc::new(pubky_switch_client::clock::TestClock::new(0)),
+    ));
+    let rail = account.rail();
+    let proof = serde_json::json!({ "payment": "same" })
+        .as_object()
+        .cloned()
+        .unwrap();
+    let first = paykit_lib::PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
+    let second = paykit_lib::PaymentEndpointIdentifier::new("btc-bitcoin-p2wpkh").unwrap();
+    // The same inner value at two endpoints is two settlements, as the method names them.
+    assert_eq!(
+        rail.settlement_id(&first, &proof),
+        Some(b"btc-lightning-bolt11/same".to_vec())
+    );
+    assert_eq!(
+        rail.settlement_id(&second, &proof),
+        Some(b"btc-bitcoin-p2wpkh/same".to_vec())
+    );
+    // A proof the method names no settlement for stays unnamed.
+    let none = serde_json::json!({ "other": "same" })
+        .as_object()
+        .cloned()
+        .unwrap();
+    assert_eq!(rail.settlement_id(&first, &none), None);
 }
 
 #[tokio::test]
@@ -270,13 +309,16 @@ fn test_method_thrown_transfer_and_settlement_id_answer_unknown_and_none() {
         rail.transfer(&endpoint, &payload, &amount).amount,
         Some(amount.clone())
     );
-    assert_eq!(rail.settlement_id(&proof), Some(b"a1".to_vec()));
+    assert_eq!(
+        rail.settlement_id(&endpoint, &proof),
+        Some(format!("{}/a1", endpoint.as_str()).into_bytes())
+    );
     assert_eq!(rail.fraction_digits(&endpoint), Some(8));
     account.throw_callbacks.store(true, Ordering::SeqCst);
     // A thrown transfer is an amount the method can't tell, which the user confirms.
     let transfer = rail.transfer(&endpoint, &payload, &amount);
     assert_eq!((transfer.amount, transfer.max_fee), (None, None));
-    assert_eq!(rail.settlement_id(&proof), None);
+    assert_eq!(rail.settlement_id(&endpoint, &proof), None);
 }
 
 #[test]

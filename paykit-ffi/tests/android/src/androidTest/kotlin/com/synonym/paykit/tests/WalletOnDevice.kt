@@ -54,7 +54,8 @@ private class DeviceMethod(ledger: File) : CheckoutMethod(ledger) {
         super.selectEndpoints(candidates, amount).also { recorded() }
     override fun transfer(endpoint: String, payload: String, amount: Amount): MethodTransfer =
         super.transfer(endpoint, payload, amount).also { recorded() }
-    override fun settlementId(proofJson: ByteArray): ByteArray? = super.settlementId(proofJson).also { recorded() }
+    override fun settlementId(endpoint: String, proofJson: ByteArray): ByteArray? =
+        super.settlementId(endpoint, proofJson).also { recorded() }
 }
 
 private class DeviceStore(private val inner: EnrollmentStore) : WalletStore {

@@ -17,7 +17,6 @@ use serde_json::{Map, Value};
 
 use crate::allowances::AllowanceTerms;
 use crate::amount::{is_conversion_segment, Asset, Decimal, PaymentAmount, Rate};
-use crate::derive::settlement_id;
 use crate::error::{ensure, invalid, Error, Result};
 use crate::identifiers::{
     AllowanceId, AttemptId, PaymentEndpointIdentifier, PaymentEndpointPayload, PaymentReference,
@@ -1007,12 +1006,6 @@ impl PaymentProof {
         }
         map.insert("proof".into(), Value::Object(self.proof.clone()));
         map
-    }
-
-    /// The settlement ID the proof names (Paykit wire 1.5), if its method gives one in its
-    /// one spelling; a proof without one isn't credited as a payment without a request.
-    pub fn settlement_id(&self) -> Option<Vec<u8>> {
-        settlement_id(&self.proof)
     }
 
     /// The checks that need the request the proof's `refs` name (Paykit wire 4.10): a

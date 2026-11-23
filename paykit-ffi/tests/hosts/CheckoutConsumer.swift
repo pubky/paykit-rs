@@ -86,7 +86,7 @@ class CheckoutMethod: ReceiptReader, @unchecked Sendable {
             return paidAt
         }
     }
-    override func settlementId(proofJson: Data) throws -> Data? {
+    override func settlementId(endpoint: String, proofJson: Data) throws -> Data? {
         guardLock.withLock {
             guard let attempt = try? stored(), proofJson == originalProof(attempt) else { return nil }
             return Data(attempt.utf8)
@@ -345,12 +345,12 @@ private final class ThrowingMethod: ReceiptReader, @unchecked Sendable {
     private func fail() -> Error { declared ? MethodError.Unknown(reason: "callback failed") : Crash() }
     override func selectEndpoints(candidates: [EndpointCandidate], amount: Amount?) throws -> SelectedEndpoints { throw fail() }
     override func transfer(endpoint: String, payload: String, amount: Amount) throws -> MethodTransfer { throw fail() }
-    override func settlementId(proofJson: Data) throws -> Data? { throw fail() }
+    override func settlementId(endpoint: String, proofJson: Data) throws -> Data? { throw fail() }
 }
 
 /// A method that names the settlement of every proof.
 private final class SettlingMethod: ReceiptReader, @unchecked Sendable {
-    override func settlementId(proofJson: Data) throws -> Data? { Data("a1".utf8) }
+    override func settlementId(endpoint: String, proofJson: Data) throws -> Data? { Data("a1".utf8) }
 }
 
 /// A callback that throws reads as no answer: no endpoint, an amount to confirm, no settlement.

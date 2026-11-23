@@ -4067,7 +4067,7 @@ impl Paykit {
                     None,
                     &key,
                     |target| self.app.record_key(target).ok(),
-                    &|proof| self.rail.settlement_id(proof),
+                    &|endpoint, proof| self.rail.settlement_id(endpoint, proof),
                 );
                 if !bound
                     .as_ref()
