@@ -1493,10 +1493,12 @@ async fn test_public_older_record_after_an_older_in_place_restore_not_used() {
     )
     .await
     .unwrap();
+    // Before any receive, the first read already refuses the stale copy.
+    serve(&w, &older);
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
     wallet.receive(None).await.unwrap();
     wallet.reconcile().await.unwrap();
     wallet.end_reconcile(UserConfirmed::new()).await.unwrap();
-    serve(&w, &older);
     assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
     // A record newer than both is used as usual.
     publish_at(
@@ -1506,4 +1508,52 @@ async fn test_public_older_record_after_an_older_in_place_restore_not_used() {
         expiry,
     );
     assert_eq!(listed(&mut wallet, &w).await, ["btc-bitcoin-p2wpkh"]);
+}
+
+#[tokio::test]
+async fn test_public_conflict_seen_after_the_backup_kept_across_an_in_place_restore() {
+    // The wallet sees bob's record and is backed up; then it sees a second, different record
+    // at the same time, a conflict, so neither is used. Restored in place from the older
+    // backup, the installation's seen records are merged with the backup's, the conflict
+    // with them: the first record served again alone is still not used (Switch spec 4.2).
+    let w = World::new();
+    let storage = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", std::sync::Arc::clone(&storage)).await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    let first = publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1first"),
+        t0,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    let backup = wallet.backup().await.unwrap();
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1second"),
+        t0,
+        expiry,
+    );
+    let conflicted = listed(&mut wallet, &w).await;
+    drop(wallet);
+    let mut wallet = paykit_sdk::Paykit::restore(
+        w.env(&w.alice, storage),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    // Before any receive, the first read already sees the conflict.
+    serve(&w, &first);
+    assert_eq!(listed(&mut wallet, &w).await, conflicted);
+    wallet.receive(None).await.unwrap();
+    wallet.reconcile().await.unwrap();
+    wallet.end_reconcile(UserConfirmed::new()).await.unwrap();
+    assert_eq!(listed(&mut wallet, &w).await, conflicted);
+    assert_ne!(conflicted, ["btc-lightning-bolt11"]);
 }

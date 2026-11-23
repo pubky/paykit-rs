@@ -1449,8 +1449,9 @@ pub(crate) fn restore_paykit_layer(
 ///   "Blocked counterparties");
 /// - every block of its own the list doesn't show yet, which the restored app writes
 ///   again (Paykit spec 8.1);
-/// - the payee app records it has seen, where it has seen a newer one than the backup, so a
-///   record older than one seen is never used again (Switch spec 4.2);
+/// - the payee app records it has seen, merged with the backup's as one set, so a record
+///   older than one seen, or one side of a conflict either saw, is never used again (Switch
+///   spec 4.2);
 /// - a list it holds over a record that doesn't read, where it is newer than the backup's,
 ///   so a later list, a withdrawal included, is never lost under an older one (Paykit wire
 ///   5.4).
@@ -1545,9 +1546,12 @@ fn keep_installation_stops(
                 };
                 let backup = state::restored::<crate::app_records::SeenRecords>(&at, held, binder)
                     .map_err(|_| "the backup's seen app records don't verify")?;
-                if seen.newest_at(&payee) > backup.newest_at(&payee) {
-                    writes[i] = LocalWrite::Put { key: at, value };
-                }
+                let merged = seen
+                    .merged(&backup, &payee)
+                    .ok_or("the installation holds seen app records that don't verify")?;
+                let value =
+                    state::encode(&merged).map_err(|_| "seen app records cannot be retained")?;
+                writes[i] = LocalWrite::Put { key: at, value };
             }
         }
     }

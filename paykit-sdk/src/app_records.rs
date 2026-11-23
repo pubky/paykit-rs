@@ -344,21 +344,13 @@ pub(crate) struct SeenRecords {
 }
 
 impl SeenRecords {
-    /// Insert into timestamp order and keep the newest complete groups within both bounds.
-    /// Return their view, or `None` if the served record itself would have to be dropped.
-    fn keep(
-        &mut self,
-        record: &AppRecord,
-        mut held: Vec<AppRecord>,
-        now: u64,
-    ) -> Option<RecordView> {
-        let at = held.partition_point(|r| r.updated_at() <= record.updated_at());
-        held.insert(at, record.clone());
+    /// Where the kept part of `held`, in timestamp order, starts: the newest complete
+    /// timestamp groups that fit both bounds. Keeping just one side of a conflict could make
+    /// it the fallback for a later conflict (Switch spec 4.2).
+    fn kept_from(held: &[AppRecord]) -> usize {
         let mut count = 0;
         let mut bytes = 0usize;
         let mut start = held.len();
-        // Keep the newest complete timestamp groups that fit. Keeping just one side of a
-        // conflict could make it the fallback for a later conflict (Switch spec 4.2).
         for group in held.chunk_by(|a, b| a.updated_at() == b.updated_at()).rev() {
             count += group.len();
             for item in group {
@@ -370,6 +362,20 @@ impl SeenRecords {
             }
             start -= group.len();
         }
+        start
+    }
+
+    /// Insert into timestamp order and keep the newest complete groups within both bounds.
+    /// Return their view, or `None` if the served record itself would have to be dropped.
+    fn keep(
+        &mut self,
+        record: &AppRecord,
+        mut held: Vec<AppRecord>,
+        now: u64,
+    ) -> Option<RecordView> {
+        let at = held.partition_point(|r| r.updated_at() <= record.updated_at());
+        held.insert(at, record.clone());
+        let start = Self::kept_from(&held);
         if at < start {
             self.unkept_at = self.unkept_at.max(Some(record.updated_at()));
             return None;
@@ -407,16 +413,36 @@ impl SeenRecords {
             })
     }
 
-    /// The latest time these seen records reach: the newest kept record's `updated_at`, or
-    /// the time of a group the reader couldn't keep, whichever is later. `None` when a kept
-    /// record doesn't verify as `payee`'s.
-    pub(crate) fn newest_at(&self, payee: &[u8; 32]) -> Option<u64> {
-        let mut newest = self.unkept_at;
-        for signed in &self.records {
-            let at = AppRecord::verify(signed, payee).ok()?.updated_at();
-            newest = Some(newest.map_or(at, |n| n.max(at)));
+    /// The union of these seen records and `other`'s, both of one app of `payee` (Switch spec
+    /// 4.2): every record of either, once, kept as a read keeps them
+    /// ([`SeenRecords::kept_from`]), so a conflict either saw stays one. The unkept bound is
+    /// the later of the two, or the newest group's if none fits, and a kept record later
+    /// than it lifts it, as at a read. `None` when a record doesn't verify as `payee`'s.
+    pub(crate) fn merged(&self, other: &Self, payee: &[u8; 32]) -> Option<Self> {
+        let mut all: Vec<AppRecord> = Vec::new();
+        let mut docs: Vec<Vec<u8>> = Vec::new();
+        for signed in self.records.iter().chain(&other.records) {
+            let record = AppRecord::verify(signed, payee).ok()?;
+            let bytes = serde_json::to_vec(record.signed()).ok()?;
+            if !docs.contains(&bytes) {
+                docs.push(bytes);
+                all.push(record);
+            }
         }
-        newest
+        all.sort_by_key(AppRecord::updated_at);
+        let start = Self::kept_from(&all);
+        let mut unkept_at = self.unkept_at.max(other.unkept_at);
+        if let Some(newest) = all.last() {
+            if start == all.len() {
+                unkept_at = unkept_at.max(Some(newest.updated_at()));
+            } else if unkept_at.is_some_and(|at| newest.updated_at() > at) {
+                unkept_at = None;
+            }
+        }
+        Some(Self {
+            records: all.into_iter().skip(start).map(SignedDoc::from).collect(),
+            unkept_at,
+        })
     }
 
     /// The view the records give, at the reader's clock `now`. A kept record that no longer
@@ -1039,6 +1065,49 @@ mod tests {
         let (_, kept) = seen.view(&bob.id(), NOW + DAY_MS).unwrap();
         assert_eq!(kept.len(), SEEN_RECORDS - 1);
         assert_eq!(kept.first().unwrap().updated_at(), NOW + 1);
+    }
+
+    #[test]
+    fn test_app_records_merged_keeps_both_sides_and_the_unkept_bound() {
+        let (bob, _) = discovery_records();
+        let signed = |ms, member| {
+            serde_json::from_slice::<SignedDoc>(&record_bytes(
+                &bob,
+                member,
+                NOW + ms,
+                Some(NOW + DAY_MS),
+            ))
+            .unwrap()
+        };
+        let times = |seen: &SeenRecords| -> Vec<u64> {
+            let mut at: Vec<_> = seen
+                .records
+                .iter()
+                .map(|doc| AppRecord::verify(doc, &bob.id()).unwrap().updated_at() - NOW)
+                .collect();
+            at.sort_unstable();
+            at
+        };
+        let seen = |records, unkept_at| SeenRecords { records, unkept_at };
+        // Each side of a conflict, and a record both hold, kept once.
+        let first = seen(vec![signed(0, tip_jar()), signed(1, tip_jar())], None);
+        let second = seen(vec![signed(0, tip_jar()), signed(1, json!({}))], None);
+        let merged = first.merged(&second, &bob.id()).unwrap();
+        assert_eq!(times(&merged), [0, 1, 1]);
+        assert!(merged.view(&bob.id(), NOW + 1).unwrap().0.in_conflict());
+        assert!(!first.view(&bob.id(), NOW + 1).unwrap().0.in_conflict());
+
+        // A group one side couldn't keep holds the older records the other side has.
+        let held = seen(Vec::new(), Some(NOW + 5));
+        let merged = held.merged(&first, &bob.id()).unwrap();
+        assert_eq!(merged.unkept_at, Some(NOW + 5));
+        assert_eq!(times(&merged), [0, 1]);
+        // A later record either holds lifts it, as at a read.
+        let later = seen(vec![signed(6, tip_jar())], None);
+        assert_eq!(held.merged(&later, &bob.id()).unwrap().unkept_at, None);
+
+        // A record of another identity refuses the merge.
+        assert!(first.merged(&second, &[9; 32]).is_none());
     }
 
     #[test]
