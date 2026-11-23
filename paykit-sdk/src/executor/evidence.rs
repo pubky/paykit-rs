@@ -301,6 +301,22 @@ pub(crate) struct OwnWrite {
 }
 
 impl OwnWrite {
+    /// The write at `version` and `at_ms` by `writer`, when that is `own`, this app: another
+    /// app's write is never vouched for by this app's evidence.
+    pub(crate) fn of(
+        version: RecordVersion,
+        at_ms: u64,
+        writer: Option<[u8; 16]>,
+        own: [u8; 16],
+    ) -> Option<Self> {
+        let writer = writer.filter(|id| *id == own)?;
+        Some(Self {
+            version,
+            at_ms,
+            writer,
+        })
+    }
+
     /// Whether the read `held` shows this write: its version authenticated by the client, or
     /// exactly this write's version, time and writer.
     pub(crate) fn stands_for(&self, held: &SharedRecord) -> bool {
@@ -442,13 +458,15 @@ impl AppliedRecord {
         })
     }
 
-    /// This write, as [`OwnWrite`] names it.
-    pub(super) fn own_write(&self) -> Option<OwnWrite> {
-        Some(OwnWrite {
-            version: self.version(),
-            at_ms: self.at_ms,
-            writer: self.op.body().app_id?,
-        })
+    /// This write, as [`OwnWrite`] names it, when this app wrote it: another app's write
+    /// is never vouched for by this app's evidence.
+    pub(super) fn own_write(&self, app: &App) -> Option<OwnWrite> {
+        OwnWrite::of(
+            self.version(),
+            self.at_ms,
+            self.op.body().app_id,
+            app.app_id(),
+        )
     }
 
     pub(super) fn current(
@@ -472,7 +490,11 @@ impl AppliedRecord {
             return None;
         };
         let applied = Self::retained(app, target, kept)?;
-        if !applied.own_write()?.stands_for(fresh)
+        let shown = fresh.authenticated
+            || applied
+                .own_write(app)
+                .is_some_and(|own| own.stands_for(fresh));
+        if !shown
             || applied.version() != fresh.version
             || Some(applied.at_ms) != fresh.written_at_ms
             || applied.op.body().app_id != Some(fresh.writer)
@@ -799,6 +821,15 @@ mod tests {
         assert!(!Purpose::Authorizes.admits(2, 3, None));
         assert!(!Purpose::Authorizes.admits(2, 3, Some(2)));
         assert!(!Purpose::Authorizes.admits(4, 3, None));
+    }
+
+    #[test]
+    fn test_evidence_own_write_is_only_this_apps() {
+        // Another app's write, or one naming no app, is never this app's own write.
+        let version = RecordVersion::new(1, 7);
+        assert!(OwnWrite::of(version, 1_000, Some([3; 16]), [3; 16]).is_some());
+        assert!(OwnWrite::of(version, 1_000, Some([4; 16]), [3; 16]).is_none());
+        assert!(OwnWrite::of(version, 1_000, None, [3; 16]).is_none());
     }
 
     #[test]

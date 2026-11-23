@@ -4983,6 +4983,63 @@ async fn test_executor_acceptance_applied_before_an_orderly_generation_change_is
     );
 }
 
+#[tokio::test]
+async fn test_executor_acceptance_kept_across_an_orderly_generation_change_is_taken_up() {
+    // The acceptance's batch is kept unapplied over an orderly generation change, and the
+    // client signs it again for the new generation: it is still the acceptance the user
+    // approved, and the executor takes the Allowance up (Paykit spec 8.3; Pubky Switch spec,
+    // Section 12.5).
+    use pubky_switch_client::testing::Fault;
+    let world = World::new();
+    let mut payer = Box::pin(world.join_with(
+        &world.alice,
+        "wallet",
+        AppScopes::new().allowance_execute().build().unwrap(),
+        Default::default(),
+        crate::common::store(),
+    ))
+    .await;
+    let mut shop = Box::pin(world.join(
+        &world.bob,
+        "shop",
+        AppScopes::new().allowance().request().build().unwrap(),
+    ))
+    .await;
+    world.rail.set_history_payer(payer.identity());
+    payer.app_mut().invite(&shop.identity()).await.unwrap();
+    shop.app_mut().invite(&payer.identity()).await.unwrap();
+    Box::pin(payer.propose_executable_allowance(shop.identity(), terms(), UserConfirmed::new()))
+        .await
+        .unwrap();
+    Box::pin(shop.receive(None)).await.unwrap();
+    let offer = shop.allowances().await.unwrap().pop().unwrap();
+    Box::pin(shop.accept_allowance(&offer.record))
+        .await
+        .unwrap();
+    world.alice.switch().fail_next(Fault::Unanswered {
+        path: "/ops".into(),
+        after: 0,
+    });
+    let _ = Box::pin(payer.receive(None)).await;
+    let _service = Box::pin(crate::allowances::advance_allowance_generation(
+        &world, &mut payer,
+    ))
+    .await;
+    let key = payer.allowances().await.unwrap().pop().unwrap().record;
+    assert_eq!(
+        payer.allowance(&key).await.unwrap().status,
+        AllowanceStatus::Accepted
+    );
+    Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .unwrap();
+    let paid = Box::pin(pays_under(&world, &mut shop, &mut payer, &key, "1")).await;
+    assert!(
+        matches!(paid.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "{paid:?}"
+    );
+}
+
 /// An orderly change of `payer`'s generation whose new `identity.json` doesn't list the
 /// earlier generation's service key.
 async fn change_dropping_the_earlier_key(
