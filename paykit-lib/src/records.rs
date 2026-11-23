@@ -723,7 +723,21 @@ impl StoredMessage {
         accepted_at: Option<u64>,
         recipient: &[u8; 32],
     ) -> Result<Self> {
-        let cert = scopes::verify_certificate(cert, &sender)?;
+        Self::checked(sender, cert, plaintext, accepted_at, recipient, None)
+    }
+
+    fn checked(
+        sender: [u8; 32],
+        cert: &SignedDoc,
+        plaintext: MessagePlaintext,
+        accepted_at: Option<u64>,
+        recipient: &[u8; 32],
+        certs: Option<&mut scopes::CertificateMemo>,
+    ) -> Result<Self> {
+        let cert = match certs {
+            Some(certs) => certs.verify(cert, &sender)?,
+            None => scopes::verify_certificate(cert, &sender)?,
+        };
         if let Some(at) = accepted_at {
             ensure(
                 !cert.expired_at(at),
@@ -796,6 +810,28 @@ impl StoredMessage {
     ///
     /// [`Error::Switch`] for the Switch's checks, [`Error::Invalid`] for Paykit's.
     pub fn read(value: &Value, recipient: &[u8; 32]) -> Result<Self> {
+        Self::read_checked(value, recipient, None)
+    }
+
+    /// [`StoredMessage::read`], with the certificate verified through `certs`: every other
+    /// check runs in full.
+    ///
+    /// # Errors
+    ///
+    /// As [`StoredMessage::read`].
+    pub fn read_with(
+        value: &Value,
+        recipient: &[u8; 32],
+        certs: &mut scopes::CertificateMemo,
+    ) -> Result<Self> {
+        Self::read_checked(value, recipient, Some(certs))
+    }
+
+    fn read_checked(
+        value: &Value,
+        recipient: &[u8; 32],
+        certs: Option<&mut scopes::CertificateMemo>,
+    ) -> Result<Self> {
         const CTX: &str = "Paykit wire 5.2: stored message";
         let obj = Obj::of(value, CTX, "stored message")?;
         let cert = obj.req_obj("cert")?;
@@ -810,12 +846,13 @@ impl StoredMessage {
             p.req_b64::<64>("signature")?,
             json,
         )?;
-        Self::new(
+        Self::checked(
             obj.req_pubky("sender")?,
             &cert,
             plaintext,
             obj.opt_time("accepted_at")?,
             recipient,
+            certs,
         )
     }
 
@@ -1374,6 +1411,30 @@ impl ActivityRecord {
     ///
     /// [`Error::Invalid`] or [`Error::Switch`] naming the rule: the record is invalid.
     pub fn read(json: &[u8], own: &[u8; 32], side: ActivitySide) -> Result<Self> {
+        Self::read_checked(json, own, side, None)
+    }
+
+    /// [`ActivityRecord::read`], with each stored message's certificate verified through
+    /// `certs` ([`scopes::CertificateMemo`]): every other check runs in full.
+    ///
+    /// # Errors
+    ///
+    /// As [`ActivityRecord::read`].
+    pub fn read_with(
+        json: &[u8],
+        own: &[u8; 32],
+        side: ActivitySide,
+        certs: &mut scopes::CertificateMemo,
+    ) -> Result<Self> {
+        Self::read_checked(json, own, side, Some(certs))
+    }
+
+    fn read_checked(
+        json: &[u8],
+        own: &[u8; 32],
+        side: ActivitySide,
+        mut certs: Option<&mut scopes::CertificateMemo>,
+    ) -> Result<Self> {
         let map = parse_object(json, ACTIVITY)?;
         let obj = Obj::new(&map, ACTIVITY);
         check_v1(&obj)?;
@@ -1403,7 +1464,7 @@ impl ActivityRecord {
                 "Paykit wire 5.3: a stored message from the wrong side",
             )?;
             let recipient = if sender == payer { payee } else { payer };
-            let stored = StoredMessage::read(value, &recipient)?;
+            let stored = StoredMessage::read_checked(value, &recipient, certs.as_deref_mut())?;
             ensure(
                 kinds.contains(&stored.body.kind()),
                 "Paykit wire 5.3: a member holds another kind",
@@ -1425,7 +1486,7 @@ impl ActivityRecord {
                 sender == payee,
                 "Paykit wire 5.3: a stored message from the wrong side",
             )?;
-            let stored = StoredMessage::read(value, &payer)?;
+            let stored = StoredMessage::read_checked(value, &payer, certs.as_deref_mut())?;
             ensure(
                 EARLIER_DETAILS.1.contains(&stored.body.kind()),
                 "Paykit wire 5.3: a member holds another kind",

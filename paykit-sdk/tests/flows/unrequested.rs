@@ -741,6 +741,16 @@ async fn test_unrequested_list_after_a_delete_stays_held_and_its_single_use_endp
     let (_, placed) = list_record(&wallet, &w).await;
     assert_eq!(placed["used"].as_array().unwrap().len(), 1, "{placed}");
     assert_eq!(w.rail.all_executions().len(), 1);
+
+    // The delete stays known after the placement: restored from a backup taken now, after
+    // the service forgets the record, the list sent again over the absent key is held, never
+    // written afresh without the mark.
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    w.alice.switch().drop_record(&key).unwrap();
+    let mut restored = restored_onto(&w, crate::common::store(), &backup).await;
+    restored.receive(None).await.unwrap();
+    assert_list_stays_held_and_unpaid(&w, &mut restored, &mut shop, &key).await;
 }
 
 #[tokio::test]

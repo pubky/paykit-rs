@@ -988,6 +988,105 @@ async fn test_local_state_notice_handle_of_another_entry_forgets_nothing() {
     assert!(held(&wallet, &key).await.is_some());
 }
 
+/// A list of bob's shop at `version`, kept as a held list is.
+fn shop_list_at(w: &World, version: paykit_lib::ListVersion) -> Value {
+    kept(kept_message(
+        w,
+        "shop",
+        "shop",
+        &w.alice,
+        "paykit.private_payment_list",
+        Value::Object(
+            paykit_lib::bodies::PrivatePaymentList {
+                version,
+                payment_endpoints: std::collections::BTreeMap::new(),
+                expires_at: w.clock.now_ms() + 86_400_000,
+            }
+            .to_body()
+            .unwrap(),
+        ),
+    ))
+}
+
+/// The `msg_id` of the list the `payment_lists` record at `record` holds.
+async fn recorded_list(wallet: &Paykit, record: &[u8; 32]) -> String {
+    let held = wallet.app().shared_record(record).await.unwrap().unwrap();
+    let value: Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
+    let message = &value["list"]["plaintext"]["json"];
+    let message: Value = match message.as_str() {
+        Some(text) => {
+            serde_json::from_slice(&pubky_switch_core::enc::unb64(text).unwrap()).unwrap()
+        }
+        None => message.clone(),
+    };
+    message["msg_id"].as_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn test_local_state_late_held_list_placement_keeps_a_newer_held_list() {
+    // The placement of a held list v3 is kept to send again; meanwhile a newer list v4 is
+    // held over the record in its place, as the receive step holds one. The kept placement
+    // carries no delete of the hold, so when it lands v4 stays held, and is placed after it,
+    // never lost.
+    use pubky_switch_client::testing::Fault;
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
+    wallet.receive(None).await.unwrap();
+    let target = lists_of(&w, &shop.app_id());
+    let record = wallet.app().record_key(&target).unwrap();
+    let readable = wallet
+        .app()
+        .shared_record(&record)
+        .await
+        .unwrap()
+        .unwrap()
+        .content
+        .value()
+        .unwrap()
+        .to_vec();
+    wallet
+        .app_mut()
+        .put_record(&target, b"{}", Vec::new())
+        .await
+        .unwrap();
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 3))
+        .await;
+    wallet.receive(None).await.unwrap();
+    let v3 = wallet.held_lists().await.unwrap().remove(0);
+    assert_eq!(v3.version, list_version(1, 3));
+    wallet
+        .app_mut()
+        .put_record(&target, &readable, Vec::new())
+        .await
+        .unwrap();
+    w.alice.switch().fail_next(Fault::Unanswered {
+        path: "/ops".into(),
+        after: 0,
+    });
+    let _ = wallet.receive(None).await;
+    let v4 = shop_list_at(&w, list_version(1, 4));
+    let v4_id = crate::restore::kept_msg_id(&v4);
+    wallet
+        .app_mut()
+        .protocol_commit(
+            "paykit",
+            &[LocalWrite::Put {
+                key: format!("lh/{}", b64(&record)).into_bytes(),
+                value: serde_json::to_vec(&v4).unwrap(),
+            }],
+        )
+        .await
+        .unwrap();
+    // The kept placement is sent again and applied; the next placement takes v4.
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(recorded_list(&wallet, &record).await, v4_id);
+    assert!(wallet.held_lists().await.unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn test_local_state_journal_expiry_without_an_allowance_is_corrupt() {
     // An Allowance's expiry is journaled only with the Allowance it reserved under; an entry

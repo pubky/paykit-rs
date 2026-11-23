@@ -491,6 +491,79 @@ pub fn verify_certificate(signed: &SignedDoc, identity: &[u8; 32]) -> Result<App
     Ok(cert)
 }
 
+/// The certificates a reader verified with [`verify_certificate`], so that reading the same
+/// certificate again, as every stored message from one app carries it, doesn't verify its
+/// signature again (Paykit wire 5.2).
+///
+/// **Why a hit is the call's own result.** [`verify_certificate`] is pure over its two
+/// inputs: the signed certificate's exact bytes, its `body` and `sig`, and the identity it
+/// is verified for. It reads no clock, no store and no state outside them: the Switch's
+/// signature and member checks, then Paykit's scope rules over the certificate itself. So
+/// the same inputs always give the same result. The memo keeps only certificates that
+/// passed, keyed by a hash of both inputs, and a hit is taken only when the entry's own
+/// bytes and identity equal the inputs, so a hash collision can't stand in for a check.
+/// A certificate's expiry isn't part of it: the caller judges it against the message's
+/// `accepted_at`, on every read.
+///
+/// It holds at most [`CertificateMemo::CAP`] certificates and starts over when full: a
+/// clear only costs one verification more per certificate. Its holder decides its
+/// lifetime; it never outlives the process.
+#[derive(Debug, Default)]
+pub struct CertificateMemo {
+    verified: std::collections::HashMap<[u8; 32], ([u8; 32], AppCert)>,
+    verifications: u64,
+}
+
+impl CertificateMemo {
+    /// The most certificates held at once.
+    pub const CAP: usize = 256;
+
+    /// [`verify_certificate`] for `signed` and `identity`, or the certificate it returned
+    /// for those exact inputs before.
+    ///
+    /// # Errors
+    ///
+    /// As [`verify_certificate`]; a refused certificate is never kept, so it is checked
+    /// again every time.
+    pub fn verify(&mut self, signed: &SignedDoc, identity: &[u8; 32]) -> Result<AppCert> {
+        let key = memo_key(signed, identity);
+        if let Some((held, cert)) = self.verified.get(&key) {
+            if held == identity && cert.signed() == signed {
+                return Ok(cert.clone());
+            }
+        }
+        self.verifications = self.verifications.saturating_add(1);
+        let cert = verify_certificate(signed, identity)?;
+        if self.verified.len() >= Self::CAP {
+            self.verified.clear();
+        }
+        self.verified.insert(key, (*identity, cert.clone()));
+        Ok(cert)
+    }
+
+    /// How many times [`verify_certificate`] ran through this memo.
+    pub fn verifications(&self) -> u64 {
+        self.verifications
+    }
+
+    /// Forget every certificate held.
+    pub fn clear(&mut self) {
+        self.verified.clear();
+    }
+}
+
+/// The memo's key: a hash of the certificate's `body` and `sig` and the identity, each
+/// length-prefixed so no two inputs share it.
+fn memo_key(signed: &SignedDoc, identity: &[u8; 32]) -> [u8; 32] {
+    let mut bytes = Vec::with_capacity(signed.body.len() + signed.sig.len() + 48);
+    for part in [signed.body.as_bytes(), signed.sig.as_bytes()] {
+        bytes.extend_from_slice(&(part.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(part);
+    }
+    bytes.extend_from_slice(identity);
+    pubky_switch_core::enc::hash(&bytes)
+}
+
 /// Whether a verified certificate was in force at the service-authenticated time of a
 /// record write (Switch wire 6.2, step 4). A removal includes its cutoff and a closed
 /// renewal excludes its end.
@@ -895,6 +968,113 @@ mod tests {
             ),
         )
         .unwrap()
+    }
+
+    /// A certificate Paykit accepts, of identity `[6; 32]`, for an app whose keys come from
+    /// `seed`.
+    fn valid(seed: u16) -> AppCert {
+        let identity = IdentityKey::from_secret([6; 32]);
+        let [hi, lo] = seed.to_be_bytes();
+        let app = AppKeys::from_secrets(
+            [
+                hi, lo, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 1, 1,
+            ],
+            [
+                hi, lo, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+                2, 2, 2, 2, 2,
+            ],
+        );
+        let scopes = owned(&["paykit_pay", "paykit_contacts"]);
+        AppCert::issue(
+            &identity,
+            AppCertBody::new(
+                identity.public(),
+                app.signing_public(),
+                app.bundle_public(),
+                scopes.clone(),
+                &permissions_for(&scopes),
+                1_767_225_600_000,
+                1_767_225_600_000 + 86_400_000,
+            ),
+        )
+        .unwrap()
+    }
+
+    fn certificate_identity() -> [u8; 32] {
+        IdentityKey::from_secret([6; 32]).public()
+    }
+
+    #[test]
+    fn test_scopes_certificate_memo_verifies_a_certificate_once() {
+        let cert = valid(1);
+        let id = certificate_identity();
+        let mut memo = CertificateMemo::default();
+        for _ in 0..3 {
+            assert_eq!(memo.verify(cert.signed(), &id).unwrap(), cert);
+        }
+        assert_eq!(memo.verifications(), 1);
+        // Cleared, it verifies again.
+        memo.clear();
+        assert_eq!(memo.verify(cert.signed(), &id).unwrap(), cert);
+        assert_eq!(memo.verifications(), 2);
+    }
+
+    #[test]
+    fn test_scopes_certificate_memo_verifies_changed_bytes_again() {
+        let (a, b) = (valid(1), valid(2));
+        let id = certificate_identity();
+        let mut memo = CertificateMemo::default();
+        assert_eq!(memo.verify(a.signed(), &id).unwrap(), a);
+        assert_eq!(memo.verify(b.signed(), &id).unwrap(), b);
+        assert_eq!(memo.verifications(), 2);
+        // The first one's body under the second's signature: verified again, refused, and
+        // refused again at the next read, as a refusal is never kept.
+        let forged = SignedDoc {
+            body: a.signed().body.clone(),
+            sig: b.signed().sig.clone(),
+        };
+        for n in 3..5 {
+            assert!(memo.verify(&forged, &id).is_err());
+            assert_eq!(memo.verifications(), n);
+        }
+        // The same signature over another body is verified again too.
+        let forged = SignedDoc {
+            body: b.signed().body.clone(),
+            sig: a.signed().sig.clone(),
+        };
+        assert!(memo.verify(&forged, &id).is_err());
+        assert_eq!(memo.verifications(), 5);
+    }
+
+    #[test]
+    fn test_scopes_certificate_memo_verifies_another_identity_again() {
+        let cert = valid(1);
+        let mut memo = CertificateMemo::default();
+        memo.verify(cert.signed(), &certificate_identity()).unwrap();
+        let other = IdentityKey::from_secret([7; 32]).public();
+        for n in 2..4 {
+            assert!(memo.verify(cert.signed(), &other).is_err());
+            assert_eq!(memo.verifications(), n);
+        }
+    }
+
+    #[test]
+    fn test_scopes_certificate_memo_starts_over_when_full() {
+        let id = certificate_identity();
+        let certs: Vec<AppCert> = (0..=CertificateMemo::CAP as u16).map(valid).collect();
+        let mut memo = CertificateMemo::default();
+        for cert in &certs[..CertificateMemo::CAP] {
+            memo.verify(cert.signed(), &id).unwrap();
+        }
+        memo.verify(certs[0].signed(), &id).unwrap();
+        assert_eq!(memo.verifications(), CertificateMemo::CAP as u64);
+        // One more, past the cap: it starts over, and the first is verified again.
+        memo.verify(certs[CertificateMemo::CAP].signed(), &id)
+            .unwrap();
+        assert!(memo.verified.len() <= CertificateMemo::CAP);
+        memo.verify(certs[0].signed(), &id).unwrap();
+        assert_eq!(memo.verifications(), CertificateMemo::CAP as u64 + 2);
     }
 
     const LISTS_READ: Permission = Permission::ListsRead;
