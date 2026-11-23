@@ -742,7 +742,8 @@ pub(crate) struct LostListRecord {
 
 /// The fewest bytes a `used` entry takes in a `payment_lists` value, with the comma after it:
 /// `{"version":{"generation":1,"counter":1},"endpoint":"a","attempt_id":"<22 characters>"}`
-/// is 93 (Paykit wire 5.4).
+/// is 93 (Paykit wire 5.4). The last entry has no comma, but the rest of the value, its list
+/// above all, is far longer than one byte.
 const SMALLEST_USED_ENTRY: usize = 94;
 
 /// The most marks a [`LostCopy`] keeps, 2,788: the most `used` entries one `payment_lists`
@@ -824,7 +825,8 @@ impl LostCopy {
     }
 
     /// The copy if it is [`Self::within_bound`]; `None`, no copy, past it, so no value is
-    /// taken at the key and its list stays held.
+    /// taken at the key and its list stays held. A copy of one record read always fits;
+    /// only a merge can pass it, and the check on a single copy guards that assumption.
     fn bounded(self) -> Option<Self> {
         self.within_bound().then_some(self)
     }
