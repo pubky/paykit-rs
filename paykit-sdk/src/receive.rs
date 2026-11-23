@@ -2630,9 +2630,25 @@ pub(crate) fn observe_list_record(
         return Ok(Vec::new());
     };
     let at = key::list_record_lost(&record.key);
-    let Some(lost) =
-        state::cx_get::<LostListRecord>(cx, &at).map_err(crate::protocol::step_failure)?
-    else {
+    let held = state::cx_get::<LostListRecord>(cx, &at).map_err(crate::protocol::step_failure)?;
+    // A value carrying `lost_to_delete` is where an app may first learn of a delete. The
+    // client's own mark of it doesn't survive a restore, so Paykit keeps the delete, with
+    // no copy, in its backed-up state: a later value that drops the marker is never taken
+    // (Paykit spec 6; wire 5).
+    if crate::protocol::list_loss_marker(value).is_some() {
+        let marked = LostListRecord::marked(record.version);
+        let kept = match held.clone() {
+            Some(lost) => lost.merge(marked),
+            None => marked,
+        };
+        if held.as_ref() == Some(&kept) {
+            return Ok(Vec::new());
+        }
+        return Ok(vec![
+            state::local_put(&at, &kept).map_err(crate::protocol::view_failure)?
+        ]);
+    }
+    let Some(lost) = held else {
         return Ok(Vec::new());
     };
     let Some(read) = crate::records::bind_list(value, &cx.identity(), &record.key, |t| {

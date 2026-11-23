@@ -909,6 +909,18 @@ impl LostListRecord {
         }
     }
 
+    /// A value at the key carrying `lost_to_delete`, written at record version `written`:
+    /// it names a delete that lost content, which this app may never have seen, so it is
+    /// kept as a delete with no copy, and no later value at the key is taken (Paykit spec
+    /// 6; wire 5). Its version is the write's, at or after the delete it answers; with no
+    /// copy, a later report of that delete changes nothing.
+    pub(crate) fn marked(written: pubky_switch_core::ops::RecordVersion) -> Self {
+        Self {
+            deleted: [written.generation, written.version],
+            copy: None,
+        }
+    }
+
     /// Whether the newest delete kept is the one at `version`.
     pub(crate) fn deleted_at(&self, version: pubky_switch_core::ops::RecordVersion) -> bool {
         self.deleted == [version.generation, version.version]
@@ -3916,6 +3928,29 @@ mod tests {
         );
         let stored = serde_json::to_vec(&later).expect("a lost record serializes");
         assert!(stored.len() < 64, "{} bytes", stored.len());
+    }
+
+    #[test]
+    fn test_state_lost_list_record_marked_keeps_no_copy() {
+        let written = pubky_switch_core::ops::RecordVersion {
+            generation: 1,
+            version: 9,
+        };
+        let marked = LostListRecord::marked(written);
+        assert_eq!(
+            marked,
+            LostListRecord {
+                deleted: [1, 9],
+                copy: None
+            }
+        );
+        // Over a delete seen with a copy, the marker leaves no copy, whichever is newer.
+        let held = lost_with(4, lost_marks(1, 2));
+        assert_eq!(held.clone().merge(marked.clone()).copy, None);
+        assert_eq!(marked.clone().merge(held).deleted, [1, 9]);
+        let at = key::list_record_lost(&[1; 32]);
+        let value = serde_json::to_value(&marked).expect("a lost record serializes");
+        assert!(reads::<LostListRecord>(&at, value));
     }
 
     #[test]

@@ -341,7 +341,7 @@ fn local_write<T: serde::Serialize>(key: &str, value: &T) -> Result<LocalWrite, 
 
 /// The `lost_to_delete` member of a `payment_lists` value, as written, if present (Paykit
 /// wire 5, 5.4).
-fn list_loss_marker(value: &[u8]) -> Option<serde_json::Value> {
+pub(crate) fn list_loss_marker(value: &[u8]) -> Option<serde_json::Value> {
     let members: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(value).ok()?;
     members.get("lost_to_delete").cloned()
 }

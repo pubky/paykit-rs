@@ -2091,6 +2091,69 @@ async fn test_unrequested_delete_by_another_installation_of_the_app_keeps_a_late
 }
 
 #[tokio::test]
+#[ignore = "the client makes a value the protocol holds the record's seen mark, then flags the put-back of the known history as an older list; it needs the client to keep such a value out of the mark"]
+async fn test_unrequested_put_back_of_the_known_history_after_a_newer_recreation_places_the_list() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let (key, marked) =
+        pay_single_use_then_delete_elsewhere(&w, &mut wallet, &mut phone, &mut shop).await;
+    let target = shop_list_target(&w, &shop);
+    wallet.receive(None).await.unwrap();
+    // The phone puts the record back with the mark, and pays a newer list's single-use
+    // endpoint: the wallet reads both marks.
+    put_list_record(&mut phone, &target, Some(&marked)).await;
+    wallet.receive(None).await.unwrap();
+    w.list_to_alice(
+        &mut shop,
+        &[wallet.app_id(), phone.app_id()],
+        list_version(1, 2),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    let paid = phone
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    wallet.receive(None).await.unwrap();
+    let (_, both) = list_record(&wallet, &w).await;
+    assert_eq!(both["used"].as_array().unwrap().len(), 2, "{both}");
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    // The record is deleted again, the service forgets it, and the wallet is restored onto
+    // a fresh store: what it read is gone with the store.
+    phone.app_mut().read_record(&target).await.unwrap();
+    put_list_record(&mut phone, &target, None).await;
+    w.alice.switch().drop_record(&key).unwrap();
+    let mut restored = restored_onto(&w, crate::common::store(), &backup).await;
+    restored.receive(None).await.unwrap();
+    // A newly joined app takes a newer list, the third, sent to it and the wallet, and
+    // creates the record with it and none of the marks. The restored wallet reads that
+    // first and holds the list.
+    let mut tablet = w.wallet("tablet").await;
+    w.list_to_alice(
+        &mut shop,
+        &[tablet.app_id(), restored.app_id()],
+        list_version(1, 3),
+    )
+    .await;
+    tablet.receive(None).await.unwrap();
+    restored.receive(None).await.unwrap();
+    assert_eq!(restored.held_lists().await.unwrap().len(), 1);
+    // Another app puts back the very copy the wallet kept, the second list with both
+    // marks: the known history is back, and the wallet takes it (Paykit spec 6).
+    let mut laptop = w.wallet("laptop").await;
+    laptop.app_mut().read_record(&target).await.unwrap();
+    put_list_record(&mut laptop, &target, Some(&both)).await;
+    restored.receive(None).await.unwrap();
+    assert_eq!(restored.held_lists().await.unwrap().len(), 0);
+}
+
+#[tokio::test]
 async fn test_unrequested_marks_read_after_a_delete_kept_through_a_fresh_restore() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -2667,6 +2730,66 @@ async fn test_unrequested_delete_over_a_refused_write_keeps_no_copy() {
         "the paid single-use endpoint was paid again: {again:?}"
     );
     assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_unrequested_loss_marker_read_first_kept_through_a_fresh_restore() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut tablet = w.wallet("tablet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    // One list to the wallet and the tablet. The wallet pays its single-use endpoint; the
+    // tablet holds the list but doesn't read the record yet.
+    w.list_to_alice(
+        &mut shop,
+        &[wallet.app_id(), tablet.app_id()],
+        list_version(1, 1),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    let target = shop_list_target(&w, &shop);
+    let key = wallet.app().record_key(&target).unwrap();
+    phone.app_mut().read_record(&target).await.unwrap();
+    let (_, marked) = list_record(&phone, &w).await;
+    // The record is deleted, the service forgets the delete, and the phone puts it back
+    // from an older copy without the mark, naming the delete. The tablet first learns of
+    // the delete from that put-back, then is backed up.
+    put_list_record(&mut phone, &target, None).await;
+    w.alice.switch().drop_record(&key).unwrap();
+    let mut put_back = marked.clone();
+    put_back["used"] = serde_json::json!([]);
+    put_back["lost_to_delete"] = serde_json::json!(pubky_switch_core::enc::b64(&[5u8; 32]));
+    let mut laptop = w.wallet("laptop").await;
+    put_list_record(&mut laptop, &target, Some(&put_back)).await;
+    tablet.receive(None).await.unwrap();
+    let backup = tablet.backup().await.unwrap();
+    drop(tablet);
+    // A later write drops the marker. Restored onto a fresh store, which holds none of what
+    // the client saw at the record, the tablet reads only that write: it is still no list
+    // to pay from, as the marker read is kept in Paykit's own state, which the backup
+    // carries (Paykit spec 6, wire 5).
+    let mut dropped = put_back.clone();
+    dropped.as_object_mut().unwrap().remove("lost_to_delete");
+    put_list_record(&mut laptop, &target, Some(&dropped)).await;
+    let mut restored = restored_onto(&w, crate::common::store(), &backup).await;
+    restored.receive(None).await.unwrap();
+    let again = restored
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome;
+    assert!(
+        !matches!(again, Ok(PayOutcome::Paid { .. })),
+        "the paid single-use endpoint was paid again: {again:?}"
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
+    assert_eq!(restored.held_lists().await.unwrap().len(), 1);
 }
 
 #[tokio::test]
