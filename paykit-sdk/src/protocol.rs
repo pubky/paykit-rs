@@ -458,8 +458,9 @@ pub const BACKUP_NAME: &str = "paykit";
 /// its entries marked restored (Paykit spec 7.2). The journal's checks are
 /// [`JournalEntry::check_restored`]'s, as every runtime read checks an entry, its claim
 /// keys blinded under the backup's naming key, each entry at its own attempt's key, and at
-/// most one open entry
-/// for one obligation, since a payment in progress blocks any other. `Err` names the rule,
+/// most one open entry not restored before for one obligation, since a payment in progress
+/// blocks any other; an entry an earlier restore left open beside it is that payment's
+/// doubt, never dispatched again. `Err` names the rule,
 /// without content: nothing is written. Pure: it is called at backup time too.
 ///
 /// The layer's schema is closed (`state::StateKey`): a key no builder of the SDK writes is
@@ -598,14 +599,16 @@ pub(crate) fn restore_paykit_layer(
         .map(|(key, value)| state::restored::<RestoreHold>(key, value, &binder))
         .transpose()
         .map_err(|_| String::from("the backup's restore hold cannot be read"))?;
-    // The hold identifier the backup's confirmations are matched to: one given under an
-    // older identifier confirmed nothing there, and carries nothing here.
+    // The hold identifier the backup's confirmations and approvals for execution are
+    // matched to: one given under an older identifier counted for nothing there, and carries
+    // nothing here.
     let backup_epoch = state
         .iter()
         .find(|(key, _)| key.as_slice() == key::HOLD_EPOCH.as_bytes())
         .map(|(key, value)| state::restored::<crate::hold::HoldEpoch>(key, value, &binder))
         .transpose()
         .map_err(|_| String::from("the backup's hold identifier cannot be read"))?;
+    let mut approvals = std::collections::BTreeSet::new();
     let mut confirmed_before = std::collections::BTreeSet::new();
     let mut executor_history = std::collections::BTreeMap::new();
     for (key, value) in restoring
@@ -717,8 +720,15 @@ pub(crate) fn restore_paykit_layer(
                 }
                 continue;
             }
-            StateKey::RestoreConsent(_) => {
+            StateKey::RestoreConsent(_) | StateKey::RestoreApproval(_) => {
                 state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
+                continue;
+            }
+            StateKey::ExecutionApproval { record, hold } => {
+                state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
+                if hold.as_ref() == backup_epoch.as_ref().map(crate::hold::HoldEpoch::as_bytes) {
+                    approvals.insert(record);
+                }
                 continue;
             }
             // So do the marks of records not yet listed and of the payer pass owed: this
@@ -1023,6 +1033,12 @@ pub(crate) fn restore_paykit_layer(
                 state::restored::<[u8; 16]>(&key, &value, &binder).map_err(|_| unread())?;
                 continue;
             }
+            StateKey::GrantBatch(_) => {
+                // The client omits unresolved batches on restore, so a first grant kept in
+                // one is not carried: the restored app reads the grant from the record.
+                state::restored::<[u8; 16]>(&key, &value, &binder).map_err(|_| unread())?;
+                continue;
+            }
             StateKey::EndBatch(_) => {
                 // A backup omits the unresolved Switch batch. Its signed end's origin
                 // can survive independently of the outcome of its counterparty delivery.
@@ -1248,7 +1264,10 @@ pub(crate) fn restore_paykit_layer(
         // ([`JournalEntry::check_restored`]): checked here, before anything is written.
         let mut entry =
             state::restored::<JournalEntry>(&key, &value, &binder).map_err(|_| bad())?;
-        if entry.open() && !open.insert(entry.obligation) {
+        // An app has one payment of an obligation in progress at a time; an entry an earlier
+        // restore left open beside it is that payment's doubt, which the user paid over, and
+        // is never dispatched again (Paykit spec 7.2, 12.4).
+        if entry.open() && !entry.restored && !open.insert(entry.obligation) {
             return Err("Paykit spec 7.2: two open journal entries for one obligation".into());
         }
         if entry.offline == Some(crate::journal::OfflineRecording::AwaitingRecording)
@@ -1313,6 +1332,15 @@ pub(crate) fn restore_paykit_layer(
         state::local_put(key::HOLD_EPOCH, &epoch)
             .map_err(|_| String::from("the restore's hold identifier can't be written"))?,
     );
+    // A carried approval waits for the restore's verdict: a clean one makes it the current
+    // hold's approval, and one that isn't clean drops it, so its Allowance is held until the
+    // user confirms again, as every first grant needs the current hold's approval.
+    for record in approvals {
+        writes.push(
+            state::local_put(&key::restore_approval(&record), &true)
+                .map_err(|_| String::from("the restored approval cannot be written"))?,
+        );
+    }
     let hold = state::local_put(key::RESTORE_HOLD, &restore_hold)
         .map_err(|_| String::from("the restore's hold can't be written"))?;
     writes.push(hold);
@@ -1850,6 +1878,13 @@ impl Protocol for PaykitProtocol {
             },
             LocalWrite::DeletePrefix {
                 prefix: key::RESTORE_CONSENTS.as_bytes().to_vec(),
+            },
+            // An approval given before the item approves nothing after it (Paykit spec 7.2).
+            LocalWrite::DeletePrefix {
+                prefix: key::EXECUTION_APPROVALS.as_bytes().to_vec(),
+            },
+            LocalWrite::DeletePrefix {
+                prefix: key::RESTORE_APPROVALS.as_bytes().to_vec(),
             },
         ])
     }
@@ -2400,6 +2435,31 @@ mod receive_tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn test_missed_drops_every_approval_for_execution() {
+        // An approval given before the item approves nothing after it, and neither does one
+        // a restore carries to its verdict (Paykit spec 7.2, "What a `missed` item loses").
+        let missed = MissedEntries {
+            read_at_ms: 0,
+            seq: 1,
+            entries: 0,
+            accepted_from_ms: 10,
+            accepted_until_ms: 20,
+        };
+        let deleted: Vec<Vec<u8>> = PaykitProtocol::new()
+            .missed(&missed)
+            .unwrap()
+            .into_iter()
+            .filter_map(|write| match write {
+                LocalWrite::DeletePrefix { prefix } => Some(prefix),
+                _ => None,
+            })
+            .collect();
+        for prefix in [key::EXECUTION_APPROVALS, key::RESTORE_APPROVALS] {
+            assert!(deleted.contains(&prefix.as_bytes().to_vec()), "{prefix}");
+        }
     }
 
     #[test]
