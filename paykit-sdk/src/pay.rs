@@ -1339,6 +1339,7 @@ impl Paykit {
             attempt_proof: None,
             failed_by_method: false,
             never_dispatched: false,
+            user_paid: false,
             request: Some(KeptMessage::of(&stored)),
             record_held: false,
             transfer_bound: Some(bound),
@@ -1595,6 +1596,7 @@ impl Paykit {
             attempt_proof: None,
             failed_by_method: false,
             never_dispatched: false,
+            user_paid: false,
             request: None,
             record_held: false,
             transfer_bound: Some(bound),
@@ -1766,12 +1768,27 @@ impl Paykit {
 
     /// The attempts a restore left unresolved for the obligation, which make it "may be
     /// paid" (Paykit spec 7.2); an open entry of this app's otherwise is a payment in
-    /// progress.
+    /// progress. A restored dispatch the user resolved as paid with no claim to write it on,
+    /// and one the method reported paid whose outcome isn't written yet, are
+    /// [`Refusal::AlreadyPaid`].
     pub(crate) async fn restored_attempts(&self, obligation: &[u8; 32]) -> Result<Vec<AttemptId>> {
         let mut restored = Vec::new();
         for entry in self.journal().await? {
-            if &entry.obligation != obligation || !entry.open() {
+            if &entry.obligation != obligation {
                 continue;
+            }
+            // The user said a restored dispatch no claim showed was paid: its obligation is
+            // paid, as a `done` on its claim would show (Paykit spec 7.2, 8.4).
+            if entry.user_paid {
+                return Err(Refusal::AlreadyPaid.into());
+            }
+            if !entry.open() {
+                continue;
+            }
+            // A restored dispatch the method reported paid holds its proof: paid, whether or
+            // not its outcome is written yet (Paykit spec 7.2).
+            if entry.restored && entry.rail_proof.is_some() {
+                return Err(Refusal::AlreadyPaid.into());
             }
             if !entry.restored {
                 return Err(Refusal::PaymentInProgress.into());
@@ -4201,15 +4218,29 @@ impl Paykit {
                     }
                 }
                 Stage::Recorded | Stage::Attempted | Stage::Paying if entry.restored => {
+                    // Restored, it may have been dispatched (Paykit spec 7.2): the backup
+                    // can't tell.
                     match self.attempt_state(&entry).await? {
                         Some((step, Outcome::Open | Outcome::Unknown)) => {
                             entry.step = Some(step);
                             entry.stage = Stage::Paying;
                             out.extend(self.resolve_dispatched(entry).await?);
                         }
-                        // Restored, it may have been dispatched (Paykit spec 7.2).
                         Some((_, outcome)) => self.finish_resolved(&mut entry, outcome).await?,
-                        None => self.set_stage(&mut entry, Stage::Abandoned).await?,
+                        // A claim without the attempt, or no claim at all, proves nothing
+                        // either: after a provider loss, once the claim is gone past its
+                        // window, or when the backup was taken before its batch reached the
+                        // switch, "absence remains insufficient" (Paykit spec 8.4, Late
+                        // recording). The attempt is open, its outcome unknown, and the
+                        // method's history decides; without it, "the dispatch stays open as
+                        // potentially paid. Only a receipt or the user can resolve it"
+                        // (Paykit spec 7.2): it stays in the doubt the user sees, and the
+                        // user resolves it ([`Paykit::resolve_attempt`]).
+                        None => {
+                            entry.step = None;
+                            entry.stage = Stage::Paying;
+                            out.extend(self.resolve_dispatched(entry).await?);
+                        }
                     }
                 }
                 Stage::Recorded if self.attempt_still_kept(&entry).await? => {}
@@ -4311,15 +4342,23 @@ impl Paykit {
     /// receipt the user is told about. A bound passes as [`bound_passed`] says. An entry's
     /// acknowledged notices go with it.
     ///
-    /// Two of those have no bound of their own: a payment made after `failed` was written
-    /// waits for its receipt for as long as no receipt comes, and a dispatch the method
+    /// Three of those have no bound of their own: a payment made after `failed` was written
+    /// waits for its receipt for as long as no receipt comes, a dispatch the method
     /// reported failed is asked about for as long as the method's history keeps it, without
-    /// end for a method whose history is kept for good. Each is one small entry.
+    /// end for a method whose history is kept for good, and a restored dispatch the user
+    /// resolved as paid with no claim to settle, whose obligation has no deadline, is the
+    /// only thing that stops it being paid again (Paykit spec 7.2, 8.4). Each is one small
+    /// entry.
     async fn prune_journal(&mut self) -> Result<()> {
         let service = self.service_time();
         let now = self.now();
         let mut tx = state::Tx::default();
         for entry in self.journal().await? {
+            // A user's `done` that no claim settled: with a deadline, the request is refused
+            // past it; without one, nothing else stops a second payment.
+            if entry.user_paid && entry.deadline.is_none() {
+                continue;
+            }
             let Some(bound) = prune_bound(
                 entry.stage,
                 entry.failed_by_method
@@ -4499,6 +4538,16 @@ impl Paykit {
     /// payment (Paykit spec 8.1, 8.3), so the attempt stays open and the user's payment
     /// method's history or a receipt settles it. A payment without a request has nothing a payee cancels.
     async fn repeat_withheld(&mut self, entry: &JournalEntry) -> Result<bool> {
+        // The user said an earlier restored dispatch of the obligation was paid: no attempt
+        // of it is carried out again (Paykit spec 7.2, 8.4).
+        if self
+            .journal()
+            .await?
+            .iter()
+            .any(|other| other.obligation == entry.obligation && other.user_paid)
+        {
+            return Ok(true);
+        }
         // An earlier-generation dispatch is never repeated after a provider loss
         // (Paykit spec 7.3).
         if self.dispatched_before_loss(entry).await? {

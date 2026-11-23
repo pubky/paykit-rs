@@ -1428,6 +1428,7 @@ impl Paykit {
             attempt_proof: None,
             failed_by_method: false,
             never_dispatched: false,
+            user_paid: false,
             request: Some(KeptMessage::of(&stored)),
             record_held: false,
             transfer_bound: Some(bound),
