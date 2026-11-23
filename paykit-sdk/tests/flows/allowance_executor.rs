@@ -4308,6 +4308,18 @@ async fn test_executor_older_in_place_restore_keeps_a_kept_end_and_its_removal()
     ))
     .await
     .unwrap();
+    // Before any read: the installation's removal stands, with no mark of a consent this
+    // restore holds.
+    assert_eq!(
+        Box::pin(crate::allowances::consent_entry(&restored, &key)).await,
+        Some(json!({ "removed": { "reason": "ended" } }))
+    );
+    assert!(restored
+        .app()
+        .protocol_scan("paykit", b"rsc/")
+        .await
+        .unwrap()
+        .is_empty());
     Box::pin(crate::common::finish_listing(&mut restored)).await;
     let mut reconciled = Box::pin(restored.reconcile()).await;
     for _ in 0..8 {

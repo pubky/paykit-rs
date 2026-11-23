@@ -1438,8 +1438,8 @@ pub(crate) fn restore_paykit_layer(
 /// - every stop it keeps: a payee's cancellation not yet placed in its request record
 ///   (Paykit spec 8.1) and a counterparty's Allowance end not yet placed in its record
 ///   (Paykit spec 8.3);
-/// - every Allowance it removed from its consent list, which stays removed for good (Paykit
-///   spec 8.3, "After a restore");
+/// - every Allowance it removed from its consent list, which stays removed for good (the
+///   consent list, Paykit spec 8.3);
 /// - every answer it holds back, a rejection or a cancellation, marked restored as the
 ///   backup's are, so it is reported, never sent on this restore's word (Paykit spec 8.1,
 ///   "Blocked counterparties");
@@ -1447,9 +1447,10 @@ pub(crate) fn restore_paykit_layer(
 ///   again (Paykit spec 8.1).
 ///
 /// Each is read bound to its key, as every runtime read binds it; one that doesn't verify
-/// refuses the restore. An entry the backup also holds is kept as the backup holds it; a
-/// removal replaces the backup's entry for its Allowance, and the mark that this restore
-/// holds that consent goes with it.
+/// refuses the restore, as for the other families merged from the installation: a restore
+/// into a fresh store reads none of them. An entry already written, the backup's or one the
+/// Allowance merge above kept, stays as written; a removal replaces the backup's entry for
+/// its Allowance, and the mark that this restore holds that consent goes with it.
 fn keep_installation_stops(
     restoring: &RestoreContext<'_>,
     binder: &state::Binder<'_>,

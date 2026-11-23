@@ -3390,9 +3390,9 @@ async fn test_blocked_held_rejection_after_the_backup_survives_an_older_in_place
     // The wallet is backed up holding bob's request, then blocks bob and rejects it: the
     // rejection is in the request record, and its message is held, not sent. Restored in
     // place from the older backup, the installation's held rejection stays, marked
-    // restored: the request stays rejected, and once bob is unblocked the rejection is
-    // reported as possibly delivered, for the user to send again, never sent on the
-    // restore's word (Paykit spec 8.1, "Blocked counterparties").
+    // restored: the request stays rejected, and the rejection is reported as possibly
+    // delivered, for the user to send again, never sent on the restore's word (Paykit spec
+    // 8.1, "Blocked counterparties").
     let w = World::new();
     let storage = store();
     let (mut wallet, mut shop, request) = received_on(&w, std::sync::Arc::clone(&storage)).await;
@@ -3409,7 +3409,28 @@ async fn test_blocked_held_rejection_after_the_backup_survives_an_older_in_place
         1
     );
     drop(wallet);
-    let mut wallet = restored_in_place(&w, storage, &backup).await;
+    let mut wallet = Paykit::restore(
+        w.env(&w.alice, storage),
+        PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    // Before any read: the installation's held rejection is kept, marked restored.
+    let held = wallet.app().protocol_scan("paykit", b"ha/").await.unwrap();
+    let [(_, value)] = held.as_slice() else {
+        panic!("one held answer: {held:?}");
+    };
+    let value: serde_json::Value = serde_json::from_slice(value).unwrap();
+    assert_eq!(value["d"]["restored"], true, "{value}");
+    wallet.receive(None).await.unwrap();
+    wallet.reconcile().await.unwrap();
+    wallet
+        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
     assert_eq!(
         wallet.request(&request).await.unwrap().status,
         paykit_sdk::RequestStatus::Rejected

@@ -760,7 +760,9 @@ impl Paykit {
     /// ([`orphan_floor_s`]), before anything is written. The client's errors, all before
     /// anything is written but a store failure: `InvalidData` for a backup whose certificate
     /// Paykit refuses (Paykit wire 3.1), one without Paykit's layer or one another protocol
-    /// made, or a journal with a malformed entry or two open entries for one obligation; a
+    /// made, or a journal with a malformed entry or two open entries for one obligation;
+    /// for a restore in place, state of the installation's it keeps that doesn't verify,
+    /// where a restore into an empty store, which reads none of it, is the way to recover; a
     /// store failure.
     pub async fn restore(
         env: AppEnv,
