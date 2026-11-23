@@ -2204,3 +2204,81 @@ async fn test_public_unkept_group_beside_a_later_record_answered_from_it_after_a
     serve(&w, &wide);
     assert_eq!(listed(&mut wallet, &w).await, ["btc-bitcoin-p2wpkh"]);
 }
+
+/// Bob's records dated a day ahead are read while the wallet's clock runs a day fast, more
+/// than the history keeps, so the floor sits a day ahead; the clock is then corrected, bob
+/// publishes a record at the corrected time, and a backup of that state is restored in place
+/// over it. Returns the wallet, that record and the corrected time.
+async fn floor_a_day_ahead_restored(w: &World) -> (paykit_sdk::Paykit, Vec<u8>, u64) {
+    let storage = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", std::sync::Arc::clone(&storage)).await;
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    w.clock.set_ms(t0 + DAY_MS);
+    for i in 1..=65u64 {
+        publish_at(
+            w,
+            one_endpoint("btc-bitcoin-p2wpkh", &format!("bc1q{i}")),
+            t0 + DAY_MS + i,
+            expiry,
+        );
+        listed(&mut wallet, w).await;
+    }
+    w.clock.set_ms(t0);
+    let current = publish_at(
+        w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1now"),
+        t0 + 1000,
+        expiry,
+    );
+    assert!(listed(&mut wallet, w).await.is_empty());
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let wallet = restored_over(w, storage, &backup).await;
+    (wallet, current, t0)
+}
+
+#[tokio::test]
+async fn test_public_floor_far_ahead_of_the_corrected_clock_holds_across_an_in_place_restore() {
+    // The floor is a day ahead of the corrected clock, far more than the clock tolerance:
+    // after the restore, bob's record at the corrected time is still not used, and the
+    // failure names the floor (Paykit spec 4).
+    let w = World::new();
+    let (mut wallet, current, t0) = floor_a_day_ahead_restored(&w).await;
+    let floor = floor_of(&wallet).await.unwrap();
+    assert!(floor > t0 + pubky_switch_core::records::CLOCK_TOLERANCE_MS);
+    serve(&w, &current);
+    let shop = w.bob.identity().app_keys("shop").app_id_bytes();
+    let list = read(&mut wallet, &w).await;
+    assert!(ids(&list).is_empty());
+    assert!(
+        fails_with(
+            &list,
+            shop,
+            &[&format!(
+                "unusable until a record of it after {floor} ms can be used"
+            )]
+        ),
+        "{list:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_public_later_record_after_the_floor_brings_the_endpoints_back_after_a_restore() {
+    // Past the floor, once the clock reaches it, bob's next record is used as usual
+    // (Paykit spec 4).
+    let w = World::new();
+    let (mut wallet, _, t0) = floor_a_day_ahead_restored(&w).await;
+    let floor = floor_of(&wallet).await.unwrap();
+    let later = t0 + DAY_MS + 100;
+    assert!(later > floor);
+    w.clock.set_ms(later);
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1later"),
+        later,
+        Some(t0 + 30 * DAY_MS),
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
+}
