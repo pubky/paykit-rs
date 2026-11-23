@@ -207,6 +207,36 @@ fn write_base(held: Option<&[u8]>, seen: Option<&[u8]>, floor: Option<u64>) -> B
         .unwrap_or_else(|| BlockFloorRecord::new(floor.unwrap_or(0)))
 }
 
+/// What a raise to `to_ms` does, from the shared floor and the floor the switch holds now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Raise {
+    /// The switch's floor already covers it: nothing is written.
+    Spared,
+    /// Write `to`, the higher of the floor held and `to_ms`, over `floor`.
+    Write { floor: Option<u64>, to: u64 },
+    /// The divergence hold stands: nothing can be written.
+    Held,
+    /// The floor can't be read now.
+    Unreadable,
+}
+
+/// The raise to `to_ms` (Paykit wire 5.6, Raising): only a floor applied at the switch
+/// (`at_switch`) at least as high spares it, since another own app reads the switch, never a
+/// floor this app saw alone; otherwise it writes the higher of the floor held and `to_ms`.
+fn raise_of(shared: SharedFloor, at_switch: Option<u64>, to_ms: u64) -> Raise {
+    if at_switch.is_some_and(|floor| floor >= to_ms) {
+        return Raise::Spared;
+    }
+    match shared {
+        SharedFloor::Known(floor) => Raise::Write {
+            floor,
+            to: floor.map_or(to_ms, |floor| floor.max(to_ms)),
+        },
+        SharedFloor::Divergent => Raise::Held,
+        SharedFloor::Unknown => Raise::Unreadable,
+    }
+}
+
 /// Whether the floor applies to `stored`: a one-time request (module docs).
 pub(crate) fn floor_applies(stored: &StoredMessage) -> bool {
     matches!(stored.body(), Body::PaymentRequest(r) if !r.is_recurring())
@@ -263,24 +293,22 @@ impl Paykit {
 
     /// Keep what `held`, a view of the floor record this app read, adds to what it keeps:
     /// a higher floor, or the divergence it shows, durably, before the view is acted on
-    /// (module docs). Writes nothing when it adds nothing.
-    /// `live` says the view is the switch's current write, read now: an authenticated one shows
-    /// the record live in the generation the app follows. A copy the app holds or keeps shows it
-    /// live only in the generation its authenticated write was made in, so a copy taken before a
-    /// provider loss stays covered by that loss (Paykit wire 5.6, Seen floor and permanence); an
-    /// upload, which carries no proof of its write, shows no generation.
-    pub(crate) async fn keep_floor_view(&mut self, held: &SharedRecord, live: bool) -> Result<()> {
+    /// (module docs). Writes nothing when it adds nothing. The generation it shows the record
+    /// live in is its authenticated write's own, so a copy taken before a provider loss stays
+    /// covered by that loss; an upload, which exists only after a loss and carries no proof of
+    /// its write, shows it live in the generation the app follows (Paykit wire 5.6, Seen floor
+    /// and permanence).
+    pub(crate) async fn keep_floor_view(&mut self, held: &SharedRecord) -> Result<()> {
         if held.key != self.app.record_key(&floor_target(&self.identity()))? {
             return Ok(());
         }
-        let generation = held.authenticated.then(|| {
-            if live {
-                self.app.own_identity().generation()
-            } else {
-                held.version.generation
-            }
-        });
-        self.keep_floor(FloorKept::of_view(held, generation)).await
+        let generation = if held.authenticated {
+            held.version.generation
+        } else {
+            self.app.own_identity().generation()
+        };
+        self.keep_floor(FloorKept::of_view(held, Some(generation)))
+            .await
     }
 
     /// Keep `more` with what this app keeps of the floor. The divergence, once kept for the
@@ -308,11 +336,16 @@ impl Paykit {
     pub(crate) async fn keep_held_floor(&mut self) -> Result<()> {
         let key = self.app.record_key(&floor_target(&self.identity()))?;
         if let Some(held) = self.app.shared_record(&key).await? {
-            self.keep_floor_view(&held, false).await?;
-        } else if self.app.alarm().is_none() && !self.side_unlisted(RecordSide::Payer).await? {
-            // Listed and absent, after a floor seen live with no provider loss to explain it:
-            // the rollback alarm (Paykit wire 5.6, Seen floor and permanence). The alarm then
-            // holds what it holds; this keep goes on.
+            self.keep_floor_view(&held).await?;
+        } else if self.holds("paykit_pay")
+            && self.holds_scope_keys()
+            && self.app.alarm().is_none()
+            && !self.side_unlisted(RecordSide::Payer).await?
+        {
+            // Listed and absent, at an app whose certificate reads the floor, after a floor
+            // seen live with no provider loss to explain it: the rollback alarm (Paykit wire
+            // 5.6, Seen floor and permanence, an authorized reader). The alarm then holds what
+            // it holds; this keep goes on.
             let lost = self.app.own_identity().body().recovery_from;
             if self.floor_kept().await?.absence_unlawful(lost) {
                 self.app
@@ -329,30 +362,35 @@ impl Paykit {
         Ok(())
     }
 
-    /// The highest floor this app has seen, from the copy it holds, its mark and what it
-    /// keeps, whatever their divergence.
-    async fn floor_seen(&self) -> Result<Option<u64>> {
-        let key = self.app.record_key(&floor_target(&self.identity()))?;
-        let read = |value: &[u8]| BlockFloorRecord::read(value).ok().map(|r| r.floor_ms);
-        let held = self.app.shared_record(&key).await?;
-        let held = held.as_ref().and_then(|h| h.content.value()).and_then(read);
-        let seen = self.app.record_seen(&key).await?;
-        let seen = seen.as_deref().and_then(read);
-        Ok(held.max(seen).max(self.floor_kept().await?.seen_ms))
+    /// The raise of an unblock this app owes and hasn't written (`bf`), applied as a floor
+    /// meanwhile (module docs).
+    async fn owed_floor(&self) -> Result<Option<u64>> {
+        Ok(self
+            .local_get::<PendingUnblocks>(key::BLOCK_FLOOR)
+            .await?
+            .map(|pending| pending.to_ms))
     }
 
-    /// Whether the app owes a raise it can write now: an unblock's (`bf`) or a widening's,
-    /// while the floor isn't held divergent. The lists are then read at each receive, so the
-    /// raise goes at the next one (Paykit wire 5.6, Raising).
+    /// Whether `sender` is one an unblock's raise this app owes holds: its entries wait
+    /// (`receive::check_before_effect`) and it is asked nothing until the raise is written
+    /// (Paykit wire 5.6, Raising).
+    pub(crate) async fn raise_holds_sender(&self, sender: &[u8; 32]) -> Result<bool> {
+        Ok(self.holds("paykit_pay")
+            && self
+                .local_get::<PendingUnblocks>(key::BLOCK_FLOOR)
+                .await?
+                .is_some_and(|pending| pending.senders.binary_search(sender).is_ok()))
+    }
+
+    /// Whether the app owes a raise it can write now, while the floor isn't held divergent.
+    /// The lists are then read at each receive, so the raise goes at the next one (Paykit wire
+    /// 5.6, Raising).
     pub(crate) async fn raise_owed(&self) -> Result<bool> {
         // Only an app holding `paykit_pay` raises the floor (Paykit wire 5.1, 5.6).
         if !self.holds("paykit_pay") || self.floor_kept().await?.divergent {
             return Ok(false);
         }
-        Ok(self
-            .local_get::<PendingUnblocks>(key::BLOCK_FLOOR)
-            .await?
-            .is_some()
+        Ok(self.owed_floor().await?.is_some()
             || !self
                 .local_scan::<crate::marks::MissedWidening>(key::BLOCKED_WIDENINGS)
                 .await?
@@ -365,10 +403,7 @@ impl Paykit {
         if !matches!(stored.body(), Body::PaymentRequest(r) if !r.is_recurring()) {
             return Ok(false);
         }
-        let owed = self
-            .local_get::<PendingUnblocks>(key::BLOCK_FLOOR)
-            .await?
-            .map(|pending| pending.to_ms);
+        let owed = self.owed_floor().await?;
         Ok(dated_before(stored, self.shared_floor().await?, owed))
     }
 
@@ -385,19 +420,26 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// A store failure keeping what the read shows.
+    /// A store failure, the client's alarm, or the rollback alarm for a floor seen live that
+    /// reads absent with no provider loss.
     pub(crate) async fn floor_read_now(&mut self) -> Result<Option<Option<SharedRecord>>> {
         self.keep_held_floor().await?;
-        let Ok(read) = self
+        let read = match self
             .app
             .read_record_fresh(&floor_target(&self.identity()))
             .await
-        else {
-            return Ok(None);
+        {
+            Ok(read) => read,
+            // An alarm and a store failure are the app's own state, never a floor to wait for.
+            Err(
+                error @ (pubky_switch_client::app::AppError::Alarm(_)
+                | pubky_switch_client::app::AppError::Store(_)),
+            ) => return Err(error.into()),
+            Err(_) => return Ok(None),
         };
         Ok(match read {
             RecordRead::Fresh(record) => {
-                self.keep_floor_view(&record, true).await?;
+                self.keep_floor_view(&record).await?;
                 Some(Some(record))
             }
             RecordRead::Kept {
@@ -422,7 +464,7 @@ impl Paykit {
                 ..
             } => {
                 // Not the switch's write, but a divergence it shows is kept all the same.
-                self.keep_floor_view(&record, false).await?;
+                self.keep_floor_view(&record).await?;
                 None
             }
             _ => None,
@@ -441,10 +483,7 @@ impl Paykit {
         if !floor_applies(stored) {
             return Ok(false);
         }
-        let owed = self
-            .local_get::<PendingUnblocks>(key::BLOCK_FLOOR)
-            .await?
-            .map(|pending| pending.to_ms);
+        let owed = self.owed_floor().await?;
         let key = self.app.record_key(&floor_target(&self.identity()))?;
         Ok(dated_before(
             stored,
@@ -453,69 +492,72 @@ impl Paykit {
         ))
     }
 
-    /// The shared floor for a write of a raise to `to_ms`: the record as the switch holds it
-    /// now, read alone, with what this app holds and keeps of it, the copy's divergence kept
-    /// first ([`Paykit::floor_read_now`]), so no write goes over a divergence the app saw or
-    /// the switch shows now. When nothing read now shows the switch's write, the copy decides
-    /// a raise that is needed, whose conditional write checks its version at the service; a
-    /// raise skipped needs the switch's write. A read that fails leaves it unknown, as does a
-    /// scope key the app waits for.
-    async fn floor_for_write(&mut self, to_ms: u64) -> Result<SharedFloor> {
+    /// The shared floor for a write of a raise to `to_ms`, with the floor the switch holds
+    /// now: the record as the switch holds it, read alone, with what this app holds and keeps
+    /// of it, the copy's divergence kept first ([`Paykit::floor_read_now`]), so no write goes
+    /// over a divergence the app saw or the switch shows now. When nothing read now shows the
+    /// switch's write, the copy decides a raise that is needed, whose conditional write checks
+    /// its version at the service; a raise skipped needs the switch's write. A read that fails
+    /// leaves it unknown, as does a scope key the app waits for.
+    async fn floor_for_write(&mut self, to_ms: u64) -> Result<(SharedFloor, Option<u64>)> {
+        let value = |record: Option<&SharedRecord>| {
+            record
+                .and_then(|record| record.content.value())
+                .and_then(|value| BlockFloorRecord::read(value).ok())
+                .map(|record| record.floor_ms)
+        };
         // Sealed under `paykit_pay` at the current data epoch: without that key nothing is written,
         // and nothing read while the copy waits for a wider certificate's keys.
         if !self.holds_scope_keys() {
-            return Ok(SharedFloor::Unknown);
+            return Ok((SharedFloor::Unknown, None));
         }
         let key = self.app.record_key(&floor_target(&self.identity()))?;
         if let Some(read) = self.floor_read_now().await? {
-            return self.floor_of_read(&key, read.as_ref()).await;
+            let at_switch = value(read.as_ref());
+            return Ok((self.floor_of_read(&key, read.as_ref()).await?, at_switch));
+        }
+        let copy = self.app.shared_record(&key).await?;
+        let at_switch = value(copy.as_ref());
+        if at_switch.is_some_and(|floor| floor >= to_ms) {
+            return Ok((SharedFloor::Unknown, None));
         }
         let held = self.shared_floor().await?;
         Ok(match held {
-            SharedFloor::Known(floor) if floor.is_none_or(|value| value < to_ms) => held,
-            SharedFloor::Divergent => held,
-            _ => SharedFloor::Unknown,
+            SharedFloor::Known(_) | SharedFloor::Divergent => (held, at_switch),
+            SharedFloor::Unknown => (SharedFloor::Unknown, None),
         })
     }
 
-    /// Prepare a conditional raise to `to_ms`. An applied floor at least as high
-    /// already covers this window. No create or successor is written over a divergent
-    /// floor or while the divergence hold stands (Paykit wire 5.6, Divergent floor). A base
-    /// taken from a recovery upload names its exact application (`record_current`), which
-    /// the client adds from the write's base.
+    /// Prepare a conditional raise to `to_ms`: of the higher of the floor held and `to_ms`
+    /// (Paykit wire 5.6, Raising). Only a floor applied at the switch at least as high spares
+    /// it; a floor this app saw alone doesn't, since another own app reads the switch. No
+    /// create or successor is written over a divergent floor or while the divergence hold
+    /// stands (Paykit wire 5.6, Divergent floor). A base taken from a recovery upload names
+    /// its exact application (`record_current`), which the client adds from the write's base.
     ///
     /// # Errors
     ///
     /// [`Refusal::FloorHeld`] while the divergence hold stands; [`Refusal::NotNow`] while the
     /// floor can't be read; the client's errors.
     async fn floor_batch(&mut self, to_ms: u64) -> Result<Option<OpBatch>> {
-        let floor = match self.floor_for_write(to_ms).await? {
-            SharedFloor::Known(floor) => floor,
-            // A floor seen at least as high already covers the window: nothing to write, the
-            // hold notwithstanding (Paykit wire 5.6: it holds what must raise the floor).
-            SharedFloor::Divergent
-                if self.floor_seen().await?.is_some_and(|seen| seen >= to_ms) =>
-            {
-                return Ok(None);
-            }
-            SharedFloor::Divergent => return Err(Refusal::FloorHeld.into()),
-            SharedFloor::Unknown => return Err(unreadable_floor()),
+        let (shared, at_switch) = self.floor_for_write(to_ms).await?;
+        let (floor, to) = match raise_of(shared, at_switch, to_ms) {
+            Raise::Spared => return Ok(None),
+            Raise::Held => return Err(Refusal::FloorHeld.into()),
+            Raise::Unreadable => return Err(unreadable_floor()),
+            Raise::Write { floor, to } => (floor, to),
         };
         let target = floor_target(&self.identity());
         let key = self.app.record_key(&target)?;
         let held = self.app.shared_record(&key).await?;
-        if floor.is_some_and(|floor| floor >= to_ms) {
-            return Ok(None);
-        }
         let seen = self.app.record_seen(&key).await?;
         let base = write_base(
             held.as_ref().and_then(|held| held.content.value()),
             seen.as_deref(),
             floor,
         );
-        let raised = base
-            .raised(to_ms)
-            .unwrap_or_else(|| BlockFloorRecord::new(to_ms));
+        // A base already at `to`, seen but not at the switch, is written back as it is.
+        let raised = base.raised(to).unwrap_or(base);
         let entry = self
             .app
             .record_op(&target, Some(&raised.to_json()?), Vec::new())
@@ -534,7 +576,7 @@ impl Paykit {
                 if error.code() == Some(ErrorCode::Conflict) {
                     let target = floor_target(&self.identity());
                     if let Some(read) = self.app.read_record(&target).await? {
-                        self.keep_floor_view(&read, false).await?;
+                        self.keep_floor_view(&read).await?;
                     }
                 }
                 Err(error.into())
@@ -633,10 +675,7 @@ impl Paykit {
         if floor == SharedFloor::Unknown {
             return Ok(());
         }
-        let owed = self
-            .local_get::<PendingUnblocks>(key::BLOCK_FLOOR)
-            .await?
-            .map(|pending| pending.to_ms);
+        let owed = self.owed_floor().await?;
         let own = self.identity();
         for (rest, _) in notes {
             let note = format!("{}{rest}", key::FLOOR_OPENED);
@@ -881,6 +920,43 @@ mod tests {
                 SharedFloor::Divergent
             );
         }
+    }
+
+    #[test]
+    fn test_floor_raise_spared_only_by_the_switchs_floor() {
+        // The switch's floor covers the raise: nothing to write, whatever is held.
+        for shared in [
+            SharedFloor::Known(Some(10)),
+            SharedFloor::Divergent,
+            SharedFloor::Unknown,
+        ] {
+            assert_eq!(raise_of(shared, Some(100), 100), Raise::Spared);
+        }
+        // A floor this app saw higher than the switch's doesn't spare it: the higher is written.
+        assert_eq!(
+            raise_of(SharedFloor::Known(Some(500)), None, 100),
+            Raise::Write {
+                floor: Some(500),
+                to: 500
+            }
+        );
+        assert_eq!(
+            raise_of(SharedFloor::Known(Some(500)), Some(50), 100),
+            Raise::Write {
+                floor: Some(500),
+                to: 500
+            }
+        );
+        assert_eq!(
+            raise_of(SharedFloor::Known(None), None, 100),
+            Raise::Write {
+                floor: None,
+                to: 100
+            }
+        );
+        // Under the hold, or unreadable, nothing is written.
+        assert_eq!(raise_of(SharedFloor::Divergent, Some(50), 100), Raise::Held);
+        assert_eq!(raise_of(SharedFloor::Unknown, None, 100), Raise::Unreadable);
     }
 
     #[test]

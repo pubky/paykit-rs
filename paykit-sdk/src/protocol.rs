@@ -507,7 +507,10 @@ fn previous_floor_kept(
     for held in restoring.previous_records_of(Collection::BlockFloor.name()) {
         let held = held.map_err(|_| "the installation's block floor cannot be read")?;
         if held.key == floor_key && held.policy == policy {
-            kept = kept.with(crate::floor::FloorKept::of_view(&held, None));
+            // The installation's copy shows the floor live in its authenticated write's own
+            // generation (`Paykit::keep_floor_view`).
+            let live = held.authenticated.then_some(held.version.generation);
+            kept = kept.with(crate::floor::FloorKept::of_view(&held, live));
         }
     }
     Ok(kept)
@@ -1732,16 +1735,21 @@ impl Protocol for PaykitProtocol {
             Err(Fail::Store(failure)) => return Outcome::Retry(failure),
             Err(_) => return Outcome::Retry(StoreFailure::of_entry(StoreError::Corrupt)),
         }
-        let effect = receive::check_before_effect(cx, &message.sender).and_then(|()| {
-            if self.handles_extension(&message.message.kind) {
-                return crate::extensions::extension_effect(cx, message);
-            }
-            let stored = stored_copy(message).map_err(Fail::Drop)?;
-            receive::effect(cx, &stored, message.position(), &|proof| {
-                self.settlement_id(proof)
-            })
-            .map(|()| Outcome::Apply(Effect::default()))
+        let stop_or_receipt = stored_copy(message).is_ok_and(|stored| {
+            crate::divergent::adds_stop(&stored)
+                || matches!(stored.body(), paykit_lib::Body::PaymentReceipt(_))
         });
+        let effect =
+            receive::check_before_effect(cx, &message.sender, stop_or_receipt).and_then(|()| {
+                if self.handles_extension(&message.message.kind) {
+                    return crate::extensions::extension_effect(cx, message);
+                }
+                let stored = stored_copy(message).map_err(Fail::Drop)?;
+                receive::effect(cx, &stored, message.position(), &|proof| {
+                    self.settlement_id(proof)
+                })
+                .map(|()| Outcome::Apply(Effect::default()))
+            });
         match effect {
             Ok(outcome) => outcome,
             // A write the context couldn't build for want of a key: the context holds the

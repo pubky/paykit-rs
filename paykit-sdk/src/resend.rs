@@ -152,7 +152,14 @@ impl Paykit {
             *refused = Some(reason);
             return Ok(true);
         }
-        self.sends_held(sender).await
+        self.asks_held(sender).await
+    }
+
+    /// Whether asks to `sender` are held: while sends to it are ([`Paykit::sends_held`]), and
+    /// while a raise this app owes for its unblock isn't written, when it is asked nothing
+    /// (Paykit wire 5.6, Raising; [`Paykit::raise_holds_sender`]).
+    pub(crate) async fn asks_held(&self, sender: &[u8; 32]) -> Result<bool> {
+        Ok(self.sends_held(sender).await? || self.raise_holds_sender(sender).await?)
     }
 
     /// A `resend_request` to `counterparty` for `selection`, signed and not yet queued.
@@ -221,7 +228,7 @@ impl Paykit {
                     QueuedAskState::Queued => {
                         let msg_id = queued.msg_id.clone();
                         self.local_delete(&ask_key).await?;
-                        if !self.sends_held(&ask.sender).await? {
+                        if !self.asks_held(&ask.sender).await? {
                             self.send_message(&msg_id).await?;
                             sent = sent.saturating_add(1);
                         }

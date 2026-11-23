@@ -162,7 +162,11 @@ pub(crate) type Settlement<'a> = &'a paykit_lib::derive::SettlementIdReader<'a>;
 
 /// Check the receiving app's certificate and the payer's floor before taking any
 /// further entry from a sender it saw unblocked (Paykit spec 8.1).
-pub(crate) fn check_before_effect(cx: &ReceiveContext<'_>, sender: &[u8; 32]) -> Result<(), Fail> {
+pub(crate) fn check_before_effect(
+    cx: &ReceiveContext<'_>,
+    sender: &[u8; 32],
+    stop_or_receipt: bool,
+) -> Result<(), Fail> {
     // No Paykit effect under an own certificate Paykit refuses, such as a renewal's the
     // Switch took (Paykit wire 3.1): the entry is held, never consumed, and tried again at
     // later reads, once a certificate that passes replaces it.
@@ -174,7 +178,10 @@ pub(crate) fn check_before_effect(cx: &ReceiveContext<'_>, sender: &[u8; 32]) ->
         .scopes()
         .iter()
         .any(|s| s == paykit_lib::scopes::PAY);
+    // A stop or a receipt goes on under its own rules while the raise is owed: it creates no
+    // state a raise protects (Paykit wire 5.6, Divergent floor).
     if pay
+        && !stop_or_receipt
         && (state::cx_get::<crate::floor::PendingUnblocks>(cx, key::BLOCK_FLOOR)?
             .is_some_and(|pending| pending.senders.binary_search(sender).is_ok())
             || (state::cx_get::<Vec<[u8; 32]>>(cx, key::DENIED)?
