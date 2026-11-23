@@ -3,9 +3,9 @@
 use super::{
     counter_unavailable, target, ListRecipient, ListReservation, UnknownListDelivery, DAY, HOUR,
 };
-use crate::error::Result;
-use crate::notices::KeptNotice;
-use crate::state::{key, Tx};
+use crate::error::{PaykitError, Result};
+use crate::notices::{KeptNotice, NoticeKind};
+use crate::state::{key, StateKey, Tx};
 use crate::Paykit;
 use paykit_lib::bodies::PRIVATE_LIST_MAX_AGE_MS;
 use paykit_lib::records::ListPublicationRecord;
@@ -190,6 +190,57 @@ impl Paykit {
             return Ok(true);
         }
         Ok(false)
+    }
+
+    /// Drop each list notice whose list's outcome is settled: that recipient's list was
+    /// superseded by a newer version, or the recipient is known to hold it, or nothing it
+    /// offered or withdrew can be paid any more (Paykit spec 9, "Deliveries of unknown
+    /// outcome"). None of these raises it again ([`Paykit::take_list_delivery`]), so an
+    /// acknowledged notice needn't be kept for good.
+    pub(super) async fn prune_list_notices(&mut self) -> Result<()> {
+        let now = self.service_time().unwrap_or(0);
+        let held = self
+            .app
+            .protocol_scan(
+                crate::protocol::BACKUP_NAME,
+                key::RESTORED_DELIVERIES.as_bytes(),
+            )
+            .await?;
+        let mut tx = Tx::default();
+        let mut settled_any = false;
+        for (raw, _) in held {
+            let Some(StateKey::RestoredDelivery { to, msg_id, hash }) = StateKey::parse(&raw)
+            else {
+                return Err(PaykitError::corrupt());
+            };
+            let at = String::from_utf8(raw).map_err(|_| PaykitError::corrupt())?;
+            let Some(notice) = self.kept_notice(&at).await? else {
+                continue;
+            };
+            if notice.kind != NoticeKind::ListDeliveryUnknown {
+                continue;
+            }
+            let issue = self
+                .local_get::<ListReservation>(&key::list_reservation(&to))
+                .await?;
+            let recipient = self
+                .local_get::<ListRecipient>(&key::list_recipient(&to))
+                .await?;
+            let settled = match (issue, recipient) {
+                (Some(issue), Some(recipient)) if issue.id == msg_id && issue.hash == hash => {
+                    recipient.answers.first(&issue).is_some() || !issue.unknown_matters(now)
+                }
+                _ => true,
+            };
+            if settled {
+                tx.delete(&at);
+                settled_any = true;
+            }
+        }
+        if !settled_any {
+            return Ok(());
+        }
+        self.local_commit(tx).await
     }
 
     /// The recipient's current list, under its current choice, whose delivery ended

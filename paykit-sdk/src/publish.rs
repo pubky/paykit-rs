@@ -908,7 +908,7 @@ impl Paykit {
                 }
             }
         }
-        Ok(())
+        self.prune_list_notices().await
     }
 
     async fn publish_recipient(

@@ -2840,6 +2840,50 @@ async fn unknown_list(
     (issue, key)
 }
 
+/// The list notices `shop` keeps, acknowledged or not (`nt/outgoing/`).
+async fn list_notices(shop: &Paykit) -> Vec<Vec<u8>> {
+    shop.app()
+        .protocol_scan("paykit", b"nt/outgoing/")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect()
+}
+
+#[tokio::test]
+async fn test_publication_acknowledged_list_notice_goes_once_its_list_expires() {
+    let w = World::new();
+    let buyer = w.wallet("wallet").await;
+    let payer = buyer.identity();
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&payer).await.unwrap();
+    shop.set_list_endpoints(offered("lno1first")).await.unwrap();
+    let (list, _) = unknown_list(&w, &mut shop, payer, async |shop| {
+        shop.publish_list_to(payer).await.unwrap();
+    })
+    .await;
+    shop.receive(None).await.unwrap();
+    let notice = shop
+        .notices()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|n| n.msg_id.as_deref() == Some(list.msg_id.as_str()))
+        .unwrap();
+    // Acknowledged, it is kept while the list's outcome matters, so it is raised once.
+    shop.acknowledge_notice(&notice.id).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert_eq!(list_notices(&shop).await.len(), 1);
+    // Once the list has expired, nothing it offered can be paid: the notice goes.
+    w.clock
+        .advance_ms(paykit_lib::bodies::PRIVATE_LIST_MAX_AGE_MS + crate::common::HOUR_MS);
+    shop.receive(None).await.unwrap();
+    assert!(list_notices(&shop).await.is_empty());
+    assert!(shop.notices().await.unwrap().is_empty());
+    drop(buyer);
+}
+
 /// The value of the refusal reporting a list of unknown delivery.
 fn unknown_shown(error: paykit_sdk::PaykitError) -> paykit_sdk::UnknownListDelivery {
     match error.refusal() {
@@ -3428,9 +3472,11 @@ async fn test_publication_takes_a_proof_paid_from_the_unknown_list_as_its_arriva
     buyer.receive(None).await.unwrap();
     assert!(pays(&w, &mut buyer).await);
     shop.receive(None).await.unwrap();
-    // It arrived: nothing is left of unknown outcome, and nothing is sent in its place.
+    // It arrived: nothing is left of unknown outcome, nothing is sent in its place, and its
+    // notice is gone.
     shop.publish_list_to(payer).await.unwrap();
     assert_eq!(w.record_writes(&w.bob, &key), 1);
+    assert!(list_notices(&shop).await.is_empty());
 }
 
 #[tokio::test]
