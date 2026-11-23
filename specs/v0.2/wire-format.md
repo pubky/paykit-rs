@@ -474,7 +474,7 @@ The `amount` of a proof without a request is the asset and amount paid, which th
     "payment_endpoint_identifier": "btc-lightning-bolt11",
     "proof": {
       "data": "0d1c2b3a",
-      "type": "bitcoin-bolt11-preimage"
+      "type": "example"
     }
   }
 }
@@ -493,8 +493,8 @@ Without a request:
   "payment_app_id": "brrz3m6g5rci6iqnzke44q4djc",
   "payment_endpoint_identifier": "btc-bitcoin-p2wpkh",
   "proof": {
-    "txid": "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b",
-    "type": "bitcoin-txid"
+    "data": "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b",
+    "type": "example"
   }
 }
 ```
@@ -524,7 +524,7 @@ The `receipt_members` cases in `messages.json` cover the receipt members for req
   },
   "to": "6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy",
   "refs": [
-    "BDGN__ffJTDNNNyF2lkTCrRNUox5u3NGNuwKgxAhcJc",
+    "5i4nqp8KShw1uLnlx5y6UTsNNw8rNS9dt7n5OBbZieQ",
     "pukrdI5C7SfN7mlLheLGWRk2qzt8RTKXlXv4E1rRGKg"
   ],
   "body": {
