@@ -4796,8 +4796,15 @@ impl Paykit {
         };
         let public = entry.destination.source()? == DestinationSource::Public;
         let now = self.now();
+        // Paid only while the payee app records kept still use the record selected, judged
+        // at this check (Paykit spec 4): otherwise the record is read again.
+        let still_used = match entry.kept_carrier(&self.identity())? {
+            Carrier::Record(record) => self.seen_still_uses(&entry.payee, &record).await?,
+            _ => true,
+        };
         let recheck_records = public
             && (answered.is_some()
+                || !still_used
                 || !self
                     .last_public_read
                     .as_ref()

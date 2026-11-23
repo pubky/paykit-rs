@@ -1601,7 +1601,14 @@ async fn test_public_conflict_evicted_ahead_of_the_clock_not_bypassed_once_it_go
         let list = read(&mut wallet, &w).await;
         assert!(ids(&list).is_empty());
         assert!(
-            fails_with(&list, shop, &["unusable until it publishes a record after"]),
+            fails_with(
+                &list,
+                shop,
+                &[&format!(
+                    "unusable until a record of it after {} ms can be used",
+                    floor_of(&wallet).await.unwrap()
+                )]
+            ),
             "{list:?}"
         );
     }
@@ -1921,7 +1928,10 @@ async fn test_public_floor_ahead_of_the_clock_holds_only_the_public_endpoints() 
             fails_with(
                 &list,
                 shop_id,
-                &["unusable until it publishes a record after"]
+                &[&format!(
+                    "unusable until a record of it after {} ms can be used",
+                    floor_of(&wallet).await.unwrap()
+                )]
             ),
             "{list:?}"
         );
@@ -2108,4 +2118,89 @@ async fn test_public_payment_after_the_clock_steps_back_judges_again() {
         paid.outcome
     );
     assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_public_repeat_never_pays_a_record_the_comparison_left_behind() {
+    // A public payment to bob's record is in flight on a method that is idempotent and keeps
+    // no history. Bob then publishes a later record, which the wallet reads: the record paid
+    // is no longer the one used. The resume's repeat judges the record against the
+    // comparison kept now and isn't made (Switch spec 4.2; Paykit spec 4).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    publish_at(&w, tip_jar(), t0, expiry);
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let pending = wallet
+        .pay_without_request(public_to_bob(&w))
+        .await
+        .outcome
+        .unwrap();
+    let PayOutcome::Pending { attempt_id, .. } = pending else {
+        panic!("{pending:?}");
+    };
+    w.rail.set_declaration(
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
+    );
+    w.clock.advance_ms(1000);
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1later"),
+        t0 + 1000,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    let _ = wallet.resume_payments().await;
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_public_unkept_group_beside_a_later_record_answered_from_it_after_a_restore() {
+    // The installation was served a group at T too large to keep; a copy that went on to read
+    // bob's later record is restored in place over it, so the merge holds both the unkept
+    // time and the later record. A copy of the group served again is answered from the later
+    // record, which stays usable (Switch spec 4.2; Paykit spec 4).
+    let w = World::new();
+    let storage = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", std::sync::Arc::clone(&storage)).await;
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1a"),
+        t0,
+        expiry,
+    );
+    listed(&mut wallet, &w).await;
+    let wide = publish_padded(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1wide"),
+        9_000_000,
+        t0,
+        expiry,
+    );
+    assert!(listed(&mut wallet, &w).await.is_empty());
+    let unkept = seen_of(&wallet).await;
+    w.clock.advance_ms(1000);
+    publish_at(
+        &w,
+        one_endpoint("btc-bitcoin-p2wpkh", "bc1qlater"),
+        t0 + 1000,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-bitcoin-p2wpkh"]);
+    let backup = wallet.backup().await.unwrap();
+    put_seen(&mut wallet, unkept).await;
+    drop(wallet);
+    let mut wallet = restored_over(&w, storage, &backup).await;
+    serve(&w, &wide);
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-bitcoin-p2wpkh"]);
 }

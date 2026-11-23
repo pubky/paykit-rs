@@ -404,7 +404,12 @@ impl SeenRecords {
     /// Whether `record` may take part: later than the floor, whatever the clock. This is the
     /// one test of the floor, for a read, the view, a merge and a drop alike.
     fn admits(&self, record: &AppRecord) -> bool {
-        self.dropped_at.is_none_or(|at| record.updated_at() > at)
+        self.admits_at(record.updated_at())
+    }
+
+    /// [`SeenRecords::admits`] of a record made at `updated_at`.
+    fn admits_at(&self, updated_at: u64) -> bool {
+        self.dropped_at.is_none_or(|at| updated_at > at)
     }
 
     /// Raise the floor to `at`: the one place it rises, never lowered or cleared. Only the
@@ -503,13 +508,14 @@ impl SeenRecords {
                 .max(self.unkept_at)
                 .max(other.unkept_at),
         };
+        // The same body twice is one record, whatever its signature (Switch wire 3.2).
         let mut all: Vec<AppRecord> = Vec::new();
-        let mut docs: Vec<Vec<u8>> = Vec::new();
         for signed in self.records.iter().chain(&other.records) {
             let record = AppRecord::verify(signed, payee).ok()?;
-            let bytes = serde_json::to_vec(record.signed()).ok()?;
-            if !docs.contains(&bytes) {
-                docs.push(bytes);
+            if !all
+                .iter()
+                .any(|held| record.order(held) == RecordOrder::Same)
+            {
                 all.push(record);
             }
         }
@@ -569,6 +575,29 @@ fn takes_part(record: &AppRecord, held: &[AppRecord], view: &RecordView, now: u6
 }
 
 impl Paykit {
+    /// Whether the payee app records this app keeps, judged now, still use `record`, the one
+    /// a public payment selected: no record later than it is usable, none conflicts with it,
+    /// and it isn't at or before the floor (Switch spec 4.2; Paykit spec 4). A payment that
+    /// reuses a read checks this before it pays, so it never pays a record the comparison it
+    /// would make now has left behind. A local read only.
+    pub(crate) async fn seen_still_uses(
+        &self,
+        payee: &[u8; 32],
+        record: &AppRecord,
+    ) -> Result<bool> {
+        let seen_key = key::seen_records(payee, &record.cert().app_id());
+        let Some(seen) = self.local_get::<SeenRecords>(&seen_key).await? else {
+            return Ok(false);
+        };
+        let (view, _) = seen.view(payee, self.now())?;
+        let hash = |r: &AppRecord| r.signed().doc_hash().ok();
+        Ok(seen.admits(record)
+            && !view.in_conflict()
+            && view
+                .used()
+                .is_some_and(|used| hash(used).is_some() && hash(used) == hash(record)))
+    }
+
     /// The payee's app records that may be used now (module docs), of `app` only when given,
     /// and the apps whose records couldn't be used: in the order of the payee's
     /// `identity.json`, within the read's bound. `Err` inside holds the refusal of the payee's
@@ -790,26 +819,31 @@ impl Paykit {
             }
             // A record at or before a group the reader couldn't keep is never used, nor an
             // earlier one in its place, until a strictly later record is kept.
-            if seen.before_unkept(served_at, now) {
+            // A later record held and usable answers for it, as for any older copy.
+            let later_used = view
+                .used()
+                .is_some_and(|used| seen.unkept_at.is_some_and(|at| used.updated_at() > at));
+            if seen.before_unkept(served_at, now) && !later_used {
+                let at = seen.unkept_at.unwrap_or_default();
                 failures.push(fail(PublicAppFailureReason::Refused(format!(
-                    "Paykit spec 4: the app's records up to a group that exceeded the history \
-                     a reader keeps ({SEEN_RECORDS} records, {SEEN_RECORDS_BYTES} bytes) are \
-                     not used"
+                    "Paykit spec 4: the app's records up to a group at {at} ms that exceeded the \
+                     history a reader keeps ({SEEN_RECORDS} records, {SEEN_RECORDS_BYTES} bytes) \
+                     are not used, until a record of it after that time can be used"
                 ))));
                 continue;
             }
             // A record at or before the floor, with nothing later held to answer for it: the
             // app's public endpoints are unusable until it publishes a record after the floor
             // and that record isn't ahead of the payer's clock (Paykit spec 4).
-            if let Some(floor) = seen.dropped_at.filter(|floor| {
-                served_at.is_some_and(|at| at <= *floor)
+            if let Some(floor) = seen.dropped_at.filter(|_| {
+                served_at.is_some_and(|at| !seen.admits_at(at))
                     && view.used().is_none()
                     && !view.in_conflict()
             }) {
                 failures.push(fail(PublicAppFailureReason::Refused(format!(
                     "Paykit spec 4: the record served is no later than one dropped from the \
-                     history a reader keeps; the app's public endpoints are unusable until it \
-                     publishes a record after {floor} ms"
+                     history a reader keeps; the app's public endpoints are unusable until a \
+                     record of it after {floor} ms can be used"
                 ))));
                 continue;
             }
