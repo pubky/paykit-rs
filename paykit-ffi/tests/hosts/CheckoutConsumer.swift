@@ -348,14 +348,21 @@ private final class ThrowingMethod: ReceiptReader, @unchecked Sendable {
     override func settlementId(proofJson: Data) throws -> Data? { throw fail() }
 }
 
+/// A method that names the settlement of every proof.
+private final class SettlingMethod: ReceiptReader, @unchecked Sendable {
+    override func settlementId(proofJson: Data) throws -> Data? { Data("a1".utf8) }
+}
+
 /// A callback that throws reads as no answer: no endpoint, an amount to confirm, no settlement.
 private func throwingCallbacks() throws {
     let proof = Data(#"{"settlement":"a1"}"#.utf8)
-    let answered = try testMethodAnswers(method: ReceiptReader(), declaration: testDeclaration, endpoints: testEndpoints, proofJson: proof)
-    precondition(answered.selected == [1] && answered.transferAmount?.value == "7" && answered.settlementId == nil)
+    let answered = try testMethodAnswers(method: SettlingMethod(), declaration: testDeclaration, endpoints: testEndpoints, proofJson: proof)
+    precondition(answered.selected == [1] && answered.selectionFailure == nil)
+    precondition(answered.transferAmount?.value == "7" && answered.settlementId == Data("a1".utf8))
     for declared in [true, false] {
         let thrown = try testMethodAnswers(method: ThrowingMethod(declared: declared), declaration: testDeclaration, endpoints: testEndpoints, proofJson: proof)
-        precondition(thrown.selected == nil && thrown.transferAmount == nil && thrown.settlementId == nil)
+        precondition(thrown.selected == nil && thrown.selectionFailure == "method_unknown")
+        precondition(thrown.transferAmount == nil && thrown.settlementId == nil)
     }
 }
 

@@ -443,6 +443,8 @@ impl CheckoutFixture {
 pub struct MethodAnswers {
     /// The candidate IDs selected; `None` when `select_endpoints` threw.
     pub selected: Option<Vec<u32>>,
+    /// The code the wallet reports for a thrown `select_endpoints`.
+    pub selection_failure: Option<String>,
     /// The transfer amount read; `None` when `transfer` threw or can't tell.
     pub transfer_amount: Option<Amount>,
     /// The settlement ID read; `None` when `settlement_id` threw or found none.
@@ -474,11 +476,17 @@ pub fn test_method_answers(
     let candidate =
         PaymentEndpointCandidate::new(CandidateId::new(1), endpoint.clone(), payload.clone());
     let proof = serde_json::from_slice(&proof_json).map_err(|_| WalletError::invalid("proof"))?;
+    let selection = rail.select_endpoints(&[candidate], Some(&amount));
     Ok(MethodAnswers {
-        selected: rail
-            .select_endpoints(&[candidate], Some(&amount))
+        selected: selection
+            .as_ref()
             .ok()
             .map(|s| s.payable.iter().map(|id| id.get()).collect()),
+        selection_failure: selection.err().and_then(|error| {
+            WalletError::from(paykit_sdk::PaykitError::Rail(error))
+                .failure()
+                .map(|failure| failure.code.clone())
+        }),
         transfer_amount: rail
             .transfer(&endpoint, &payload, &amount)
             .amount

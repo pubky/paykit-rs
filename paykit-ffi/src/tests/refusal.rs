@@ -158,7 +158,7 @@ fn test_wallet_errors_categorize_each_failure_with_a_stable_code() {
         ),
         (
             PaykitError::Refused(Refusal::RecordHeld(reason())),
-            "recovery",
+            "needs_user",
             "record_held",
         ),
         (
@@ -208,7 +208,7 @@ fn test_wallet_errors_categorize_each_failure_with_a_stable_code() {
         ),
         (
             PaykitError::Client(switch_answer(ErrorCode::StaleIdentity, None)),
-            "permanent",
+            "retry_later",
             "switch_stale_identity",
         ),
         (
@@ -503,6 +503,14 @@ fn every_other_failure() -> Vec<WalletError> {
         .into_iter()
         .map(|code| PaykitError::Client(switch_answer(code, None)))
         .collect();
+    // A full quota by the limit it names (Switch wire 9.3).
+    for limit in ["inbox", "storage", "connect_requests", "record_origins"] {
+        let mut answer = switch_answer(ErrorCode::QuotaExceeded, None);
+        if let AppError::Switch(ClientError::Switch { current, .. }) = &mut answer {
+            *current = serde_json::json!({ "limit": limit });
+        }
+        errors.push(PaykitError::Client(answer));
+    }
     let app = [
         AppError::ExpiredUnsent,
         AppError::Transport(TransportError::Timeout),
@@ -528,6 +536,18 @@ fn every_other_failure() -> Vec<WalletError> {
         AppError::Alarm(pubky_switch_client::app::Alarm::Rollback { reason: reason() }),
     ];
     errors.extend(app.into_iter().map(PaykitError::Client));
+    // A store failure behind a kept batch may have applied; bare, it keeps its own case.
+    for kept in [
+        AppError::Store(pubky_switch_client::error::StoreError::Unavailable),
+        AppError::Protocol(pubky_switch_client::app::StoreFailure::of_entry(
+            pubky_switch_client::error::StoreError::Unavailable,
+        )),
+    ] {
+        errors.push(PaykitError::Client(AppError::Kept {
+            batch_id: [9; 16],
+            error: Box::new(kept),
+        }));
+    }
     errors.extend([
         PaykitError::PublicEndpointChangePending(AppError::Transport(TransportError::Timeout)),
         PaykitError::Rail(RailError::Unavailable(reason())),
@@ -558,12 +578,22 @@ fn guide_rows() -> Vec<(String, String)> {
         .lines()
         .filter_map(|line| {
             let cells: Vec<_> = line.split('|').map(str::trim).collect();
-            // The code table's rows: code, from, case, what the host does.
-            if cells.len() != 6 {
+            let code = cells.get(1)?.strip_prefix('`')?.strip_suffix('`')?;
+            // The case table above the codes has two columns.
+            if cells.len() == 4 {
                 return None;
             }
-            let code = cells.get(1)?.strip_prefix('`')?.strip_suffix('`')?;
-            let case = cells.get(3)?.trim_matches('`');
+            // The code table's rows: code, from, case, what the host does, all filled.
+            assert_eq!(
+                cells.len(),
+                6,
+                "the row for {code} has another column count"
+            );
+            assert!(
+                cells[2..5].iter().all(|cell| !cell.is_empty()),
+                "the row for {code} has an empty column"
+            );
+            let case = cells[3].trim_matches('`');
             Some((code.to_string(), case.to_string()))
         })
         .collect()
@@ -585,6 +615,7 @@ fn test_wallet_errors_match_the_host_guide_table() {
         add(code.into(), category.case());
     }
     let reason = || String::from("reason");
+    // Through the same conversion a host's errors take, short-cuts included.
     for refusal in [
         AppRefusal::Stopped,
         AppRefusal::Left,
@@ -605,21 +636,23 @@ fn test_wallet_errors_match_the_host_guide_table() {
         },
         AppRefusal::WontDeliver(pubky_switch_client::app::WontDeliver::GivenUp),
     ] {
-        let (category, code) = crate::error::app_refusal_category(&refusal);
-        add(code.into(), category.case());
+        let enrollment = matches!(
+            refusal,
+            AppRefusal::NotJoined | AppRefusal::RestoreQuestionOpen
+        );
+        match categorized(AppError::Refused(refusal).into()) {
+            Some((case, failure)) => add(failure.code.clone(), case_name(case)),
+            None => assert!(enrollment, "a refusal outside the table"),
+        }
     }
     for error in every_other_failure() {
         let (case, failure) = categorized(error).expect("a categorized failure");
         add(failure.code.clone(), case_name(case));
     }
-    // Reached only by a failure class the bindings don't know yet.
-    for code in ["unclassified", "client_unclassified", "method_unclassified"] {
-        add(code.into(), "OutcomeUnknown");
+    // No test can build these failures; the mapping's own arms give their codes.
+    for (category, code) in crate::error::UNBUILT {
+        add(code.into(), category.case());
     }
-    // Their Switch client values can't be built outside it.
-    add("chain".into(), "Recovery");
-    add("kept_batches_ahead".into(), "RetryLater");
-    add("protocol_store".into(), "RetryLater");
     // `NotSent` promises nothing took effect, so a host may redo the call: each of these is
     // refused before anything was written, sent or applied.
     let not_sent: Vec<_> = produced
@@ -630,21 +663,24 @@ fn test_wallet_errors_match_the_host_guide_table() {
     assert_eq!(
         not_sent,
         [
-            "body_over_cap",        // not sent: over its call's cap
-            "carried_too_large",    // nothing written by the restore
-            "client_usage",         // not sent: breaks a Switch rule
-            "conflict",             // nothing applied: the state changed first
-            "destination",          // refused before the attempt was written
-            "expired_unsent",       // retired before its first send
-            "invalid_input",        // the caller's value breaks a Paykit rule
-            "label",                // refused before the request was sent
-            "method_not_submitted", // the method submitted nothing
-            "no_destination",       // refused before the attempt was written
-            "recurring",            // refused before the attempt was written
-            "switch_conflict",      // refused by the switch, nothing applied
-            "unpinned",             // not sent without a pinned key
-            "unsupported_endpoint", // nothing written
-            "usage",                // the caller's value breaks a Paykit rule
+            "body_over_cap",                 // not sent: over its call's cap
+            "carried_too_large",             // nothing written by the restore
+            "client_usage",                  // not sent: breaks a Switch rule
+            "conflict",                      // nothing applied: the state changed first
+            "destination",                   // refused before the attempt was written
+            "expired_unsent",                // retired before its first send
+            "invalid_input",                 // the caller's value breaks a Paykit rule
+            "label",                         // refused before the request was sent
+            "method_not_submitted",          // the method submitted nothing
+            "no_destination",                // refused before the attempt was written
+            "recurring",                     // refused before the attempt was written
+            "switch_conflict",               // refused by the switch, nothing applied
+            "switch_not_admitted",           // refused by the recipient's switch, nothing applied
+            "switch_quota_connect_requests", // the recipient's pending list is full
+            "switch_too_large",              // refused by the switch as over a cap, nothing applied
+            "unpinned",                      // not sent without a pinned key
+            "unsupported_endpoint",          // nothing written
+            "usage",                         // the caller's value breaks a Paykit rule
         ]
     );
     let rows = guide_rows();
@@ -724,6 +760,13 @@ fn test_wallet_errors_attempt_failed_comes_as_its_cause() {
         (Refusal::Destination("expired".into()), "not_sent"),
         (Refusal::NotCurrent("removed".into()), "recovery"),
         (Refusal::DeadlinePassed, "permanent"),
+        (
+            Refusal::MayBePaid {
+                reason: "earlier payment".into(),
+                doubt: Some(Box::default()),
+            },
+            "needs_user",
+        ),
     ] {
         let error = PaykitError::Refused(Refusal::AttemptFailed(Box::new(cause)));
         let (found, failure) = categorized(error.into()).expect("a categorized failure");
@@ -733,4 +776,53 @@ fn test_wallet_errors_attempt_failed_comes_as_its_cause() {
             .as_ref()
             .is_some_and(|r| r.attempted_failure().is_some()));
     }
+}
+
+#[test]
+fn test_wallet_errors_full_quota_comes_as_what_frees_it() {
+    for (limit, case, code) in [
+        (Some("inbox"), "retry_later", "switch_quota_wait"),
+        (Some("open_attempts"), "retry_later", "switch_quota_wait"),
+        (Some("storage"), "needs_user", "switch_quota_full"),
+        (Some("contacts"), "needs_user", "switch_quota_full"),
+        (Some("claims"), "retry_later", "switch_quota_wait"),
+        (
+            Some("connect_requests"),
+            "not_sent",
+            "switch_quota_connect_requests",
+        ),
+        (Some("attempts"), "permanent", "switch_quota_final"),
+        (Some("record_origins"), "permanent", "switch_quota_final"),
+        (Some("a later limit"), "needs_user", "switch_quota_exceeded"),
+        (None, "needs_user", "switch_quota_exceeded"),
+    ] {
+        let mut answer = switch_answer(ErrorCode::QuotaExceeded, None);
+        if let (AppError::Switch(ClientError::Switch { current, .. }), Some(limit)) =
+            (&mut answer, limit)
+        {
+            *current = serde_json::json!({ "limit": limit });
+        }
+        let (found, failure) = categorized(answer.into()).expect("a categorized failure");
+        assert_eq!((found, failure.code.as_str()), (case, code), "{limit:?}");
+        assert_eq!(failure.service_code.as_deref(), Some("quota_exceeded"));
+    }
+}
+
+#[test]
+fn test_wallet_errors_store_failure_keeps_its_kept_batch() {
+    use pubky_switch_client::error::StoreError;
+    assert!(matches!(
+        WalletError::from(AppError::Store(StoreError::Unavailable)),
+        WalletError::Storage { .. }
+    ));
+    let kept = AppError::Kept {
+        batch_id: [9; 16],
+        error: Box::new(AppError::Store(StoreError::Unavailable)),
+    };
+    let (case, failure) = categorized(kept.into()).expect("a categorized failure");
+    assert_eq!(
+        (case, failure.code.as_str()),
+        ("outcome_unknown", "store_after_kept")
+    );
+    assert_eq!(failure.kept_batch.as_deref(), Some([9; 16].as_slice()));
 }

@@ -426,14 +426,21 @@ private class ThrowingMethod(private val declared: Boolean) : ReceiptReader() {
     override fun settlementId(proofJson: ByteArray): ByteArray? = fail()
 }
 
+/// A method that names the settlement of every proof.
+private class SettlingMethod : ReceiptReader() {
+    override fun settlementId(proofJson: ByteArray): ByteArray? = "a1".toByteArray()
+}
+
 /// A callback that throws reads as no answer: no endpoint, an amount to confirm, no settlement.
 private fun throwingCallbacks() {
     val proof = """{"settlement":"a1"}""".toByteArray()
-    val answered = testMethodAnswers(ReceiptReader(), testDeclaration, testEndpoints, proof)
-    check(answered.selected == listOf(1u) && answered.transferAmount?.value == "7" && answered.settlementId == null)
+    val answered = testMethodAnswers(SettlingMethod(), testDeclaration, testEndpoints, proof)
+    check(answered.selected == listOf(1u) && answered.selectionFailure == null)
+    check(answered.transferAmount?.value == "7" && answered.settlementId?.contentEquals("a1".toByteArray()) == true)
     for (declared in listOf(true, false)) {
         val thrown = testMethodAnswers(ThrowingMethod(declared), testDeclaration, testEndpoints, proof)
-        check(thrown.selected == null && thrown.transferAmount == null && thrown.settlementId == null)
+        check(thrown.selected == null && thrown.selectionFailure == "method_unknown")
+        check(thrown.transferAmount == null && thrown.settlementId == null)
     }
 }
 
