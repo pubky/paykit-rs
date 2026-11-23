@@ -1217,6 +1217,10 @@ impl Paykit {
         if body.is_recurring() {
             return Err(Refusal::Recurring.into());
         }
+        // No automatic one-time payment under the shared post-loss hold (Paykit spec 8.1).
+        if by == Initiator::Automatic && self.shared_loss_hold().await? {
+            return Err(Refusal::NotAutomatic(crate::loss::SHARED_LOSS_HOLD.into()).into());
+        }
         if record.shows_paid() {
             return Err(Refusal::AlreadyPaid.into());
         }
@@ -5065,7 +5069,13 @@ impl Paykit {
             }));
         }
         let stored = stored.clone();
-        let Some(floor) = self.floor_read_now().await else {
+        // The shared post-loss hold, judged at both collects by the newest own `identity.json`
+        // verified, holds every automatic dispatch of a one-time request, a repeat included
+        // (Paykit spec 8.1).
+        if self.shared_loss_hold().await? {
+            return Ok(None);
+        }
+        let Some(floor) = self.floor_read_now().await? else {
             return Ok(None);
         };
         if judge && self.floor_holds_read(&stored, floor.as_ref()).await? {

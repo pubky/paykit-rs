@@ -104,6 +104,26 @@ pub enum NoticeKind {
     /// A bounded recovery family discarded a window before a request covering it was
     /// delivered. Recovery of those messages is no longer tracked (Paykit spec 9).
     DroppedMessagesLost,
+    /// The identity's block floor was seen divergent after a provider loss and is held for
+    /// good (Paykit wire 5.6, Divergent floor): no automatic one-time payment goes, every
+    /// one-time request is paid only by hand, and an unblock or a widening that needs the
+    /// floor raised waits ([`crate::Refusal::FloorHeld`]), unless the shared post-loss hold
+    /// stands too, when it goes without the raise. Raised when the hold is first kept
+    /// and again at each load while it stands; it names no attempt, message or counterparty.
+    BlockFloorHeld,
+    /// A block floor raise this wallet owes was tried and isn't written, with no divergence
+    /// hold: the floor doesn't read, or the switch refuses the write for now (Paykit wire 5.6,
+    /// Raising). Until it is, an unblocked sender's one-time requests wait and it is asked
+    /// nothing, and while a widening's raise waits no one is asked to re-send; it is tried again
+    /// at each receive. Raised
+    /// once while it stands, and removed when the raise is written; it names no attempt,
+    /// message or counterparty.
+    FloorRaiseWaiting,
+    /// Automatic one-time payments for the identity are held for good after a provider
+    /// loss, and each request can still be paid by hand (Paykit spec 8.1, Paykit wire 5.6,
+    /// Shared post-loss hold). Raised once, and again after each reopen, while the hold
+    /// stands; it names no attempt, message or counterparty.
+    AutomaticPaymentsHeld,
 }
 
 impl NoticeKind {
@@ -130,7 +150,22 @@ impl NoticeKind {
             Self::SettlementMarksChanged => "settlement_marks_changed",
             Self::SettlementCreditedTwice => "settlement_credited_twice",
             Self::DroppedMessagesLost => "dropped_lost",
+            Self::BlockFloorHeld => "floor_held",
+            Self::FloorRaiseWaiting => "raise_waiting",
+            Self::AutomaticPaymentsHeld => "loss_hold",
         }
+    }
+
+    /// The identity-wide kind a key names (`nt/<tag>`): one about the identity as a whole,
+    /// at most one kept, naming no attempt, message or counterparty.
+    pub(crate) fn identity_from_tag(tag: &str) -> Option<Self> {
+        [
+            Self::BlockFloorHeld,
+            Self::FloorRaiseWaiting,
+            Self::AutomaticPaymentsHeld,
+        ]
+        .into_iter()
+        .find(|kind| kind.tag() == tag)
     }
 
     /// The kind a key names.
@@ -306,7 +341,8 @@ pub struct Notice {
 /// A notice as kept (`p/nt/<attempt_id>/<kind>`, `p/nt/<sender>/<msg_id>` for a message
 /// given up, or `p/nt/<counterparty>/lost-<from_ms>` for a window of messages a block
 /// dropped that can no longer come back, `from_ms` its earliest acceptance time, zero-padded
-/// to 20 digits): what its key names repeats in it, so a restore binds the value to its key.
+/// to 20 digits, or `p/nt/<tag>` for an identity-wide notice): what its key names repeats in
+/// it, so a restore binds the value to its key.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct KeptNotice {
     pub(crate) kind: NoticeKind,
@@ -393,6 +429,24 @@ pub(crate) struct StoredHandle {
 }
 
 impl KeptNotice {
+    /// The identity-wide notice of `kind`, raised at `at`.
+    pub(crate) fn identity(kind: NoticeKind, at: u64) -> Self {
+        Self {
+            kind,
+            settlement: None,
+            counterparty: None,
+            raised_at_ms: at,
+            acknowledged: false,
+            attempt_id: None,
+            msg_id: None,
+            message_hash: None,
+            request_hash: None,
+            stored: None,
+            origin: None,
+            lost: None,
+        }
+    }
+
     pub(crate) fn settlement(subject: SettlementSubject, payer: Option<[u8; 32]>, at: u64) -> Self {
         Self {
             kind: subject.kind(),
@@ -722,6 +776,7 @@ pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
             SettlementSubject::Changed { .. } | SettlementSubject::Conflicting { .. },
         )) => peer.is_none(),
         Some(StateKey::SettlementNotice(SettlementSubject::Bucket(_))) => true,
+        Some(StateKey::IdentityNotice(_)) => peer.is_none(),
         _ => peer.is_some(),
     };
     if !peer_allowed {
@@ -745,6 +800,13 @@ pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
             }
         }
         _ if notice.settlement.is_some() => Err(PaykitError::corrupt()),
+        Some(StateKey::IdentityNotice(kind)) => {
+            if *notice == KeptNotice::identity(kind, notice.raised_at_ms) {
+                Ok(())
+            } else {
+                Err(PaykitError::corrupt())
+            }
+        }
         Some(StateKey::RestoredDelivery { to, msg_id, hash }) => {
             if !notice.kind.names_outgoing_message()
                 || notice.counterparty.as_deref() != Some(&b64(&to))
@@ -876,6 +938,7 @@ impl Paykit {
                     | StateKey::BlockedLost { .. }
                     | StateKey::SettlementNotice(_)
                     | StateKey::DroppedLost { .. }
+                    | StateKey::IdentityNotice(_)
             )
         ) {
             return Err(Refusal::NotFound.into());
@@ -907,6 +970,46 @@ impl Paykit {
         }
         kept.acknowledged = true;
         self.local_put(&key, &kept).await
+    }
+
+    /// Tell the host of the identity-wide notice of `kind`, once per load: a notice already
+    /// shown and not yet acknowledged is left as it is.
+    ///
+    /// # Errors
+    ///
+    /// A store failure.
+    pub(crate) async fn tell_identity_notice(&mut self, kind: NoticeKind) -> Result<()> {
+        if self.identity_told.contains(&kind) {
+            return Ok(());
+        }
+        let key = key::identity_notice(kind);
+        if self.kept_notice(&key).await?.is_none() {
+            let at = self.service_time().unwrap_or(0);
+            self.local_put(&key, &KeptNotice::identity(kind, at))
+                .await?;
+        }
+        self.identity_told.push(kind);
+        Ok(())
+    }
+
+    /// Tell the host, at a load, a restore or a receive's end, of every identity-wide hold
+    /// that stands: the block floor held after it was seen divergent
+    /// ([`NoticeKind::BlockFloorHeld`]) and the shared post-loss hold
+    /// ([`NoticeKind::AutomaticPaymentsHeld`], `crate::loss`).
+    ///
+    /// # Errors
+    ///
+    /// A store failure, or a kept floor that doesn't read.
+    pub(crate) async fn tell_identity_notices(&mut self) -> Result<()> {
+        if self.floor_kept().await?.divergent {
+            self.tell_identity_notice(NoticeKind::BlockFloorHeld)
+                .await?;
+        }
+        if self.shared_loss_hold().await? {
+            self.tell_identity_notice(NoticeKind::AutomaticPaymentsHeld)
+                .await?;
+        }
+        Ok(())
     }
 
     /// The notice kept at `key`, read whole and bound to it ([`bind_notice`]).
@@ -992,6 +1095,34 @@ mod tests {
             stored: None,
             origin: None,
             lost: None,
+        }
+    }
+
+    #[test]
+    fn test_identity_notices_bind_only_at_their_key_and_name_nothing() {
+        for kind in [
+            NoticeKind::BlockFloorHeld,
+            NoticeKind::FloorRaiseWaiting,
+            NoticeKind::AutomaticPaymentsHeld,
+        ] {
+            let key = key::identity_notice(kind);
+            let notice = KeptNotice::identity(kind, 5);
+            assert!(bind_notice(&key, &notice).is_ok(), "{kind:?}");
+            // Never kept acknowledged: acknowledging removes it.
+            let mut acknowledged = notice.clone();
+            acknowledged.acknowledged = true;
+            assert!(bind_notice(&key, &acknowledged).is_err());
+            let mut named = notice.clone();
+            named.counterparty = Some(b64(&[1; 32]));
+            assert!(bind_notice(&key, &named).is_err());
+            let mut other = notice.clone();
+            other.kind = NoticeKind::MessageGivenUp;
+            assert!(bind_notice(&key, &other).is_err());
+            // Nor at another notice's key.
+            let attempt = AttemptId::from_bytes([5; 16]);
+            assert!(
+                bind_notice(&key::notice(&attempt, NoticeKind::HeldWithoutPay), &notice).is_err()
+            );
         }
     }
 

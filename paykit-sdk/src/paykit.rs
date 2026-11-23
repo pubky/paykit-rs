@@ -396,6 +396,12 @@ pub struct Paykit {
     /// The capabilities the join checked, which its first update signs as they are
     /// (`crate::own_record`); `None` otherwise.
     pub(crate) capability_snapshot: Option<Vec<paykit_lib::PaymentEndpointIdentifier>>,
+    /// The identity-wide notices this load has told the host of (`crate::notices`): each
+    /// once per load while what it tells stands.
+    pub(crate) identity_told: Vec<crate::NoticeKind>,
+    /// Whether a floor raise this app owes was tried and left unwritten
+    /// ([`Paykit::settle_raise_waiting`]).
+    pub(crate) raise_unwritten: bool,
     /// How many activity records this handle bound ([`Paykit::activity_binds`]).
     #[cfg(feature = "test-support")]
     pub(crate) activity_binds: std::sync::atomic::AtomicU64,
@@ -468,6 +474,8 @@ impl Paykit {
             first_read_summary: None,
             own_record_unknown: false,
             capability_snapshot: None,
+            identity_told: Vec::new(),
+            raise_unwritten: false,
             #[cfg(feature = "test-support")]
             activity_binds: std::sync::atomic::AtomicU64::new(0),
             certificates: std::sync::Mutex::default(),
@@ -739,6 +747,8 @@ impl Paykit {
         // A divergent record pauses even when a crash came before the receive's events
         // were taken: look at each held record once (`divergent.rs`).
         Box::pin(self.sweep_divergent()).await?;
+        // The host hears again, at each load, of what holds the identity for good.
+        self.tell_identity_notices().await?;
         // A crash between the restore's commit and clock clamp leaves the clamp for the
         // next load. Nothing is written under a certificate Paykit refuses.
         if self.certificate_refused().is_none() {
@@ -812,6 +822,8 @@ impl Paykit {
             let mut paykit = Self::assemble(app, protocol, config, rail, timer);
             paykit.bound_restored_cursor_time().await?;
             paykit.stamp_restore_time().await?;
+            // An app restored opens as one loaded does.
+            paykit.tell_identity_notices().await?;
             Ok(paykit)
         })
         .await
@@ -826,6 +838,10 @@ impl Paykit {
     /// The client's errors, such as a backup over the store's sizes
     /// (`AppEvent::BackupRefused`) or a journal Paykit's layer refuses; a store failure.
     pub async fn backup(&mut self) -> Result<PaykitBackup> {
+        // A divergence of the block floor the client holds or reported goes into the backup
+        // as the hold (`crate::floor`), whatever the receive that met it got to, under a
+        // refused certificate too: it is this app's own state.
+        Box::pin(self.keep_held_floor()).await?;
         Ok(PaykitBackup {
             app: self.app.backup_layered().await?,
         })
@@ -1240,8 +1256,12 @@ impl Paykit {
         Box::pin(self.forget_blocked_pairs()).await?;
         let mut resend_refused = None;
         let marked = Box::pin(self.ask_on_marks(&mut resend_refused)).await?;
-        // The payer's records opened before this app held the block floor they fall under
-        // carry `manual_only` from now on (`crate::floor`), unless the payer's side waits.
+        // A higher floor or a divergence the reads showed is kept (`crate::floor`). The
+        // payer's records opened before this app held the block floor they fall under carry
+        // `manual_only` from now on, unless the payer's side waits.
+        Box::pin(self.keep_held_floor()).await?;
+        // A loss followed in this read is told as at a load (`crate::loss`).
+        self.tell_identity_notices().await?;
         if !Box::pin(self.payer_waits(keys)).await? {
             Box::pin(self.sweep_floor()).await?;
         }
@@ -1285,6 +1305,8 @@ impl Paykit {
             Box::pin(self.note_imported_receipt_batches()).await?;
         }
         let asked = Box::pin(self.send_asks(&mut resend_refused)).await?;
+        // After every read of this receive, the last of which may have written the raise.
+        Box::pin(self.settle_raise_waiting()).await?;
         Box::pin(self.retire_end_origins()).await?;
         // A confirmed mark goes once its record's view isn't divergent any more, after this
         // read's events were taken.

@@ -259,6 +259,10 @@ pub enum RefusalKind {
     NotCurrent,
     /// The call doesn't apply now: the text says why.
     NotNow,
+    /// The identity's block floor is held after it was seen divergent: no unblock or widening
+    /// that needs a raise goes, and retrying changes nothing until the shared post-loss hold
+    /// stands too.
+    FloorHeld,
     /// A value the protocol or the host gave breaks a rule: the text names it.
     Usage,
     /// A payment action is held by its record. If the payer's payment history was lost to
@@ -386,6 +390,7 @@ impl PaymentRefusal {
             Refusal::PaymentInProgress => D::PaymentInProgress,
             Refusal::NotCurrent(_) => D::NotCurrent,
             Refusal::NotNow(_) => D::NotNow,
+            Refusal::FloorHeld => D::FloorHeld,
             Refusal::Usage(_) => D::Usage,
             Refusal::RecordHeld(_) => D::RecordHeld,
             Refusal::CertificateRefused(_) => D::CertificateRefused,
