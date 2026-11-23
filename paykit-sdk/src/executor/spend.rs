@@ -450,7 +450,9 @@ impl Paykit {
             };
             let consent = self.local_get::<ConsentEntry>(&key::consent(&key)).await?;
             if original.grant.revision != under.revision()
-                || checked.revision.generation != under.revision().generation
+                // The record moves on only to a later write: a later generation of the same
+                // history continues the sequence (Pubky Switch spec, Section 12.5).
+                || checked.revision.generation < under.revision().generation
                 || (checked.revision != under.revision()
                     && checked.revision.seq <= under.revision().seq)
                 || original.record.check_later_write(&record).is_err()
