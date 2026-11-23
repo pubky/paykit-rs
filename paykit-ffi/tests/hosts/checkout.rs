@@ -495,3 +495,10 @@ pub fn test_method_answers(
         settlement_id: rail.settlement_id(&proof),
     })
 }
+
+/// A wallet error whose SDK refusal quotes `text`, as one quoting the switch's own message
+/// does, for the host tests to check that none of it leaves the bindings.
+#[uniffi::export]
+pub fn test_outside_text_error(text: String) -> Result<(), WalletError> {
+    Err(paykit_sdk::PaykitError::Refused(paykit_sdk::Refusal::SwitchUnavailable(text)).into())
+}

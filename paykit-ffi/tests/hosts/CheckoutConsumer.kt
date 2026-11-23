@@ -444,9 +444,27 @@ private fun throwingCallbacks() {
     }
 }
 
+/// Text the switch gave never leaves the bindings: not in a message, a description or a reason.
+private fun outsideTextStaysInside() {
+    val sentinel = "SENTINEL-outside-text"
+    try {
+        testOutsideTextError(sentinel)
+        error("no error")
+    } catch (error: WalletException) {
+        val failure = checkNotNull(error.categorized)
+        val shown = listOf(
+            error.message.orEmpty(), error.toString(), error.localizedMessage.orEmpty(),
+            failure.code(), failure.context(), checkNotNull(failure.refusal()).reason(),
+        )
+        check(shown.none { it.contains(sentinel) }) { "outside text left the bindings" }
+        check(failure.context() == "switch_unavailable: a later call can succeed")
+    }
+}
+
 object CheckoutConsumer {
     @JvmStatic fun main(args: Array<String>) {
         val restore = System.getenv("PAYKIT_TEST_RESTORE")
+        if (restore == null) outsideTextStaysInside()
         if (restore == null) throwingCallbacks()
         if (restore == null) CheckoutReview.entries.forEach { driveCheckout(it) }
         else driveCheckout(CheckoutReview.ORDINARY, restore)

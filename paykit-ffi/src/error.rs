@@ -107,7 +107,7 @@ pub enum WalletError {
 
 /// What failed, for a host that branches on `code` and shows or reports the rest. Codes are
 /// stable snake_case names, fixed with the first packaged release to a host.
-#[derive(Debug, uniffi::Object)]
+#[derive(uniffi::Object)]
 pub struct WalletFailure {
     pub(crate) code: String,
     pub(crate) context: String,
@@ -118,13 +118,28 @@ pub struct WalletFailure {
     pub(crate) refusal: Option<Arc<PaymentRefusal>>,
 }
 
+/// The fields a host may log; the refusals show only their codes.
+impl std::fmt::Debug for WalletFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WalletFailure")
+            .field("code", &self.code)
+            .field("service_code", &self.service_code)
+            .field("retry_after_ms", &self.retry_after_ms)
+            .field("kept_batch", &self.kept_batch.is_some())
+            .field("switch_refusal", &self.switch_refusal)
+            .field("refusal", &self.refusal)
+            .finish()
+    }
+}
+
 #[uniffi::export]
 impl WalletFailure {
     /// What failed, as a stable machine-readable name.
     pub fn code(&self) -> String {
         self.code.clone()
     }
-    /// A redacted explanation for logs and support: it names the rule, never wallet data.
+    /// A fixed explanation for logs and support: the code and what its case means, never
+    /// text the service, the network, the payment method, the store or a document gave.
     pub fn context(&self) -> String {
         self.context.clone()
     }
@@ -204,6 +219,20 @@ pub(crate) enum Category {
 }
 
 impl Category {
+    /// What the case tells the host, in fixed words: a failure's `context` is built from its
+    /// code and this alone, never from text the service, the network, the payment method, the
+    /// store or a document gave.
+    fn meaning(self) -> &'static str {
+        match self {
+            Category::NeedsUser => "the user must see this and decide",
+            Category::RetryLater => "a later call can succeed",
+            Category::OutcomeUnknown => "the call may have taken effect",
+            Category::NotSent => "nothing took effect",
+            Category::Permanent => "the answer is final",
+            Category::Recovery => "the wallet stopped for a recovery",
+        }
+    }
+
     /// The `WalletError` case this category comes as.
     #[cfg(test)]
     pub(crate) fn case(self) -> &'static str {
@@ -218,12 +247,12 @@ impl Category {
     }
 }
 
-fn failure(category: Category, code: &str, context: String) -> (Category, WalletFailure) {
+fn failure(category: Category, code: &str) -> (Category, WalletFailure) {
     (
         category,
         WalletFailure {
             code: code.into(),
-            context,
+            context: String::new(),
             service_code: None,
             retry_after_ms: None,
             kept_batch: None,
@@ -233,7 +262,9 @@ fn failure(category: Category, code: &str, context: String) -> (Category, Wallet
     )
 }
 
-fn into_error((category, failure): (Category, WalletFailure)) -> WalletError {
+fn into_error((category, mut failure): (Category, WalletFailure)) -> WalletError {
+    // Set last, from the final code and case alone.
+    failure.context = format!("{}: {}", failure.code, category.meaning());
     let failure = Arc::new(failure);
     match category {
         Category::NeedsUser => WalletError::NeedsUser { failure },
@@ -432,25 +463,22 @@ fn app_refusal_category(refusal: &AppRefusal) -> (Category, &'static str) {
 fn client_failure(e: &AppError) -> (Category, WalletFailure) {
     use pubky_switch_client::error::ClientError;
     use Category::*;
-    let context = e.to_string();
     let (mut category, mut failure) = match e.unkept() {
-        AppError::ExpiredUnsent => failure(NotSent, "expired_unsent", context),
+        AppError::ExpiredUnsent => failure(NotSent, "expired_unsent"),
         // Reached only behind a kept batch: the commit failed after the batch was kept.
-        AppError::Store(_) => failure(OutcomeUnknown, "store_after_kept", context),
-        AppError::Protocol(_) => failure(OutcomeUnknown, "protocol_store", context),
-        AppError::Transport(_) => failure(RetryLater, "transport", context),
-        AppError::NotAnsweringAsAccount { .. } => {
-            failure(RetryLater, "account_not_answering", context)
-        }
-        AppError::InvalidData(_) => failure(Permanent, "invalid_data", context),
-        AppError::Alarm(_) => failure(Recovery, "alarm", context),
+        AppError::Store(_) => failure(OutcomeUnknown, "store_after_kept"),
+        AppError::Protocol(_) => failure(OutcomeUnknown, "protocol_store"),
+        AppError::Transport(_) => failure(RetryLater, "transport"),
+        AppError::NotAnsweringAsAccount { .. } => failure(RetryLater, "account_not_answering"),
+        AppError::InvalidData(_) => failure(Permanent, "invalid_data"),
+        AppError::Alarm(_) => failure(Recovery, "alarm"),
         AppError::Refused(refusal) => {
             let (category, code) = app_refusal_category(refusal);
-            failure(category, code, context)
+            failure(category, code)
         }
         AppError::Switch(switch) => {
             let (category, code) = switch_client_category(switch);
-            let (category, mut failure) = failure(category, &code, context);
+            let (category, mut failure) = failure(category, &code);
             if let ClientError::Switch { retry_after, .. }
             | ClientError::BodyUnread { retry_after, .. } = switch
             {
@@ -458,7 +486,7 @@ fn client_failure(e: &AppError) -> (Category, WalletFailure) {
             }
             (category, failure)
         }
-        _ => failure(CLIENT_UNCLASSIFIED.0, CLIENT_UNCLASSIFIED.1, context),
+        _ => failure(CLIENT_UNCLASSIFIED.0, CLIENT_UNCLASSIFIED.1),
     };
     failure.service_code = e.code().map(|code| code.as_str().into());
     failure.kept_batch = e.kept_batch().map(Vec::from);
@@ -494,16 +522,11 @@ impl From<AppError> for WalletError {
 impl From<PaykitError> for WalletError {
     fn from(e: PaykitError) -> Self {
         use Category::*;
-        let context = e.to_string();
         let categorized = match &e {
             PaykitError::Refused(r) => {
                 let refusal = Arc::new(PaymentRefusal(r.clone()));
-                let (mut category, code) = refusal_category(&refusal.kind());
-                // The attempt was closed and nothing paid: what to do next is its cause's.
-                if let paykit_sdk::Refusal::AttemptFailed(cause) = r {
-                    category = refusal_category(&PaymentRefusal((**cause).clone()).kind()).0;
-                }
-                let (category, mut failure) = failure(category, code, context);
+                let (category, code) = refusal.case();
+                let (category, mut failure) = failure(category, code);
                 failure.refusal = Some(refusal);
                 (category, failure)
             }
@@ -534,40 +557,58 @@ impl From<PaykitError> for WalletError {
                 (category, failure)
             }
             PaykitError::Rail(error) => match error {
-                paykit_sdk::RailError::Unavailable(_) => {
-                    failure(RetryLater, "method_unknown", context)
-                }
-                paykit_sdk::RailError::Refused(_) => {
-                    failure(NotSent, "method_not_submitted", context)
-                }
+                paykit_sdk::RailError::Unavailable(_) => failure(RetryLater, "method_unknown"),
+                paykit_sdk::RailError::Refused(_) => failure(NotSent, "method_not_submitted"),
                 paykit_sdk::RailError::InvalidSelection(_) => {
-                    failure(Permanent, "method_invalid_selection", context)
+                    failure(Permanent, "method_invalid_selection")
                 }
-                _ => failure(METHOD_UNCLASSIFIED.0, METHOD_UNCLASSIFIED.1, context),
+                _ => failure(METHOD_UNCLASSIFIED.0, METHOD_UNCLASSIFIED.1),
             },
             // A value the caller gave, against data from the network or the store.
-            PaykitError::Lib(paykit_lib::Error::Validation(_)) => {
-                failure(NotSent, "invalid_input", context)
-            }
-            PaykitError::Lib(_) => failure(Permanent, "invalid_protocol_data", context),
+            PaykitError::Lib(paykit_lib::Error::Validation(_)) => failure(NotSent, "invalid_input"),
+            PaykitError::Lib(_) => failure(Permanent, "invalid_protocol_data"),
             // Nothing applied: read the current state, decide again, then redo.
-            PaykitError::Conflict(_) => failure(NotSent, "conflict", context),
-            PaykitError::Homeserver(_) => failure(RetryLater, "homeserver", context),
-            _ => failure(UNCLASSIFIED.0, UNCLASSIFIED.1, context),
+            PaykitError::Conflict(_) => failure(NotSent, "conflict"),
+            PaykitError::Homeserver(_) => failure(RetryLater, "homeserver"),
+            _ => failure(UNCLASSIFIED.0, UNCLASSIFIED.1),
         };
         into_error(categorized)
     }
 }
 
 /// The exact payment refusal and its confirmation evidence retained by the SDK.
-#[derive(Debug, uniffi::Object)]
+#[derive(uniffi::Object)]
 pub struct PaymentRefusal(pub(crate) Refusal);
+
+impl PaymentRefusal {
+    /// The case and code it comes as. An attempt that failed comes as its cause's case: it was
+    /// closed with nothing paid.
+    fn case(&self) -> (Category, &'static str) {
+        let (category, code) = refusal_category(&self.kind());
+        match &self.0 {
+            Refusal::AttemptFailed(cause) => (PaymentRefusal((**cause).clone()).case().0, code),
+            _ => (category, code),
+        }
+    }
+}
+
+/// Only the code: the SDK's refusal text can quote what the switch or the network said.
+impl std::fmt::Debug for PaymentRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("PaymentRefusal")
+            .field(&self.case().1)
+            .finish()
+    }
+}
 
 #[uniffi::export]
 impl PaymentRefusal {
-    /// Return the native explanation for display.
+    /// A fixed description for display: the refusal's code and what its case means. The SDK's
+    /// own refusal text can quote what the switch or the network said, so it never leaves
+    /// the bindings; the refusal's data is in `kind()`.
     pub fn reason(&self) -> String {
-        self.0.to_string()
+        let (category, code) = self.case();
+        format!("{code}: {}", category.meaning())
     }
     /// For a failed earlier attempt, return the underlying reason when available.
     pub fn attempted_failure(&self) -> Option<Arc<Self>> {

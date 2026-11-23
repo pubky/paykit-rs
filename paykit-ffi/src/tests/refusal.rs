@@ -828,3 +828,91 @@ fn test_wallet_errors_store_failure_keeps_its_kept_batch() {
     );
     assert_eq!(failure.kept_batch.as_deref(), Some([9; 16].as_slice()));
 }
+
+#[test]
+fn test_wallet_errors_context_carries_no_outside_text() {
+    // Text the service, the network, the method, the store or a document can put in an error.
+    let sentinel = "SENTINEL-outside-text";
+    let text = || String::from(sentinel);
+    let mut service = switch_answer(ErrorCode::Unavailable, None);
+    if let AppError::Switch(ClientError::Switch { message, .. }) = &mut service {
+        *message = text();
+    }
+    let errors = [
+        PaykitError::Client(service),
+        PaykitError::Client(AppError::Transport(TransportError::Connect(text()))),
+        PaykitError::Client(AppError::InvalidData(text())),
+        PaykitError::Client(AppError::Refused(AppRefusal::Usage(text()))),
+        PaykitError::Client(AppError::Kept {
+            batch_id: [3; 16],
+            error: Box::new(AppError::Transport(TransportError::Connect(text()))),
+        }),
+        PaykitError::PublicEndpointChangePending(AppError::Refused(AppRefusal::NotNow(text()))),
+        PaykitError::Refused(Refusal::Usage(text())),
+        PaykitError::Refused(Refusal::Destination(text())),
+        // The SDK builds these from what the switch or the network said.
+        PaykitError::Refused(Refusal::SwitchUnavailable(text())),
+        PaykitError::Refused(Refusal::IdentityUnavailable(text())),
+        PaykitError::Refused(Refusal::CertificateRefused(text())),
+        PaykitError::Refused(Refusal::AttemptFailed(Box::new(Refusal::NotNow(text())))),
+        PaykitError::Client(AppError::Alarm(pubky_switch_client::app::Alarm::Rollback {
+            reason: text(),
+        })),
+        PaykitError::Client(AppError::Switch(ClientError::InvalidResponse(text()))),
+        PaykitError::Client(AppError::Switch(ClientError::Usage(text()))),
+        PaykitError::Client(AppError::Switch(ClientError::Transport(
+            TransportError::Connect(text()),
+        ))),
+        PaykitError::Client(AppError::Refused(AppRefusal::Approval(text()))),
+        PaykitError::Client(AppError::Refused(AppRefusal::NotNow(text()))),
+        PaykitError::Rail(RailError::Refused(text())),
+        PaykitError::Rail(RailError::InvalidSelection(text())),
+        PaykitError::Lib(paykit_lib::Error::Validation(text())),
+        PaykitError::Rail(RailError::Unavailable(text())),
+        PaykitError::Lib(paykit_lib::Error::Invalid(text())),
+        PaykitError::Conflict(text()),
+        PaykitError::Homeserver(TransportError::Connect(text())),
+    ];
+    for error in errors {
+        let error = WalletError::from(error);
+        let (_, failure) = categorized(error.clone()).expect("a categorized failure");
+        let code = &failure.code;
+        // The context is the final code and the meaning of the case the error comes as.
+        let (case, _) = categorized(error.clone()).expect("a categorized failure");
+        assert_eq!(failure.context, format!("{code}: {}", meaning_of(case)));
+        // Every text a host or the bindings can print: the context, the message, the debug
+        // output, and the refusals' reason and debug output.
+        let mut shown = vec![
+            failure.context.clone(),
+            error.to_string(),
+            format!("{error:?}"),
+            format!("{failure:?}"),
+        ];
+        if let Some(refusal) = &failure.refusal {
+            shown.push(refusal.reason());
+            shown.push(format!("{refusal:?}"));
+            if let Some(cause) = refusal.attempted_failure() {
+                shown.push(cause.reason());
+            }
+        }
+        if let Some(rule) = &failure.switch_refusal {
+            shown.push(format!("{rule:?}"));
+        }
+        for text in shown {
+            assert!(!text.contains(sentinel), "{code}: {text}");
+        }
+    }
+}
+
+/// What each case tells the host, as `context` and `reason()` spell it.
+fn meaning_of(case: &str) -> &'static str {
+    match case {
+        "needs_user" => "the user must see this and decide",
+        "retry_later" => "a later call can succeed",
+        "outcome_unknown" => "the call may have taken effect",
+        "not_sent" => "nothing took effect",
+        "permanent" => "the answer is final",
+        "recovery" => "the wallet stopped for a recovery",
+        _ => panic!("no case {case}"),
+    }
+}

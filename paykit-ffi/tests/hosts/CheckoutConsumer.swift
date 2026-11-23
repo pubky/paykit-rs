@@ -366,10 +366,30 @@ private func throwingCallbacks() throws {
     }
 }
 
+/// Text the switch gave never leaves the bindings: not in a message, a description or a reason.
+private func outsideTextStaysInside() {
+    let sentinel = "SENTINEL-outside-text"
+    do {
+        try testOutsideTextError(text: sentinel)
+        preconditionFailure("no error")
+    } catch let error as WalletError {
+        guard let failure = error.categorized, let refusal = failure.refusal() else { preconditionFailure("no failure") }
+        let shown = [
+            String(describing: error), String(reflecting: error), error.localizedDescription,
+            failure.code(), failure.context(), refusal.reason(),
+        ]
+        precondition(!shown.contains { $0.contains(sentinel) }, "outside text left the bindings")
+        precondition(failure.context() == "switch_unavailable: a later call can succeed")
+    } catch {
+        preconditionFailure("unexpected error")
+    }
+}
+
 func driveCheckout() async throws {
     if let action = ProcessInfo.processInfo.environment["PAYKIT_TEST_RESTORE"] {
         try await driveCheckout(.ordinary, restore: action)
     } else {
+        outsideTextStaysInside()
         try throwingCallbacks()
         for review in CheckoutReview.allCases { try await driveCheckout(review) }
     }

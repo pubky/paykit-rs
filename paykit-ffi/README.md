@@ -28,7 +28,7 @@ If an install or load fails after acquiring its writer, the call waits for relea
 
 Use `backup` to export the installed wallet’s SDK backup. Store its bytes and App ID together in protected storage. Use `load` to reopen the installed state on the same device. For a retained grant, `reconcileAllowance` reports usage only from the original authority and complete account-wide method history. An unknown result leaves spending held.
 
-A failed call says what to do next by its error case, and every case carries a `WalletFailure` with a stable `code` to branch on and a `context` for logs:
+A failed call says what to do next by its error case, and every case carries a `WalletFailure` with a stable `code` to branch on and a `context` for logs. The context is fixed text, the code and what its case means, so it never carries what the service, the network, the payment method or the store said:
 
 - `NeedsUser`: show it to the user. A held, blocked, may-be-paid, transfer or rate refusal goes ahead once the user confirms it and the same `failure.refusal` is passed back in `confirmedRefusals`; every other code names its own call.
 - `RetryLater`: try again later, after `retryAfterMs` when it is set. The network, the service or a rule that can't be met now.
@@ -39,7 +39,7 @@ A failed call says what to do next by its error case, and every case carries a `
 
 The enrollment, restore and store failures keep their own cases. Codes are fixed with the first packaged release; a code a host doesn't know is handled by its case. The "Wallet errors" table of the [host guide](../docs/paykit-host-guide.md#wallet-errors) lists every code, where it comes from, its case and what the host does.
 
-A failure from the payment rules carries a `PaymentRefusal` in `failure.refusal`. Use `kind()` for its data and `reason()` for display. For example, `IdentityUnavailable` means the wallet needs a fresh identity before it can resume a payment. A `Divergent` refusal identifies the affected records and versions. `attemptedFailure()` exposes the original refusal when an attempt failed before dispatch. A failure from the Switch client can also carry a typed `switchRefusal`, including the generation requiring recovery. `KeptBatchesAhead` identifies the earlier batch and its answer window. The separate `keptBatch` field identifies a batch retained for this call. A refusal the bindings don't recognize has the code `unknown` and comes as `Permanent`: show it, and never retry or confirm it.
+A failure from the payment rules carries a `PaymentRefusal` in `failure.refusal`. Use `kind()` for its data. `reason()` is fixed text, the refusal's code and what its case means: the SDK's own refusal text can quote what the switch or the network said, so it never leaves the bindings. For example, `IdentityUnavailable` means the wallet needs a fresh identity before it can resume a payment. A `Divergent` refusal identifies the affected records and versions. `attemptedFailure()` exposes the original refusal when an attempt failed before dispatch. A failure from the Switch client can also carry a typed `switchRefusal`, including the generation requiring recovery. `KeptBatchesAhead` identifies the earlier batch and its answer window. The separate `keptBatch` field identifies a batch retained for this call. A refusal the bindings don't recognize has the code `unknown` and comes as `Permanent`: show it, and never retry or confirm it.
 
 ## Restore the wallet from a protected backup
 
