@@ -283,8 +283,17 @@ pub trait PaymentMethod: Send + Sync {
     /// the payee credits the request only when it lies within the request's times, so
     /// return the time the payment's evidence dates it, never a placeholder.
     async fn verify(&self, proof: MethodProof) -> Result<Option<u64>, MethodError>;
-    /// Extract the method-defined settlement ID for deduplication, when available.
-    fn settlement_id(&self, proof_json: Vec<u8>) -> Option<Vec<u8>>;
+    /// The settlement ID of a proof this method made, paid to `endpoint`: the bytes the
+    /// method defines to name one settlement, the same for every proof of it, read from the
+    /// endpoint and the proof alone and deterministic. Paykit defines none and reads no
+    /// proof; whether one transaction carries several payments, named apart, is the
+    /// method's rule. The endpoint lets a method name apart settlements that are distinct,
+    /// such as those of several endpoints whose proofs can carry the same inner value. A
+    /// method for which one transaction is one settlement returns the same ID for every proof
+    /// of it, whatever the endpoint (Paykit wire 1.5): naming it apart would give one
+    /// settlement two marks. Null for a proof that names none: a payment without a request
+    /// isn't credited by it.
+    fn settlement_id(&self, endpoint: String, proof_json: Vec<u8>) -> Option<Vec<u8>>;
 }
 
 pub(crate) struct HostRail {
@@ -517,9 +526,16 @@ impl Rail for HostRail {
         })
     }
 
-    fn settlement_id(&self, proof: &Map<String, Value>) -> Option<Vec<u8>> {
+    fn settlement_id(
+        &self,
+        endpoint_id: &PaymentEndpointIdentifier,
+        proof: &Map<String, Value>,
+    ) -> Option<Vec<u8>> {
         let proof = serde_json::to_vec(proof).ok()?;
-        in_callback(|| self.method.settlement_id(proof))
+        in_callback(|| {
+            self.method
+                .settlement_id(endpoint_id.as_str().to_owned(), proof)
+        })
     }
 }
 
