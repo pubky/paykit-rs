@@ -509,7 +509,9 @@ async fn test_blocked_peer_asked_after_a_missed_item_only_once_the_deny_list_rea
     let w = World::new();
     let (mut wallet, _, _) = received(&w, PaykitConfig::default()).await;
     w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
-    // The read at the receive's start and the one before the asks both fail.
+    // The read at the receive's start, the item's own after the feed and the one before the
+    // asks all fail.
+    fail_list_read(&w);
     fail_list_read(&w);
     fail_list_read(&w);
     let now = w.clock.now_ms();
