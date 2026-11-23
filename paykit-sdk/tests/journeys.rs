@@ -19,6 +19,8 @@ mod periods;
 mod priced;
 #[path = "journeys/private_list.rs"]
 mod private_list;
+#[path = "journeys/provider_loss.rs"]
+mod provider_loss;
 #[path = "journeys/public_endpoint.rs"]
 mod public_endpoint;
 #[path = "journeys/restore.rs"]

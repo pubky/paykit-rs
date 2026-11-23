@@ -127,7 +127,10 @@ async fn test_extensions_registered_kind_kept_until_taken() {
 }
 
 #[tokio::test]
-async fn test_extensions_payer_receives_after_the_unblock_floor_can_be_checked() {
+async fn test_extensions_payer_receives_while_the_unblock_floor_cannot_be_checked() {
+    // An extension message carries no payment semantics and isn't a one-time request, so it
+    // never waits for the raise of its sender's unblock (Paykit spec 8.1; Paykit wire 5.6,
+    // Raising): it is taken while the owed unblocks can't be read.
     let w = World::new();
     let lists = Arc::new(ListsStore::default());
     let mut payer = sender_on(&w, handling(), lists.clone()).await;
@@ -142,9 +145,6 @@ async fn test_extensions_payer_receives_after_the_unblock_floor_can_be_checked()
     // Isolate delivery from the SDK's after-read work on the same floor.
     lists.pending_unblocks_unreadable(true);
     payer.app_mut().receive(None).await.unwrap();
-    assert!(payer.extension_messages().await.unwrap().is_empty());
-    lists.pending_unblocks_unreadable(false);
-    payer.receive(None).await.unwrap();
     let kept = payer.extension_messages().await.unwrap();
     assert_eq!(kept.len(), 1);
     assert_eq!(kept[0].msg_id, id);

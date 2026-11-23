@@ -95,9 +95,12 @@
         ]
       },
       {
-        "hashed_bytes_hex": "000000167075626b792d7377697463682f76312f706f6c6963790000000a7061796b69745f7061790000000800000000000000010000000a7061796b69745f706179",
+        "hashed_bytes_hex": "000000207075626b792d7377697463682f76312f7065726d616e656e742d706f6c6963790000000a7061796b69745f7061790000000800000000000000010000000a7061796b69745f706179000000080000000000000000",
         "name": "block_floor",
-        "policy_hash": "T2nnvFGNVnBeOE5yZLMxNFEekVzGbPsON87MmBPWrqQ",
+        "permanent": {
+          "generation": null
+        },
+        "policy_hash": "s5ASsveGo8b2p6eAoo1lp4Rxg0-A8XP_SfZkS-EPgg4",
         "read_scope": "paykit_pay",
         "write_scopes": [
           "paykit_pay"
