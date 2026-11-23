@@ -1625,6 +1625,26 @@ fn stale(kept: &StoredMessage, service: Option<u64>) -> Result<bool> {
     Ok(crate::stored::past_window(at, service))
 }
 
+/// Whether `status` is a stop: an end, a rejection or a conflict, final whatever the record
+/// could still establish (Paykit spec 8.3).
+fn stopped(status: AllowanceStatus) -> bool {
+    matches!(
+        status,
+        AllowanceStatus::Conflicted | AllowanceStatus::Ended | AllowanceStatus::Rejected
+    )
+}
+
+/// The status a view shows for `status` while the record could still establish a conflict
+/// (`unresolved`): an Allowance that hasn't stopped waits for the conflict check, and a stop
+/// stays what it is.
+pub(crate) fn shown_status(status: AllowanceStatus, unresolved: bool) -> AllowanceStatus {
+    if unresolved && !stopped(status) {
+        AllowanceStatus::AwaitingConflictCheck
+    } else {
+        status
+    }
+}
+
 impl Paykit {
     pub(crate) fn require_allowance(&self) -> Result<()> {
         if self.holds("paykit_allowance") {
@@ -2534,17 +2554,8 @@ impl Paykit {
             Box::pin(self.allowance_stopped(&record)).await?,
             Box::pin(self.conflict_kept(&record)).await?,
         );
-        // An end, a rejection or a conflict is final whatever the record could still
-        // establish; only an Allowance that hasn't stopped waits for the conflict check.
-        let status = if !matches!(
-            status,
-            AllowanceStatus::Conflicted | AllowanceStatus::Ended | AllowanceStatus::Rejected
-        ) && self.unresolved_for_allowance(&record, held).await?
-        {
-            AllowanceStatus::AwaitingConflictCheck
-        } else {
-            status
-        };
+        let unresolved = !stopped(status) && self.unresolved_for_allowance(&record, held).await?;
+        let status = shown_status(status, unresolved);
         let mut view = Box::pin(self.proposal_view(record, &held.proposal, status)).await?;
         view.executor_app_id = held
             .current_grant(&self.identity())

@@ -125,15 +125,8 @@ impl Standing {
 /// counterparty's block and the knowledge of the deny list, and only then the user's
 /// confirmation, so the user is asked only when confirming lifts the refusal.
 pub(crate) fn standing(app: &Paykit, view: &AllowanceView, consent: ConsentState) -> Standing {
-    match view.status {
-        AllowanceStatus::Accepted => {}
-        AllowanceStatus::Ended => return Standing::Final(Refusal::AllowanceEnded),
-        AllowanceStatus::Conflicted => return Standing::Final(Refusal::AllowanceConflicted),
-        AllowanceStatus::Rejected => return Standing::Final(Refusal::Rejected),
-        AllowanceStatus::AwaitingConflictCheck => {
-            return Standing::Temporary("the Allowance waits for its conflict check")
-        }
-        _ => return Standing::Temporary("the Allowance isn't accepted yet"),
+    if let Some(standing) = status_standing(view.status) {
+        return standing;
     }
     if view.role != Some(AllowanceRole::Allower) {
         return Standing::Final(Refusal::Usage(
@@ -198,6 +191,21 @@ pub(crate) fn standing(app: &Paykit, view: &AllowanceView, consent: ConsentState
         (ConsentState::Waiting(why), _) => Standing::Temporary(why),
         (ConsentState::Removed(reason), _) => Standing::Final(removed_refusal(reason)),
     }
+}
+
+/// Where an Allowance stands by its status alone: `None` for an accepted one, which the
+/// rest of [`standing`] decides.
+fn status_standing(status: AllowanceStatus) -> Option<Standing> {
+    Some(match status {
+        AllowanceStatus::Accepted => return None,
+        AllowanceStatus::Ended => Standing::Final(Refusal::AllowanceEnded),
+        AllowanceStatus::Conflicted => Standing::Final(Refusal::AllowanceConflicted),
+        AllowanceStatus::Rejected => Standing::Final(Refusal::Rejected),
+        AllowanceStatus::AwaitingConflictCheck => {
+            Standing::Temporary("the Allowance waits for its conflict check")
+        }
+        _ => Standing::Temporary("the Allowance isn't accepted yet"),
+    })
 }
 
 /// Why an Allowance last confirmed before a provider loss pays nothing automatically.
@@ -726,6 +734,35 @@ impl Paykit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_spend_pending_conflict_check_waits_and_stops_stay_final() {
+        use crate::allowances::shown_status;
+        // An accepted Allowance whose record could still establish a conflict waits for
+        // the check, with its own reason, not as one not accepted yet.
+        assert_eq!(
+            status_standing(shown_status(AllowanceStatus::Accepted, true)),
+            Some(Standing::Temporary(
+                "the Allowance waits for its conflict check"
+            ))
+        );
+        assert_eq!(
+            status_standing(shown_status(AllowanceStatus::Accepted, false)),
+            None
+        );
+        // An ended, rejected or conflicted record stays final with conflict evidence still
+        // unresolved (Paykit spec 8.3).
+        for (status, refusal) in [
+            (AllowanceStatus::Ended, Refusal::AllowanceEnded),
+            (AllowanceStatus::Rejected, Refusal::Rejected),
+            (AllowanceStatus::Conflicted, Refusal::AllowanceConflicted),
+        ] {
+            assert_eq!(
+                status_standing(shown_status(status, true)),
+                Some(Standing::Final(refusal))
+            );
+        }
+    }
 
     #[test]
     fn test_spend_removed_consent_refuses_as_its_end() {
