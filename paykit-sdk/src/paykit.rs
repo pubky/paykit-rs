@@ -621,6 +621,9 @@ impl Paykit {
             paykit.capability_snapshot = snapshot;
             let _owed = Box::pin(paykit.tend_own_record()).await;
             paykit.capability_snapshot = None;
+            // The host hears at once of what holds the identity for good, as at a load; one that
+            // can't be told now is told at the first receive's end.
+            let _told = paykit.tell_identity_notices().await;
             Ok(paykit)
         })
         .await
