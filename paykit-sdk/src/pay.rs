@@ -2004,7 +2004,21 @@ impl Paykit {
                 .choose(payee, gathered, pricing, options, Some(&identity))?
                 .ok_or_else(|| unsupported("the payee's public endpoints"));
         }
-        let read = self.lists_read_of(payee).await?;
+        let mut read = Vec::new();
+        for (list, version) in self.lists_read_of(payee).await? {
+            // Over a `payment_lists` record seen deleted, a list is paid only from a value
+            // holding every single-use mark known, and none with no copy known; another waits
+            // (Paykit spec 6, "Visible deletion without a copy").
+            let at = key::list_record_lost(
+                &self
+                    .app
+                    .record_key(&list_target(&list.payee, &list.app_id))?,
+            );
+            let lost = self.local_get::<crate::state::LostListRecord>(&at).await?;
+            if lost.is_none_or(|lost| lost.admits(&list)) {
+                read.push((list, version));
+            }
+        }
         // The version of each record's write selected from: every attempt on a list endpoint
         // is conditioned on it, never on a write the app refused (Switch spec 8.2).
         let versions: Vec<([u8; 16], RecordVersion)> =

@@ -457,7 +457,7 @@ The method declares `payment_time_tolerance_ms` with its declaration. The payee 
 | `Refusal::AttemptFailed` | The attempt was recorded failed before dispatch. Show its enclosed refusal. |
 | `Refusal::NoDestination` | Show why no endpoint could be used, including failed public app reads if available. |
 | `Refusal::UnsupportedEndpoint` | Ask the user to choose a compatible endpoint or payment method. |
-| `Refusal::WaitingForList` | Show that a newer Private Payment List was requested. A public destination is a separate user choice. |
+| `Refusal::WaitingForList` | Show that a newer Private Payment List was requested. A public destination is a separate user choice. A list in `held_lists()` waits because its record was deleted or doesn't read; after a delete it can wait indefinitely, and the payee's public endpoints or a request's own destination remain the way to pay. |
 | `Refusal::ListDeliveryUnknown` | Show the counterparty, whether the list was a withdrawal and how long the earlier or current list may be paid. `withdraw_list_from` has already recorded the counterparty as withdrawn. Pass the same value to `send_list_again` only after the user confirms another version. `Ok` means nothing of unknown outcome is left. `NotNow` keeps the confirmation: a later call or receive sends the list once it can, which for a nonempty list to a blocked counterparty is after the block ends. |
 | `Refusal::Transfer` | Show the actual transfer or fee quote and return that exact quote only on confirmation. |
 | `Refusal::PricedByRate` | Obtain authorization for this exact quote from the user or their bounded policy (Scheduling a Billing Period). |

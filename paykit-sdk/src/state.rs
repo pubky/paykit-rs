@@ -46,8 +46,8 @@
 //! | `ml` | set by a `missed` item: the shared records aren't listed by Paykit since, so a record's absence means nothing yet; cleared by Paykit's next listing (`hold.rs`); never restored | |
 //! | `lp/<recipient>/<generation>/<message hash>` | outstanding original publication batch IDs, kept atomically before submission and retained across restore | yes |
 //! | `lres/<recipient>` | the applied list, its publisher and original signed message, its first delivery outcome (open, undelivered or unknown) and any kept confirmation of another version, prior offers' latest possible expiry, and the interval of an outstanding withdrawal | yes |
-//! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read: never written over it, which could drop its single-use marks, until the record reads again with them, or reads absent and was never seen lost (`lgone/`); deleted once the record holds the list | |
-//! | `lgone/<record key>` | set in the commit in which this app sees the `payment_lists` record deleted, or holds a list over it while it doesn't read: a later absence of it, as after a forgotten delete or a restore, keeps a list held there; never cleared, and a restore keeps the installation's own as well as the backup's | yes |
+//! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read, or reads without the marks `lgone/` knows: never written over it, which could drop its single-use marks, until the record reads again with them, or reads absent and was never seen deleted (`lgone/`); deleted once the record holds the list | |
+//! | `lgone/<record key>` | set in the commit in which this app sees the `payment_lists` record deleted, with the single-use marks its copy held, or none known with no copy (`LostListRecord`): a later absence of it, as after a forgotten delete or a restore, keeps a list held there, and a later value is taken only if it holds every mark known, none with no copy; never cleared, and a restore keeps the union of the installation's and the backup's | yes |
 //! | `kc/<record key>/<certificate hash>/<feed generation>` | a payee's cancellation of a request, kept until it is placed in the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
 //! | `lr` | when the app last read the lists, on the device clock; absent before the first read and after a due read failed, when new activity waits (Paykit wire 4.1); never restored, so a restored app reads the deny list again before any payment | |
@@ -689,6 +689,118 @@ impl Stored for OwnBlockMark {
     }
 }
 
+/// What this app knew of a `payment_lists` record when it saw it deleted
+/// (`lgone/<record key>`; Paykit spec 6, "Visible deletion without a copy"; Paykit wire 5,
+/// "A visible delete without a copy"): the single-use endpoints its copy held used, or none
+/// known when it held no copy. While it is kept, a later value at that key is taken only if
+/// it holds every one of these marks, and with no copy none is: an unmarked create after
+/// the service forgot the delete, or a create kept in a batch that lands late, proves
+/// nothing about what the delete took, and could let an endpoint already paid be paid again
+/// (Paykit wire 5.4). An absence of the record keeps its list held too.
+///
+/// Its size is that of one record's `used` entries, one for each list version a single-use
+/// endpoint was paid at, read from a value within the largest the switch takes (Switch wire
+/// 6.2), or a restore's union of two such sets. It is never removed: a value holding every
+/// mark is taken with it kept, while removing it would let a later absence of the record,
+/// or a value without the marks, read as a record never deleted, since the client's own
+/// mark of what it saw ends at the delete and no backup carries it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LostListRecord {
+    /// The marks known, in ascending order; `None` for a delete seen with no copy.
+    #[serde(deserialize_with = "Option::deserialize")]
+    marks: Option<Vec<LostMark>>,
+}
+
+/// A single-use endpoint used, as a [`LostListRecord`] keeps it (Paykit wire 5.4 `used`).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LostMark {
+    generation: u64,
+    counter: u64,
+    endpoint: String,
+    attempt_id: [u8; 16],
+}
+
+impl LostMark {
+    fn valid(&self) -> bool {
+        paykit_lib::ListVersion::new(self.generation, self.counter).is_ok()
+            && paykit_lib::PaymentEndpointIdentifier::parse(&self.endpoint).is_ok()
+    }
+}
+
+/// The marks of `record`'s `used` entries, in ascending order, each once.
+fn marks_of(record: &paykit_lib::records::PaymentListRecord) -> Vec<LostMark> {
+    let mut marks: Vec<LostMark> = record
+        .used
+        .iter()
+        .map(|used| LostMark {
+            generation: used.version.generation(),
+            counter: used.version.counter(),
+            endpoint: used.endpoint.as_str().to_owned(),
+            attempt_id: used.attempt_id.to_bytes(),
+        })
+        .collect();
+    marks.sort();
+    marks.dedup();
+    marks
+}
+
+impl LostListRecord {
+    /// A delete seen over `copy`, the last value of the record this app read, if any.
+    pub(crate) fn over(copy: Option<&paykit_lib::records::PaymentListRecord>) -> Self {
+        Self {
+            marks: copy.map(marks_of),
+        }
+    }
+
+    /// Both kept: a value is then taken only if it holds the marks of each, and none is
+    /// when either knew no copy.
+    pub(crate) fn merge(self, other: Self) -> Self {
+        let marks = match (self.marks, other.marks) {
+            (Some(mut one), Some(other)) => {
+                one.extend(other);
+                one.sort();
+                one.dedup();
+                Some(one)
+            }
+            _ => None,
+        };
+        Self { marks }
+    }
+
+    /// Whether `record`, a value read at the key, may be taken: it holds every mark known.
+    pub(crate) fn admits(&self, record: &paykit_lib::records::PaymentListRecord) -> bool {
+        let Some(marks) = &self.marks else {
+            return false;
+        };
+        let held = marks_of(record);
+        marks.iter().all(|mark| held.binary_search(mark).is_ok())
+    }
+
+    /// The entry once `record`, which it admits, was read: the marks it holds, a superset
+    /// of those known; `None` when nothing changes.
+    pub(crate) fn after(&self, record: &paykit_lib::records::PaymentListRecord) -> Option<Self> {
+        let grown = Self::over(Some(record));
+        (self.admits(record) && grown != *self).then_some(grown)
+    }
+}
+
+impl sealed::Sealed for LostListRecord {}
+
+/// Its marks are valid, in ascending order and each once, as every writer keeps them.
+impl Stored for LostListRecord {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        let ordered = self.marks.as_ref().is_none_or(|marks| {
+            marks.iter().all(LostMark::valid) && marks.windows(2).all(|pair| pair[0] < pair[1])
+        });
+        match family {
+            StateKey::ListRecordLost(_) if ordered => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
 impl sealed::Sealed for bool {}
 
 /// A mark, which every writer sets `true`.
@@ -707,7 +819,6 @@ impl Stored for bool {
             | StateKey::NotPaidBeforeLoss(_)
             | StateKey::FloorDeleted
             | StateKey::FloorOpened(_)
-            | StateKey::ListRecordLost(_)
             | StateKey::Taken(_)
                 if *self =>
             {
@@ -2182,9 +2293,8 @@ pub(crate) mod key {
         format!("{HELD_LISTS}{}", b64(record_key))
     }
 
-    /// Set once this app has seen the `payment_lists` record at `record_key` deleted or
-    /// unreadable, and never cleared: a later absence of it says nothing of the marks it
-    /// held.
+    /// Set once this app has seen the `payment_lists` record at `record_key` deleted, with
+    /// the marks it knew of it ([`LostListRecord`]), and never cleared.
     pub(crate) fn list_record_lost(record_key: &[u8; 32]) -> String {
         format!("{LISTS_LOST}{}", b64(record_key))
     }
@@ -2388,7 +2498,8 @@ pub(crate) enum StateKey {
     ListsRead,
     /// `lh/<record key>`: a list held over a record that didn't read.
     HeldList([u8; 32]),
-    /// `lgone/<record key>`: a `payment_lists` record seen deleted or unreadable.
+    /// `lgone/<record key>`: a `payment_lists` record seen deleted, and what this app knew
+    /// of it ([`LostListRecord`]).
     ListRecordLost([u8; 32]),
     /// `side/<msg_id>`: the side of a message the app sent.
     Side(String),
@@ -3334,6 +3445,48 @@ mod tests {
         partial.as_object_mut().unwrap().remove("raised_ms");
         assert!(!reads::<crate::marks::LostOwed>(&at, partial));
         assert!(StateKey::parse(key::lost_owed(&[1; 32], "not-a-uuid").as_bytes()).is_none());
+    }
+
+    #[test]
+    fn test_state_lost_list_record_bound_to_ordered_valid_marks() {
+        let at = key::list_record_lost(&[1; 32]);
+        let mark = |counter: u64, endpoint: &str| {
+            serde_json::json!({
+                "generation": 1, "counter": counter, "endpoint": endpoint,
+                "attempt_id": vec![7u8; 16],
+            })
+        };
+        let lost = |marks: serde_json::Value| serde_json::json!({ "marks": marks });
+        assert!(reads::<LostListRecord>(&at, lost(serde_json::Value::Null)));
+        assert!(reads::<LostListRecord>(&at, lost(serde_json::json!([]))));
+        assert!(reads::<LostListRecord>(
+            &at,
+            lost(serde_json::json!([mark(1, "btc-a"), mark(2, "btc-a")]))
+        ));
+        // Out of order, twice, at a version that isn't one or of an invalid identifier.
+        assert!(!reads::<LostListRecord>(
+            &at,
+            lost(serde_json::json!([mark(2, "btc-a"), mark(1, "btc-a")]))
+        ));
+        assert!(!reads::<LostListRecord>(
+            &at,
+            lost(serde_json::json!([mark(1, "btc-a"), mark(1, "btc-a")]))
+        ));
+        assert!(!reads::<LostListRecord>(
+            &at,
+            lost(serde_json::json!([mark(0, "btc-a")]))
+        ));
+        assert!(!reads::<LostListRecord>(
+            &at,
+            lost(serde_json::json!([mark(1, "..")]))
+        ));
+        // The member is always written, and a bare mark is no value of this family.
+        assert!(!reads::<LostListRecord>(&at, serde_json::json!({})));
+        assert!(!reads::<bool>(&at, serde_json::json!(true)));
+        assert!(!reads::<LostListRecord>(
+            &key::held_list(&[1; 32]),
+            lost(serde_json::Value::Null)
+        ));
     }
 
     #[test]

@@ -63,7 +63,7 @@ use crate::pay::ListAsk;
 use crate::rail::Rail;
 use crate::receive::{self, Fail, QueuedAnswer};
 use crate::records::KeptMessage;
-use crate::state::{self, key, StateKey};
+use crate::state::{self, key, LostListRecord, StateKey};
 
 /// The kinds this SDK handles (Paykit wire 4.3): the one-time request flow, recurring
 /// requests' acceptance and period details, payments without a request, Private Payment Lists,
@@ -676,7 +676,12 @@ pub(crate) fn restore_paykit_layer(
     let mut writes = crate::reply_asks::restore(restoring, &binder, &state)?;
     // A backup taken before a `payment_lists` delete was seen cannot discharge the
     // installation's knowledge of it either (Paykit spec 6).
-    let mut lists_lost = std::collections::BTreeSet::new();
+    let mut lists_lost: std::collections::BTreeMap<Vec<u8>, LostListRecord> =
+        std::collections::BTreeMap::new();
+    let mut keep_lost = |k: Vec<u8>, lost: LostListRecord| match lists_lost.remove(&k) {
+        Some(held) => lists_lost.insert(k, held.merge(lost)),
+        None => lists_lost.insert(k, lost),
+    };
     for (k, value) in restoring
         .previous_local_scan(key::LISTS_LOST.as_bytes())
         .map_err(|_| "the installation's deleted list records cannot be read")?
@@ -684,9 +689,9 @@ pub(crate) fn restore_paykit_layer(
         if !matches!(StateKey::parse(&k), Some(StateKey::ListRecordLost(_))) {
             return Err("the installation holds an invalid deleted list record".into());
         }
-        state::restored::<bool>(&k, &value, &binder)
+        let lost = state::restored::<LostListRecord>(&k, &value, &binder)
             .map_err(|_| "the installation holds an invalid deleted list record")?;
-        lists_lost.insert(k);
+        keep_lost(k, lost);
     }
     // A backup taken before the floor was deleted cannot discharge the installation's hold.
     let mut floor_deleted = false;
@@ -1046,8 +1051,9 @@ pub(crate) fn restore_paykit_layer(
                 continue;
             }
             StateKey::ListRecordLost(_) => {
-                state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
-                lists_lost.insert(key);
+                let lost = state::restored::<LostListRecord>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                keep_lost(key, lost);
                 continue;
             }
             StateKey::HeldList(_) => {
@@ -1278,10 +1284,10 @@ pub(crate) fn restore_paykit_layer(
         &mut writes,
     )
     .map_err(|_| "the pending Allowance replies cannot be retained")?;
-    for key in lists_lost {
+    for (key, lost) in lists_lost {
         writes.push(LocalWrite::Put {
             key,
-            value: state::encode(&true).map_err(|_| "a deleted list record cannot be written")?,
+            value: state::encode(&lost).map_err(|_| "a deleted list record cannot be written")?,
         });
     }
     if floor_deleted {
@@ -1899,11 +1905,16 @@ impl Protocol for PaykitProtocol {
         }
         let mut writes = crate::settlement_marks::observe(observation, context)?;
         writes.extend(crate::publish::history::observe(observation, context)?);
+        writes.extend(crate::receive::observe_list_record(observation, context)?);
         Ok(writes)
     }
 
+    /// A `payment_lists` record's mark ends at its delete too, so the delete is seen
+    /// whoever wrote it, another installation of this app included: the marks it held go
+    /// into `lgone/` in that commit ([`Self::record_lifetime_ended`]; Paykit spec 6).
     fn mark_ends_at_delete(&self, collection: &str) -> bool {
         collection == Collection::AllowanceProposals.name()
+            || collection == Collection::PaymentLists.name()
     }
 
     fn record_lifetime_ended(
@@ -1912,6 +1923,10 @@ impl Protocol for PaykitProtocol {
         version: pubky_switch_core::ops::RecordVersion,
         context: &ReceiveContext<'_>,
     ) -> Result<Vec<LocalWrite>, StoreFailure> {
+        if record.collection.name == Collection::PaymentLists.name() {
+            let seen = context.record_seen(&record.key).map_err(store_failure)?;
+            return crate::receive::list_record_deleted(context, &record.key, seen.as_deref());
+        }
         crate::allowances::lifetime_ended(record, version, context)
     }
 
@@ -1976,11 +1991,12 @@ impl Protocol for PaykitProtocol {
         }
         if deletion.collection == paykit_lib::collections::Collection::PaymentLists.name() {
             // The delete is kept as seen in the commit that observes it, from the feed or a
-            // read: a later absence, such as the service forgetting it or a restore that
-            // empties the copy of records, never places a list there without the single-use
-            // marks the deleted record held (Paykit spec 6, Paykit wire 4.13 and 5).
+            // read, with the marks of the copy seen before it: a later absence, such as the
+            // service forgetting it or a restore that empties the copy of records, never
+            // places a list there, and a later value is taken only with those marks (Paykit
+            // spec 6, Paykit wire 4.13 and 5).
             return Ok(Some(PutBack::Observe {
-                observed: vec![local_write(&key::list_record_lost(deletion.key), &true)?],
+                observed: crate::receive::list_record_deleted(cx, deletion.key, deletion.seen)?,
             }));
         }
         crate::deletions::observe_payee_deletion(deletion, cx, &|proof| self.settlement_id(proof))
