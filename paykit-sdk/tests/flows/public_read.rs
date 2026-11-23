@@ -1396,7 +1396,7 @@ async fn test_public_read_unretained_conflict_still_refused_after_a_reload() {
         assert_eq!(read.failures[0].app_id, apps[0].1);
         assert!(
             matches!(&read.failures[0].reason, PublicAppFailureReason::Refused(rule)
-                if rule.contains("a reader keeps") && rule.contains(&at) && rule.contains(&floor)),
+                if rule.contains("a reader keeps") && rule.contains(&at) && rule.contains(floor)),
             "{:?}",
             read.failures
         );
