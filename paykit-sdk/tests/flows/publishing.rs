@@ -4115,6 +4115,21 @@ async fn test_publication_waiting_confirmation_leaves_the_list_once_the_earlier_
 }
 
 #[tokio::test]
+async fn test_publication_waiting_confirmation_leaves_the_list_once_the_list_changes() {
+    let w = World::new();
+    let buyer = w.wallet("wallet").await;
+    let payer = buyer.identity();
+    let (mut shop, _, _) = confirmed_while_blocked(&w, payer).await;
+    assert_eq!(shop.lists_waiting_to_send_again().await.unwrap(), [payer]);
+    // New endpoints: the next publication sends the changed list instead, so the
+    // confirmation no longer waits.
+    shop.set_list_endpoints(offered("lno1changed"))
+        .await
+        .unwrap();
+    assert!(shop.lists_waiting_to_send_again().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn test_publication_waiting_confirmation_stays_after_the_earlier_list_expired() {
     let w = World::new();
     let buyer = w.wallet("wallet").await;

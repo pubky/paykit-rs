@@ -889,9 +889,10 @@ impl Paykit {
 
     /// The counterparties whose list the user confirmed sending again
     /// ([`Paykit::send_list_again`]) and which hasn't been sent yet: a later call or receive
-    /// sends it once it can. One leaves the list once its newer version is reserved, or the
-    /// earlier list is known to have arrived; a confirmation is kept, and still sent, after
-    /// the earlier list expired.
+    /// sends it once it can. One leaves the list once its newer version is reserved, the
+    /// earlier list is known to have arrived, or the counterparty's choice, the list's
+    /// endpoints or its withdrawal changed, so another list goes instead; a confirmation is
+    /// kept, and still sent, after the earlier list expired.
     ///
     /// # Errors
     ///
@@ -912,8 +913,12 @@ impl Paykit {
             else {
                 continue;
             };
-            // What the next publication sends it, as `publish_recipient` decides: the
-            // confirmed version goes only for the same list, not yet known to have arrived.
+            // What the next publication sends it, as `publish_recipient` decides: nothing for
+            // a chosen counterparty while no list is set, and the confirmed version only for
+            // the same list, not yet known to have arrived.
+            if recipient.chosen && settings.is_none() {
+                continue;
+            }
             let revision = settings
                 .as_ref()
                 .filter(|s| recipient.chosen && !recipient.withdraw && !s.endpoints.is_empty())

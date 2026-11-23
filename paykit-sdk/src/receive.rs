@@ -1723,7 +1723,9 @@ fn payer_reply(
             // admitted is kept as a reply before its record (`pr/`), within those bounds,
             // never written over the value (Paykit spec 8.1, "Replies before their record").
             // A proof kept or placed, its sender admitted, also shows which list version the
-            // payer held; one dropped as never processed shows nothing (Paykit spec 9).
+            // payer held; one dropped as never processed shows nothing (Paykit spec 9). It is
+            // judged when the proof is taken: a kept proof evicted later for room leaves the
+            // evidence, which was genuine.
             if held_request(cx, &target)? && held_bound(cx, &target, settlement)?.is_none() {
                 if admits_new_state(cx, &sender, scopes, stored)? {
                     keep_reply(cx, &target, stored, position)?;
