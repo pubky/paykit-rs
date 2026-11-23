@@ -643,12 +643,16 @@ impl Paykit {
             if !self.block_mark_ready(&mark).await? {
                 continue;
             }
-            // A fresh copy that still holds the sender spares the read for it.
+            // A fresh copy that still holds the sender spares the read for it, as does a floor
+            // raise owed that holds its ask while no read is due for that raise, such as one the
+            // divergence hold keeps from being written (`Paykit::raise_owed`).
             let held_by_fresh_copy = fresh_copy
                 && (self.denied_as_last_read(&mark.sender).await?
                     || kept_flagged
                         .as_ref()
-                        .is_some_and(|flagged| flagged.contains(&mark.sender)));
+                        .is_some_and(|flagged| flagged.contains(&mark.sender))
+                    || (self.raise_holds_asks_to(&mark.sender).await?
+                        && !self.raise_owed().await?));
             needs_read |= !held_by_fresh_copy;
         }
         let read = needs_read && Box::pin(self.read_lists_now()).await?;

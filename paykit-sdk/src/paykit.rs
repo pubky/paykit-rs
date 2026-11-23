@@ -387,6 +387,9 @@ pub struct Paykit {
     /// The identity-wide notices this load has told the host of (`crate::notices`): each
     /// once per load while what it tells stands.
     pub(crate) identity_told: Vec<crate::NoticeKind>,
+    /// Whether a floor raise this app owes was tried and left unwritten
+    /// ([`Paykit::settle_raise_waiting`]).
+    pub(crate) raise_unwritten: bool,
 }
 
 impl std::fmt::Debug for Paykit {
@@ -453,6 +456,7 @@ impl Paykit {
             own_record_unknown: false,
             capability_snapshot: None,
             identity_told: Vec::new(),
+            raise_unwritten: false,
         }
     }
 
@@ -1268,6 +1272,8 @@ impl Paykit {
             Box::pin(self.note_imported_receipt_batches()).await?;
         }
         let asked = Box::pin(self.send_asks(&mut resend_refused)).await?;
+        // After every read of this receive, the last of which may have written the raise.
+        Box::pin(self.settle_raise_waiting()).await?;
         Box::pin(self.retire_end_origins()).await?;
         // A confirmed mark goes once its record's view isn't divergent any more, after this
         // read's events were taken.

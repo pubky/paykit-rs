@@ -81,17 +81,20 @@ pub(crate) fn floor_target(own: &[u8; 32]) -> RecordTarget {
 }
 
 /// The floor raises this app owes and hasn't written (Paykit wire 5.6, Raising): an unblock's
-/// (`bf`), a restore's widening that isn't clean (`rh`) and a `missed` item's widening whose
-/// read of the lists holds a blocked sender (`bw/`). Every reader takes them from here: the
+/// (`bf`), a restore's widening that isn't clean (`rh`) and a `missed` item's widening (`bw/`),
+/// from the commit that writes it until a read of the lists shows it holds no blocked sender
+/// or its raise applies. Every reader takes them from here: the
 /// time owed applies as a floor meanwhile, the asks wait, and the raise is tried again at the
 /// next receive. Only an app holding `paykit_pay` owes a raise (Paykit wire 5.1).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct OwedRaises {
-    /// The senders an unblock's raise is owed for, in increasing order: their entries wait and
-    /// they are asked nothing.
+    /// The senders an unblock's raise is owed for, in increasing order: their one-time
+    /// requests wait and they are asked nothing.
     senders: Vec<[u8; 32]>,
     /// Whether a widening's raise is owed: it names no sender, so no one is asked.
     widening: bool,
+    /// Whether a `missed` item's widening waits for its read of the lists, which is due at once.
+    unread: bool,
     /// The highest time a raise is owed to, applied as a floor meanwhile.
     to_ms: Option<u64>,
 }
@@ -112,9 +115,14 @@ impl OwedRaises {
                     .chain(hold.widening_owed())
             })
             .map(|owed| owed.read.at_ms);
+        // A widening whose read holds no blocked sender raises nothing; one not read yet may.
+        let missed: Vec<_> = missed
+            .into_iter()
+            .filter(|widening| widening.deny.as_ref().is_none_or(|deny| !deny.is_empty()))
+            .collect();
+        let unread = missed.iter().any(|widening| widening.deny.is_none());
         let missing = missed
             .into_iter()
-            .filter(|widening| widening.deny.as_ref().is_some_and(|deny| !deny.is_empty()))
             .flat_map(|widening| widening.windows)
             .map(|window| window.floor_ms);
         let widenings: Vec<u64> = restoring.chain(missing).collect();
@@ -125,6 +133,7 @@ impl OwedRaises {
         Self {
             senders,
             widening: !widenings.is_empty(),
+            unread,
             to_ms: unblock_ms.into_iter().chain(widenings).max(),
         }
     }
@@ -139,14 +148,19 @@ impl OwedRaises {
         self.to_ms
     }
 
-    /// Whether `sender`'s entries wait for an unblock's raise.
-    pub(crate) fn holds_entries_of(&self, sender: &[u8; 32]) -> bool {
+    /// Whether a `missed` item's widening waits for its read of the lists.
+    pub(crate) fn unread(&self) -> bool {
+        self.unread
+    }
+
+    /// Whether `sender`'s one-time requests wait for an unblock's raise.
+    pub(crate) fn holds_one_time_requests_of(&self, sender: &[u8; 32]) -> bool {
         self.senders.binary_search(sender).is_ok()
     }
 
     /// Whether an ask to `to` waits: while its unblock's raise or any widening's is owed.
     pub(crate) fn holds_asks_to(&self, to: &[u8; 32]) -> bool {
-        self.widening || self.holds_entries_of(to)
+        self.widening || self.holds_one_time_requests_of(to)
     }
 }
 
@@ -529,18 +543,44 @@ impl Paykit {
         Ok(())
     }
 
-    /// Whether the app owes a raise it can write now, while the floor isn't held divergent, or
-    /// a `missed` item's widening waits for its read of the lists. The lists are then read at
-    /// each receive, so the raise goes at the next one (Paykit wire 5.6, Raising).
+    /// Whether the lists are due for a raise this app owes: while a `missed` item's widening
+    /// waits for its read, the divergence hold or not, and while a raise it can write is owed,
+    /// with no divergence hold. The raise goes with that read, at the next receive (Paykit wire
+    /// 5.6, Raising).
     pub(crate) async fn raise_owed(&self) -> Result<bool> {
-        if !self.holds("paykit_pay") || self.floor_kept().await?.divergent {
-            return Ok(false);
+        let owed = self.owed_raises().await?;
+        if owed.unread() {
+            return Ok(true);
         }
-        Ok(self.owed_raises().await?.any()
-            || !self
-                .local_scan::<crate::marks::MissedWidening>(key::BLOCKED_WIDENINGS)
-                .await?
-                .is_empty())
+        Ok(owed.any() && !self.floor_kept().await?.divergent)
+    }
+
+    /// At a receive's end: while a raise this app owes is tried and left unwritten, with no
+    /// divergence hold, its payer records listed and no kept batch waiting for its answer, tell
+    /// the host ([`crate::NoticeKind::FloorRaiseWaiting`]). Once none is owed, forget the try;
+    /// once none is owed or the divergence hold stands, which its own notice tells, forget the
+    /// notice, which a later raise left unwritten tells again.
+    pub(crate) async fn settle_raise_waiting(&mut self) -> Result<()> {
+        let kind = crate::NoticeKind::FloorRaiseWaiting;
+        let owed = self.owed_raises().await?.any();
+        if !owed || self.floor_kept().await?.divergent {
+            if !owed {
+                self.raise_unwritten = false;
+            }
+            self.identity_told.retain(|told| *told != kind);
+            let key = key::identity_notice(kind);
+            if self.kept_notice(&key).await?.is_some() {
+                self.local_delete(&key).await?;
+            }
+            return Ok(());
+        }
+        if self.raise_unwritten
+            && !self.side_unlisted(RecordSide::Payer).await?
+            && !self.floor_write_is_kept().await?
+        {
+            self.tell_identity_notice(kind).await?;
+        }
+        Ok(())
     }
 
     /// Whether `stored` is a one-time request dated before the floor, shared or owed, as this
@@ -753,9 +793,19 @@ impl Paykit {
         Ok(false)
     }
 
+    /// [`Paykit::write_with_floor`], noting a raise it leaves unwritten for the host
+    /// ([`Paykit::settle_raise_waiting`]).
+    pub(crate) async fn commit_with_floor(&mut self, to_ms: u64, tx: Tx) -> Result<()> {
+        let result = self.write_with_floor(to_ms, tx).await;
+        if result.as_ref().is_err_and(is_raise_unwritten) {
+            self.raise_unwritten = true;
+        }
+        result
+    }
+
     /// Apply local effects with the shared raise, or directly if a sufficient floor
     /// already applied. An unanswered batch keeps its local effects with it.
-    pub(crate) async fn commit_with_floor(&mut self, to_ms: u64, tx: Tx) -> Result<()> {
+    async fn write_with_floor(&mut self, to_ms: u64, tx: Tx) -> Result<()> {
         if !self.holds("paykit_pay") {
             return self.local_commit(tx).await;
         }
@@ -1122,7 +1172,7 @@ mod tests {
         // Nothing owed: no floor, no ask held.
         let none = OwedRaises::of(None, None, Vec::new());
         assert!(!none.any() && !none.holds_asks_to(&[1; 32]));
-        // An unblock's raise holds its senders' entries and asks, no one else's.
+        // An unblock's raise holds its senders' one-time requests and asks, no one else's.
         let unblock = OwedRaises::of(
             Some(PendingUnblocks {
                 to_ms: 50,
@@ -1132,8 +1182,8 @@ mod tests {
             Vec::new(),
         );
         assert_eq!(unblock.to_ms(), Some(50));
-        assert!(unblock.holds_entries_of(&[1; 32]) && unblock.holds_asks_to(&[1; 32]));
-        assert!(!unblock.holds_entries_of(&[2; 32]) && !unblock.holds_asks_to(&[2; 32]));
+        assert!(unblock.holds_one_time_requests_of(&[1; 32]) && unblock.holds_asks_to(&[1; 32]));
+        assert!(!unblock.holds_one_time_requests_of(&[2; 32]) && !unblock.holds_asks_to(&[2; 32]));
         // A restore's owed widening names no sender: every ask waits, no entry does.
         let mut hold = crate::hold::RestoreHold::of(10, None);
         hold.verdict = crate::hold::RestoreVerdict::NotClean;
@@ -1143,15 +1193,17 @@ mod tests {
         });
         let restore = OwedRaises::of(None, Some(&hold), Vec::new());
         assert_eq!(restore.to_ms(), Some(70));
-        assert!(restore.holds_asks_to(&[2; 32]) && !restore.holds_entries_of(&[2; 32]));
-        // A missed item's widening owes a raise once its read holds a blocked sender; before
-        // that read, or with none blocked, it owes none.
+        assert!(restore.holds_asks_to(&[2; 32]) && !restore.holds_one_time_requests_of(&[2; 32]));
+        // A missed item's widening owes a raise from its write: before its read of the lists,
+        // which is then due, and once that read holds a blocked sender. A read that holds none
+        // owes none.
         let read = OwedRaises::of(None, None, vec![missed(90, Some(vec![[3; 32]]))]);
         assert_eq!(read.to_ms(), Some(90));
-        assert!(read.holds_asks_to(&[2; 32]));
-        for unraised in [missed(90, None), missed(90, Some(Vec::new()))] {
-            assert!(!OwedRaises::of(None, None, vec![unraised]).any());
-        }
+        assert!(read.holds_asks_to(&[2; 32]) && !read.unread());
+        let unread = OwedRaises::of(None, None, vec![missed(80, None)]);
+        assert_eq!(unread.to_ms(), Some(80));
+        assert!(unread.holds_asks_to(&[2; 32]) && unread.unread());
+        assert!(!OwedRaises::of(None, None, vec![missed(90, Some(Vec::new()))]).any());
         // The floor applied meanwhile is the highest owed.
         let all = OwedRaises::of(
             Some(PendingUnblocks {

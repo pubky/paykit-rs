@@ -110,6 +110,14 @@ pub enum NoticeKind {
     /// floor raised waits ([`crate::Refusal::FloorHeld`]). Raised when the hold is first kept
     /// and again at each load while it stands; it names no attempt, message or counterparty.
     BlockFloorHeld,
+    /// A block floor raise this wallet owes was tried and isn't written, with no divergence
+    /// hold: the floor doesn't read, or the switch refuses the write for now (Paykit wire 5.6,
+    /// Raising). Until it is, an unblocked sender's one-time requests wait and it is asked
+    /// nothing, and while a widening's raise waits no one is asked to re-send; it is tried again
+    /// at each receive. Raised
+    /// once while it stands, and removed when the raise is written; it names no attempt,
+    /// message or counterparty.
+    FloorRaiseWaiting,
 }
 
 impl NoticeKind {
@@ -137,13 +145,14 @@ impl NoticeKind {
             Self::SettlementCreditedTwice => "settlement_credited_twice",
             Self::DroppedMessagesLost => "dropped_lost",
             Self::BlockFloorHeld => "floor_held",
+            Self::FloorRaiseWaiting => "raise_waiting",
         }
     }
 
     /// The identity-wide kind a key names (`nt/<tag>`): one about the identity as a whole,
     /// at most one kept, naming no attempt, message or counterparty.
     pub(crate) fn identity_from_tag(tag: &str) -> Option<Self> {
-        [Self::BlockFloorHeld]
+        [Self::BlockFloorHeld, Self::FloorRaiseWaiting]
             .into_iter()
             .find(|kind| kind.tag() == tag)
     }
@@ -1072,23 +1081,26 @@ mod tests {
 
     #[test]
     fn test_identity_notices_bind_only_at_their_key_and_name_nothing() {
-        let kind = NoticeKind::BlockFloorHeld;
-        let key = key::identity_notice(kind);
-        let notice = KeptNotice::identity(kind, 5);
-        assert!(bind_notice(&key, &notice).is_ok(), "{kind:?}");
-        // Never kept acknowledged: acknowledging removes it.
-        let mut acknowledged = notice.clone();
-        acknowledged.acknowledged = true;
-        assert!(bind_notice(&key, &acknowledged).is_err());
-        let mut named = notice.clone();
-        named.counterparty = Some(b64(&[1; 32]));
-        assert!(bind_notice(&key, &named).is_err());
-        let mut other = notice.clone();
-        other.kind = NoticeKind::MessageGivenUp;
-        assert!(bind_notice(&key, &other).is_err());
-        // Nor at another notice's key.
-        let attempt = AttemptId::from_bytes([5; 16]);
-        assert!(bind_notice(&key::notice(&attempt, NoticeKind::HeldWithoutPay), &notice).is_err());
+        for kind in [NoticeKind::BlockFloorHeld, NoticeKind::FloorRaiseWaiting] {
+            let key = key::identity_notice(kind);
+            let notice = KeptNotice::identity(kind, 5);
+            assert!(bind_notice(&key, &notice).is_ok(), "{kind:?}");
+            // Never kept acknowledged: acknowledging removes it.
+            let mut acknowledged = notice.clone();
+            acknowledged.acknowledged = true;
+            assert!(bind_notice(&key, &acknowledged).is_err());
+            let mut named = notice.clone();
+            named.counterparty = Some(b64(&[1; 32]));
+            assert!(bind_notice(&key, &named).is_err());
+            let mut other = notice.clone();
+            other.kind = NoticeKind::MessageGivenUp;
+            assert!(bind_notice(&key, &other).is_err());
+            // Nor at another notice's key.
+            let attempt = AttemptId::from_bytes([5; 16]);
+            assert!(
+                bind_notice(&key::notice(&attempt, NoticeKind::HeldWithoutPay), &notice).is_err()
+            );
+        }
     }
 
     #[test]
