@@ -79,7 +79,7 @@ impl Paykit {
         let lookup_answered = self.inspect_ready_lookup(&entry.payee, |_| ()).is_some();
         self.require_pay()?;
         self.transfer_holds(entry, peer, false)??;
-        self.app.may_attempt(false).map_err(not_now)?;
+        self.app.may_attempt(false).map_err(held_back)?;
         let (now, own_fresh) = self.dispatch_time();
         let Some((_, denied)) = read
             .zip(copy)
@@ -200,7 +200,7 @@ impl Paykit {
             entry.failed_on_claim = shown.outcome == Outcome::Failed;
             entry.offline = Some(OfflineRecording::Applied);
             let mut tx = state::Tx::default();
-            entry.check()?;
+            entry.check_bound(|input| self.app.blind(input))?;
             tx.put(&key::journal(&attempt), entry)?.delete(&marker);
             self.local_commit(tx).await?;
             return Ok(true);
@@ -281,7 +281,7 @@ impl Paykit {
             .entry(write)
             // The original ID and signed operations become durable together (Paykit spec 8.4).
             .keep_id_at(marker.as_bytes().to_vec())
-            .local(journal_write(&applied)?)
+            .local(self.journal_write(&applied)?)
             .local(LocalWrite::Delete {
                 key: marker.into_bytes(),
             });

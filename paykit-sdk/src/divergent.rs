@@ -246,9 +246,12 @@ impl DivergentMark {
         self.confirmed.is_none()
     }
 
-    /// The mark's collection; a mark is read only bound, so it names one of Paykit's.
+    /// The mark's collection; a mark is read only bound, so it names one of Paykit's, never
+    /// `block_floor`, whose divergence is held for good with no mark (`crate::floor`).
     fn collection(&self) -> Result<Collection> {
-        Collection::from_name(&self.collection).ok_or_else(PaykitError::corrupt)
+        Collection::from_name(&self.collection)
+            .filter(|collection| *collection != Collection::BlockFloor)
+            .ok_or_else(PaykitError::corrupt)
     }
 
     /// The mark bound to the key it is read at, `dv/<record>` (`state::Stored`): the record
@@ -261,6 +264,7 @@ impl DivergentMark {
     /// check for a restore and for every read at runtime; a value that fails it is a corrupt
     /// store, never an absent mark, so no credit goes from it.
     pub(crate) fn bind_to(&self, record: &[u8; 32]) -> Result<()> {
+        self.collection()?;
         if self.record != *record
             || self.confirmed.is_some_and(|at| at < self.seen)
             || self.credit_confirmed.is_some_and(|at| at < self.seen)
@@ -571,9 +575,13 @@ impl Pause {
 
 /// The collections whose records the load's sweep and [`Paykit::divergent_records`] look at:
 /// every collection of Paykit's (`Collection::ALL`), `allowance_ledgers` included (Paykit
-/// spec 6).
+/// spec 6), but `block_floor`, whose divergence is held for good rather than paused for the
+/// user (`crate::floor`, Paykit wire 5.6).
 fn divergent_collections() -> impl Iterator<Item = &'static str> {
-    Collection::ALL.into_iter().map(Collection::name)
+    Collection::ALL
+        .into_iter()
+        .filter(|collection| *collection != Collection::BlockFloor)
+        .map(Collection::name)
 }
 
 /// Whether `stored` adds a stop to the record it goes into, which goes over a divergent view
@@ -1293,6 +1301,11 @@ impl Paykit {
 
     /// Take the view of `held`, keeping the mark it sets, and tell what it allows.
     pub(crate) async fn pause_of(&mut self, held: &SharedRecord) -> Result<Pause> {
+        if held.collection == Collection::BlockFloor.name() {
+            // No mark the user could confirm: the floor's divergence is held for good.
+            self.keep_floor_view(held, false).await?;
+            return Ok(Pause::default());
+        }
         let Some(view) = View::of(held) else {
             return Ok(Pause::default());
         };
@@ -1319,6 +1332,15 @@ impl Paykit {
     pub(crate) async fn pause_seen(&self, record: &[u8; 32]) -> Result<Pause> {
         let (marked, view) = self.mark_and_view(record).await?;
         self.pause_with(record, &marked, view.as_ref()).await
+    }
+
+    /// [`Paykit::pause_seen`] for the record `held`, as a list read took it from the client
+    /// a moment before: the same record [`pubky_switch_client::app::App::shared_record`]
+    /// returns, as nothing is written between them.
+    pub(crate) async fn pause_seen_held(&self, held: &SharedRecord) -> Result<Pause> {
+        let view = View::of(held);
+        let marked = self.marked(&held.key, view.as_ref()).await?;
+        self.pause_with(&held.key, &marked, view.as_ref()).await
     }
 
     /// The host's view of the record at `record`, `pause` as it allows, shown for a credit
@@ -1399,13 +1421,6 @@ impl Paykit {
             records: vec![shown],
         }
         .into())
-    }
-
-    /// Refused while an own write of another kind than a stop over the record at `record`
-    /// waits, by the one rule of writes that add no stop ([`Pause::adds_no_stop_waits`]).
-    pub(crate) async fn refuse_while_write_waits(&mut self, record: &[u8; 32]) -> Result<()> {
-        self.refuse_where(&[*record], Pause::adds_no_stop_waits, false)
-            .await
     }
 
     /// Whether a write that records a payment already dispatched, its acceptance owed, its
@@ -1494,6 +1509,14 @@ impl Paykit {
         record: &[u8; 32],
         event: &EventId,
     ) -> Result<()> {
+        if *record
+            == self
+                .app
+                .record_key(&crate::floor::floor_target(&self.identity()))?
+        {
+            // Kept before the event is taken, held or not (Paykit wire 5.6, Divergent floor).
+            return self.keep_floor(crate::floor::FloorKept::divergent()).await;
+        }
         let (marked, Some(view)) = self.mark_and_view(record).await? else {
             return Ok(());
         };
@@ -1506,6 +1529,7 @@ impl Paykit {
     /// Take the view of every record of Paykit's collections the app holds, once at a load:
     /// a flag a crash left before a receive's events were taken still pauses its record.
     pub(crate) async fn sweep_divergent(&mut self) -> Result<()> {
+        Box::pin(self.keep_held_floor()).await?;
         for collection in divergent_collections() {
             for held in self.app.records_of(collection).await? {
                 if held.divergent {
@@ -1902,6 +1926,14 @@ impl Paykit {
     ) -> Result<()> {
         self.refresh_own()?;
         let record = &shown.record;
+        // The floor's divergence is no record the user confirms (`crate::floor`).
+        if *record
+            == self
+                .app
+                .record_key(&crate::floor::floor_target(&self.identity()))?
+        {
+            return Err(Refusal::FloorHeld.into());
+        }
         let (marked, view) = self.mark_and_view(record).await?;
         if marked == Marked::Clear && !view.is_some_and(|view| view.divergent) {
             return Err(Refusal::NotFound.into());
@@ -1925,10 +1957,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_divergent_collections_cover_every_collection_ledgers_included() {
+    fn test_divergent_collections_cover_every_collection_but_the_floor() {
         let looked_at: Vec<&str> = divergent_collections().collect();
         for collection in Collection::ALL {
-            assert!(looked_at.contains(&collection.name()), "{collection:?}");
+            assert_eq!(
+                looked_at.contains(&collection.name()),
+                collection != Collection::BlockFloor,
+                "{collection:?}"
+            );
         }
         assert!(looked_at.contains(&"allowance_ledgers"));
     }

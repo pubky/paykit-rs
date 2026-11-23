@@ -57,14 +57,71 @@ async fn payer_notice(world: &World) -> TestResult {
         draft("1", world.now_ms()),
     ))
     .await;
+    // Two payments left in flight: a resume under the notice must reach both, whichever
+    // the journal holds first.
+    rail.set_declaration(
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true)
+        .with_history(true),
+    );
+    let mut in_flight = Vec::new();
+    for value in ["2", "3"] {
+        in_flight.push(
+            Box::pin(request_from(
+                &mut seller,
+                payer.identity(),
+                draft(value, world.now_ms()),
+            ))
+            .await,
+        );
+    }
     Box::pin(payer.receive(None)).await?;
     assert_eq!(payer.request(&request).await?.status, RequestStatus::Open);
+    let mut attempts = Vec::new();
+    for unpaid in &in_flight {
+        rail.next(paykit_sdk::rail::Behaviour::Hang);
+        let PayOutcome::Pending { attempt_id, .. } =
+            Box::pin(payer.pay_request(unpaid, PayOptions::default()))
+                .await
+                .outcome?
+        else {
+            return Err("a payment did not stay in flight".into());
+        };
+        attempts.push(attempt_id);
+    }
+    // Both method calls started: each entry is `Paying`, not held at `Attempted` before
+    // its dispatch, so the resume below meets two payments in flight.
+    let payments = payer.payments().await?;
+    for attempt in &attempts {
+        assert_eq!(rail.pay_calls(attempt), 1);
+        assert_eq!(
+            payments
+                .iter()
+                .find(|view| view.attempt_id == *attempt)
+                .map(|view| view.stage),
+            Some(paykit_sdk::Stage::Paying)
+        );
+    }
+    // The journal holds its entries by attempt ID: the first fails before the notice, so
+    // writing its outcome is what the notice holds.
+    attempts.sort_by_key(|attempt| attempt.to_text());
+    let [first, later] = attempts[..] else {
+        return Err("two payments in flight".into());
+    };
+    rail.settle(&first, false);
+    let held = [first, later];
 
     let owner = world.identity("buyer")?;
     let origin = "https://buyer.public.test";
     let generation = payer.app().own_identity().generation();
     Box::pin(world.set_account_missing(origin, &owner, true)).await?;
-    let reopened = Box::pin(reopen_held_payer(world, payer, &request, storage, &rail)).await;
+    let reopened = Box::pin(reopen_held_payer(
+        world, payer, &request, storage, &rail, held,
+    ))
+    .await;
     Box::pin(world.set_account_missing(origin, &owner, false)).await?;
     let mut payer = reopened?;
     assert!(payer.app().recovery_required().is_some());
@@ -76,7 +133,10 @@ async fn payer_notice(world: &World) -> TestResult {
     assert!(read.report.events.iter().any(|event| matches!(
         event, AppEvent::RecoveryNoticeCleared { generation: cleared, .. } if *cleared == generation
     )));
-    assert!(rail.all_pay_calls().is_empty());
+    assert_eq!(
+        rail.all_pay_calls(),
+        BTreeMap::from([(first, 1), (later, 1)])
+    );
 
     let PayOutcome::Paid { attempt_id, .. } =
         Box::pin(payer.pay_request(&request, PayOptions::default()))
@@ -86,9 +146,8 @@ async fn payer_notice(world: &World) -> TestResult {
         return Err("the request did not pay after the recovery notice cleared".into());
     };
     Box::pin(payer.resume_payments()).await?;
-    let expected = BTreeMap::from([(attempt_id, 1)]);
-    assert_eq!(rail.all_pay_calls(), expected);
-    assert_eq!(rail.all_executions(), expected);
+    assert_eq!(rail.pay_calls(&attempt_id), 1);
+    assert_eq!(rail.all_executions().get(&attempt_id), Some(&1));
     Ok(())
 }
 
@@ -98,6 +157,7 @@ async fn reopen_held_payer(
     request: &RequestRef,
     storage: Arc<FaultStore>,
     rail: &Arc<FakeRail>,
+    held: [paykit_lib::AttemptId; 2],
 ) -> TestResult<Paykit> {
     // A stopped read must reach the host even when resend upkeep cannot read its queue.
     storage.fail_scan(b"p/paykit/ask/", 0);
@@ -155,11 +215,36 @@ async fn reopen_held_payer(
         generation: notice.generation,
     };
     assert!(
-        matches!(blocked.refusal(), Some(paykit_sdk::Refusal::NotNow(message)) if message == &reason.to_string()),
+        matches!(&blocked, paykit_sdk::PaykitError::Client(AppError::Refused(refused)) if refused == &reason),
         "{blocked}"
     );
-    assert!(Box::pin(payer.resume_payments()).await?.is_empty());
-    assert!(rail.all_pay_calls().is_empty());
-    assert!(rail.all_executions().is_empty());
+    // A recovery notice the client holds stops the wallet as a whole: a resume under it
+    // returns the recovery at the first entry whose step the notice refuses, and nothing
+    // after it is written or looked up, so the payment the method reports made later waits
+    // for the resume after the notice clears.
+    let [first, later] = held;
+    let refused = |resumed: &paykit_sdk::Result<Vec<PayOutcome>>| {
+        matches!(resumed, Err(paykit_sdk::PaykitError::Client(AppError::Refused(refused))) if refused == &reason)
+            || matches!(resumed, Err(error) if error.code() == Some(pubky_switch_core::http::ErrorCode::RecoveryRequired))
+    };
+    let resumed = Box::pin(payer.resume_payments()).await;
+    assert!(refused(&resumed), "{resumed:?}");
+    // The method reports the later payment made only now; under the notice it still waits.
+    rail.settle(&later, true);
+    let resumed = Box::pin(payer.resume_payments()).await;
+    assert!(refused(&resumed), "{resumed:?}");
+    let stage = |attempt: paykit_lib::AttemptId, payments: &[paykit_sdk::PaymentView]| {
+        payments
+            .iter()
+            .find(|view| view.attempt_id == attempt)
+            .map(|view| view.stage)
+    };
+    let payments = payer.payments().await?;
+    assert_eq!(stage(first, &payments), Some(paykit_sdk::Stage::RailFailed));
+    assert_eq!(stage(later, &payments), Some(paykit_sdk::Stage::Paying));
+    assert_eq!(
+        rail.all_pay_calls(),
+        BTreeMap::from([(first, 1), (later, 1)])
+    );
     Ok(payer)
 }

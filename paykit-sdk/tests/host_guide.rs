@@ -85,7 +85,15 @@ fn covers(name: &str) -> bool {
 
 fn documented_variants() -> BTreeSet<String> {
     let mut documented = BTreeSet::new();
-    for row in GUIDE.lines().filter_map(|line| line.strip_prefix("| `")) {
+    // The wallet bindings' section lists their own codes, checked by the bindings' tests.
+    let mut bindings = false;
+    let sdk_lines = GUIDE.lines().filter(|line| {
+        if let Some(heading) = line.strip_prefix("## ") {
+            bindings = heading == "Wallet errors";
+        }
+        !bindings
+    });
+    for row in sdk_lines.filter_map(|line| line.strip_prefix("| `")) {
         let (name, explanation) = row.split_once("` | ").expect("case and explanation");
         assert!(
             !explanation.trim_end_matches('|').trim().is_empty(),

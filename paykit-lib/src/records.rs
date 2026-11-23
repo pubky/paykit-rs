@@ -723,7 +723,21 @@ impl StoredMessage {
         accepted_at: Option<u64>,
         recipient: &[u8; 32],
     ) -> Result<Self> {
-        let cert = scopes::verify_certificate(cert, &sender)?;
+        Self::checked(sender, cert, plaintext, accepted_at, recipient, None)
+    }
+
+    fn checked(
+        sender: [u8; 32],
+        cert: &SignedDoc,
+        plaintext: MessagePlaintext,
+        accepted_at: Option<u64>,
+        recipient: &[u8; 32],
+        certs: Option<&mut scopes::CertificateMemo>,
+    ) -> Result<Self> {
+        let cert = match certs {
+            Some(certs) => certs.verify(cert, &sender)?,
+            None => scopes::verify_certificate(cert, &sender)?,
+        };
         if let Some(at) = accepted_at {
             ensure(
                 !cert.expired_at(at),
@@ -796,6 +810,28 @@ impl StoredMessage {
     ///
     /// [`Error::Switch`] for the Switch's checks, [`Error::Invalid`] for Paykit's.
     pub fn read(value: &Value, recipient: &[u8; 32]) -> Result<Self> {
+        Self::read_checked(value, recipient, None)
+    }
+
+    /// [`StoredMessage::read`], with the certificate verified through `certs`: every other
+    /// check runs in full.
+    ///
+    /// # Errors
+    ///
+    /// As [`StoredMessage::read`].
+    pub fn read_with(
+        value: &Value,
+        recipient: &[u8; 32],
+        certs: &mut scopes::CertificateMemo,
+    ) -> Result<Self> {
+        Self::read_checked(value, recipient, Some(certs))
+    }
+
+    fn read_checked(
+        value: &Value,
+        recipient: &[u8; 32],
+        certs: Option<&mut scopes::CertificateMemo>,
+    ) -> Result<Self> {
         const CTX: &str = "Paykit wire 5.2: stored message";
         let obj = Obj::of(value, CTX, "stored message")?;
         let cert = obj.req_obj("cert")?;
@@ -810,12 +846,13 @@ impl StoredMessage {
             p.req_b64::<64>("signature")?,
             json,
         )?;
-        Self::new(
+        Self::checked(
             obj.req_pubky("sender")?,
             &cert,
             plaintext,
             obj.opt_time("accepted_at")?,
             recipient,
+            certs,
         )
     }
 
@@ -1374,6 +1411,30 @@ impl ActivityRecord {
     ///
     /// [`Error::Invalid`] or [`Error::Switch`] naming the rule: the record is invalid.
     pub fn read(json: &[u8], own: &[u8; 32], side: ActivitySide) -> Result<Self> {
+        Self::read_checked(json, own, side, None)
+    }
+
+    /// [`ActivityRecord::read`], with each stored message's certificate verified through
+    /// `certs` ([`scopes::CertificateMemo`]): every other check runs in full.
+    ///
+    /// # Errors
+    ///
+    /// As [`ActivityRecord::read`].
+    pub fn read_with(
+        json: &[u8],
+        own: &[u8; 32],
+        side: ActivitySide,
+        certs: &mut scopes::CertificateMemo,
+    ) -> Result<Self> {
+        Self::read_checked(json, own, side, Some(certs))
+    }
+
+    fn read_checked(
+        json: &[u8],
+        own: &[u8; 32],
+        side: ActivitySide,
+        mut certs: Option<&mut scopes::CertificateMemo>,
+    ) -> Result<Self> {
         let map = parse_object(json, ACTIVITY)?;
         let obj = Obj::new(&map, ACTIVITY);
         check_v1(&obj)?;
@@ -1403,7 +1464,7 @@ impl ActivityRecord {
                 "Paykit wire 5.3: a stored message from the wrong side",
             )?;
             let recipient = if sender == payer { payee } else { payer };
-            let stored = StoredMessage::read(value, &recipient)?;
+            let stored = StoredMessage::read_checked(value, &recipient, certs.as_deref_mut())?;
             ensure(
                 kinds.contains(&stored.body.kind()),
                 "Paykit wire 5.3: a member holds another kind",
@@ -1425,7 +1486,7 @@ impl ActivityRecord {
                 sender == payee,
                 "Paykit wire 5.3: a stored message from the wrong side",
             )?;
-            let stored = StoredMessage::read(value, &payer)?;
+            let stored = StoredMessage::read_checked(value, &payer, certs.as_deref_mut())?;
             ensure(
                 EARLIER_DETAILS.1.contains(&stored.body.kind()),
                 "Paykit wire 5.3: a member holds another kind",
@@ -2603,7 +2664,10 @@ impl PaymentListRecord {
 /// Security: the floor only rises. A reader that holds a floor ignores a later write of a
 /// lower one ([`BlockFloorRecord::check_later_write`]), so a writer that lost a raise, or a
 /// service that serves an older write, can't lower it; the highest floor an app has seen is
-/// the one it applies.
+/// the one it applies. The record sits under the permanent policy of Paykit wire 5.1, so no
+/// app deletes it and the service refuses a delete in every generation. It defines no
+/// `lost_to_delete`: a member of that name is one the reader doesn't know, kept as read on a
+/// rewrite and never a restriction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockFloorRecord {
     /// The floor, in Unix milliseconds.
@@ -5109,6 +5173,44 @@ mod tests {
         ] {
             assert!(BlockFloorRecord::read(bad).is_err());
         }
+    }
+
+    #[test]
+    fn test_block_floor_keeps_lost_to_delete_as_a_member_it_does_not_define() {
+        // Paykit wire 5.6: the permanent record carries no `lost_to_delete`; whatever a writer
+        // put there is kept as read and restricts nothing, a value no other collection allows
+        // included.
+        for marker in [r#""AAAA""#, "null", "true", r#"{"kind":"x"}"#] {
+            let json = format!(
+                r#"{{"v":1,"floor":"2023-11-14T22:13:20.123Z","lost_to_delete":{marker}}}"#
+            );
+            let read = BlockFloorRecord::read(json.as_bytes()).unwrap();
+            assert_eq!(read.floor_ms, 1_700_000_000_123, "{marker}");
+            let raised = read.raised(1_700_000_000_124).unwrap();
+            let written: Value = serde_json::from_slice(&raised.to_json().unwrap()).unwrap();
+            let marker: Value = serde_json::from_str(marker).unwrap();
+            assert_eq!(written["lost_to_delete"], marker);
+        }
+    }
+
+    #[test]
+    fn test_block_floor_binds_only_under_the_permanent_policy() {
+        let own = [3u8; 32];
+        let nk = NamingKey::from_bytes([7; 32]);
+        let json = BlockFloorRecord::new(9).to_json().unwrap();
+        assert!(Collection::BlockFloor.fixed_policy().permanent.is_some());
+        // The key the ordinary `paykit_pay` policy derives isn't the record's.
+        let ordinary = pubky_switch_core::ident::Policy::new("paykit_pay", &["paykit_pay"]);
+        let at_ordinary = nk.record_key(
+            Collection::BlockFloor.name(),
+            &natural_key::block_floor(&own),
+            &ordinary.hash().unwrap(),
+        );
+        assert_ne!(
+            at_ordinary,
+            BlockFloorRecord::record_key(&own, &nk).unwrap()
+        );
+        assert!(BlockFloorRecord::bind(&json, &own, &nk, &at_ordinary).is_err());
     }
 
     #[test]

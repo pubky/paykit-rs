@@ -117,8 +117,8 @@ pub use paykit::{
 };
 pub use paykit_lib::bodies::RequestDestination;
 pub use paykit_lib::{
-    Asset, AttemptId, Decimal, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
-    PaymentReference,
+    Asset, AttemptId, Decimal, ListVersion, PaymentAmount, PaymentEndpointIdentifier,
+    PaymentEndpointPayload, PaymentReference,
 };
 pub use periods::{PeriodDetailsView, PeriodPrice, PeriodView};
 pub use protocol::{PaykitProtocol, HANDLED_KINDS};
@@ -126,6 +126,7 @@ pub use pubky_switch_client::app::{
     App, AppConfig, AppEnv, JoinRequest, ProtocolSet, UserConfirmed,
 };
 pub use publish::history::PublicationConflict;
+pub use publish::UnknownListDelivery;
 pub use rail::{
     CandidateError, CandidateId, EndpointSelection, PaymentEndpointCandidate, Rail,
     RailDeclaration, RailError, RailOutcome, RailPaid, RailPayment, Transfer,
@@ -193,6 +194,7 @@ mod tests {
             payload_hash: pubky_switch_core::enc::hash(payload().as_str().as_bytes()),
             amount: btc(),
             transfer: Transfer::new(Some(btc()), None),
+            fee_cap: None,
         };
         let mut endpoints = std::collections::BTreeMap::new();
         endpoints.insert(id(), payload());

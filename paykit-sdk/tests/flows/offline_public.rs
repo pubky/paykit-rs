@@ -22,7 +22,13 @@ async fn test_offline_public_same_selection_pays_once_while_connected() {
 #[tokio::test]
 async fn test_offline_public_payment_rechecks_the_selected_transfer_before_dispatch() {
     let world = World::new();
-    let mut wallet = world.wallet("wallet").await;
+    let mut wallet = world
+        .wallet_with(
+            "wallet",
+            store(),
+            crate::common::btc_fee_cap(PaykitConfig::default(), "0.00001"),
+        )
+        .await;
     let _shop = shop_with_endpoint(&world).await;
     wallet.receive(None).await.unwrap();
     world.router.remove(world.alice.origin());
@@ -42,7 +48,7 @@ async fn test_offline_public_payment_rechecks_the_selected_transfer_before_dispa
     assert!(world.rail.all_executions().is_empty());
 }
 
-async fn shop_with_endpoint(world: &World) -> paykit_sdk::Paykit {
+pub(crate) async fn shop_with_endpoint(world: &World) -> paykit_sdk::Paykit {
     let mut shop = world
         .join_with(
             &world.bob,
@@ -66,7 +72,7 @@ async fn shop_with_endpoint(world: &World) -> paykit_sdk::Paykit {
     shop
 }
 
-fn payment(world: &World) -> paykit_sdk::UnrequestedPayment {
+pub(crate) fn payment(world: &World) -> paykit_sdk::UnrequestedPayment {
     paykit_sdk::UnrequestedPayment::new(world.bob_id(), btc("0.001")).with_options(
         PayOptions::default()
             .with_endpoint(endpoint("btc-lightning-bolt12"))
@@ -202,6 +208,12 @@ async fn test_offline_public_late_success_records_original_attempt() {
         .router
         .add_switch(world.alice.origin(), world.alice.switch());
     let obligation = wallet.payments().await.unwrap()[0].obligation;
+    // The claim the payment would have written through the switch: its attempt ID blinded
+    // with the payer's naming key (Paykit wire 1.5).
+    assert_eq!(
+        obligation,
+        paykit_lib::derive::payment_obligation(wallet.app().naming_key(), &id)
+    );
     assert!(wallet
         .app_mut()
         .read_claim(&obligation)

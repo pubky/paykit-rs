@@ -8,7 +8,7 @@ use crate::error::{PaykitError, Result};
 use crate::receive::{keep_local, local, Fail};
 use crate::state::{self, key};
 use crate::Paykit;
-use paykit_lib::bodies::{PrivatePaymentListRequest, PRIVATE_LIST_MAX_AGE_MS};
+use paykit_lib::bodies::{PaymentProof, PrivatePaymentListRequest, PRIVATE_LIST_MAX_AGE_MS};
 use paykit_lib::records::StoredMessage;
 use paykit_lib::{Kind, ListVersion};
 use pubky_switch_client::app::{
@@ -485,6 +485,82 @@ impl Answers {
     }
 }
 
+/// A list request to this app naming the exact version of the counterparty's current list,
+/// given up or still in flight, is evidence that it arrived (Paykit spec 9): it counts as that
+/// list's acceptance, at the request's acceptance time. Whether `recipient` changed.
+fn observe_named(
+    app_id: [u8; 16],
+    recipient: &mut ListRecipient,
+    held: Option<&ListReservation>,
+    request: &PrivatePaymentListRequest,
+    stored: &StoredMessage,
+) -> std::result::Result<bool, Fail> {
+    // Only a request addressed to this app names this app's counter: versions of the
+    // payee's other apps may coincide (Paykit wire 4.14).
+    if request.app_id != Some(app_id) {
+        return Ok(false);
+    }
+    observe_version(recipient, held, request.held_version, stored)
+}
+
+/// A payer's proof of a payment to an endpoint of this app's list names the exact version
+/// it paid from, bound to this app and that payer (Paykit wire 4.10): like a list request
+/// naming it, it shows that version arrived (Paykit spec 9, "Deliveries of unknown
+/// outcome"), whether or not the payment is credited.
+pub(crate) fn note_proof(
+    cx: &mut ReceiveContext<'_>,
+    stored: &StoredMessage,
+    proof: &PaymentProof,
+) -> std::result::Result<(), Fail> {
+    let Some(version) = proof.list_version else {
+        return Ok(());
+    };
+    // Only a payee app holding plain `paykit_request` takes a proof without a request this
+    // far (Switch wire 5.1 check 10; `writes_payee_label`).
+    if proof.payment_app_id != cx.app_id() {
+        return Ok(());
+    }
+    let sender = stored.sender();
+    let at = key::list_recipient(&sender);
+    let Some(mut recipient) = state::cx_get::<ListRecipient>(cx, &at)? else {
+        return Ok(());
+    };
+    // Only a nonempty list can be paid from: a proof naming a withdrawal's version shows
+    // nothing, since counters are sequential and a payer holding one version can name the
+    // next without having it.
+    let held = state::cx_get::<ListReservation>(cx, &key::list_reservation(&sender))?
+        .filter(|issue| issue.revision.is_some());
+    if observe_version(&mut recipient, held.as_ref(), Some(version), stored)? {
+        keep_local(cx, local(&at, &recipient)?);
+    }
+    Ok(())
+}
+
+/// The counterparty's message `stored` names `version` of this app's list to it: when that
+/// is its current list, given up or still in flight, it counts as that list's acceptance,
+/// at the message's acceptance time. Whether `recipient` changed.
+fn observe_version(
+    recipient: &mut ListRecipient,
+    held: Option<&ListReservation>,
+    version: Option<ListVersion>,
+    stored: &StoredMessage,
+) -> std::result::Result<bool, Fail> {
+    let Some(issue) = held.filter(|issue| {
+        issue.delivery != super::FirstDelivery::Undelivered
+            && issue.choice == recipient.choice
+            && recipient.answers.first(issue).is_none()
+            && version.is_some()
+            && version == ListVersion::new(issue.generation, issue.counter).ok()
+    }) else {
+        return Ok(false);
+    };
+    let accepted = stored.accepted_at().ok_or_else(Fail::corrupt)?;
+    recipient
+        .answers
+        .observe(issue, accepted, true)
+        .map_err(|_| Fail::corrupt())
+}
+
 pub(crate) fn note(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
@@ -510,9 +586,20 @@ pub(crate) fn note(
             keep_local(cx, local(&at, &recipient)?);
             return Ok(());
         }
-        _ => return Ok(()),
+        other => {
+            // A withdrawn counterparty is answered nothing, but its request can still show
+            // that it holds the current list whose delivery was unknown.
+            if let Some(mut current) = other {
+                let held = state::cx_get::<ListReservation>(cx, &key::list_reservation(&sender))?;
+                if observe_named(cx.app_id(), &mut current, held.as_ref(), request, stored)? {
+                    keep_local(cx, local(&at, &current)?);
+                }
+            }
+            return Ok(());
+        }
     };
     let held = state::cx_get::<ListReservation>(cx, &key::list_reservation(&sender))?;
+    observe_named(cx.app_id(), &mut recipient, held.as_ref(), request, stored)?;
     let reserved = held
         .map(|r| ListVersion::new(r.generation, r.counter))
         .transpose()?;

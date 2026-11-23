@@ -14,6 +14,13 @@ pub(super) struct Account {
     /// The clock the account stamps each payment's verified time from.
     clock: Arc<dyn pubky_switch_client::clock::Clock>,
     pub calls: AtomicUsize,
+    pub lookups: AtomicUsize,
+    /// A proof check never answers.
+    pub stall_verify: AtomicBool,
+    /// After its charge, `pay` throws instead of answering.
+    pub throw_after_charge: AtomicBool,
+    /// `transfer` and `settlement_id` throw instead of answering.
+    pub throw_callbacks: AtomicBool,
     pub park: AtomicBool,
     pub entered: Notify,
     pub finish: Notify,
@@ -33,6 +40,10 @@ impl Account {
             file,
             clock,
             calls: AtomicUsize::new(0),
+            lookups: AtomicUsize::new(0),
+            stall_verify: AtomicBool::new(false),
+            throw_after_charge: AtomicBool::new(false),
+            throw_callbacks: AtomicBool::new(false),
             park: AtomicBool::new(true),
             entered: Notify::new(),
             finish: Notify::new(),
@@ -45,6 +56,34 @@ impl Account {
             .query_row("SELECT count(*) FROM payments", [], |r| r.get(0))
             .unwrap()
     }
+    /// What the host declares for this account; `history: false` for a method that can't look
+    /// a payment up.
+    pub fn declaration(history: bool) -> MethodDeclaration {
+        MethodDeclaration {
+            idempotent: true,
+            idempotency_retention_ms: None,
+            history,
+            history_retention_ms: None,
+            history_survives_restore: true,
+            longest_completion_ms: 1000,
+            payment_time_tolerance_ms: 7_200_000,
+        }
+    }
+    /// The endpoint the account pays, with its fractional digits.
+    pub fn endpoints() -> Vec<(paykit_lib::PaymentEndpointIdentifier, Option<u32>)> {
+        vec![(
+            paykit_lib::PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+            Some(8),
+        )]
+    }
+    /// A rail over this account, as the host would declare it.
+    pub fn rail(self: &Arc<Self>) -> HostRail {
+        HostRail::new(self.clone(), Self::declaration(true), Self::endpoints())
+    }
+    /// A rail over this account declared without a history.
+    pub fn rail_without_history(self: &Arc<Self>) -> HostRail {
+        HostRail::new(self.clone(), Self::declaration(false), Self::endpoints())
+    }
     pub fn paid(id: &str) -> MethodOutcome {
         MethodOutcome::Paid {
             proof_json: serde_json::to_vec(&serde_json::json!({"payment":id})).unwrap(),
@@ -54,17 +93,6 @@ impl Account {
 }
 #[async_trait::async_trait]
 impl PaymentMethod for Account {
-    fn declaration(&self) -> MethodDeclaration {
-        MethodDeclaration {
-            idempotent: true,
-            idempotency_retention_ms: None,
-            history: true,
-            history_retention_ms: None,
-            history_survives_restore: true,
-            longest_completion_ms: 1000,
-            payment_time_tolerance_ms: 7_200_000,
-        }
-    }
     fn select_endpoints(
         &self,
         candidates: Vec<EndpointCandidate>,
@@ -79,11 +107,18 @@ impl PaymentMethod for Account {
             failures: Vec::new(),
         })
     }
-    fn transfer(&self, _: String, _: String, amount: Amount) -> Arc<MethodTransfer> {
-        MethodTransfer::new(Some(amount), None).unwrap()
-    }
-    fn fraction_digits(&self, _: String) -> Option<u32> {
-        Some(8)
+    fn transfer(
+        &self,
+        _: String,
+        _: String,
+        amount: Amount,
+    ) -> Result<Arc<MethodTransfer>, MethodError> {
+        if self.throw_callbacks.load(Ordering::SeqCst) {
+            return Err(MethodError::Unknown {
+                reason: "transfer threw".into(),
+            });
+        }
+        Ok(MethodTransfer::new(Some(amount), None).unwrap())
     }
     async fn pay(&self, p: MethodPayment) -> Result<MethodOutcome, MethodError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -105,9 +140,15 @@ impl PaymentMethod for Account {
         if self.park.load(Ordering::SeqCst) {
             self.finish.notified().await;
         }
+        if self.throw_after_charge.load(Ordering::SeqCst) {
+            return Err(MethodError::Unknown {
+                reason: "answer lost after the charge".into(),
+            });
+        }
         Ok(Self::paid(&p.attempt_id))
     }
     async fn payment(&self, id: String) -> Result<Option<MethodOutcome>, MethodError> {
+        self.lookups.fetch_add(1, Ordering::SeqCst);
         let paid = Connection::open(&self.file)
             .unwrap()
             .query_row("SELECT attempt FROM payments WHERE attempt=?1", [id], |r| {
@@ -125,7 +166,7 @@ impl PaymentMethod for Account {
             Coverage::Complete => {}
             Coverage::Incomplete => return Ok(None),
             Coverage::Unavailable => {
-                return Err(MethodError::Unavailable {
+                return Err(MethodError::Unknown {
                     reason: "account history unavailable".into(),
                 })
             }
@@ -150,6 +191,9 @@ impl PaymentMethod for Account {
         Ok(Some(rows.collect::<Result<_, _>>().unwrap()))
     }
     async fn verify(&self, p: MethodProof) -> Result<Option<u64>, MethodError> {
+        if self.stall_verify.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
         let proof: serde_json::Value = serde_json::from_slice(&p.proof_json).unwrap();
         if proof["payment"].as_str() != Some(p.attempt_id.as_str()) {
             return Ok(None);
@@ -157,12 +201,15 @@ impl PaymentMethod for Account {
         let found=Connection::open(&self.file).unwrap().query_row("SELECT paid_at FROM payments WHERE attempt=?1 AND asset=?2 AND amount=?3 AND endpoint=?4 AND (?5 IS NULL OR payload=?5)",params![p.attempt_id,p.amount.asset,p.amount.value,p.endpoint,p.payload],|r|r.get::<_,i64>(0)).optional().unwrap();
         Ok(found.map(|at| u64::try_from(at).unwrap()))
     }
-    fn settlement_id(&self, proof: Vec<u8>) -> Option<Vec<u8>> {
-        serde_json::from_slice::<serde_json::Value>(&proof)
-            .ok()?
-            .get("payment")?
-            .as_str()
-            .map(|s| s.as_bytes().to_vec())
+    fn settlement_id(&self, proof: Vec<u8>) -> Result<Option<Vec<u8>>, MethodError> {
+        if self.throw_callbacks.load(Ordering::SeqCst) {
+            return Err(MethodError::Unknown {
+                reason: "settlement id threw".into(),
+            });
+        }
+        Ok(serde_json::from_slice::<serde_json::Value>(&proof)
+            .ok()
+            .and_then(|proof| Some(proof.get("payment")?.as_str()?.as_bytes().to_vec())))
     }
 }
 
@@ -174,10 +221,7 @@ async fn test_method_history_distinguishes_complete_empty_from_missing_and_unava
         directory.path(),
         Arc::new(pubky_switch_client::clock::TestClock::new(0)),
     ));
-    let rail = HostRail {
-        method: account.clone(),
-        identifiers: Vec::new(),
-    };
+    let rail = account.rail();
     let payer = [17; 32];
     assert_eq!(
         rail.allowance_history(payer).await.unwrap(),
@@ -196,13 +240,60 @@ async fn test_method_history_distinguishes_complete_empty_from_missing_and_unava
 fn test_method_declaration_forwards_the_payment_time_tolerance() {
     use paykit_sdk::Rail;
     let directory = tempfile::tempdir().unwrap();
-    let rail = HostRail {
-        method: Arc::new(Account::open(
-            directory.path(),
-            Arc::new(pubky_switch_client::clock::TestClock::new(0)),
-        )),
-        identifiers: Vec::new(),
-    };
+    let rail = Arc::new(Account::open(
+        directory.path(),
+        Arc::new(pubky_switch_client::clock::TestClock::new(0)),
+    ))
+    .rail();
     assert_eq!(rail.declaration().payment_time_tolerance_ms, 7_200_000);
     assert_eq!(rail.declaration().longest_completion_ms, 1000);
+}
+
+#[test]
+fn test_method_thrown_transfer_and_settlement_id_answer_unknown_and_none() {
+    use paykit_lib::{Asset, Decimal, PaymentAmount, PaymentEndpointPayload};
+    use paykit_sdk::Rail;
+    let directory = tempfile::tempdir().unwrap();
+    let account = Arc::new(Account::open(
+        directory.path(),
+        Arc::new(pubky_switch_client::clock::TestClock::new(0)),
+    ));
+    let rail = account.rail();
+    let (endpoint, _) = Account::endpoints().remove(0);
+    let payload = PaymentEndpointPayload::new("lnbc1").unwrap();
+    let amount = PaymentAmount {
+        asset: Asset::new("btc").unwrap(),
+        value: Decimal::new("7").unwrap(),
+    };
+    let proof = serde_json::Map::from_iter([("payment".into(), serde_json::json!("a1"))]);
+    assert_eq!(
+        rail.transfer(&endpoint, &payload, &amount).amount,
+        Some(amount.clone())
+    );
+    assert_eq!(rail.settlement_id(&proof), Some(b"a1".to_vec()));
+    assert_eq!(rail.fraction_digits(&endpoint), Some(8));
+    account.throw_callbacks.store(true, Ordering::SeqCst);
+    // A thrown transfer is an amount the method can't tell, which the user confirms.
+    let transfer = rail.transfer(&endpoint, &payload, &amount);
+    assert_eq!((transfer.amount, transfer.max_fee), (None, None));
+    assert_eq!(rail.settlement_id(&proof), None);
+}
+
+#[test]
+fn test_method_fraction_digits_come_from_the_declared_endpoints() {
+    use paykit_sdk::Rail;
+    let directory = tempfile::tempdir().unwrap();
+    let account = Arc::new(Account::open(
+        directory.path(),
+        Arc::new(pubky_switch_client::clock::TestClock::new(0)),
+    ));
+    let other = paykit_lib::PaymentEndpointIdentifier::new("btc-onchain").unwrap();
+    let rail = HostRail::new(
+        account,
+        Account::declaration(true),
+        vec![(other.clone(), None)],
+    );
+    assert_eq!(rail.fraction_digits(&other), None);
+    let (lightning, _) = Account::endpoints().remove(0);
+    assert_eq!(rail.fraction_digits(&lightning), None);
 }

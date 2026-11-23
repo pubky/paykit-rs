@@ -246,58 +246,67 @@ pub struct PaymentEntry {
     /// 4.11), as this app's copy shows it: for display.
     pub receipt: Option<Receipt>,
 }
-#[uniffi::export(async_runtime = "tokio")]
+#[uniffi::export]
 impl NativeWallet {
     /// Read attempts and receipts from the wallet's durable payment journal.
     pub async fn payments(&self) -> Result<Vec<PaymentEntry>, WalletError> {
-        self.lock()
-            .await?
-            .payments()
-            .await?
-            .into_iter()
-            .map(|p| {
-                Ok(PaymentEntry {
-                    attempt_id: p.attempt_id.to_text(),
-                    obligation: p.obligation.into(),
-                    payee: p.payee.into(),
-                    request_hash: p.request_hash.map(Vec::from),
-                    period: p.billing_period.map(Into::into),
-                    amount: (&p.amount).into(),
-                    endpoint: p.endpoint_id.as_str().into(),
-                    stage: p.stage.into(),
-                    restored: p.restored,
-                    record_held: p.record_held,
-                    paid: p.paid.as_ref().map(Into::into),
-                    rate: p.rate.map(|r| Amount {
-                        asset: r.asset().as_str().into(),
-                        value: r.value().as_str().into(),
-                    }),
-                    receipt: p.receipt.map(TryInto::try_into).transpose()?,
-                })
+        self.with_wallet(|app| {
+            Box::pin(async move {
+                app.payments()
+                    .await?
+                    .into_iter()
+                    .map(|p| {
+                        Ok(PaymentEntry {
+                            attempt_id: p.attempt_id.to_text(),
+                            obligation: p.obligation.into(),
+                            payee: p.payee.into(),
+                            request_hash: p.request_hash.map(Vec::from),
+                            period: p.billing_period.map(Into::into),
+                            amount: (&p.amount).into(),
+                            endpoint: p.endpoint_id.as_str().into(),
+                            stage: p.stage.into(),
+                            restored: p.restored,
+                            record_held: p.record_held,
+                            paid: p.paid.as_ref().map(Into::into),
+                            rate: p.rate.map(|r| Amount {
+                                asset: r.asset().as_str().into(),
+                                value: r.value().as_str().into(),
+                            }),
+                            receipt: p.receipt.map(TryInto::try_into).transpose()?,
+                        })
+                    })
+                    .collect()
             })
-            .collect()
+        })
+        .await
     }
     /// Resolve original attempts according to their stored stage and method evidence.
     pub async fn resume_payments(&self) -> Result<Vec<PaymentOutcome>, WalletError> {
-        self.with_wallet(async |app| {
-            Ok(app
-                .resume_payments()
-                .await?
-                .into_iter()
-                .map(Into::into)
-                .collect())
+        self.with_wallet(move |app| {
+            Box::pin(async move {
+                Ok(app
+                    .resume_payments()
+                    .await?
+                    .into_iter()
+                    .map(Into::into)
+                    .collect())
+            })
         })
         .await
     }
     /// Read the seller's signed receipts for the original one-time request.
     pub async fn request_receipts(&self, id: RequestId) -> Result<Vec<Receipt>, WalletError> {
-        self.lock()
-            .await?
-            .receipts(paykit_sdk::ReceiptsOf::Request(id.try_into()?))
-            .await?
-            .into_iter()
-            .map(TryInto::try_into)
-            .collect()
+        let request = id.try_into()?;
+        self.with_wallet(move |app| {
+            Box::pin(async move {
+                app.receipts(paykit_sdk::ReceiptsOf::Request(request))
+                    .await?
+                    .into_iter()
+                    .map(TryInto::try_into)
+                    .collect()
+            })
+        })
+        .await
     }
 }
 
@@ -326,7 +335,7 @@ pub struct AllowancePeriodUsage {
     pub count: u64,
 }
 
-#[uniffi::export(async_runtime = "tokio")]
+#[uniffi::export]
 impl NativeWallet {
     /// Reconcile an existing grant against the original wallet's current ledger and
     /// complete account-wide method history. Null leaves usage unknown and spending held.
@@ -335,24 +344,26 @@ impl NativeWallet {
         record: Vec<u8>,
     ) -> Result<Option<AllowanceUsage>, WalletError> {
         let record = fixed(record, "Allowance record")?;
-        self.with_wallet(async |app| {
-            Ok(app
-                .reconcile_allowance(&record)
-                .await?
-                .map(|usage| AllowanceUsage {
-                    lifetime: usage.lifetime().as_str().into(),
-                    periods: usage
-                        .periods()
-                        .iter()
-                        .map(|period| AllowancePeriodUsage {
-                            amount: period.amount().as_str().into(),
-                            count: period.count(),
-                        })
-                        .collect(),
-                    reserved: usage.reserved(),
-                    spent: usage.spent(),
-                    released: usage.released(),
-                }))
+        self.with_wallet(move |app| {
+            Box::pin(async move {
+                Ok(app
+                    .reconcile_allowance(&record)
+                    .await?
+                    .map(|usage| AllowanceUsage {
+                        lifetime: usage.lifetime().as_str().into(),
+                        periods: usage
+                            .periods()
+                            .iter()
+                            .map(|period| AllowancePeriodUsage {
+                                amount: period.amount().as_str().into(),
+                                count: period.count(),
+                            })
+                            .collect(),
+                        reserved: usage.reserved(),
+                        spent: usage.spent(),
+                        released: usage.released(),
+                    }))
+            })
         })
         .await
     }

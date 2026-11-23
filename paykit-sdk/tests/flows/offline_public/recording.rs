@@ -124,7 +124,7 @@ async fn record_after_commit(delay: u64) {
     });
     let mut wallet = world.wallet_on("wallet", store.clone()).await;
     let attempt = AttemptId::generate().unwrap();
-    let obligation = payment_obligation(&attempt);
+    let obligation = payment_obligation(wallet.app().naming_key(), &attempt);
     assert!(wallet
         .app_mut()
         .read_claim(&obligation)
@@ -193,7 +193,7 @@ async fn test_offline_public_renews_after_only_candidate_is_retired_unsent() {
         .outcome
         .unwrap()
         .attempt_id();
-    let obligation = payment_obligation(&id);
+    let obligation = payment_obligation(wallet.app().naming_key(), &id);
     world
         .router
         .add_switch(world.alice.origin(), world.alice.switch());
@@ -252,7 +252,7 @@ async fn test_offline_public_reload_on_either_side_of_recording_custody() {
             .outcome
             .unwrap()
             .attempt_id();
-        let obligation = payment_obligation(&id);
+        let obligation = payment_obligation(wallet.app().naming_key(), &id);
         world
             .router
             .add_switch(world.alice.origin(), world.alice.switch());

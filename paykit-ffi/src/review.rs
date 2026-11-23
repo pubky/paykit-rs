@@ -140,6 +140,23 @@ pub enum RefusalKind {
         /// The settlement bucket that could not accept the mark.
         bucket: u16,
     },
+    /// The delivery of the counterparty's current Private Payment List is unknown. Only the
+    /// user can authorize another version.
+    ListDeliveryUnknown {
+        /// The counterparty the list was sent to.
+        recipient: Vec<u8>,
+        /// The publishing identity generation of the list's version.
+        generation: u64,
+        /// The list version's counter.
+        counter: u64,
+        /// The list message's ID.
+        msg_id: String,
+        /// Whether the list was empty, withdrawing an earlier one.
+        withdrawal: bool,
+        /// For a withdrawal, when an earlier list may last be paid; otherwise when the list
+        /// expires. `None` when it can't be bounded.
+        payable_until_ms: Option<u64>,
+    },
     /// The host must show the affected records and their observed versions before asking for confirmation.
     Divergent {
         /// The records the user is asked to confirm.
@@ -207,7 +224,11 @@ pub enum RefusalKind {
     /// The method cannot pay the selected endpoint.
     UnsupportedEndpoint,
     /// A usable Private Payment List is required.
-    WaitingForList,
+    WaitingForList {
+        /// Whether a list expired only by the service's time: the device clock is behind it,
+        /// and the user is told so.
+        device_clock_behind: bool,
+    },
     /// The wallet could not read or revalidate the identity required for payment.
     IdentityUnavailable,
     /// The payee identity needs explicit confirmation.
@@ -219,6 +240,10 @@ pub enum RefusalKind {
     NotCurrent,
     /// The call doesn't apply now: the text says why.
     NotNow,
+    /// The identity's block floor is held after it was seen divergent: no unblock or widening
+    /// that needs a raise goes, and retrying changes nothing until the shared post-loss hold
+    /// stands too.
+    FloorHeld,
     /// A value the protocol or the host gave breaks a rule: the text names it.
     Usage,
     /// A payment action is held by its record. If the payer's payment history was lost to
@@ -294,6 +319,14 @@ impl PaymentRefusal {
                 amount: (&p.amount).into(),
             },
             Refusal::SettlementBucketFull { bucket } => D::SettlementBucketFull { bucket: *bucket },
+            Refusal::ListDeliveryUnknown(list) => D::ListDeliveryUnknown {
+                recipient: list.recipient().into(),
+                generation: list.version().generation(),
+                counter: list.version().counter(),
+                msg_id: list.msg_id().to_owned(),
+                withdrawal: list.withdrawal(),
+                payable_until_ms: list.payable_until_ms(),
+            },
             Refusal::Divergent { records } => D::Divergent {
                 records: records.iter().cloned().map(Into::into).collect(),
             },
@@ -325,12 +358,17 @@ impl PaymentRefusal {
             Refusal::AttemptFailed(_) => D::AttemptFailed,
             Refusal::NoDestination(_) => D::NoDestination,
             Refusal::UnsupportedEndpoint(_) => D::UnsupportedEndpoint,
-            Refusal::WaitingForList => D::WaitingForList,
+            Refusal::WaitingForList {
+                device_clock_behind,
+            } => D::WaitingForList {
+                device_clock_behind: *device_clock_behind,
+            },
             Refusal::IdentityUnavailable(_) => D::IdentityUnavailable,
             Refusal::IdentityUnconfirmed => D::IdentityUnconfirmed,
             Refusal::PaymentInProgress => D::PaymentInProgress,
             Refusal::NotCurrent(_) => D::NotCurrent,
             Refusal::NotNow(_) => D::NotNow,
+            Refusal::FloorHeld => D::FloorHeld,
             Refusal::Usage(_) => D::Usage,
             Refusal::RecordHeld(_) => D::RecordHeld,
             Refusal::CertificateRefused(_) => D::CertificateRefused,
