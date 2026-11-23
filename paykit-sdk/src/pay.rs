@@ -2070,26 +2070,6 @@ impl Paykit {
             .iter()
             .filter_map(|l| crate::receive::list_version(&l.list).map(|v| (l.app_id, v)))
             .collect();
-        // A list held over its record, as when the record didn't read when it came, replaces
-        // the record's list once placed: until then that payee app's list isn't paid to, so
-        // nothing goes to a list a later one, a withdrawal included, replaces (Paykit wire
-        // 5.4). A hold the record already holds, placed and not yet cleared, stops nothing:
-        // the test is the one placement takes. Its pair stays installed above.
-        let own = self.identity();
-        let mut held = Vec::new();
-        for list in &lists {
-            let record = self.app.record_key(&list_target(payee, &list.app_id))?;
-            let Some(kept) = self
-                .local_get::<KeptMessage>(&key::held_list(&record))
-                .await?
-            else {
-                continue;
-            };
-            if crate::receive::next_list_record(Some(list.clone()), &kept.stored(&own)?).is_some() {
-                held.push(list.app_id);
-            }
-        }
-        lists.retain(|l| !held.contains(&l.app_id));
         // Only a current app's list counts (Paykit spec 8.4, 7.2): a removed app's list, of
         // whatever version it chose, would shadow the current apps' and then be refused by
         // the destination check. The payee's `identity.json` is the copy that check takes,
@@ -2142,6 +2122,14 @@ impl Paykit {
         // other list to pay, the payment is refused naming those records. The certificate the
         // held list was signed under decides nothing here: the upload's list may be signed
         // under the one its current app is listed with now.
+        //
+        // A list held over its record, as when the record didn't read when it came, replaces
+        // the record's list once placed: until then that payee app's list isn't paid to, so
+        // nothing goes to a list a later one, a withdrawal included, replaces (Paykit wire
+        // 5.4). A hold the record already holds, placed and not yet cleared, stops nothing:
+        // the test is the one placement takes. A divergent record is named first: its held
+        // list is placed only once the user confirms it. Its pair stays installed above.
+        let own = self.identity();
         let mut paused_lists = Vec::new();
         let mut usable = Vec::with_capacity(lists.len());
         for list in lists {
@@ -2150,9 +2138,19 @@ impl Paykit {
                 .record_key(&list_target(&list.payee, &list.app_id))?;
             if Box::pin(self.pause_at(&record)).await?.blocks_by_hand() {
                 paused_lists.push(record);
-            } else {
-                usable.push(list);
+                continue;
             }
+            if let Some(kept) = self
+                .local_get::<KeptMessage>(&key::held_list(&record))
+                .await?
+            {
+                if crate::receive::next_list_record(Some(list.clone()), &kept.stored(&own)?)
+                    .is_some()
+                {
+                    continue;
+                }
+            }
+            usable.push(list);
         }
         let mut lists = usable;
         // Of the lists not paused, only one the destination check takes counts: the

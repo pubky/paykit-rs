@@ -1257,3 +1257,42 @@ async fn test_local_state_list_held_over_its_record_not_paid_to() {
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
 }
+
+#[tokio::test]
+async fn test_local_state_list_held_over_a_divergent_record_refused_as_divergent() {
+    // A newer list of bob's is held over his payment_lists record, which is divergent: the
+    // held list waits for the user to confirm the record, so the payment is refused naming
+    // it, for the user to confirm, never as waiting for a list (Paykit spec 6).
+    let w = World::new();
+    let base = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
+    wallet.receive(None).await.unwrap();
+    let record = wallet
+        .app()
+        .record_key(&lists_of(&w, &shop.app_id()))
+        .unwrap();
+    put(
+        &mut wallet,
+        &format!("lh/{}", b64(&record)),
+        &shop_list_at(&w, list_version(1, 2)),
+    )
+    .await;
+    crate::divergent::set_divergent(&base, &wallet, &record, true);
+    let refused = wallet
+        .pay_without_request(UnrequestedPayment::new(w.bob_id(), crate::common::btc("1")))
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::Divergent { records })
+                if records.iter().any(|r| r.record == record)
+        ),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
