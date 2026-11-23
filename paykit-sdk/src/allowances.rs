@@ -171,6 +171,10 @@ pub struct AllowanceView {
     /// Whether its executor wrote its grant again after a provider loss, which pauses it
     /// until its usage is repaired (Paykit spec 8.3, "After provider loss").
     pub(crate) regranted_after_loss: bool,
+    /// Whether a write over its record waits, divergent and not confirmed by the user, or
+    /// behind messages kept over it (Paykit spec 6): the regrant after a provider loss waits
+    /// with it.
+    pub(crate) record_write_waits: bool,
     /// Whether the counterparty is on the identity's deny list, as the app last read it
     /// (Paykit spec 8.1, "Blocked counterparties"): nothing new from it is taken, its
     /// requests are paused and nothing is sent to it, so the host shows the Allowance as
@@ -2334,6 +2338,45 @@ impl Paykit {
     /// that isn't queued with it is refused before anything is sent ([`stores_unqueued`]),
     /// but for a crossing end owed while sends to the counterparty are held, `owed`, whose
     /// mark goes in the same batch.
+    /// A write of `value` over the Allowance record at `target`, with `conditions`, built on
+    /// the version the service holds the record's current write at. After a recovery upload
+    /// that can be lower than the version this app holds for the same write, and the
+    /// compare-and-swap is on the service's version (Pubky Switch wire 6.3, 7.6): the write
+    /// keeps the client's `record_current` on that exact write and takes the installed
+    /// version as its `expected_version`.
+    pub(crate) async fn allowance_record_op(
+        &mut self,
+        target: &RecordTarget,
+        value: &[u8],
+        conditions: Vec<pubky_switch_core::ops::Condition>,
+    ) -> Result<(
+        Vec<pubky_switch_core::ops::Condition>,
+        pubky_switch_core::ops::OpKind,
+    )> {
+        use pubky_switch_core::ops::{Condition, OpKind};
+        let (conditions, mut kind) = self.app.record_op(target, Some(value), conditions).await?;
+        if let OpKind::RecordPut(put) = &mut kind {
+            // Only a write the client conditions on an exact earlier write can be over an
+            // upload; any other builds on the version as held, with no read first.
+            let names_a_write = conditions.iter().any(|condition| {
+                matches!(condition, Condition::RecordCurrent { key, deleted: false, .. }
+                    if *key == put.key)
+            });
+            if names_a_write {
+                if let Some(current) = self.app.read_record_application(target).await? {
+                    let names_it = conditions.iter().any(|condition| {
+                        matches!(condition, Condition::RecordCurrent { key, revision, deleted: false }
+                            if *key == put.key && *revision == current.application)
+                    });
+                    if names_it && put.expected_version == current.record.version {
+                        put.expected_version = current.installed_version;
+                    }
+                }
+            }
+        }
+        Ok((conditions, kind))
+    }
+
     async fn submit_with_record(
         &mut self,
         target: &RecordTarget,
@@ -2359,10 +2402,8 @@ impl Paykit {
         ) {
             return Err(PaykitError::corrupt());
         }
-        let write = self
-            .app
-            .record_op(target, Some(&next.to_json()?), Vec::new())
-            .await?;
+        let write =
+            Box::pin(self.allowance_record_op(target, &next.to_json()?, Vec::new())).await?;
         let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
             .entry(write)
             .locals(locals);
@@ -2546,6 +2587,7 @@ impl Paykit {
             confirmation_needed: false,
             granted_before_loss: false,
             regranted_after_loss: false,
+            record_write_waits: false,
             hold: self.allowance_hold(record).await?,
             blocked: Box::pin(self.blocked_as_known(&stored.sender())).await?,
         }))
@@ -2569,13 +2611,16 @@ impl Paykit {
             .map(|(grant, _)| grant.app_id);
         // The generation the user last confirmed it in: its grant's, or before a grant its
         // proposal's. One a provider loss ended pays nothing automatically (Paykit spec 8.3).
-        let confirmed = held
-            .current_grant(&self.identity())
-            .map(|(grant, _)| grant.confirmed_generation)
-            .or(match held.proposal.body() {
+        // A record whose last grant entry doesn't verify reads as neither: only one with no
+        // grant at all is judged by its proposal.
+        let confirmed = match held.current_grant(&self.identity()) {
+            Some((grant, _)) => Some(grant.confirmed_generation),
+            None if held.grants.is_empty() => match held.proposal.body() {
                 Body::AllowanceProposal(proposal) => Some(proposal.allower_generation),
                 _ => None,
-            });
+            },
+            None => None,
+        };
         view.granted_before_loss = confirmed
             .zip(self.app.own_identity().body().recovery_from)
             .is_some_and(|(confirmed, lost)| confirmed <= lost);
@@ -2590,6 +2635,7 @@ impl Paykit {
             (Some((grant, _)), Some(lost)) => {
                 held.grants.iter().rev().nth(1).is_some_and(|before| {
                     grant.confirmed_generation > lost
+                        && grant.confirmed_generation <= self.app.own_identity().generation()
                         && before.grant.app_id == grant.app_id
                         && before.grant.confirmed_generation <= lost
                         && held
@@ -2602,6 +2648,9 @@ impl Paykit {
             }
             _ => false,
         };
+        view.record_write_waits = Box::pin(self.pause_seen(&record))
+            .await?
+            .adds_no_stop_waits();
         let consent = Box::pin(self.consent_state(&record)).await?;
         view.consented = consent == ConsentState::Held;
         view.confirmation_needed = matches!(
@@ -2645,6 +2694,7 @@ impl Paykit {
             confirmation_needed: false,
             granted_before_loss: false,
             regranted_after_loss: false,
+            record_write_waits: false,
             hold: self.allowance_hold(&record).await?,
             blocked: Box::pin(self.blocked_as_known(&counterparty)).await?,
         })

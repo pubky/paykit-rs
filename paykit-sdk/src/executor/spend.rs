@@ -176,8 +176,13 @@ pub(crate) fn standing(app: &Paykit, view: &AllowanceView, consent: ConsentState
     if let ConsentState::Waiting(why) = consent {
         return Standing::Temporary(why);
     }
+    // The regrant is a write over the record: while that waits for the user's confirmation
+    // of the record, or for the messages kept over it, so does the Allowance's (Paykit spec 6).
     if view.granted_before_loss {
-        return Standing::Confirm;
+        return match view.record_write_waits {
+            true => Standing::Temporary(WAITS_FOR_RECORD_WRITE),
+            false => Standing::Confirm,
+        };
     }
     // The regrant written, a newer hold asks the user again first; then its usage waits.
     if view.regranted_after_loss {
@@ -188,7 +193,10 @@ pub(crate) fn standing(app: &Paykit, view: &AllowanceView, consent: ConsentState
     }
     match (consent, own) {
         (ConsentState::Held, true) => Standing::Payable,
-        (ConsentState::ConfirmAgain, _) => Standing::Confirm,
+        // Asked again only where this app holds a grant it can stand on: confirming lifts
+        // nothing on a record whose executor doesn't verify.
+        (ConsentState::ConfirmAgain, true) => Standing::Confirm,
+        (ConsentState::ConfirmAgain, false) => Standing::NotTakenUp,
         // The grant path lands the kept batch: the host calls again.
         (ConsentState::GrantKept, _) => {
             Standing::Temporary("the executor grant's write waits to be sent again")
@@ -229,8 +237,11 @@ fn status_standing(status: AllowanceStatus) -> Option<Standing> {
 /// automatically.
 pub(crate) const SET_UP_BEFORE_LOSS: &str = "the Allowance was set up before a provider loss and never granted here, so it can't be granted now: the user can end it and set up a new one";
 
+/// Why an Allowance last confirmed before a provider loss waits before asking the user.
+pub(crate) const WAITS_FOR_RECORD_WRITE: &str = "the Allowance record is divergent or has messages to write first: the user confirms the record as shown, a newer write ends it, or the next receive writes the messages";
+
 /// Why an Allowance whose grant was written again after a provider loss doesn't pay yet.
-pub(crate) const NEEDS_REPAIR_AFTER_LOSS: &str = "after a provider loss, the Allowance's usage record needs a repair before it pays automatically; the user can end it and set up a new one";
+pub(crate) const NEEDS_REPAIR_AFTER_LOSS: &str = "after a provider loss this version doesn't resume automatic payments under the Allowance, whose usage needs a repair it doesn't make: the user ends it and sets up a new one";
 
 /// The refusal for an Allowance taken off this app's consent list for `reason`: final, as no
 /// later read puts it back (Paykit spec 8.3, "Executor", "Ends reach the executor").

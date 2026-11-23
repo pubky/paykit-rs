@@ -60,8 +60,10 @@ pub enum Refusal {
     /// again, since an end may be among what was lost (Paykit spec 8.3, "Ends reach the
     /// executor"). After a provider loss, an Allowance this app executes that the user last
     /// confirmed before the loss gets it too: confirming writes its grant at the current
-    /// generation, after which payments under it wait for its usage to be repaired, with
-    /// their own [`Refusal::NotNow`] (Paykit spec 8.3, "After provider loss"). It is
+    /// generation, but automatic payments under it don't resume in this version, which
+    /// doesn't repair its usage: they answer [`Refusal::NotNow`] with that reason, and the
+    /// user who wants them ends the Allowance and sets up a new one (Paykit spec 8.3, "After
+    /// provider loss"). It is
     /// returned only where confirming lifts it, so not while the Allowance
     /// is ended, expired, executed by another app or its counterparty blocked. The host shows
     /// the Allowance `hold` names and, once the user confirms, calls

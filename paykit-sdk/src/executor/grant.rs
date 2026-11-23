@@ -17,6 +17,14 @@ use crate::allowances::{allowance_target, Consent, ConsentEntry};
 use crate::state::{self, key, Tx};
 use crate::{AllowanceRole, AllowanceStatus, Paykit, Refusal, Result};
 
+/// Why the regrant after a provider loss waits: the Allowance record isn't read as writing
+/// on it needs, as after an unverified or not yet taken write.
+const REGRANT_WAITS: &str = "the Allowance record isn't read as writing on it needs yet";
+
+fn regrant_waits() -> Refusal {
+    Refusal::NotNow(REGRANT_WAITS.into())
+}
+
 fn held() -> Refusal {
     Refusal::NotNow("the executor cannot establish the original Allowance grant and ledger".into())
 }
@@ -61,7 +69,10 @@ impl Paykit {
 
     /// Confirm this app's previously approved execution again after a consent hold.
     /// The host shows the counterparty, terms and executor. An earlier approval of
-    /// automatic execution by this app is required (Paykit spec 8.3).
+    /// automatic execution by this app is required (Paykit spec 8.3). After a provider loss,
+    /// for an Allowance the user confirmed before it, this writes its grant again at the
+    /// current generation; automatic payments under it don't resume in this version, which
+    /// doesn't repair its usage (Paykit spec 8.3, "After provider loss").
     /// This app can renew held consent against its own already incorporated ledger. A
     /// restored or unrecognized later ledger requires complete wallet history.
     ///
@@ -70,7 +81,8 @@ impl Paykit {
     /// Where the Allowance stands, as [`Paykit::resume_allowance_executor`] says. The
     /// confirmation is the user's for `hold`, the Allowance and the hold in force when it was
     /// shown ([`crate::AllowanceView::hold`], [`Refusal::AllowanceConfirmationNeeded`]): once
-    /// a newer restore or `missed` item has set another hold, before this call or during its
+    /// a newer restore, `missed` item or provider loss has set another hold, before this call
+    /// or during its
     /// read, it is refused with [`Refusal::AllowanceConfirmationNeeded`] naming the hold in
     /// force now, nothing is written, and the host asks the user again. It can still refuse
     /// with [`Refusal::NotNow`] when the original ledger or grant result can't be established
@@ -405,7 +417,7 @@ impl Paykit {
             .app
             .read_record_application(&allow)
             .await?
-            .ok_or_else(held)?;
+            .ok_or_else(regrant_waits)?;
         // The read brings the service time up to date: an Allowance that expired since is
         // refused as ended before anything is written.
         Box::pin(self.still_standing(record)).await?;
@@ -416,17 +428,17 @@ impl Paykit {
         }
         let read = &current.record;
         let pubky_switch_client::app::RecordContent::Value(bytes) = &read.content else {
-            return Err(held().into());
+            return Err(regrant_waits().into());
         };
         if !read.authenticated
             || read.doubtful
             || read.flagged
             || read.not_taken
-            || read.divergent
             || read.different_write_at_held_version
             || read.key != *record
+            || self.pause_at(record).await?.adds_no_stop_waits()
         {
-            return Err(held().into());
+            return Err(regrant_waits().into());
         }
         let own = self.identity();
         let lost = self.app.own_identity().body().recovery_from;
@@ -436,9 +448,9 @@ impl Paykit {
                 && lost.is_some_and(|lost| grant.confirmed_generation <= lost)
         });
         if !paused || next.end.is_some() || next.conflicted.is_some() {
-            return Err(held().into());
+            return Err(regrant_waits().into());
         }
-        let terms_hash = next.terms_hash().ok_or_else(held)?;
+        let terms_hash = next.terms_hash().ok_or_else(regrant_waits)?;
         let generation = self.app.own_identity().generation();
         // The write builds on the version the service holds the record's current write at:
         // after a recovery upload that can be lower than the version the write was first
@@ -467,6 +479,8 @@ impl Paykit {
             origin: Origin::default(),
         });
         next.grant = Some(grant);
+        // Built on the one read checked above, with no read again in between: the write is
+        // conditioned on that exact write and on the version the service installed it at.
         let (conditions, mut kind) = self
             .app
             .record_op(
@@ -479,18 +493,49 @@ impl Paykit {
                 }],
             )
             .await?;
-        if let OpKind::RecordPut(put) = &mut kind {
-            put.expected_version = base;
-        }
+        let OpKind::RecordPut(put) = &mut kind else {
+            return Err(regrant_waits().into());
+        };
+        put.expected_version = base;
         let op = (conditions, kind);
         let hold = self.current_hold().await?;
+        // Kept to send again after a lost answer, the batch leaves its ID at `gb/`, which it
+        // deletes when it applies: a call again lands it first and builds no second grant.
+        let marker = key::grant_batch(record).into_bytes();
         let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
             .entry(op)
             .local(state::local_put(
                 &key::execution_approval(record, hold.as_ref()),
                 &true,
-            )?);
+            )?)
+            .keep_id_at(marker.clone())
+            .local(LocalWrite::Delete { key: marker });
         self.app.submit_batch(batch).await?;
+        // Applied now, under the hold the user confirmed: a `confirm again` mark from that
+        // same hold is answered by this confirmation.
+        if self.allowance_hold(record).await? == view.hold {
+            if let Some(entry) = self
+                .local_get::<ConsentEntry>(&key::consent(record))
+                .await?
+                .filter(|entry| {
+                    matches!(
+                        entry.consent,
+                        Consent::Held {
+                            confirm_again: true
+                        }
+                    )
+                })
+            {
+                let mut tx = Tx::default();
+                tx.put(
+                    &key::consent(record),
+                    &entry.with(Consent::Held {
+                        confirm_again: false,
+                    }),
+                )?;
+                self.local_commit(tx).await?;
+            }
+        }
         Ok(())
     }
 
@@ -501,6 +546,24 @@ impl Paykit {
         record: &[u8; 32],
         view: &crate::AllowanceView,
     ) -> Result<()> {
+        // Read fresh first: an end or another change since the last receive, a hold set in
+        // between, or a stopped app, refuses as it would before a write.
+        if let Some(alarm) = self.app.alarm() {
+            return Err(pubky_switch_client::app::AppError::Alarm(alarm.clone()).into());
+        }
+        let allow = allowance_target(&view.counterparty, &view.allowance_id);
+        self.app
+            .read_record_application(&allow)
+            .await?
+            .ok_or_else(regrant_waits)?;
+        Box::pin(self.still_standing(record)).await?;
+        let shown = self.allowance(record).await?;
+        if shown.hold != view.hold {
+            return Err(Refusal::AllowanceConfirmationNeeded { hold: shown.hold }.into());
+        }
+        if !shown.regranted_after_loss {
+            return Err(regrant_waits().into());
+        }
         let hold = self.current_hold().await?;
         let mut tx = Tx::default();
         tx.put(&key::execution_approval(record, hold.as_ref()), &true)?;
