@@ -229,8 +229,9 @@ pub enum RefusalKind {
     /// under its Allowance: outside its terms, or its lifetime limit used up with nothing
     /// reserved or to release, the Allowance the payment was reserved under expired before
     /// its first dispatch, or it was granted before a provider loss, whose new grant this
-    /// version doesn't write: end it and set up a new one (Paykit spec 8.3). The user may still
-    /// pay it by hand.
+    /// version doesn't write: end it and set up a new one for its Billing Periods (Paykit spec
+    /// 8.3); or, after a provider loss, the request is one-time, under the shared post-loss
+    /// hold (Paykit spec 8.1). The user may still pay it by hand.
     NotAutomatic,
     /// All retained period slots may have an open attempt.
     AttemptedPeriodsFull,

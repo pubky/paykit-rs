@@ -1342,7 +1342,8 @@ async fn test_allowance_refusals_grant_before_a_provider_loss_is_not_automatic()
     // An Allowance granted before a provider loss needs a new grant at the new generation,
     // which this version doesn't write (Paykit spec 8.3, "After provider loss"): every path
     // refuses it as not automatic, and none asks for a confirmation. A new Allowance proposed
-    // and accepted after the loss pays automatically.
+    // and accepted after the loss pays its Billing Periods automatically; a one-time request
+    // is held for good under any Allowance by the shared post-loss hold (Paykit spec 8.1).
     let (w, mut payer, mut shop, key) = Box::pin(first_grant_in(store(), terms())).await;
     w.rail.set_history_payer(payer.identity());
     let _service = crate::provider_loss::declare_loss(&w);
@@ -1367,11 +1368,32 @@ async fn test_allowance_refusals_grant_before_a_provider_loss_is_not_automatic()
     // the shop's copy of the old routing has lapsed.
     w.clock
         .set_ms(uncertain_until.max(w.clock.now_ms()) + pubky_switch_client::app::DOC_CACHE_MS);
+    let start = w.clock.now_ms() / 1_000 * 1_000;
+    let schedule = Recurrence::new(
+        AnchoredRule::new(start, 1, Unit::Hour).unwrap(),
+        start,
+        None,
+    )
+    .unwrap();
+    let subscription = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("1", start).with_recurrence(schedule),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    assert_eq!(
+        refusal_of(Box::pin(payer.accept_subscription_under_allowance(&subscription, &key)).await),
+        not_automatic
+    );
     let request = Box::pin(one_time(&w, &mut shop, &mut payer, "1")).await;
     Box::pin(confirm_hold(&mut payer, &request)).await;
     assert_eq!(
         refused(Box::pin(payer.pay_under_allowance(&request, &key)).await),
-        not_automatic
+        Refusal::NotAutomatic(
+            "Paykit spec 8.1: automatic one-time payments are held for good after a provider loss"
+                .into()
+        )
     );
 
     // The user sets up a new Allowance with the shop: it executes.
@@ -1401,7 +1423,12 @@ async fn test_allowance_refusals_grant_before_a_provider_loss_is_not_automatic()
     Box::pin(payer.resume_allowance_executor(&fresh))
         .await
         .unwrap();
-    Box::pin(pays(&w, &mut shop, &mut payer, &fresh)).await;
+    let (request, periods) = Box::pin(subscribed(&w, &mut shop, &mut payer, &fresh)).await;
+    let paid = Box::pin(payer.pay_period_under_allowance(&request, &periods[0]))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
 }
 
 #[tokio::test]

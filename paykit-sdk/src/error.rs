@@ -177,9 +177,10 @@ pub enum Refusal {
     /// or with its lifetime limit used up and nothing reserved or to release; the Allowance
     /// the payment was reserved under expired before its first dispatch; or the Allowance was
     /// granted before a provider loss, whose new grant this version doesn't write, so the user
-    /// can end it and set up a new one (Paykit spec 8.3, "After provider loss"). The user may
-    /// still pay it by hand. At an open attempt's first dispatch this is an
-    /// [`Self::AttemptFailed`].
+    /// can end it and set up a new one for its Billing Periods (Paykit spec 8.3, "After
+    /// provider loss"); or, after a provider loss, the request is one-time, under the shared
+    /// post-loss hold (Paykit spec 8.1). The user may still pay it by hand. At an open
+    /// attempt's first dispatch this is an [`Self::AttemptFailed`].
     #[error("Paykit spec 8.2, 8.3: not paid automatically: {0}")]
     NotAutomatic(String),
     /// The request record lists 16 Billing Periods that may have an open attempt and none of
