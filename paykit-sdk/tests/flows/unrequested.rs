@@ -2861,6 +2861,28 @@ async fn test_unrequested_loss_marker_over_a_kept_copy_keeps_both_through_restor
 }
 
 #[tokio::test]
+async fn test_unrequested_loss_marker_kept_when_the_rest_of_its_value_does_not_read() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let (_, marked) =
+        pay_single_use_then_delete_elsewhere(&w, &mut wallet, &mut phone, &mut shop).await;
+    let target = shop_list_target(&w, &shop);
+    // A put-back naming the delete whose `used` doesn't read: its payee and app still bind
+    // the key, so the marker is kept, with no copy (Paykit spec 6; wire 5).
+    let mut put_back = marked_put_back(&marked, 5);
+    put_back["used"] = serde_json::json!([{ "endpoint": 7 }]);
+    put_list_record(&mut phone, &target, Some(&put_back)).await;
+    let mut tablet = w.wallet("tablet").await;
+    tablet.receive(None).await.unwrap();
+    let kept = lost_entries(&tablet.backup().await.unwrap());
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(kept[0]["marked"], true);
+    assert_eq!(kept[0]["copy"], serde_json::Value::Null);
+}
+
+#[tokio::test]
 async fn test_unrequested_two_loss_markers_keep_the_newer_write() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;

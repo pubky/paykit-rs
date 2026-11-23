@@ -2140,6 +2140,7 @@ impl Protocol for PaykitProtocol {
                     cx,
                     deletion.key,
                     deletion.version,
+                    Some(deletion.item_hash),
                     crate::receive::DeleteSource {
                         exact,
                         seen: deletion.seen,
@@ -3769,17 +3770,19 @@ mod receive_tests {
         }]);
         let refused = record(Vec::new());
         let deleted = pubky_switch_core::ops::RecordVersion::new(1, 9);
-        let lost = crate::state::LostListRecord::over_exact(deleted, Some(&refused), Some(&seen));
+        let lost =
+            crate::state::LostListRecord::over_exact(deleted, None, Some(&refused), Some(&seen));
         assert!(!lost.admits(&refused));
         assert!(lost.admits(&seen));
         // With no exact predecessor, no copy: nothing is taken.
-        let unknown = crate::state::LostListRecord::over_exact(deleted, None, Some(&seen));
+        let unknown = crate::state::LostListRecord::over_exact(deleted, None, None, Some(&seen));
         assert!(!unknown.admits(&seen));
         // A value seen that doesn't bind, such as a put-back carrying `lost_to_delete`,
         // leaves no copy: the exact predecessor alone could lack the marks it stands for.
         let bind = |value: &[u8]| (value == b"exact").then(|| refused.clone());
-        let over =
-            |seen: Option<&[u8]>| crate::receive::lost_over(deleted, Some(b"exact"), seen, bind);
+        let over = |seen: Option<&[u8]>| {
+            crate::receive::lost_over(deleted, None, Some(b"exact"), seen, bind)
+        };
         assert!(over(None).admits(&refused));
         assert!(!over(Some(b"put-back")).admits(&refused));
     }

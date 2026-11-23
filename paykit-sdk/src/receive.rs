@@ -2524,7 +2524,7 @@ fn hold_list(
     if let Some(version) = deleted {
         // Kept already when the client reported the delete; else with no copy, as nothing
         // shows the value it took.
-        let writes = list_record_deleted(cx, &record_key, version, DeleteSource::NONE);
+        let writes = list_record_deleted(cx, &record_key, version, None, DeleteSource::NONE);
         for write in writes.map_err(Fail::Store)? {
             keep_local(cx, write);
         }
@@ -2549,28 +2549,55 @@ pub(crate) fn list_record_deleted(
     cx: &ReceiveContext<'_>,
     record_key: &[u8; 32],
     version: RecordVersion,
+    item: Option<[u8; 32]>,
     source: DeleteSource<'_>,
 ) -> Result<Vec<LocalWrite>, StoreFailure> {
     let bind = |value: &[u8]| {
         crate::records::bind_list(value, &cx.identity(), record_key, |t| cx.record_key(t).ok())
     };
     let at = key::list_record_lost(record_key);
-    let lost = lost_over(version, source.exact, source.seen, bind);
-    let lost =
-        match state::cx_get::<LostListRecord>(cx, &at).map_err(crate::protocol::step_failure)? {
-            // Over the delete the entry keeps, with no write between: the same copy.
-            Some(held) if source.over_delete.is_some_and(|base| held.deleted_at(base)) => {
-                held.moved(version)
-            }
-            Some(held) => match held.clone().then(lost) {
-                same if same == held => return Ok(Vec::new()),
-                changed => changed,
-            },
-            None => lost,
-        };
+    let lost = lost_over(version, item, source.exact, source.seen, bind);
+    let held = state::cx_get::<LostListRecord>(cx, &at).map_err(crate::protocol::step_failure)?;
+    // Reported again without its item, the delete the entry keeps by its item, when the
+    // client holds that one delete there.
+    if item.is_none()
+        && held.as_ref().is_some_and(|kept| kept.deleted_at(version))
+        && cx
+            .record_at(record_key)
+            .map_err(crate::protocol::store_failure)?
+            .is_some_and(|record| holds_one_delete(&record, version))
+    {
+        return Ok(Vec::new());
+    }
+    let lost = match held {
+        // Over the delete the entry keeps, with no write between: the same copy.
+        Some(held) if source.over_delete.is_some_and(|base| held.deleted_at(base)) => {
+            held.moved(version, item)
+        }
+        Some(held) => match held.clone().then(lost) {
+            same if same == held => return Ok(Vec::new()),
+            changed => changed,
+        },
+        None => lost,
+    };
     Ok(vec![
         state::local_put(&at, &lost).map_err(crate::protocol::view_failure)?
     ])
+}
+
+/// Whether `held`, the record the client holds, is the one delete at `version`: authenticated,
+/// with no other write shown at that version and no divergent view. A delete reported again
+/// without its item hash is then the delete an entry keeps by its item at that version
+/// ([`LostListRecord::deleted_at`]), not another a recovery uploaded (Paykit spec 6).
+pub(crate) fn holds_one_delete(
+    held: &pubky_switch_client::app::SharedRecord,
+    version: RecordVersion,
+) -> bool {
+    held.content == RecordContent::Deleted
+        && held.version == version
+        && held.authenticated
+        && !held.different_write_at_held_version
+        && !held.divergent
 }
 
 /// What the client shows of a `payment_lists` delete's predecessor ([`list_record_deleted`]).
@@ -2602,17 +2629,27 @@ impl DeleteSource<'_> {
 /// stands for are unknown, so the exact predecessor alone could lack them.
 pub(crate) fn lost_over(
     version: RecordVersion,
+    item: Option<[u8; 32]>,
     exact: Option<&[u8]>,
     seen: Option<&[u8]>,
     bind: impl Fn(&[u8]) -> Option<PaymentListRecord>,
 ) -> LostListRecord {
     let exact = exact.and_then(&bind);
     let seen = match seen.map(&bind) {
-        Some(None) => return LostListRecord::over(version, None),
+        Some(None) => return LostListRecord::over(version, item, None),
         Some(Some(seen)) => Some(seen),
         None => None,
     };
-    LostListRecord::over_exact(version, exact.as_ref(), seen.as_ref())
+    LostListRecord::over_exact(version, item, exact.as_ref(), seen.as_ref())
+}
+
+/// The outer `payee` and `app_id` of a `payment_lists` value, as written, if both decode
+/// (Paykit wire 5.4).
+fn outer_list_owner(value: &[u8]) -> Option<([u8; 32], [u8; 16])> {
+    let members: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(value).ok()?;
+    let payee = pubky_switch_core::enc::pubky_key(members.get("payee")?.as_str()?).ok()?;
+    let app_id = pubky_switch_core::enc::app_id_decode(members.get("app_id")?.as_str()?).ok()?;
+    Some((payee, app_id))
 }
 
 /// The `lgone/` entry once `value`, a `payment_lists` value carrying `lost_to_delete` read at
@@ -2630,11 +2667,19 @@ pub(crate) fn marked_entry(
     held: Option<LostListRecord>,
     record_key: impl Fn(&RecordTarget) -> Option<[u8; 32]>,
 ) -> Option<LostListRecord> {
-    let read = paykit_lib::records::PaymentListRecord::read(value, own).ok()?;
-    if record_key(&crate::records::list_target(&read.payee, &read.app_id))? != *key {
+    // The value as a whole, when it reads, gives the marks and list kept with the marker.
+    // One whose outer payee and app bind the key but that doesn't read otherwise, such as
+    // one with an invalid `used` or `msg_ids`, still names a lost delete: it is kept marked
+    // with no copy, and nothing in it is ever paid from (Paykit spec 6; wire 5).
+    let read = paykit_lib::records::PaymentListRecord::read(value, own).ok();
+    let (payee, app_id) = match &read {
+        Some(read) => (read.payee, read.app_id),
+        None => outer_list_owner(value)?,
+    };
+    if record_key(&crate::records::list_target(&payee, &app_id))? != *key {
         return None;
     }
-    let marked = LostListRecord::marked(version, Some(&read));
+    let marked = LostListRecord::marked(version, read.as_ref());
     let kept = match held.clone() {
         Some(lost) => lost.merge(marked),
         None => marked,
@@ -3168,9 +3213,20 @@ impl Paykit {
     ) -> crate::error::Result<()> {
         let at = key::list_record_lost(record_key);
         // Nothing shows the value the delete took: no copy (Paykit spec 6).
-        let lost = LostListRecord::over(version, None);
+        let lost = LostListRecord::over(version, None, None);
+        let held = self.local_get::<LostListRecord>(&at).await?;
+        // The delete the entry keeps by its item, when the client holds that one delete.
+        if held.as_ref().is_some_and(|kept| kept.deleted_at(version))
+            && self
+                .app
+                .shared_record(record_key)
+                .await?
+                .is_some_and(|record| holds_one_delete(&record, version))
+        {
+            return Ok(());
+        }
         // As at an observed delete: the same delete, or an older one, changes nothing.
-        let lost = match self.local_get::<LostListRecord>(&at).await? {
+        let lost = match held {
             Some(held) => match held.clone().then(lost) {
                 same if same == held => return Ok(()),
                 changed => changed,
