@@ -814,7 +814,7 @@ mod tests {
         let read = |authenticated, version, written_at_ms, writer| SharedRecord {
             key: [0; 32],
             collection: String::new(),
-            policy: paykit_lib::collections::Collection::AllowanceLedger.fixed_policy(),
+            policy: paykit_lib::collections::Collection::AllowanceLedgers.fixed_policy(),
             version,
             authenticated,
             writer,
