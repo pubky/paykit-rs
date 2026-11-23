@@ -463,6 +463,7 @@ async fn payment(
     assert!(restored.reconcile_allowance(vec![0; 32]).await?.is_none());
     let restored = Box::pin(later_checkout(
         &mut seller,
+        root,
         host,
         restored,
         account,
@@ -497,8 +498,8 @@ async fn payment(
     assert!(
         matches!(refused.decision, PaymentDecision::Error { error: WalletError::Refused { refusal } } if matches!(refusal.kind(), RefusalKind::Cancelled))
     );
-    assert_eq!(account.count(), 2);
-    assert_eq!(account.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(account.count(), 3);
+    assert_eq!(account.calls.load(Ordering::SeqCst), 3);
     Ok(())
 }
 
@@ -507,6 +508,7 @@ async fn payment(
 /// that answer without asking the host.
 async fn later_checkout(
     seller: &mut Paykit,
+    root: &Path,
     host: &WalletHost,
     wallet: Arc<NativeWallet>,
     account: &Account,
@@ -589,19 +591,104 @@ async fn later_checkout(
     account.finish.notify_one();
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let reopened = host.load(app_id.to_vec()).await?;
+    let mut recorded = false;
     for _ in 0..1000 {
         let now = reopened.payments().await?;
         if now
             .iter()
             .any(|p| p.attempt_id == attempt && recorded_paid(p))
         {
-            assert_eq!(account.lookups.load(Ordering::SeqCst), lookups);
-            assert_eq!(account.calls.load(Ordering::SeqCst), calls + 1);
-            return Ok(reopened);
+            recorded = true;
+            break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    Err("the late answer was not recorded by the next wallet".into())
+    assert!(
+        recorded,
+        "the late answer was not recorded by the next wallet"
+    );
+    assert_eq!(account.lookups.load(Ordering::SeqCst), lookups);
+    assert_eq!(account.calls.load(Ordering::SeqCst), calls + 1);
+    Box::pin(lost_answer_checkout(
+        seller,
+        root,
+        reopened.clone(),
+        account,
+    ))
+    .await?;
+    Ok(reopened)
+}
+
+/// A checkout whose `pay` charges and then throws after the wallet stopped waiting, while the
+/// store refuses the wallet's writes: the resume it wakes fails, and a retry records the
+/// payment from the host's lookup once writes work, with no host call to resume.
+async fn lost_answer_checkout(
+    seller: &mut Paykit,
+    root: &Path,
+    wallet: Arc<NativeWallet>,
+    account: &Account,
+) -> TestResult {
+    let buyer = wallet
+        .identity()
+        .await?
+        .try_into()
+        .map_err(|_| "identity")?;
+    let draft = RequestDraft::new(
+        PaymentAmount {
+            asset: Asset::new("btc")?,
+            value: Decimal::new("4")?,
+        },
+        PaymentReference::new("lost-answer")?,
+        RequestDestination::Endpoints(BTreeMap::from([(
+            PaymentEndpointIdentifier::new("btc-lightning-bolt11")?,
+            PaymentEndpointPayload::new("lnbc1lost")?,
+        )])),
+    );
+    let lost: RequestId = Box::pin(seller.send_request(buyer, draft))
+        .await?
+        .request
+        .ok_or("missing lost-answer checkout")?
+        .into();
+    for _ in 0..8 {
+        if !Box::pin(wallet.receive()).await?.more {
+            break;
+        }
+    }
+    let lookups = account.lookups.load(Ordering::SeqCst);
+    account.park.store(true, Ordering::SeqCst);
+    account.throw_after_charge.store(true, Ordering::SeqCst);
+    {
+        let mut paying = Box::pin(wallet.pay_request(lost, PaymentOptions::default()));
+        tokio::select! {
+            _ = account.entered.notified() => {},
+            _ = &mut paying => return Err("payment did not reach the parked method".into()),
+        }
+    }
+    let attempt = wallet
+        .payments()
+        .await?
+        .into_iter()
+        .find(|p| matches!(p.stage, PaymentStage::Paying))
+        .ok_or("the lost-answer payment is not paying")?
+        .attempt_id;
+    DeviceStore::hold_installation(root, true);
+    account.park.store(false, Ordering::SeqCst);
+    account.finish.notify_one();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    DeviceStore::hold_installation(root, false);
+    account.throw_after_charge.store(false, Ordering::SeqCst);
+    for _ in 0..1000 {
+        let now = wallet.payments().await?;
+        if now
+            .iter()
+            .any(|p| p.attempt_id == attempt && recorded_paid(p))
+        {
+            assert!(account.lookups.load(Ordering::SeqCst) > lookups);
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    Err("the retry did not record the payment".into())
 }
 /// Whether the method's "paid" answer is written for this entry.
 fn recorded_paid(entry: &PaymentEntry) -> bool {

@@ -19,6 +19,8 @@ pub(super) struct Account {
     pub history: AtomicBool,
     /// A proof check never answers.
     pub stall_verify: AtomicBool,
+    /// After its charge, `pay` throws instead of answering.
+    pub throw_after_charge: AtomicBool,
     pub park: AtomicBool,
     pub entered: Notify,
     pub finish: Notify,
@@ -41,6 +43,7 @@ impl Account {
             lookups: AtomicUsize::new(0),
             history: AtomicBool::new(true),
             stall_verify: AtomicBool::new(false),
+            throw_after_charge: AtomicBool::new(false),
             park: AtomicBool::new(true),
             entered: Notify::new(),
             finish: Notify::new(),
@@ -112,6 +115,11 @@ impl PaymentMethod for Account {
         self.entered.notify_one();
         if self.park.load(Ordering::SeqCst) {
             self.finish.notified().await;
+        }
+        if self.throw_after_charge.load(Ordering::SeqCst) {
+            return Err(MethodError::Unavailable {
+                reason: "answer lost after the charge".into(),
+            });
         }
         Ok(Self::paid(&p.attempt_id))
     }

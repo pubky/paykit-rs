@@ -115,10 +115,14 @@ const SETTLE_RETRY_CAP: Duration = Duration::from_secs(60);
 /// Resume this wallet's payments after a host `pay` answered late: the resume takes each
 /// answer kept for this wallet through the method's lookup and asks the host about the rest.
 /// A kept answer is let go only once the journal no longer shows its attempt paying; a resume
-/// that stops early, on a lookup or a store write, leaves it kept. Returns whether none is left.
+/// that stops early, on a lookup or a store write, leaves it kept and is retried, with or
+/// without kept answers. Returns whether the settle is done.
 async fn settle(app: &mut Paykit, flights: &Flights, id: &AppId) -> bool {
     let kept = flights.late_of(id);
-    if app.resume_payments().await.is_err() || kept.is_empty() {
+    if app.resume_payments().await.is_err() {
+        return false;
+    }
+    if kept.is_empty() {
         return flights.late_of(id).is_empty();
     }
     let Ok(journal) = app.payments().await else {
@@ -160,8 +164,13 @@ async fn work(
         })
     };
     flights.open(id, wake.clone());
-    // Answers that came while no wallet for this App ID was open are settled first.
-    let mut retry = (!flights.late_of(&id).is_empty()).then(|| (Instant::now(), SETTLE_RETRY));
+    // Answers that came while no wallet for this App ID was open are settled before the first
+    // host call runs.
+    let mut retry = None;
+    if !flights.late_of(&id).is_empty() && !CURRENT.scope(id, settle(&mut app, &flights, &id)).await
+    {
+        retry = Some((Instant::now() + SETTLE_RETRY, SETTLE_RETRY * 2));
+    }
     let mut stopped = None;
     loop {
         let command = match retry {
