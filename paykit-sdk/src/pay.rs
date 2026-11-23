@@ -914,9 +914,14 @@ fn repeat_hold(held: Held, attempt_id: AttemptId) -> Result<PayOutcome> {
 }
 
 /// Whether a resume goes on past an entry that failed with `error`, and returns it after the
-/// other entries: the Switch client's refusal of that entry's repeat.
+/// other entries: the Switch client's refusal of that entry's step, kept or not, a wait
+/// included, or the switch's answer that the account awaits a recovery (Switch spec 12.4,
+/// 12.6, Switch wire 7.6).
 fn deferred(error: &PaykitError) -> bool {
-    matches!(error, PaykitError::Client(AppError::Refused(refusal)) if !matches!(refusal, ClientRefusal::NotNow(_)))
+    if error.code() == Some(pubky_switch_core::http::ErrorCode::RecoveryRequired) {
+        return true;
+    }
+    matches!(error, PaykitError::Client(client) if matches!(client.unkept(), AppError::Refused(_)))
 }
 
 /// The Switch client's refusal of an attempt (Switch spec 3.6, 10.1, 12.3, 12.4), carried as
@@ -4318,6 +4323,10 @@ impl Paykit {
             self.place_kept_cancellations().await?;
         }
         let mut out = Vec::new();
+        // Each entry's work stands alone: the client's refusal of one entry, or the
+        // switch's word that the account awaits a recovery, leaves that entry for the next
+        // resume and stops no other, so a payment the method reports made is still
+        // journaled behind it. The first such refusal is returned once every entry is done.
         let mut held_back = None;
         for mut entry in self.journal().await? {
             // An outcome written whose acceptance is still owed: queued and placed now.
@@ -4329,96 +4338,12 @@ impl Paykit {
                 }
                 continue;
             }
-            let held = !self.holds("paykit_pay") || payer_waits;
-            if !held {
-                // Under `paykit_pay` again, the payment is held without it no more: that notice
-                // goes, so a later certificate without `paykit_pay` tells the host again.
-                self.drop_notice(NoticeKind::HeldWithoutPay, &entry).await?;
-            }
-            if !entry.open() {
-                continue;
-            }
-            let attempt_id = entry.attempt()?;
-            // Without `paykit_pay` the app reads and writes no claim and no payer record (the
-            // service refuses both, `403 permission_missing`), and makes no payment
-            // ([`Paykit::final_payment_check`]): every open entry waits for an app holding
-            // it, its proof kept if it has one, and the other entries go on.
-            if held {
-                out.push(self.held_without_pay(&mut entry).await?);
-                continue;
-            }
-            match entry.stage {
-                Stage::Recorded | Stage::Paying if entry.offline.is_some() => {
-                    if entry.stage == Stage::Recorded && !entry.restored {
-                        self.set_stage(&mut entry, Stage::Abandoned).await?;
-                    } else {
-                        out.push(self.offline_method_outcome(&mut entry).await?);
-                    }
+            match Box::pin(self.resume_entry(entry, payer_waits, &mut out)).await {
+                Ok(()) => {}
+                Err(error) if deferred(&error) => {
+                    held_back.get_or_insert(error);
                 }
-                Stage::Recorded | Stage::Attempted | Stage::Paying if entry.restored => {
-                    // Restored, it may have been dispatched (Paykit spec 7.2): the backup
-                    // can't tell.
-                    match self.attempt_state(&entry).await? {
-                        Some((step, Outcome::Open | Outcome::Unknown)) => {
-                            entry.step = Some(step);
-                            entry.stage = Stage::Paying;
-                            match self.resolve_dispatched(entry).await {
-                                Ok(outcomes) => out.extend(outcomes),
-                                Err(error) if deferred(&error) => {
-                                    held_back.get_or_insert(error);
-                                }
-                                Err(error) => return Err(error),
-                            }
-                        }
-                        Some((_, outcome)) => self.finish_resolved(&mut entry, outcome).await?,
-                        // A claim without the attempt, or no claim at all, proves nothing
-                        // either: after a provider loss, once the claim is gone past its
-                        // window, or when the backup was taken before its batch reached the
-                        // switch, "absence remains insufficient" (Paykit spec 8.4, Late
-                        // recording). The attempt is open, its outcome unknown, and the
-                        // method's history decides; without it, "the dispatch stays open as
-                        // potentially paid. Only a receipt or the user can resolve it"
-                        // (Paykit spec 7.2): it stays in the doubt the user sees, and the
-                        // user resolves it ([`Paykit::resolve_attempt`]).
-                        None => {
-                            entry.step = None;
-                            entry.stage = Stage::Paying;
-                            match self.resolve_dispatched(entry).await {
-                                Ok(outcomes) => out.extend(outcomes),
-                                Err(error) if deferred(&error) => {
-                                    held_back.get_or_insert(error);
-                                }
-                                Err(error) => return Err(error),
-                            }
-                        }
-                    }
-                }
-                Stage::Recorded if self.attempt_still_kept(&entry).await? => {}
-                Stage::Recorded | Stage::Attempted => match self.attempt_state(&entry).await? {
-                    // No payment started: the open attempt is written `failed`.
-                    Some((step, Outcome::Open | Outcome::Unknown)) => {
-                        entry.step = Some(step);
-                        self.write_outcome(&mut entry, false, false).await?;
-                        out.push(PayOutcome::Failed {
-                            attempt_id,
-                            reason: "Paykit spec 7.2: no payment started".into(),
-                        });
-                    }
-                    // Known unsubmitted: this app never called the method.
-                    Some((_, outcome)) => self.finish_resolved(&mut entry, outcome).await?,
-                    None => self.set_stage(&mut entry, Stage::Abandoned).await?,
-                },
-                Stage::Paying => match self.resolve_dispatched(entry).await {
-                    Ok(outcomes) => out.extend(outcomes),
-                    Err(error) if deferred(&error) => {
-                        held_back.get_or_insert(error);
-                    }
-                    Err(error) => return Err(error),
-                },
-                Stage::RailPaid | Stage::RailFailed => {
-                    out.push(self.report(&mut entry).await?);
-                }
-                Stage::AcceptanceOwed | Stage::Finished | Stage::Abandoned => {}
+                Err(error) => return Err(error),
             }
         }
         if self.holds("paykit_pay") && !payer_waits {
@@ -4434,6 +4359,91 @@ impl Paykit {
             Some(error) => Err(error),
             None => Ok(out),
         }
+    }
+
+    /// One open journal entry's resume (Paykit spec 7.2, 7.3): its outcomes go to `out`.
+    async fn resume_entry(
+        &mut self,
+        mut entry: JournalEntry,
+        payer_waits: bool,
+        out: &mut Vec<PayOutcome>,
+    ) -> Result<()> {
+        let held = !self.holds("paykit_pay") || payer_waits;
+        if !held {
+            // Under `paykit_pay` again, the payment is held without it no more: that notice
+            // goes, so a later certificate without `paykit_pay` tells the host again.
+            self.drop_notice(NoticeKind::HeldWithoutPay, &entry).await?;
+        }
+        if !entry.open() {
+            return Ok(());
+        }
+        let attempt_id = entry.attempt()?;
+        // Without `paykit_pay` the app reads and writes no claim and no payer record (the
+        // service refuses both, `403 permission_missing`), and makes no payment
+        // ([`Paykit::final_payment_check`]): every open entry waits for an app holding
+        // it, its proof kept if it has one, and the other entries go on.
+        if held {
+            out.push(self.held_without_pay(&mut entry).await?);
+            return Ok(());
+        }
+        match entry.stage {
+            Stage::Recorded | Stage::Paying if entry.offline.is_some() => {
+                if entry.stage == Stage::Recorded && !entry.restored {
+                    self.set_stage(&mut entry, Stage::Abandoned).await?;
+                } else {
+                    out.push(self.offline_method_outcome(&mut entry).await?);
+                }
+            }
+            Stage::Recorded | Stage::Attempted | Stage::Paying if entry.restored => {
+                // Restored, it may have been dispatched (Paykit spec 7.2): the backup
+                // can't tell.
+                match self.attempt_state(&entry).await? {
+                    Some((step, Outcome::Open | Outcome::Unknown)) => {
+                        entry.step = Some(step);
+                        entry.stage = Stage::Paying;
+                        out.extend(self.resolve_dispatched(entry).await?);
+                    }
+                    Some((_, outcome)) => self.finish_resolved(&mut entry, outcome).await?,
+                    // A claim without the attempt, or no claim at all, proves nothing
+                    // either: after a provider loss, once the claim is gone past its
+                    // window, or when the backup was taken before its batch reached the
+                    // switch, "absence remains insufficient" (Paykit spec 8.4, Late
+                    // recording). The attempt is open, its outcome unknown, and the
+                    // method's history decides; without it, "the dispatch stays open as
+                    // potentially paid. Only a receipt or the user can resolve it"
+                    // (Paykit spec 7.2): it stays in the doubt the user sees, and the
+                    // user resolves it ([`Paykit::resolve_attempt`]).
+                    None => {
+                        entry.step = None;
+                        entry.stage = Stage::Paying;
+                        out.extend(self.resolve_dispatched(entry).await?);
+                    }
+                }
+            }
+            Stage::Recorded if self.attempt_still_kept(&entry).await? => {}
+            Stage::Recorded | Stage::Attempted => match self.attempt_state(&entry).await? {
+                // No payment started: the open attempt is written `failed`.
+                Some((step, Outcome::Open | Outcome::Unknown)) => {
+                    entry.step = Some(step);
+                    self.write_outcome(&mut entry, false, false).await?;
+                    out.push(PayOutcome::Failed {
+                        attempt_id,
+                        reason: "Paykit spec 7.2: no payment started".into(),
+                    });
+                }
+                // Known unsubmitted: this app never called the method.
+                Some((_, outcome)) => self.finish_resolved(&mut entry, outcome).await?,
+                None => self.set_stage(&mut entry, Stage::Abandoned).await?,
+            },
+            Stage::Paying => {
+                out.extend(self.resolve_dispatched(entry).await?);
+            }
+            Stage::RailPaid | Stage::RailFailed => {
+                out.push(self.report(&mut entry).await?);
+            }
+            Stage::AcceptanceOwed | Stage::Finished | Stage::Abandoned => {}
+        }
+        Ok(())
     }
 
     /// An own attempt the claim shows resolved already, by the user in another app or by
@@ -5728,16 +5738,34 @@ mod tests {
     }
 
     #[test]
-    fn test_pay_gate_resume_defers_only_the_clients_refusal() {
+    fn test_pay_gate_resume_defers_the_clients_refusal_and_recovery() {
         assert!(deferred(&held_back(ClientRefusal::Stopped)));
         assert!(deferred(&held_back(ClientRefusal::RecoveryRequired {
             generation: 3
         })));
-        assert!(!deferred(&held_back(ClientRefusal::NotNow(
-            "clocks".into()
+        // A wait, such as every batch held before a provider loss's upload, defers its entry
+        // too: it passes soonest.
+        assert!(deferred(&held_back(ClientRefusal::NotNow(
+            "before the upload".into()
         ))));
         assert!(!deferred(&PaykitError::Refused(Refusal::NotFound)));
         assert!(!deferred(&lost().into()));
+        // The switch's own answer that the account awaits a recovery, and a refusal behind a
+        // kept batch, leave only that entry too.
+        let recovery = AppError::Switch(ClientError::Switch {
+            status: 503,
+            code: pubky_switch_core::http::ErrorCode::RecoveryRequired,
+            message: String::new(),
+            current: serde_json::Value::Null,
+            known_version: None,
+            retry_after: None,
+        });
+        assert!(deferred(&PaykitError::Client(recovery)));
+        let kept = AppError::Kept {
+            batch_id: [1; 16],
+            error: Box::new(AppError::Refused(ClientRefusal::Left)),
+        };
+        assert!(deferred(&PaykitError::Client(kept)));
     }
 
     #[test]
