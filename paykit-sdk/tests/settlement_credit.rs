@@ -105,6 +105,9 @@ fn invoice(endpoint_id: &str, payload: &str) -> TestResult<RequestDraft> {
     ))
 }
 
+/// How many times [`paid_request`]'s buyer pays again after a payment held at the last check.
+const MAX_HELD_PAYMENTS: usize = 3;
+
 async fn paid_request(
     shop: &mut Paykit,
     mut buyer: Paykit,
@@ -121,16 +124,27 @@ async fn paid_request(
     // The shop's orchestration frame need not stay on the payer's native stack.
     let buyer = tokio::spawn(Box::pin(async move {
         buyer.receive(None).await?;
-        let payment = buyer
-            .pay_request(&request, PayOptions::default())
-            .await
-            .outcome?;
-        let PayOutcome::Paid {
-            proof_msg_id: Some(id),
-            ..
-        } = payment
-        else {
-            panic!("the wallet must report its actual proof, got {payment:?}");
+        // The buyer follows its attempt as a host does. A lookup of the seller that ends at
+        // the last check before money moves can hold a payment by hand there: the payment
+        // answers Pending, and the next resume closes the attempt unpaid. The host then pays
+        // again. A few rounds at most; a payment that never goes through still fails here.
+        let mut held = 0;
+        let id = loop {
+            let payment = buyer
+                .pay_request(&request, PayOptions::default())
+                .await
+                .outcome?;
+            match payment {
+                PayOutcome::Paid {
+                    proof_msg_id: Some(id),
+                    ..
+                } => break id,
+                PayOutcome::Pending { .. } if held < MAX_HELD_PAYMENTS => {
+                    held += 1;
+                    buyer.resume_payments().await?;
+                }
+                payment => panic!("the wallet must report its actual proof, got {payment:?}"),
+            }
         };
         Ok::<_, paykit_sdk::PaykitError>((buyer, id))
     }))
