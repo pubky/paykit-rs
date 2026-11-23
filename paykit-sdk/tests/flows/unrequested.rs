@@ -3331,3 +3331,155 @@ async fn test_unrequested_delete_over_a_delete_keeps_the_copy_and_a_put_back_pla
     assert!(matches!(paid, Ok(PayOutcome::Paid { .. })), "{paid:?}");
     assert_eq!(w.rail.all_executions().len(), 2);
 }
+
+#[tokio::test]
+async fn test_unrequested_loss_marker_of_a_recovery_upload_kept_through_an_in_place_restore() {
+    use pubky_switch_client::client::answers::{RecoveryUpload, UploadedOp};
+    use pubky_switch_client::client::{Credentials, SwitchClient};
+    use pubky_switch_client::testing::{Fault, SWITCH_ORIGIN};
+    use pubky_switch_core::ops::{Entry, OpsRequest};
+    let w = World::new();
+    let storage = crate::common::store();
+    let mut tablet = w.wallet_on("tablet", std::sync::Arc::clone(&storage)).await;
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    // The tablet holds the list and is backed up before anything else happens.
+    w.list_to_alice(
+        &mut shop,
+        &[wallet.app_id(), tablet.app_id()],
+        list_version(1, 1),
+    )
+    .await;
+    tablet.receive(None).await.unwrap();
+    let backup = tablet.backup().await.unwrap();
+    // The wallet pays the single-use endpoint; the phone deletes the record and the service
+    // forgets the delete.
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    let target = shop_list_target(&w, &shop);
+    let key = wallet.app().record_key(&target).unwrap();
+    phone.app_mut().read_record(&target).await.unwrap();
+    let (_, marked) = list_record(&phone, &w).await;
+    put_list_record(&mut phone, &target, None).await;
+    w.alice.switch().drop_record(&key).unwrap();
+    // The phone's put-back naming the delete, without the mark, never reaches the old
+    // service; after a provider loss it is a recovery upload, signed and readable with no
+    // proof of its version.
+    let put_back = marked_put_back(&marked, 5);
+    let op = phone
+        .app_mut()
+        .record_op(
+            &target,
+            Some(&serde_json::to_vec(&put_back).unwrap()),
+            vec![],
+        )
+        .await
+        .unwrap();
+    w.alice.switch().fail_next(Fault::Unreachable {
+        path: "/ops".into(),
+        after: 0,
+    });
+    let batch = pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(op);
+    assert!(phone.app_mut().submit_batch(batch).await.is_err());
+    let missed = w.alice.switch().unreached_bodies().pop().unwrap();
+    let records = OpsRequest::parse(&missed)
+        .unwrap()
+        .entries
+        .into_iter()
+        .filter_map(|entry| match entry {
+            Entry::Signed(op) => Some(UploadedOp {
+                op,
+                cert: phone.app().cert().signed().clone(),
+                proof: None,
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 1);
+    let lost = phone.app().own_identity().signed().clone();
+    let next = crate::provider_loss::declare_loss(&w);
+    phone.app_mut().refresh_identity().await.unwrap();
+    phone.app_mut().follow_provider().await.unwrap();
+    SwitchClient::new(
+        SWITCH_ORIGIN,
+        w.alice_id(),
+        Credentials::App {
+            identity: w.alice_id(),
+            keys: w.alice.identity().app_keys("phone"),
+            cert: phone.app().cert().clone(),
+        },
+        Some(next.service_key()),
+        w.router.clone(),
+        w.clock.clone(),
+    )
+    .unwrap()
+    .recovery_upload(
+        &RecoveryUpload {
+            lost_identity: Some(lost),
+            records,
+            ..Default::default()
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    // The tablet reads the put-back: its client holds it, unproved, and no receive or
+    // backup follows before the tablet is dropped.
+    tablet.app_mut().refresh_identity().await.unwrap();
+    tablet.app_mut().follow_provider().await.unwrap();
+    let held = tablet
+        .app_mut()
+        .read_record(&target)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!held.authenticated);
+    assert!(held.content.value().is_some());
+    drop(tablet);
+    // A later write drops the marker and the mark.
+    let mut dropped = put_back.clone();
+    dropped.as_object_mut().unwrap().remove("lost_to_delete");
+    phone.app_mut().read_record(&target).await.unwrap();
+    put_list_record(&mut phone, &target, Some(&dropped)).await;
+    // The older backup, taken before the marker, is restored in place: the installation's
+    // held put-back still names the delete, so the list is never paid from again (Paykit
+    // spec 6; wire 5).
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, storage),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    crate::provider_loss::follow_generation(&mut restored).await;
+    // The receive key the tablet registered at the new service after the backup is its own.
+    restored
+        .app_mut()
+        .confirm_restored_registrations(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+    restored.reconcile().await.unwrap();
+    restored
+        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+    restored.receive(None).await.unwrap();
+    assert_eq!(lost_entries(&restored.backup().await.unwrap()).len(), 1);
+    let again = restored
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome;
+    assert!(
+        !matches!(again, Ok(PayOutcome::Paid { .. })),
+        "the paid single-use endpoint was paid again: {again:?}"
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
+}

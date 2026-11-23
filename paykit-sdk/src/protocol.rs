@@ -773,6 +773,25 @@ pub(crate) fn restore_paykit_layer(
             .map_err(|_| "the installation holds an invalid deleted list record")?;
         keep_lost(k, lost);
     }
+    // And the marker of a `payment_lists` value the installation's client holds but never
+    // showed Paykit, such as a recovery upload with no proof of its version: an earlier
+    // backup lacks it, and a later value dropping it is still never taken (Paykit spec 6;
+    // wire 5).
+    for record in restoring.previous_records_of(Collection::PaymentLists.name()) {
+        let record = record.map_err(|_| "the installation's list records cannot be read")?;
+        let Some(value) = record.content.value() else {
+            continue;
+        };
+        if list_loss_marker(value).is_none() {
+            continue;
+        }
+        let marked = receive::marked_entry(value, &own, &record.key, record.version, None, |t| {
+            binder.record_key(t).ok()
+        });
+        if let Some(lost) = marked {
+            keep_lost(key::list_record_lost(&record.key).into_bytes(), lost);
+        }
+    }
     let mut cursor_time_ms = 0;
     let mut bounded = BoundedFamilies::default();
     for (key, value) in state {
