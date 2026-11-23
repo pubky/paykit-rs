@@ -53,6 +53,7 @@ async fn issue() -> Payment {
         last: Mutex::new(None),
         supplies_id: true,
         lookalike: false,
+        next_output: Mutex::new(None),
         fee: None,
     });
     let mut wallet = joined(

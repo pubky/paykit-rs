@@ -486,8 +486,8 @@ fn transactions_in_one_bucket<const N: usize>(
         .map_err(|_| "too few test transactions in the bucket".into())
 }
 
-/// Two independent transactions in the same bucket. Each has two payments and one
-/// method settlement ID under Paykit wire 1.5.
+/// Two independent transactions in the same bucket. Each has two payments, which the fake
+/// rail names in one settlement.
 async fn two_transactions(world: &World) -> TestResult {
     let mut wallets = Box::pin(enrolled_seller_wallets(world)).await?;
     // Finish each buyer's authenticated seller lookup before the two seller wallets compete.
