@@ -1156,8 +1156,9 @@ impl sealed::Sealed for JournalEntry {}
 
 /// A journal entry (Paykit spec 7.2), checked as a restore checks it
 /// ([`JournalEntry::check_restored`]): of the attempt its key names; its claim key the one
-/// its payee, request and Billing Period blind to; the request it keeps that payee's request of that hash,
-/// amount, reference and label; its carrier verified for the payee; its acceptance this
+/// its payee, request and Billing Period blind to, or, for a payment without a request, its
+/// attempt ID; the request it keeps that payee's request of that hash, amount, reference
+/// and label; its carrier verified for the payee; its acceptance this
 /// app's, of that request, at the `msg_id` it keeps; and its record the payer's record of
 /// that request, or, for a payment without a request, of this app's attempt the key names.
 /// An entry naming another attempt, claim, record or message would read and write one
