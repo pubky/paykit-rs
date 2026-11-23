@@ -278,10 +278,11 @@ impl Paykit {
     /// which the copy of the deny list is known and doesn't hold the payee, with the records
     /// listed and no scope key awaited (Paykit spec 8.1, "Blocked counterparties"), on what
     /// its request record says of it ([`Paykit::answer_record`]): nothing is decided while
-    /// the record doesn't read or is paused as divergent; the host is told when the record
-    /// holds the stop or lost it with a write, and not when the record is gone or another
-    /// stop covers it, since the notice requires a record that holds the message ("Undelivered
-    /// messages"). Each is ended through the client's
+    /// the record doesn't read or is paused as divergent; the host is told it was given up
+    /// when the record holds the stop or lost it with a write, and not when the record is
+    /// gone or another stop covers it, since that notice requires a record that holds the
+    /// message ("Undelivered messages"); a possible delivery is always told. Each is ended
+    /// through the client's
     /// withdrawal, which reports it undelivered when no try of it can have reached the
     /// payee's switch, and unknown otherwise; that report is taken at once, the host told
     /// in the commit that takes it ([`crate::NoticeKind::MessageGivenUp`] or
@@ -356,8 +357,8 @@ impl Paykit {
 
     /// Take, in `tx`, the client's report that the outbox copy of a stop ended past its 30
     /// days ([`Paykit::give_up_expired_stops`]): the host is told it was given up when no
-    /// try of it can have reached the payee's switch, and that it may have been delivered
-    /// otherwise, unless its record left nothing to tell of. Whether `event` is such a
+    /// try of it can have reached the payee's switch, unless its record left nothing to tell
+    /// of, and always that it may have been delivered otherwise. Whether `event` is such a
     /// report: one about a stop the receive step didn't give up stays for the host.
     pub(crate) async fn take_expired_stop(&self, tx: &mut Tx, event: &AppEvent) -> Result<bool> {
         let (msg_id, undelivered) = match event {
