@@ -775,6 +775,20 @@ pub(crate) fn restore_paykit_layer(
             .map_err(|_| "the installation holds an invalid deleted list record")?;
         keep_lost(k, lost);
     }
+    // And its holds over unread `payment_lists` records: a later absence of one holds its
+    // list too, which a backup taken before the hold doesn't know (Paykit spec 6).
+    let mut lists_unread = std::collections::BTreeSet::new();
+    for (k, value) in restoring
+        .previous_local_scan(key::LISTS_UNREAD.as_bytes())
+        .map_err(|_| "the installation's unread list records cannot be read")?
+    {
+        if !matches!(StateKey::parse(&k), Some(StateKey::ListRecordUnread(_))) {
+            return Err("the installation holds an invalid unread list record".into());
+        }
+        state::restored::<bool>(&k, &value, &binder)
+            .map_err(|_| "the installation holds an invalid unread list record")?;
+        lists_unread.insert(k);
+    }
     // And the marker of a `payment_lists` value the installation's client holds but never
     // showed Paykit, such as a recovery upload with no proof of its version: an earlier
     // backup lacks it, and a later value dropping it is still never taken (Paykit spec 6;
@@ -1165,6 +1179,11 @@ pub(crate) fn restore_paykit_layer(
                 keep_lost(key, lost);
                 continue;
             }
+            StateKey::ListRecordUnread(_) => {
+                state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
+                lists_unread.insert(key);
+                continue;
+            }
             StateKey::HeldList(_) => {
                 state::restored::<KeptMessage>(&key, &value, &binder).map_err(|_| {
                     String::from("Paykit wire 5.4: a held list in the backup doesn't verify")
@@ -1406,6 +1425,12 @@ pub(crate) fn restore_paykit_layer(
             state::local_put(key::LOSS_RECORDED, &recorded)
                 .map_err(|_| "the recorded provider loss cannot be written")?,
         );
+    }
+    for key in lists_unread {
+        writes.push(LocalWrite::Put {
+            key,
+            value: state::encode(&true).map_err(|_| "an unread list record cannot be written")?,
+        });
     }
     for (key, lost) in lists_lost {
         writes.push(LocalWrite::Put {

@@ -49,8 +49,9 @@
 //! | `ml` | set by a `missed` item: the shared records aren't listed by Paykit since, so a record's absence means nothing yet; cleared by Paykit's next listing (`hold.rs`); never restored | |
 //! | `lp/<recipient>/<generation>/<message hash>` | outstanding original publication batch IDs, kept atomically before submission and retained across restore | yes |
 //! | `lres/<recipient>` | the applied list, its publisher and original signed message, its first delivery outcome (open, undelivered or unknown) and any kept confirmation of another version, prior offers' latest possible expiry, and the interval of an outstanding withdrawal | yes |
-//! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read, or reads without the marks `lgone/` knows: never written over it, which could drop its single-use marks, until the record reads again with them, or reads absent and was never seen deleted (`lgone/`); deleted once the record holds the list | |
-//! | `lgone/<record key>` | set in the commit in which this app sees the `payment_lists` record deleted, with the single-use marks its copy held, or none known with no copy (`LostListRecord`): a later absence of it, as after a forgotten delete or a restore, keeps a list held there, and a later value is taken only if it holds every mark known and its list is no older than the one seen nor another at that version, none with no copy; never cleared, and a restore keeps the union of the installation's and the backup's | yes |
+//! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read or bind, or was seen deleted (`lgone/`): never written over it, which could drop its single-use marks, until the record reads and binds, or reads absent and was neither seen deleted nor held unreadable (`lur/`); deleted once the record holds the list | |
+//! | `lgone/<record key>` | set in the commit in which this app sees the `payment_lists` record deleted, or reads a value there carrying `lost_to_delete` (`LostListRecord`): no later value or absence of it places a list held there; never cleared, and a restore keeps the union of the installation's and the backup's | yes |
+//! | `lur/<record key>` | set while a list is held over the `payment_lists` record because it didn't read or bind: a later absence keeps the list held; cleared by a value that reads and binds, or by a delete seen (`lgone/`), and a restore keeps the union of the installation's and the backup's | yes |
 //! | `kc/<record key>/<certificate hash>/<feed generation>` | a payee's cancellation of a request, kept until it is placed in the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
 //! | `lr` | when the app last read the lists, on the device clock; absent before the first read and after a due read failed, when new activity waits (Paykit wire 4.1); never restored, so a restored app reads the deny list again before any payment | |
@@ -818,6 +819,7 @@ impl Stored for bool {
             | StateKey::RestoreApproval(_)
             | StateKey::NotPaidBeforeLoss(_)
             | StateKey::FloorOpened(_)
+            | StateKey::ListRecordUnread(_)
             | StateKey::Taken(_)
                 if *self =>
             {
@@ -1949,6 +1951,7 @@ pub(crate) mod key {
     pub(crate) const LISTS_READ: &str = "lr";
     pub(crate) const HELD_LISTS: &str = "lh/";
     pub(crate) const LISTS_LOST: &str = "lgone/";
+    pub(crate) const LISTS_UNREAD: &str = "lur/";
     pub(crate) const RECORDS_UNLISTED: &str = "nl";
     pub(crate) const MISSED_UNLISTED: &str = "ml";
     pub(crate) const MISSED_CONSENTS: &str = "mc";
@@ -2326,10 +2329,17 @@ pub(crate) mod key {
         format!("{HELD_LISTS}{}", b64(record_key))
     }
 
-    /// Set once this app has seen the `payment_lists` record at `record_key` deleted, with
-    /// the marks it knew of it ([`LostListRecord`]), and never cleared.
+    /// Set once this app has seen the `payment_lists` record at `record_key` deleted
+    /// ([`LostListRecord`]), and never cleared.
     pub(crate) fn list_record_lost(record_key: &[u8; 32]) -> String {
         format!("{LISTS_LOST}{}", b64(record_key))
+    }
+
+    /// Set while a list is held over the `payment_lists` record at `record_key` because
+    /// the record didn't read or bind, so a later absence keeps the list held; cleared by a
+    /// value that reads and binds, or by a delete seen ([`list_record_lost`]).
+    pub(crate) fn list_record_unread(record_key: &[u8; 32]) -> String {
+        format!("{LISTS_UNREAD}{}", b64(record_key))
     }
 
     /// This app's block or unblock of `pubky` not yet shown by a read of the lists
@@ -2542,9 +2552,10 @@ pub(crate) enum StateKey {
     ListsRead,
     /// `lh/<record key>`: a list held over a record that didn't read.
     HeldList([u8; 32]),
-    /// `lgone/<record key>`: a `payment_lists` record seen deleted, and what this app knew
-    /// of it ([`LostListRecord`]).
+    /// `lgone/<record key>`: a `payment_lists` record seen deleted ([`LostListRecord`]).
     ListRecordLost([u8; 32]),
+    /// `lur/<record key>`: a `payment_lists` record a list is held over that didn't read.
+    ListRecordUnread([u8; 32]),
     /// `side/<msg_id>`: the side of a message the app sent.
     Side(String),
     /// `ar/<payee>/<app>`: a payee app's records a reader has seen.
@@ -2893,6 +2904,7 @@ impl StateKey {
                     "fo" => Self::FloorOpened(b64_32(rest)?),
                     "lh" => Self::HeldList(b64_32(rest)?),
                     "lgone" => Self::ListRecordLost(b64_32(rest)?),
+                    "lur" => Self::ListRecordUnread(b64_32(rest)?),
                     "side" => Self::Side(msg_id(rest)?),
                     "ha" => {
                         let (payee, id) = rest.split_once('/')?;
@@ -4075,6 +4087,10 @@ mod tests {
             (
                 key::list_record_lost(&pubky),
                 StateKey::ListRecordLost(pubky),
+            ),
+            (
+                key::list_record_unread(&pubky),
+                StateKey::ListRecordUnread(pubky),
             ),
             (key::side(id), StateKey::Side(id.into())),
             (
