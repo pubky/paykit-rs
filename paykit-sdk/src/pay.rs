@@ -4150,14 +4150,25 @@ impl Paykit {
                 }
                 Stage::Recorded | Stage::Attempted | Stage::Paying if entry.restored => {
                     match self.attempt_state(&entry).await? {
+                        // Restored, it may have been dispatched (Paykit spec 7.2): the backup
+                        // can't tell. A claim without the attempt, or no claim at all, as
+                        // after a provider loss or once the claim is gone past its window,
+                        // proves nothing either: "absence remains insufficient" (Paykit spec
+                        // 8.4, Late recording). The attempt is open, its outcome unknown, and
+                        // the method's history decides; without it, "the dispatch stays open
+                        // as potentially paid. Only a receipt or the user can resolve it"
+                        // (Paykit spec 7.2), and it stays in the doubt the user sees.
                         Some((step, Outcome::Open | Outcome::Unknown)) => {
                             entry.step = Some(step);
                             entry.stage = Stage::Paying;
                             out.extend(self.resolve_dispatched(entry).await?);
                         }
-                        // Restored, it may have been dispatched (Paykit spec 7.2).
                         Some((_, outcome)) => self.finish_resolved(&mut entry, outcome).await?,
-                        None => self.set_stage(&mut entry, Stage::Abandoned).await?,
+                        None => {
+                            entry.step = None;
+                            entry.stage = Stage::Paying;
+                            out.extend(self.resolve_dispatched(entry).await?);
+                        }
                     }
                 }
                 Stage::Recorded if self.attempt_still_kept(&entry).await? => {}

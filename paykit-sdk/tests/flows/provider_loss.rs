@@ -2963,12 +2963,13 @@ async fn test_provider_loss_reconcile_retains_journaled_orphan_without_loss() {
 
 /// Alice's wallet dispatches a payment the method leaves pending, is backed up with it in
 /// flight and lost; the signer declares a provider loss, which the laptop follows, so the new
-/// service holds the request's record but no claim
-/// for the obligation, and the wallet is restored from that backup there. `paid` settles the
-/// dispatch paid before the restore; otherwise the method's history loses it.
+/// service holds the request's record but no claim for the obligation, and the wallet is
+/// restored from that backup there. `paid` settles the dispatch paid before the restore;
+/// otherwise the method's history, which doesn't survive a restore, tells nothing of it.
+/// Returns the world, the restored wallet, the shop, the request and the attempt.
 async fn restored_dispatch_without_a_claim(
     paid: bool,
-) -> (World, Paykit, RequestRef, paykit_sdk::AttemptId) {
+) -> (World, Paykit, Paykit, RequestRef, paykit_sdk::AttemptId) {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut laptop = w.wallet("laptop").await;
@@ -2989,6 +2990,13 @@ async fn restored_dispatch_without_a_claim(
     if paid {
         w.rail.settle(&attempt_id, true);
     } else {
+        w.rail.set_declaration(
+            RailDeclaration::new(
+                paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+                paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+            )
+            .with_history(true),
+        );
         w.rail.forget_history(&attempt_id);
     }
     drop(wallet);
@@ -3008,7 +3016,7 @@ async fn restored_dispatch_without_a_claim(
             .is_none(),
         "the new service holds no claim for it"
     );
-    (w, app, request, attempt_id)
+    (w, app, shop, request, attempt_id)
 }
 
 /// The stage of `attempt_id`'s journal entry.
@@ -3025,12 +3033,21 @@ async fn stage_of(app: &Paykit, attempt_id: &paykit_sdk::AttemptId) -> paykit_sd
 #[tokio::test]
 async fn test_provider_loss_restored_dispatch_without_a_claim_the_method_shows_paid_keeps_its_proof(
 ) {
-    let (w, mut app, request, attempt_id) = restored_dispatch_without_a_claim(true).await;
+    // The method's history shows the restored dispatch paid: it is recorded paid, its proof
+    // reaches the payee, and nothing pays it again, even once the user states it wasn't paid
+    // before the loss (Paykit spec 7.2, 8.4).
+    let (w, mut app, mut shop, request, attempt_id) = restored_dispatch_without_a_claim(true).await;
     app.resume_payments().await.unwrap();
-    // The method's history shows it paid: the payment keeps its proof, never given up.
-    let stage = stage_of(&app, &attempt_id).await;
-    assert_ne!(stage, paykit_sdk::Stage::Abandoned);
-    // Nothing pays it again, even once the user states it wasn't paid before the loss.
+    assert_eq!(
+        stage_of(&app, &attempt_id).await,
+        paykit_sdk::Stage::Finished
+    );
+    assert_eq!(status(&app, &request).await, RequestStatus::Paid);
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        shop.payee_activity().await.unwrap()[0].status,
+        paykit_sdk::PayeeStatus::ProofReceived
+    );
     let obligation = app.payments().await.unwrap()[0].obligation;
     let loss = kept_loss(&app).await;
     app.confirm_not_paid_before_loss(&obligation, &loss, UserConfirmed::new())
@@ -3038,9 +3055,10 @@ async fn test_provider_loss_restored_dispatch_without_a_claim_the_method_shows_p
         .unwrap();
     let options = crate::common::over_hold(&app, &request).await;
     let again = app.pay_request(&request, options).await.outcome;
-    assert!(
-        !matches!(again, Ok(PayOutcome::Paid { .. })),
-        "paid twice: {again:?}"
+    assert_eq!(
+        again.as_ref().err().and_then(PaykitError::refusal),
+        Some(&Refusal::AlreadyPaid),
+        "{again:?}"
     );
     assert_eq!(w.rail.executions(&attempt_id), 1);
     assert_eq!(executions(&w), 1);
@@ -3048,18 +3066,40 @@ async fn test_provider_loss_restored_dispatch_without_a_claim_the_method_shows_p
 
 #[tokio::test]
 async fn test_provider_loss_restored_dispatch_without_a_claim_or_history_stays_doubtful() {
-    let (w, mut app, request, attempt_id) = restored_dispatch_without_a_claim(false).await;
+    // Neither the claim nor the method's history can tell: the restored dispatch stays open
+    // as potentially paid. The refusal names it as this app's own restored attempt, before
+    // and after the user states the request wasn't paid before the loss, and nothing is
+    // paid again until the user decides on it (Paykit spec 7.2, 8.4).
+    let (w, mut app, _shop, request, attempt_id) = restored_dispatch_without_a_claim(false).await;
     app.resume_payments().await.unwrap();
-    // Neither the claim nor the method can tell: the dispatch stays open as potentially paid.
     let stage = stage_of(&app, &attempt_id).await;
-    assert_ne!(stage, paykit_sdk::Stage::Abandoned);
+    assert!(
+        !matches!(
+            stage,
+            paykit_sdk::Stage::Abandoned | paykit_sdk::Stage::Finished
+        ),
+        "{stage:?}"
+    );
+    let options = crate::common::over_hold(&app, &request).await;
+    let refused = app.pay_request(&request, options.clone()).await.outcome;
+    let doubt = doubt_of(&refused);
+    assert_eq!(doubt.restored, vec![attempt_id], "{refused:?}");
+    assert!(doubt.before_loss.is_some(), "{refused:?}");
     let obligation = app.payments().await.unwrap()[0].obligation;
     let loss = kept_loss(&app).await;
     app.confirm_not_paid_before_loss(&obligation, &loss, UserConfirmed::new())
         .await
         .unwrap();
-    let options = crate::common::over_hold(&app, &request).await;
-    let again = app.pay_request(&request, options).await.outcome;
+    let again = app.pay_request(&request, options.clone()).await.outcome;
     assert_eq!(doubt_of(&again).restored, vec![attempt_id], "{again:?}");
     assert_eq!(executions(&w), 1);
+    // The user's decision on it pays: seen "may already be paid", the user pays anyway.
+    let shown = doubt_of(&again);
+    let paid = app
+        .pay_request(&request, options.with_may_be_paid_confirmed(shown))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(executions(&w), 2);
 }
