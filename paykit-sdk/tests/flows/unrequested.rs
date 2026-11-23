@@ -1826,3 +1826,62 @@ async fn test_unrequested_placement_settling_late_keeps_a_newer_hold() {
     );
     assert_eq!(w.rail.all_executions().len(), 1);
 }
+
+#[tokio::test]
+async fn test_unrequested_list_held_for_a_refused_write_stays_held_over_a_later_delete() {
+    use pubky_switch_client::app::OpBatch;
+
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    // A newer list whose record write is refused is held, the record still reading.
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 2))
+        .await;
+    crate::common::refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
+    // Then another own app deletes the record, the wallet sees it, and the service forgets it.
+    let target = shop_list_target(&w, &shop);
+    phone.app_mut().read_record(&target).await.unwrap();
+    let op = phone
+        .app_mut()
+        .record_op(&target, None, Vec::new())
+        .await
+        .unwrap();
+    phone
+        .app_mut()
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let key = wallet.app().record_key(&target).unwrap();
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    w.alice.switch().drop_record(&key).unwrap();
+    let mut restored = restored_onto(&w, crate::common::store(), &backup).await;
+    restored.receive(None).await.unwrap();
+    let writes = w.record_writes(&w.alice, &key);
+    let again = restored
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome;
+    assert!(
+        !matches!(again, Ok(PayOutcome::Paid { .. })),
+        "the paid single-use endpoint was paid again: {again:?}"
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
+    assert_eq!(w.record_writes(&w.alice, &key), writes);
+    let held = restored.held_lists().await.unwrap();
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0].version, list_version(1, 2));
+}

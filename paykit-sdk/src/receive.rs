@@ -2410,12 +2410,6 @@ fn hold_list(
     target: &pubky_switch_client::app::RecordTarget,
     stored: &StoredMessage,
 ) -> Result<(), Fail> {
-    // Kept apart from the list, and first: only a record seen lost keeps a later absence
-    // from ending the hold, not a first write that was refused.
-    let lost = key::list_record_lost(&cx.record_key(target)?);
-    if state::cx_get::<bool>(cx, &lost)?.is_none() {
-        keep_local(cx, local(&lost, &true)?);
-    }
     let kept = key::held_list(&cx.record_key(target)?);
     if let Some(held) = state::cx_get::<KeptMessage>(cx, &kept)? {
         let held = held.stored(&cx.identity()).map_err(|_| Fail::corrupt())?;
@@ -2424,6 +2418,10 @@ fn hold_list(
         }
     }
     keep_local(cx, local(&kept, &KeptMessage::of(stored))?);
+    // Kept apart from the list: only a record seen lost keeps a later absence from ending
+    // the hold, not a first write that was refused.
+    let lost = key::list_record_lost(&cx.record_key(target)?);
+    keep_local(cx, local(&lost, &true)?);
     Ok(())
 }
 
