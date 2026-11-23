@@ -1318,3 +1318,38 @@ async fn test_allowance_refusals_grant_before_a_provider_loss_is_not_automatic()
         .unwrap();
     Box::pin(pays(&w, &mut shop, &mut payer, &fresh)).await;
 }
+
+#[tokio::test]
+async fn test_allowance_refusals_grant_after_the_backup_asks_no_confirmation() {
+    // The user approved automatic execution, the backup was taken, and then the grant
+    // applied. Restored from that backup, the record shows this app's grant with no history
+    // of it here: no confirmation lands it, so none is asked for (Paykit spec 7.2, 8.3).
+    let (w, mut payer, _shop, key) = Box::pin(super::accepted_not_granted(store())).await;
+    w.rail.set_history_payer(payer.identity());
+    let backup = payer.backup().await.unwrap();
+    Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .unwrap();
+    drop(payer);
+    let mut payer = Box::pin(Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    crate::common::restore_with_unknown_cursor(&mut payer).await;
+    Box::pin(payer.reconcile()).await.unwrap();
+    Box::pin(payer.end_reconcile(UserConfirmed::new()))
+        .await
+        .unwrap();
+    let view = payer.allowance(&key).await.unwrap();
+    assert_eq!(view.executor_app_id, Some(payer.app_id()), "{view:?}");
+    assert!(!view.consented && !view.confirmation_needed, "{view:?}");
+    assert_eq!(
+        refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
+        not_now("this app's grant is held, but its consent isn't on this device")
+    );
+}

@@ -49,7 +49,8 @@ impl Paykit {
     ///
     /// Where the Allowance stands first, as a payment under it gets it: for good
     /// [`Refusal::AllowanceEnded`], [`Refusal::AllowanceConflicted`], [`Refusal::Rejected`],
-    /// [`Refusal::ScopeMissing`] or [`Refusal::Usage`]; [`Refusal::AllowanceConfirmationNeeded`]
+    /// [`Refusal::Usage`] or [`Refusal::NotAutomatic`]; [`Refusal::ScopeMissing`] until the
+    /// signer renews this app's certificate with the scope; [`Refusal::AllowanceConfirmationNeeded`]
     /// when the user must confirm it again ([`Paykit::confirm_allowance_executor`]); and
     /// [`Refusal::NotNow`] when the original approval, its complete service application or
     /// current authority is unavailable, or the ledger cannot be reconciled yet. Accessing the

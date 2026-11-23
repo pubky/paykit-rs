@@ -2698,7 +2698,7 @@ impl Paykit {
         if shared.flagged {
             return Ok(ConsentState::Waiting(WAITS_FOR_RECORD));
         }
-        match Box::pin(self.held_allowance(record)).await? {
+        let shown = match Box::pin(self.held_allowance(record)).await? {
             Some(held) if held.end.is_some() => {
                 return Ok(ConsentState::Removed(ConsentEnd::Ended))
             }
@@ -2712,14 +2712,18 @@ impl Paykit {
                 if self.unresolved_for_allowance(record, &held).await? {
                     return Ok(ConsentState::Waiting(WAITS_FOR_RECORD));
                 }
+                held
             }
             None => return Ok(ConsentState::Waiting(WAITS_FOR_RECORD)),
-        }
+        };
+        let own_granted = shown
+            .current_grant(&self.identity())
+            .is_some_and(|(grant, _)| grant.app_id == self.app_id());
         let Some(held) = self
             .local_get::<ConsentEntry>(&key::consent(record))
             .await?
         else {
-            return Box::pin(self.unconsented_state(record)).await;
+            return Box::pin(self.unconsented_state(record, own_granted)).await;
         };
         if Box::pin(self.rejection_kept(record, &held.counterparty)).await? {
             return Ok(ConsentState::Removed(ConsentEnd::Rejected));
@@ -2739,7 +2743,11 @@ impl Paykit {
     /// send again; applied, its consent waiting for resume or the user; or no grant of its
     /// own. The grant's batch writes its history (`xc/`) only as it applies, and leaves its
     /// ID at `gb/` until then.
-    async fn unconsented_state(&self, record: &[u8; 32]) -> Result<ConsentState> {
+    async fn unconsented_state(
+        &self,
+        record: &[u8; 32],
+        own_granted: bool,
+    ) -> Result<ConsentState> {
         if let Some(id) = self
             .local_get::<[u8; 16]>(&key::grant_batch(record))
             .await?
@@ -2757,9 +2765,11 @@ impl Paykit {
             .await?
             .is_none()
         {
-            // No grant of this app's own yet. One the user approved here for automatic
-            // execution, whose approval a restore or a `missed` item took since, waits for the
-            // user's confirmation, which grants it; any other is this app's to take up.
+            // No grant history here. One the user approved here for automatic execution, not
+            // granted yet, whose approval a restore or a `missed` item took since, waits for
+            // the user's confirmation, which grants it. One the record shows granted by this
+            // app, after the backup this app was restored from, isn't: no confirmation lands
+            // a grant this installation has no history of.
             let approved_here = self
                 .local_get::<OriginalAllowance>(&key::original_allowance(record))
                 .await?
@@ -2767,7 +2777,7 @@ impl Paykit {
                 .transpose()?
                 .flatten()
                 .is_some();
-            return Ok(if approved_here && !approved {
+            return Ok(if approved_here && !approved && !own_granted {
                 ConsentState::Unconsented { approved: false }
             } else {
                 ConsentState::Unrecorded
