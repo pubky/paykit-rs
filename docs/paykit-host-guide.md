@@ -255,10 +255,17 @@ After the original exchange applies, the approving payer calls
 `Paykit::resume_allowance_executor` with the permanent Allowance handle to
 complete its first executor grant. Repeating that call or reopening the same
 wallet preserves the original grant. A sibling wallet, missing original
-application or unverified ledger change leaves the grant held. After a restore
-that requires consent again, show the counterparty, terms and this executor
-before calling `Paykit::confirm_allowance_executor`. These calls establish the
-first grant.
+application or unverified ledger change leaves the grant held. When the grant's
+write gets no answer, the Allowance isn't consented yet even if the grant later
+applies: retry `Paykit::resume_allowance_executor` until it succeeds. Each retry
+sends the kept grant again first, so no `receive` is needed in between, and no
+second grant is built. If the client instead gives the grant's batch up with an
+unknown outcome (`AppEvent::KeptBatchDropped`), the grant may have applied without
+this app's record of it, and the resume stays held. After a
+restore that isn't clean or a `missed` item, the user confirms again before the
+first grant, as for any Allowance that requires consent again: show the
+counterparty, terms and this executor before calling
+`Paykit::confirm_allowance_executor`. These calls establish the first grant.
 
 Call `Paykit::reconcile_allowance` to read this executor's verified usage.
 The method adapter supplies `Rail::allowance_history` for the payer's entire
@@ -366,8 +373,14 @@ usual payment restrictions again before dispatch. A missed period remains availa
 
 Read `notices` and `payee_deletion_notices` by their stable identities. Acknowledge
 each through its matching SDK API after recording or showing it. Handle Switch
-duty events from `ReceiveSummary::report`. If `records_unlisted` says the listing
-has more to read, call `receive(None)` again. The wallet can still be listing
+duty events from `ReceiveSummary::report`. Call `receive` on startup and after a
+feed wake. It returns one bounded report. Use `more` to decide when to read another
+page: while `ReceiveSummary::report.more` is set, the read stopped on one of its
+per-call budgets, such as its feed pages, with more to read now, so call
+`receive(None)` again without waiting. Nothing it left is lost or reordered: the next
+read goes on from there. The loop ends at the first summary whose `report.more` is
+unset; a host that caps its rounds reads the rest at its next wake. If
+`records_unlisted` says the listing has more to read, call `receive(None)` again. The wallet can still be listing
 collections after the Switch has finished its feed read. An explicit `reconcile` or
 `end_reconcile` can also run its own listing. Follow the action named in its
 `NotNow` result to resume that scan. After a receive error,
@@ -458,7 +471,7 @@ The method declares `payment_time_tolerance_ms` with its declaration. The payee 
 | `Refusal::NoDestination` | Show why no endpoint could be used, including failed public app reads if available. When its text says the device clock is behind, a destination expired by the service's time: tell the user the device clock is behind. |
 | `Refusal::UnsupportedEndpoint` | Ask the user to choose a compatible endpoint or payment method. |
 | `Refusal::WaitingForList` | Show that a newer Private Payment List was requested. A public destination is a separate user choice. When `device_clock_behind` is set, a list expired by the service's time while the device clock is behind it: tell the user the device clock is behind. |
-| `Refusal::ListDeliveryUnknown` | Show the counterparty, whether the list was a withdrawal and how long the earlier or current list may be paid. `withdraw_list_from` has already recorded the counterparty as withdrawn. Pass the same value to `send_list_again` only after the user confirms another version. `Ok` means nothing of unknown outcome is left. `NotNow` keeps the confirmation: a later call or receive sends the list once it can, which for a nonempty list to a blocked counterparty is after the block ends. |
+| `Refusal::ListDeliveryUnknown` | Show the counterparty, whether the list was a withdrawal and how long the earlier or current list may be paid. `withdraw_list_from` has already recorded the counterparty as withdrawn. Pass the same value to `send_list_again` only after the user confirms another version. `Ok` means nothing of unknown outcome is left. `NotNow` keeps the confirmation: a later call or receive sends the list once it can, which for a nonempty list to a blocked counterparty is after the block ends; `lists_waiting_to_send_again` lists the counterparties still waiting. |
 | `Refusal::Transfer` | Show the actual transfer or fee quote and return that exact quote only on confirmation. |
 | `Refusal::PricedByRate` | Obtain authorization for this exact quote from the user or their bounded policy (Scheduling a Billing Period). |
 | `Refusal::IdentityUnavailable` | Refresh the required identity before retrying. |

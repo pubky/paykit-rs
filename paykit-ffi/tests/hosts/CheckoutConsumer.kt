@@ -9,7 +9,7 @@ import java.io.FileOutputStream
 import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicInteger
 
-private class CheckoutMethod(private val ledger: File) : ReceiptReader() {
+internal open class CheckoutMethod(private val ledger: File) : ReceiptReader() {
     val entered = CompletableDeferred<Unit>()
     val release = CompletableDeferred<Unit>()
     val calls = AtomicInteger()
@@ -60,7 +60,7 @@ private class CheckoutMethod(private val ledger: File) : ReceiptReader() {
         stored()?.takeIf { proofJson.contentEquals(originalProof(it)) }?.toByteArray()
 }
 
-private suspend fun NativeWallet.finishReceive() {
+internal suspend fun NativeWallet.finishReceive() {
     repeat(8) {
         val report = receive()
         if (!report.more) return

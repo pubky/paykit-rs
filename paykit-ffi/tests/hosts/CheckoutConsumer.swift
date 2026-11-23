@@ -1,7 +1,7 @@
 import Foundation
 import PaykitV2
 
-private actor PaymentGate {
+actor PaymentGate {
     private var open = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
@@ -15,7 +15,7 @@ private actor PaymentGate {
     }
 }
 
-private enum CheckoutStep: Equatable, Sendable {
+enum CheckoutStep: Equatable, Sendable {
     case feedReady, methodEntered
 }
 
@@ -23,7 +23,7 @@ private enum CheckoutFailure: Error {
     case timedOut, unexpectedWake(FeedWake), missingStep
 }
 
-private final class CheckoutMethod: ReceiptReader, @unchecked Sendable {
+class CheckoutMethod: ReceiptReader, @unchecked Sendable {
     private let ledger: URL
     private let guardLock = NSLock()
     private var dispatches = 0
@@ -94,7 +94,7 @@ private final class CheckoutMethod: ReceiptReader, @unchecked Sendable {
     }
 }
 
-private extension NativeWallet {
+extension NativeWallet {
     func finishReceive() async throws {
         for _ in 0..<8 { if !(try await receive()).more { return } }
         preconditionFailure("wallet did not complete its feed")
