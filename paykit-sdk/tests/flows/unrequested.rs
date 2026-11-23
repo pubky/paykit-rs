@@ -1222,7 +1222,7 @@ async fn test_unrequested_proof_of_a_settlement_seen_not_credited_again_over_its
         ),
         &paykit_lib::derive::natural_key::payee_payment_record(
             &proof.payment_endpoint_identifier,
-            &proof.settlement_id().unwrap(),
+            &paykit_sdk::rail::fake_settlement_id(&proof.proof).unwrap(),
         ),
     );
     seller_wallet

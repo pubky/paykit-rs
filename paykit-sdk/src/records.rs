@@ -430,7 +430,7 @@ impl Paykit {
             label,
             &held.key,
             |t| self.app.record_key(t).ok(),
-            &|p| self.rail.settlement_id(p),
+            &|endpoint, proof| self.rail.settlement_id(endpoint, proof),
             Some(&mut certs.memo),
         )
     }

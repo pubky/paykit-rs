@@ -254,7 +254,7 @@ impl Paykit {
             target.label().as_ref(),
             &put.key,
             |t| self.app.record_key(t).ok(),
-            &|p| self.rail.settlement_id(p),
+            &|endpoint, proof| self.rail.settlement_id(endpoint, proof),
         ) else {
             return Ok(None);
         };
