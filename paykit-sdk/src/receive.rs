@@ -1707,12 +1707,15 @@ fn payer_reply(
             // A payment without a request: keyed by its settlement, so every proof of one
             // settlement names one record and is credited once (Paykit spec 8.4). The app's
             // rail gives the settlement ID, so a method of its own is credited too; a proof
-            // whose method gives none isn't credited.
+            // whose method gives none isn't credited, and is dropped with that reason rather
+            // than applied, so the host sees it wasn't taken (Paykit wire 1.5).
             let Body::PaymentProof(proof) = stored.body() else {
                 return Ok(false);
             };
-            let Some(settled) = settlement(&proof.proof) else {
-                return Ok(false);
+            let Some(settled) = settlement(&proof.payment_endpoint_identifier, &proof.proof) else {
+                return Err(Fail::Drop(
+                    "Paykit wire 1.5: the payment method names no settlement for this proof".into(),
+                ));
             };
             let target = ActivityTarget::payee(
                 natural_key::payee_payment_record(&proof.payment_endpoint_identifier, &settled),
@@ -2411,8 +2414,8 @@ fn list_effect(cx: &mut ReceiveContext<'_>, stored: &StoredMessage, seq: u64) ->
     // Over a divergent record its user hasn't confirmed, or while a list kept over it waits
     // to be written, the list is kept, and written once the user confirms (Paykit spec 6).
     if let Some(held) = cx.record(&target)? {
-        if crate::divergent::step_write_waits(cx, &held, stored, seq, &|_| None)? {
-            return crate::divergent::step_keep(cx, &held, stored, seq, &|_| None, true);
+        if crate::divergent::step_write_waits(cx, &held, stored, seq, &|_, _| None)? {
+            return crate::divergent::step_keep(cx, &held, stored, seq, &|_, _| None, true);
         }
     }
     let held = match cx.record(&target)?.map(|r| r.content) {
@@ -3020,15 +3023,18 @@ impl Paykit {
                     else {
                         return Err(crate::error::PaykitError::corrupt());
                     };
-                    let target = self.rail.settlement_id(&proof.proof).map(|settled| {
-                        ActivityTarget::payee(
-                            natural_key::payee_payment_record(
-                                &proof.payment_endpoint_identifier,
-                                &settled,
-                            ),
-                            None,
-                        )
-                    });
+                    let target = self
+                        .rail
+                        .settlement_id(&proof.payment_endpoint_identifier, &proof.proof)
+                        .map(|settled| {
+                            ActivityTarget::payee(
+                                natural_key::payee_payment_record(
+                                    &proof.payment_endpoint_identifier,
+                                    &settled,
+                                ),
+                                None,
+                            )
+                        });
                     match target {
                         Some(target) if self.activity_key(&target)? == record => target,
                         // Kept for another record than the rail's settlement names now: never
@@ -3073,7 +3079,7 @@ impl Paykit {
                     target.label().as_ref(),
                     &record_key,
                     |t| self.app.record_key(t).ok(),
-                    &|proof| self.rail.settlement_id(proof),
+                    &|endpoint, proof| self.rail.settlement_id(endpoint, proof),
                 )
             });
             // A message the record can't take, its sender not the record's counterparty,

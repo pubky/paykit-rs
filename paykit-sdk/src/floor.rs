@@ -1098,7 +1098,7 @@ impl Paykit {
                     None,
                     &held.key,
                     |t| self.app.record_key(t).ok(),
-                    &|p| self.rail.settlement_id(p),
+                    &|endpoint, proof| self.rail.settlement_id(endpoint, proof),
                 )
             });
             let marks = record.as_ref().and_then(|record| {
