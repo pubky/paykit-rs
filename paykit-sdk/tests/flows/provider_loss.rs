@@ -1605,11 +1605,22 @@ async fn test_provider_loss_the_final_activity_read_precedes_the_payment_method_
             .with_options(PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")))
     };
     // The first checks succeeded. At the Paying commit the app's next read of
-    // this payer activity becomes unavailable, before the call to the method.
+    // this payer activity becomes unavailable, before the call to the method: the
+    // store's failure is the call's error, and nothing is paid.
     let at_commit = disk.clone();
     disk.on_paying(move || at_commit.fail_next_payer_activity_read());
-    let held = wallet.pay_without_request(payment()).await.outcome.unwrap();
-    assert!(matches!(held, PayOutcome::Pending { .. }), "{held:?}");
+    let failed = wallet
+        .pay_without_request(payment())
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(
+            failed,
+            PaykitError::Client(pubky_switch_client::app::AppError::Store(_))
+        ),
+        "{failed:?}"
+    );
     assert_eq!(executions(&w), 0);
     wallet.resume_payments().await.unwrap();
     assert_eq!(executions(&w), 0);
