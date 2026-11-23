@@ -21,7 +21,7 @@ use pubky_switch_core::enc::serde_b64;
 use pubky_switch_core::records::CLOCK_TOLERANCE_MS;
 use serde::{Deserialize, Serialize};
 
-use crate::activity::{KeptSide, SideTag};
+use crate::activity::{ActivityTarget, KeptSide, SideTag};
 use crate::error::Result;
 use crate::hold::AnswerRecord;
 use crate::notices::{GivenUpFrom, GivenUpOrigin, KeptNotice};
@@ -249,24 +249,30 @@ pub(crate) fn past_replay_window(created_at_ms: u64, now_ms: u64) -> bool {
             .saturating_add(SENT_RETENTION_MS)
 }
 
-/// A rejection or payer's cancellation this app queued, kept at `qs/<msg_id>` in the
-/// commit that queues it, for as long as its outbox copy is owed: what the receive step
-/// needs to end that copy past its 30 days and tell the host, which the outbox doesn't
-/// show (Paykit spec 8.1). `given_up` is set before the client ends the copy, with whether
-/// the host is told. The entry stays, a backup and restore included, until neither the
-/// outbox nor an unacknowledged report names its message, so a report a restore carries
-/// is taken again as it was decided, and acknowledged (Paykit spec 9). `told` is set in the
-/// commit that takes the report, and restored with the entry, so a report taken again,
-/// after a restore in place included, tells the host nothing twice even once the host
-/// has acknowledged the notice (Paykit spec 8.1).
+/// A held message this app queued, kept at `qs/<msg_id>` in the commit that queues it,
+/// for as long as its outbox copy is owed: a rejection or payer's cancellation, a payment
+/// request, period details, a list request or a subscription acceptance. It holds what
+/// the receive step needs to end that copy past its 30 days and tell the host, which the
+/// outbox doesn't show (Paykit spec 8.1, "Messages already queued"): its counterparty, its
+/// request, its signed hash and time, and the activity record that holds it, if any.
+/// `given_up` is set before the client ends the copy, with whether the host is told. The
+/// entry stays, a backup and restore included, until neither the outbox nor an
+/// unacknowledged report names its message, so a report a restore carries is taken again
+/// as it was decided, and acknowledged (Paykit spec 9). `told` is set in the commit that
+/// takes the report, and restored with the entry, so a report taken again, after a restore
+/// in place included, tells the host nothing twice even once the host has acknowledged
+/// the notice (Paykit spec 8.1).
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct QueuedStop {
     pub(crate) msg_id: String,
+    pub(crate) held: HeldKind,
     #[serde(with = "serde_b64")]
-    pub(crate) payee: [u8; 32],
-    #[serde(with = "serde_b64")]
-    pub(crate) request_hash: [u8; 32],
+    pub(crate) to: [u8; 32],
+    #[serde(with = "serde_b64_opt")]
+    pub(crate) request_hash: Option<[u8; 32]>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(crate) record: Option<HeldRecord>,
     #[serde(with = "serde_b64")]
     pub(crate) hash: [u8; 32],
     pub(crate) created_at_ms: u64,
@@ -275,14 +281,92 @@ pub(crate) struct QueuedStop {
     pub(crate) told: bool,
 }
 
-/// How a stop's outbox copy past its window is ended, by what its request record says of
-/// it ([`crate::hold::AnswerRecord`], Paykit spec 8.1, "Undelivered messages").
+/// The kind of held message a `qs/` entry keeps, which decides what its give-up tells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum HeldKind {
+    /// A rejection or a payer's cancellation: a stop.
+    Stop,
+    /// A payment request.
+    Request,
+    /// Period details.
+    PeriodDetails,
+    /// A `private_payment_list_request`, which no activity record holds.
+    ListRequest,
+    /// A subscription acceptance that reports no payment.
+    SubscriptionAcceptance,
+}
+
+/// The activity record a held message was recorded in, as kept: its side, natural key and
+/// label (Paykit wire 5.1).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HeldRecord {
+    pub(crate) side: SideTag,
+    #[serde(with = "pubky_switch_core::enc::serde_b64_vec")]
+    pub(crate) natural_key: Vec<u8>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(crate) label: Option<String>,
+}
+
+impl HeldRecord {
+    pub(crate) fn of(target: &ActivityTarget) -> Self {
+        Self {
+            side: target.side,
+            natural_key: target.natural_key.clone(),
+            label: target.label().map(|label| label.as_str().to_owned()),
+        }
+    }
+
+    /// The record's target; a label that doesn't parse is a corrupt store.
+    fn target(&self) -> Result<ActivityTarget> {
+        let label = self
+            .label
+            .as_deref()
+            .map(paykit_lib::scopes::Label::parse)
+            .transpose()
+            .map_err(|_| crate::error::PaykitError::corrupt())?;
+        Ok(ActivityTarget {
+            side: self.side,
+            natural_key: self.natural_key.clone(),
+            label,
+        })
+    }
+}
+
+/// An optional 32-byte value as base64url, or null.
+mod serde_b64_opt {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(crate) fn serialize<S: Serializer>(
+        value: &Option<[u8; 32]>,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        match value {
+            Some(bytes) => serializer.serialize_some(&pubky_switch_core::enc::b64(bytes)),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Option<[u8; 32]>, D::Error> {
+        Option::<String>::deserialize(deserializer)?
+            .map(|text| {
+                pubky_switch_core::enc::unb64_array::<32>(&text).map_err(serde::de::Error::custom)
+            })
+            .transpose()
+    }
+}
+
+/// How a held message's outbox copy past its window is ended, by what its activity record
+/// says of it ([`crate::hold::AnswerRecord`], Paykit spec 8.1, "Undelivered messages").
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum GivenUp {
-    /// The record holds the stop, or lost it with a write: the host is told.
+    /// The record holds it, or, for a stop, lost it with a write: the host is told.
     Told,
-    /// The record is gone, or holds another stop that covers it: nothing is told of it
+    /// No record holds it, it is gone, or another stop covers it: nothing is told of it
     /// as given up, though a possible delivery still is.
     Silent,
 }
@@ -293,10 +377,13 @@ impl QueuedStop {
         (self.given_up.is_some(), self.told)
     }
 
-    /// The entry of `signed`, a stop answering the request `request_hash`, just signed.
+    /// The entry of `signed`, a held message of `held` just signed, about the request
+    /// `request_hash` and recorded in `record`, if any.
     pub(crate) fn signed(
         signed: &pubky_switch_client::app::SignedMessage,
-        request_hash: [u8; 32],
+        held: HeldKind,
+        request_hash: Option<[u8; 32]>,
+        record: Option<&ActivityTarget>,
     ) -> Result<Self> {
         let message = pubky_switch_core::message::Message::parse(
             signed.plaintext().json(),
@@ -304,8 +391,10 @@ impl QueuedStop {
         )?;
         Ok(Self {
             msg_id: message.msg_id,
-            payee: message.to,
+            held,
+            to: message.to,
             request_hash,
+            record: record.map(HeldRecord::of),
             hash: signed.hash(),
             created_at_ms: message.created_at_ms,
             given_up: None,
@@ -314,16 +403,22 @@ impl QueuedStop {
     }
 
     /// The entry of `stored`, a stop answering the request `request_hash`, queued again
-    /// from its record.
+    /// from the payer's request record.
     pub(crate) fn stored(
         stored: &paykit_lib::records::StoredMessage,
         request_hash: [u8; 32],
     ) -> Self {
         let message = stored.message();
+        let record = ActivityTarget::payer(paykit_lib::derive::natural_key::request_record(
+            &message.to,
+            &request_hash,
+        ));
         Self {
             msg_id: message.msg_id.clone(),
-            payee: message.to,
-            request_hash,
+            held: HeldKind::Stop,
+            to: message.to,
+            request_hash: Some(request_hash),
+            record: Some(HeldRecord::of(&record)),
             hash: stored.hash(),
             created_at_ms: message.created_at_ms,
             given_up: None,
@@ -350,19 +445,20 @@ impl Paykit {
         self.local_put(key::SERVICE_TIME, &at).await
     }
 
-    /// End the outbox copies of this app's rejections and payer's cancellations that are
-    /// past 30 days from their `created_at`, less the clock tolerance, by the service time
-    /// verified, or the device clock while none is: such a stop is never sent, and a client
-    /// original carries no deadline of its own. As for one held in its record
-    /// ([`Paykit::queue_own_again`]), it is decided at the first receive past that time at
-    /// which the copy of the deny list is known and doesn't hold the payee, with the records
-    /// listed and no scope key awaited (Paykit spec 8.1, "Blocked counterparties"), on what
-    /// its request record says of it ([`Paykit::answer_record`]): nothing is decided while
-    /// the record doesn't read or is paused as divergent; the host is told it was given up
-    /// when the record holds the stop or lost it with a write, and not when the record is
-    /// gone or another stop covers it, since that notice requires a record that holds the
-    /// message ("Undelivered messages"); a possible delivery is always told. Each is ended
-    /// through the client's
+    /// End the outbox copies of this app's held messages ([`QueuedStop`]) that are past 30
+    /// days from their `created_at`, less the clock tolerance, by the service time
+    /// verified, or the device clock while none is: such a message is never sent, and a
+    /// client original carries no deadline of its own (Paykit spec 8.1, "Messages already
+    /// queued"). As for an answer held in its record ([`Paykit::queue_own_again`]), it is
+    /// decided at the first receive past that time at which the copy of the deny list is
+    /// known and doesn't hold the counterparty, with the records listed and no scope key
+    /// awaited ("Blocked counterparties"), on what its activity record says of it
+    /// ([`Paykit::record_outcome`]): nothing is decided while the record doesn't read or is
+    /// paused as divergent. The host is told it was given up when the record holds it, or,
+    /// for a stop, lost it with a write, so the user may answer again; not when the record is
+    /// gone, another stop covers it or no record holds its kind, such as a list request,
+    /// since that notice requires a record that holds the message ("Undelivered
+    /// messages"). A possible delivery is always told. Each is ended through the client's
     /// withdrawal, which reports it undelivered when no try of it can have reached the
     /// payee's switch, and unknown otherwise; that report is taken at once, the host told
     /// in the commit that takes it ([`crate::NoticeKind::MessageGivenUp`] or
@@ -390,7 +486,7 @@ impl Paykit {
             let at = key::queued_stop(&stop.msg_id);
             let owed = queued
                 .get(&stop.msg_id)
-                .is_some_and(|copy| copy.hash == stop.hash && copy.to == stop.payee);
+                .is_some_and(|copy| copy.hash == stop.hash && copy.to == stop.to);
             if !owed {
                 // One given up keeps its entry while a report of its end isn't
                 // acknowledged, which is taken, or taken again after a restore, as it was
@@ -409,30 +505,33 @@ impl Paykit {
                 gone.delete(&at);
                 continue;
             }
-            if past_replay_window(stop.created_at_ms, now)
-                && !self.delivery_held(&stop.payee).await?
-            {
+            if past_replay_window(stop.created_at_ms, now) && !self.delivery_held(&stop.to).await? {
                 expired.push(stop);
             }
         }
         self.local_commit(gone).await?;
         for mut stop in expired {
             let at = key::queued_stop(&stop.msg_id);
-            stop.given_up =
-                match Box::pin(self.answer_record(&stop.payee, &stop.request_hash, &stop.msg_id))
-                    .await?
-                {
-                    // Nothing is decided, and no decision left by an end that didn't happen
-                    // applies to a report the host causes meanwhile.
-                    AnswerRecord::Undecided => {
-                        if stop.given_up.take().is_some() {
-                            self.local_put(&at, &stop).await?;
-                        }
-                        continue;
+            let outcome = match &stop.record {
+                Some(record) => {
+                    Some(Box::pin(self.record_outcome(&record.target()?, &stop.msg_id)).await?)
+                }
+                None => None,
+            };
+            stop.given_up = match (stop.held, outcome) {
+                // Nothing is decided, and no decision left by an end that didn't happen
+                // applies to a report the host causes meanwhile.
+                (_, Some(AnswerRecord::Undecided)) => {
+                    if stop.given_up.take().is_some() {
+                        self.local_put(&at, &stop).await?;
                     }
-                    AnswerRecord::Holds | AnswerRecord::Lacks => Some(GivenUp::Told),
-                    AnswerRecord::Gone | AnswerRecord::Covered => Some(GivenUp::Silent),
-                };
+                    continue;
+                }
+                (_, Some(AnswerRecord::Holds)) | (HeldKind::Stop, Some(AnswerRecord::Lacks)) => {
+                    Some(GivenUp::Told)
+                }
+                _ => Some(GivenUp::Silent),
+            };
             self.local_put(&at, &stop).await?;
             if self
                 .app
@@ -503,21 +602,25 @@ impl Paykit {
             return Ok(true);
         }
         let now = self.service_time().unwrap_or(0);
+        let origin = match stop.held {
+            HeldKind::Stop => GivenUpOrigin::HeldAnswer,
+            _ => GivenUpOrigin::HeldSend,
+        };
         let (notice_key, notice) = if undelivered {
             (
-                key::message_notice(&stop.payee, &stop.msg_id),
+                key::message_notice(&stop.to, &stop.msg_id),
                 KeptNotice::given_up(
-                    stop.payee,
+                    stop.to,
                     &stop.msg_id,
-                    Some(stop.request_hash),
+                    stop.request_hash,
                     now,
-                    GivenUpFrom::Origin(GivenUpOrigin::HeldAnswer),
+                    GivenUpFrom::Origin(origin),
                 ),
             )
         } else {
             (
-                key::restored_delivery(&stop.payee, &stop.msg_id, &stop.hash),
-                KeptNotice::delivery_unknown(&stop.payee, &stop.msg_id, &stop.hash, now),
+                key::restored_delivery(&stop.to, &stop.msg_id, &stop.hash),
+                KeptNotice::delivery_unknown(&stop.to, &stop.msg_id, &stop.hash, now),
             )
         };
         if self.kept_notice(&notice_key).await?.is_none() {
@@ -560,8 +663,14 @@ mod tests {
     fn test_send_holds_queued_stop_names_its_decision() {
         let stop = QueuedStop {
             msg_id: "123e4567-e89b-42d3-a456-426614174000".into(),
-            payee: [1; 32],
-            request_hash: [2; 32],
+            held: HeldKind::PeriodDetails,
+            to: [1; 32],
+            request_hash: Some([2; 32]),
+            record: Some(HeldRecord {
+                side: SideTag::Payee,
+                natural_key: vec![5; 3],
+                label: Some("shop1".into()),
+            }),
             hash: [3; 32],
             created_at_ms: 4,
             given_up: Some(GivenUp::Silent),

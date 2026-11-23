@@ -790,6 +790,17 @@ impl Paykit {
             .await?;
         let mut tx = Tx::default();
         self.note_peer(&mut tx, &to)?;
+        // What ends its outbox copy past its 30 days, in the commit that queues it (Paykit
+        // spec 8.1).
+        tx.put(
+            &key::queued_stop(&msg_id),
+            &crate::send_holds::QueuedStop::signed(
+                &signed,
+                crate::send_holds::HeldKind::Request,
+                Some(hash),
+                Some(&target),
+            )?,
+        )?;
         let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
             .entry(write)
             .queue(signed)
@@ -2672,12 +2683,22 @@ impl Paykit {
                 ),
             )?;
         }
-        if answer != Answer::Accept && !held {
-            // A stop queued keeps what ends its outbox copy past its 30 days, in the commit
-            // that queues it (Paykit spec 8.1).
+        if !held {
+            // A held answer queued keeps what ends its outbox copy past its 30 days, in the
+            // commit that queues it (Paykit spec 8.1).
+            let kind = if answer == Answer::Accept {
+                crate::send_holds::HeldKind::SubscriptionAcceptance
+            } else {
+                crate::send_holds::HeldKind::Stop
+            };
             tx.put(
                 &key::queued_stop(signed.msg_id()),
-                &crate::send_holds::QueuedStop::signed(&signed, request.request_hash)?,
+                &crate::send_holds::QueuedStop::signed(
+                    &signed,
+                    kind,
+                    Some(request.request_hash),
+                    Some(&target),
+                )?,
             )?;
         }
         if answer == Answer::Cancel {

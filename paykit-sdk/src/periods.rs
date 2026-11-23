@@ -766,8 +766,19 @@ impl Paykit {
                 body,
             )?;
             let msg_id = signed.msg_id().to_owned();
+            // What ends its outbox copy past its 30 days, in the commit that queues it
+            // (Paykit spec 8.1).
+            let kept = crate::state::local_put(
+                &crate::state::key::queued_stop(&msg_id),
+                &crate::send_holds::QueuedStop::signed(
+                    &signed,
+                    crate::send_holds::HeldKind::PeriodDetails,
+                    Some(request_hash),
+                    Some(&into),
+                )?,
+            )?;
             match self
-                .send_with_record(signed, &into, Role::PeriodDetails, Vec::new(), Vec::new())
+                .send_with_record(signed, &into, Role::PeriodDetails, Vec::new(), vec![kept])
                 .await
             {
                 Ok(_) => break msg_id,
