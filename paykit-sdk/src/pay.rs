@@ -1096,13 +1096,22 @@ fn fence_news(same_document: bool, basis: SwitchCopy, answer: Answer, by: Initia
     } else if by == Initiator::User
         && same_document
         && !answer.switch_read
-        && answer.copy != SwitchCopy::Read
-        && basis != SwitchCopy::Read
+        && unread(answer.copy)
+        && unread(basis)
     {
         FenceNews::None
     } else {
         FenceNews::Holds
     }
+}
+
+/// Whether `copy` is a switch copy state known to carry no read copy. A state this crate
+/// doesn't know reads as one that may: the fence holds on it.
+fn unread(copy: SwitchCopy) -> bool {
+    matches!(
+        copy,
+        SwitchCopy::Unavailable | SwitchCopy::Stale | SwitchCopy::Pending
+    )
 }
 
 impl Paykit {
@@ -5674,6 +5683,18 @@ mod tests {
             copy,
             switch_read,
             confirmed,
+        }
+    }
+
+    #[test]
+    fn test_fence_news_unread_names_only_the_states_known_to_read_nothing() {
+        assert!(!unread(SwitchCopy::Read));
+        for copy in [
+            SwitchCopy::Unavailable,
+            SwitchCopy::Stale,
+            SwitchCopy::Pending,
+        ] {
+            assert!(unread(copy), "{copy:?}");
         }
     }
 
