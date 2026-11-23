@@ -852,7 +852,9 @@ impl Paykit {
     /// ([`Paykit::settle_raise_waiting`]).
     pub(crate) async fn commit_with_floor(&mut self, to_ms: u64, tx: Tx) -> Result<()> {
         let result = self.write_with_floor(to_ms, tx).await;
-        if result.as_ref().is_err_and(is_raise_unwritten) {
+        // A raise a read of the lists leaves owed, a conflict after its retry included, is
+        // told to the host as waiting.
+        if result.as_ref().is_err_and(is_raise_left_owed) {
             self.raise_unwritten = true;
         }
         // Wherever a raise is written or left unwritten, the host is told as it stands now.

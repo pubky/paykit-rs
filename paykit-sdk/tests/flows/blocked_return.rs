@@ -4587,7 +4587,8 @@ async fn test_blocked_return_raise_writes_the_floor_held_over_a_lower_write_refu
 async fn test_blocked_return_conflicting_background_raise_keeps_the_receive_going() {
     // Paykit wire 5.6, Raising: another app unblocks bob, and the wallet's raise for it meets
     // `409 conflict` on its write and again on its retry. The lists read stands, the raise
-    // stays owed for the next receive, and the feed is read: bob's period details are taken.
+    // stays owed for the next receive, the host told, and the feed is read: bob's period
+    // details are taken.
     let w = World::new();
     let mut shop = w.shop().await;
     let mut wallet = contacts_wallet(&w, store()).await;
@@ -4659,9 +4660,12 @@ async fn test_blocked_return_conflicting_background_raise_keeps_the_receive_goin
         wallet.request(&subscription).await.unwrap().periods.len(),
         1
     );
+    // The host is told the raise waits, and the notice goes once it is written.
+    assert_eq!(raise_waiting_notices(&wallet).await, 1);
     w.clock.advance_ms(5_000);
     wallet.receive(None).await.unwrap();
     assert!(!unblock_raise_owed(&wallet).await);
+    assert_eq!(raise_waiting_notices(&wallet).await, 0);
 }
 
 #[tokio::test]
