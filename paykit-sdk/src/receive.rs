@@ -2497,11 +2497,14 @@ pub(crate) fn list_version(stored: &StoredMessage) -> Option<ListVersion> {
 /// the absence it was built on: past its window it is refused, its batch ends, the list
 /// stays held, and the next pass builds it again from what this app holds then, under the
 /// rules of a delete seen. Five minutes covers a slow send, a lost answer and the resend at
-/// the next receive, while the service forgets a delete only once every own app has
-/// acknowledged it (Switch spec 10.3), which takes this app's own feed read and is far
-/// slower. A create refused for it costs only another write at the next pass. The full
-/// close, a kept create not sent once the app has seen a write or a delete at its key, is
-/// the client's to make.
+/// the next receive; a create refused for it costs only another write at the next pass.
+/// It narrows the case, and doesn't close it: the service forgets a delete once every own
+/// app has acknowledged it (Switch spec 10.3), which can take seconds with every app
+/// reading, so a kept create sent again inside the window can still land over a forgotten
+/// delete. This app then takes nothing of it ([`LostListRecord`]), but another own app that
+/// never saw the delete could pay a single-use endpoint the delete took. The full close, a
+/// kept create not sent once the app has seen a write or a delete at its key, is the
+/// client's to make.
 pub(crate) const PLACEMENT_WINDOW_MS: u64 = 5 * 60 * 1000;
 
 /// Hold `stored`, a list whose `payment_lists` record doesn't read, with the cursor move,
@@ -2518,7 +2521,7 @@ fn hold_list(
     if let Some(version) = deleted {
         // Kept already when the client reported the delete; else with no copy, as nothing
         // shows the value it took.
-        let writes = list_record_deleted(cx, &record_key, version, None, None);
+        let writes = list_record_deleted(cx, &record_key, version, DeleteSource::NONE);
         for write in writes.map_err(Fail::Store)? {
             keep_local(cx, write);
         }
@@ -2543,16 +2546,19 @@ pub(crate) fn list_record_deleted(
     cx: &ReceiveContext<'_>,
     record_key: &[u8; 32],
     version: RecordVersion,
-    exact: Option<&[u8]>,
-    seen: Option<&[u8]>,
+    source: DeleteSource<'_>,
 ) -> Result<Vec<LocalWrite>, StoreFailure> {
     let bind = |value: &[u8]| {
         crate::records::bind_list(value, &cx.identity(), record_key, |t| cx.record_key(t).ok())
     };
     let at = key::list_record_lost(record_key);
-    let lost = lost_over(version, exact, seen, bind);
+    let lost = lost_over(version, source.exact, source.seen, bind);
     let lost =
         match state::cx_get::<LostListRecord>(cx, &at).map_err(crate::protocol::step_failure)? {
+            // Over the delete the entry keeps, with no write between: the same copy.
+            Some(held) if source.over_delete.is_some_and(|base| held.deleted_at(base)) => {
+                held.moved(version)
+            }
             Some(held) => match held.clone().then(lost) {
                 same if same == held => return Ok(Vec::new()),
                 changed => changed,
@@ -2562,6 +2568,26 @@ pub(crate) fn list_record_deleted(
     Ok(vec![
         state::local_put(&at, &lost).map_err(crate::protocol::view_failure)?
     ])
+}
+
+/// What the client shows of a `payment_lists` delete's predecessor ([`list_record_deleted`]).
+pub(crate) struct DeleteSource<'a> {
+    /// The delete's exact predecessor, if this app read it and its version is authenticated.
+    pub(crate) exact: Option<&'a [u8]>,
+    /// The client's mark of what this app saw at the key.
+    pub(crate) seen: Option<&'a [u8]>,
+    /// The version of the delete this one was built on, when it is the record this app
+    /// holds, taken on its own evidence: no write lies between them.
+    pub(crate) over_delete: Option<RecordVersion>,
+}
+
+impl DeleteSource<'_> {
+    /// Nothing shown of the predecessor.
+    pub(crate) const NONE: DeleteSource<'static> = DeleteSource {
+        exact: None,
+        seen: None,
+        over_delete: None,
+    };
 }
 
 /// The entry for the delete at `version`: the marks and list of `exact`, the delete's exact

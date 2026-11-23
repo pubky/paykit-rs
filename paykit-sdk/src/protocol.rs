@@ -1990,6 +1990,10 @@ impl Protocol for PaykitProtocol {
             (Collection::PayeeActivity, Some(v)) => {
                 activity::read(Some(v), &own.identity, ActivitySide::Payee).is_some()
             }
+            // The limit: the client gives this mark no record key, so a value is not bound
+            // here to the key its payee and app derive (Paykit wire 5.4), and another payee
+            // app's valid record written at a key becomes the mark there, against which the
+            // real payee app's lists are then refused. Binding needs the key from the client.
             (Collection::PaymentLists, Some(v)) => {
                 PaymentListRecord::read(v, &own.identity).is_ok()
             }
@@ -2035,13 +2039,33 @@ impl Protocol for PaykitProtocol {
             let exact = deletion
                 .exact_value
                 .filter(|_| deletion.exact_version_authenticated);
+            // A delete built on the delete this app holds, taken on its own evidence, has no
+            // write between them, so it took nothing the first one hadn't: the entry moves
+            // to it and keeps its copy. The client gives a deleted predecessor no value.
+            let base = deletion.base.expected_version;
+            let over_delete = deletion.base.held
+                && cx
+                    .record_at(deletion.key)
+                    .map_err(store_failure)?
+                    .is_some_and(|held| {
+                        held.content == pubky_switch_client::app::RecordContent::Deleted
+                            && held.version == base
+                            && held.authenticated
+                            && !held.doubtful
+                            && !held.flagged
+                            && !held.not_taken
+                            && !held.different_write_at_held_version
+                    });
             return Ok(Some(PutBack::Observe {
                 observed: crate::receive::list_record_deleted(
                     cx,
                     deletion.key,
                     deletion.version,
-                    exact,
-                    deletion.seen,
+                    crate::receive::DeleteSource {
+                        exact,
+                        seen: deletion.seen,
+                        over_delete: over_delete.then_some(base),
+                    },
                 )?,
             }));
         }
@@ -3629,8 +3653,8 @@ mod receive_tests {
 
     #[test]
     fn test_protocol_list_copy_over_a_refused_exact_predecessor_keeps_the_marks_seen() {
-        // The client refused a write dropping a mark, which then became the delete's exact
-        // predecessor: the copy keeps the mark the app saw.
+        // Should a delete's exact predecessor be a write dropping a mark the app saw, as a
+        // client could offer, the copy keeps the mark: the pinned client offers none then.
         let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
         let bob = Party::new(
             "bob",

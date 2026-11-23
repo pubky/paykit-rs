@@ -710,8 +710,8 @@ impl Stored for OwnBlockMark {
 /// endpoint was paid at, read from a value within the largest the switch takes (Switch wire
 /// 6.2), or a restore's union of two such sets. It is never removed: a value the family's
 /// rules take is taken with it kept, while removing it would let a later absence of the
-/// record, or a value without the marks, read as a record never deleted, since the client's
-/// own mark of what it saw ends at the delete and no backup carries it.
+/// record, or a value without the marks, read as a record never deleted, since no backup
+/// carries the client's own mark of what it saw, nor does a fresh store hold it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LostListRecord {
@@ -810,13 +810,14 @@ impl LostCopy {
 
     /// Whether the family's rules take `record` over this copy (Paykit wire 4.13, 5.4).
     fn admits(&self, record: &paykit_lib::records::PaymentListRecord) -> bool {
-        let Some(later) = Self::of(record) else {
-            return false;
-        };
+        Self::of(record).is_some_and(|later| self.takes(&later))
+    }
+
+    /// The rules of [`Self::admits`] on `later`, a value's marks and list: a newer list, or
+    /// the same one where a single list is known at this version, holding every mark.
+    fn takes(&self, later: &Self) -> bool {
         let newer = later.version() > self.version()
-            || (later.version() == self.version()
-                && self.hash.is_some()
-                && later.hash == self.hash);
+            || (later.version() == self.version() && later.hash == self.hash);
         newer
             && self
                 .marks
@@ -839,11 +840,11 @@ impl LostListRecord {
     }
 
     /// The delete at record version `deleted` over `exact`, its exact predecessor, joined
-    /// with `seen`, the client's mark of what this app saw at the key: a write this app
-    /// refused, such as one dropping a mark, can be the exact predecessor while the mark
-    /// still holds what it saw, so the copy keeps both: every mark of either, the newer
-    /// list, and no hash for two lists at one version ([`LostCopy::merge`]). With no exact
-    /// predecessor, no copy: what the delete took isn't known.
+    /// with `seen`, the client's mark of what this app saw at the key, should the two
+    /// differ: the copy keeps both, every mark of either, the newer list, and no hash for
+    /// two lists at one version ([`LostCopy::merge`]). The pinned client offers no exact
+    /// predecessor while it holds a refused write after it, so today they differ only if
+    /// a client does. With no exact predecessor, no copy: what the delete took isn't known.
     pub(crate) fn over_exact(
         deleted: pubky_switch_core::ops::RecordVersion,
         exact: Option<&paykit_lib::records::PaymentListRecord>,
@@ -861,8 +862,23 @@ impl LostListRecord {
         }
     }
 
+    /// Whether the newest delete kept is the one at `version`.
+    pub(crate) fn deleted_at(&self, version: pubky_switch_core::ops::RecordVersion) -> bool {
+        self.deleted == [version.generation, version.version]
+    }
+
+    /// The entry once a delete at `deleted` was written over the delete it keeps, with no
+    /// write between them: the later delete took nothing the earlier hadn't, so the copy
+    /// stays.
+    pub(crate) fn moved(self, deleted: pubky_switch_core::ops::RecordVersion) -> Self {
+        Self {
+            deleted: std::cmp::max(self.deleted, [deleted.generation, deleted.version]),
+            copy: self.copy,
+        }
+    }
+
     /// The entry after `seen`, a delete seen now, is kept with it: the same delete, or an
-    /// older one, reported again changes nothing, as its copy, the client's mark, ended at
+    /// older one, reported again changes nothing, as what it knew of the copy was kept at
     /// its first report; a newer one is merged in.
     pub(crate) fn then(self, seen: Self) -> Self {
         if seen.deleted <= self.deleted {
@@ -3741,6 +3757,34 @@ mod tests {
         assert_eq!(two.clone().then(lost(6, None)), two);
         assert_eq!(two.clone().then(lost(5, None)), two);
         assert_eq!(two.clone().then(lost(7, None)), lost(7, None));
+    }
+
+    #[test]
+    fn test_state_lost_copy_takes_only_a_newer_list_or_the_same_one() {
+        let mark = LostMark {
+            generation: 1,
+            counter: 1,
+            endpoint: "btc-a".into(),
+            attempt_id: [7; 16],
+        };
+        let copy = |counter: u64, hash: Option<u8>, marks: Vec<LostMark>| LostCopy {
+            marks,
+            generation: 1,
+            counter,
+            hash: hash.map(|h| [h; 32]),
+        };
+        let seen = copy(2, Some(1), vec![mark.clone()]);
+        // The same list, or a newer one, holding every mark.
+        assert!(seen.takes(&copy(2, Some(1), vec![mark.clone()])));
+        assert!(seen.takes(&copy(3, Some(4), vec![mark.clone()])));
+        // Not an older list, another at the seen version, or one dropping a mark.
+        assert!(!seen.takes(&copy(1, Some(1), vec![mark.clone()])));
+        assert!(!seen.takes(&copy(2, Some(2), vec![mark.clone()])));
+        assert!(!seen.takes(&copy(3, Some(4), Vec::new())));
+        // After a tie, only a newer version, whatever its hash.
+        let tie = copy(2, None, vec![mark.clone()]);
+        assert!(!tie.takes(&copy(2, Some(1), vec![mark.clone()])));
+        assert!(tie.takes(&copy(3, Some(1), vec![mark])));
     }
 
     #[test]
