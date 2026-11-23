@@ -400,6 +400,9 @@ pub struct Paykit {
     /// Whether a floor raise this app owes was tried and left unwritten
     /// ([`Paykit::settle_raise_waiting`]).
     pub(crate) raise_unwritten: bool,
+    /// Whether the lists were read since this handle's last receive or flush began: a raise
+    /// owed asks for no second read before the next one ([`Paykit::raise_owed`]).
+    pub(crate) lists_read_this_pass: bool,
     /// How many activity records this handle bound ([`Paykit::activity_binds`]).
     #[cfg(feature = "test-support")]
     pub(crate) activity_binds: std::sync::atomic::AtomicU64,
@@ -474,6 +477,7 @@ impl Paykit {
             capability_snapshot: None,
             identity_told: Vec::new(),
             raise_unwritten: false,
+            lists_read_this_pass: false,
             #[cfg(feature = "test-support")]
             activity_binds: std::sync::atomic::AtomicU64::new(0),
             certificates: std::sync::Mutex::default(),
@@ -617,6 +621,9 @@ impl Paykit {
             paykit.capability_snapshot = snapshot;
             let _owed = Box::pin(paykit.tend_own_record()).await;
             paykit.capability_snapshot = None;
+            // The host hears at once of what holds the identity for good, as at a load; one that
+            // can't be told now is told at the first receive's end.
+            let _told = paykit.tell_identity_notices().await;
             Ok(paykit)
         })
         .await
@@ -1026,6 +1033,7 @@ impl Paykit {
     }
 
     async fn receive_inner(&mut self, wait: Option<u32>) -> Result<ReceiveSummary> {
+        self.lists_read_this_pass = false;
         let read = Box::pin(self.read_before_effects(wait)).await?;
         Box::pin(self.after_read(read)).await
     }
@@ -1235,6 +1243,12 @@ impl Paykit {
         // a narrower one included: they are listed now, or stay unlisted for the next
         // receive or write (`Paykit::list_under_new_cert`).
         let records_unlisted = Box::pin(self.list_under_new_cert()).await?;
+        // A `missed` item this read took waits for its read of the lists, with or without the
+        // divergence hold and whatever the app's scopes: it is made now, its records listed,
+        // before any ask (Paykit wire 5.6, Raising).
+        if Box::pin(self.missed_widening_unread()).await? {
+            Box::pin(self.refresh_lists_when_due()).await?;
+        }
         let pending_read = records_unlisted.is_none().then_some(&report);
         let keys = Box::pin(self.scope_keys_awaited()).await?;
         // The entries the client stored for good: their messages, kept above, written into
@@ -1345,6 +1359,7 @@ impl Paykit {
     /// The client's errors.
     pub async fn flush(&mut self) -> Result<()> {
         let _delivery = self.delivery_operation();
+        self.lists_read_this_pass = false;
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;

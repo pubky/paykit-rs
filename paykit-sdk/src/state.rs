@@ -3268,6 +3268,13 @@ mod tests {
     }
 
     #[test]
+    fn test_loss_recorded_binds_a_generation_after_another_only() {
+        assert!(reads::<u64>(key::LOSS_RECORDED, serde_json::json!(2)));
+        assert!(!reads::<u64>(key::LOSS_RECORDED, serde_json::json!(0)));
+        assert!(!reads::<u64>(key::DENIED, serde_json::json!(2)));
+    }
+
+    #[test]
     fn test_loss_current_boundary_requires_exact_members() {
         let loss = serde_json::json!({
             "generation": 2, "declared_at_ms": 5, "uncertain_until_ms": 9
@@ -3672,7 +3679,8 @@ mod tests {
         assert!(!reads::<QueuedAsk>(&key::ask(&pubky, 5), ask(6)));
         assert!(!reads::<QueuedAsk>(&key::ask(&[4; 32], 5), ask(5)));
         // A side of the message its key names.
-        let side = |msg_id: &str| serde_json::json!({ "msg_id": msg_id, "side": "payer" });
+        let side =
+            |msg_id: &str| serde_json::json!({ "msg_id": msg_id, "side": "payer", "label": null });
         assert!(reads::<KeptSide>(&key::side(id), side(id)));
         assert!(!reads::<KeptSide>(&key::side(id), side(other)));
         // A held answer of the payee and message its key names.
@@ -4077,6 +4085,10 @@ mod tests {
             (
                 key::identity_notice(crate::notices::NoticeKind::BlockFloorHeld),
                 StateKey::IdentityNotice(crate::notices::NoticeKind::BlockFloorHeld),
+            ),
+            (
+                key::identity_notice(crate::notices::NoticeKind::FloorRaiseWaiting),
+                StateKey::IdentityNotice(crate::notices::NoticeKind::FloorRaiseWaiting),
             ),
             (
                 key::identity_notice(crate::notices::NoticeKind::AutomaticPaymentsHeld),

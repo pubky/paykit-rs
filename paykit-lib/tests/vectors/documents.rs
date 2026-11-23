@@ -886,7 +886,7 @@ const CERTIFICATE_REJECTIONS: [CertCase; 2] = [
 ];
 
 /// The cases of `labelled_scope_rejections`: their names, scopes and the reason every
-/// verifier gives, in the prototype's wording.
+/// verifier gives, in paykit-lib's wording.
 const LABELLED_SCOPE_REJECTIONS: [(&str, &[&str], &str); 5] = [
     (
         "a label of 33 characters",

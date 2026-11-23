@@ -124,9 +124,9 @@ pub enum NoticeKind {
     /// hold: the floor doesn't read, or the switch refuses the write for now (Paykit wire 5.6,
     /// Raising). Until it is, an unblocked sender's one-time requests wait and it is asked
     /// nothing, and while a widening's raise waits no one is asked to re-send; it is tried again
-    /// at each receive. Raised
-    /// once while it stands, and removed when the raise is written; it names no attempt,
-    /// message or counterparty.
+    /// at each receive. Raised once per load while it stands, and again after a reopen when a
+    /// receive leaves it unwritten; removed when the raise is written or the divergence hold
+    /// stands, which its own notice tells. It names no attempt, message or counterparty.
     FloorRaiseWaiting,
     /// Automatic one-time payments for the identity are held for good after a provider
     /// loss, and each request can still be paid by hand (Paykit spec 8.1, Paykit wire 5.6,
@@ -995,6 +995,12 @@ impl Paykit {
         // notice, for the host to acknowledge again.
         if let Some(stored) = &kept.stored {
             self.forget_stored(stored, &kept).await?;
+        }
+        // An identity-wide notice acknowledged stays told for this load, as one shown is.
+        if let Some(StateKey::IdentityNotice(kind)) = StateKey::parse(key.as_bytes()) {
+            if !self.identity_told.contains(&kind) {
+                self.identity_told.push(kind);
+            }
         }
         if !held && kept.settlement.is_none() && !kept.kind.names_outgoing_message() {
             return self.local_delete(&key).await;

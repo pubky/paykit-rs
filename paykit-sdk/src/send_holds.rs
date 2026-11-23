@@ -149,22 +149,41 @@ pub(crate) fn may_deliver(delivery: &DeliveryView<'_>, kind: Kind) -> Result<boo
     {
         return Ok(false);
     }
+    let message = delivery.message();
+    // A cancellation goes only while the role of the side it was sent from still sends it,
+    // before a re-send's rule or the payee's exception: `paykit_pay` for the payer's, the
+    // selling scope of its sale for the payee's. One whose side isn't kept, as one queued
+    // through the client directly, goes as a payer's only under a certificate that sends it
+    // from either side, and waits otherwise (Paykit spec 3.3, 3.4).
+    let mut payee_cancellation = false;
+    if kind == Kind::PaymentRequestCancellation {
+        use paykit_lib::kinds::Side;
+        let kept = state::delivery_get::<KeptSide>(delivery, &key::side(&message.msg_id))?;
+        let (sides, label) = match &kept {
+            Some(kept) if kept.side == SideTag::Payer => (&[Side::Payer][..], None),
+            Some(kept) => (&[Side::Payee][..], kept.label.as_deref()),
+            None => (&[Side::Payer, Side::Payee][..], None),
+        };
+        let label = label.map(paykit_lib::Label::parse).transpose();
+        if !label.is_ok_and(|label| {
+            sides
+                .iter()
+                .all(|side| paykit_lib::kinds::may_send(kind, *side, cert.scopes(), label.as_ref()))
+        }) {
+            return Ok(false);
+        }
+        payee_cancellation = kept.is_some_and(|kept| kept.side == SideTag::Payee);
+    }
     let reads_lists = receive::reads_lists(cert.scopes());
     // Re-sending an answer requires `paykit_contacts` and a known deny copy that permits
     // the counterparty, what settles a payment included (Paykit spec 3.1, 8.1, 9).
     if delivery.resend() {
         return Ok(reads_lists && deny_decision(delivery)? == DenyDecision::Permits);
     }
-    let message = delivery.message();
     match kind {
         // A proof and a receipt report a payment already made (Paykit spec 8.1).
         Kind::PaymentProof | Kind::PaymentReceipt => return Ok(true),
-        Kind::PaymentRequestCancellation => {
-            let side = state::delivery_get::<KeptSide>(delivery, &key::side(&message.msg_id))?;
-            if side.is_some_and(|kept| kept.side == SideTag::Payee) {
-                return Ok(true);
-            }
-        }
+        Kind::PaymentRequestCancellation if payee_cancellation => return Ok(true),
         Kind::PaymentRequestAcceptance => {
             let exemption = state::delivery_get::<SendExemption>(
                 delivery,
@@ -552,6 +571,22 @@ impl QueuedStop {
         Ok(())
     }
 
+    /// The entry of `answer`, a held answer given up with no copy ever queued: its hash and
+    /// time name no copy, so no outbox copy is ever taken for it.
+    pub(crate) fn never_queued(answer: &crate::hold::HeldAnswer) -> Self {
+        Self {
+            msg_id: answer.msg_id.clone(),
+            held: HeldKind::Stop,
+            to: answer.payee,
+            request_hash: Some(answer.request_hash),
+            record: None,
+            hash: [0; 32],
+            created_at_ms: 0,
+            given_up: None,
+            told: false,
+        }
+    }
+
     /// The entry of `stored`, a stop answering the request `request_hash`, queued again
     /// from the payer's request record.
     pub(crate) fn stored(
@@ -675,7 +710,13 @@ impl Paykit {
     /// answers (Paykit spec 8.1). A read that fails observes nothing, and such messages
     /// wait for the next operation; the operation tries no other.
     pub(crate) async fn observe_for_delivery(&mut self) -> Result<()> {
-        if self.protocol.delivery.observed(self.now()).is_some()
+        // A time observed spares the read only while the copy of the lists is fresh: a due
+        // copy is read before a governed send all the same (Paykit spec 8.1).
+        let fresh = self
+            .local_get::<u64>(key::LISTS_READ)
+            .await?
+            .is_some_and(|at| receive::lists_read_is_fresh(at, self.now()));
+        if (self.protocol.delivery.observed(self.now()).is_some() && fresh)
             || self.protocol.delivery.has_failed()
         {
             return Ok(());

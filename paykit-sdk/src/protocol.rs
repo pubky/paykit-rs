@@ -136,8 +136,8 @@ pub struct PaykitProtocol {
     /// endpoints (`crate::own_record`): `PUBLISHES_UNKNOWN` until the SDK's constructors
     /// set it, as for a protocol a host registers itself, when only the scopes decide.
     publishes_record: std::sync::atomic::AtomicU8,
-    /// The app's rail, which names a proof's settlement (Paykit wire 1.5); without one, the
-    /// methods `paykit-lib` knows.
+    /// The app's rail, which names a proof's settlement (Paykit wire 1.5); without one, no
+    /// proof names a settlement.
     rail: Option<Arc<dyn Rail>>,
     /// The extension kinds the host's extension handles (Paykit spec 3.3).
     extensions: Vec<ExtensionKind>,
@@ -242,13 +242,15 @@ impl PaykitProtocol {
         true
     }
 
-    /// The settlement ID of a proof's `proof` object: the rail's, or else the one
-    /// `paykit-lib` knows.
-    fn settlement_id(&self, proof: &Map<String, Value>) -> Option<Vec<u8>> {
-        match &self.rail {
-            Some(rail) => rail.settlement_id(proof),
-            None => paykit_lib::derive::settlement_id(proof),
-        }
+    /// The settlement ID of a proof's `proof` object, as the rail names it (Paykit wire 1.5).
+    /// A protocol without a rail ([`PaykitProtocol::new`]) pays and credits nothing, so no
+    /// proof names a settlement for it.
+    fn settlement_id(
+        &self,
+        endpoint_id: &paykit_lib::PaymentEndpointIdentifier,
+        proof: &Map<String, Value>,
+    ) -> Option<Vec<u8>> {
+        self.rail.as_ref()?.settlement_id(endpoint_id, proof)
     }
 
     /// Set the own identity and certificate, after a join, a load or a renewal.
@@ -1654,7 +1656,9 @@ impl Protocol for PaykitProtocol {
         // certificate the Switch takes and Paykit refuses writes nothing.
         check_certificate(restoring.cert())
             .map_err(|error| format!("the backup's certificate: {error}"))?;
-        restore_paykit_layer(layer, restoring, &|proof| self.settlement_id(proof))
+        restore_paykit_layer(layer, restoring, &|endpoint, proof| {
+            self.settlement_id(endpoint, proof)
+        })
     }
 
     /// Check the applied original before delivering any Allowance reply (Paykit spec
@@ -1672,6 +1676,14 @@ impl Protocol for PaykitProtocol {
         &self,
         delivery: &pubky_switch_client::app::DeliveryView<'_>,
     ) -> Result<bool, StoreFailure> {
+        // Nothing goes under a certificate Paykit refuses, or one that no longer sends the
+        // kind, before any rule of the kind's own (Paykit spec 3.1 to 3.3, 7.2, 9).
+        let cert = delivery.cert();
+        if check_certificate(cert).is_err()
+            || paykit_lib::kinds::check_sender_scopes(delivery.message(), cert.scopes()).is_err()
+        {
+            return Ok(false);
+        }
         let kind = MessageKind::parse(&delivery.message().kind);
         if crate::allowances::pending_delivery(delivery.message())
             && (crate::allowances::pending_conflict_holds_delivery(delivery)
@@ -1915,8 +1927,8 @@ impl Protocol for PaykitProtocol {
                     return crate::extensions::extension_effect(cx, message);
                 }
                 let stored = stored_copy(message).map_err(Fail::Drop)?;
-                receive::effect(cx, &stored, message.position(), &|proof| {
-                    self.settlement_id(proof)
+                receive::effect(cx, &stored, message.position(), &|endpoint, proof| {
+                    self.settlement_id(endpoint, proof)
                 })
                 .map(|()| Outcome::Apply(Effect::default()))
             });
@@ -2188,7 +2200,9 @@ impl Protocol for PaykitProtocol {
                 observed: vec![local_write(&key::list_record_lost(deletion.key), &true)?],
             }));
         }
-        crate::deletions::observe_payee_deletion(deletion, cx, &|proof| self.settlement_id(proof))
+        crate::deletions::observe_payee_deletion(deletion, cx, &|endpoint, proof| {
+            self.settlement_id(endpoint, proof)
+        })
     }
 
     fn record_put_back_successor(
@@ -2197,7 +2211,9 @@ impl Protocol for PaykitProtocol {
         successor: &RecordSuccessor<'_>,
         cx: &ReceiveContext<'_>,
     ) -> Result<PutBackSuccessor, StoreFailure> {
-        crate::deletions::receipt_publication(deletion, successor, cx, &|p| self.settlement_id(p))
+        crate::deletions::receipt_publication(deletion, successor, cx, &|endpoint, proof| {
+            self.settlement_id(endpoint, proof)
+        })
     }
 
     /// Whether a newer write goes back on what the app saw (Paykit wire 5.3, 5.4): drops or
@@ -2577,6 +2593,27 @@ mod receive_tests {
         assert_eq!(widening(&missed)["d"]["windows"][0]["floor_ms"], 0);
     }
 
+    #[test]
+    fn test_missed_widening_raises_to_the_read_that_first_passed_the_item() {
+        // Paykit wire 5.6, Raising; spec 7.2, What a `missed` item loses: the widening raises
+        // the floor to the earlier of the item's last acceptance time and the authenticated
+        // time of the feed page that first passed it (`read_at_ms`), which the client keeps
+        // across a retried or delayed callback, never the time the callback runs at.
+        let at = |read_at_ms, accepted_until_ms| {
+            widening(&MissedEntries {
+                read_at_ms,
+                seq: 1,
+                entries: 1,
+                accepted_from_ms: 10,
+                accepted_until_ms,
+            })["d"]["windows"][0]["floor_ms"]
+                .clone()
+        };
+        assert_eq!(at(15, 20), 15);
+        assert_eq!(at(30, 20), 20);
+        assert_eq!(at(40, u64::MAX), 40);
+    }
+
     /// The keys `missed()` puts, with their values as JSON.
     fn missed_puts(missed: &MissedEntries) -> Vec<(String, serde_json::Value)> {
         PaykitProtocol::new()
@@ -2746,7 +2783,7 @@ mod receive_tests {
                 None,
                 &key(target),
                 |t| Some(key(t)),
-                &|_| None,
+                &|_, _| None,
             )
         };
         assert!(read(&first).unwrap().receipt.is_some());

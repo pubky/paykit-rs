@@ -1707,12 +1707,15 @@ fn payer_reply(
             // A payment without a request: keyed by its settlement, so every proof of one
             // settlement names one record and is credited once (Paykit spec 8.4). The app's
             // rail gives the settlement ID, so a method of its own is credited too; a proof
-            // whose method gives none isn't credited.
+            // whose method gives none isn't credited, and is dropped with that reason rather
+            // than applied, so the host sees it wasn't taken (Paykit wire 1.5).
             let Body::PaymentProof(proof) = stored.body() else {
                 return Ok(false);
             };
-            let Some(settled) = settlement(&proof.proof) else {
-                return Ok(false);
+            let Some(settled) = settlement(&proof.payment_endpoint_identifier, &proof.proof) else {
+                return Err(Fail::Drop(
+                    "Paykit wire 1.5: the payment method names no settlement for this proof".into(),
+                ));
             };
             let target = ActivityTarget::payee(
                 natural_key::payee_payment_record(&proof.payment_endpoint_identifier, &settled),
@@ -2411,8 +2414,8 @@ fn list_effect(cx: &mut ReceiveContext<'_>, stored: &StoredMessage, seq: u64) ->
     // Over a divergent record its user hasn't confirmed, or while a list kept over it waits
     // to be written, the list is kept, and written once the user confirms (Paykit spec 6).
     if let Some(held) = cx.record(&target)? {
-        if crate::divergent::step_write_waits(cx, &held, stored, seq, &|_| None)? {
-            return crate::divergent::step_keep(cx, &held, stored, seq, &|_| None, true);
+        if crate::divergent::step_write_waits(cx, &held, stored, seq, &|_, _| None)? {
+            return crate::divergent::step_keep(cx, &held, stored, seq, &|_, _| None, true);
         }
     }
     let held = match cx.record(&target)?.map(|r| r.content) {
@@ -3020,15 +3023,18 @@ impl Paykit {
                     else {
                         return Err(crate::error::PaykitError::corrupt());
                     };
-                    let target = self.rail.settlement_id(&proof.proof).map(|settled| {
-                        ActivityTarget::payee(
-                            natural_key::payee_payment_record(
-                                &proof.payment_endpoint_identifier,
-                                &settled,
-                            ),
-                            None,
-                        )
-                    });
+                    let target = self
+                        .rail
+                        .settlement_id(&proof.payment_endpoint_identifier, &proof.proof)
+                        .map(|settled| {
+                            ActivityTarget::payee(
+                                natural_key::payee_payment_record(
+                                    &proof.payment_endpoint_identifier,
+                                    &settled,
+                                ),
+                                None,
+                            )
+                        });
                     match target {
                         Some(target) if self.activity_key(&target)? == record => target,
                         // Kept for another record than the rail's settlement names now: never
@@ -3073,7 +3079,7 @@ impl Paykit {
                     target.label().as_ref(),
                     &record_key,
                     |t| self.app.record_key(t).ok(),
-                    &|proof| self.rail.settlement_id(proof),
+                    &|endpoint, proof| self.rail.settlement_id(endpoint, proof),
                 )
             });
             // A message the record can't take, its sender not the record's counterparty,
@@ -3202,9 +3208,11 @@ impl Paykit {
         let now = self.now();
         let last = self.local_get::<u64>(key::LISTS_READ).await?;
         // A raise owed that can be written goes at the next receive, whatever the copy's age,
-        // and so does a read after a deny change the client told (Paykit spec 8.1).
+        // with one read of the lists in a pass, and so does a read after a deny change the
+        // client told (Paykit spec 8.1).
         if last.is_some_and(|read| lists_read_is_fresh(read, now))
             && !self.raise_owed().await?
+            && !Box::pin(self.missed_widening_unread()).await?
             && self.local_get::<u64>(key::LISTS_TOLD).await?.is_none()
         {
             return Ok(());
@@ -3301,6 +3309,7 @@ impl Paykit {
     ) -> crate::error::Result<Vec<[u8; 32]>> {
         // The read's answer verified a service time: the current delivery operation's.
         self.observe_service_time();
+        self.lists_read_this_pass = true;
         let (mut deny, mut tx) = self.judged_deny(lists.deny).await?;
         deny.sort_unstable();
         deny.dedup();
@@ -3354,10 +3363,11 @@ impl Paykit {
             match Box::pin(self.commit_with_floor(pending.to_ms, tx)).await {
                 Ok(()) => {}
                 // A raise that can't be written, for now or while the divergence hold stands,
-                // leaves the unblock's senders held (`bf`) and is tried again at the next
-                // read; it never leaves the lists unread, which would hold every payment,
-                // intake and send (Paykit spec 8.1; Paykit wire 5.6).
-                Err(error) if crate::floor::is_raise_unwritten(&error) => {}
+                // or that still conflicts after its retry, leaves the unblock's senders held
+                // (`bf`) and is tried again at the next read; it never leaves the lists unread,
+                // which would hold every payment, intake and send (Paykit spec 8.1; Paykit
+                // wire 5.6).
+                Err(error) if crate::floor::is_raise_left_owed(&error) => {}
                 Err(error) => return Err(error),
             }
             let mut read = Tx::default();

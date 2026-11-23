@@ -270,8 +270,9 @@ impl Paykit {
                 continue;
             }
             let target = ActivityTarget::payer(
-                activity
-                    .natural_key_with(&self.identity(), &|proof| self.rail.settlement_id(proof))?,
+                activity.natural_key_with(&self.identity(), &|endpoint, proof| {
+                    self.rail.settlement_id(endpoint, proof)
+                })?,
             );
             let record = target.record_target();
             let RecordRead::Fresh(fresh) = self.app.read_record_fresh(&record).await? else {

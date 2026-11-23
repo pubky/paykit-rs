@@ -1187,7 +1187,7 @@ impl Paykit {
                         label.as_ref(),
                         &record_held.key,
                         |t| self.app.record_key(t).ok(),
-                        &|p| self.rail.settlement_id(p),
+                        &|endpoint, proof| self.rail.settlement_id(endpoint, proof),
                     )
                 });
                 // A record that doesn't open, read or bind shows nothing to send now: the
@@ -1364,14 +1364,14 @@ impl Paykit {
             // the same commit, so it stays while the notice does and an in-place restore
             // keeps the notice with it (Paykit spec 8.1, [`crate::send_holds::QueuedStop`]).
             let entry = key::queued_stop(&answer.msg_id);
-            if let Some(mut stop) = self
+            // One never queued, lost from its record, gets one so.
+            let mut stop = self
                 .local_get::<crate::send_holds::QueuedStop>(&entry)
                 .await?
-            {
-                stop.given_up = Some(crate::send_holds::GivenUp::Told);
-                stop.told = true;
-                tx.put(&entry, &stop)?;
-            }
+                .unwrap_or_else(|| crate::send_holds::QueuedStop::never_queued(&answer));
+            stop.given_up = Some(crate::send_holds::GivenUp::Told);
+            stop.told = true;
+            tx.put(&entry, &stop)?;
             if self.kept_notice(&notice).await?.is_none() {
                 tx.put(
                     &notice,

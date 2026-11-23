@@ -216,6 +216,22 @@ impl Owner {
         store: Arc<MemoryStore>,
         rail: &Arc<FakeRail>,
     ) -> TestResult<Paykit> {
+        let mut wallet =
+            Box::pin(self.join_unlisted(world, app, scopes, config, store, rail)).await?;
+        Box::pin(finish_listing(&mut wallet)).await?;
+        Ok(wallet)
+    }
+
+    /// [`Self::join`], before the app reads anything.
+    async fn join_unlisted(
+        &mut self,
+        world: &World,
+        app: &str,
+        scopes: RequestedScopes,
+        config: PaykitConfig,
+        store: Arc<MemoryStore>,
+        rail: &Arc<FakeRail>,
+    ) -> TestResult<Paykit> {
         let identity = world.identity(&self.name)?;
         let names: Vec<_> = scopes.scopes.iter().map(String::as_str).collect();
         let asking = Asking::for_scopes_with_paths(
@@ -228,16 +244,14 @@ impl Owner {
         let approved = Box::pin(self.signer.approve(review)).await?;
         Box::pin(self.signer.claim_delivered(&approved.request)).await?;
         world.advance_ms(1_000);
-        let mut wallet = Box::pin(Paykit::join(
+        Ok(Box::pin(Paykit::join(
             app_env(world, store),
             config,
             asking.join_request(identity.public(), &approved)?,
             rail.clone(),
             Arc::new(HostTimer),
         ))
-        .await?;
-        Box::pin(finish_listing(&mut wallet)).await?;
-        Ok(wallet)
+        .await?)
     }
 }
 

@@ -893,7 +893,9 @@ impl Paykit {
             .bind_held(held, ActivitySide::Payee, label.as_ref())
             .ok_or(Refusal::NotFound)?;
         let target = ActivityTarget::payee(
-            bound.natural_key_with(&self.identity(), &|p| self.rail.settlement_id(p))?,
+            bound.natural_key_with(&self.identity(), &|endpoint, proof| {
+                self.rail.settlement_id(endpoint, proof)
+            })?,
             label.as_ref(),
         );
         Ok((target, bound))
@@ -973,9 +975,9 @@ impl Paykit {
     /// credited to another request, Billing Period or payment without a request of the same
     /// payer, that record holding a proof of the same settlement with its receipt, is `None`
     /// too. Its proof stays in its record and gets no receipt. The settlement is the one the
-    /// payment method names, such as the transaction ID of an on-chain payment, with no
-    /// output index, so one transaction pays one occurrence. A proof without a receipt, such
-    /// as late evidence, credits nothing.
+    /// payment method names ([`crate::Rail::settlement_id`]): whether one transaction can
+    /// pay two occurrences is the method's rule, not Paykit's. A proof without a receipt,
+    /// such as late evidence, credits nothing.
     ///
     /// # Errors
     ///
@@ -1226,13 +1228,9 @@ impl Paykit {
             None => return Err(Refusal::NotFound.into()),
         };
         let (amount, payload, destination_expires, rate_window, deadline, not_before) = payment;
-        let settlement_id = self.rail.settlement_id(&proof.proof);
-        let typed = proof.proof.get("type").filter(|value| !value.is_null());
-        let known_method = typed.and_then(Value::as_str) == Some("bitcoin-txid")
-            || (typed.is_none() && proof.proof.get("rail").and_then(Value::as_str) == Some("fake"));
-        if known_method && paykit_lib::derive::settlement_id(&proof.proof).is_none() {
-            return Ok(None);
-        }
+        let settlement_id = self
+            .rail
+            .settlement_id(&proof.payment_endpoint_identifier, &proof.proof);
         let mut other_uncertain = false;
         if let Some(settlement) = settlement_id.as_ref().filter(|_| bound.receipt.is_none()) {
             if self
@@ -1460,7 +1458,7 @@ impl Paykit {
             .is_some_and(|stored| match stored.body() {
                 Body::PaymentProof(proof) => self
                     .rail
-                    .settlement_id(&proof.proof)
+                    .settlement_id(&proof.payment_endpoint_identifier, &proof.proof)
                     .is_some_and(|id| id != settlement),
                 _ => false,
             }))
@@ -1691,6 +1689,7 @@ impl Paykit {
                 &KeptSide {
                     msg_id: signed.msg_id().to_owned(),
                     side: SideTag::Payee,
+                    label: target.label().map(|label| label.as_str().to_owned()),
                 },
             )?;
             match self
@@ -2727,6 +2726,7 @@ impl Paykit {
                 &KeptSide {
                     msg_id: signed.msg_id().to_owned(),
                     side: SideTag::Payer,
+                    label: None,
                 },
             )?;
         }
