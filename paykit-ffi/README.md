@@ -117,19 +117,3 @@ DYLD_LIBRARY_PATH="$OUT:$LIB" "$OUT/wallet-consumer"
 To exercise a full checkout from the host, build the host library with `--features bindgen,test-wallet` and regenerate the bindings. Supply `-PcheckoutTest=true` to the Kotlin command. For the Swift 6 command, add `-D PAYKIT_CHECKOUT_TEST` and `paykit-ffi/tests/hosts/CheckoutConsumer.swift`. Both consumers enroll with a local shop, acknowledge a recovery notice across reopen, and stop waiting for the payment call after the host method has durably charged it. The payment is recorded when the method answers, and the reopened wallet uses the original attempt to obtain the signed seller receipt. The same programs also exercise a divergent request with a held receipt and a payment whose only doubt is a provider loss.
 
 Run either checkout consumer with `PAYKIT_TEST_RESTORE=confirm` to restore a backup into a fresh store, review a registration made since the backup, and pay the original held request after confirmation. Use `refuse` to decline the registration and observe the compromise alarm, or `doubt` to close the wallet while the method's charge is still running and reconcile that possibly sent attempt. The test checkout waits 2 seconds for `pay` instead of 30.
-
-### On an Android emulator and an iOS simulator
-
-Both device tests run a checkout from the main thread with the test-wallet library and check that every wallet call and callback runs on Paykit's own threads. On Android, strict mode ends the process on any disk or network work on the main thread. Build the library for the emulator's ABI and run the instrumented test against the bindings generated with `test-wallet`:
-
-```sh
-cargo ndk -t arm64-v8a -p 28 -o "$OUT/jniLibs" build --locked --release -p paykit-ffi --features test-wallet --lib
-gradle -p paykit-ffi/tests/android -Pbindings="$OUT/kotlin" -PjniLibs="$OUT/jniLibs" connectedAndroidTest
-```
-
-On iOS, build both archives with `--features test-wallet`, assemble them with `package-apple.sh`, and run the test from `paykit-ffi/tests`:
-
-```sh
-PAYKIT_APPLE_PACKAGE="$OUT/apple" xcodebuild test -scheme PaykitWalletDevice-Package \
-    -destination "platform=iOS Simulator,name=iPhone 17"
-```

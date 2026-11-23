@@ -1,4 +1,7 @@
-// Runs the generated Kotlin bindings and the test-wallet library on an Android device.
+// Runs the generated Kotlin bindings and the test-wallet library on an Android device:
+//   cargo ndk -t arm64-v8a -p 28 -o "$OUT/jniLibs" build --locked --release -p paykit-ffi --features test-wallet --lib
+//   gradle -p paykit-ffi/tests/android -Pbindings="$OUT/kotlin" -PjniLibs="$OUT/jniLibs" connectedAndroidTest
+// with the bindings generated from a host library built with `test-wallet`.
 plugins {
     id("com.android.library") version "9.3.0"
 }
