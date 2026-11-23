@@ -1078,7 +1078,7 @@ impl Paykit {
         count
     }
 
-    fn remember_read(&mut self, summary: ReceiveSummary) {
+    pub(crate) fn remember_read(&mut self, summary: ReceiveSummary) {
         self.first_read_summary = Some(Box::new(match self.first_read_summary.take() {
             Some(earlier) => summary.after(*earlier),
             None => summary,

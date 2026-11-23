@@ -1327,6 +1327,15 @@ pub(crate) fn kept(value: serde_json::Value) -> serde_json::Value {
     serde_json::json!({ "v": 1, "d": value })
 }
 
+/// The `msg_id` of the message a [`kept`] value holds.
+pub(crate) fn kept_msg_id(kept: &serde_json::Value) -> String {
+    let plaintext =
+        pubky_switch_core::enc::unb64(kept["d"]["plaintext"].as_str().unwrap()).unwrap();
+    let plaintext = pubky_switch_core::message::MessagePlaintext::decode(&plaintext).unwrap();
+    let json: serde_json::Value = serde_json::from_slice(plaintext.json()).unwrap();
+    json["msg_id"].as_str().unwrap().to_owned()
+}
+
 #[tokio::test]
 async fn test_restore_kept_cancellation_binds_the_received_kind_and_request() {
     let w = World::new();
