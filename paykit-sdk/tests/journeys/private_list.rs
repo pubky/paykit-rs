@@ -29,12 +29,13 @@ fn offer(text: &str) -> TestResult<BTreeMap<PaymentEndpointIdentifier, PaymentEn
         .collect())
 }
 
-fn expected(value: &str) -> TestResult<Expected> {
-    Ok(Expected {
-        request_hash: None,
-        amount: btc(value)?,
-        endpoint_id: endpoint("btc-lightning-bolt12")?,
-    })
+fn expected(rail: &FakeRail, value: &str) -> TestResult<Expected> {
+    Ok(Expected::new(
+        rail,
+        None,
+        btc(value)?,
+        endpoint("btc-lightning-bolt12")?,
+    ))
 }
 
 /// The seller sets `text` as its list's endpoints and chooses the payer as a contact to
@@ -64,25 +65,17 @@ async fn pay_from_list(
     published: &str,
 ) -> TestResult<String> {
     let payment = UnrequestedPayment::new(shop.identity(), btc(value)?);
-    let before = rail.selections().len();
+    let expected = expected(rail, value)?;
     let outcome = Box::pin(wallet.pay_without_request(payment))
         .await
         .outcome?;
     let selections = rail.selections();
-    assert_eq!(selections.len(), before + 1, "{selections:?}");
     let (candidates, _) = selections
         .last()
         .ok_or("the method was handed no endpoint")?;
     assert_eq!(candidates.len(), 1, "{candidates:?}");
     assert_eq!(candidates[0].payload.as_str(), published);
-    Box::pin(paid_and_receipted(
-        wallet,
-        shop,
-        rail,
-        outcome,
-        &expected(value)?,
-    ))
-    .await
+    Box::pin(paid_and_receipted(wallet, shop, rail, outcome, &expected)).await
 }
 
 /// A payment without a request to the seller is refused with `refusal`, and nothing is paid.

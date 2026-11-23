@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use paykit_sdk::rail::FakeRail;
 use paykit_sdk::{
     AppScopes, PayOptions, PayeeStatus, Paykit, PaykitConfig, ReceiptsOf, Refusal, RequestRef,
     RequestStatus,
@@ -48,12 +49,13 @@ async fn requested(wallet: &mut Paykit, shop: &mut Paykit) -> TestResult<Request
     Ok(request)
 }
 
-fn expected(request: &RequestRef) -> TestResult<Expected> {
-    Ok(Expected {
-        request_hash: Some(request.request_hash),
-        amount: btc("0.00025")?,
-        endpoint_id: endpoint("btc-lightning-bolt11")?,
-    })
+fn expected(rail: &FakeRail, request: &RequestRef) -> TestResult<Expected> {
+    Ok(Expected::new(
+        rail,
+        Some(request.request_hash),
+        btc("0.00025")?,
+        endpoint("btc-lightning-bolt11")?,
+    ))
 }
 
 /// Paying `request` again from `wallet` is refused, and its journal holds no new payment.
@@ -75,6 +77,7 @@ async fn paid_proven_and_receipted(world: &World) -> TestResult {
         ..
     } = Box::pin(checkout(world, PaykitConfig::default())).await?;
     let request = Box::pin(requested(&mut wallet, &mut shop)).await?;
+    let expected = expected(&rail, &request)?;
     let outcome = Box::pin(wallet.pay_request(&request, PayOptions::default()))
         .await
         .outcome?;
@@ -88,7 +91,7 @@ async fn paid_proven_and_receipted(world: &World) -> TestResult {
         &mut shop,
         &rail,
         outcome,
-        &expected(&request)?,
+        &expected,
     ))
     .await?;
     let of_request = Box::pin(wallet.receipts(ReceiptsOf::Request(request))).await?;
@@ -128,6 +131,7 @@ async fn second_wallet_sees_the_payment(world: &World) -> TestResult {
     );
 
     // The wallet pays; the phone sees the request paid and doesn't pay it a second time.
+    let expected = expected(&rail, &request)?;
     let outcome = Box::pin(wallet.pay_request(&request, PayOptions::default()))
         .await
         .outcome?;
@@ -144,7 +148,7 @@ async fn second_wallet_sees_the_payment(world: &World) -> TestResult {
         &mut shop,
         &rail,
         outcome,
-        &expected(&request)?,
+        &expected,
     ))
     .await?;
     Box::pin(phone.receive(None)).await?;

@@ -59,6 +59,15 @@ pub struct MethodDeclaration {
     /// The longest a dispatch takes to complete or fail, in milliseconds: a day for an ordinary
     /// Lightning payment (Switch spec 10.2).
     pub longest_completion_ms: u64,
+    /// How far, in milliseconds, the method's verified payment time may lie before the
+    /// request's signed `created_at` for a payment made after it (Paykit spec 7.1, "Not
+    /// before the request"). The payee credits no evidence dated earlier than `created_at`
+    /// less this. Cover the method's time precision (at least 1,000 ms for whole seconds),
+    /// the skew of the clock that dates the evidence, and the method's timestamp rules: two
+    /// hours is a conservative early tolerance for a Bitcoin block timestamp. A block
+    /// timestamp ahead of real time can also put a payment made in time past a deadline, and
+    /// no tolerance covers that.
+    pub payment_time_tolerance_ms: u64,
 }
 
 /// A Payment Endpoint a payment may take, handed to `Rail::select_endpoints`: its candidate
@@ -266,7 +275,10 @@ pub trait PaymentMethod: Send + Sync {
         &self,
         payer: Vec<u8>,
     ) -> Result<Option<Vec<MethodDispatch>>, MethodError>;
-    /// Verify the proof against the original payment and return its verified time when known.
+    /// Verify the proof against the original payment and return its verified payment time,
+    /// in Unix milliseconds, or null when it can't be verified. That time decides credit:
+    /// the payee credits the request only when it lies within the request's times, so
+    /// return the time the payment's evidence dates it, never a placeholder.
     async fn verify(&self, proof: MethodProof) -> Result<Option<u64>, MethodError>;
     /// Extract the method-defined settlement ID for deduplication, when available.
     fn settlement_id(&self, proof_json: Vec<u8>) -> Option<Vec<u8>>;
@@ -319,7 +331,7 @@ async fn bounded<T>(
 impl Rail for HostRail {
     fn declaration(&self) -> RailDeclaration {
         let d = in_callback(|| self.method.declaration());
-        let mut v = RailDeclaration::new(d.longest_completion_ms)
+        let mut v = RailDeclaration::new(d.longest_completion_ms, d.payment_time_tolerance_ms)
             .with_idempotent(d.idempotent)
             .with_history(d.history)
             .with_history_survives_restore(d.history_survives_restore);

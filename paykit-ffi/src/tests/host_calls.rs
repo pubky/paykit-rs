@@ -3,7 +3,7 @@ use super::storage::DeviceStore;
 use crate::*;
 use paykit_lib::AttemptId;
 use paykit_sdk::{Rail, RailError};
-use pubky_switch_client::{app::HomeserverReader, transport::TransportError};
+use pubky_switch_client::transport::TransportError;
 use std::{
     future::Future,
     sync::Arc,
@@ -25,6 +25,7 @@ impl PaymentMethod for Stalled {
             history_retention_ms: None,
             history_survives_restore: true,
             longest_completion_ms: 1000,
+            payment_time_tolerance_ms: 0,
         }
     }
     fn select_endpoints(

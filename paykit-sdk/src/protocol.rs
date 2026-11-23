@@ -1192,13 +1192,21 @@ pub(crate) fn restore_paykit_layer(
             StateKey::RestoredDelivery { .. } => {
                 let incoming =
                     state::restored::<KeptNotice>(&key, &value, &binder).map_err(|_| unread())?;
-                delivery_notices
-                    .entry(key)
-                    .and_modify(|kept| {
+                match delivery_notices.entry(key) {
+                    std::collections::btree_map::Entry::Occupied(mut held) => {
+                        // Both kinds share the key of the message: two kinds for one
+                        // message don't read.
+                        let kept = held.get_mut();
+                        if kept.kind != incoming.kind {
+                            return Err(unread());
+                        }
                         kept.acknowledged |= incoming.acknowledged;
                         kept.raised_at_ms = kept.raised_at_ms.min(incoming.raised_at_ms);
-                    })
-                    .or_insert(incoming);
+                    }
+                    std::collections::btree_map::Entry::Vacant(slot) => {
+                        slot.insert(incoming);
+                    }
+                }
                 continue;
             }
             StateKey::MessageNotice { .. }

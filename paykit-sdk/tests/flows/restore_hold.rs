@@ -609,8 +609,11 @@ async fn test_restore_hold_missed_item_holds_a_repeat_until_the_user_confirms() 
         panic!("pending");
     };
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     wallet
         .confirm_possibly_cancelled(&request, &earlier, UserConfirmed::new())
@@ -866,6 +869,55 @@ async fn test_restore_hold_missed_item_holds_no_request_created_after_it() {
     wallet.receive(None).await.unwrap();
     assert_eq!(status_of(&w, &wallet, &within).await, RequestStatus::Held);
     assert_eq!(status_of(&w, &wallet, &after).await, RequestStatus::Open);
+}
+
+#[tokio::test]
+async fn test_restore_hold_missed_item_pays_a_request_created_after_it_without_a_confirmation() {
+    // On the pay path: a request bob creates and sends within the clock tolerance of the
+    // item's last acceptance time still needs the user's confirmation, by hand and as a
+    // payment started automatically. One created at that time plus the tolerance, or later,
+    // isn't earlier than it, and is paid with no confirmation (Paykit spec 7.2, "What a
+    // `missed` item loses").
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    missed(&w);
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(CLOCK_TOLERANCE_MS - 1_000);
+    let within = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    w.clock.advance_ms(1_000);
+    let at_bound = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    w.clock.advance_ms(1_000);
+    let after = request_from(&mut shop, w.alice_id(), draft("3", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    for automatic in [false, true] {
+        let refused = if automatic {
+            wallet
+                .pay_request_automatically(&within, PayOptions::default())
+                .await
+        } else {
+            wallet.pay_request(&within, PayOptions::default()).await
+        }
+        .outcome
+        .unwrap_err();
+        assert!(
+            matches!(refused.refusal(), Some(Refusal::HeldAfterRestore { .. })),
+            "{automatic}: {refused:?}"
+        );
+    }
+    let paid = wallet
+        .pay_request(&at_bound, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    let paid = wallet
+        .pay_request_automatically(&after, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(w.rail.all_executions().len(), 2);
 }
 
 #[tokio::test]
