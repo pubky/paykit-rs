@@ -3154,22 +3154,28 @@ async fn journaled_past_the_window(
 #[tokio::test]
 async fn test_provider_loss_restored_dispatch_without_a_claim_the_user_resolves_paid() {
     // No claim shows the restored dispatch and the method can't tell: the user, seen "may
-    // already be paid", resolves it as paid. Its journal entry finishes, the request's
-    // record shows it paid, and the doubt no longer names the attempt: what remains is the
-    // provider loss's, as for any request payable before it. With no claim to write on, and
-    // no Late recording from a restored journal, nothing is SETTLED at the new service
-    // (Paykit spec 7.2, 7.3, 8.4). Past the claim's window the entry is dropped.
+    // already be paid", resolves it as paid. Its journal entry finishes, the request
+    // record's `status` is `paid`, and with no claim to settle the journal keeps the user's
+    // word: the request is refused as already paid, also once the user states it wasn't paid
+    // before the loss (Paykit spec 7.2, 8.4). Past the claim's window the entry is dropped.
     let (w, mut app, request, attempt_id) =
         resolved_without_a_claim(paykit_sdk::Resolution::Done).await;
     let key = app.request(&request).await.unwrap().record;
     let record = app.app().shared_record(&key).await.unwrap().unwrap();
     let value: serde_json::Value = serde_json::from_slice(record.content.value().unwrap()).unwrap();
     assert_eq!(value["status"], "paid", "{value}");
+    let obligation = app.payments().await.unwrap()[0].obligation;
+    let loss = kept_loss(&app).await;
+    app.confirm_not_paid_before_loss(&obligation, &loss, UserConfirmed::new())
+        .await
+        .unwrap();
     let options = crate::common::over_hold(&app, &request).await;
     let refused = app.pay_request(&request, options).await.outcome;
-    let doubt = doubt_of(&refused);
-    assert!(doubt.restored.is_empty(), "{refused:?}");
-    assert!(doubt.before_loss.is_some(), "{refused:?}");
+    assert_eq!(
+        refused.as_ref().err().and_then(PaykitError::refusal),
+        Some(&Refusal::AlreadyPaid),
+        "{refused:?}"
+    );
     assert_eq!(executions(&w), 1);
     assert!(!journaled_past_the_window(&w, &mut app, &attempt_id).await);
 }

@@ -625,6 +625,7 @@ impl Paykit {
             attempt_proof: None,
             failed_by_method: false,
             never_dispatched: false,
+            user_paid: false,
             request: Some(KeptMessage::of(stored)),
             record_held: false,
             transfer_bound: None,
@@ -791,6 +792,7 @@ impl Paykit {
             Some(target) => Some(self.done_record(target, &attempt, entry.as_ref()).await?),
             None => None,
         };
+        let on_claim = op.is_some();
         let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME);
         if let Some(op) = op {
             batch = batch
@@ -806,6 +808,13 @@ impl Paykit {
         {
             batch =
                 Box::pin(self.executor_outcome(own, resolution == Resolution::Done, batch)).await?;
+        }
+        // With no claim entry, the journal keeps the user's `done` on the entry itself: no
+        // payment of its obligation goes again while it is journaled (Paykit spec 8.4).
+        if !on_claim && resolution == Resolution::Done {
+            if let Some(entry) = entry.as_mut() {
+                entry.user_paid = true;
+            }
         }
         // With no claim entry, record or ledger write to make, only the journal changes:
         // the entry finishes locally.

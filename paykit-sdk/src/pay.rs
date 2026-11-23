@@ -1338,6 +1338,7 @@ impl Paykit {
             attempt_proof: None,
             failed_by_method: false,
             never_dispatched: false,
+            user_paid: false,
             request: Some(KeptMessage::of(&stored)),
             record_held: false,
             transfer_bound: Some(bound),
@@ -1594,6 +1595,7 @@ impl Paykit {
             attempt_proof: None,
             failed_by_method: false,
             never_dispatched: false,
+            user_paid: false,
             request: None,
             record_held: false,
             transfer_bound: Some(bound),
@@ -1764,11 +1766,20 @@ impl Paykit {
 
     /// The attempts a restore left unresolved for the obligation, which make it "may be
     /// paid" (Paykit spec 7.2); an open entry of this app's otherwise is a payment in
-    /// progress.
+    /// progress, and a restored dispatch the user resolved as paid with no claim to write
+    /// it on is [`Refusal::AlreadyPaid`].
     pub(crate) async fn restored_attempts(&self, obligation: &[u8; 32]) -> Result<Vec<AttemptId>> {
         let mut restored = Vec::new();
         for entry in self.journal().await? {
-            if &entry.obligation != obligation || !entry.open() {
+            if &entry.obligation != obligation {
+                continue;
+            }
+            // The user said a restored dispatch no claim showed was paid: its obligation is
+            // paid, as a `done` on its claim would show (Paykit spec 7.2, 8.4).
+            if entry.user_paid {
+                return Err(Refusal::AlreadyPaid.into());
+            }
+            if !entry.open() {
                 continue;
             }
             if !entry.restored {

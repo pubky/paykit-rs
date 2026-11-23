@@ -396,6 +396,10 @@ pub(crate) struct JournalEntry {
     /// This device ended the Allowance attempt before entering the payment method.
     /// Restore clears the evidence because the original device may have continued.
     pub(crate) never_dispatched: bool,
+    /// The user resolved this restored dispatch as paid while no claim showed it, so its
+    /// `done` went on no claim (Paykit spec 7.2, 8.4): no payment of its obligation goes
+    /// again while it is journaled, as `done` on a claim would settle it.
+    pub(crate) user_paid: bool,
     /// The attempt's transition proof, for the service and generation it was written at
     /// (Paykit spec 4, "Fresh before paying"). An entry without one is never dispatched again.
     pub(crate) attempt_proof: Option<SignedDoc>,
@@ -679,6 +683,10 @@ impl JournalEntry {
         let period = self.period()?;
         // An expiry is the reserving Allowance's, kept only with it.
         if self.allowance.is_none() && self.allowance_expires_at_ms.is_some() {
+            return bad();
+        }
+        // Only a restored dispatch the user resolved, and so finished, is paid by the user.
+        if self.user_paid && (!self.restored || self.stage != Stage::Finished) {
             return bad();
         }
         if self.offline.is_some()
