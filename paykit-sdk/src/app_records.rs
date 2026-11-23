@@ -845,12 +845,14 @@ impl Paykit {
                 .used()
                 .is_some_and(|used| seen.unkept_at.is_some_and(|at| used.updated_at() > at));
             if seen.before_unkept(served_at, now) && !later_used {
-                // The floor is never below the group's time; after a merge it may be later.
+                // The history floor: never below the group's time, and after a merge it may be
+                // later.
                 let at = seen.dropped_at.max(seen.unkept_at).unwrap_or_default();
                 failures.push(fail(PublicAppFailureReason::Refused(format!(
-                    "Paykit spec 4: the app's records up to a group at {at} ms that exceeded the \
-                     history a reader keeps ({SEEN_RECORDS} records, {SEEN_RECORDS_BYTES} bytes) \
-                     are not used, until a record of it after that time can be used"
+                    "Paykit spec 4: a group of the app's records exceeded the history a reader \
+                     keeps ({SEEN_RECORDS} records, {SEEN_RECORDS_BYTES} bytes): its records up \
+                     to the history floor at {at} ms are not used, until a record of it after \
+                     that time can be used"
                 ))));
                 continue;
             }
