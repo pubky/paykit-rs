@@ -2636,6 +2636,19 @@ pub(crate) fn observe_list_record(
     // no copy, in its backed-up state: a later value that drops the marker is never taken
     // (Paykit spec 6; wire 5).
     if crate::protocol::list_loss_marker(value).is_some() {
+        // Only a value whose payee and app derive the key holds it: another payee app's
+        // list written there, which only a faulty own app writes, says nothing of this
+        // key's deletes (Paykit wire 5.4).
+        let bound = paykit_lib::records::PaymentListRecord::read(value, &cx.identity())
+            .ok()
+            .and_then(|read| {
+                cx.record_key(&crate::records::list_target(&read.payee, &read.app_id))
+                    .ok()
+            })
+            .is_some_and(|derived| derived == record.key);
+        if !bound {
+            return Ok(Vec::new());
+        }
         let marked = LostListRecord::marked(record.version);
         let kept = match held.clone() {
             Some(lost) => lost.merge(marked),
