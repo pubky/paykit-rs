@@ -103,7 +103,7 @@ fn fails_with(list: &PublicPaymentList, app: [u8; 16], rules: &[&str]) -> bool {
         })
 }
 
-fn tip_jar() -> Value {
+pub(crate) fn tip_jar() -> Value {
     json!({
         "capabilities": { "endpoint_identifiers": ["btc-lightning-bolt12"] },
         "public_endpoints": { "btc-lightning-bolt12": "lno1tips" }
