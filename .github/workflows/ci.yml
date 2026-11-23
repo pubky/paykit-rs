@@ -109,10 +109,12 @@ jobs:
       run:
         shell: bash
     env:
-      OUT: ${{ runner.temp }}/hosts
       PAYKIT_TEST_ISSUER: ${{ github.workspace }}/target/release/examples/wallet-test-issuer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Generated sources and libraries stay out of the cached target directory.
+      - name: Choose the output directory
+        run: echo "OUT=$RUNNER_TEMP/hosts" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: stable
@@ -161,10 +163,12 @@ jobs:
       run:
         shell: bash
     env:
-      OUT: ${{ runner.temp }}/hosts
       PAYKIT_TEST_ISSUER: ${{ github.workspace }}/target/release/examples/wallet-test-issuer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Generated sources and libraries stay out of the cached target directory.
+      - name: Choose the output directory
+        run: echo "OUT=$RUNNER_TEMP/hosts" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: stable
