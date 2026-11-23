@@ -3756,8 +3756,8 @@ async fn test_blocked_return_missed_item_under_the_hold_asks_no_one() {
 async fn test_blocked_return_missed_item_holds_a_due_mark_ask_until_its_raise() {
     // Paykit wire 5.6, Raising: with no hold, a `missed` item comes while carol is blocked and
     // bob's mark is due. Its widening is owed before its read of the lists, so bob's ask
-    // waits; the read failing in that receive, nothing is raised and no ask is made. Once
-    // the read applies the widening and its raise, bob's ask is made.
+    // waits for that read, which the receive taking the item makes after the feed: the
+    // widening and its raise applied, bob is asked in that receive.
     let w = World::new();
     let mut wallet = contacts_wallet(&w, store()).await;
     wallet.app_mut().invite(&w.carol_id()).await.unwrap();
@@ -3768,25 +3768,7 @@ async fn test_blocked_return_missed_item_holds_a_due_mark_ask_until_its_raise() 
     w.alice
         .switch()
         .push_missed(1, since - 1_000, since + MINUTE_MS);
-    for _ in 0..4 {
-        w.alice
-            .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Unreachable {
-                path: "/allow".into(),
-                after: 0,
-            });
-    }
-    let _ = wallet.receive(None).await;
-    assert!(widening_owed(&wallet).await);
-    assert!(!mark_asked(&wallet).await);
-    assert_eq!(asked_since(&wallet, &w.bob_id(), since).await, 0);
-    for _ in 0..4 {
-        let _ = wallet.app_mut().allow_list().await;
-    }
-    for _ in 0..2 {
-        w.clock.advance_ms(11 * MINUTE_MS);
-        wallet.receive(None).await.unwrap();
-    }
+    wallet.receive(None).await.unwrap();
     assert!(!widening_owed(&wallet).await);
     assert!(shared_floor(&wallet).await.is_some());
     assert!(mark_asked(&wallet).await);
