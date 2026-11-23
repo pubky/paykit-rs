@@ -503,14 +503,14 @@ async fn test_blocked_peer_asked_after_a_missed_item_only_once_unblocked() {
 
 #[tokio::test]
 async fn test_blocked_peer_asked_after_a_missed_item_only_once_the_deny_list_reads() {
-    // The read of the lists at the receive that takes the `missed` item fails: the copy of
+    // The reads of the lists at the receive that takes the `missed` item fail: the copy of
     // the deny list isn't known, so bob is asked nothing yet, and the ask is kept; the next
     // receive reads the list, and asks him.
     let w = World::new();
     let (mut wallet, _, _) = received(&w, PaykitConfig::default()).await;
     w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
-    // The read at the receive's start fails, and the call reads the lists no more before
-    // the asks.
+    // The read at the receive's start and the one before the asks both fail.
+    fail_list_read(&w);
     fail_list_read(&w);
     let now = w.clock.now_ms();
     w.alice.switch().push_missed(1, now - 1_000, now);
@@ -1806,9 +1806,8 @@ async fn test_blocked_block_applied_whose_answer_is_of_unknown_fate_still_counts
 async fn test_blocked_own_unblock_applied_in_the_read_keeps_the_resend_request_owed() {
     // Bob's request to re-send is kept, and the wallet's unblock of him kept unanswered. The
     // next read sends the unblock and the switch applies it: the unblock counts no more, so
-    // the copy of the lists isn't known until it is read again, which the same receive does
-    // once the feed shows the change; the request is answered then, once (Paykit spec 8.1,
-    // 9).
+    // the copy of the lists isn't known until it is read again, and the request waits for
+    // that, never dropped; the next receive answers it (Paykit spec 8.1, 9).
     let w = World::new();
     let (mut wallet, shop, request) = received(&w, PaykitConfig::default()).await;
     wallet.block(&w.bob_id()).await.unwrap();
@@ -1824,8 +1823,8 @@ async fn test_blocked_own_unblock_applied_in_the_read_keeps_the_resend_request_o
         .await
         .unwrap()
         .len();
-    assert_eq!((first.resends, left), (1, 0));
-    assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
+    assert_eq!((first.resends, left), (0, 1));
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
     assert!(wallet
         .app()
         .protocol_scan("paykit", b"ans/")
@@ -5465,10 +5464,9 @@ async fn test_blocked_failed_time_read_holds_only_governed_messages() {
         .unwrap();
     let rejection = wallet.reject_request(&rejected, None).await.unwrap();
     wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
-    // The read that would observe the service time fails, the copy of the lists still
-    // fresh: the rejection waits, the payment's reports still go, and the next flush
-    // delivers it (Paykit spec 8.1).
-    fail_time_read(&w);
+    // The read that would observe the service time fails: the rejection waits, the
+    // payment's reports still go, and the next flush delivers it (Paykit spec 8.1).
+    fail_list_read(&w);
     wallet.flush().await.unwrap();
     let sent = sent_of(
         &wallet,
@@ -5565,14 +5563,11 @@ async fn test_blocked_acknowledged_give_up_notice_stays_gone_across_an_in_place_
     assert_eq!(notices_of(&wallet, &rejection).await, 0);
 }
 
-/// The reads in `log` from `from` on that read the lists or observe the service time:
-/// `GET /allow` and `GET /connect`.
+/// The `GET /allow` reads in `log` from `from` on.
 fn list_reads(log: &[String], from: usize) -> usize {
     log[from..]
         .iter()
-        .filter(|line| {
-            line.starts_with("GET ") && (line.contains("/allow") || line.contains("/connect"))
-        })
+        .filter(|line| line.starts_with("GET ") && line.contains("/allow"))
         .count()
 }
 
@@ -5620,8 +5615,8 @@ async fn test_blocked_time_answered_during_the_flush_justifies_no_send() {
     wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
     // The flush's read of the time fails, so the only service answer in the call is the kept
     // write's, inside the client's flush: it justifies no send, and the rejection waits
-    // (Paykit spec 8.1), the copy of the lists still fresh.
-    fail_time_read(&w);
+    // (Paykit spec 8.1).
+    fail_list_read(&w);
     let before = w.router.log().len();
     wallet.flush().await.unwrap();
     let log = w.router.log();
@@ -5662,15 +5657,6 @@ async fn received_on(
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     (wallet, shop, request)
-}
-
-/// The next read the flush makes to observe the service time fails.
-fn fail_time_read(w: &World) {
-    w.alice.switch().fail_next(Fault::Error {
-        path: "/connect".into(),
-        code: ErrorCode::Unavailable,
-        current: serde_json::Value::Null,
-    });
 }
 
 #[tokio::test]
@@ -5753,37 +5739,6 @@ async fn test_blocked_exemption_kept_only_while_its_acceptance_is_queued() {
 }
 
 #[tokio::test]
-async fn test_blocked_flush_reads_no_time_for_a_message_it_holds_anyway() {
-    let w = World::new();
-    let (mut wallet, mut shop, request) = received(&w, PaykitConfig::default()).await;
-    // A message to a blocked counterparty waits on the deny decision, which the copy, fresh,
-    // gives: no read of the time (Paykit spec 8.1, "Messages already queued").
-    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
-    let rejection = wallet.reject_request(&request, None).await.unwrap();
-    wallet.block(&w.bob_id()).await.unwrap();
-    wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
-    wallet.flush().await.unwrap();
-    let before = w.router.log().len();
-    wallet.flush().await.unwrap();
-    assert_eq!(list_reads(&w.router.log(), before), 0);
-    assert_eq!(verdict(&wallet, &rejection).await, Some(false));
-    // One past its window by the service time already verified never goes: no read either.
-    wallet.unblock(&w.bob_id()).await.unwrap();
-    let recurring = request_from(&mut shop, w.alice_id(), monthly(w.clock.now_ms())).await;
-    wallet.receive(None).await.unwrap();
-    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
-    let acceptance = wallet.accept_subscription(&recurring).await.unwrap().msg_id;
-    wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
-    w.clock.advance_ms(31 * 24 * HOUR_MS);
-    wallet.receive(None).await.unwrap();
-    wallet.flush().await.unwrap();
-    let before = w.router.log().len();
-    wallet.flush().await.unwrap();
-    assert_eq!(list_reads(&w.router.log(), before), 0);
-    assert_eq!(verdict(&wallet, &acceptance).await, Some(false));
-}
-
-#[tokio::test]
 async fn test_blocked_failed_time_read_not_made_again_in_the_call() {
     use paykit_lib::Kind;
 
@@ -5815,7 +5770,6 @@ async fn test_blocked_failed_time_read_not_made_again_in_the_call() {
     wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
     let rejection = wallet.reject_request(&request, None).await.unwrap();
     wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
-    fail_time_read(&w);
     fail_list_read(&w);
     let before = w.router.log().len();
     wallet.resume_payments().await.unwrap();
@@ -5830,24 +5784,6 @@ async fn test_blocked_failed_time_read_not_made_again_in_the_call() {
         sent_of(&wallet, &w.bob_id(), &[Kind::PaymentRequestRejection]).await,
         vec![rejection]
     );
-}
-
-#[tokio::test]
-async fn test_blocked_time_read_owes_the_next_receive_no_read() {
-    let w = World::new();
-    let (mut wallet, _shop, request) = received(&w, PaykitConfig::default()).await;
-    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
-    wallet.reject_request(&request, None).await.unwrap();
-    wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
-    // One read observes the time for the waiting rejection; the copy of the lists, fresh,
-    // is read neither by it nor for it at the receives after (Paykit spec 8.1; Paykit wire
-    // 4.1).
-    let before = w.router.log().len();
-    wallet.flush().await.unwrap();
-    for _ in 0..2 {
-        wallet.receive(None).await.unwrap();
-    }
-    assert_eq!(list_reads(&w.router.log(), before), 1);
 }
 
 #[tokio::test]
@@ -5878,9 +5814,63 @@ async fn test_blocked_flush_reports_a_store_failure_listing_what_waits() {
 }
 
 #[tokio::test]
-async fn test_blocked_block_learned_from_the_feed_holds_the_next_send() {
+async fn test_blocked_resume_reads_a_stale_copy_before_a_held_message() {
+    use paykit_lib::Kind;
+
     let w = World::new();
-    let (mut wallet, mut shop, request) = received(&w, PaykitConfig::default()).await;
+    let (mut wallet, _shop, request) = received(&w, PaykitConfig::default()).await;
+    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    let rejection = wallet.reject_request(&request, None).await.unwrap();
+    wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
+    // The copy of the lists is past its refresh interval: the resume reads it before the
+    // rejection can go, and it goes (Paykit spec 8.1, "Messages already queued").
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(
+        sent_of(&wallet, &w.bob_id(), &[Kind::PaymentRequestRejection]).await,
+        vec![rejection]
+    );
+}
+
+#[tokio::test]
+async fn test_blocked_flush_reads_no_time_for_a_message_the_client_holds() {
+    use paykit_lib::Kind;
+
+    let w = World::new();
+    let (mut wallet, _shop, request) = received(&w, PaykitConfig::default()).await;
+    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    let rejection = wallet.reject_request(&request, None).await.unwrap();
+    // The client holds the rejection, and the copy of the lists is fresh: the flush reads
+    // nothing for it (Paykit spec 8.1).
+    let before = w.router.log().len();
+    wallet.flush().await.unwrap();
+    assert_eq!(list_reads(&w.router.log(), before), 0);
+    // Released, it waits only for an observed time: one read, and it goes.
+    wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
+    let before = w.router.log().len();
+    wallet.flush().await.unwrap();
+    assert_eq!(list_reads(&w.router.log(), before), 1);
+    assert_eq!(
+        sent_of(&wallet, &w.bob_id(), &[Kind::PaymentRequestRejection]).await,
+        vec![rejection]
+    );
+}
+
+/// Alice's wallet, reloaded on a store failing as `fault` says, with carol in its copy of
+/// the deny list while another app of alice's has unblocked her, and a rejection to bob
+/// waiting for a time read. Returns the world, the wallet and the store.
+async fn unblock_unseen_on(
+    fault: impl Fn(u64) -> pubky_switch_client::store::Fault,
+) -> (
+    World,
+    Paykit,
+    std::sync::Arc<pubky_switch_client::store::FaultStore>,
+) {
+    use pubky_switch_client::store::{Fault as StoreFault, FaultStore};
+
+    let w = World::new();
+    let storage = store();
+    let (mut wallet, _shop, request) = received_on(&w, storage.clone()).await;
     let mut phone = w
         .join_with(
             &w.alice,
@@ -5890,27 +5880,53 @@ async fn test_blocked_block_learned_from_the_feed_holds_the_next_send() {
             store(),
         )
         .await;
-    phone.block(&w.bob_id()).await.unwrap();
-    // The wallet's copy of the lists is fresh, and its read hands it the other app's block:
-    // the block holds the next send at once (Paykit spec 8.1, "Messages already queued").
+    phone.block(&w.carol_id()).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
     wallet.receive(None).await.unwrap();
-    let before = w.bob.switch().entries_from(&w.alice_id());
-    let rejection = wallet.reject_request(&request, None).await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
-    // The lists the gap after that read carries are the copy's: no read follows for them.
-    wallet.receive(None).await.unwrap();
-    let reads = w.router.log().len();
-    wallet.receive(None).await.unwrap();
-    assert_eq!(list_reads(&w.router.log(), reads), 0);
-    // Once the unblock is learned the same way, the rejection goes.
-    phone.unblock(&w.bob_id()).await.unwrap();
-    for _ in 0..2 {
-        wallet.receive(None).await.unwrap();
-    }
-    shop.receive(None).await.unwrap();
-    assert_eq!(
-        sale_status(&shop, &request).await,
-        Some(paykit_sdk::PayeeStatus::Rejected)
+    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    wallet.reject_request(&request, None).await.unwrap();
+    wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
+    // Unblocked through the client alone, which raises no floor.
+    phone.app_mut().undeny(&w.carol_id()).await.unwrap();
+    let app_id = wallet.app_id();
+    drop(wallet);
+    let faulty = std::sync::Arc::new(FaultStore::new(storage, StoreFault::None));
+    let probe = w
+        .load_on_clock(
+            &w.alice,
+            faulty.clone(),
+            app_id,
+            std::sync::Arc::clone(&w.clock),
+        )
+        .await;
+    let loaded = faulty.commits();
+    drop(probe);
+    let faulty = std::sync::Arc::new(FaultStore::new(faulty.inner(), fault(loaded)));
+    let wallet = w
+        .load_on_clock(
+            &w.alice,
+            faulty.clone(),
+            app_id,
+            std::sync::Arc::clone(&w.clock),
+        )
+        .await;
+    (w, wallet, faulty)
+}
+
+#[tokio::test]
+async fn test_blocked_flush_reports_a_store_failure_raising_the_floor() {
+    // The flush's read of the time shows carol unblocked, and the floor is raised with it;
+    // the store fails as the raise settles, its batch kept: the flush says so (Paykit wire
+    // 5.6). The failing commit is the flush's sixth, the one after the raise's write.
+    let (_w, mut wallet, _store) =
+        unblock_unseen_on(|loaded| pubky_switch_client::store::Fault::FailBefore(loaded + 6)).await;
+    let flushed = wallet.flush().await;
+    assert!(
+        matches!(
+            &flushed,
+            Err(paykit_sdk::PaykitError::Client(error))
+                if matches!(error.unkept(), pubky_switch_client::app::AppError::Store(_))
+        ),
+        "{flushed:?}"
     );
-    let _ = rejection;
 }

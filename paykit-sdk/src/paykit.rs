@@ -1093,9 +1093,6 @@ impl Paykit {
             }
             Err(error) => return Err(error.into()),
         };
-        if Box::pin(self.take_learned_lists()).await? {
-            Box::pin(self.refresh_lists_when_due()).await?;
-        }
         // A successful call can stop while keys or a listing wait, before any page.
         // Only a page's verdict under the confirmed current identity opens outgoing work.
         if report.held_cursor.is_some() && self.app.identity_confirmed_at().is_some() {

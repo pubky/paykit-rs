@@ -44,7 +44,6 @@ use pubky_switch_client::app::{
     RecordExpiry, RecordMarkContext, RecordRepair, RecordSuccessor, ResendNeeded, RestoreContext,
     StoreFailure, WriteBase,
 };
-use pubky_switch_client::app::{DenyListChange, DenyListGap};
 use pubky_switch_client::error::StoreError;
 use pubky_switch_core::enc::{serde_b64, unb64_array};
 use pubky_switch_core::message::{Message, MessagePlaintext};
@@ -850,7 +849,7 @@ pub(crate) fn restore_paykit_layer(
             // The time of the last read of the lists isn't restored: the copy of the deny
             // list the backup holds may be stale by any time, so the list is read again before
             // any payment (Paykit spec 8.1).
-            StateKey::ListsRead | StateKey::ListsTold => continue,
+            StateKey::ListsRead => continue,
             // Nor the service time the delivery hook judges by: the restore's first read
             // writes it again, and until then the device clock alone judges.
             StateKey::ServiceTime => continue,
@@ -1680,18 +1679,13 @@ impl Protocol for PaykitProtocol {
             return Ok(false);
         }
         // No message the counterparty hold governs goes past its window, whichever rules
-        // its kind has besides (Paykit spec 8.1, "Messages already queued"). One held only
-        // for want of an observed time, not past by the time kept, that its kind's rules
-        // send asks the delivery operation for a time.
-        let observed = self.delivery.observed();
-        let past = crate::send_holds::held_past_window(delivery, observed).map_err(view_failure)?;
-        if past
-            && (observed.is_some()
-                || crate::send_holds::held_past_window(delivery, Some(0)).map_err(view_failure)?)
+        // its kind has besides (Paykit spec 8.1, "Messages already queued").
+        if crate::send_holds::held_past_window(delivery, self.delivery.observed())
+            .map_err(view_failure)?
         {
             return Ok(false);
         }
-        let permits = match kind {
+        match kind {
             Ok(MessageKind::Paykit(Kind::PrivatePaymentList)) => crate::publish::may_send(delivery),
             Ok(MessageKind::Paykit(Kind::AllowanceEnd)) => {
                 crate::allowances::may_deliver_end(delivery).map_err(view_failure)
@@ -1724,14 +1718,7 @@ impl Protocol for PaykitProtocol {
             Ok(MessageKind::Paykit(Kind::ExecutorNotice)) => Ok(true),
             // A message whose role can't be established waits (Paykit spec 8.1).
             Err(_) => Ok(false),
-        };
-        if past {
-            if permits? {
-                self.delivery.want();
-            }
-            return Ok(false);
         }
-        permits
     }
 
     fn append_records(
@@ -1951,22 +1938,6 @@ impl Protocol for PaykitProtocol {
             // marks its sender to ask again once the key is held (`stored.rs`, `marks.rs`).
             Err(Fail::AwaitsKey { data_epoch }) => Outcome::AwaitKey { data_epoch },
         }
-    }
-
-    /// A deny list change the feed shows: no delivery decision is taken on the copy of the
-    /// lists until the receive has taken it, reading the lists again before the sends that
-    /// follow; the copy's deny list stays, so that read sees an unblock (Paykit spec 8.1,
-    /// "Messages already queued"; Paykit wire 5.6).
-    fn deny_list_changed(&self, _: &DenyListChange) -> Result<Vec<LocalWrite>, StoreFailure> {
-        self.delivery.learned(None);
-        Ok(vec![local_write(key::LISTS_TOLD, &1u64)?])
-    }
-
-    /// A gap in the deny list's history (Switch spec 8.3), taken as a change, its list kept
-    /// for the receive (`Paykit::take_learned_lists`).
-    fn deny_list_gap(&self, gap: &DenyListGap) -> Result<Vec<LocalWrite>, StoreFailure> {
-        self.delivery.learned(gap.list_read.then_some(&gap.denied));
-        Ok(vec![local_write(key::LISTS_TOLD, &1u64)?])
     }
 
     /// Entries the app can't read: ask the sender to send again (Paykit spec 9).
