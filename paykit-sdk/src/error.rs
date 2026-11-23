@@ -208,8 +208,8 @@ pub enum Refusal {
     /// [`crate::Paykit::withdraw_list_from`] records the counterparty as withdrawn.
     #[error("Paykit spec 9: the delivery of the counterparty's current list is unknown")]
     ListDeliveryUnknown(Box<crate::UnknownListDelivery>),
-    /// The payment method would transfer another amount or asset, an amount it can't tell, or
-    /// a fee above the app's cap, and the user didn't choose it (Paykit spec 7.2 step 1).
+    /// The payment method would transfer another amount or asset, or an amount it can't tell,
+    /// and the user didn't choose it (Paykit spec 7.2 step 1).
     /// `quote` is what it would transfer, to show the user; paying it anyway carries it back
     /// ([`crate::PayOptions::with_transfer_confirmed`]).
     #[error("Paykit spec 7.2 step 1: {reason}")]

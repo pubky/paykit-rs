@@ -753,8 +753,9 @@ struct Ordered {
 /// amount or asset, or one the method can't tell. Paykit makes no check of the fee: it is
 /// the payment method's. `None` when it passes.
 fn transfer_refused(transfer: &Transfer, amount: &PaymentAmount) -> Option<&'static str> {
-    (transfer.amount.as_ref() != Some(amount))
-        .then_some("the destination transfers another amount or asset, or one the method can't tell")
+    (transfer.amount.as_ref() != Some(amount)).then_some(
+        "the destination transfers another amount or asset, or one the method can't tell",
+    )
 }
 
 /// Whether `quote`, the transfer the method reports now, is the one the user confirmed,
@@ -2632,9 +2633,9 @@ impl Paykit {
     /// The transfer check again, at the final payment check just before the call, a
     /// repeat's included (Paykit spec 7.2 step 1): the method's transfer now of the amount
     /// paid, the one its host authorized for a payment priced by a rate, must still be
-    /// within the bound the attempt was journaled with, so a fee estimate that grew, or an
-    /// amount that changed, since the attempt was planned is never paid. A transfer that is
-    /// what the user asked for, within the cap at planning, passes; a confirmed one passes
+    /// within the bound the attempt was journaled with, so an amount that changed since the
+    /// attempt was planned is never paid. A transfer that is what the user asked for
+    /// passes; a confirmed one passes
     /// also when it is the one confirmed. For a payment permitted only by hand,
     /// [`Paykit::amount_holds`] requires the original selection and the transfer must
     /// match its confirmation. `Err` inside holds the refusal.

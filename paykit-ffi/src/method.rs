@@ -258,7 +258,8 @@ pub trait PaymentMethod: Send + Sync {
         candidates: Vec<EndpointCandidate>,
         amount: Option<Amount>,
     ) -> Result<SelectedEndpoints, MethodError>;
-    /// Describe the proposed transfer and fee bound before authorizing payment.
+    /// Describe the amount the method would transfer before authorizing payment. Its fee is
+    /// the method's own to bound.
     fn transfer(&self, endpoint: String, payload: String, amount: Amount) -> Arc<MethodTransfer>;
     /// Return the supported fractional digits for this endpoint's transfer amount.
     fn fraction_digits(&self, endpoint: String) -> Option<u32>;

@@ -171,7 +171,7 @@ impl Destination {
 /// the rule the final payment check holds the method's transfer to again, just before each
 /// call, a repeat's included, so no call transfers more than the first was allowed to.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum TransferBound {
     /// What the user asked for: exactly the amount paid.
     Asked {},
@@ -1126,6 +1126,23 @@ pub(crate) fn dispatched(stage: Stage, restored: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_journal_transfer_bound_refuses_a_fee_from_earlier_builds() {
+        let read = |v: serde_json::Value| serde_json::from_value::<TransferBound>(v);
+        assert_eq!(
+            read(serde_json::json!({ "kind": "asked" })).unwrap(),
+            TransferBound::Asked {}
+        );
+        assert!(read(serde_json::json!({ "kind": "confirmed", "amount": null })).is_ok());
+        // A cap or a fee is no member of the bound: an entry holding one is refused.
+        for earlier in [
+            serde_json::json!({ "kind": "asked", "cap": null }),
+            serde_json::json!({ "kind": "confirmed", "cap": "1", "amount": null, "max_fee": null }),
+        ] {
+            assert!(read(earlier).is_err());
+        }
+    }
 
     #[test]
     fn test_journal_dispatched_only_at_paying_or_restored_before_an_outcome() {

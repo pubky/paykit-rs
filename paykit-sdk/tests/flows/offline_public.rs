@@ -22,7 +22,9 @@ async fn test_offline_public_same_selection_pays_once_while_connected() {
 #[tokio::test]
 async fn test_offline_public_payment_rechecks_the_selected_transfer_before_dispatch() {
     let world = World::new();
-    let mut wallet = world.wallet_with("wallet", store(), PaykitConfig::default()).await;
+    let mut wallet = world
+        .wallet_with("wallet", store(), PaykitConfig::default())
+        .await;
     let _shop = shop_with_endpoint(&world).await;
     wallet.receive(None).await.unwrap();
     world.router.remove(world.alice.origin());

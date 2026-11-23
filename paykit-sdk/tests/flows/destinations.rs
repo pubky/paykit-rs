@@ -1546,7 +1546,10 @@ async fn test_destinations_confirmed_transfer_quoted_again_differently_refused_a
     assert!(wallet.payments().await.unwrap().is_empty());
     assert!(w.rail.all_executions().is_empty());
     let outcome = wallet
-        .pay_request(&request, PayOptions::default().with_transfer_confirmed(three))
+        .pay_request(
+            &request,
+            PayOptions::default().with_transfer_confirmed(three),
+        )
         .await
         .outcome
         .unwrap();
@@ -1668,7 +1671,10 @@ async fn test_destinations_another_amount_refused_automatically_and_paid_only_as
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(paykit_sdk::Refusal::Transfer { .. })),
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::Transfer { .. })
+        ),
         "{refused:?}"
     );
     let shown = quote_of(
