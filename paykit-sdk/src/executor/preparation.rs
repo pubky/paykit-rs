@@ -6,7 +6,7 @@ use pubky_switch_core::enc::{b64, hash, serde_b64_vec};
 use pubky_switch_core::ops::{Condition, OpKind, SignedOp};
 use serde::{Deserialize, Serialize};
 
-use super::checkpoint::ledger_target;
+use super::checkpoint::{ledger_target, AcceptedLedger};
 use super::evidence::AppliedRecord;
 use super::spend::JournalAllowance;
 use crate::state::{self, key, Binder};
@@ -135,7 +135,7 @@ impl Paykit {
     pub(super) async fn prepared_ledger(
         &mut self,
         record: &[u8; 32],
-        installed: &AppliedRecord,
+        installed: &AcceptedLedger,
         current: &AppliedRecord,
         grant: &Condition,
     ) -> Result<Option<AppliedProposals>> {
@@ -169,7 +169,7 @@ impl Paykit {
                     // An imported marker can name the installed wallet's accepted
                     // application even after the service has advanced. The caller
                     // verifies that continuation before committing this cleanup.
-                    if let Some(write) = [current, installed]
+                    if let Some(write) = [current, &installed.application]
                         .into_iter()
                         .find(|w| w.op.body().batch.id == id)
                     {
@@ -185,7 +185,9 @@ impl Paykit {
                             // the grant it is conditioned on (Pubky Switch spec, Section 12.5).
                             || write.revision.generation < revision.generation
                             || write.value != proposal.result
-                            || AppliedRecord::retained(&self.app, &target, &proposal.before)
+                            // Staging retained the verified base. The signed write must still
+                            // pin its exact revision after key retirement (Switch spec 4.3).
+                            || AppliedRecord::established(&self.app, &target, &proposal.before)
                                 .is_none_or(|base| !write.follows(&base))
                         {
                             return Ok(None);

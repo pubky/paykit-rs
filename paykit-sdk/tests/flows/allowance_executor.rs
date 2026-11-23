@@ -2211,11 +2211,154 @@ async fn write_owner_failure(
 }
 
 #[tokio::test]
-async fn test_compacted_failure_paid_by_receipt_survives_reopen_and_restore() {
-    paykit_sdk::with_early_ledger_compaction(Box::pin(compacted_failure_paid_by_receipt())).await;
+async fn test_executor_restores_applied_batch_after_predecessor_key_retirement() {
+    use paykit_lib::allowances::EntryOutcome;
+    use pubky_switch_client::testing::Fault;
+
+    let store = crate::common::store();
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant_in(store.clone(), terms())).await;
+    world.rail.set_history_payer(payer.identity());
+    for amount in ["5", "7"] {
+        Box::pin(open_funded_request(
+            &world, &mut payer, &mut shop, &key, amount,
+        ))
+        .await;
+    }
+    let (opened, _) = only_ledger(&payer).await;
+    Box::pin(write_owner_failure(&world, &mut payer, &opened.entries[0])).await;
+    let second = Box::pin(crate::allowances::advance_allowance_generation(
+        &world, &mut payer,
+    ))
+    .await;
+    let (base, predecessor) = only_ledger(&payer).await;
+    assert_eq!(base.entries[0].outcome, Some(EntryOutcome::Failed));
+    assert_eq!(predecessor.generation, second.generation());
+    let ledger = payer.app().records_of("allowance_ledgers").await.unwrap()[0].key;
+    let (_, base_revision) = applied_put(payer.app(), ledger, predecessor).await;
+
+    let third = Box::pin(change_dropping(&world, &second, &mut payer, &[], [75; 32])).await;
+    Box::pin(write_owner_failure(&world, &mut payer, &opened.entries[1])).await;
+    third.fail_next(Fault::LoseAnswer {
+        path: "/ops".into(),
+    });
+    Box::pin(payer.receive(None)).await.unwrap();
+    let markers = payer.app().protocol_scan("paykit", b"lb/").await.unwrap();
+    assert_eq!(markers.len(), 1);
+    let pending = Box::pin(payer.backup()).await.unwrap();
+    let app_id = payer.app_id();
+    drop(payer);
+
+    let mut payer =
+        Box::pin(world.load_on_clock(&world.alice, store.clone(), app_id, world.clock.clone()))
+            .await;
+    Box::pin(crate::common::finish_listing(&mut payer)).await;
+    let usage = Box::pin(payer.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((usage.spent(), usage.reserved()), (2, 0));
+    let (_, installed) = only_ledger(&payer).await;
+    assert_eq!(installed.generation, third.generation());
+    let (write, installed_revision) = applied_put(payer.app(), ledger, installed).await;
+    assert_eq!(markers[0].1.as_slice(), write.body().batch.id.as_slice());
+    let follows = |revision| Condition::RecordCurrent {
+        key: ledger,
+        revision,
+        deleted: false,
+    };
+    assert!(write.body().conditions.contains(&follows(base_revision)));
+    assert!(payer
+        .app()
+        .protocol_scan("paykit", b"lb/")
+        .await
+        .unwrap()
+        .is_empty());
+    let accepted = Box::pin(payer.backup()).await.unwrap();
+    drop(payer);
+
+    // A second installation advances the service one write beyond the installed batch.
+    let mut other = Box::pin(restored_across_a_change(
+        &world,
+        &accepted,
+        crate::common::store(),
+        &key,
+    ))
+    .await;
+    world.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let result = Box::pin(pays_under(&world, &mut shop, &mut other, &key, "1")).await;
+    assert!(
+        matches!(result.outcome, Ok(paykit_sdk::PayOutcome::Pending { .. })),
+        "{result:?}"
+    );
+    let (_, successor) = only_ledger(&other).await;
+    let (write, _) = applied_put(other.app(), ledger, successor).await;
+    assert!(write
+        .body()
+        .conditions
+        .contains(&follows(installed_revision)));
+    let _moved = Box::pin(change_dropping(
+        &world,
+        &third,
+        &mut other,
+        &[predecessor.generation],
+        [76; 32],
+    ))
+    .await;
+    drop(other);
+    let mut restored = Box::pin(paykit_sdk::Paykit::restore(
+        world.env(&world.alice, store),
+        Default::default(),
+        &pending,
+        world.rail.clone(),
+        world.timer(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        restored
+            .app()
+            .protocol_scan("paykit", b"lb/")
+            .await
+            .unwrap(),
+        markers
+    );
+    restored.app_mut().refresh_identity().await.unwrap();
+    assert!(restored
+        .app()
+        .own_identity()
+        .service_key_of(predecessor.generation)
+        .is_none());
+    Box::pin(crate::common::finish_listing(&mut restored)).await;
+    let usage = Box::pin(restored.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (usage.lifetime().as_str(), usage.spent(), usage.reserved()),
+        ("13", 2, 1)
+    );
+    assert_eq!(only_ledger(&restored).await.1, successor);
+    assert!(restored
+        .app()
+        .protocol_scan("paykit", b"lb/")
+        .await
+        .unwrap()
+        .is_empty());
 }
 
-async fn compacted_failure_paid_by_receipt() {
+#[tokio::test]
+async fn test_compacted_failure_paid_by_receipt_survives_reopen_and_restore() {
+    paykit_sdk::with_early_ledger_compaction(Box::pin(compacted_failure_paid_by_receipt(false)))
+        .await;
+}
+
+#[tokio::test]
+async fn test_executor_pays_after_copied_outcome_key_retirement() {
+    paykit_sdk::with_early_ledger_compaction(Box::pin(compacted_failure_paid_by_receipt(true)))
+        .await;
+}
+
+async fn compacted_failure_paid_by_receipt(retire_copy_key: bool) {
     use paykit_lib::allowances::EntryOutcome;
     use paykit_sdk::rail::{Behaviour, RailOutcome};
     use paykit_sdk::Rail;
@@ -2315,6 +2458,17 @@ async fn compacted_failure_paid_by_receipt() {
         .await
         .unwrap();
     let before_copy = Box::pin(payer.backup()).await.unwrap();
+    // Only the copy into paid totals needs to be written in this generation.
+    let copy_service = if retire_copy_key {
+        Some(
+            Box::pin(crate::allowances::advance_allowance_generation(
+                &world, &mut payer,
+            ))
+            .await,
+        )
+    } else {
+        None
+    };
     world.rail.set_history_payer(identity);
     let inventory = world
         .rail
@@ -2354,6 +2508,38 @@ async fn compacted_failure_paid_by_receipt() {
         .unwrap();
     assert_eq!(usage.lifetime().as_str(), "8");
     assert_eq!(usage.spent() + done.count, 2);
+    if let Some(service) = copy_service {
+        assert_eq!(version.generation, service.generation());
+        assert_compaction_receipt(
+            &payer,
+            compacted_version.generation,
+            version.generation,
+            false,
+        )
+        .await;
+        let next = Box::pin(change_dropping(&world, &service, &mut payer, &[], [75; 32])).await;
+        Box::pin(assert_pays_under(&world, &mut shop, &mut payer, &key, "2")).await;
+        assert_eq!(only_ledger(&payer).await.1.generation, next.generation());
+        let _moved = Box::pin(change_dropping(
+            &world,
+            &next,
+            &mut payer,
+            &[version.generation],
+            [76; 32],
+        ))
+        .await;
+        Box::pin(assert_pays_under(&world, &mut shop, &mut payer, &key, "3")).await;
+        assert_eq!(
+            Box::pin(payer.reconcile_allowance(&key))
+                .await
+                .unwrap()
+                .unwrap()
+                .lifetime()
+                .as_str(),
+            "13"
+        );
+        return;
+    }
     drop(payer);
     let mut reopened =
         Box::pin(world.load_on_clock(&world.alice, store, app_id, world.clock.clone())).await;
@@ -5289,15 +5475,29 @@ async fn change_dropping(
     service.deliver_identity(&doc).unwrap();
     payer.app_mut().refresh_identity().await.unwrap();
     Box::pin(crate::common::finish_listing(payer)).await;
+    for generation in dropped {
+        assert!(payer
+            .app()
+            .own_identity()
+            .service_key_of(*generation)
+            .is_none());
+    }
     service
 }
 
 #[tokio::test]
 async fn test_executor_pays_after_the_proposals_generation_key_is_dropped() {
-    // Proposed in one generation, accepted, granted and paid in the next; at the move after
-    // that, the signer drops the first generation's key, which only the superseded pending
-    // write's proof needed. The grant is established here, so the executor goes on paying
-    // (Pubky Switch spec, Sections 4.3 and 12.5).
+    Box::pin(proposal_across_a_move(true)).await;
+}
+
+#[tokio::test]
+async fn test_executor_requires_proposal_key_without_checkpoint() {
+    Box::pin(proposal_across_a_move(false)).await;
+}
+
+async fn proposal_across_a_move(establish: bool) {
+    // Acceptance supersedes the proposal in the next generation. Only its original
+    // placement needs the key dropped in the following move (Switch spec 4.3).
     let world = World::new();
     let mut payer = Box::pin(world.join_with(
         &world.alice,
@@ -5331,14 +5531,13 @@ async fn test_executor_pays_after_the_proposals_generation_key_is_dropped() {
         .unwrap();
     Box::pin(payer.receive(None)).await.unwrap();
     let key = payer.allowances().await.unwrap().pop().unwrap().record;
-    Box::pin(payer.resume_allowance_executor(&key))
-        .await
-        .unwrap();
-    let paid = Box::pin(pays_under(&world, &mut shop, &mut payer, &key, "1")).await;
-    assert!(
-        matches!(paid.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
-        "{paid:?}"
-    );
+    if establish {
+        Box::pin(payer.resume_allowance_executor(&key))
+            .await
+            .unwrap();
+        Box::pin(assert_pays_under(&world, &mut shop, &mut payer, &key, "1")).await;
+    }
+    assert_eq!(granted(&payer, &key).await, establish);
     let _third = Box::pin(change_dropping(
         &world,
         &second,
@@ -5347,10 +5546,129 @@ async fn test_executor_pays_after_the_proposals_generation_key_is_dropped() {
         [76; 32],
     ))
     .await;
-    assert!(payer.app().own_identity().service_key_of(first).is_none());
-    let paid = Box::pin(pays_under(&world, &mut shop, &mut payer, &key, "2")).await;
+    if establish {
+        Box::pin(assert_pays_under(&world, &mut shop, &mut payer, &key, "2")).await;
+    } else {
+        let refused = Box::pin(payer.confirm_allowance_executor(&key, UserConfirmed::new()))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            refused.refusal(),
+            Some(&paykit_sdk::Refusal::NotNow(
+                "the executor cannot establish the original Allowance grant and ledger".into()
+            ))
+        );
+        assert!(!granted(&payer, &key).await);
+        assert!(
+            Box::pin(pays_under(&world, &mut shop, &mut payer, &key, "2"))
+                .await
+                .outcome
+                .is_err()
+        );
+        assert!(world.rail.all_pay_calls().is_empty());
+    }
+}
+
+async fn assert_pays_under(
+    world: &World,
+    shop: &mut paykit_sdk::Paykit,
+    payer: &mut paykit_sdk::Paykit,
+    key: &[u8; 32],
+    value: &str,
+) {
+    let paid = Box::pin(pays_under(world, shop, payer, key, value)).await;
     assert!(
         matches!(paid.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
         "{paid:?}"
     );
+}
+
+async fn assert_compaction_receipt(
+    payer: &paykit_sdk::Paykit,
+    before: u64,
+    after: u64,
+    opening: bool,
+) {
+    let rows = payer.app().protocol_scan("paykit", b"lx/").await.unwrap();
+    assert_eq!(rows.len(), 1);
+    let row: serde_json::Value = serde_json::from_slice(&rows[0].1).unwrap();
+    let receipt = &row["d"];
+    let generation = |field: &str| {
+        let kept: pubky_switch_client::app::KeptOp =
+            serde_json::from_value(receipt[field].clone()).unwrap();
+        TransitionProof::peek(&kept.proof.unwrap())
+            .unwrap()
+            .envelope()
+            .generation
+    };
+    assert_eq!((generation("before"), generation("after")), (before, after));
+    assert_eq!(!receipt.get("opening").unwrap().is_null(), opening);
+    if opening {
+        assert_eq!(generation("opening"), after);
+    }
+}
+
+#[tokio::test]
+async fn test_executor_pays_after_compacting_reservation_key_retirement() {
+    paykit_sdk::with_early_ledger_compaction(Box::pin(async {
+        let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+        world.rail.set_history_payer(payer.identity());
+        let second = Box::pin(crate::allowances::advance_allowance_generation(
+            &world, &mut payer,
+        ))
+        .await;
+        let generation = second.generation();
+        Box::pin(assert_pays_under(&world, &mut shop, &mut payer, &key, "7")).await;
+        world.clock.advance_ms(60_001);
+        Box::pin(assert_pays_under(&world, &mut shop, &mut payer, &key, "3")).await;
+        assert_compaction_receipt(&payer, generation, generation, true).await;
+        let (ledger, _) = only_ledger(&payer).await;
+        assert_eq!(ledger.count, 1);
+        let claim = payer
+            .app_mut()
+            .read_claim(&ledger.entries[0].obligation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(claim.view.tombstone && claim.entries.is_empty());
+
+        // Supersede the ledger and both payer records before retiring their key (Switch spec 4.3).
+        let third = Box::pin(change_dropping(&world, &second, &mut payer, &[], [75; 32])).await;
+        Box::pin(crate::common::finish_listing(&mut shop)).await;
+        let sales = shop.payee_activity().await.unwrap();
+        assert_eq!(sales.len(), 2);
+        for sale in sales {
+            Box::pin(shop.confirm_payment(&sale.record))
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        Box::pin(crate::common::finish_listing(&mut payer)).await;
+        let activities = payer.app().records_of("payer_activity").await.unwrap();
+        assert_eq!(activities.len(), 2);
+        assert!(activities
+            .iter()
+            .all(|r| r.version.generation == third.generation()));
+        Box::pin(assert_pays_under(&world, &mut shop, &mut payer, &key, "2")).await;
+        assert_eq!(only_ledger(&payer).await.1.generation, third.generation());
+        let _moved = Box::pin(change_dropping(
+            &world,
+            &third,
+            &mut payer,
+            &[generation],
+            [76; 32],
+        ))
+        .await;
+        Box::pin(assert_pays_under(&world, &mut shop, &mut payer, &key, "1")).await;
+        assert_eq!(
+            Box::pin(payer.reconcile_allowance(&key))
+                .await
+                .unwrap()
+                .unwrap()
+                .lifetime()
+                .as_str(),
+            "13"
+        );
+    }))
+    .await;
 }

@@ -9,7 +9,7 @@ use pubky_switch_core::ops::{Condition, RecordVersion};
 use pubky_switch_core::shared::ApplicationRef;
 
 use super::checkpoint::ledger_target;
-use super::evidence::AppliedRecord;
+use super::evidence::{AppliedRecord, Purpose};
 use crate::allowances::{allowance_record_target, allowance_target, OriginalAllowanceApplication};
 use crate::{Paykit, Result};
 
@@ -27,9 +27,8 @@ pub(super) struct ApprovedOpening {
 }
 
 impl ApprovedOpening {
-    /// `established`: this installation holds the checkpoint of the grant made on this
-    /// opening, so its original writes count as evidence it verified then, read without a
-    /// generation key the signer has since dropped ([`AppliedRecord::established`]).
+    /// The retained proofs date the original writes. A grant checkpoint records that this
+    /// installation verified them before the signer retired their key (Switch spec 4.3).
     fn verify(
         app: &App,
         key: &[u8; 32],
@@ -44,7 +43,12 @@ impl ApprovedOpening {
         if &app.record_key(&target).ok()? != key {
             return None;
         }
-        let permanent = AppliedRecord::retained_for(app, &target, &source.permanent, established)?;
+        let purpose = if established {
+            Purpose::Established
+        } else {
+            Purpose::Evidence
+        };
+        let permanent = AppliedRecord::retained_for(app, &target, &source.permanent, purpose)?;
         let own = app.identity();
         let record = AllowanceRecord::bind(&permanent.value, &own, app.naming_key(), key).ok()?;
         let Body::AllowanceProposal(p) = record.proposal.body() else {
@@ -72,7 +76,7 @@ impl ApprovedOpening {
             return None;
         }
         let target = ledger_target(&source.counterparty, &id);
-        let ledger = AppliedRecord::retained_for(app, &target, &source.ledger, established)?;
+        let ledger = AppliedRecord::retained_for(app, &target, &source.ledger, purpose)?;
         let zero = bind_ledger(
             &ledger.value,
             app.naming_key(),
@@ -89,8 +93,7 @@ impl ApprovedOpening {
 
         let pending =
             allowance_record_target(Collection::AllowanceProposals, &source.counterparty, &id);
-        let selected =
-            AppliedRecord::selected_proposal(app, &pending, &source.selected, established)?;
+        let selected = AppliedRecord::selected_proposal(app, &pending, &source.selected, purpose)?;
         let pending_key = app.record_key(&pending).ok()?;
         let placed =
             PendingAllowanceRecord::bind(&selected.value, &own, app.naming_key(), &pending_key)
@@ -108,7 +111,7 @@ impl ApprovedOpening {
             &selected,
             &source.selected_condition,
             &source.deletion,
-            established,
+            purpose,
         )?;
         Some(Self {
             record,

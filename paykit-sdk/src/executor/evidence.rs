@@ -19,16 +19,14 @@ use super::ReservationClaim;
 
 /// What an applied operation is verified for ([`AppliedOperation::applied`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Purpose {
+pub(super) enum Purpose {
     /// Evidence of what happened: of a generation in the grant's history.
     Evidence,
     /// It authorizes or dispatches a new attempt: of the current generation.
     Authorizes,
-    /// Evidence this installation retained and verified when its grant was established
-    /// (the original writes of an established opening, a checkpoint's writes): as
-    /// [`Self::Evidence`], but once the signer has dropped its generation's service key,
-    /// as it may when no current record or live claim needs it (Pubky Switch spec, Section
-    /// 4.3, `service_keys`), its retained proof is read without that key. The writer's
+    /// Evidence already verified and retained under this installation's grant checkpoint.
+    /// Once the signer drops its generation's service key (Switch spec 4.3),
+    /// the retained proof can still date the write for the grant's accounting. The writer's
     /// signature, the proof's binding to the operation, the certificate in force and the
     /// grant's history are all still checked.
     Established,
@@ -381,8 +379,9 @@ impl AppliedRecord {
         kept: &KeptOp,
         entry: &LedgerEntry,
         grant: &Condition,
+        purpose: Purpose,
     ) -> bool {
-        let Some(applied) = AppliedOperation::applied(app, kept, Purpose::Evidence) else {
+        let Some(applied) = AppliedOperation::applied(app, kept, purpose) else {
             return false;
         };
         let b = applied.op.body();
@@ -436,11 +435,7 @@ impl AppliedRecord {
 
     /// As [`Self::retained`], for evidence of an established grant ([`Purpose::Established`]).
     pub(super) fn established(app: &App, target: &RecordTarget, kept: &KeptOp) -> Option<Self> {
-        Self::from_operation(
-            app,
-            target,
-            AppliedOperation::applied(app, kept, Purpose::Established)?,
-        )
+        Self::retained_for(app, target, kept, Purpose::Established)
     }
 
     /// `kept` verified for `purpose`: [`Self::retained`] or [`Self::established`].
@@ -448,20 +443,13 @@ impl AppliedRecord {
         app: &App,
         target: &RecordTarget,
         kept: &KeptOp,
-        established: bool,
+        purpose: Purpose,
     ) -> Option<Self> {
-        match established {
-            true => Self::established(app, target, kept),
-            false => Self::retained(app, target, kept),
-        }
+        Self::from_operation(app, target, AppliedOperation::applied(app, kept, purpose)?)
     }
 
     pub(super) fn retained(app: &App, target: &RecordTarget, kept: &KeptOp) -> Option<Self> {
-        Self::from_operation(
-            app,
-            target,
-            AppliedOperation::applied(app, kept, Purpose::Evidence)?,
-        )
+        Self::retained_for(app, target, kept, Purpose::Evidence)
     }
 
     /// A selected proposal may retain its original signed write after a cooperative move.
@@ -469,12 +457,8 @@ impl AppliedRecord {
         app: &App,
         target: &RecordTarget,
         kept: &KeptOp,
-        established: bool,
+        purpose: Purpose,
     ) -> Option<Self> {
-        let purpose = match established {
-            true => Purpose::Established,
-            false => Purpose::Evidence,
-        };
         let applied = AppliedOperation::verify_for(app, kept, purpose)?;
         let current = app.own_identity();
         if !super::in_grant_history(
@@ -602,12 +586,8 @@ impl AppliedRecord {
         selected: &Self,
         selected_condition: &Condition,
         kept: &KeptOp,
-        established: bool,
+        purpose: Purpose,
     ) -> Option<(ApplicationRef, OwnWrite)> {
-        let purpose = match established {
-            true => Purpose::Established,
-            false => Purpose::Evidence,
-        };
         let deleted = AppliedOperation::applied(app, kept, purpose)?;
         let RecordValue::Delete = deleted.open_record(app, pending)? else {
             return None;
@@ -751,9 +731,9 @@ impl AppliedRecord {
         )
     }
 
-    // The opening's inputs, named as `opening` names them, and what it is verified for.
+    /// Check the signed opening against the claim read for this reservation (Paykit spec 8.3).
     #[allow(clippy::too_many_arguments)]
-    fn opening_for(
+    pub(super) fn opening_for(
         &self,
         app: &App,
         kept: &KeptOp,
@@ -767,8 +747,9 @@ impl AppliedRecord {
         // signing key. The certificate of the accepted ledger also proves an opening
         // only when it verifies that operation and was in force at its proved time.
         let applied = AppliedOperation::applied(app, kept, purpose).or_else(|| {
-            let applied = AppliedOperation::with_certificate(app, kept, self.cert.clone())?
-                .fit_for(app, purpose)?;
+            let applied =
+                AppliedOperation::with_certificate_for(app, kept, self.cert.clone(), purpose)?
+                    .fit_for(app, purpose)?;
             (applied.op.body().batch == self.op.body().batch
                 && applied.proof.envelope().server_time == self.at_ms)
                 .then_some(applied)

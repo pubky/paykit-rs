@@ -15,7 +15,7 @@ use pubky_switch_core::shared::ApplicationRef;
 use super::approval::ApprovedOpening;
 use super::checkpoint::{ledger_target, ExecutorCheckpoint};
 use super::compaction::{CompactionRead, LedgerCompaction, Retired};
-use super::evidence::AppliedRecord;
+use super::evidence::{AppliedRecord, Purpose};
 use super::ExecutorHistory;
 use super::{reconciled_usage, wallet_inventory, Accounting};
 use crate::allowances::allowance_target;
@@ -447,13 +447,9 @@ impl Paykit {
                 .await?;
             return Err(pubky_switch_client::app::AppError::Alarm(alarm).into());
         }
-        let Some(applied_proposals) = Box::pin(self.prepared_ledger(
-            permanent_key,
-            &accepted.application,
-            &current,
-            &exact_grant,
-        ))
-        .await?
+        let Some(applied_proposals) =
+            Box::pin(self.prepared_ledger(permanent_key, &accepted, &current, &exact_grant))
+                .await?
         else {
             return Ok(None);
         };
@@ -635,12 +631,12 @@ impl Paykit {
             self.local_scan::<LedgerCompaction>(&key::ledger_compactions(&ledger_key))
                 .await?
                 .into_iter()
-                .map(|(_, row)| row)
+                .map(|(_, row)| (row, Purpose::Established))
                 .collect()
         };
         if let Some(receipt) = &compaction {
-            if !compactions.contains(receipt) {
-                compactions.push(receipt.clone());
+            if !compactions.iter().any(|(held, _)| held == receipt) {
+                compactions.push((receipt.clone(), Purpose::Evidence));
             }
         }
         // An open claim reserves its entry even before dispatch (Paykit spec 8.3).
@@ -682,23 +678,26 @@ impl Paykit {
                 .map(|e| (e.attempt_id, e))
                 .collect();
             let openings = || {
-                ops.ops
-                    .iter()
-                    .chain(compactions.iter().filter_map(|c| c.opening.as_ref()))
+                ops.ops.iter().map(|op| (op, Purpose::Evidence)).chain(
+                    compactions.iter().filter_map(|(receipt, purpose)| {
+                        receipt.opening.as_ref().map(|op| (op, *purpose))
+                    }),
+                )
             };
             for entry in entries {
                 let Some(read) = reads.get(&entry.obligation).and_then(Option::as_ref) else {
                     continue;
                 };
-                if let Some(opening) = openings().find_map(|op| {
+                if let Some(opening) = openings().find_map(|(op, purpose)| {
                     let op = checkpoint.signers.original(entry.attempt_id, op)?;
-                    let (claim, seq) = accepted.application.opening(
+                    let (claim, seq) = accepted.application.opening_for(
                         &self.app,
                         &op,
                         &entry.obligation,
                         entry.attempt_id,
                         read,
                         Some((&exact_grant, entry.at)),
+                        purpose,
                     )?;
                     results
                         .confirms(entry.attempt_id, claim, seq, None)
@@ -736,15 +735,16 @@ impl Paykit {
                 let Some(read) = reads.get(&entry.obligation).and_then(Option::as_ref) else {
                     continue;
                 };
-                if let Some(opening) = openings().find_map(|op| {
+                if let Some(opening) = openings().find_map(|(op, purpose)| {
                     let op = checkpoint.signers.original(entry.attempt_id, op)?;
-                    let (claim, seq) = current.opening(
+                    let (claim, seq) = current.opening_for(
                         &self.app,
                         &op,
                         &entry.obligation,
                         entry.attempt_id,
                         read,
                         Some((&exact_grant, 0)),
+                        purpose,
                     )?;
                     results
                         .confirms(entry.attempt_id, claim, seq, None)
