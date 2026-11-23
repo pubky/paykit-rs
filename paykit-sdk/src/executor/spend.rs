@@ -170,13 +170,24 @@ pub(crate) fn standing(app: &Paykit, view: &AllowanceView, consent: ConsentState
     match (consent, own) {
         (ConsentState::Held, true) => Standing::Payable,
         (ConsentState::ConfirmAgain, _) => Standing::Confirm,
-        (ConsentState::Held | ConsentState::Unrecorded, false) => Standing::NotTakenUp,
+        // The grant path lands the kept batch: the host calls again.
+        (ConsentState::GrantKept, _) => {
+            Standing::Temporary("the executor grant's write waits to be sent again")
+        }
+        // Applied here: resuming writes the consent the user approved under this hold, and
+        // without that approval the user confirms it.
+        (ConsentState::Unconsented { approved: false }, _) => Standing::Confirm,
+        (
+            ConsentState::Held | ConsentState::Unrecorded | ConsentState::Unconsented { .. },
+            false,
+        )
+        | (ConsentState::Unconsented { approved: true }, true) => Standing::NotTakenUp,
+        // The grant came from a backup taken before this device's consent was written.
         (ConsentState::Unrecorded, true) => {
             Standing::Temporary("this app's grant is held, but its consent isn't on this device")
         }
-        (ConsentState::Waiting | ConsentState::Removed(_), _) => {
-            Standing::Temporary("this app's consent to execute the Allowance isn't established")
-        }
+        (ConsentState::Waiting(why), _) => Standing::Temporary(why),
+        (ConsentState::Removed(reason), _) => Standing::Final(removed_refusal(reason)),
     }
 }
 

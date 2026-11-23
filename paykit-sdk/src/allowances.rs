@@ -278,13 +278,29 @@ pub(crate) enum ConsentState {
     ConfirmAgain,
     /// Removed for good, and why.
     Removed(ConsentEnd),
-    /// This app holds no consent entry for it: before its first grant, or after a restore of
-    /// a backup taken before it.
+    /// This app holds no consent entry for it, and no first grant of its own: before its
+    /// first grant, or after a restore of a backup taken before it.
     Unrecorded,
-    /// Not held for now: a `missed` item's mark the next receive turns into
+    /// This app's first grant is kept by the client to send again, its answer lost: the
+    /// grant path lands it first ([`Paykit::resume_allowance_executor`]).
+    GrantKept,
+    /// This app's first grant applied and its consent isn't written yet. With the user's
+    /// approval under the current hold (`approved`), resuming writes it; without, the user
+    /// confirms it ([`Paykit::confirm_allowance_executor`]).
+    Unconsented {
+        /// Whether the user approved execution under the current hold.
+        approved: bool,
+    },
+    /// Not held for now, and why: a `missed` item's mark the next receive turns into
     /// [`ConsentState::ConfirmAgain`], or a record not held as it must be yet.
-    Waiting,
+    Waiting(&'static str),
 }
+
+/// Why consent waits while a `missed` item's mark is kept.
+const WAITS_FOR_MISSED: &str =
+    "a missed item holds every Allowance until the next receive marks it for confirmation";
+/// Why consent waits while the Allowance record isn't held as it must be.
+const WAITS_FOR_RECORD: &str = "the Allowance record isn't held as executing it needs yet";
 
 /// The executor app an `executor_notice` is wrapped to (`en/<msg_id>`), kept with the batch
 /// that queues it; it names its message, so it is taken only for that one.
@@ -2636,7 +2652,7 @@ impl Paykit {
     /// tell why it doesn't: one the user can lift, one a later read can, or one that is final.
     pub(crate) async fn consent_state(&self, record: &[u8; 32]) -> Result<ConsentState> {
         if Box::pin(self.consents_unconfirmed()).await? {
-            return Ok(ConsentState::Waiting);
+            return Ok(ConsentState::Waiting(WAITS_FOR_MISSED));
         }
         if Box::pin(self.allowance_stopped(record)).await? {
             return Ok(ConsentState::Removed(ConsentEnd::Ended));
@@ -2645,10 +2661,10 @@ impl Paykit {
             return Ok(ConsentState::Removed(ConsentEnd::Conflicted));
         }
         let Some(shared) = Box::pin(self.app.shared_record(record)).await? else {
-            return Ok(ConsentState::Waiting);
+            return Ok(ConsentState::Waiting(WAITS_FOR_RECORD));
         };
         if shared.flagged {
-            return Ok(ConsentState::Waiting);
+            return Ok(ConsentState::Waiting(WAITS_FOR_RECORD));
         }
         match Box::pin(self.held_allowance(record)).await? {
             Some(held) if held.end.is_some() => {
@@ -2662,16 +2678,16 @@ impl Paykit {
             }
             Some(held) => {
                 if self.unresolved_for_allowance(record, &held).await? {
-                    return Ok(ConsentState::Waiting);
+                    return Ok(ConsentState::Waiting(WAITS_FOR_RECORD));
                 }
             }
-            None => return Ok(ConsentState::Waiting),
+            None => return Ok(ConsentState::Waiting(WAITS_FOR_RECORD)),
         }
         let Some(held) = self
             .local_get::<ConsentEntry>(&key::consent(record))
             .await?
         else {
-            return Ok(ConsentState::Unrecorded);
+            return Box::pin(self.unconsented_state(record)).await;
         };
         if Box::pin(self.rejection_kept(record, &held.counterparty)).await? {
             return Ok(ConsentState::Removed(ConsentEnd::Rejected));
@@ -2684,6 +2700,34 @@ impl Paykit {
                 confirm_again: true,
             } => ConsentState::ConfirmAgain,
             Consent::Removed { reason } => ConsentState::Removed(reason),
+        })
+    }
+
+    /// Where this app's consent stands with no consent entry kept: its first grant kept to
+    /// send again; applied, its consent waiting for resume or the user; or no grant of its
+    /// own. The grant's batch writes its history (`xc/`) only as it applies, and leaves its
+    /// ID at `gb/` until then.
+    async fn unconsented_state(&self, record: &[u8; 32]) -> Result<ConsentState> {
+        if let Some(id) = self
+            .local_get::<[u8; 16]>(&key::grant_batch(record))
+            .await?
+        {
+            if matches!(
+                self.app.kept_batch(id).await?,
+                Some(pubky_switch_client::app::KeptBatchStatus::Kept { .. })
+            ) {
+                return Ok(ConsentState::GrantKept);
+            }
+        }
+        if self
+            .local_get::<crate::executor::ExecutorHistory>(&key::executor_checkpoint(record))
+            .await?
+            .is_none()
+        {
+            return Ok(ConsentState::Unrecorded);
+        }
+        Ok(ConsentState::Unconsented {
+            approved: self.execution_approved(record).await?,
         })
     }
 
