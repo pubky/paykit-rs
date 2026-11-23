@@ -3015,3 +3015,100 @@ async fn test_provider_loss_keeps_the_floor_divergence_hold() {
         wallet.app().protocol_get("paykit", b"fk").await.unwrap()
     ));
 }
+
+/// The generation `app`'s kept floor (`fk`) shows the record live in.
+async fn floor_live_in(app: &Paykit) -> Option<u64> {
+    let bytes = app.app().protocol_get("paykit", b"fk").await.unwrap()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    value["d"]["live_in"].as_u64()
+}
+
+#[tokio::test]
+async fn test_provider_loss_floor_upload_seen_only_in_a_listing_shows_no_generation() {
+    // Paykit wire 5.6, Seen floor and permanence: after a loss the wallet uploads the floor to
+    // the new service. The phone, restored on a fresh device from a backup taken before the
+    // floor, sees that upload in its listing first. An unauthenticated copy shows a generation
+    // only from a read the current service answered then, so after the listing alone the
+    // phone's kept floor shows none, and an absence then raises no alarm from it. The highest floor seen still holds:
+    // a one-time request created past the loss's window and dated before that floor isn't
+    // paid automatically.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let before = phone.backup().await.unwrap();
+    drop(phone);
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            "block_floor",
+            paykit_lib::collections::Collection::BlockFloor.fixed_policy(),
+        ),
+        &paykit_lib::derive::natural_key::block_floor(&w.alice_id()),
+    );
+    let floor = w.clock.now_ms() + 7 * 24 * 3_600_000;
+    wallet
+        .app_mut()
+        .put_record(
+            &target,
+            &paykit_lib::records::BlockFloorRecord::new(floor)
+                .to_json()
+                .unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    w.clock.advance_ms(60_000);
+    let next = declare_loss(&w);
+    let until = follow_loss(&mut wallet).await;
+    let mut phone = Box::pin(Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &before,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    // The phone's own reads of the floor fail meanwhile, so only its listing shows the upload.
+    let path = format!(
+        "/records/{}",
+        pubky_switch_core::enc::b64(&phone.app().record_key(&target).unwrap())
+    );
+    const FAILED_READS: usize = 40;
+    for _ in 0..FAILED_READS {
+        next.fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: path.clone(),
+            after: 0,
+        });
+    }
+    follow_generation(&mut phone).await;
+    // Leftover failures are spent on reads that show nothing to Paykit.
+    for _ in 0..FAILED_READS {
+        if phone.app_mut().read_record(&target).await.is_ok() {
+            break;
+        }
+    }
+    let held = phone
+        .app()
+        .shared_record(&phone.app().record_key(&target).unwrap())
+        .await
+        .unwrap()
+        .expect("the upload, listed");
+    assert!(!held.authenticated);
+    assert_eq!(floor_live_in(&phone).await, None);
+    follow_loss(&mut phone).await;
+    w.clock
+        .advance_ms(until.saturating_sub(w.clock.now_ms()) + 3_600_000);
+    assert!(w.clock.now_ms() < floor);
+    let request = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    phone.receive(None).await.unwrap();
+    let outcome = phone
+        .pay_request_automatically(&request, PayOptions::default())
+        .await
+        .outcome;
+    assert!(
+        !matches!(outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "{outcome:?}"
+    );
+    assert!(w.rail.all_pay_calls().is_empty());
+}

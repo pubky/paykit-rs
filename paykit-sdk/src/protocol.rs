@@ -1762,12 +1762,10 @@ impl Protocol for PaykitProtocol {
             Err(Fail::Store(failure)) => return Outcome::Retry(failure),
             Err(_) => return Outcome::Retry(StoreFailure::of_entry(StoreError::Corrupt)),
         }
-        let stop_or_receipt = stored_copy(message).is_ok_and(|stored| {
-            crate::divergent::adds_stop(&stored)
-                || matches!(stored.body(), paykit_lib::Body::PaymentReceipt(_))
-        });
+        let one_time_request =
+            stored_copy(message).is_ok_and(|stored| crate::floor::floor_applies(&stored));
         let effect =
-            receive::check_before_effect(cx, &message.sender, stop_or_receipt).and_then(|()| {
+            receive::check_before_effect(cx, &message.sender, one_time_request).and_then(|()| {
                 if self.handles_extension(&message.message.kind) {
                     return crate::extensions::extension_effect(cx, message);
                 }

@@ -160,12 +160,12 @@ impl std::fmt::Debug for QueuedAnswer {
 /// ([`crate::Rail::settlement_id`]).
 pub(crate) type Settlement<'a> = &'a paykit_lib::derive::SettlementIdReader<'a>;
 
-/// Check the receiving app's certificate and the payer's floor before taking any
-/// further entry from a sender it saw unblocked (Paykit spec 8.1).
+/// Check the receiving app's certificate, and the payer's floor before taking any further
+/// one-time request, `one_time_request`, from a sender it saw unblocked (Paykit spec 8.1).
 pub(crate) fn check_before_effect(
     cx: &ReceiveContext<'_>,
     sender: &[u8; 32],
-    stop_or_receipt: bool,
+    one_time_request: bool,
 ) -> Result<(), Fail> {
     // No Paykit effect under an own certificate Paykit refuses, such as a renewal's the
     // Switch took (Paykit wire 3.1): the entry is held, never consumed, and tried again at
@@ -178,12 +178,12 @@ pub(crate) fn check_before_effect(
         .scopes()
         .iter()
         .any(|s| s == paykit_lib::scopes::PAY);
-    // A stop or a receipt goes on under its own rules while the raise is owed: it creates no
-    // state a raise protects (Paykit wire 5.6, Divergent floor).
+    // Only a one-time request waits for the raise of its sender's unblock: the floor applies to
+    // it alone, and every other entry goes on under its own rules (Paykit spec 8.1; Paykit
+    // wire 5.6, Raising).
     if pay
-        && !stop_or_receipt
-        && (state::cx_get::<crate::floor::PendingUnblocks>(cx, key::BLOCK_FLOOR)?
-            .is_some_and(|pending| pending.senders.binary_search(sender).is_ok())
+        && one_time_request
+        && (crate::floor::owed_raises_at(cx)?.holds_entries_of(sender)
             || (state::cx_get::<Vec<[u8; 32]>>(cx, key::DENIED)?
                 .is_some_and(|deny| deny.contains(sender))
                 && !cx.sender_disposition(sender)?.blocked
@@ -582,8 +582,7 @@ fn came_back_from_block(
     stored: &StoredMessage,
 ) -> Result<bool, Fail> {
     let mark = state::cx_get::<crate::marks::DropMark>(cx, &MarkFamily::Blocked.key(sender))?;
-    let owed = state::cx_get::<crate::floor::PendingUnblocks>(cx, key::BLOCK_FLOOR)?
-        .map(|pending| pending.to_ms);
+    let owed = crate::floor::owed_raises_at(cx)?.to_ms();
     let target = crate::floor::floor_target(&cx.identity());
     let held = cx.record(&target)?;
     let seen = cx.record_seen(&cx.record_key(&target)?)?;
@@ -3224,6 +3223,28 @@ impl Paykit {
         let mut owed = self
             .local_get::<crate::floor::PendingUnblocks>(key::BLOCK_FLOOR)
             .await?;
+        // A sender blocked again is held by the block, not by the raise of its earlier unblock:
+        // its next unblock raises the floor anew (Paykit wire 5.6, Raising).
+        let reblocked = owed.as_ref().is_some_and(|pending| {
+            pending
+                .senders
+                .iter()
+                .any(|sender| deny.binary_search(sender).is_ok())
+        });
+        if let Some(pending) = owed.as_mut() {
+            pending
+                .senders
+                .retain(|sender| deny.binary_search(sender).is_err());
+        }
+        if owed
+            .as_ref()
+            .is_some_and(|pending| pending.senders.is_empty())
+        {
+            owed = None;
+        }
+        if reblocked && owed.is_none() {
+            tx.delete(key::BLOCK_FLOOR);
+        }
         if self.holds("paykit_pay") {
             let closed: Vec<_> = previous
                 .into_iter()
@@ -3461,6 +3482,28 @@ impl Paykit {
         self.local_commit(tx).await
     }
 
+    /// Drop `pubky` from the unblocks whose raise is owed (`bf`), in `tx`, once the switch took
+    /// its block again: the block holds it now, and its next unblock raises the floor anew
+    /// (Paykit wire 5.6, Raising).
+    async fn drop_owed_unblock(&self, tx: &mut Tx, pubky: &[u8; 32]) -> crate::error::Result<()> {
+        let Some(mut pending) = self
+            .local_get::<crate::floor::PendingUnblocks>(key::BLOCK_FLOOR)
+            .await?
+        else {
+            return Ok(());
+        };
+        let Ok(at) = pending.senders.binary_search(pubky) else {
+            return Ok(());
+        };
+        pending.senders.remove(at);
+        if pending.senders.is_empty() {
+            tx.delete(key::BLOCK_FLOOR);
+        } else {
+            tx.put(key::BLOCK_FLOOR, &pending)?;
+        }
+        Ok(())
+    }
+
     /// The block of [`Paykit::list_own`]: marked and in the copy first, then sent. The mark
     /// goes once the switch took it, and names the batch the client keeps it in. Only an
     /// answer that shows the block was neither applied nor kept puts the mark and the copy
@@ -3499,6 +3542,7 @@ impl Paykit {
             match self.deny_at_switch(pubky).await {
                 Ok(()) => {
                     tx.delete(&mark);
+                    self.drop_owed_unblock(&mut tx, pubky).await?;
                 }
                 Err(error) if error.kept_batch().is_some() => {
                     let kept = OwnBlockMark {

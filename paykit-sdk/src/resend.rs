@@ -104,14 +104,13 @@ impl Paykit {
     /// while sends to `counterparty` are held: while the copy of the deny list holds it, or, at an
     /// app holding `paykit_contacts`, while that copy isn't known, which a read of the lists is
     /// tried for first (Paykit spec 8.1, "Blocked counterparties"), and while a floor raise this
-    /// app owes for its unblock isn't written (Paykit wire 5.6, Raising).
+    /// app owes isn't written, its unblock's or any widening's (Paykit wire 5.6, Raising).
     ///
     /// # Errors
     ///
     /// [`crate::Refusal::ScopeMissing`] without `paykit_contacts`. Sends wait while the
-    /// recipient is blocked, the deny list is unknown, a floor raise for its unblock is
-    /// owed, or a prior overlapping request
-    /// has an unresolved delivery. An empty selection fails validation. Client errors
+    /// recipient is blocked, the deny list is unknown, a floor raise is owed, or a prior
+    /// overlapping request has an unresolved delivery. An empty selection fails validation. Client errors
     /// from queuing and sending are returned to the caller.
     pub async fn request_resend(
         &mut self,
@@ -159,10 +158,10 @@ impl Paykit {
     }
 
     /// Whether asks to `sender` are held: while sends to it are ([`Paykit::sends_held`]), and
-    /// while a raise this app owes for its unblock isn't written, when it is asked nothing
-    /// (Paykit wire 5.6, Raising; [`Paykit::raise_holds_sender`]).
+    /// while a raise this app owes isn't written, its unblock's or any widening's, when no one
+    /// it covers is asked (Paykit wire 5.6, Raising; [`crate::floor::OwedRaises`]).
     pub(crate) async fn asks_held(&self, sender: &[u8; 32]) -> Result<bool> {
-        Ok(self.sends_held(sender).await? || self.raise_holds_sender(sender).await?)
+        Ok(self.sends_held(sender).await? || self.raise_holds_asks_to(sender).await?)
     }
 
     /// A `resend_request` to `counterparty` for `selection`, signed and not yet queued.
