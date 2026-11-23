@@ -341,9 +341,9 @@ const SEEN_RECORDS_BYTES: usize = (pubky_switch_client::store::MAX_VALUE_BYTES /
 /// ([`SeenRecords::drop_before`], the one place a record leaves it), which nothing lowers or
 /// clears. A record at or before it, a whole group at exactly that time included, is never
 /// kept again, so never used, nor the fallback under a conflict: what was dropped may have
-/// withdrawn it or conflicted with it, and the set no longer knows. Nothing is held for good: a record
-/// newer than it is compared and used as usual, so a payee's newer record is paid to as
-/// before. The one case where it sits ahead of real time is when records the payee dated
+/// withdrawn it or conflicted with it, and the set no longer knows. Nothing is held for
+/// good: a record newer than it is compared and used as usual, so a payee's newer record is
+/// paid to as before. The one case where it sits ahead of real time is when records the payee dated
 /// ahead were read while the device clock ran fast, and then dropped: that app's public
 /// endpoints aren't used until it publishes a record newer than them. Only public records
 /// are compared here; a Private Payment List or a request's own destination never is.
@@ -714,7 +714,10 @@ impl Paykit {
             let served_at = read.as_ref().map(AppRecord::updated_at);
             let served_refused = read.is_none();
             if let Some(record) = read {
-                if takes_part(&record, &held, &view, now) {
+                // A record at or before one dropped from the set takes part in nothing, as a
+                // record earlier than one held: what was dropped may have withdrawn it or
+                // conflicted with it (Switch spec 4.2). The records held answer for it.
+                if seen.past_dropped(&record) && takes_part(&record, &held, &view, now) {
                     // A record the reader can't keep for the comparison is never used, nor
                     // is an earlier one in its place, which it may withdraw: the app's
                     // failure, and the other apps' reads go on (Paykit spec 4, below).

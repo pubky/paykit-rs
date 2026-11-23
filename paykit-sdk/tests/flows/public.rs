@@ -1884,7 +1884,17 @@ async fn test_public_floor_ahead_of_real_time_holds_only_the_public_endpoints() 
         t0 + 1000,
         expiry,
     );
-    assert!(listed(&mut wallet, &w).await.is_empty());
+    // The records held answer for it: they are ahead of the clock, so nothing is used yet,
+    // across reads.
+    let shop_app = w.bob.identity().app_keys("shop").app_id_bytes();
+    for _ in 0..2 {
+        let list = read(&mut wallet, &w).await;
+        assert!(ids(&list).is_empty());
+        assert!(
+            fails_with(&list, shop_app, &["made ahead of the payer's clock"]),
+            "{list:?}"
+        );
+    }
     w.list_to_alice(
         &mut shop,
         &[wallet.app_id()],
