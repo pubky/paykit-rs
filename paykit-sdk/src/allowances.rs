@@ -432,6 +432,16 @@ pub(crate) fn may_deliver_end(
     crate::protocol::may_deliver_to_contact(delivery)
 }
 
+/// Whether `delivery` is the original delivery of an `allowance_end` the user initiated,
+/// by the durable origin kept for exactly that signed end (Paykit spec 3.1, 8.3).
+pub(crate) fn user_end(delivery: &pubky_switch_client::app::DeliveryView<'_>) -> Result<bool> {
+    let message = delivery.message();
+    let origin = state::delivery_get::<EndOrigin>(delivery, &key::end_origin(&message.msg_id))?;
+    Ok(origin.is_some_and(|origin| {
+        origin.cause == EndCause::User && origin.matches(message, delivery.hash())
+    }) && delivery.origin() == pubky_switch_client::app::DeliveryOrigin::Original)
+}
+
 /// The client's target of the `allowances` record of `counterparty`'s Allowance
 /// `allowance_id` (Paykit wire 1.5, 5.4).
 pub(crate) fn allowance_target(
@@ -1674,6 +1684,7 @@ impl Paykit {
         peer: &[u8; 32],
         id: &AllowanceId,
         deletion: pubky_switch_core::shared::ApplicationRef,
+        deletion_write: &crate::executor::OwnWrite,
     ) -> Result<Option<pubky_switch_core::ops::Condition>> {
         use pubky_switch_client::app::{KeptReason, RecordRead};
         use pubky_switch_core::ops::{Condition, RecordVersion};
@@ -1688,7 +1699,12 @@ impl Paykit {
             return Ok(None);
         }
         let read = self.app.read_record_fresh(&target).await?;
-        if !matches!(delivery::current(&target, &key, &read, true), Some(None)) {
+        // Read with no copy held after an orderly change, the deletion is shown by this
+        // app's own retained write (`OwnWrite`).
+        let own_deletion = matches!(&read, RecordRead::Fresh(r)
+            if replies::qualified_as(r, &target, &key, deletion_write)
+                && r.content == pubky_switch_client::app::RecordContent::Deleted);
+        if !own_deletion && !matches!(delivery::current(&target, &key, &read, true), Some(None)) {
             return Ok(None);
         }
         match read {
@@ -1709,7 +1725,7 @@ impl Paykit {
                 Ok(applied
                     .is_some_and(|current| {
                         current.application == deletion
-                            && replies::qualified_at(&current.record, &target, &key)
+                            && replies::qualified_as(&current.record, &target, &key, deletion_write)
                             && current.record.content
                                 == pubky_switch_client::app::RecordContent::Deleted
                     })
@@ -1781,6 +1797,8 @@ impl Paykit {
         role: AllowanceRole,
         terms: AllowanceTerms,
     ) -> Result<SentAllowance> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         Box::pin(self.propose_allowance_with_consent(to, role, terms, None)).await
     }
 
@@ -1796,6 +1814,8 @@ impl Paykit {
         terms: AllowanceTerms,
         confirmed: crate::UserConfirmed,
     ) -> Result<SentAllowance> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         Box::pin(self.propose_allowance_with_consent(
             to,
             AllowanceRole::Allower,
@@ -2080,6 +2100,8 @@ impl Paykit {
     /// accepted. A seller accepts using this method. The payer uses [`Self::accept_executable_allowance`].
     /// Both approval and contacts scopes are required to send the signed reply.
     pub async fn accept_allowance(&mut self, record: &[u8; 32]) -> Result<String> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.accept_allowance_with_consent(record, None).await
     }
 
@@ -2095,6 +2117,8 @@ impl Paykit {
         record: &[u8; 32],
         confirmed: crate::UserConfirmed,
     ) -> Result<String> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         Box::pin(self.accept_allowance_with_consent(record, Some(confirmed))).await
     }
 
@@ -2122,6 +2146,8 @@ impl Paykit {
     /// changed; [`Refusal::Usage`] for a proposal this identity sent or one answered already;
     /// as [`Paykit::propose_allowance`]. Never [`Refusal::Divergent`].
     pub async fn reject_allowance(&mut self, record: &[u8; 32]) -> Result<String> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         Box::pin(self.answer_allowance(record, Kind::AllowanceRejection, None)).await
     }
 
@@ -2144,6 +2170,8 @@ impl Paykit {
     /// 8.1, "Blocked counterparties"); [`Refusal::Usage`] for a proposal to this identity not
     /// yet answered, which is rejected instead; as [`Paykit::propose_allowance`].
     pub async fn end_allowance(&mut self, record: &[u8; 32]) -> Result<String> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         Box::pin(self.answer_allowance(record, Kind::AllowanceEnd, None)).await
     }
 

@@ -491,10 +491,28 @@ pub(super) fn qualified_at(
     target: &pubky_switch_client::app::RecordTarget,
     key: &[u8; 32],
 ) -> bool {
+    held.authenticated && qualified_unless_unauthenticated(held, target, key)
+}
+
+/// As [`qualified_at`], for a read of `own`, this app's own retained write: the client's
+/// authentication of its version, or the write's own proof (`OwnWrite::stands_for`).
+pub(super) fn qualified_as(
+    held: &SharedRecord,
+    target: &pubky_switch_client::app::RecordTarget,
+    key: &[u8; 32],
+    own: &crate::executor::OwnWrite,
+) -> bool {
+    own.stands_for(held) && qualified_unless_unauthenticated(held, target, key)
+}
+
+fn qualified_unless_unauthenticated(
+    held: &SharedRecord,
+    target: &pubky_switch_client::app::RecordTarget,
+    key: &[u8; 32],
+) -> bool {
     held.key == *key
         && held.collection == target.collection.name
         && held.policy == target.collection.policy
-        && held.authenticated
         && !held.doubtful
         && !held.not_taken
         && !held.flagged

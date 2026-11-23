@@ -21,7 +21,11 @@ use crate::common::{store, World};
 /// `paykit_pay` with one switch permission its scopes don't derive: the Switch takes such a
 /// certificate, and Paykit refuses it (Paykit wire 3.1).
 fn refused_scopes() -> RequestedScopes {
-    let mut scopes = AppScopes::new().pay().build().unwrap();
+    refused(AppScopes::new().pay().build().unwrap())
+}
+
+/// `scopes` with one switch permission they don't derive, which Paykit refuses.
+pub(crate) fn refused(mut scopes: RequestedScopes) -> RequestedScopes {
     let extra = Permission::ALL
         .into_iter()
         .find(|p| !scopes.permissions.contains(p))
@@ -2074,9 +2078,18 @@ async fn test_certificate_wider_without_the_pay_key_writes_nothing_and_journals_
 
 /// The signer stores `cert`'s key bundle for app `me`, every data epoch up to the current.
 pub(crate) fn store_bundle(w: &World, me: [u8; 16], cert: &AppCert) {
-    let epoch = w.alice.switch().identity_doc().unwrap().data_epoch();
+    store_bundle_for(&w.alice, me, cert);
+}
+
+/// [`store_bundle`] by `signer`, for its app `me`.
+pub(crate) fn store_bundle_for(
+    signer: &pubky_switch_client::testing::TestSigner,
+    me: [u8; 16],
+    cert: &AppCert,
+) {
+    let epoch = signer.switch().identity_doc().unwrap().data_epoch();
     let parts = pubky_switch_core::records::seal_bundle_parts(
-        w.alice.identity().key(),
+        signer.identity().key(),
         cert,
         1,
         epoch,
@@ -2084,7 +2097,7 @@ pub(crate) fn store_bundle(w: &World, me: [u8; 16], cert: &AppCert) {
     )
     .unwrap();
     for part in parts {
-        w.alice
+        signer
             .switch()
             .signer_op(OpKind::KeyBundlePut(pubky_switch_core::ops::KeyBundlePut {
                 target_app_id: me,
