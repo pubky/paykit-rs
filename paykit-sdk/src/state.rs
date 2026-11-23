@@ -70,6 +70,7 @@
 //! | `fg` | the flagged senders as the app last read them, at most `MAX_FLAGGED_COPY`; absent while not known, which holds the asks of block marks (`marks.rs`); never restored | |
 //! | `bf` | the raise of the identity's block floor this app owes: the latest of the latest times of the block marks gone for the bound or their own expiry, and of a restore's first read of the lists; written to the shared `block_floor` record before the block marks ask and with any ask, and deleted in that batch; applied as a floor meanwhile (`crate::floor`) | yes |
 //! | `fk` | what this app keeps of the identity's block floor: the highest floor it has seen and whether it has seen the record divergent, the durable divergence hold; both only grow, and an in-place restore keeps the higher of the backup's and the installation's (`crate::floor::FloorKept`, Paykit wire 5.6) | yes |
+//! | `rr` | a block floor raise this app owes, tried and left unwritten for a cause other than the divergence hold: how many such tries in a row, when the next may go, the wait, and the floor record and whether the floor read as it was then (`crate::floor::RaiseRetry`, Paykit wire 5.6, Raising); never restored | |
 //! | `fo/<record key>` | a request record a read opened without `manual_only`, checked against the block floor once the read is done and marked if dated before it (`crate::floor`); never restored | |
 //! | `bk/<pubky>` | this app's block or unblock of `pubky` not yet shown by the list (`OwnBlockMark`): a block from before the switch is asked, an unblock only with the batch the client keeps; a block counts until a read of the list shows it, and is written again at a receive while the client neither keeps nor applied its batch, a restored one too, since the kept batch stays with the device that kept it; an unblock counts for payments and held sends only while the client still keeps its batch, never for the spam rule, and isn't restored (Paykit spec 8.1) | |
 //! | `ra/<sender>` | signed recovery requests for dropped replies, their first-delivery outcomes and any unresolved original missing from a restore | |
@@ -551,6 +552,18 @@ impl Stored for crate::floor::FloorKept {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         // No writer keeps an empty one.
         if matches!(family, StateKey::FloorKept) && !self.is_empty() {
+            Ok(())
+        } else {
+            corrupt()
+        }
+    }
+}
+
+impl sealed::Sealed for crate::floor::RaiseRetry {}
+
+impl Stored for crate::floor::RaiseRetry {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        if matches!(family, StateKey::RaiseRetry) && self.reads() {
             Ok(())
         } else {
             corrupt()
@@ -1844,6 +1857,8 @@ pub(crate) mod key {
     /// The newest provider loss this app recorded, by the generation recovered at
     /// (`crate::loss`, the shared post-loss hold).
     pub(crate) const LOSS_RECORDED: &str = "rl";
+    /// A floor raise tried and left unwritten (`crate::floor::RaiseRetry`).
+    pub(crate) const RAISE_RETRY: &str = "rr";
     pub(crate) const NOT_PAID_BEFORE_LOSS: &str = "pn/";
     /// A `missed` item's hold whose end isn't known yet (`Paykit::bound_missed_hold`).
     pub(crate) const MISSED_END_UNKNOWN: &str = "mu";
@@ -2521,6 +2536,8 @@ pub(crate) enum StateKey {
     IdentityNotice(crate::notices::NoticeKind),
     /// `rl`: the newest provider loss this app recorded.
     LossRecorded,
+    /// `rr`: a floor raise tried and left unwritten.
+    RaiseRetry,
     /// The local identifier of an unanswered floor write.
     FloorBatch,
     /// `fo/<record key>`: a request record a read opened without `manual_only`, to check
@@ -2672,6 +2689,7 @@ impl StateKey {
             "mh" => Self::MissedHold,
             "pl" => Self::LossBoundary,
             "rl" => Self::LossRecorded,
+            "rr" => Self::RaiseRetry,
             "mu" => Self::MissedEndUnknown,
             "nl" => Self::RecordsUnlisted,
             "ml" => Self::MissedUnlisted,
@@ -4006,6 +4024,7 @@ mod tests {
                 StateKey::IdentityNotice(crate::notices::NoticeKind::AutomaticPaymentsHeld),
             ),
             (key::LOSS_RECORDED.into(), StateKey::LossRecorded),
+            (key::RAISE_RETRY.into(), StateKey::RaiseRetry),
             (key::BLOCK_FLOOR.into(), StateKey::BlockFloor),
             (key::FLOOR_BATCH.into(), StateKey::FloorBatch),
             (key::floor_opened(&pubky), StateKey::FloorOpened(pubky)),

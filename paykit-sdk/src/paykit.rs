@@ -403,6 +403,9 @@ pub struct Paykit {
     /// Whether the lists were read since this handle's last receive or flush began: a raise
     /// owed asks for no second read before the next one ([`Paykit::raise_owed`]).
     pub(crate) lists_read_this_pass: bool,
+    /// Whether the read of the lists in progress already left a raise unwritten: one read
+    /// counts one try, however many raises it leaves unwritten ([`crate::floor::RaiseRetry`]).
+    pub(crate) raise_tried_in_read: bool,
     /// How many activity records this handle bound ([`Paykit::activity_binds`]).
     #[cfg(feature = "test-support")]
     pub(crate) activity_binds: std::sync::atomic::AtomicU64,
@@ -478,6 +481,7 @@ impl Paykit {
             identity_told: Vec::new(),
             raise_unwritten: false,
             lists_read_this_pass: false,
+            raise_tried_in_read: false,
             #[cfg(feature = "test-support")]
             activity_binds: std::sync::atomic::AtomicU64::new(0),
             certificates: std::sync::Mutex::default(),

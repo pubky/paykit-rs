@@ -836,6 +836,8 @@ pub(crate) fn restore_paykit_layer(
             // list the backup holds may be stale by any time, so the list is read again before
             // any payment (Paykit spec 8.1).
             StateKey::ListsRead => continue,
+            // How a raise was last tried belongs to the installation that tried it.
+            StateKey::RaiseRetry => continue,
             // A read's records to check against the block floor belong to the read: the
             // restore holds every open request (`hold.rs`).
             StateKey::FloorOpened(_) => continue,

@@ -3293,6 +3293,7 @@ impl Paykit {
         read_at: u64,
     ) -> crate::error::Result<Vec<[u8; 32]>> {
         self.lists_read_this_pass = true;
+        self.raise_tried_in_read = false;
         let (mut deny, mut tx) = self.judged_deny(lists.deny).await?;
         deny.sort_unstable();
         deny.dedup();
