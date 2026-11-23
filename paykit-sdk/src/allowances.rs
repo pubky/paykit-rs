@@ -2534,8 +2534,12 @@ impl Paykit {
             Box::pin(self.allowance_stopped(&record)).await?,
             Box::pin(self.conflict_kept(&record)).await?,
         );
-        let status = if status != AllowanceStatus::Conflicted
-            && self.unresolved_for_allowance(&record, held).await?
+        // An end, a rejection or a conflict is final whatever the record could still
+        // establish; only an Allowance that hasn't stopped waits for the conflict check.
+        let status = if !matches!(
+            status,
+            AllowanceStatus::Conflicted | AllowanceStatus::Ended | AllowanceStatus::Rejected
+        ) && self.unresolved_for_allowance(&record, held).await?
         {
             AllowanceStatus::AwaitingConflictCheck
         } else {
@@ -2673,16 +2677,14 @@ impl Paykit {
     /// [`Paykit::consents`], which holds it only at [`ConsentState::Held`]. The other states
     /// tell why it doesn't: one the user can lift, one a later read can, or one that is final.
     pub(crate) async fn consent_state(&self, record: &[u8; 32]) -> Result<ConsentState> {
-        if Box::pin(self.consents_unconfirmed()).await? {
-            return Ok(ConsentState::Waiting(WAITS_FOR_MISSED));
-        }
+        // A stop, a kept conflict and a removal this app recorded are final, whatever the
+        // record shows now or a `missed` item's mark holds.
         if Box::pin(self.allowance_stopped(record)).await? {
             return Ok(ConsentState::Removed(ConsentEnd::Ended));
         }
         if Box::pin(self.conflict_kept(record)).await? {
             return Ok(ConsentState::Removed(ConsentEnd::Conflicted));
         }
-        // A removal this app recorded is final, whatever the record shows now.
         if let Some(ConsentEntry {
             consent: Consent::Removed { reason },
             ..
@@ -2691,6 +2693,9 @@ impl Paykit {
             .await?
         {
             return Ok(ConsentState::Removed(reason));
+        }
+        if Box::pin(self.consents_unconfirmed()).await? {
+            return Ok(ConsentState::Waiting(WAITS_FOR_MISSED));
         }
         let Some(shared) = Box::pin(self.app.shared_record(record)).await? else {
             return Ok(ConsentState::Waiting(WAITS_FOR_RECORD));
@@ -2773,6 +2778,7 @@ impl Paykit {
             let approved_here = self
                 .local_get::<OriginalAllowance>(&key::original_allowance(record))
                 .await?
+                .filter(OriginalAllowance::opened)
                 .map(|original| original.approved_for_execution())
                 .transpose()?
                 .flatten()

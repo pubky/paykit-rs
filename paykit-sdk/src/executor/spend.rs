@@ -130,6 +130,9 @@ pub(crate) fn standing(app: &Paykit, view: &AllowanceView, consent: ConsentState
         AllowanceStatus::Ended => return Standing::Final(Refusal::AllowanceEnded),
         AllowanceStatus::Conflicted => return Standing::Final(Refusal::AllowanceConflicted),
         AllowanceStatus::Rejected => return Standing::Final(Refusal::Rejected),
+        AllowanceStatus::AwaitingConflictCheck => {
+            return Standing::Temporary("the Allowance waits for its conflict check")
+        }
         _ => return Standing::Temporary("the Allowance isn't accepted yet"),
     }
     if view.role != Some(AllowanceRole::Allower) {

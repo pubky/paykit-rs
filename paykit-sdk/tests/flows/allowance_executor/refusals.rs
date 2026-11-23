@@ -1353,3 +1353,109 @@ async fn test_allowance_refusals_grant_after_the_backup_asks_no_confirmation() {
         not_now("this app's grant is held, but its consent isn't on this device")
     );
 }
+
+#[tokio::test]
+async fn test_allowance_refusals_expiry_since_the_last_receive_ends_the_grant_paths() {
+    // The terms expire after the wallet's last receive: the grant paths' fresh reads bring
+    // the service time up to date, and they refuse the Allowance as ended, writing nothing.
+    let (w, mut payer, _shop, key) = Box::pin(first_grant_in(store(), expiring())).await;
+    let hold = payer.allowance(&key).await.unwrap().hold;
+    w.clock
+        .set_ms(pubky_switch_client::testing::START_MS + 3 * HOUR_MS);
+    assert_eq!(
+        refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
+        Refusal::AllowanceEnded
+    );
+    assert_eq!(
+        refusal_of(Box::pin(payer.confirm_allowance_executor(&hold, UserConfirmed::new())).await),
+        Refusal::AllowanceEnded
+    );
+}
+
+#[tokio::test]
+async fn test_allowance_refusals_removal_comes_before_a_missed_mark() {
+    // Another own app's end is recorded as a removal, then a `missed` item's mark is kept
+    // before the entries are marked: the removal is final all the same.
+    use pubky_switch_client::app::LocalWrite;
+    let (w, mut payer, _shop, key) = Box::pin(first_grant_in(store(), terms())).await;
+    let _phone = Box::pin(w.join(
+        &w.alice,
+        "phone",
+        AppScopes::new().allowance().build().unwrap(),
+    ))
+    .await;
+    crate::allowances::notice(&w, &w.alice, "phone", payer.app_id(), &key, "ended");
+    Box::pin(payer.receive(None)).await.unwrap();
+    payer
+        .app_mut()
+        .protocol_commit(
+            "paykit",
+            &[LocalWrite::Put {
+                key: b"mc".to_vec(),
+                value: br#"{"v":1,"d":true}"#.to_vec(),
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
+        Refusal::AllowanceEnded
+    );
+}
+
+#[tokio::test]
+async fn test_allowance_refusals_restore_before_the_acceptance_asks_no_confirmation() {
+    // The backup holds the user's approval from the proposal but not the acceptance that
+    // opened the Allowance. Restored from it, the Allowance isn't asked to be confirmed:
+    // confirming couldn't grant it without that opening.
+    let w = World::new();
+    let mut payer = Box::pin(w.join_with(
+        &w.alice,
+        "wallet",
+        AppScopes::new().allowance_execute().build().unwrap(),
+        PaykitConfig::default(),
+        store(),
+    ))
+    .await;
+    let mut shop = Box::pin(w.join(
+        &w.bob,
+        "shop",
+        AppScopes::new().allowance().request().build().unwrap(),
+    ))
+    .await;
+    payer.app_mut().invite(&shop.identity()).await.unwrap();
+    shop.app_mut().invite(&payer.identity()).await.unwrap();
+    w.rail.set_history_payer(payer.identity());
+    Box::pin(payer.propose_executable_allowance(shop.identity(), terms(), UserConfirmed::new()))
+        .await
+        .unwrap();
+    let backup = payer.backup().await.unwrap();
+    Box::pin(shop.receive(None)).await.unwrap();
+    let offer = shop.allowances().await.unwrap().pop().unwrap();
+    Box::pin(shop.accept_allowance(&offer.record))
+        .await
+        .unwrap();
+    Box::pin(payer.receive(None)).await.unwrap();
+    let key = payer.allowances().await.unwrap().pop().unwrap().record;
+    drop(payer);
+    let mut payer = Box::pin(Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    crate::common::restore_with_unknown_cursor(&mut payer).await;
+    Box::pin(payer.reconcile()).await.unwrap();
+    Box::pin(payer.end_reconcile(UserConfirmed::new()))
+        .await
+        .unwrap();
+    let view = payer.allowance(&key).await.unwrap();
+    assert!(!view.confirmation_needed, "{view:?}");
+    assert!(!matches!(
+        refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
+        Refusal::AllowanceConfirmationNeeded { .. }
+    ));
+}

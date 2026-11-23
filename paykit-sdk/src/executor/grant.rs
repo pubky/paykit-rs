@@ -148,6 +148,7 @@ impl Paykit {
             let (fresh, _) = self.current_executor_record(&allow).await?;
             let ledger = ledger_target(&view.counterparty, &view.allowance_id);
             let (current_ledger, _) = self.current_executor_record(&ledger).await?;
+            Box::pin(self.still_standing(record)).await?;
             let original_ledger = current_ledger.revision == opening.ledger.revision
                 && accepted.application.revision == opening.ledger.revision;
             if fresh.revision != accepted.grant.revision
@@ -257,6 +258,7 @@ impl Paykit {
         let led = ledger_target(&view.counterparty, &view.allowance_id);
         let (a, _) = self.current_executor_record(&allow).await?;
         let (l, _) = self.current_executor_record(&led).await?;
+        Box::pin(self.still_standing(record)).await?;
         let pending = Box::pin(self.pending_condition_for_executor(
             &view.counterparty,
             &view.allowance_id,
@@ -373,6 +375,19 @@ impl Paykit {
         .await?;
         self.promote_consent(record, &view.counterparty, &view.allowance_id)
             .await
+    }
+
+    /// Refused for good or for now as [`standing`] says, read again after the fresh reads of
+    /// the records, which bring the service time up to date: an Allowance that expired
+    /// since the last receive refuses as ended before anything is written.
+    async fn still_standing(&self, record: &[u8; 32]) -> Result<()> {
+        let shown = self.allowance(record).await?;
+        let consent = Box::pin(self.consent_state(record)).await?;
+        match standing(self, &shown, consent) {
+            Standing::Final(refusal) => Err(refusal.into()),
+            Standing::Temporary(why) => Err(Refusal::NotNow(why.into()).into()),
+            Standing::Confirm | Standing::Payable | Standing::NotTakenUp => Ok(()),
+        }
     }
 
     /// Land this app's first grant of the Allowance at `record` when the client keeps its

@@ -2612,7 +2612,7 @@ async fn confirm_foreign_failure(case: ForeignFailure) {
     ))
     .await;
     // A larger request, sent now while the shop's certificate holds, paid only later.
-    let larger = if case == ForeignFailure::BeforeDispatch {
+    let larger = if case != ForeignFailure::LostRelease {
         let lasting = draft("95", world.clock.now_ms())
             .with_proposal_expires_at_ms(world.clock.now_ms() + 3_650 * 24 * HOUR_MS);
         Some(Box::pin(request_from(&mut shop, payer.identity(), lasting)).await)
@@ -2704,10 +2704,10 @@ async fn confirm_foreign_failure(case: ForeignFailure) {
             .as_str(),
         "9"
     );
-    if case == ForeignFailure::BeforeDispatch {
-        // The failed attempt holds 9 of the 100 the lifetime limit allows: a payment of 95
-        // waits for the user's release of it, rather than being refused for good.
-        let larger = larger.as_ref().unwrap();
+    if let Some(larger) = larger.as_ref() {
+        // The failed attempt holds 9 of the 100 the lifetime limit allows. Ended before
+        // dispatch, the user can release it, so a payment of 95 waits; dispatched, it can't
+        // be released, so the payment is refused for good.
         // The shop's certificate is renewed too, so its destination checks.
         let shop_old = shop.app().cert().clone();
         let shop_id = shop.app_id();
@@ -2723,13 +2723,14 @@ async fn confirm_foreign_failure(case: ForeignFailure) {
             .await
             .outcome
             .unwrap_err();
-        assert_eq!(
-            waits.refusal(),
-            Some(&paykit_sdk::Refusal::NotNow(
-                "the lifetime limit has no room while another app's failed attempt holds it: the user can release that attempt (reserved_by_other_apps)".into()
-            )),
-            "{waits:?}"
-        );
+        let expected = if case == ForeignFailure::BeforeDispatch {
+            paykit_sdk::Refusal::NotNow(
+                "the lifetime limit has no room while another app's failed attempt holds it: the user can release that attempt (reserved_by_other_apps)".into(),
+            )
+        } else {
+            paykit_sdk::Refusal::NotAutomatic("the lifetime limit has no room".into())
+        };
+        assert_eq!(waits.refusal(), Some(&expected), "{waits:?}");
     }
     let before_release = if case == ForeignFailure::BeforeDispatch {
         Some(Box::pin(payer.backup()).await.unwrap())

@@ -33,8 +33,18 @@ pub(super) struct LedgerFacts {
 impl LedgerFacts {
     /// Whether an attempt another app reported failed still holds room the user can give
     /// back ([`Paykit::release_allowance_attempt`]).
+    /// It is releasable by the same evidence the release itself requires: never paid,
+    /// ended before dispatch on this installation, failed by another app, and with the
+    /// record write the release is conditioned on.
     pub(super) fn releasable(&self) -> bool {
-        !self.other_failures.is_empty()
+        self.other_failures.iter().any(|failure| {
+            self.release_records.contains_key(&failure.attempt_id)
+                && self.signed.get(&failure.attempt_id).is_some_and(|fact| {
+                    !fact.paid
+                        && fact.never_dispatched
+                        && fact.claim == Some(ClaimState::Failed { by_owner: false })
+                })
+        })
     }
 }
 
