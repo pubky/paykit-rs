@@ -432,6 +432,16 @@ pub(crate) fn may_deliver_end(
     crate::protocol::may_deliver_to_contact(delivery)
 }
 
+/// Whether `delivery` is the original delivery of an `allowance_end` the user initiated,
+/// by the durable origin kept for exactly that signed end (Paykit spec 3.1, 8.3).
+pub(crate) fn user_end(delivery: &pubky_switch_client::app::DeliveryView<'_>) -> Result<bool> {
+    let message = delivery.message();
+    let origin = state::delivery_get::<EndOrigin>(delivery, &key::end_origin(&message.msg_id))?;
+    Ok(origin.is_some_and(|origin| {
+        origin.cause == EndCause::User && origin.matches(message, delivery.hash())
+    }) && delivery.origin() == pubky_switch_client::app::DeliveryOrigin::Original)
+}
+
 /// The client's target of the `allowances` record of `counterparty`'s Allowance
 /// `allowance_id` (Paykit wire 1.5, 5.4).
 pub(crate) fn allowance_target(

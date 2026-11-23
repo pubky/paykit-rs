@@ -54,6 +54,7 @@
 //! | `lgone/<record key>` | set in the commit in which this app sees the `payment_lists` record deleted, or holds a list over it while it doesn't read: a later absence of it, as after a forgotten delete or a restore, keeps a list held there; never cleared, and a restore keeps the installation's own as well as the backup's | yes |
 //! | `kc/<record key>/<certificate hash>/<feed generation>` | a payee's cancellation of a request, kept until it is placed in the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
+//! | `sv` | the highest service time the app verified, as the receive step and a flush last saw it, for the delivery hook's window of a held message, which judges by it, by the device clock only while none is kept (`send_holds.rs`, Paykit spec 8.1); never restored, a restore's first read writing it again | |
 //! | `lr` | when the app last read the lists, on the device clock; absent before the first read and after a due read failed, when new activity waits (Paykit wire 4.1); never restored, so a restored app reads the deny list again before any payment | |
 //! | `spam/<pubky>` | how many messages from a blocked or flagged sender only were counted (Paykit wire 4.1) | |
 //! | `rs/<pubky>/<msg_id>` | when a message was last re-sent to a requester | |
@@ -601,7 +602,8 @@ impl Stored for u64 {
             | StateKey::Spam(_)
             | StateKey::Resent { .. }
             | StateKey::ResentDay { .. }
-            | StateKey::ListsRead => Ok(()),
+            | StateKey::ListsRead
+            | StateKey::ServiceTime => Ok(()),
             _ => corrupt(),
         }
     }
@@ -1867,6 +1869,7 @@ pub(crate) mod key {
     pub(crate) const LIST_RECIPIENTS: &str = "lrec/";
     pub(crate) const LIST_DISCOVERY: &str = "ld";
     pub(crate) const LISTS_READ: &str = "lr";
+    pub(crate) const SERVICE_TIME: &str = "sv";
     pub(crate) const HELD_LISTS: &str = "lh/";
     pub(crate) const LISTS_LOST: &str = "lgone/";
     pub(crate) const RECORDS_UNLISTED: &str = "nl";
@@ -2465,6 +2468,8 @@ pub(crate) enum StateKey {
     },
     /// `lr`: when the lists were last read.
     ListsRead,
+    /// `sv`: the highest service time verified, for the delivery hook.
+    ServiceTime,
     /// `lh/<record key>`: a list held over a record that didn't read.
     HeldList([u8; 32]),
     /// `lgone/<record key>`: a `payment_lists` record seen deleted or unreadable.
@@ -2691,6 +2696,7 @@ impl StateKey {
             "ro" => Self::OwnResendOwed,
             "lc" => Self::ListedCert,
             "lr" => Self::ListsRead,
+            "sv" => Self::ServiceTime,
             "dl" => Self::Denied,
             "fg" => Self::Flagged,
             "fd" => Self::FloorDeleted,
@@ -3898,6 +3904,7 @@ mod tests {
                 },
             ),
             (key::LISTS_READ.into(), StateKey::ListsRead),
+            (key::SERVICE_TIME.into(), StateKey::ServiceTime),
             (key::DENIED.into(), StateKey::Denied),
             (key::own_block(&pubky), StateKey::OwnBlock(pubky)),
             (

@@ -126,19 +126,17 @@ pub(crate) fn deny_decision(delivery: &DeliveryView<'_>) -> Result<DenyDecision>
 /// exceptions still go, under a certificate that sends them, which reads the lists.
 ///
 /// What ends a message held here:
-/// - a rejection or a payer's cancellation is never sent once 30 days have passed since
-///   its `created_at`, less the clock tolerance; the receive step then ends its outbox copy
-///   and tells the host ([`Paykit::give_up_expired_stops`], Paykit spec 8.1). Here the
-///   window is judged on the device clock, since the delivery view carries no service
-///   time; the receive step judges it on the later of the device clock and the service
-///   time verified, so it ends every copy this holds as past its window, and may end one
-///   this would still let go while the service time runs ahead of the device clock;
+/// - no held kind is sent past its window ([`held_past_window`]); a rejection's or a
+///   payer's cancellation's outbox copy is then ended by the receive step, which tells the
+///   host ([`Paykit::give_up_expired_stops`], Paykit spec 8.1). Both judge the window on
+///   the service time verified, the device clock only while none is known;
 /// - a re-send ends at the client's replay deadline, its first acceptance plus 30 days
 ///   (Switch spec 11);
 /// - a request, period details, a list request and a subscription acceptance not
 ///   confirmed while blocked are never sent past the same window either: past it, the
-///   copy stays queued and never goes, nothing is paid for it, and the host gets no notice
-///   of it yet.
+///   copy stays queued and never goes, and the host gets no notice of it yet. Its record
+///   keeps its effect (Paykit spec 8.1): a subscription it accepted stays accepted, and
+///   its periods may still be paid, each payment reported by its proof.
 pub(crate) fn may_deliver(delivery: &DeliveryView<'_>, kind: Kind) -> Result<bool> {
     let cert = delivery.cert();
     if paykit_lib::scopes::check_certificate(cert).is_err()
@@ -183,13 +181,55 @@ pub(crate) fn may_deliver(delivery: &DeliveryView<'_>, kind: Kind) -> Result<boo
         }
         _ => {}
     }
-    // Held, it is never sent past its window (Paykit spec 8.1). A certificate that sends
-    // it holds `paykit_contacts` (Paykit spec 3.1, checked above), so its deny decision
-    // below is never taken without the lists.
-    if past_replay_window(message.created_at_ms, delivery.now_ms()) {
+    // A certificate that sends it holds `paykit_contacts` (Paykit spec 3.1, checked
+    // above), so its deny decision is never taken without the lists. Its window is
+    // judged for every held kind before this ([`held_past_window`]).
+    Ok(deny_decision(delivery)? == DenyDecision::Permits)
+}
+
+/// Whether `delivery` is the first delivery, or a retry of it, of a message the
+/// counterparty hold governs that is past its window: 30 days past its `created_at`, less
+/// the clock tolerance, by the highest service time the app verified that its state holds,
+/// and by the device clock only while it holds none, so neither a slow device clock sends
+/// late nor a fast one ends a message early. Such a
+/// message is never sent, whatever its kind and its other rules (Paykit spec 8.1, "Messages
+/// already queued"). What still goes when first sent while sends are held keeps the
+/// client's own deadline instead, as the hold doesn't govern it: a payment's proof, a
+/// receipt, a payee's cancellation, the acceptance of a dispatched payment, the user's
+/// `allowance_end`, a list's withdrawal and an own app's `executor_notice`. A re-send keeps
+/// the client's replay deadline from its first acceptance (Switch spec 11).
+pub(crate) fn held_past_window(delivery: &DeliveryView<'_>) -> Result<bool> {
+    if delivery.resend() {
         return Ok(false);
     }
-    Ok(deny_decision(delivery)? == DenyDecision::Permits)
+    let message = delivery.message();
+    let now = state::delivery_get::<u64>(delivery, key::SERVICE_TIME)?
+        .unwrap_or_else(|| delivery.now_ms());
+    if !past_replay_window(message.created_at_ms, now) {
+        return Ok(false);
+    }
+    let goes = match paykit_lib::kinds::MessageKind::parse(&message.kind) {
+        Ok(paykit_lib::kinds::MessageKind::Paykit(kind)) => match kind {
+            Kind::PaymentProof | Kind::PaymentReceipt | Kind::ExecutorNotice => true,
+            Kind::PaymentRequestCancellation => {
+                state::delivery_get::<KeptSide>(delivery, &key::side(&message.msg_id))?
+                    .is_some_and(|kept| kept.side == SideTag::Payee)
+            }
+            Kind::PaymentRequestAcceptance => state::delivery_get::<SendExemption>(
+                delivery,
+                &key::send_exemption(&message.msg_id),
+            )?
+            .is_some_and(|e| e.reason == ExemptionReason::DispatchedPayment),
+            Kind::AllowanceEnd => crate::allowances::user_end(delivery)?,
+            Kind::PrivatePaymentList => {
+                paykit_lib::bodies::PrivatePaymentList::from_body(&message.body)
+                    .is_ok_and(|list| list.payment_endpoints.is_empty())
+            }
+            _ => false,
+        },
+        _ => false,
+    };
+    Ok(!goes)
 }
 
 /// Whether a message signed at `created_at_ms` is past its 30 days, less the clock
@@ -241,6 +281,11 @@ pub(crate) enum GivenUp {
 }
 
 impl QueuedStop {
+    /// How far its end has gone: undecided, decided, then told.
+    pub(crate) fn progress(&self) -> (bool, bool) {
+        (self.given_up.is_some(), self.told)
+    }
+
     /// The entry of `signed`, a stop answering the request `request_hash`, just signed.
     pub(crate) fn signed(
         signed: &pubky_switch_client::app::SignedMessage,
@@ -281,9 +326,26 @@ impl QueuedStop {
 }
 
 impl Paykit {
+    /// Keep the highest service time the app verified where the delivery hook reads it
+    /// (`sv`), so a held message's window is judged by it ([`held_past_window`]). It only
+    /// goes up.
+    pub(crate) async fn note_service_time(&mut self) -> Result<()> {
+        let Some(at) = self.service_time() else {
+            return Ok(());
+        };
+        if self
+            .local_get::<u64>(key::SERVICE_TIME)
+            .await?
+            .is_some_and(|kept| kept >= at)
+        {
+            return Ok(());
+        }
+        self.local_put(key::SERVICE_TIME, &at).await
+    }
+
     /// End the outbox copies of this app's rejections and payer's cancellations that are
-    /// past 30 days from their `created_at`, less the clock tolerance, by the later of the
-    /// device clock and the service time verified: such a stop is never sent, and a client
+    /// past 30 days from their `created_at`, less the clock tolerance, by the service time
+    /// verified, or the device clock while none is: such a stop is never sent, and a client
     /// original carries no deadline of its own. As for one held in its record
     /// ([`Paykit::queue_own_again`]), it is decided at the first receive past that time at
     /// which the copy of the deny list is known and doesn't hold the payee, with the records
@@ -312,7 +374,8 @@ impl Paykit {
             .filter(|queued| !queued.resend)
             .map(|queued| (queued.msg_id.clone(), queued))
             .collect();
-        let now = self.window_now();
+        // The window's clock, as the delivery hook judges it ([`held_past_window`]).
+        let now = self.service_time().unwrap_or_else(|| self.now());
         let mut reported: Option<std::collections::BTreeSet<String>> = None;
         let mut gone = Tx::default();
         let mut expired = Vec::new();

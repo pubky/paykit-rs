@@ -1159,6 +1159,7 @@ impl Paykit {
             });
         }
         self.refresh_own()?;
+        Box::pin(self.note_service_time()).await?;
         // A recovery notice holds own writes. Return the client's report before upkeep
         // can try a held write. A restore or a kept floor batch also defers that work.
         if self.app.recovery_required().is_some()
@@ -1315,6 +1316,7 @@ impl Paykit {
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
         Box::pin(self.refresh_lists_when_due()).await?;
+        Box::pin(self.note_service_time()).await?;
         self.send_outbox().await?;
         // Flushing can settle a kept deletion. Its signed reply can leave only
         // once Paykit has verified the applied operation and its service result.

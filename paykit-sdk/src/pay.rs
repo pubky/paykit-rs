@@ -4244,7 +4244,9 @@ impl Paykit {
         // stays kept: its attempt isn't on the claim yet, so its entry is left `Recorded`
         // below, until the batch is sent or the client drops it. The flush sends only bytes
         // signed earlier, kept batches and queued messages, and builds nothing on the copy,
-        // so it goes while the payer's side waits too.
+        // so it goes while the payer's side waits too. Its held messages' windows are judged
+        // on the service time verified so far (Paykit spec 8.1).
+        Box::pin(self.note_service_time()).await?;
         self.send_outbox().await?;
         // Cancellations kept and not yet placed go into their records (Paykit spec 8.1),
         // which they build on: not while the payer's side waits.

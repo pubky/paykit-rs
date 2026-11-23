@@ -682,6 +682,18 @@ pub(crate) fn restore_paykit_layer(
                 .map_err(|_| "invalid retained block floor hold")?;
         }
     }
+    // The installation's stops: a restore in place keeps the store's unacknowledged
+    // reports under their IDs, so the decision taken on them stays with them (Paykit spec
+    // 8.1, 9).
+    let mut previous_stops = std::collections::BTreeMap::new();
+    for (k, value) in restoring
+        .previous_local_scan(key::QUEUED_STOPS.as_bytes())
+        .map_err(|_| "the installation's queued stops cannot be read")?
+    {
+        let stop = state::restored::<crate::send_holds::QueuedStop>(&k, &value, &binder)
+            .map_err(|_| "the installation holds an invalid queued stop")?;
+        previous_stops.insert(k, stop);
+    }
     let mut cursor_time_ms = 0;
     let mut bounded = BoundedFamilies::default();
     for (key, value) in state {
@@ -757,6 +769,9 @@ pub(crate) fn restore_paykit_layer(
             // list the backup holds may be stale by any time, so the list is read again before
             // any payment (Paykit spec 8.1).
             StateKey::ListsRead => continue,
+            // Nor the service time the delivery hook judges by: the restore's first read
+            // writes it again, and until then the device clock alone judges.
+            StateKey::ServiceTime => continue,
             // A read's records to check against the block floor belong to the read: the
             // restore holds every open request (`hold.rs`).
             StateKey::FloorOpened(_) => continue,
@@ -888,8 +903,16 @@ pub(crate) fn restore_paykit_layer(
             // its end, which is taken again as it was decided, told once (Paykit spec 8.1,
             // 9): the entry is restored whole.
             StateKey::QueuedStop(_) => {
-                state::restored::<crate::send_holds::QueuedStop>(&key, &value, &binder)
-                    .map_err(|_| unread())?;
+                let carried =
+                    state::restored::<crate::send_holds::QueuedStop>(&key, &value, &binder)
+                        .map_err(|_| unread())?;
+                // Restored in place, the installation's decision wins unless the backup's
+                // is further on.
+                let stop = match previous_stops.remove(&key) {
+                    Some(previous) if previous.progress() >= carried.progress() => previous,
+                    _ => carried,
+                };
+                let value = state::encode(&stop).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -1309,6 +1332,10 @@ pub(crate) fn restore_paykit_layer(
         let value = state::encode(&notice).map_err(|_| "a delivery notice cannot be written")?;
         writes.push(LocalWrite::Put { key, value });
     }
+    for (key, stop) in previous_stops {
+        let value = state::encode(&stop).map_err(|_| "a queued stop cannot be written")?;
+        writes.push(LocalWrite::Put { key, value });
+    }
     if !recordings.is_subset(&awaiting_recording) {
         return Err("an offline recording has no matching payment journal entry".into());
     }
@@ -1542,6 +1569,11 @@ impl Protocol for PaykitProtocol {
                 .map_err(view_failure)?
                 || !crate::allowances::reply_is_applied(delivery)?)
         {
+            return Ok(false);
+        }
+        // No message the counterparty hold governs goes past its window, whichever rules
+        // its kind has besides (Paykit spec 8.1, "Messages already queued").
+        if crate::send_holds::held_past_window(delivery).map_err(view_failure)? {
             return Ok(false);
         }
         match kind {
