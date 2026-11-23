@@ -2045,7 +2045,9 @@ impl Protocol for PaykitProtocol {
                 .filter(|_| deletion.exact_version_authenticated);
             // A delete built on the delete this app holds, taken on its own evidence, has no
             // write between them, so it took nothing the first one hadn't: the entry moves
-            // to it and keeps its copy. The client gives a deleted predecessor no value.
+            // to it and keeps its copy. The client gives a deleted predecessor no value. A
+            // held delete a view shows divergent, as after a provider loss's conflicting
+            // upload, isn't taken as that evidence.
             let base = deletion.base.expected_version;
             let over_delete = deletion.base.held
                 && cx
@@ -2055,6 +2057,7 @@ impl Protocol for PaykitProtocol {
                         held.content == pubky_switch_client::app::RecordContent::Deleted
                             && held.version == base
                             && held.authenticated
+                            && !held.divergent
                             && !held.doubtful
                             && !held.flagged
                             && !held.not_taken
