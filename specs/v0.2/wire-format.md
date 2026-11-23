@@ -2,7 +2,7 @@
 
 This draft defines Paykit’s encodings and validation. The [specification](spec.md) identifies the normative Pubky Switch revision and each separately adopted contract. Wire Section 5 identifies the protected-record paths whose positive wire contract is incomplete. Appendix A lists encoding choices.
 
-**Invitation delivery.** All invitation-specific rules and citations use [Switch revision `6ef258d1ada96db7637394b57307335cb802b461`](https://github.com/pubky/pubky-switch/blob/6ef258d1ada96db7637394b57307335cb802b461/spec/wire-format.md), as named in the specification's **Invitation delivery** paragraph. These include registration (6.2), its service-written `reply.add` transition (6.5), the request header and trusted-time rule (7.1, 7.3), append and retry by the same sealed envelope (7.4.3), the allowlist response (7.4.6), readable feed entries (7.5) and export parts (10.3). Unrelated Switch rules retain their earlier references. No invitation member is added to a signed Paykit message body, and the stored Paykit vectors are unchanged. The [implementation table](implementation.md) links the SDK runtime checks.
+**Invitation delivery.** All invitation-specific rules and citations use [Switch revision `6ef258d1ada96db7637394b57307335cb802b461`](https://github.com/pubky/pubky-switch/blob/6ef258d1ada96db7637394b57307335cb802b461/spec/wire-format.md), as named in the specification's **Invitation delivery** paragraph. These include registration (6.2), its service-written `reply.add` transition (6.5), the request header and trusted-time rule (7.1, 7.3), append and retry by the same sealed envelope (7.4.3), the allowlist response (7.4.6), readable feed entries (7.5) and export parts (10.3). The admission encodings these sections touch, the permission `reply.add` that registering and withdrawing an invite code require and that gives access to `invite_code.*` feed entries (6.2, 7.5), the service-written `reply.add` transition and which apps may read it in the feed (6.5, 7.4.3, 7.5), the `peers` array of the allowlist response (7.4.6) and the `admission` export part (10.3), are those of the peer admission adoption at Pubky Switch revision `964c832895630465812292ded65227104dca22ca` (spec Section 4), not of this invitation revision. Unrelated Switch rules retain their earlier references. No invitation member is added to a signed Paykit message body, and the stored Paykit vectors are unchanged. The [implementation table](implementation.md) links the SDK runtime checks.
 
 **Test vectors.** The [vector guide](vectors/README.md) lists the files, fixed inputs and regeneration order. The [implementation table](implementation.md) distinguishes library checks, generated examples and wallet behavior.
 
@@ -192,7 +192,7 @@ Example (`documents.json` `executor_grant`, whose write built on version (1, 12)
   "app_id": "cw5ahtdkixcafna9zh1y5y5o1w",
   "cert": {
     "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFw...",
-    "sig": "JEGa78qsr_F28gpLUIq1wG1q5zlNcZQ3SpZNstomnJXVaGVFCERjADDUWpaikmdTNBBnpCLsyvYKUS6ukIiWBA"
+    "sig": "Ir-nJajpFEnwb23vssI3EeOQj5e1-q6-40FrkjXZb0f6irORauaGp_fi8YPsLbC3V153vNz1PfcjyPJI_DXODA"
   },
   "confirmed_generation": 1,
   "sig": "jKZ13zfRyNtQPpLEeOU2USP0AH5ryagD_QqudMVFPn2bi61kshMto6Uuqxohf38_ueLZXBivfe9V3j_CWacmBg",
@@ -1007,7 +1007,7 @@ Example entry (`documents.json` `executor_grant_history_entry`: the record was c
     "app_id": "cw5ahtdkixcafna9zh1y5y5o1w",
     "cert": {
       "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFw...",
-      "sig": "JEGa78qsr_F28gpLUIq1wG1q5zlNcZQ3SpZNstomnJXVaGVFCERjADDUWpaikmdTNBBnpCLsyvYKUS6ukIiWBA"
+      "sig": "Ir-nJajpFEnwb23vssI3EeOQj5e1-q6-40FrkjXZb0f6irORauaGp_fi8YPsLbC3V153vNz1PfcjyPJI_DXODA"
     },
     "confirmed_generation": 1,
     "sig": "jKZ13zfRyNtQPpLEeOU2USP0AH5ryagD_QqudMVFPn2bi61kshMto6Uuqxohf38_ueLZXBivfe9V3j_CWacmBg",
