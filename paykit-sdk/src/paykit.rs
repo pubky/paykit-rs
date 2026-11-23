@@ -1253,6 +1253,8 @@ impl Paykit {
         // payer's records opened before this app held the block floor they fall under carry
         // `manual_only` from now on, unless the payer's side waits.
         Box::pin(self.keep_held_floor()).await?;
+        // A loss followed in this read is told as at a load (`crate::loss`).
+        self.tell_identity_notices().await?;
         if !Box::pin(self.payer_waits(keys)).await? {
             Box::pin(self.sweep_floor()).await?;
         }

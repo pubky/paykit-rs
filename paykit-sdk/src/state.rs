@@ -42,6 +42,7 @@
 //! | `xr/<record key>` | an approval for execution a restore carried, which counts once its verdict is clean | |
 //! | `xa/<record key>/<hold identifier>` | the user approved automatic execution of an Allowance under that hold; only the current hold's approval lets a first grant go without a new confirmation | |
 //! | `pl` | the latest provider-loss boundary followed, retained across restore (`loss.rs`, Paykit spec 7.3) | |
+//! | `rl` | the newest provider loss this app recorded, by the generation recovered at: written with `pl`, never lowered, and kept from the installation over an in-place restore; the shared post-loss hold stands while it is set (`loss.rs`, Paykit spec 8.1) | |
 //! | `pn/<obligation>` | the user states this obligation was not paid before the kept loss; a newer loss clears these statements | |
 //! | `mh` | the hold a `missed` item set on the open requests, bounded by a time: the item's last acceptance time, or, for an item whose end isn't known, a service time verified after the read that handed it (`hold.rs`) | |
 //! | `mu` | set by a `missed` item whose end isn't known: every open request is held, as after a restore, until a read that completes bounds the hold by the service time verified then, into `mh`, and clears it (`hold.rs`) | |
@@ -613,6 +614,8 @@ impl Stored for u64 {
             | StateKey::Resent { .. }
             | StateKey::ResentDay { .. }
             | StateKey::ListsRead => Ok(()),
+            // A generation recovered at follows another.
+            StateKey::LossRecorded if *self > 0 => Ok(()),
             _ => corrupt(),
         }
     }
@@ -1838,6 +1841,9 @@ pub(crate) mod key {
     pub(crate) const HOLD_EPOCH: &str = "he";
     pub(crate) const MISSED_HOLD: &str = "mh";
     pub(crate) const LOSS_BOUNDARY: &str = "pl";
+    /// The newest provider loss this app recorded, by the generation recovered at
+    /// (`crate::loss`, the shared post-loss hold).
+    pub(crate) const LOSS_RECORDED: &str = "rl";
     pub(crate) const NOT_PAID_BEFORE_LOSS: &str = "pn/";
     /// A `missed` item's hold whose end isn't known yet (`Paykit::bound_missed_hold`).
     pub(crate) const MISSED_END_UNKNOWN: &str = "mu";
@@ -2513,6 +2519,8 @@ pub(crate) enum StateKey {
     FloorKept,
     /// `nt/<tag>`: an identity-wide notice of the kind the tag names.
     IdentityNotice(crate::notices::NoticeKind),
+    /// `rl`: the newest provider loss this app recorded.
+    LossRecorded,
     /// The local identifier of an unanswered floor write.
     FloorBatch,
     /// `fo/<record key>`: a request record a read opened without `manual_only`, to check
@@ -2663,6 +2671,7 @@ impl StateKey {
             "he" => Self::HoldEpoch,
             "mh" => Self::MissedHold,
             "pl" => Self::LossBoundary,
+            "rl" => Self::LossRecorded,
             "mu" => Self::MissedEndUnknown,
             "nl" => Self::RecordsUnlisted,
             "ml" => Self::MissedUnlisted,
@@ -3981,6 +3990,11 @@ mod tests {
                 key::identity_notice(crate::notices::NoticeKind::BlockFloorHeld),
                 StateKey::IdentityNotice(crate::notices::NoticeKind::BlockFloorHeld),
             ),
+            (
+                key::identity_notice(crate::notices::NoticeKind::AutomaticPaymentsHeld),
+                StateKey::IdentityNotice(crate::notices::NoticeKind::AutomaticPaymentsHeld),
+            ),
+            (key::LOSS_RECORDED.into(), StateKey::LossRecorded),
             (key::BLOCK_FLOOR.into(), StateKey::BlockFloor),
             (key::FLOOR_BATCH.into(), StateKey::FloorBatch),
             (key::floor_opened(&pubky), StateKey::FloorOpened(pubky)),

@@ -44,7 +44,9 @@
 //!   shows. Under it every one-time request counts as dated before the floor, no automatic
 //!   one-time dispatch or repeat goes, and the app writes no `block_floor` create or
 //!   successor (Paykit wire 5.6, Divergent floor). Nothing lifts it, the user's confirmation
-//!   included, and it is kept across restart, restore, scope changes and later losses.
+//!   included, and it is kept across restart, restore, scope changes and later losses. While
+//!   the shared post-loss hold (`crate::loss`) stands too, an unblock or a widening goes
+//!   without the raise it would need (Paykit wire 5.6, Unblocking under the divergence hold).
 //! - **The highest floor seen** is kept in the same record, so an in-place restore from an
 //!   earlier backup, or a later lower write, never lowers it.
 
@@ -544,15 +546,17 @@ impl Paykit {
     }
 
     /// Whether the lists are due for a raise this app owes: while a `missed` item's widening
-    /// waits for its read, the divergence hold or not, and while a raise it can write is owed,
-    /// with no divergence hold. The raise goes with that read, at the next receive (Paykit wire
-    /// 5.6, Raising).
+    /// waits for its read, the divergence hold or not, and while a raise is owed that can go,
+    /// written with no divergence hold, or without the raise under both holds. It goes with that
+    /// read, at the next receive (Paykit wire 5.6, Raising; Unblocking under the divergence
+    /// hold).
     pub(crate) async fn raise_owed(&self) -> Result<bool> {
         let owed = self.owed_raises().await?;
         if owed.unread() {
             return Ok(true);
         }
-        Ok(owed.any() && !self.floor_kept().await?.divergent)
+        Ok(owed.any()
+            && (!self.floor_kept().await?.divergent || self.shared_loss_hold().await?))
     }
 
     /// At a receive's end: while a raise this app owes is tried and left unwritten, with no
@@ -739,12 +743,17 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// [`Refusal::FloorHeld`] while the divergence hold stands; [`Refusal::NotNow`] while the
-    /// floor can't be read; the client's errors.
+    /// [`Refusal::FloorHeld`] while the divergence hold stands without the shared post-loss
+    /// hold; [`Refusal::NotNow`] while the floor can't be read; the client's errors.
     async fn floor_batch(&mut self, to_ms: u64) -> Result<Option<OpBatch>> {
         let (shared, at_switch) = self.floor_for_write(to_ms).await?;
         let (floor, to) = match raise_of(shared, at_switch, to_ms) {
             Raise::Spared => return Ok(None),
+            // Paykit wire 5.6, Unblocking under the divergence hold: under both holds no own
+            // app pays a one-time request automatically and this app holds every one as dated
+            // before the floor, so the unblock or widening goes without the raise. Under the
+            // divergence hold alone it waits.
+            Raise::Held if self.shared_loss_hold().await? => return Ok(None),
             Raise::Held => return Err(Refusal::FloorHeld.into()),
             Raise::Unreadable => return Err(unreadable_floor()),
             Raise::Write { floor, to } => (floor, to),

@@ -473,6 +473,27 @@ impl BoundedFamilies {
 /// The name of Paykit's layer in app backups (Switch spec 12.4).
 pub const BACKUP_NAME: &str = "paykit";
 
+/// The newest provider loss the installation an in-place restore replaces has recorded
+/// (`rl`, the generation recovered at), if any. A fresh destination has none.
+fn previous_loss_recorded(
+    restoring: &RestoreContext<'_>,
+    binder: &state::Binder<'_>,
+) -> Result<Option<u64>, String> {
+    let mut recorded = None;
+    for (k, value) in restoring
+        .previous_local_scan(key::LOSS_RECORDED.as_bytes())
+        .map_err(|_| "the installation's recorded loss cannot be read")?
+    {
+        if k == key::LOSS_RECORDED.as_bytes() {
+            recorded = Some(
+                state::restored::<u64>(&k, &value, binder)
+                    .map_err(|_| "invalid recorded provider loss")?,
+            );
+        }
+    }
+    Ok(recorded)
+}
+
 /// What the installation an in-place restore replaces keeps of the block floor: its kept
 /// floor (`fk`) with its held floor record's floor and divergence, so a backup taken before
 /// either never lowers the floor or drops the hold (Paykit wire 5.6, Divergent floor). A fresh
@@ -722,6 +743,9 @@ pub(crate) fn restore_paykit_layer(
     // An in-place restore from an earlier backup keeps the installation's divergence hold
     // and highest floor seen, its held floor record's included (Paykit wire 5.6).
     let mut floor_kept = previous_floor_kept(restoring, &binder)?;
+    // And its recorded loss: an in-place restore keeps the shared post-loss hold's evidence
+    // (Paykit spec 8.1, wire 5.6).
+    let mut loss_recorded = previous_loss_recorded(restoring, &binder)?;
     // A backup taken before a `payment_lists` delete was seen cannot discharge the
     // installation's knowledge of it either (Paykit spec 6).
     let mut lists_lost = std::collections::BTreeSet::new();
@@ -831,6 +855,11 @@ pub(crate) fn restore_paykit_layer(
                 state::restored::<crate::LossBoundary>(&key, &value, &binder)
                     .map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::LossRecorded => {
+                let backup = state::restored::<u64>(&key, &value, &binder).map_err(|_| unread())?;
+                loss_recorded = loss_recorded.max(Some(backup));
                 continue;
             }
             StateKey::NotPaidBeforeLoss(_) => {
@@ -1334,6 +1363,12 @@ pub(crate) fn restore_paykit_layer(
         &mut writes,
     )
     .map_err(|_| "the pending Allowance replies cannot be retained")?;
+    if let Some(recorded) = loss_recorded {
+        writes.push(
+            state::local_put(key::LOSS_RECORDED, &recorded)
+                .map_err(|_| "the recorded provider loss cannot be written")?,
+        );
+    }
     for key in lists_lost {
         writes.push(LocalWrite::Put {
             key,

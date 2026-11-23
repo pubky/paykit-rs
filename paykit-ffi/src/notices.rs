@@ -54,6 +54,9 @@ pub enum WalletNoticeKind {
     /// widening's raise waits no one is asked to re-send.
     /// Shown once while it stands; it goes when the raise is written.
     FloorRaiseWaiting,
+    /// Automatic one-time payments for the identity are held for good after a provider loss;
+    /// each request can still be paid by hand. Shown once, and again after each reopen.
+    AutomaticPaymentsHeld,
     /// A native case that this binding does not recognize.
     Other,
 }
@@ -77,6 +80,7 @@ impl From<paykit_sdk::NoticeKind> for WalletNoticeKind {
             K::DroppedMessagesLost => Self::DroppedMessagesLost,
             K::BlockFloorHeld => Self::BlockFloorHeld,
             K::FloorRaiseWaiting => Self::FloorRaiseWaiting,
+            K::AutomaticPaymentsHeld => Self::AutomaticPaymentsHeld,
             _ => Self::Other,
         }
     }

@@ -118,6 +118,11 @@ pub enum NoticeKind {
     /// once while it stands, and removed when the raise is written; it names no attempt,
     /// message or counterparty.
     FloorRaiseWaiting,
+    /// Automatic one-time payments for the identity are held for good after a provider
+    /// loss, and each request can still be paid by hand (Paykit spec 8.1, Paykit wire 5.6,
+    /// Shared post-loss hold). Raised once, and again after each reopen, while the hold
+    /// stands; it names no attempt, message or counterparty.
+    AutomaticPaymentsHeld,
 }
 
 impl NoticeKind {
@@ -146,15 +151,20 @@ impl NoticeKind {
             Self::DroppedMessagesLost => "dropped_lost",
             Self::BlockFloorHeld => "floor_held",
             Self::FloorRaiseWaiting => "raise_waiting",
+            Self::AutomaticPaymentsHeld => "loss_hold",
         }
     }
 
     /// The identity-wide kind a key names (`nt/<tag>`): one about the identity as a whole,
     /// at most one kept, naming no attempt, message or counterparty.
     pub(crate) fn identity_from_tag(tag: &str) -> Option<Self> {
-        [Self::BlockFloorHeld, Self::FloorRaiseWaiting]
-            .into_iter()
-            .find(|kind| kind.tag() == tag)
+        [
+            Self::BlockFloorHeld,
+            Self::FloorRaiseWaiting,
+            Self::AutomaticPaymentsHeld,
+        ]
+        .into_iter()
+        .find(|kind| kind.tag() == tag)
     }
 
     /// The kind a key names.
@@ -981,8 +991,10 @@ impl Paykit {
         Ok(())
     }
 
-    /// Tell the host, at a load or a restore, of every identity-wide hold that stands: the
-    /// block floor held after it was seen divergent ([`NoticeKind::BlockFloorHeld`]).
+    /// Tell the host, at a load, a restore or a receive's end, of every identity-wide hold
+    /// that stands: the block floor held after it was seen divergent
+    /// ([`NoticeKind::BlockFloorHeld`]) and the shared post-loss hold
+    /// ([`NoticeKind::AutomaticPaymentsHeld`], `crate::loss`).
     ///
     /// # Errors
     ///
@@ -990,6 +1002,10 @@ impl Paykit {
     pub(crate) async fn tell_identity_notices(&mut self) -> Result<()> {
         if self.floor_kept().await?.divergent {
             self.tell_identity_notice(NoticeKind::BlockFloorHeld)
+                .await?;
+        }
+        if self.shared_loss_hold().await? {
+            self.tell_identity_notice(NoticeKind::AutomaticPaymentsHeld)
                 .await?;
         }
         Ok(())
@@ -1083,7 +1099,11 @@ mod tests {
 
     #[test]
     fn test_identity_notices_bind_only_at_their_key_and_name_nothing() {
-        for kind in [NoticeKind::BlockFloorHeld, NoticeKind::FloorRaiseWaiting] {
+        for kind in [
+            NoticeKind::BlockFloorHeld,
+            NoticeKind::FloorRaiseWaiting,
+            NoticeKind::AutomaticPaymentsHeld,
+        ] {
             let key = key::identity_notice(kind);
             let notice = KeptNotice::identity(kind, 5);
             assert!(bind_notice(&key, &notice).is_ok(), "{kind:?}");

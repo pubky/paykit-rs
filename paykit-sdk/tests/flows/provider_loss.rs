@@ -3,6 +3,7 @@
 //! and her apps follow the loss there.
 
 mod notice;
+mod shared_hold;
 
 use std::sync::Arc;
 
@@ -1632,6 +1633,15 @@ async fn test_provider_loss_the_final_activity_read_precedes_the_payment_method_
 }
 
 /// The doubt a payment was refused with, as [`Refusal::MayBePaid`] shows it.
+/// Whether `outcome` is the refusal of an automatic payment under the shared post-loss hold
+/// (Paykit spec 8.1).
+pub(super) fn held_after_loss(outcome: &paykit_sdk::Result<PayOutcome>) -> bool {
+    matches!(
+        outcome.as_ref().err().and_then(PaykitError::refusal),
+        Some(Refusal::NotAutomatic(why)) if why.contains("provider loss")
+    )
+}
+
 pub(crate) fn doubt_of(paid: &paykit_sdk::Result<PayOutcome>) -> PaymentDoubt {
     match paid.as_ref().err().and_then(PaykitError::refusal) {
         Some(Refusal::MayBePaid {
@@ -1800,13 +1810,19 @@ async fn test_provider_loss_automatic_payment_of_an_obligation_from_before_is_re
         "{resumed:?}"
     );
     assert_eq!(executions(&w), 1);
-    // An automatic payment of a request from before the loss is refused, a confirmation of
-    // its doubt passing nothing.
+    // An automatic payment of a request from before the loss is refused, under the shared
+    // post-loss hold, a confirmation of its doubt passing nothing.
     let refused = wallet
         .pay_request_automatically(&held, PayOptions::default())
         .await
         .outcome;
-    let doubt = doubt_of(&refused);
+    assert!(held_after_loss(&refused), "{refused:?}");
+    let doubt = doubt_of(
+        &wallet
+            .pay_request(&held, PayOptions::default())
+            .await
+            .outcome,
+    );
     assert!(doubt.before_loss.is_some(), "{doubt:?}");
     let refused = wallet
         .pay_request_automatically(
@@ -1815,7 +1831,7 @@ async fn test_provider_loss_automatic_payment_of_an_obligation_from_before_is_re
         )
         .await
         .outcome;
-    assert!(doubt_of(&refused).before_loss.is_some());
+    assert!(held_after_loss(&refused), "{refused:?}");
     assert_eq!(executions(&w), 1);
 }
 
@@ -2076,7 +2092,13 @@ async fn test_provider_loss_request_created_inside_the_residual_window_is_paid_o
         .pay_request_automatically(&request, PayOptions::default())
         .await
         .outcome;
-    let doubt = doubt_of(&refused);
+    assert!(held_after_loss(&refused), "{refused:?}");
+    let doubt = doubt_of(
+        &wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .outcome,
+    );
     assert!(doubt.before_loss.is_some(), "{doubt:?}");
     let refused = wallet
         .pay_request_automatically(
@@ -2085,7 +2107,7 @@ async fn test_provider_loss_request_created_inside_the_residual_window_is_paid_o
         )
         .await
         .outcome;
-    assert!(doubt_of(&refused).before_loss.is_some());
+    assert!(held_after_loss(&refused), "{refused:?}");
     // By hand, it is met by the prompt that it may already be paid, and goes only on the
     // user's confirmation.
     let doubt = doubt_of(
