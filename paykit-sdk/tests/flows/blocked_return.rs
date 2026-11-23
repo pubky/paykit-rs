@@ -4761,7 +4761,21 @@ async fn test_blocked_return_conflicting_background_raise_keeps_the_receive_goin
         wallet.request(&subscription).await.unwrap().periods.len(),
         1
     );
-    // The host is told the raise waits, and the notice goes once it is written.
+    // The host is told the raise waits, once in this load whatever the conflicts that follow,
+    // and the notice goes once the raise is written.
+    assert_eq!(raise_waiting_notices(&wallet).await, 1);
+    for _ in 0..2 {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "/ops".into(),
+                code: pubky_switch_core::http::ErrorCode::Conflict,
+                current: serde_json::Value::Null,
+            });
+    }
+    w.clock.advance_ms(5_000);
+    wallet.receive(None).await.unwrap();
+    assert!(unblock_raise_owed(&wallet).await);
     assert_eq!(raise_waiting_notices(&wallet).await, 1);
     w.clock.advance_ms(5_000);
     wallet.receive(None).await.unwrap();
