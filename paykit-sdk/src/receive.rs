@@ -1899,6 +1899,9 @@ fn receipt_effect(
         }
     }
     if let Some(entry) = settles.received {
+        entry
+            .check_bound(|input| cx.blind(input))
+            .map_err(|_| Fail::corrupt())?;
         keep_local(cx, local(&key::journal(&attempt_id), &entry)?);
     }
     Ok(())

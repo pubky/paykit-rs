@@ -562,8 +562,8 @@ async fn journal_on_the_unblinded_claim_refused(mode: Mode) {
             &attempt_id
         )))
     );
-    // An entry on the attempt's unblinded derivation, as an earlier build wrote it, is a
-    // corrupt store: refused, not taken or migrated (Paykit wire 1.5).
+    // An entry on the attempt's unblinded derivation is a corrupt store: refused, not taken
+    // or migrated (Paykit wire 1.5).
     state[journal].1["d"]["obligation"] =
         serde_json::Value::String(pubky_switch_core::enc::b64(&unblinded(&attempt_id)));
     let target = store();

@@ -1312,6 +1312,7 @@ impl Paykit {
                 }
             }
             if let Some(entry) = settles.received {
+                entry.check_bound(|input| self.app.blind(input))?;
                 tx.put(&key::journal(&attempt_id), &entry)?;
             }
         }
