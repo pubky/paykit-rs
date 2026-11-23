@@ -2815,9 +2815,12 @@ async fn test_unrequested_loss_marker_over_a_kept_copy_keeps_both_through_restor
     assert_eq!(kept[0]["marked"], false);
     let copy = kept[0]["copy"].clone();
     assert_eq!(copy["marks"].as_array().unwrap().len(), 1, "{copy}");
-    // A put-back that keeps the mark names the delete: the entry is marked and keeps the
-    // copy.
+    // A put-back that keeps the mark, and shows a second, names the delete: the entry is
+    // marked and keeps both marks.
     let mut put_back = marked.clone();
+    let mut second = put_back["used"][0].clone();
+    second["attempt_id"] = serde_json::json!(pubky_switch_core::enc::b64(&[9u8; 16]));
+    put_back["used"].as_array_mut().unwrap().push(second);
     put_back["lost_to_delete"] = serde_json::json!(pubky_switch_core::enc::b64(&[5u8; 32]));
     put_list_record(&mut phone, &target, Some(&put_back)).await;
     wallet.receive(None).await.unwrap();
@@ -2825,7 +2828,12 @@ async fn test_unrequested_loss_marker_over_a_kept_copy_keeps_both_through_restor
     let held = lost_entries(&both);
     assert_eq!(held.len(), 1, "{held:?}");
     assert_eq!(held[0]["marked"], true);
-    assert_eq!(held[0]["copy"], copy);
+    assert_eq!(
+        held[0]["copy"]["marks"].as_array().unwrap().len(),
+        2,
+        "{held:?}"
+    );
+    let copy = held[0]["copy"].clone();
     // Restored in place from the backup that held only the copy, and onto a fresh store from
     // the one that held both: each keeps the mark and the copy (Paykit spec 6).
     drop(wallet);
@@ -2838,8 +2846,10 @@ async fn test_unrequested_loss_marker_over_a_kept_copy_keeps_both_through_restor
     // A later write drops the marker but keeps every mark of the copy. Restored onto a fresh
     // store, the wallet reads only that write, and still doesn't take it: once marked, no
     // value is (Paykit spec 6; wire 5). A newer list then stays held over it.
+    let mut unmarked = put_back.clone();
+    unmarked.as_object_mut().unwrap().remove("lost_to_delete");
     phone.app_mut().read_record(&target).await.unwrap();
-    put_list_record(&mut phone, &target, Some(&marked)).await;
+    put_list_record(&mut phone, &target, Some(&unmarked)).await;
     let mut fresh = restored_onto(&w, crate::common::store(), &both).await;
     assert_eq!(lost_entries(&fresh.backup().await.unwrap()), held);
     w.list_to_alice(&mut shop, &[fresh.app_id()], list_version(1, 2))

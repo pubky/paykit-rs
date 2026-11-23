@@ -918,12 +918,15 @@ impl LostListRecord {
     /// A value at the key carrying `lost_to_delete`, written at record version `written`:
     /// it names a delete that lost content, which this app may never have seen, so no
     /// later value at the key is taken (Paykit spec 6; wire 5). Its version is the write's,
-    /// at or after the delete it answers. Merged with an entry that holds a copy, the copy
-    /// is kept ([`Self::merge`]).
-    pub(crate) fn marked(written: pubky_switch_core::ops::RecordVersion) -> Self {
+    /// at or after the delete it answers. Its own marks and list are kept as the copy, and
+    /// merged with any copy an entry holds ([`Self::merge`]), so nothing it showed is lost.
+    pub(crate) fn marked(
+        written: pubky_switch_core::ops::RecordVersion,
+        value: Option<&paykit_lib::records::PaymentListRecord>,
+    ) -> Self {
         Self {
             deleted: [written.generation, written.version],
-            copy: None,
+            copy: value.and_then(LostCopy::of).and_then(LostCopy::bounded),
             marked: true,
         }
     }
@@ -3955,7 +3958,7 @@ mod tests {
             generation: 1,
             version: 9,
         };
-        let marked = LostListRecord::marked(written);
+        let marked = LostListRecord::marked(written, None);
         assert_eq!(
             marked,
             LostListRecord {
@@ -3977,10 +3980,13 @@ mod tests {
             assert_eq!(marked.clone().merge(held), kept);
         }
         // Two markers keep the newer version; two copies under a marker their union.
-        let older = LostListRecord::marked(pubky_switch_core::ops::RecordVersion {
-            generation: 1,
-            version: 3,
-        });
+        let older = LostListRecord::marked(
+            pubky_switch_core::ops::RecordVersion {
+                generation: 1,
+                version: 3,
+            },
+            None,
+        );
         assert_eq!(older.merge(marked.clone()), marked);
         let both = lost_with(4, lost_marks(1, 1))
             .merge(marked.clone())

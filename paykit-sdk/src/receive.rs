@@ -2634,7 +2634,7 @@ pub(crate) fn marked_entry(
     if record_key(&crate::records::list_target(&read.payee, &read.app_id))? != *key {
         return None;
     }
-    let marked = LostListRecord::marked(version);
+    let marked = LostListRecord::marked(version, Some(&read));
     let kept = match held.clone() {
         Some(lost) => lost.merge(marked),
         None => marked,
@@ -3042,9 +3042,8 @@ impl Paykit {
     /// authenticated value as it takes it, while one whose write has no proof yet, such as a
     /// recovery upload, still reads, and its marker must outlive a restore too (Paykit spec 6;
     /// wire 5).
-    async fn keep_list_loss_markers(&mut self) -> crate::error::Result<()> {
+    pub(crate) async fn keep_list_loss_markers(&mut self) -> crate::error::Result<()> {
         let own = self.identity();
-        let mut tx = Tx::default();
         for record in self
             .app
             .records_of(paykit_lib::collections::Collection::PaymentLists.name())
@@ -3059,13 +3058,15 @@ impl Paykit {
             let at = key::list_record_lost(&record.key);
             let held = self.local_get::<LostListRecord>(&at).await?;
             let app = &self.app;
+            // One commit per record, so a commit stays within the store's size however many
+            // records change.
             if let Some(kept) = marked_entry(value, &own, &record.key, record.version, held, |t| {
                 app.record_key(t).ok()
             }) {
-                tx.put(&at, &kept)?;
+                self.local_put(&at, &kept).await?;
             }
         }
-        self.local_commit(tx).await
+        Ok(())
     }
 
     /// Place one held list (`lh/<rest>`), as [`Paykit::place_held_lists`] says.
