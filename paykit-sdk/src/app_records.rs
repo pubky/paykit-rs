@@ -807,8 +807,17 @@ impl Paykit {
                             && check_record_lifetime_and_certificate(&app_id, &record, doc, clocks)
                                 .is_ok()
                             && !view.see(&record, now);
+                        let floor = seen.dropped_at.filter(|_| !seen.admits(&record));
                         let reason = if over_bound {
                             PublicAppFailureReason::OverBound
+                        } else if let Some(floor) = floor {
+                            // At or before the floor: the time a later record must pass.
+                            PublicAppFailureReason::Refused(format!(
+                                "Paykit spec 4: the app's records up to {floor} ms left the \
+                                 history a reader keeps ({SEEN_RECORDS} records, \
+                                 {SEEN_RECORDS_BYTES} bytes); its public endpoints are unusable \
+                                 until a record of it after that time can be used"
+                            ))
                         } else {
                             PublicAppFailureReason::Refused(format!(
                                 "Paykit spec 4: the served record exceeds the history a reader keeps \
@@ -829,7 +838,8 @@ impl Paykit {
                 .used()
                 .is_some_and(|used| seen.unkept_at.is_some_and(|at| used.updated_at() > at));
             if seen.before_unkept(served_at, now) && !later_used {
-                let at = seen.unkept_at.unwrap_or_default();
+                // The floor is never below the group's time; after a merge it may be later.
+                let at = seen.dropped_at.max(seen.unkept_at).unwrap_or_default();
                 failures.push(fail(PublicAppFailureReason::Refused(format!(
                     "Paykit spec 4: the app's records up to a group at {at} ms that exceeded the \
                      history a reader keeps ({SEEN_RECORDS} records, {SEEN_RECORDS_BYTES} bytes) \
