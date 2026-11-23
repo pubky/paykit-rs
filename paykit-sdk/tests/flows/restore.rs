@@ -1458,7 +1458,7 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
             "asked_at_ms": null, "queued": null, "epochs": epochs,
         })
     };
-    let cases: [(&str, String, serde_json::Value); 20] = [
+    let cases: [(&str, String, serde_json::Value); 22] = [
         (
             "held list of another kind",
             key_of("lh/"),
@@ -1488,6 +1488,16 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
             "malformed key",
             "peer/not-base64".into(),
             kept(serde_json::json!(1)),
+        ),
+        (
+            "list record seen lost, not set",
+            format!("lgone/{}", pubky_switch_core::enc::b64(&[3; 32])),
+            kept(serde_json::json!(false)),
+        ),
+        (
+            "list record seen lost under a malformed key",
+            "lgone/not-base64".into(),
+            kept(serde_json::json!(true)),
         ),
         ("unknown key", "zz/1".into(), kept(serde_json::json!(1))),
         (

@@ -144,20 +144,42 @@ impl ListSettings {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct UnknownListDelivery {
+    pub(crate) recipient: [u8; 32],
+    pub(crate) version: ListVersion,
+    pub(crate) msg_id: String,
+    pub(crate) withdrawal: bool,
+    pub(crate) payable_until_ms: Option<u64>,
+}
+
+impl UnknownListDelivery {
     /// The counterparty the list was sent to.
-    pub recipient: [u8; 32],
+    pub fn recipient(&self) -> [u8; 32] {
+        self.recipient
+    }
+
     /// The list's version.
-    pub version: ListVersion,
+    pub fn version(&self) -> ListVersion {
+        self.version
+    }
+
     /// The list message's `msg_id`.
-    pub msg_id: String,
+    pub fn msg_id(&self) -> &str {
+        &self.msg_id
+    }
+
     /// Whether the list was empty: a withdrawal. If it didn't arrive, the counterparty
     /// may keep paying the earlier list. A nonempty list that didn't arrive leaves the
     /// counterparty without it.
-    pub withdrawal: bool,
+    pub fn withdrawal(&self) -> bool {
+        self.withdrawal
+    }
+
     /// For a withdrawal, the latest time, in Unix milliseconds, an earlier nonempty list
     /// to this counterparty can still be paid; `None` when it can't be bounded. For a
     /// nonempty list, when the list itself expires.
-    pub payable_until_ms: Option<u64>,
+    pub fn payable_until_ms(&self) -> Option<u64> {
+        self.payable_until_ms
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -863,6 +885,52 @@ impl Paykit {
         self.refuse_unknown_list(&shown.recipient).await
     }
 
+    /// The counterparties whose list the user confirmed sending again
+    /// ([`Paykit::send_list_again`]) and which hasn't been sent yet: a later call or receive
+    /// sends it once it can. One leaves the list once its newer version is reserved, the
+    /// earlier list is known to have arrived, or the counterparty's choice, the list's
+    /// endpoints or its withdrawal changed, so another list goes instead; a confirmation is
+    /// kept, and still sent, after the earlier list expired.
+    ///
+    /// # Errors
+    ///
+    /// A store failure.
+    pub async fn lists_waiting_to_send_again(&self) -> Result<Vec<[u8; 32]>> {
+        let settings = self.local_get::<ListSettings>(key::LIST_SETTINGS).await?;
+        let mut waiting = Vec::new();
+        for (_, issue) in self
+            .local_scan::<ListReservation>(key::LIST_RESERVATIONS)
+            .await?
+        {
+            if !issue.confirmed {
+                continue;
+            }
+            let Some(recipient) = self
+                .local_get::<ListRecipient>(&key::list_recipient(&issue.recipient))
+                .await?
+            else {
+                continue;
+            };
+            // What the next publication sends it, as `publish_recipient` decides: nothing for
+            // a chosen counterparty while no list is set, and the confirmed version only for
+            // the same list, not yet known to have arrived.
+            if recipient.chosen && settings.is_none() {
+                continue;
+            }
+            let revision = settings
+                .as_ref()
+                .filter(|s| recipient.chosen && !recipient.withdraw && !s.endpoints.is_empty())
+                .map(ListSettings::revision);
+            if issue.choice == recipient.choice
+                && issue.revision == revision
+                && recipient.answers.first(&issue).is_none()
+            {
+                waiting.push(issue.recipient);
+            }
+        }
+        Ok(waiting)
+    }
+
     pub(crate) async fn tend_private_lists(
         &mut self,
         report: Option<&ReceiveReport>,
@@ -906,7 +974,7 @@ impl Paykit {
                 }
             }
         }
-        Ok(())
+        self.prune_list_notices().await
     }
 
     async fn publish_recipient(
