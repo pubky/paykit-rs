@@ -319,8 +319,8 @@ async fn swapped(wallet: &Paykit, two: &Two, swap: Swap) -> Value {
 
 /// A finished entry read at `a`'s key once its payment is found paid: the outcome's write
 /// reads the entry again there, as a batch kept from before may have finished it. Returns
-/// what the resume reports of `a`, and `a`'s outcome on its claim.
-async fn outcome_written_over(swap: Swap) -> (PayOutcome, Outcome) {
+/// what the resume returns, and `a`'s outcome on its claim.
+async fn outcome_written_over(swap: Swap) -> (paykit_sdk::Result<Vec<PayOutcome>>, Outcome) {
     let w = World::new();
     let base = Arc::new(SwappedReads::default());
     let mut wallet = w
@@ -334,24 +334,33 @@ async fn outcome_written_over(swap: Swap) -> (PayOutcome, Outcome) {
         serde_json::to_vec(&value).unwrap(),
     );
     w.rail.settle(&two.a_attempt, true);
-    let resumed = wallet.resume_payments().await.unwrap();
-    let [outcome_of_a] = resumed.as_slice() else {
-        panic!("{resumed:?}");
-    };
+    let resumed = wallet.resume_payments().await;
     let claim = outcome(&mut wallet, &two.a_obligation, &two.a_attempt).await;
-    (outcome_of_a.clone(), claim)
+    (resumed, claim)
+}
+
+/// The resume ended at the corrupt store: a store failure stops the wallet as a whole.
+fn assert_corrupt(resumed: &paykit_sdk::Result<Vec<PayOutcome>>) {
+    assert!(
+        matches!(
+            resumed,
+            Err(paykit_sdk::PaykitError::Client(
+                pubky_switch_client::app::AppError::Store(
+                    pubky_switch_client::error::StoreError::Corrupt
+                )
+            ))
+        ),
+        "{resumed:?}"
+    );
 }
 
 #[tokio::test]
 async fn test_local_state_finished_entry_of_another_attempt_never_finishes_a_payment() {
-    // `b`'s finished entry under `a`'s key: `a`'s outcome isn't taken as written. Money
-    // moved, so the payment reports its outcome unwritten, for a resume, and the claim shows
-    // it open still.
+    // `b`'s finished entry under `a`'s key: `a`'s outcome isn't taken as written. The entry
+    // doesn't bind to its key, a corrupt store, which stops the wallet: the resume returns it,
+    // and the claim shows the payment open still, for a resume once the store is sound.
     let (reported, claim) = outcome_written_over(Swap::AnotherAttempt).await;
-    assert!(
-        matches!(reported, PayOutcome::PaidOutcomeUnwritten { .. }),
-        "{reported:?}"
-    );
+    assert_corrupt(&reported);
     assert_eq!(claim, Outcome::Open);
 }
 
@@ -360,10 +369,7 @@ async fn test_local_state_finished_entry_of_an_earlier_attempt_never_finishes_a_
     // The finished entry of an earlier attempt on the same claim, under `a`'s key: of the
     // claim, but not of the attempt the key names, so it finishes nothing either.
     let (reported, claim) = outcome_written_over(Swap::EarlierAttempt).await;
-    assert!(
-        matches!(reported, PayOutcome::PaidOutcomeUnwritten { .. }),
-        "{reported:?}"
-    );
+    assert_corrupt(&reported);
     assert_eq!(claim, Outcome::Open);
 }
 
@@ -372,10 +378,7 @@ async fn test_local_state_finished_entry_of_the_attempt_on_another_claim_finishe
     // `a`'s attempt ID on `b`'s finished entry: the entry is of another claim than the one
     // the outcome is written on, so it finishes nothing.
     let (reported, claim) = outcome_written_over(Swap::AnotherClaim).await;
-    assert!(
-        matches!(reported, PayOutcome::PaidOutcomeUnwritten { .. }),
-        "{reported:?}"
-    );
+    assert_corrupt(&reported);
     assert_eq!(claim, Outcome::Open);
 }
 

@@ -1910,7 +1910,9 @@ impl Paykit {
                 // A placement that fails now is tried again at the next run; the kept stop
                 // stands meanwhile, so it can't let a payment through.
                 placed.insert((cancellation.sender(), request));
-                let _ = self.place_kept_cancellation(&target).await;
+                if let Err(error) = self.place_kept_cancellation(&target).await {
+                    crate::pay::unless_stop(error)?;
+                }
                 continue;
             }
             let held = self.app.shared_record(&self.activity_key(&target)?).await?;
