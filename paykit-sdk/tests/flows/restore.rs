@@ -1523,12 +1523,12 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
         (
             "seen records holding a certificate",
             seen_key(shop1.app_id_bytes()),
-            kept(serde_json::json!({ "records": [request["cert"].clone()] })),
+            kept(serde_json::json!({ "records": [request["cert"].clone()], "unkept_at": null })),
         ),
         (
             "seen records of another app",
             seen_key([9; 16]),
-            kept(serde_json::json!({ "records": [record_json.clone()] })),
+            kept(serde_json::json!({ "records": [record_json.clone()], "unkept_at": null })),
         ),
         (
             "missed item time other than its key's",
@@ -1574,7 +1574,7 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
     let mut state = layer.clone();
     state.push((
         seen_key(shop1.app_id_bytes()).into_bytes(),
-        kept(serde_json::json!({ "records": [record_json] })),
+        kept(serde_json::json!({ "records": [record_json], "unkept_at": null })),
     ));
     // A queued answer bound to its key restores too.
     state.push((

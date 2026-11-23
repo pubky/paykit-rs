@@ -1245,10 +1245,10 @@ pub(crate) fn restore_paykit_layer(
         };
         let bad = || String::from("Paykit spec 7.2: a journal entry in the backup doesn't read");
         // Bound to its key as every runtime read binds it (`state::Stored`): of the attempt
-        // its key names, each request payment's claim key the one its payee and request
-        // blind to under the backup's naming key, which the restore context gives (Paykit
-        // spec 7.1, Paykit wire 1.5), its record the one its request or attempt names, and
-        // every message it keeps verified for this app
+        // its key names, its claim key the one its payee and request, or its attempt for a
+        // payment without a request, blind to under the backup's naming key, which the
+        // restore context gives (Paykit spec 7.1, Paykit wire 1.5), its record the one its
+        // request or attempt names, and every message it keeps verified for this app
         // ([`JournalEntry::check_restored`]): checked here, before anything is written.
         let mut entry =
             state::restored::<JournalEntry>(&key, &value, &binder).map_err(|_| bad())?;
