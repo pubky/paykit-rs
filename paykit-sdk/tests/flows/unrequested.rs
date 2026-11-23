@@ -2793,6 +2793,122 @@ async fn test_unrequested_loss_marker_read_first_kept_through_a_fresh_restore() 
 }
 
 #[tokio::test]
+#[ignore = "the client forgets what it saw of a record at a restore, so after a fresh restore it can't show the writer of a write that drops a marker it saw before; it needs the client to keep that through a backup and restore"]
+async fn test_unrequested_write_dropping_a_loss_marker_after_a_fresh_restore_shown_with_its_writer()
+{
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut tablet = w.wallet("tablet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    // One list to the wallet and the tablet. The wallet pays its single-use endpoint; the
+    // tablet holds the list but doesn't read the record yet.
+    w.list_to_alice(
+        &mut shop,
+        &[wallet.app_id(), tablet.app_id()],
+        list_version(1, 1),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    let target = shop_list_target(&w, &shop);
+    let key = wallet.app().record_key(&target).unwrap();
+    phone.app_mut().read_record(&target).await.unwrap();
+    let (_, marked) = list_record(&phone, &w).await;
+    // The record is deleted, the service forgets the delete, and the phone puts it back
+    // from an older copy without the mark, naming the delete. The tablet first learns of
+    // the delete from that put-back, then is backed up.
+    put_list_record(&mut phone, &target, None).await;
+    w.alice.switch().drop_record(&key).unwrap();
+    let mut put_back = marked.clone();
+    put_back["used"] = serde_json::json!([]);
+    put_back["lost_to_delete"] = serde_json::json!(pubky_switch_core::enc::b64(&[5u8; 32]));
+    let mut laptop = w.wallet("laptop").await;
+    put_list_record(&mut laptop, &target, Some(&put_back)).await;
+    tablet.receive(None).await.unwrap();
+    let backup = tablet.backup().await.unwrap();
+    drop(tablet);
+    // A later write drops the marker. Restored onto a fresh store, which holds none of what
+    // the client saw at the record, the tablet reads only that write: it is still no list
+    // to pay from, as the marker read is kept in Paykit's own state, which the backup
+    // carries (Paykit spec 6, wire 5).
+    let mut dropped = put_back.clone();
+    dropped.as_object_mut().unwrap().remove("lost_to_delete");
+    put_list_record(&mut laptop, &target, Some(&dropped)).await;
+    let mut restored = restored_onto(&w, crate::common::store(), &backup).await;
+    restored.receive(None).await.unwrap();
+    let again = restored
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome;
+    assert!(
+        !matches!(again, Ok(PayOutcome::Paid { .. })),
+        "the paid single-use endpoint was paid again: {again:?}"
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
+    assert_eq!(restored.held_lists().await.unwrap().len(), 1);
+    // The write that dropped the marker is shown with its writer (Paykit wire 5).
+    assert_eq!(restored.app().flagged_writes().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+#[ignore = "the client never shows the app a write it flags, and forgets what it saw of the record at a restore, so the paid single-use endpoint is paid again; it needs the client to keep that through a backup and restore"]
+async fn test_unrequested_flagged_put_back_then_a_dropped_marker_not_paid_after_a_fresh_restore() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    let target = shop_list_target(&w, &shop);
+    let key = wallet.app().record_key(&target).unwrap();
+    phone.app_mut().read_record(&target).await.unwrap();
+    let (_, marked) = list_record(&phone, &w).await;
+    // The record is deleted and the service forgets the delete. A put-back from an older
+    // copy, without the mark and naming the delete, is flagged by the wallet for dropping
+    // the mark it saw, so Paykit never sees its marker. The wallet is then backed up.
+    put_list_record(&mut phone, &target, None).await;
+    w.alice.switch().drop_record(&key).unwrap();
+    let mut put_back = marked.clone();
+    put_back["used"] = serde_json::json!([]);
+    put_back["lost_to_delete"] = serde_json::json!(pubky_switch_core::enc::b64(&[5u8; 32]));
+    let mut laptop = w.wallet("laptop").await;
+    put_list_record(&mut laptop, &target, Some(&put_back)).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().flagged_writes().await.unwrap().len(), 1);
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    // A later write drops the marker. Restored onto a fresh store, the wallet reads only
+    // that write: the single-use endpoint it paid is never paid again (Paykit spec 6).
+    let mut dropped = put_back.clone();
+    dropped.as_object_mut().unwrap().remove("lost_to_delete");
+    put_list_record(&mut laptop, &target, Some(&dropped)).await;
+    let mut restored = restored_onto(&w, crate::common::store(), &backup).await;
+    restored.receive(None).await.unwrap();
+    let again = restored
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome;
+    assert!(
+        !matches!(again, Ok(PayOutcome::Paid { .. })),
+        "the paid single-use endpoint was paid again: {again:?}"
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
 async fn test_unrequested_later_write_dropping_lost_to_delete_flagged_and_not_paid() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
