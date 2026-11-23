@@ -3792,6 +3792,39 @@ async fn test_blocked_return_missed_item_holds_a_due_mark_ask_until_its_raise() 
     assert!(mark_asked(&wallet).await);
 }
 
+#[tokio::test]
+async fn test_blocked_return_conflicting_widening_raise_keeps_the_receive_going() {
+    // Paykit wire 5.6, Raising: a `missed` item comes while carol is blocked. Its widening's
+    // raise meets `409 conflict` on its write and again on its retry: the widening stays owed,
+    // the read of the lists stands, and the next read applies it with its raise.
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    wallet.app_mut().invite(&w.carol_id()).await.unwrap();
+    wallet.block(&w.carol_id()).await.unwrap();
+    let since = w.clock.now_ms();
+    w.alice
+        .switch()
+        .push_missed(1, since - 1_000, since + MINUTE_MS);
+    for _ in 0..2 {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "/ops".into(),
+                code: pubky_switch_core::http::ErrorCode::Conflict,
+                current: serde_json::Value::Null,
+            });
+    }
+    for _ in 0..2 {
+        w.clock.advance_ms(11 * MINUTE_MS);
+        wallet.receive(None).await.unwrap();
+    }
+    assert!(widening_owed(&wallet).await);
+    w.clock.advance_ms(5_000);
+    wallet.receive(None).await.unwrap();
+    assert!(!widening_owed(&wallet).await);
+    assert!(shared_floor(&wallet).await.is_some());
+}
+
 /// Whether the unverified mark's ask was made: its request signed and queued.
 async fn mark_asked(app: &Paykit) -> bool {
     app.app()
@@ -4430,6 +4463,87 @@ async fn test_blocked_return_owed_raise_takes_period_details_and_holds_a_one_tim
         1
     );
     assert_eq!(wallet.requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_blocked_return_conflicting_background_raise_keeps_the_receive_going() {
+    // Paykit wire 5.6, Raising: another app unblocks bob, and the wallet's raise for it meets
+    // `409 conflict` on its write and again on its retry. The lists read stands, the raise
+    // stays owed for the next receive, and the feed is read: bob's period details are taken.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let sent = shop
+        .send_request(
+            w.alice_id(),
+            crate::periods::monthly(pubky_switch_client::testing::START_MS, None),
+        )
+        .await
+        .unwrap();
+    let subscription = sent.request.unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet.accept_subscription(&subscription).await.unwrap();
+    shop.receive(None).await.unwrap();
+    let sale = shop.payee_activity().await.unwrap()[0].record;
+    wallet.block(&w.bob_id()).await.unwrap();
+    let mut phone = payer_app(&w, "phone").await;
+    phone
+        .app_mut()
+        .put_record(
+            &floor_record(&w),
+            &paykit_lib::records::BlockFloorRecord::new(1)
+                .to_json()
+                .unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let mut contacts = w
+        .join_with(
+            &w.alice,
+            "contacts",
+            AppScopes::new().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            store(),
+        )
+        .await;
+    contacts.unblock(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    let mut endpoints = std::collections::BTreeMap::new();
+    endpoints.insert(
+        crate::common::endpoint("btc-lightning-bolt11"),
+        paykit_lib::PaymentEndpointPayload::new("lnbc1period").unwrap(),
+    );
+    shop.send_period_details(
+        &sale,
+        paykit_lib::bodies::PeriodDetails {
+            billing_period: crate::periods::january(),
+            payment_endpoints: Some(endpoints),
+            rates: None,
+            expires_at: w.clock.now_ms() + 24 * 60 * MINUTE_MS,
+        },
+    )
+    .await
+    .unwrap();
+    for _ in 0..2 {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "/ops".into(),
+                code: pubky_switch_core::http::ErrorCode::Conflict,
+                current: serde_json::Value::Null,
+            });
+    }
+    wallet.receive(None).await.unwrap();
+    assert!(unblock_raise_owed(&wallet).await);
+    assert_eq!(
+        wallet.request(&subscription).await.unwrap().periods.len(),
+        1
+    );
+    w.clock.advance_ms(5_000);
+    wallet.receive(None).await.unwrap();
+    assert!(!unblock_raise_owed(&wallet).await);
 }
 
 #[tokio::test]

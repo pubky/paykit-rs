@@ -1264,14 +1264,14 @@ pub(crate) fn tell_lost_if_unasked(
 }
 
 /// Whether a widening's commit with its raise applied: a raise that can't be written, for
-/// now or while the divergence hold stands, leaves the widening owed, its marks and their
-/// asks unapplied, to be tried again at the next read of the lists (Paykit wire 5.6,
-/// Raising: a widening whose raise isn't applied isn't applied either). It never fails the
-/// read of the lists.
+/// now or while the divergence hold stands, or that still conflicts after its retry, leaves
+/// the widening owed, its marks and their asks unapplied, to be tried again at the next read
+/// of the lists (Paykit wire 5.6, Raising: a widening whose raise isn't applied isn't applied
+/// either). It never fails the read of the lists.
 fn raised(commit: Result<()>) -> Result<bool> {
     match commit {
         Ok(()) => Ok(true),
-        Err(error) if crate::floor::is_raise_unwritten(&error) => Ok(false),
+        Err(error) if crate::floor::is_raise_left_owed(&error) => Ok(false),
         Err(error) => Err(error),
     }
 }

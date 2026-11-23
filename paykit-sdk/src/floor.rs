@@ -998,6 +998,16 @@ pub(crate) fn is_raise_unwritten(error: &crate::error::PaykitError) -> bool {
     is_unreadable_floor(error) || matches!(error.refusal(), Some(Refusal::FloorHeld))
 }
 
+/// Whether a raise a read of the lists tried stays owed and the read goes on: unwritten
+/// ([`is_raise_unwritten`]), or still meeting `409 conflict` after its retry, no batch kept.
+/// The conflict refreshed the floor this app holds, never lowering it, and the raise owed
+/// holds what waits for it meanwhile; the raise is built anew at the next read (Paykit wire
+/// 5.6, Raising). A user's own unblock returns the conflict instead.
+pub(crate) fn is_raise_left_owed(error: &crate::error::PaykitError) -> bool {
+    is_raise_unwritten(error)
+        || (error.code() == Some(ErrorCode::Conflict) && error.kept_batch().is_none())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1371,6 +1381,25 @@ mod tests {
         }
         let conflict = floor_write_error(client(answered(ErrorCode::Conflict)));
         assert_eq!(conflict.code(), Some(ErrorCode::Conflict));
+    }
+
+    #[test]
+    fn test_floor_raise_left_owed_after_a_conflict_with_nothing_kept() {
+        use pubky_switch_client::app::AppError;
+        // A conflict after the retry leaves the raise owed and the read of the lists going;
+        // a batch the client kept goes at the next write or read, so the read waits for it.
+        let conflict = floor_write_error(client(answered(ErrorCode::Conflict)));
+        assert!(is_raise_left_owed(&conflict));
+        let kept = floor_write_error(client(AppError::Kept {
+            batch_id: [7; 16],
+            error: Box::new(answered(ErrorCode::Conflict)),
+        }));
+        assert_eq!(kept.code(), Some(ErrorCode::Conflict));
+        assert!(!is_raise_left_owed(&kept));
+        assert!(is_raise_left_owed(&unreadable_floor()));
+        assert!(!is_raise_left_owed(&floor_write_error(client(answered(
+            ErrorCode::PermissionMissing
+        )))));
     }
 
     #[test]

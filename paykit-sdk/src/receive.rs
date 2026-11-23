@@ -3341,10 +3341,11 @@ impl Paykit {
             match Box::pin(self.commit_with_floor(pending.to_ms, tx)).await {
                 Ok(()) => {}
                 // A raise that can't be written, for now or while the divergence hold stands,
-                // leaves the unblock's senders held (`bf`) and is tried again at the next
-                // read; it never leaves the lists unread, which would hold every payment,
-                // intake and send (Paykit spec 8.1; Paykit wire 5.6).
-                Err(error) if crate::floor::is_raise_unwritten(&error) => {}
+                // or that still conflicts after its retry, leaves the unblock's senders held
+                // (`bf`) and is tried again at the next read; it never leaves the lists unread,
+                // which would hold every payment, intake and send (Paykit spec 8.1; Paykit
+                // wire 5.6).
+                Err(error) if crate::floor::is_raise_left_owed(&error) => {}
                 Err(error) => return Err(error),
             }
             self.local_put(key::LISTS_READ, &read_at).await?;
