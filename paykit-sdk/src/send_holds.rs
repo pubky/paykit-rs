@@ -148,25 +148,27 @@ pub(crate) fn may_deliver(delivery: &DeliveryView<'_>, kind: Kind) -> Result<boo
     let message = delivery.message();
     // A cancellation goes only while the role of the side it was sent from still sends it,
     // before a re-send's rule or the payee's exception: `paykit_pay` for the payer's, the
-    // selling scope of its sale for the payee's. One whose side isn't kept waits (Paykit
-    // spec 3.3, 3.4).
+    // selling scope of its sale for the payee's. One whose side isn't kept, as one queued
+    // through the client directly, goes as a payer's only under a certificate that sends it
+    // from either side, and waits otherwise (Paykit spec 3.3, 3.4).
     let mut payee_cancellation = false;
     if kind == Kind::PaymentRequestCancellation {
-        let Some(kept) = state::delivery_get::<KeptSide>(delivery, &key::side(&message.msg_id))?
-        else {
-            return Ok(false);
+        use paykit_lib::kinds::Side;
+        let kept = state::delivery_get::<KeptSide>(delivery, &key::side(&message.msg_id))?;
+        let (sides, label) = match &kept {
+            Some(kept) if kept.side == SideTag::Payer => (&[Side::Payer][..], None),
+            Some(kept) => (&[Side::Payee][..], kept.label.as_deref()),
+            None => (&[Side::Payer, Side::Payee][..], None),
         };
-        let from = match kept.side {
-            SideTag::Payer => paykit_lib::kinds::Side::Payer,
-            SideTag::Payee => paykit_lib::kinds::Side::Payee,
-        };
-        let label = kept.label.as_deref().map(paykit_lib::Label::parse);
-        if !label.transpose().is_ok_and(|label| {
-            paykit_lib::kinds::may_send(kind, from, cert.scopes(), label.as_ref())
+        let label = label.map(paykit_lib::Label::parse).transpose();
+        if !label.is_ok_and(|label| {
+            sides
+                .iter()
+                .all(|side| paykit_lib::kinds::may_send(kind, *side, cert.scopes(), label.as_ref()))
         }) {
             return Ok(false);
         }
-        payee_cancellation = kept.side == SideTag::Payee;
+        payee_cancellation = kept.is_some_and(|kept| kept.side == SideTag::Payee);
     }
     let reads_lists = receive::reads_lists(cert.scopes());
     // Re-sending an answer requires `paykit_contacts` and a known deny copy that permits
