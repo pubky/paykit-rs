@@ -1595,7 +1595,16 @@ async fn test_public_conflict_evicted_ahead_of_the_clock_not_bypassed_once_it_go
     }
     w.clock.set_ms(t0);
     serve(&w, &first);
-    assert!(listed(&mut wallet, &w).await.is_empty());
+    // The records held answer for it: they are ahead of the clock, so nothing is used yet.
+    let shop = w.bob.identity().app_keys("shop").app_id_bytes();
+    for _ in 0..2 {
+        let list = read(&mut wallet, &w).await;
+        assert!(ids(&list).is_empty());
+        assert!(
+            fails_with(&list, shop, &["made ahead of the payer's clock"]),
+            "{list:?}"
+        );
+    }
 }
 
 /// As [`publish_at`], with a `pad` protocol member of `pad` bytes beside the Paykit member.
@@ -1857,11 +1866,13 @@ async fn test_public_conflict_dropped_ahead_of_the_clock_kept_by_a_newer_in_plac
 }
 
 #[tokio::test]
-async fn test_public_floor_ahead_of_real_time_holds_only_the_public_endpoints() {
+async fn test_public_floor_ahead_of_the_clock_holds_only_the_public_endpoints() {
     // The payer's clock runs a day fast and it reads more of bob's records, dated within it,
-    // than the history keeps. Back at real time, bob's record from before them isn't used,
-    // until he publishes a newer one; a payment to his Private Payment List goes as usual
-    // (Switch spec 4.2; Paykit spec 4).
+    // than the history keeps, which raises the floor a day ahead. Back at real time the floor
+    // holds nothing, and the history full of records ahead of the clock keeps bob's record
+    // from before them out, as it would without the floor, until the clock reaches them or
+    // he publishes a newer one; a payment to his Private Payment List goes as usual (Switch
+    // spec 4.2; Paykit spec 4).
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -1884,14 +1895,12 @@ async fn test_public_floor_ahead_of_real_time_holds_only_the_public_endpoints() 
         t0 + 1000,
         expiry,
     );
-    // The records held answer for it: they are ahead of the clock, so nothing is used yet,
-    // across reads.
     let shop_app = w.bob.identity().app_keys("shop").app_id_bytes();
     for _ in 0..2 {
         let list = read(&mut wallet, &w).await;
         assert!(ids(&list).is_empty());
         assert!(
-            fails_with(&list, shop_app, &["made ahead of the payer's clock"]),
+            fails_with(&list, shop_app, &["exceeds the history a reader keeps"]),
             "{list:?}"
         );
     }
