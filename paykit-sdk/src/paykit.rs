@@ -88,8 +88,13 @@ pub struct PaykitConfig {
     /// an app that wants later repeats sets a larger value.
     pub orphan_after_s: Option<u64>,
     /// The largest fee the payee can influence through its destination that the app pays
-    /// without asking, per asset, in whole units of the payment's asset (Paykit spec 7.2
-    /// step 1): a fee in an asset without a cap here is accepted only when it is zero.
+    /// without asking, per asset, in whole units of the asset the payment method transfers,
+    /// which its fee is in (Paykit spec 7.2 step 1). A fee above an asset's cap makes the destination unusable for automatic
+    /// payment and needs the user's choice by hand. With no cap for an asset, the default,
+    /// Paykit makes no check of the fee and asks nothing for it: the fee is left to the
+    /// payment method, whose own limit, if any, is the only bound on it, an Allowance
+    /// executor's payments included. Set a cap when the payment method enforces no fee limit
+    /// of its own, or for a tighter bound on unattended payments.
     pub fee_caps: BTreeMap<Asset, Decimal>,
     /// The label a payee app sends its requests under (Paykit spec 3.1, 8.1). An app holding
     /// only labelled selling scopes needs one unless it holds exactly one label.
@@ -125,9 +130,9 @@ impl PaykitConfig {
     }
 
     /// The largest fee the payee can influence through its destination that the app pays
-    /// without asking for a payment in `asset` (Paykit spec 7.2 step 1), replacing any cap
-    /// set for that asset before. A fee in an asset without a cap is accepted only when it
-    /// is zero.
+    /// without asking when the payment method transfers `asset` (Paykit spec 7.2 step 1),
+    /// replacing any cap set for that asset before. Without a cap for an asset, Paykit makes no check of the
+    /// fee ([`PaykitConfig::fee_caps`]).
     #[must_use]
     pub fn with_fee_cap(mut self, asset: Asset, fee_cap: Decimal) -> Self {
         self.fee_caps.insert(asset, fee_cap);
@@ -760,8 +765,8 @@ impl Paykit {
     /// ([`orphan_floor_s`]), before anything is written. The client's errors, all before
     /// anything is written but a store failure: `InvalidData` for a backup whose certificate
     /// Paykit refuses (Paykit wire 3.1), one without Paykit's layer or one another protocol
-    /// made, or a journal with a malformed entry or two open entries for one obligation; a
-    /// store failure.
+    /// made, or a journal with a malformed entry or two open entries for one obligation that
+    /// no earlier restore left; a store failure.
     pub async fn restore(
         env: AppEnv,
         config: PaykitConfig,
