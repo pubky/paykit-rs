@@ -3482,8 +3482,22 @@ async fn test_publication_takes_only_a_proof_naming_its_own_unknown_list_as_its_
     let w = World::new();
     let buyer = w.wallet("wallet").await;
     let payer = buyer.identity();
-    let mut shop = w.shop().await;
+    // The shop reads and edits its lists, so it can block the payer.
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            paykit_sdk::AppScopes::new()
+                .request()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+            paykit_sdk::PaykitConfig::default(),
+            crate::common::store(),
+        )
+        .await;
     shop.app_mut().invite(&payer).await.unwrap();
+    shop.receive(None).await.unwrap();
     shop.set_list_endpoints(offered("lno1first")).await.unwrap();
     w.alice.switch().fail_next(Fault::LoseAnswer {
         path: "inbox".into(),
@@ -3501,8 +3515,9 @@ async fn test_publication_takes_only_a_proof_naming_its_own_unknown_list_as_its_
     let shown = unknown_shown(shop.publish_list_to(payer).await.unwrap_err());
     let shop_app = shop.app_id();
     let proof = |app: [u8; 16], version: Option<paykit_sdk::ListVersion>| {
+        let attempt = paykit_lib::AttemptId::generate().unwrap();
         let body = paykit_lib::bodies::PaymentProof {
-            attempt_id: paykit_lib::AttemptId::generate().unwrap(),
+            attempt_id: attempt,
             billing_period: None,
             payment_endpoint_identifier: crate::common::endpoint("btc-lightning-bolt12"),
             payment_app_id: app,
@@ -3511,7 +3526,8 @@ async fn test_publication_takes_only_a_proof_naming_its_own_unknown_list_as_its_
             allowance_id: None,
             label: None,
             payment_reference: None,
-            proof: serde_json::json!({ "rail": "fake", "tx": "t1" })
+            // Each proof its own settlement, so none is placed on another's record.
+            proof: serde_json::json!({ "rail": "fake", "tx": attempt.to_text() })
                 .as_object()
                 .cloned()
                 .unwrap(),
@@ -3547,7 +3563,18 @@ async fn test_publication_takes_only_a_proof_naming_its_own_unknown_list_as_its_
             "{app:?} {version:?}"
         );
     }
+    // Nor does one from a sender whose message is dropped as never processed: blocked,
+    // its proof isn't taken, so it shows nothing either.
+    shop.block(&payer).await.unwrap();
+    proof(shop_app, Some(shown.version()));
+    w.clock.advance_ms(1);
+    shop.receive(None).await.unwrap();
+    assert_eq!(list_notices(&shop).await.len(), 1);
+    shop.unblock(&payer).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert_eq!(list_notices(&shop).await.len(), 1);
     // One naming this app's list at that version does.
+    w.clock.advance_ms(1);
     proof(shop_app, Some(shown.version()));
     shop.receive(None).await.unwrap();
     shop.publish_list_to(payer).await.unwrap();

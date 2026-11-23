@@ -1659,7 +1659,6 @@ fn payer_reply(
             let Body::PaymentProof(proof) = stored.body() else {
                 return Ok(false);
             };
-            crate::publish::answers::note_proof(cx, stored, proof)?;
             let Some(settled) = settlement(&proof.proof) else {
                 return Ok(false);
             };
@@ -1674,13 +1673,17 @@ fn payer_reply(
             // proof's sender: the proof is new state, under the spam rule first, and one
             // admitted is kept as a reply before its record (`pr/`), within those bounds,
             // never written over the value (Paykit spec 8.1, "Replies before their record").
+            // A proof kept or placed, its sender admitted, also shows which list version the
+            // payer held; one dropped as never processed shows nothing (Paykit spec 9).
             if held_request(cx, &target)? && held_bound(cx, &target, settlement)?.is_none() {
                 if admits_new_state(cx, &sender, scopes, stored)? {
+                    crate::publish::answers::note_proof(cx, stored, proof)?;
                     keep_reply(cx, &target, stored, position)?;
                 }
                 return Ok(true);
             }
             if held.is_some() || admits_new_state(cx, &sender, scopes, stored)? {
+                crate::publish::answers::note_proof(cx, stored, proof)?;
                 place(cx, &target, sender, role, stored, seq, settlement)?;
             }
             Ok(true)
