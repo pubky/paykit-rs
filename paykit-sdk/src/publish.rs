@@ -144,20 +144,42 @@ impl ListSettings {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct UnknownListDelivery {
+    pub(crate) recipient: [u8; 32],
+    pub(crate) version: ListVersion,
+    pub(crate) msg_id: String,
+    pub(crate) withdrawal: bool,
+    pub(crate) payable_until_ms: Option<u64>,
+}
+
+impl UnknownListDelivery {
     /// The counterparty the list was sent to.
-    pub recipient: [u8; 32],
+    pub fn recipient(&self) -> [u8; 32] {
+        self.recipient
+    }
+
     /// The list's version.
-    pub version: ListVersion,
+    pub fn version(&self) -> ListVersion {
+        self.version
+    }
+
     /// The list message's `msg_id`.
-    pub msg_id: String,
+    pub fn msg_id(&self) -> &str {
+        &self.msg_id
+    }
+
     /// Whether the list was empty: a withdrawal. If it didn't arrive, the counterparty
     /// may keep paying the earlier list. A nonempty list that didn't arrive leaves the
     /// counterparty without it.
-    pub withdrawal: bool,
+    pub fn withdrawal(&self) -> bool {
+        self.withdrawal
+    }
+
     /// For a withdrawal, the latest time, in Unix milliseconds, an earlier nonempty list
     /// to this counterparty can still be paid; `None` when it can't be bounded. For a
     /// nonempty list, when the list itself expires.
-    pub payable_until_ms: Option<u64>,
+    pub fn payable_until_ms(&self) -> Option<u64> {
+        self.payable_until_ms
+    }
 }
 
 #[derive(Deserialize, Serialize)]
