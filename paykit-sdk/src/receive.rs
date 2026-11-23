@@ -2695,10 +2695,10 @@ pub(crate) fn lists_read_is_fresh(read: u64, now: u64) -> bool {
 /// A Private Payment List held because its `payment_lists` record doesn't read, or is
 /// deleted ([`Paykit::held_lists`]): never written over it, which could drop the single-use
 /// marks it holds or held, until the record reads again with those marks. After a delete
-/// no SDK app writes the record again; only a readable write from outside the SDK that
-/// keeps the marks places the list. No payment uses that payee app's list meanwhile; its
-/// public endpoints remain a separate choice of the user, as does a list the payee shares
-/// from another app.
+/// it has seen, an SDK app never writes the record again itself: only another writer's
+/// readable write that keeps the marks places the list. No payment uses that payee app's
+/// list meanwhile; its public endpoints remain a separate choice of the user, as does a
+/// list the payee shares from another app.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct HeldList {
@@ -2801,7 +2801,7 @@ impl Paykit {
             // Seen deleted or unreadable: an absence now, such as a delete the service forgot
             // or a restore into a fresh store, says nothing of the marks the record held. The
             // list stays held (Paykit spec 6). A list held because its first write was refused
-            // is placed on the absent key as room frees.
+            // is placed on the absent key once a write of it lands.
             None if self
                 .local_get::<bool>(&key::list_record_lost(&record_key))
                 .await?

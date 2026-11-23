@@ -855,7 +855,7 @@ async fn test_stored_refused_list_held_notes_its_sender() {
 }
 
 #[tokio::test]
-async fn test_stored_refused_first_list_placed_once_room_frees() {
+async fn test_stored_refused_first_list_placed_once_a_write_lands() {
     // The first list's record write is refused, so no record exists: the list is held only
     // until a later write lands, never kept from its own payee for good.
     let w = World::new();
