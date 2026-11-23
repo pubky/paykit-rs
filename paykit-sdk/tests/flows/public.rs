@@ -2282,3 +2282,103 @@ async fn test_public_later_record_after_the_floor_brings_the_endpoints_back_afte
     );
     assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
 }
+
+#[tokio::test]
+async fn test_public_small_record_at_a_group_too_large_to_keep_names_the_floor() {
+    // Bob's record at T is followed by a second body at T too large to keep. A small third
+    // body served at T is refused naming T, the time a later record must pass, not as one
+    // over the history bound (Paykit spec 4).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1a"),
+        t0,
+        expiry,
+    );
+    listed(&mut wallet, &w).await;
+    publish_padded(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1wide"),
+        9_000_000,
+        t0,
+        expiry,
+    );
+    assert!(listed(&mut wallet, &w).await.is_empty());
+    publish_at(
+        &w,
+        one_endpoint("btc-bitcoin-p2wpkh", "bc1qsmall"),
+        t0,
+        expiry,
+    );
+    let shop = w.bob.identity().app_keys("shop").app_id_bytes();
+    let list = read(&mut wallet, &w).await;
+    assert!(ids(&list).is_empty());
+    assert!(
+        fails_with(
+            &list,
+            shop,
+            &[&format!("up to {t0} ms left the history a reader keeps")]
+        ),
+        "{list:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_public_group_refusal_after_a_restore_names_the_later_floor() {
+    // The installation holds a group at T too large to keep; a backup taken while the clock
+    // ran a day ahead holds a floor past T. Restored in place with the clock back, the floor
+    // is past the group's time: a record served at T is refused naming the floor, not the
+    // group's time, as the time a later record must pass (Paykit spec 4).
+    let w = World::new();
+    let storage = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", std::sync::Arc::clone(&storage)).await;
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    let first = publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1a"),
+        t0,
+        expiry,
+    );
+    listed(&mut wallet, &w).await;
+    publish_padded(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1wide"),
+        9_000_000,
+        t0,
+        expiry,
+    );
+    assert!(listed(&mut wallet, &w).await.is_empty());
+    let unkept = seen_of(&wallet).await;
+    read_ahead(&w, &mut wallet, t0, expiry).await;
+    // Two more than the history keeps: the earliest read ahead is dropped too.
+    for i in 64..=65u64 {
+        publish_at(
+            &w,
+            one_endpoint("btc-bitcoin-p2wpkh", &format!("bc1q{i}")),
+            t0 + DAY_MS + i,
+            expiry,
+        );
+        listed(&mut wallet, &w).await;
+    }
+    let backup = wallet.backup().await.unwrap();
+    put_seen(&mut wallet, unkept).await;
+    drop(wallet);
+    w.clock.set_ms(t0);
+    let mut wallet = restored_over(&w, storage, &backup).await;
+    let floor = floor_of(&wallet).await.unwrap();
+    assert!(floor > t0);
+    serve(&w, &first);
+    let shop = w.bob.identity().app_keys("shop").app_id_bytes();
+    let list = read(&mut wallet, &w).await;
+    assert!(ids(&list).is_empty());
+    assert!(
+        fails_with(&list, shop, &[&format!("up to {floor} ms")]),
+        "{list:?}"
+    );
+}
