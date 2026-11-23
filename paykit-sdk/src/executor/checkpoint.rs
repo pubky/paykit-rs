@@ -331,7 +331,15 @@ impl ExecutorCheckpoint {
             || grant_entry.built_on != grant.expected
             || signed.app_id != app.app_id()
             || grant.op.body().app_id != Some(app.app_id())
-            || signed.confirmed_generation != grant.revision.generation
+            // A grant confirmed in one generation can apply in a later one of the same
+            // history, its batch kept and sent again after an orderly change: its
+            // `confirmed_generation` stays the user's (Paykit spec 8.3, "After provider loss").
+            || signed.confirmed_generation < proposed.allower_generation
+            || !super::in_grant_history(
+                signed.confirmed_generation,
+                grant.revision.generation,
+                app.own_identity().body().recovery_from,
+            )
             || !super::in_grant_history(
                 proposed.allower_generation,
                 grant.revision.generation,

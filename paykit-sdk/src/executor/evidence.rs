@@ -282,6 +282,35 @@ fn pins_selected_proposal(
     }
 }
 
+/// A write of this app's own, retained with its proof and verified as evidence of its
+/// generation ([`AppliedOperation::applied`] with [`Purpose::Evidence`]): the proof verifies
+/// with the service key the current `identity.json` lists for that generation, and the
+/// generation is in the grant's history, after the last provider loss.
+///
+/// After an orderly generation change, the Switch client authenticates the version of a
+/// record read with no copy held (after a restore, or a move that dropped proofs) only for
+/// a proof of the current generation (Pubky Switch spec, Section 12.5). This app's own
+/// retained proof of an earlier generation still dates and places its own write: a read
+/// naming exactly its version, time and writer shows that write. It authenticates no other
+/// write, and no other app's.
+#[derive(Clone, Copy)]
+pub(crate) struct OwnWrite {
+    version: RecordVersion,
+    at_ms: u64,
+    writer: [u8; 16],
+}
+
+impl OwnWrite {
+    /// Whether the read `held` shows this write: its version authenticated by the client, or
+    /// exactly this write's version, time and writer.
+    pub(crate) fn stands_for(&self, held: &SharedRecord) -> bool {
+        held.authenticated
+            || (held.version == self.version
+                && held.written_at_ms == Some(self.at_ms)
+                && held.writer == self.writer)
+    }
+}
+
 /// One ordinary application in the current service history. The signed operation names
 /// its predecessor; the service proof binds its version, time and item hash.
 #[derive(Clone)]
@@ -413,14 +442,22 @@ impl AppliedRecord {
         })
     }
 
+    /// This write, as [`OwnWrite`] names it.
+    pub(super) fn own_write(&self) -> Option<OwnWrite> {
+        Some(OwnWrite {
+            version: self.version(),
+            at_ms: self.at_ms,
+            writer: self.op.body().app_id?,
+        })
+    }
+
     pub(super) fn current(
         app: &App,
         target: &RecordTarget,
         fresh: &SharedRecord,
         kept: &KeptOp,
     ) -> Option<Self> {
-        if !fresh.authenticated
-            || fresh.doubtful
+        if fresh.doubtful
             || fresh.flagged
             || fresh.not_taken
             || fresh.different_write_at_held_version
@@ -435,7 +472,8 @@ impl AppliedRecord {
             return None;
         };
         let applied = Self::retained(app, target, kept)?;
-        if applied.version() != fresh.version
+        if !applied.own_write()?.stands_for(fresh)
+            || applied.version() != fresh.version
             || Some(applied.at_ms) != fresh.written_at_ms
             || applied.op.body().app_id != Some(fresh.writer)
             || &applied.value != bytes
@@ -493,7 +531,7 @@ impl AppliedRecord {
         selected: &Self,
         selected_condition: &Condition,
         kept: &KeptOp,
-    ) -> Option<ApplicationRef> {
+    ) -> Option<(ApplicationRef, OwnWrite)> {
         let deleted = AppliedOperation::applied(app, kept, Purpose::Evidence)?;
         let RecordValue::Delete = deleted.open_record(app, pending)? else {
             return None;
@@ -513,7 +551,14 @@ impl AppliedRecord {
             && self.revision.generation == reference.generation
             && self.revision.seq.checked_add(1) == Some(reference.seq)
             && self.at_ms == deleted.proof.envelope().server_time)
-            .then_some(reference)
+            .then_some((
+                reference,
+                OwnWrite {
+                    version: RecordVersion::new(reference.generation, reference.seq),
+                    at_ms: self.at_ms,
+                    writer: app.app_id(),
+                },
+            ))
     }
 
     /// The writer pinned the preceding record application, including its operation hash.
@@ -539,9 +584,10 @@ impl AppliedRecord {
         let OpKind::RecordPut(put) = &self.op.body().kind else {
             return false;
         };
-        self.revision.generation == original.revision.generation
-            && self.expected.generation == original.revision.generation
-            && self.at_ms >= original.at_ms
+        // Versions order by generation, then sequence, which an orderly change continues
+        // (Pubky Switch spec, Section 12.5); both writes were retained as evidence of a
+        // generation in the grant's history.
+        self.at_ms >= original.at_ms
             && original.version() < self.expected
             && self.expected < self.version()
             && self.op.body().conditions.iter().any(|condition| {
@@ -753,6 +799,46 @@ mod tests {
         assert!(!Purpose::Authorizes.admits(2, 3, None));
         assert!(!Purpose::Authorizes.admits(2, 3, Some(2)));
         assert!(!Purpose::Authorizes.admits(4, 3, None));
+    }
+
+    #[test]
+    fn test_evidence_own_write_stands_only_for_its_exact_read() {
+        // A read the client didn't authenticate shows this app's own write only when it
+        // names exactly its version, time and writer; an authenticated read stands as the
+        // client checked it.
+        let own = OwnWrite {
+            version: RecordVersion::new(1, 7),
+            at_ms: 1_000,
+            writer: [3; 16],
+        };
+        let read = |authenticated, version, written_at_ms, writer| SharedRecord {
+            key: [0; 32],
+            collection: String::new(),
+            policy: paykit_lib::collections::Collection::AllowanceLedger.fixed_policy(),
+            version,
+            authenticated,
+            writer,
+            written_at_ms,
+            content: RecordContent::Deleted,
+            doubtful: false,
+            flagged: false,
+            not_taken: false,
+            different_write_at_held_version: false,
+            divergent: false,
+        };
+        assert!(own.stands_for(&read(false, RecordVersion::new(1, 7), Some(1_000), [3; 16])));
+        assert!(own.stands_for(&read(true, RecordVersion::new(2, 9), Some(5), [4; 16])));
+        for (version, at, writer) in [
+            (RecordVersion::new(1, 8), Some(1_000), [3; 16]),
+            (RecordVersion::new(1, 6), Some(1_000), [3; 16]),
+            (RecordVersion::new(2, 7), Some(1_000), [3; 16]),
+            (RecordVersion::new(1, 7), Some(1_001), [3; 16]),
+            (RecordVersion::new(1, 7), Some(999), [3; 16]),
+            (RecordVersion::new(1, 7), None, [3; 16]),
+            (RecordVersion::new(1, 7), Some(1_000), [4; 16]),
+        ] {
+            assert!(!own.stands_for(&read(false, version, at, writer)));
+        }
     }
 
     #[test]

@@ -22,6 +22,8 @@ pub(super) struct ApprovedOpening {
     pub(super) zero: Ledger,
     pending_key: [u8; 32],
     pub(super) deletion: ApplicationRef,
+    /// The deletion, as this app's own write it retains.
+    pub(super) deletion_write: super::evidence::OwnWrite,
 }
 
 impl ApprovedOpening {
@@ -91,7 +93,7 @@ impl ApprovedOpening {
         {
             return None;
         }
-        let deletion = ledger.original_deletion(
+        let (deletion, deletion_write) = ledger.original_deletion(
             app,
             &pending,
             &selected,
@@ -106,6 +108,7 @@ impl ApprovedOpening {
             zero,
             pending_key,
             deletion,
+            deletion_write,
         })
     }
 

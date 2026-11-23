@@ -160,7 +160,15 @@ pub(super) fn applied_applications(
             continue;
         };
         if !(1..=3).contains(&body.batch.count)
-            || (body.batch.count > 1 && body.generation != doc.generation())
+            // A batch applied in an earlier generation of the same history, after the last
+            // provider loss, is still its own evidence (Paykit spec 8.3; Pubky Switch spec,
+            // Section 12.5).
+            || (body.batch.count > 1
+                && !crate::executor::in_grant_history(
+                    body.generation,
+                    doc.generation(),
+                    doc.body().recovery_from,
+                ))
             || !put
                 .policy
                 .write_scopes
