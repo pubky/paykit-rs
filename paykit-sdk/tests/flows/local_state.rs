@@ -1219,8 +1219,9 @@ async fn test_local_state_held_withdrawal_survives_an_older_in_place_restore() {
 async fn test_local_state_list_held_over_its_record_not_paid_to() {
     // Bob's list is in the record, and a newer list of his, a withdrawal, is held over it, as
     // when the record didn't read when it came and its placement hasn't landed yet. While a
-    // list is held over the record, the payee app's list isn't paid to: nothing goes to the
-    // older list the withdrawal replaces (Paykit wire 5.4).
+    // newer list is held over the record, the payee app's list isn't paid to: nothing goes to
+    // the older list the withdrawal replaces (Paykit wire 5.4). A hold the record already
+    // holds, placed but not yet cleared, stops nothing.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -1231,22 +1232,28 @@ async fn test_local_state_list_held_over_its_record_not_paid_to() {
         .app()
         .record_key(&lists_of(&w, &shop.app_id()))
         .unwrap();
-    put(
-        &mut wallet,
-        &format!("lh/{}", b64(&record)),
-        &shop_list_at(&w, list_version(1, 2)),
-    )
-    .await;
-    let paid = wallet
-        .pay_without_request(paykit_sdk::UnrequestedPayment::new(
-            w.bob_id(),
-            crate::common::btc("1"),
-        ))
+    let held = format!("lh/{}", b64(&record));
+    put(&mut wallet, &held, &shop_list_at(&w, list_version(1, 2))).await;
+    assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
+    let refused = wallet
+        .pay_without_request(UnrequestedPayment::new(w.bob_id(), crate::common::btc("1")))
         .await
-        .outcome;
+        .outcome
+        .unwrap_err();
     assert!(
-        !matches!(paid, Ok(paykit_sdk::PayOutcome::Paid { .. })),
-        "paid the list a held withdrawal replaces: {paid:?}"
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::WaitingForList { .. })
+        ),
+        "paid the list a held withdrawal replaces: {refused:?}"
     );
     assert!(w.rail.all_executions().is_empty());
+
+    put(&mut wallet, &held, &shop_list_at(&w, list_version(1, 1))).await;
+    let paid = wallet
+        .pay_without_request(UnrequestedPayment::new(w.bob_id(), crate::common::btc("1")))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
 }

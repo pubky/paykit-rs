@@ -2073,17 +2073,19 @@ impl Paykit {
         // A list held over its record, as when the record didn't read when it came, replaces
         // the record's list once placed: until then that payee app's list isn't paid to, so
         // nothing goes to a list a later one, a withdrawal included, replaces (Paykit wire
-        // 5.4). Its pair stays installed above.
+        // 5.4). A hold the record already holds, placed and not yet cleared, stops nothing:
+        // the test is the one placement takes. Its pair stays installed above.
+        let own = self.identity();
         let mut held = Vec::new();
         for list in &lists {
-            let record = self
-                .app
-                .record_key(&crate::records::list_target(payee, &list.app_id))?;
-            if self
-                .local_get::<crate::records::KeptMessage>(&key::held_list(&record))
+            let record = self.app.record_key(&list_target(payee, &list.app_id))?;
+            let Some(kept) = self
+                .local_get::<KeptMessage>(&key::held_list(&record))
                 .await?
-                .is_some()
-            {
+            else {
+                continue;
+            };
+            if crate::receive::next_list_record(Some(list.clone()), &kept.stored(&own)?).is_some() {
                 held.push(list.app_id);
             }
         }
