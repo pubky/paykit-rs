@@ -520,9 +520,6 @@ pub(crate) fn may_send(view: &DeliveryView<'_>) -> std::result::Result<bool, Sto
         {
             return Ok(false);
         }
-        if !crate::receive::reads_lists(view.cert().scopes()) {
-            return Ok(true);
-        }
         // A nonempty list goes only on the deny decision every held send is judged by: a
         // copy past its refresh interval or not known doesn't authorize it (Paykit spec 8.1,
         // "Messages already queued").

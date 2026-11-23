@@ -3673,7 +3673,8 @@ mod tests {
         assert!(!reads::<QueuedAsk>(&key::ask(&pubky, 5), ask(6)));
         assert!(!reads::<QueuedAsk>(&key::ask(&[4; 32], 5), ask(5)));
         // A side of the message its key names.
-        let side = |msg_id: &str| serde_json::json!({ "msg_id": msg_id, "side": "payer" });
+        let side =
+            |msg_id: &str| serde_json::json!({ "msg_id": msg_id, "side": "payer", "label": null });
         assert!(reads::<KeptSide>(&key::side(id), side(id)));
         assert!(!reads::<KeptSide>(&key::side(id), side(other)));
         // A held answer of the payee and message its key names.

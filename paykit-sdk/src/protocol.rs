@@ -1670,6 +1670,14 @@ impl Protocol for PaykitProtocol {
         &self,
         delivery: &pubky_switch_client::app::DeliveryView<'_>,
     ) -> Result<bool, StoreFailure> {
+        // Nothing goes under a certificate Paykit refuses, or one that no longer sends the
+        // kind, before any rule of the kind's own (Paykit spec 3.1 to 3.3, 7.2, 9).
+        let cert = delivery.cert();
+        if check_certificate(cert).is_err()
+            || paykit_lib::kinds::check_sender_scopes(delivery.message(), cert.scopes()).is_err()
+        {
+            return Ok(false);
+        }
         let kind = MessageKind::parse(&delivery.message().kind);
         if crate::allowances::pending_delivery(delivery.message())
             && (crate::allowances::pending_conflict_holds_delivery(delivery)

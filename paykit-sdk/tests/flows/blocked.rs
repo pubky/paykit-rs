@@ -5932,3 +5932,342 @@ async fn test_blocked_flush_reports_a_store_failure_raising_the_floor() {
         "{flushed:?}"
     );
 }
+
+#[tokio::test]
+async fn test_blocked_list_waits_under_a_renewal_paykit_refuses() {
+    let w = World::new();
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    let _wallet = w.wallet("wallet").await;
+    shop.app_mut().hold_queued(&w.alice_id()).await.unwrap();
+    shop.set_list_endpoints(crate::publishing::offered("lno1first"))
+        .await
+        .unwrap();
+    shop.publish_list_to(w.alice_id()).await.unwrap();
+    let list = verdicts(&shop)
+        .await
+        .into_iter()
+        .find(|(kind, ..)| kind == "paykit.private_payment_list")
+        .unwrap()
+        .1;
+    assert_eq!(verdict(&shop, &list).await, Some(true));
+    // Renewed with a permission its scopes don't derive, which Paykit refuses: the list
+    // doesn't go (Paykit spec 3.1 to 3.3, 7.2).
+    let scopes = AppScopes::new().request().build().unwrap();
+    let app_id = shop.app_id();
+    let old = shop.app().cert().clone();
+    let refused = crate::certificate::renew_for(
+        &w,
+        &w.bob,
+        "shop",
+        app_id,
+        &crate::certificate::refused(scopes.clone()),
+        1_000,
+    );
+    crate::certificate::list_for(&w.bob, app_id, &old, &refused);
+    shop.receive(None).await.unwrap();
+    assert!(shop.certificate_refused().is_some());
+    assert_eq!(verdict(&shop, &list).await, Some(false));
+    // Renewed again with one that passes, it goes.
+    let passing = crate::certificate::renew_for(&w, &w.bob, "shop", app_id, &scopes, 2_000);
+    crate::certificate::list_for(&w.bob, app_id, &refused, &passing);
+    shop.receive(None).await.unwrap();
+    assert_eq!(verdict(&shop, &list).await, Some(true));
+}
+
+/// Renew `signer`'s app `name`, `app`, to `scopes`, `after_ms` from now, and take it, then
+/// the scope keys its signer stores for the new certificate, with the receives after.
+async fn renew_with_keys(
+    w: &World,
+    signer: &pubky_switch_client::testing::TestSigner,
+    name: &str,
+    app: &mut Paykit,
+    scopes: paykit_sdk::RequestedScopes,
+    after_ms: u64,
+) {
+    let app_id = app.app_id();
+    let old = app.app().cert().clone();
+    let renewed = crate::certificate::renew_for(w, signer, name, app_id, &scopes, after_ms);
+    crate::certificate::list_for(signer, app_id, &old, &renewed);
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    app.receive(None).await.unwrap();
+    // Taken, it is given the keys of its new scopes.
+    crate::certificate::store_bundle_for(signer, app_id, &renewed);
+    for _ in 0..3 {
+        w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+        app.receive(None).await.unwrap();
+    }
+    assert_eq!(app.app().cert().hash(), renewed.hash());
+}
+
+#[tokio::test]
+async fn test_blocked_payee_cancellation_waits_under_a_payer_only_renewal() {
+    use paykit_lib::Kind;
+
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = contacts_shop(&w).await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    shop.app_mut().hold_queued(&w.alice_id()).await.unwrap();
+    let record = shop
+        .payee_activity()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|sale| sale.request_hash == Some(request.request_hash))
+        .unwrap()
+        .record;
+    let cancellation = shop.cancel_sent_request(&record, None).await.unwrap();
+    assert_eq!(verdict(&shop, &cancellation).await, Some(true));
+    // Renewed to pay alone, the shop sends nothing as payee any more, and the cancellation
+    // stays queued (Paykit spec 3.3, 3.4).
+    let paying = AppScopes::new().pay().manage_contacts().build().unwrap();
+    renew_with_keys(&w, &w.bob, "shop", &mut shop, paying, 1_000).await;
+    assert_eq!(verdict(&shop, &cancellation).await, Some(false));
+    // Its selling scope back, it goes.
+    let selling = AppScopes::new()
+        .request()
+        .manage_contacts()
+        .build()
+        .unwrap();
+    renew_with_keys(&w, &w.bob, "shop", &mut shop, selling, 2_000).await;
+    shop.app_mut().release_queued(&w.alice_id()).await.unwrap();
+    shop.flush().await.unwrap();
+    assert_eq!(
+        sent_of(&shop, &w.alice_id(), &[Kind::PaymentRequestCancellation]).await,
+        vec![cancellation]
+    );
+}
+
+#[tokio::test]
+async fn test_blocked_payer_cancellation_waits_under_a_selling_only_renewal() {
+    use paykit_lib::Kind;
+
+    let w = World::new();
+    let (mut wallet, mut shop, _) = received(&w, PaykitConfig::default()).await;
+    let recurring = request_from(&mut shop, w.alice_id(), monthly(w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet.accept_subscription(&recurring).await.unwrap();
+    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    let cancellation = wallet.cancel_request(&recurring, None).await.unwrap();
+    assert_eq!(verdict(&wallet, &cancellation).await, Some(true));
+    // Renewed to sell alone, the wallet sends nothing as payer any more, and the
+    // cancellation stays queued (Paykit spec 3.3, 3.4).
+    let selling = AppScopes::new()
+        .request()
+        .manage_contacts()
+        .build()
+        .unwrap();
+    renew_with_keys(&w, &w.alice, "wallet", &mut wallet, selling, 1_000).await;
+    assert_eq!(verdict(&wallet, &cancellation).await, Some(false));
+    // `paykit_pay` back, it goes.
+    let paying = AppScopes::new().pay().manage_contacts().build().unwrap();
+    renew_with_keys(&w, &w.alice, "wallet", &mut wallet, paying, 2_000).await;
+    wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
+    wallet.flush().await.unwrap();
+    assert_eq!(
+        sent_of(&wallet, &w.bob_id(), &[Kind::PaymentRequestCancellation]).await,
+        vec![cancellation]
+    );
+}
+
+#[tokio::test]
+async fn test_blocked_cancellation_without_its_kept_side_waits() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = contacts_shop(&w).await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    shop.app_mut().hold_queued(&w.alice_id()).await.unwrap();
+    let record = shop
+        .payee_activity()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|sale| sale.request_hash == Some(request.request_hash))
+        .unwrap()
+        .record;
+    let cancellation = shop.cancel_sent_request(&record, None).await.unwrap();
+    assert_eq!(verdict(&shop, &cancellation).await, Some(true));
+    // Without the side it was sent from, its sender's role can't be checked: it waits
+    // (Paykit spec 3.3, 3.4).
+    shop.app_mut()
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Delete {
+                key: format!("side/{cancellation}").into_bytes(),
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(verdict(&shop, &cancellation).await, Some(false));
+}
+
+#[tokio::test]
+async fn test_blocked_held_answer_lost_from_its_record_keeps_its_notice_across_an_in_place_restore()
+{
+    use paykit_lib::collections::Collection;
+    use paykit_lib::derive::natural_key;
+    use pubky_switch_client::app::{Collection as SwitchCollection, OpBatch, RecordTarget};
+
+    let w = World::new();
+    let storage = store();
+    let (mut wallet, _shop, request) = received_on(&w, storage.clone()).await;
+    let target = RecordTarget::new(
+        SwitchCollection::new(
+            Collection::PayerActivity.name(),
+            Collection::PayerActivity.fixed_policy(),
+        ),
+        &natural_key::request_record(&request.payee, &request.request_hash),
+    );
+    let key = wallet.app().record_key(&target).unwrap();
+    let open = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    // Rejected while bob is blocked: held in its record, never queued.
+    wallet.block(&w.bob_id()).await.unwrap();
+    let rejection = wallet.reject_request(&request, None).await.unwrap();
+    assert_eq!(verdict(&wallet, &rejection).await, None);
+    let older = wallet.backup().await.unwrap();
+    // A write of this app's own puts the record back as it was open, without it; once bob is
+    // unblocked the answer is given up, the host told.
+    let rewrite = wallet
+        .app_mut()
+        .record_op(&target, open.content.value(), Vec::new())
+        .await
+        .unwrap();
+    wallet
+        .app_mut()
+        .submit_batch(OpBatch::for_protocol("paykit").entry(rewrite))
+        .await
+        .unwrap();
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(given_up_notices(&w, &wallet, &rejection, &request).await, 1);
+    let notice = wallet
+        .notices()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|n| n.msg_id.as_deref() == Some(rejection.as_str()))
+        .unwrap();
+    drop(wallet);
+    // Restored in place from the older backup, the host still holds that one notice
+    // (Paykit spec 8.1, "Undelivered messages").
+    let mut wallet = Paykit::restore(
+        w.env(&w.alice, storage),
+        PaykitConfig::default(),
+        &older,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    for _ in 0..3 {
+        wallet.receive(None).await.unwrap();
+    }
+    let kept: Vec<_> = wallet
+        .notices()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|n| n.msg_id.as_deref() == Some(rejection.as_str()))
+        .collect();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(kept[0].id, notice.id);
+}
+
+/// A store that moves the clock on by the lists' refresh interval at the first commit,
+/// once armed, that queues a message: the copy of the lists ages inside the call that
+/// queues it.
+struct AgingStore {
+    inner: pubky_switch_client::store::MemoryStore,
+    clock: std::sync::Arc<pubky_switch_client::clock::TestClock>,
+    armed: std::sync::atomic::AtomicBool,
+}
+
+impl AgingStore {
+    fn age_at_queueing(&self, batch: &pubky_switch_client::store::WriteBatch) {
+        let queues = batch.writes().iter().any(|write| {
+            matches!(write, pubky_switch_client::store::Write::Put { key, .. } if key.starts_with(b"out/"))
+        });
+        if queues && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+        }
+    }
+}
+
+impl pubky_switch_client::store::StateStore for AgingStore {
+    fn get(
+        &self,
+        ns: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+        self.inner.get(ns, key)
+    }
+
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    {
+        self.inner.scan(ns, prefix, after, limit)
+    }
+
+    fn commit(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        self.age_at_queueing(&batch);
+        self.inner.commit(batch)
+    }
+
+    fn acquire(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.inner.acquire(ns, owner)
+    }
+
+    fn commit_if(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.age_at_queueing(&batch);
+        self.inner.commit_if(ns, owner, batch)
+    }
+}
+
+#[tokio::test]
+async fn test_blocked_acceptance_reads_a_due_copy_before_it_goes() {
+    use paykit_lib::Kind;
+
+    let w = World::new();
+    let aging = std::sync::Arc::new(AgingStore {
+        inner: pubky_switch_client::store::MemoryStore::default(),
+        clock: std::sync::Arc::clone(&w.clock),
+        armed: std::sync::atomic::AtomicBool::new(false),
+    });
+    let (mut wallet, mut shop, _) = received_on(&w, aging.clone()).await;
+    let recurring = request_from(&mut shop, w.alice_id(), monthly(w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    // The copy of the lists passes its refresh interval while the acceptance is recorded,
+    // after its write's answer gave a service time: it is still read again before the
+    // acceptance goes (Paykit spec 8.1, "Messages already queued").
+    aging.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    let acceptance = wallet.accept_subscription(&recurring).await.unwrap().msg_id;
+    assert!(!aging.armed.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        sent_of(&wallet, &w.bob_id(), &[Kind::PaymentRequestAcceptance]).await,
+        vec![acceptance]
+    );
+}

@@ -15919,3 +15919,67 @@ async fn test_prepared_rejection_uses_its_original_signature_after_certificate_r
 async fn test_prepared_withdrawal_uses_its_original_signature_after_certificate_renewal() {
     Box::pin(prepared_answer_after_change(true, true)).await;
 }
+
+#[tokio::test]
+async fn test_allowances_end_and_executor_notice_wait_under_a_renewal_paykit_refuses() {
+    let w = World::new();
+    let (_shop, mut wallet, _exec, _phone, _, mine) = Box::pin(executed(&w)).await;
+    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    // The executor notice's first try fails, and it is held from then on.
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/inbox".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: Value::Null,
+        });
+    wallet.end_allowance(&mine).await.unwrap();
+    for queued in wallet.queued_in_delivery().await.unwrap() {
+        if queued.kind == "paykit.executor_notice" {
+            assert!(wallet
+                .app_mut()
+                .hold_message("paykit", &queued.msg_id)
+                .await
+                .unwrap());
+        }
+    }
+    let verdicts = async |wallet: &Paykit| {
+        let mut verdicts: Vec<_> = wallet
+            .queued_in_delivery()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.kind == "paykit.allowance_end" || m.kind == "paykit.executor_notice")
+            .map(|m| (m.kind, m.may_send))
+            .collect();
+        verdicts.sort();
+        verdicts
+    };
+    let both = |go: bool| {
+        vec![
+            ("paykit.allowance_end".to_owned(), go),
+            ("paykit.executor_notice".to_owned(), go),
+        ]
+    };
+    assert_eq!(verdicts(&wallet).await, both(true));
+    // Renewed with a permission its scopes don't derive, which Paykit refuses: neither the
+    // user's end nor its executor notice goes (Paykit spec 3.1 to 3.3, 7.2).
+    let scopes = AppScopes::new().pay().allowance().build().unwrap();
+    let app_id = wallet.app_id();
+    let old = wallet.app().cert().clone();
+    let refused = renew(
+        &w,
+        app_id,
+        &crate::certificate::refused(scopes.clone()),
+        1_000,
+    );
+    list(&w, app_id, &old, &refused);
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.certificate_refused().is_some());
+    assert_eq!(verdicts(&wallet).await, both(false));
+    // Renewed again with one that passes, both go.
+    let passing = renew(&w, app_id, &scopes, 2_000);
+    list(&w, app_id, &refused, &passing);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(verdicts(&wallet).await, both(true));
+}

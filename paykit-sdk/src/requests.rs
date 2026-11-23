@@ -1680,6 +1680,7 @@ impl Paykit {
                 &KeptSide {
                     msg_id: signed.msg_id().to_owned(),
                     side: SideTag::Payee,
+                    label: target.label().map(|label| label.as_str().to_owned()),
                 },
             )?;
             match self
@@ -2706,6 +2707,7 @@ impl Paykit {
                 &KeptSide {
                     msg_id: signed.msg_id().to_owned(),
                     side: SideTag::Payer,
+                    label: None,
                 },
             )?;
         }
