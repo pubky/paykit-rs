@@ -1023,6 +1023,60 @@
     }
   ],
   "description": "Billing Periods (wire 4.4, spec 8.2, specs/allowances.md anchored rule): boundary k = anchor + k * every units, fixed seconds for minute, hour, day and week, a calendar step from the original anchor for month and year, clamped to the target month's last day. Period k = [boundary(k), boundary(k+1)). The first period contains starts_at; the last contains the instant just before ends_at. start_secs is the obligation ID's period start. A message's {starts_at, ends_at} must equal a computed period, compared as instants.",
+  "destination_expiry": {
+    "cases": [
+      {
+        "device_time": "2026-03-01T00:00:00.500Z",
+        "expired": true,
+        "name": "device_at_expiry_no_service_time",
+        "service_time": null
+      },
+      {
+        "device_time": "2026-03-01T00:00:00.499Z",
+        "expired": false,
+        "name": "device_before_expiry_no_service_time",
+        "service_time": null
+      },
+      {
+        "device_time": "2026-03-01T00:00:00.000Z",
+        "expired": true,
+        "name": "device_behind_service_at_expiry",
+        "service_time": "2026-03-01T00:00:00.500Z"
+      },
+      {
+        "device_time": "2026-03-01T00:00:00.000Z",
+        "expired": true,
+        "name": "device_behind_service_past_expiry",
+        "service_time": "2026-03-01T00:00:01.000Z"
+      },
+      {
+        "device_time": "2026-03-01T00:00:00.000Z",
+        "expired": false,
+        "name": "device_behind_service_before_expiry",
+        "service_time": "2026-03-01T00:00:00.499Z"
+      },
+      {
+        "device_time": "2026-03-01T00:00:00.500Z",
+        "expired": true,
+        "name": "service_behind_device_at_expiry",
+        "service_time": "2026-03-01T00:00:00.000Z"
+      },
+      {
+        "device_time": "2026-03-01T00:00:00.499Z",
+        "expired": false,
+        "name": "service_behind_device_before_expiry",
+        "service_time": "2026-03-01T00:00:00.000Z"
+      },
+      {
+        "device_time": "2026-03-01T00:00:00.499Z",
+        "expired": false,
+        "name": "both_clocks_before_expiry",
+        "service_time": "2026-03-01T00:00:00.499Z"
+      }
+    ],
+    "description": "A destination has expired once its expiry is at or before the later of the payer's device clock and the highest service time it has verified for its own account at its current service, compared at millisecond precision (spec 7.2, check the destination; Switch wire 1.6). A null service_time is a payer that has verified none, which judges by its device clock alone. The expiry is a public record's finite expires_at or its updated_at plus the record age limit, a Private Payment List's expires_at or 30 days after its acceptance, or period details' expires_at.",
+    "expires_at": "2026-03-01T00:00:00.500Z"
+  },
   "details_rates": {
     "cases": [
       {

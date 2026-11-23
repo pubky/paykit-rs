@@ -2934,6 +2934,32 @@ fn repeat_without_method_history(world: &World) {
 }
 
 #[tokio::test]
+async fn test_executor_pays_a_fee_with_no_cap() {
+    // With no fee cap, an Allowance executor's payment is not refused or held for its fee:
+    // the fee is left to the payment method and counts against no limit (Paykit spec 7.2
+    // step 1, 8.3).
+    use paykit_sdk::PayOutcome;
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    world.rail.set_history_payer(payer.identity());
+    world
+        .rail
+        .set_max_fee(Some(paykit_lib::Decimal::new("0.5").unwrap()));
+    let request = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("1", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    let paid = Box::pin(payer.pay_under_allowance(&request, &key))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(world.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
 async fn test_an_earlier_failure_under_the_same_allowance_allows_a_new_attempt() {
     use paykit_sdk::{rail::Behaviour, PayOutcome};
     let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
@@ -4251,4 +4277,148 @@ async fn test_executor_holds_a_period_whose_record_diverges_after_paying_is_jour
     );
     assert!(world.rail.all_executions().is_empty());
     assert!(base.fired(), "the record diverged after Paying");
+}
+
+#[tokio::test]
+async fn test_executor_restored_dispatch_resolved_with_no_claim_keeps_the_allowance_usable() {
+    // The executor's attempt is written to the claim but its answer is lost, so the payment
+    // method is never called. Once the executor's certificate has expired, another own app
+    // writes the attempt failed, and the executor, renewed, sees it and is backed up. Past
+    // the claim's window the service drops the claim. Restored from the backup at the same
+    // service, the attempt is open with no claim showing it, the method's history no longer
+    // keeps it, and the user resolves it as not paid. The Allowance is then read and pays
+    // (Paykit spec 7.2, 8.3, 8.4).
+    let storage = crate::common::store();
+    let (world, mut payer, mut shop, key) =
+        Box::pin(first_grant_in(storage.clone(), terms())).await;
+    world.rail.set_history_payer(payer.identity());
+    let original = payer.app().cert().clone();
+    world
+        .clock
+        .set_ms(original.expires_at() - paykit_sdk::PRE_DISPATCH_BUDGET_MS - 120_000);
+    let mut other = Box::pin(world.wallet("second wallet")).await;
+    let request = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("9", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    world
+        .alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+            path: "/ops".into(),
+        });
+    let lost = Box::pin(payer.pay_under_allowance(&request, &key))
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(lost.kept_batch().is_some(), "{lost:?}");
+    Box::pin(payer.receive(None)).await.unwrap();
+    let (held, _) = only_ledger(&payer).await;
+    let (obligation, attempt) = (held.entries[0].obligation, held.entries[0].attempt_id);
+    world.clock.set_ms(original.expires_at() + 1);
+    Box::pin(other.receive(None)).await.unwrap();
+    Box::pin(other.resolve_attempt(
+        &obligation,
+        attempt,
+        paykit_sdk::Resolution::Failed,
+        UserConfirmed::new(),
+    ))
+    .await
+    .unwrap();
+    let scopes = AppScopes::new().allowance_execute().build().unwrap();
+    let id = payer.app_id();
+    let renewed = crate::certificate::renew(&world, id, &scopes, 0);
+    crate::certificate::list(&world, id, &original, &renewed);
+    Box::pin(payer.receive(None)).await.unwrap();
+    Box::pin(payer.reconcile_allowance(&key)).await.unwrap();
+    // The shop's certificate, issued with the payer's, is renewed too.
+    let shop_scopes = AppScopes::new().allowance().request().build().unwrap();
+    let shop_cert = shop.app().cert().clone();
+    let shop_renewed =
+        crate::certificate::renew_for(&world, &world.bob, "shop", shop.app_id(), &shop_scopes, 0);
+    crate::certificate::list_for(&world.bob, shop.app_id(), &shop_cert, &shop_renewed);
+    Box::pin(shop.receive(None)).await.unwrap();
+    let backup = payer.backup().await.unwrap();
+    drop(payer);
+    // By the restore, the method's history keeps a dispatch a week: it no longer tells.
+    let declared = |retention: Option<u64>| {
+        let declaration = paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_history(true)
+        .with_history_survives_restore(true);
+        match retention {
+            Some(ms) => declaration.with_history_retention_ms(ms),
+            None => declaration,
+        }
+    };
+    world
+        .rail
+        .set_declaration(declared(Some(7 * 24 * crate::common::HOUR_MS)));
+    world
+        .clock
+        .advance_ms(2 * 24 * crate::common::HOUR_MS + pubky_switch_core::claims::RECONCILIATION_MS);
+    let mut restored = Box::pin(paykit_sdk::Paykit::restore(
+        world.env(&world.alice, crate::common::store()),
+        Default::default(),
+        &backup,
+        world.rail.clone(),
+        world.timer(),
+    ))
+    .await
+    .unwrap();
+    Box::pin(crate::common::finish_listing(&mut restored)).await;
+    // Reconciliation lists the shared records in pages, asked again until done.
+    let mut reconciled = Box::pin(restored.reconcile()).await;
+    for _ in 0..8 {
+        let Err(error) = &reconciled else { break };
+        assert!(
+            matches!(error.refusal(), Some(paykit_sdk::Refusal::NotNow(_))),
+            "{error}"
+        );
+        reconciled = Box::pin(restored.reconcile()).await;
+    }
+    reconciled.unwrap();
+    Box::pin(restored.end_reconcile(UserConfirmed::new()))
+        .await
+        .unwrap();
+    assert!(restored
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .is_none());
+    Box::pin(restored.resolve_attempt(
+        &obligation,
+        attempt,
+        paykit_sdk::Resolution::Failed,
+        UserConfirmed::new(),
+    ))
+    .await
+    .unwrap();
+    // A history kept for good again, the Allowance is read and pays.
+    world.rail.set_declaration(declared(None));
+    assert!(Box::pin(restored.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .is_some());
+    let next = Box::pin(request_from(
+        &mut shop,
+        restored.identity(),
+        draft("2", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(restored.receive(None)).await.unwrap();
+    let paid = Box::pin(restored.pay_under_allowance(&next, &key))
+        .await
+        .outcome
+        .unwrap();
+    assert!(
+        matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
+        "{paid:?}"
+    );
 }

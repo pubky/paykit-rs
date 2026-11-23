@@ -165,7 +165,7 @@ async fn produced(w: &World, family: Family) -> Held {
             .outcome
             .unwrap_err();
         assert!(
-            matches!(error.refusal(), Some(Refusal::WaitingForList)),
+            matches!(error.refusal(), Some(Refusal::WaitingForList { .. })),
             "{error:?}"
         );
         None
@@ -360,7 +360,7 @@ async fn preserves(family: Family) {
         _ => {
             let error = held.read(&w).await.unwrap_err();
             assert!(
-                matches!(error.refusal(), Some(Refusal::WaitingForList)),
+                matches!(error.refusal(), Some(Refusal::WaitingForList { .. })),
                 "{error:?}"
             );
         }
@@ -401,7 +401,7 @@ async fn preserves(family: Family) {
         _ => {
             let error = held.read(&w).await.unwrap_err();
             assert!(
-                matches!(error.refusal(), Some(Refusal::WaitingForList)),
+                matches!(error.refusal(), Some(Refusal::WaitingForList { .. })),
                 "{error:?}"
             );
         }
@@ -540,7 +540,7 @@ async fn test_discovery_state_ask_clock_and_version_progress() {
     w.clock.set_ms(asked - 1);
     let error = held.read(&w).await.unwrap_err();
     assert!(
-        matches!(error.refusal(), Some(Refusal::WaitingForList)),
+        matches!(error.refusal(), Some(Refusal::WaitingForList { .. })),
         "{error:?}"
     );
     assert_eq!(
@@ -555,7 +555,7 @@ async fn test_discovery_state_ask_clock_and_version_progress() {
     w.clock.set_ms(asked + 24 * HOUR_MS);
     let error = held.read(&w).await.unwrap_err();
     assert!(
-        matches!(error.refusal(), Some(Refusal::WaitingForList)),
+        matches!(error.refusal(), Some(Refusal::WaitingForList { .. })),
         "{error:?}"
     );
     assert_eq!(
@@ -571,7 +571,7 @@ async fn test_discovery_state_ask_clock_and_version_progress() {
     Box::pin(list(&w, &mut held.wallet, held.app, list_version(1, 8))).await;
     let error = held.read(&w).await.unwrap_err();
     assert!(
-        matches!(error.refusal(), Some(Refusal::WaitingForList)),
+        matches!(error.refusal(), Some(Refusal::WaitingForList { .. })),
         "{error:?}"
     );
     let key = format!("lq/{}/{}", b64(&w.bob_id()), b64(&held.app));
