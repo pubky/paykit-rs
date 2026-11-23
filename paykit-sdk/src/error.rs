@@ -66,7 +66,8 @@ pub enum Refusal {
     /// is ended, expired, executed by another app or its counterparty blocked. The host shows
     /// the Allowance `hold` names and, once the user confirms, calls
     /// [`crate::Paykit::confirm_allowance_executor`] with `hold`; if that answers
-    /// [`Refusal::NotNow`], it keeps the confirmation with `hold` and calls again later. The
+    /// [`Refusal::NotNow`], it keeps the confirmation with `hold` and calls again later,
+    /// except for the repair after a provider loss, which no confirmation lifts. The
     /// confirmation counts only for the hold it was given under: after a newer restore,
     /// `missed` item or provider loss the call answers this refusal again, with the new hold,
     /// and the host asks the user again.

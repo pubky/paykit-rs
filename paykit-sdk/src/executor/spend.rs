@@ -172,11 +172,19 @@ pub(crate) fn standing(app: &Paykit, view: &AllowanceView, consent: ConsentState
     // confirmation again, which writes its grant at the current generation; that grant
     // establishes no complete usage authority, so its usage waits for a repair (Paykit spec
     // 8.3, "After provider loss"). Neither lifts the shared hold on one-time payments.
+    // A known wait comes first: confirming wouldn't lift it.
+    if let ConsentState::Waiting(why) = consent {
+        return Standing::Temporary(why);
+    }
     if view.granted_before_loss {
         return Standing::Confirm;
     }
+    // The regrant written, a newer hold asks the user again first; then its usage waits.
     if view.regranted_after_loss {
-        return Standing::Temporary(NEEDS_REPAIR_AFTER_LOSS);
+        return match consent {
+            ConsentState::ConfirmAgain => Standing::Confirm,
+            _ => Standing::Temporary(NEEDS_REPAIR_AFTER_LOSS),
+        };
     }
     match (consent, own) {
         (ConsentState::Held, true) => Standing::Payable,

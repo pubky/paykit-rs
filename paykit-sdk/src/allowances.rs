@@ -2585,12 +2585,20 @@ impl Paykit {
             held.current_grant(&self.identity()),
             self.app.own_identity().body().recovery_from,
         ) {
+            // The entry just before the current one, whose app executed up to it, is the
+            // same app's, last confirmed before the loss.
             (Some((grant, _)), Some(lost)) => {
-                grant.confirmed_generation > lost
-                    && held.grants.iter().rev().skip(1).any(|entry| {
-                        entry.grant.app_id == grant.app_id
-                            && entry.grant.confirmed_generation <= lost
-                    })
+                held.grants.iter().rev().nth(1).is_some_and(|before| {
+                    grant.confirmed_generation > lost
+                        && before.grant.app_id == grant.app_id
+                        && before.grant.confirmed_generation <= lost
+                        && held
+                            .grants
+                            .last()
+                            .and_then(|last| held.executor_at(&self.identity(), last.built_on).ok())
+                            .flatten()
+                            == Some(grant.app_id)
+                })
             }
             _ => false,
         };

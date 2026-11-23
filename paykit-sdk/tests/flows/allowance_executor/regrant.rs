@@ -13,6 +13,8 @@ use pubky_switch_client::clock::Clock;
 use super::{first_grant_in, terms};
 use crate::common::{draft, request_from, store, World};
 
+type Service = std::sync::Arc<pubky_switch_client::testing::ScriptedSwitch>;
+
 const NEEDS_REPAIR: &str = "after a provider loss, the Allowance's usage record needs a repair before it pays automatically; the user can end it and set up a new one";
 
 fn refusal_of<T: std::fmt::Debug>(result: paykit_sdk::Result<T>) -> Refusal {
@@ -26,7 +28,8 @@ fn refusal_of<T: std::fmt::Debug>(result: paykit_sdk::Result<T>) -> Refusal {
 /// An Allowance granted, then a provider loss the payer has followed and reconciled.
 async fn granted_then_lost() -> (World, Paykit, Paykit, [u8; 32]) {
     let (w, payer, shop, key) = Box::pin(first_grant_in(store(), terms())).await;
-    Box::pin(lost(w, payer, shop, key)).await
+    let (w, payer, shop, key, _) = Box::pin(lost(w, payer, shop, key)).await;
+    (w, payer, shop, key)
 }
 
 /// [`granted_then_lost`] from an Allowance already granted.
@@ -35,15 +38,15 @@ async fn lost(
     mut payer: Paykit,
     mut shop: Paykit,
     key: [u8; 32],
-) -> (World, Paykit, Paykit, [u8; 32]) {
+) -> (World, Paykit, Paykit, [u8; 32], Service) {
     w.rail.set_history_payer(payer.identity());
-    let _service = crate::provider_loss::declare_loss(&w);
+    let service = crate::provider_loss::declare_loss(&w);
     let until = Box::pin(crate::provider_loss::follow_loss(&mut payer)).await;
     payer.app_mut().invite(&shop.identity()).await.unwrap();
     w.clock
         .set_ms(until.max(w.clock.now_ms()) + pubky_switch_client::app::DOC_CACHE_MS);
     Box::pin(shop.receive(None)).await.unwrap();
-    (w, payer, shop, key)
+    (w, payer, shop, key, service)
 }
 
 /// The Allowance record at `key` as `payer` holds it.
@@ -176,7 +179,8 @@ async fn test_allowance_regrant_one_time_requests_stay_held_after_the_regrant() 
 async fn test_allowance_regrant_confirmation_before_a_second_loss_writes_nothing() {
     // The user was shown the Allowance after one loss; a second loss came before the
     // answer. That confirmation counts for nothing: it is refused with the hold in force
-    // now, no grant is written, and the user is asked with the new hold.
+    // now, no grant is written, and the user is asked with the new hold, whose
+    // confirmation writes it.
     let (_w, mut payer, _shop, key) = Box::pin(granted_then_lost()).await;
     let w = &_w;
     let shown = payer.allowance(&key).await.unwrap().hold;
@@ -194,13 +198,24 @@ async fn test_allowance_regrant_confirmation_before_a_second_loss_writes_nothing
     assert!(view.confirmation_needed, "{view:?}");
     assert_eq!(view.hold, hold);
     assert!(w.rail.all_executions().is_empty());
+    // The confirmation of the new hold writes the grant at the newest generation, over the
+    // record the second recovery installed.
+    Box::pin(payer.confirm_allowance_executor(&hold, UserConfirmed::new()))
+        .await
+        .unwrap();
+    Box::pin(payer.receive(None)).await.unwrap();
+    assert_eq!(
+        Box::pin(confirmed(&payer, &key)).await,
+        (payer.app().own_identity().generation(), before.1 + 1)
+    );
 }
 
 #[tokio::test]
 async fn test_allowance_regrant_no_other_own_app_lifts_the_pause() {
     // Another app of the identity can't confirm for the executor, and a record it writes
-    // with the executor's grant claiming the current generation doesn't verify: the
-    // executor's pause stays (Paykit spec 8.3: no other app can end this generation pause).
+    // with the executor's grant claiming the current generation doesn't verify: nothing
+    // lifts the executor's pause (Paykit spec 8.3: no other app can end this generation
+    // pause).
     let (w, payer, shop, key) = Box::pin(first_grant_in(store(), terms())).await;
     let mut phone = Box::pin(w.join(
         &w.alice,
@@ -208,7 +223,7 @@ async fn test_allowance_regrant_no_other_own_app_lifts_the_pause() {
         AppScopes::new().allowance_execute().build().unwrap(),
     ))
     .await;
-    let (w, mut payer, mut shop, key) = Box::pin(lost(w, payer, shop, key)).await;
+    let (w, mut payer, mut shop, key, _) = Box::pin(lost(w, payer, shop, key)).await;
     Box::pin(crate::provider_loss::follow_loss(&mut phone)).await;
     let hold = phone.allowance(&key).await.unwrap().hold;
     assert_eq!(
@@ -234,12 +249,14 @@ async fn test_allowance_regrant_no_other_own_app_lifts_the_pause() {
         .await
         .unwrap();
     Box::pin(payer.receive(None)).await.unwrap();
-    let view = payer.allowance(&key).await.unwrap();
-    assert!(view.confirmation_needed, "{view:?}");
+    let refused = Box::pin(subscription_refused(&w, &mut shop, &mut payer, &key)).await;
+    // The executor flags the write it can't verify and keeps the one it held: it waits on
+    // that record, asks no confirmation, and pays nothing.
     assert_eq!(
-        Box::pin(subscription_refused(&w, &mut shop, &mut payer, &key)).await,
-        Refusal::AllowanceConfirmationNeeded { hold: view.hold }
+        refused,
+        Refusal::NotNow("the Allowance record isn't held as executing it needs yet".into())
     );
+    assert!(!payer.allowance(&key).await.unwrap().confirmation_needed);
     assert!(w.rail.all_executions().is_empty());
 }
 
@@ -262,7 +279,7 @@ async fn test_allowance_regrant_never_granted_before_a_loss_is_not_automatic() {
     // Accepted before the loss but never granted here: it can't be granted now (Paykit spec
     // 8.3, Acceptance), so it pays nothing automatically and asks no confirmation.
     let (w, payer, shop, key) = Box::pin(super::accepted_not_granted(store())).await;
-    let (_w, mut payer, _shop, key) = Box::pin(lost(w, payer, shop, key)).await;
+    let (_w, mut payer, _shop, key, _) = Box::pin(lost(w, payer, shop, key)).await;
     let view = payer.allowance(&key).await.unwrap();
     assert!(!view.confirmation_needed, "{view:?}");
     let set_up_before = Refusal::NotAutomatic(
@@ -278,4 +295,94 @@ async fn test_allowance_regrant_never_granted_before_a_loss_is_not_automatic() {
         ),
         set_up_before
     );
+}
+
+#[tokio::test]
+async fn test_allowance_regrant_expiry_crossed_by_the_regrants_read_writes_nothing() {
+    // The terms expire after the last receive: the regrant's fresh read brings the service
+    // time up to date, and the confirmation is refused as ended, writing no grant.
+    use paykit_lib::allowances::TermsTime;
+    let mut expiring = terms();
+    let end = pubky_switch_client::testing::START_MS + 48 * crate::common::HOUR_MS;
+    expiring.expires_at = Some(TermsTime::new(end));
+    let (w, payer, shop, key) = Box::pin(first_grant_in(store(), expiring)).await;
+    let (w, mut payer, _shop, key, _) = Box::pin(lost(w, payer, shop, key)).await;
+    let hold = payer.allowance(&key).await.unwrap().hold;
+    let before = Box::pin(confirmed(&payer, &key)).await;
+    w.clock.set_ms(end + crate::common::HOUR_MS);
+    assert_eq!(
+        refusal_of(Box::pin(payer.confirm_allowance_executor(&hold, UserConfirmed::new())).await),
+        Refusal::AllowanceEnded
+    );
+    assert_eq!(Box::pin(confirmed(&payer, &key)).await, before);
+}
+
+#[tokio::test]
+async fn test_allowance_regrant_a_known_wait_comes_before_the_confirmation() {
+    // A `missed` item's mark not yet applied: the Allowance waits for it, and the user isn't
+    // asked to confirm until it is.
+    use pubky_switch_client::app::LocalWrite;
+    let (_w, mut payer, _shop, key) = Box::pin(granted_then_lost()).await;
+    payer
+        .app_mut()
+        .protocol_commit(
+            "paykit",
+            &[LocalWrite::Put {
+                key: b"mc".to_vec(),
+                value: br#"{"v":1,"d":true}"#.to_vec(),
+            }],
+        )
+        .await
+        .unwrap();
+    assert!(!payer.allowance(&key).await.unwrap().confirmation_needed);
+    assert_eq!(
+        refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
+        Refusal::NotNow(
+            "a missed item holds every Allowance until the next receive marks it for confirmation"
+                .into()
+        )
+    );
+}
+
+#[tokio::test]
+async fn test_allowance_regrant_kept_and_landed_under_a_newer_hold_asks_again() {
+    // The regrant's batch is kept unanswered; a `missed` item sets a newer hold before it
+    // lands. The grant landed, the user is asked again under the newer hold, and that
+    // confirmation consents; the usage still waits for its repair.
+    use pubky_switch_client::testing::Fault;
+    let (w, payer, shop, key) = Box::pin(first_grant_in(store(), terms())).await;
+    let (w, mut payer, _shop, key, service) = Box::pin(lost(w, payer, shop, key)).await;
+    let shown = payer.allowance(&key).await.unwrap().hold;
+    service.fail_next(Fault::Unanswered {
+        path: "/ops".into(),
+        after: 0,
+    });
+    Box::pin(payer.confirm_allowance_executor(&shown, UserConfirmed::new()))
+        .await
+        .expect_err("the regrant's batch is unanswered");
+    let now = w.clock.now_ms();
+    service.push_missed(1, now - 1_000, now);
+    for _ in 0..3 {
+        Box::pin(crate::common::finish_listing(&mut payer)).await;
+    }
+    let generation = payer.app().own_identity().generation();
+    assert_eq!(Box::pin(confirmed(&payer, &key)).await.0, generation);
+    let view = payer.allowance(&key).await.unwrap();
+    assert!(view.confirmation_needed, "{view:?}");
+    assert_ne!(view.hold, shown);
+    assert_eq!(
+        refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
+        Refusal::AllowanceConfirmationNeeded {
+            hold: view.hold.clone()
+        }
+    );
+    Box::pin(payer.confirm_allowance_executor(&view.hold, UserConfirmed::new()))
+        .await
+        .unwrap();
+    assert!(!payer.allowance(&key).await.unwrap().confirmation_needed);
+    assert_eq!(
+        refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
+        Refusal::NotNow(NEEDS_REPAIR.into())
+    );
+    assert!(w.rail.all_executions().is_empty());
 }

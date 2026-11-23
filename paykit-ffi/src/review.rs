@@ -185,7 +185,8 @@ pub enum RefusalKind {
     /// answered, ended, granted or paid under it, for good (Paykit spec 8.3, "Conflicted").
     AllowanceConflicted,
     /// The user must confirm this Allowance again before this app pays under it, after a missed
-    /// item, or a restore until it is judged clean or the user confirms. Show the Allowance and,
+    /// item, a restore until it is judged clean or the user confirms, or a provider loss, for one
+    /// the user confirmed before the loss. Show the Allowance and,
     /// once the user confirms, call `confirm_allowance_executor` (Paykit spec 8.3). No Allowance
     /// payment, resume or confirm call is bound yet, so hosts don't receive it today.
     AllowanceConfirmationNeeded {

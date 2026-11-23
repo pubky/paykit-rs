@@ -7,7 +7,7 @@ use pubky_switch_client::app::{
     KeptBatchStatus, KeptOp, LocalWrite, OpBatch, RecordRead, RecordTarget, UserConfirmed,
 };
 use pubky_switch_core::enc::hash;
-use pubky_switch_core::ops::Condition;
+use pubky_switch_core::ops::{Condition, OpKind};
 
 use super::approval::ApprovedOpening;
 use super::checkpoint::{ledger_target, ExecutorCheckpoint, ExecutorHistory, GrantEvidence};
@@ -131,6 +131,11 @@ impl Paykit {
         }
         if shown.granted_before_loss {
             return Box::pin(self.regrant_after_loss(record, &shown)).await;
+        }
+        if shown.regranted_after_loss {
+            // Asked again under a newer hold after the regrant: the confirmation consents
+            // under it, and the usage still waits for its repair.
+            return self.consent_under_current_hold(record, &shown).await;
         }
         let opening = Box::pin(self.approved_opening(record))
             .await?
@@ -401,6 +406,14 @@ impl Paykit {
             .read_record_application(&allow)
             .await?
             .ok_or_else(held)?;
+        // The read brings the service time up to date: an Allowance that expired since is
+        // refused as ended before anything is written.
+        Box::pin(self.still_standing(record)).await?;
+        // A newer loss or hold learned during the read leaves the confirmation stale.
+        let hold = self.allowance_hold(record).await?;
+        if hold != view.hold {
+            return Err(Refusal::AllowanceConfirmationNeeded { hold }.into());
+        }
         let read = &current.record;
         let pubky_switch_client::app::RecordContent::Value(bytes) = &read.content else {
             return Err(held().into());
@@ -427,13 +440,17 @@ impl Paykit {
         }
         let terms_hash = next.terms_hash().ok_or_else(held)?;
         let generation = self.app.own_identity().generation();
+        // The write builds on the version the service holds the record's current write at:
+        // after a recovery upload that can be lower than the version the write was first
+        // given (Pubky Switch wire 6.3, 7.6).
+        let base = current.installed_version;
         let fields = grant_fields(
             &own,
             &view.counterparty,
             &view.allowance_id,
             &terms_hash,
             generation,
-            read.version,
+            base,
         );
         let refs: Vec<&[u8]> = fields.iter().map(Vec::as_slice).collect();
         let grant = ExecutorGrant {
@@ -445,12 +462,12 @@ impl Paykit {
             origin: Origin::default(),
         };
         next.grants.push(GrantEntry {
-            built_on: read.version,
+            built_on: base,
             grant: grant.clone(),
             origin: Origin::default(),
         });
         next.grant = Some(grant);
-        let op = self
+        let (conditions, mut kind) = self
             .app
             .record_op(
                 &allow,
@@ -462,6 +479,10 @@ impl Paykit {
                 }],
             )
             .await?;
+        if let OpKind::RecordPut(put) = &mut kind {
+            put.expected_version = base;
+        }
+        let op = (conditions, kind);
         let hold = self.current_hold().await?;
         let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
             .entry(op)
@@ -471,6 +492,29 @@ impl Paykit {
             )?);
         self.app.submit_batch(batch).await?;
         Ok(())
+    }
+
+    /// The user's confirmation, under the hold in force now, of an Allowance whose grant was
+    /// written again after a provider loss: its approval and consent, in one local commit.
+    async fn consent_under_current_hold(
+        &mut self,
+        record: &[u8; 32],
+        view: &crate::AllowanceView,
+    ) -> Result<()> {
+        let hold = self.current_hold().await?;
+        let mut tx = Tx::default();
+        tx.put(&key::execution_approval(record, hold.as_ref()), &true)?;
+        tx.put(
+            &key::consent(record),
+            &ConsentEntry::new(
+                view.counterparty,
+                &view.allowance_id,
+                Consent::Held {
+                    confirm_again: false,
+                },
+            ),
+        )?;
+        self.local_commit(tx).await
     }
 
     /// Refused for good or for now as [`standing`] says, read again after the fresh reads of
