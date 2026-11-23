@@ -292,8 +292,15 @@ impl NativeWallet {
     ) -> Result<PaymentResult, WalletError> {
         let request = id.try_into()?;
         let options = options.try_into()?;
+        let rail = self.rail();
         self.with_wallet(move |app| {
-            Box::pin(async move { Ok(app.pay_request(&request, options).await.into()) })
+            Box::pin(async move {
+                // Before anything is journaled, on Paykit's thread like every callback.
+                if !rail.has_lookup() {
+                    return Err(WalletError::PaymentMethodWithoutLookup);
+                }
+                Ok(app.pay_request(&request, options).await.into())
+            })
         })
         .await
     }

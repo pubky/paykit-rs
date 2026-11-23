@@ -1,8 +1,14 @@
+use crate::flights::{AppId, Flights, Wake};
 use crate::{fixed, runtime, WalletError, WalletHost};
+use paykit_sdk::Stage;
 use paykit_sdk::{AppEnv, Paykit, PaykitError};
 use pubky_switch_client::store::StoreHandle;
 use pubky_switch_client::transport::BoxFuture;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 /// One wallet command: it runs on the wallet's worker with the SDK value to itself and sends
@@ -11,6 +17,8 @@ type Job = Box<dyn for<'a> FnOnce(&'a mut Paykit) -> BoxFuture<'a, ()> + Send>;
 
 enum Command {
     Run(Job),
+    /// Resume the payments, to record the late answers kept for this wallet.
+    Settle,
     Shutdown(oneshot::Sender<Result<(), WalletError>>),
     /// Hand the SDK value to a test and wait for it to come back.
     #[cfg(test)]
@@ -26,20 +34,29 @@ enum Command {
 #[derive(uniffi::Object)]
 pub struct NativeWallet {
     commands: mpsc::UnboundedSender<Command>,
+    rail: Arc<crate::HostRail>,
     pub(crate) pace: Arc<Mutex<pubky_switch_client::app::WaitPace>>,
 }
 
 impl NativeWallet {
     pub(crate) fn opened(
         app: Paykit,
+        rail: Arc<crate::HostRail>,
         ownership: Option<Arc<crate::LeaseOwner>>,
     ) -> Result<Arc<Self>, WalletError> {
         let (commands, queue) = mpsc::unbounded_channel();
-        runtime::spawn(work(app, commands.downgrade(), queue, ownership))?;
+        let flights = rail.flights().clone();
+        runtime::spawn(work(app, flights, commands.downgrade(), queue, ownership))?;
         Ok(Arc::new(Self {
             commands,
+            rail,
             pace: Arc::default(),
         }))
+    }
+
+    /// The rail of the host this wallet was opened with.
+    pub(crate) fn rail(&self) -> Arc<crate::HostRail> {
+        self.rail.clone()
     }
 
     /// Run `call` on the wallet's worker and wait for its answer. The call runs to its end
@@ -81,41 +98,93 @@ impl NativeWallet {
 }
 
 tokio::task_local! {
-    /// The wallet whose worker runs the current command.
-    static CURRENT: mpsc::WeakUnboundedSender<Command>;
+    /// The App ID of the wallet whose worker runs the current command.
+    static CURRENT: AppId;
 }
 
-/// Inside a wallet command: a way to queue a resume of that wallet's payments later, for a
-/// late answer from the host's `pay`. Nothing is queued once the wallet is closed; its next
-/// open resumes the payment through the host's lookup.
-pub(crate) fn settle_target() -> Option<crate::flights::Settle> {
-    let wallet = CURRENT.try_with(Clone::clone).ok()?;
-    Some(Box::new(move || {
-        let Some(commands) = wallet.upgrade() else {
-            return;
-        };
-        let job: Job = Box::new(|app| {
-            Box::pin(async move {
-                // A failed resume leaves the attempt open for the next one.
-                let _ = app.resume_payments().await;
-            })
-        });
-        let _ = commands.send(Command::Run(job));
-    }))
+/// Inside a wallet command: the App ID the command's payments belong to.
+pub(crate) fn current_app() -> Option<AppId> {
+    CURRENT.try_with(|app| *app).ok()
+}
+
+/// The first wait before a settle that left a late answer unrecorded runs again, and the
+/// longest the wait grows to.
+const SETTLE_RETRY: Duration = Duration::from_secs(2);
+const SETTLE_RETRY_CAP: Duration = Duration::from_secs(60);
+
+/// Record the late answers kept for this wallet: resume its payments, which take each kept
+/// answer through the method's lookup, then let go of every answer the journal no longer shows
+/// paying. Returns whether every one of them is recorded.
+async fn settle(app: &mut Paykit, flights: &Flights, id: &AppId) -> bool {
+    if flights.late_of(id).is_empty() {
+        return true;
+    }
+    // A resume that stops early leaves the answers kept, and the settle runs again.
+    let _ = app.resume_payments().await;
+    let Ok(journal) = app.payments().await else {
+        return false;
+    };
+    for attempt in flights.late_of(id) {
+        let paying = journal
+            .iter()
+            .any(|entry| entry.attempt_id.to_text() == attempt && entry.stage == Stage::Paying);
+        if !paying {
+            flights.recorded(&attempt);
+        }
+    }
+    flights.late_of(id).is_empty()
 }
 
 /// The wallet's worker. It stops after a shutdown, or once every handle is gone and the
-/// calls already sent have run; then it drops the SDK value and releases the store.
+/// calls already sent have run; then it drops the SDK value and releases the store. While it
+/// runs, a late answer from the host's `pay` for its App ID wakes it to settle, at most one
+/// settle queued at a time, and an unrecorded answer is retried with a growing wait.
 async fn work(
     mut app: Paykit,
+    flights: Flights,
     own: mpsc::WeakUnboundedSender<Command>,
     mut queue: mpsc::UnboundedReceiver<Command>,
     ownership: Option<Arc<crate::LeaseOwner>>,
 ) {
+    let id: AppId = app.app_id();
+    let queued = Arc::new(AtomicBool::new(false));
+    let wake: Wake = {
+        let queued = queued.clone();
+        Arc::new(move || {
+            if queued.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            if let Some(commands) = own.upgrade() {
+                let _ = commands.send(Command::Settle);
+            }
+        })
+    };
+    flights.open(id, wake.clone());
+    // Answers that came while no wallet for this App ID was open are settled first.
+    let mut retry = (!flights.late_of(&id).is_empty()).then(|| (Instant::now(), SETTLE_RETRY));
     let mut stopped = None;
-    while let Some(command) = queue.recv().await {
+    loop {
+        let command = match retry {
+            Some((at, _)) => tokio::select! {
+                command = queue.recv() => command,
+                () = tokio::time::sleep_until(at.into()) => Some(Command::Settle),
+            },
+            None => queue.recv().await,
+        };
+        let Some(command) = command else { break };
         match command {
-            Command::Run(job) => CURRENT.scope(own.clone(), job(&mut app)).await,
+            Command::Run(job) => CURRENT.scope(id, job(&mut app)).await,
+            Command::Settle => {
+                queued.store(false, Ordering::SeqCst);
+                let done = CURRENT.scope(id, settle(&mut app, &flights, &id)).await;
+                retry = match (done, retry) {
+                    (true, _) => None,
+                    (false, Some((_, wait))) => {
+                        Some((Instant::now() + wait, (wait * 2).min(SETTLE_RETRY_CAP)))
+                    }
+                    (false, None) => Some((Instant::now() + SETTLE_RETRY, SETTLE_RETRY * 2)),
+                };
+            }
             Command::Shutdown(done) => {
                 // Calls sent after this one find the wallet closed.
                 queue.close();
@@ -132,12 +201,16 @@ async fn work(
                     Ok(()) => match back.await {
                         Ok(app) => app,
                         // The test kept the value: dropping it there released the store.
-                        Err(_) => return finish(ownership, stopped).await,
+                        Err(_) => {
+                            flights.close(&id, &wake);
+                            return finish(ownership, stopped).await;
+                        }
                     },
                 };
             }
         }
     }
+    flights.close(&id, &wake);
     drop(app);
     finish(ownership, stopped).await;
 }
@@ -191,7 +264,7 @@ impl WalletHost {
     ) -> Result<Arc<NativeWallet>, WalletError> {
         let (env, owner) = self.session_env(id).await?;
         match open(env).await {
-            Ok(app) => NativeWallet::opened(app, Some(owner)),
+            Ok(app) => NativeWallet::opened(app, self.rail.clone(), Some(owner)),
             Err(error) => {
                 // The failed SDK open has dropped its store. Wait for the physical
                 // writer to release before a host can act on the failure and retry.

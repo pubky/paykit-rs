@@ -133,7 +133,9 @@ impl NativeWallet {
             .with_wallet(move |app| Box::pin(async move { Ok(app.app().feed_wait(seconds)) }))
             .await?;
         let pace = self.pace.clone();
-        crate::runtime::run(async move {
+        // A host that stops waiting ends the long poll and the pause, so a restarted feed loop
+        // never holds two reads at once.
+        crate::runtime::run_while_waited(async move {
             let requested = wait.seconds();
             let started = std::time::Instant::now();
             let wake = wait.wait().await;

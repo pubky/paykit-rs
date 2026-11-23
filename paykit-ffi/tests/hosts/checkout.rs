@@ -137,13 +137,15 @@ async fn harness<T: Send + 'static>(
 /// How long the test wallets wait for the host's `pay` before recording it as possibly sent.
 const TEST_PAY_LIMIT: Duration = Duration::from_secs(2);
 
+/// Each test device keeps its own record of payments in flight, as separate devices do.
 fn device_rail(method: Arc<dyn PaymentMethod>) -> Result<HostRail, WalletError> {
     Ok(HostRail::new(
         method,
         vec![PaymentEndpointIdentifier::new("btc-lightning-bolt11")
             .map_err(|_| WalletError::invalid("test endpoint"))?],
-    )?
-    .with_pay_limit(TEST_PAY_LIMIT))
+    )
+    .with_pay_limit(TEST_PAY_LIMIT)
+    .with_own_flights())
 }
 
 fn invoice() -> paykit_lib::Result<RequestDraft> {

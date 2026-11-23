@@ -51,7 +51,6 @@ fn host(world: &World, root: &Path, account: Arc<Account>) -> Arc<WalletHost> {
         account,
         vec![PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap()],
     )
-    .unwrap()
     .with_pay_limit(std::time::Duration::from_millis(300));
     host.rail = Arc::new(rail);
     let env = world.app_env(Arc::new(MemoryStore::new()));
@@ -249,6 +248,7 @@ async fn received_message(wallet: &NativeWallet, expected: &str) -> TestResult<E
 
 async fn payment(
     world: &World,
+    root: &Path,
     host: &WalletHost,
     payer: Arc<NativeWallet>,
     account: &Account,
@@ -323,6 +323,27 @@ async fn payment(
             Ok(())
         })
         .await??;
+    // A feed wait the host stops waiting for ends its long poll at the service.
+    {
+        let mut waiting = Box::pin(payer.feed_wait(25));
+        for _ in 0..500 {
+            if world.held_reads() > 0 {
+                break;
+            }
+            tokio::select! {
+                _ = &mut waiting => return Err("the feed wait returned before holding".into()),
+                () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+            }
+        }
+        assert!(world.held_reads() > 0);
+    }
+    for _ in 0..500 {
+        if world.held_reads() == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(world.held_reads(), 0);
     let views = payer.requests().await?;
     assert_eq!(views.len(), 1);
     assert_eq!(views[0].id.request_hash, request.request_hash);
@@ -365,10 +386,20 @@ async fn payment(
         reentrant,
         std::task::Poll::Ready(Err(WalletError::Reentrant))
     ));
+    // The store refuses the wallet's writes when the host's `pay` answers: the first settle
+    // can't record the answer and keeps it, and a later one records it once writes work.
+    DeviceStore::hold_installation(root, true);
     account.park.store(false, Ordering::SeqCst);
     account.finish.notify_one();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(payer
+        .payments()
+        .await?
+        .iter()
+        .any(|p| &p.attempt_id == attempt && matches!(p.stage, PaymentStage::Paying)));
+    DeviceStore::hold_installation(root, false);
     let mut settled = false;
-    for _ in 0..200 {
+    for _ in 0..1000 {
         let now = payer.payments().await?;
         if now
             .iter()
@@ -419,6 +450,14 @@ async fn payment(
         && &r.attempt_id == attempt
         && r.payment_reference.as_deref() == Some("checkout-7")));
     assert!(restored.reconcile_allowance(vec![0; 32]).await?.is_none());
+    let restored = Box::pin(later_checkout(
+        &mut seller,
+        host,
+        restored,
+        account,
+        &app_id,
+    ))
+    .await?;
     let draft = RequestDraft::new(
         PaymentAmount {
             asset: Asset::new("btc")?,
@@ -447,9 +486,108 @@ async fn payment(
     assert!(
         matches!(refused.decision, PaymentDecision::Error { error: WalletError::Refused { refusal } } if matches!(refusal.kind(), RefusalKind::Cancelled))
     );
-    assert_eq!(account.count(), 1);
-    assert_eq!(account.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(account.count(), 2);
+    assert_eq!(account.calls.load(Ordering::SeqCst), 2);
     Ok(())
+}
+
+/// A checkout the wallet can't pay with a method without history, then pays: its `pay`
+/// answers after the wallet stopped waiting and closed, and the next wallet that opens records
+/// that answer without asking the host.
+async fn later_checkout(
+    seller: &mut Paykit,
+    host: &WalletHost,
+    wallet: Arc<NativeWallet>,
+    account: &Account,
+    app_id: &[u8],
+) -> TestResult<Arc<NativeWallet>> {
+    let buyer = wallet
+        .identity()
+        .await?
+        .try_into()
+        .map_err(|_| "identity")?;
+    let draft = RequestDraft::new(
+        PaymentAmount {
+            asset: Asset::new("btc")?,
+            value: Decimal::new("5")?,
+        },
+        PaymentReference::new("later-checkout")?,
+        RequestDestination::Endpoints(BTreeMap::from([(
+            PaymentEndpointIdentifier::new("btc-lightning-bolt11")?,
+            PaymentEndpointPayload::new("lnbc1later")?,
+        )])),
+    );
+    let later: RequestId = Box::pin(seller.send_request(buyer, draft))
+        .await?
+        .request
+        .ok_or("missing later checkout")?
+        .into();
+    for _ in 0..8 {
+        if !Box::pin(wallet.receive()).await?.more {
+            break;
+        }
+    }
+    let lookups = account.lookups.load(Ordering::SeqCst);
+    let calls = account.calls.load(Ordering::SeqCst);
+    // A method that can't look a payment up refuses paying, and only paying.
+    account.history.store(false, Ordering::SeqCst);
+    let refused = Box::pin(wallet.pay_request(later.clone(), PaymentOptions::default())).await;
+    assert!(matches!(
+        refused,
+        Err(WalletError::PaymentMethodWithoutLookup)
+    ));
+    let request: paykit_sdk::RequestRef = later.clone().try_into()?;
+    let options: paykit_sdk::PayOptions = PaymentOptions::default().try_into()?;
+    // A dispatch that doesn't pass through that check is refused by the method's rail.
+    let dispatched: PaymentResult = wallet
+        .lend(async |app| app.pay_request(&request, options).await)
+        .await?
+        .into();
+    assert!(!matches!(
+        dispatched.decision,
+        PaymentDecision::Outcome {
+            outcome: PaymentOutcome::Paid { .. }
+        }
+    ));
+    assert_eq!(account.calls.load(Ordering::SeqCst), calls);
+    wallet.backup().await?;
+    Box::pin(wallet.receive()).await?;
+    wallet.payments().await?;
+    account.history.store(true, Ordering::SeqCst);
+    account.park.store(true, Ordering::SeqCst);
+    {
+        let mut paying = Box::pin(wallet.pay_request(later, PaymentOptions::default()));
+        tokio::select! {
+            _ = account.entered.notified() => {},
+            _ = &mut paying => return Err("payment did not reach the parked method".into()),
+        }
+    }
+    // The wallet stops waiting at its limit and closes while the host's `pay` still runs.
+    let open = wallet.payments().await?;
+    let attempt = open
+        .iter()
+        .find(|p| matches!(p.stage, PaymentStage::Paying))
+        .ok_or("the later payment is not paying")?
+        .attempt_id
+        .clone();
+    wallet.shutdown().await?;
+    account.park.store(false, Ordering::SeqCst);
+    account.finish.notify_one();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let reopened = host.load(app_id.to_vec()).await?;
+    for _ in 0..1000 {
+        let now = reopened.payments().await?;
+        if now
+            .iter()
+            .any(|p| p.attempt_id == attempt && recorded_paid(p))
+        {
+            assert_eq!(account.lookups.load(Ordering::SeqCst), lookups);
+            assert_eq!(account.calls.load(Ordering::SeqCst), calls + 1);
+            return Ok(reopened);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    Err("the late answer was not recorded by the next wallet".into())
 }
 /// Whether the method's "paid" answer is written for this entry.
 fn recorded_paid(entry: &PaymentEntry) -> bool {
@@ -524,7 +662,7 @@ async fn journey(world: &World) -> TestResult {
     assert_eq!(reopened.identity().await?, identity);
     assert_eq!(reopened.app_id().await?, id);
     assert_eq!(account.count(), 0);
-    Box::pin(payment(world, &env, reopened, &account, id)).await
+    Box::pin(payment(world, root.path(), &env, reopened, &account, id)).await
 }
 fn run(backend: Backend, journey: impl AsyncFn(&World) -> TestResult + Send + 'static) {
     let thread = std::thread::Builder::new()

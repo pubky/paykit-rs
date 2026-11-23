@@ -41,10 +41,15 @@ pub enum WalletError {
     /// The wallet handle was shut down.
     #[error("the wallet is closed")]
     Closed,
-    /// A wallet call was made from inside a synchronous host callback, which the call
-    /// would have waited for.
+    /// A wallet call was made on the thread of a synchronous host callback, which the call
+    /// would have waited for. A call from another thread the callback waits on can't be told
+    /// apart from any other call: it waits for the callback, and the wallet hangs.
     #[error("a wallet call from inside a host callback")]
     Reentrant,
+    /// The payment method can't look up a payment by its attempt ID, so a payment the wallet
+    /// stopped waiting for could never be settled: paying is refused. Every other call works.
+    #[error("the payment method can't look up a payment by its attempt ID")]
+    PaymentMethodWithoutLookup,
     /// The bindings could not start the threads they run wallet work on.
     #[error("the wallet runtime is unavailable")]
     RuntimeUnavailable,

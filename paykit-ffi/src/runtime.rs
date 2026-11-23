@@ -64,6 +64,25 @@ where
     spawn(work)?.await.map_err(|_| WalletError::Closed)?
 }
 
+/// Run `work`, which has no effect of its own such as a wait, on the wallet runtime for as
+/// long as the caller waits: a caller that stops waiting stops `work` too.
+pub(crate) async fn run_while_waited<F, T>(work: F) -> Result<T, WalletError>
+where
+    F: Future<Output = Result<T, WalletError>> + Send + 'static,
+    T: Send + 'static,
+{
+    struct Stop(tokio::task::AbortHandle);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    refuse_reentry()?;
+    let task = spawn(work)?;
+    let _stop = Stop(task.abort_handle());
+    task.await.map_err(|_| WalletError::Closed)?
+}
+
 thread_local! {
     static IN_CALLBACK: Cell<u32> = const { Cell::new(0) };
 }
