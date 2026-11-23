@@ -1571,10 +1571,15 @@ fn keep_installation_stops(
         let Some(StateKey::Consent(record)) = StateKey::parse(&at) else {
             return Err("the installation holds an invalid consent key".into());
         };
+        // The restore's marks for the Allowance go with the backup's entry: its consent held
+        // and its approval for execution, which a clean verdict would otherwise make live.
         let held = key::restore_consent(&record);
+        let approval = key::restore_approval(&record);
         writes.retain(|w| {
             !matches!(w, LocalWrite::Put { key, .. }
-                if key.as_slice() == at.as_slice() || key.as_slice() == held.as_bytes())
+                if key.as_slice() == at.as_slice()
+                    || key.as_slice() == held.as_bytes()
+                    || key.as_slice() == approval.as_bytes())
         });
         writes.push(LocalWrite::Put { key: at, value });
     }

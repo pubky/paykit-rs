@@ -4499,6 +4499,12 @@ async fn test_executor_older_in_place_restore_keeps_a_kept_end_and_its_removal()
         .await
         .unwrap()
         .is_empty());
+    assert!(restored
+        .app()
+        .protocol_scan("paykit", b"xr/")
+        .await
+        .unwrap()
+        .is_empty());
     Box::pin(crate::common::finish_listing(&mut restored)).await;
     let mut reconciled = Box::pin(restored.reconcile()).await;
     for _ in 0..8 {
