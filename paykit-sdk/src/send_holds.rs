@@ -551,9 +551,9 @@ impl Paykit {
                             error @ PaykitError::Client(AppError::Alarm(_) | AppError::Store(_)),
                         ) => return Err(error),
                         // Any other failure, such as an unreadable floor or a refusal,
-                        // records nothing: the copy of the lists stays as it was, and a
-                        // governed message waits on it as before (Paykit spec 8.1). The
-                        // receive step reports it.
+                        // leaves the lists' read time as it was, so a governed message
+                        // waits on the deny decision as before (Paykit spec 8.1). The
+                        // receive step's own read reports it.
                         Err(_) => {}
                     }
                 }
