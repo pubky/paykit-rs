@@ -469,6 +469,6 @@ The method declares `payment_time_tolerance_ms` with its declaration. The payee 
 | `Refusal::Usage` | Correct the supplied API input. |
 | `Refusal::RecordHeld` | A payer record with payment history lost to deletion permanently holds that obligation. For a temporarily unreadable record, resume when it can be read or repaired. |
 | `Refusal::CertificateRefused` | Seek a suitable certificate from the signer and keep Paykit actions paused meanwhile. |
-| `Refusal::SwitchUnavailable` | Show the own Switch as unavailable and keep payment actions waiting. |
+| `Refusal::SwitchUnavailable` | Show the own Switch as unavailable and keep payment actions waiting. From a payment, directly or as an `AttemptFailed` cause, it means nothing was paid, not a payment in flight: retry the payment once the switch answers. If the retry is refused with `PaymentInProgress`, call `Paykit::resume_payments` and retry once the earlier attempt is resolved; the resume records it failed when the switch takes that write. |
 | `Refusal::Blocked` | Show the blocked recipient and the exact payment to the user before any supported override. |
 | `Refusal::Divergent` | Show the returned records and the exact confirmation asked for. Run receive while the record still has writes waiting. |
