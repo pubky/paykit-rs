@@ -1684,6 +1684,7 @@ impl Paykit {
         peer: &[u8; 32],
         id: &AllowanceId,
         deletion: pubky_switch_core::shared::ApplicationRef,
+        deletion_write: &crate::executor::OwnWrite,
     ) -> Result<Option<pubky_switch_core::ops::Condition>> {
         use pubky_switch_client::app::{KeptReason, RecordRead};
         use pubky_switch_core::ops::{Condition, RecordVersion};
@@ -1698,7 +1699,12 @@ impl Paykit {
             return Ok(None);
         }
         let read = self.app.read_record_fresh(&target).await?;
-        if !matches!(delivery::current(&target, &key, &read, true), Some(None)) {
+        // Read with no copy held after an orderly change, the deletion is shown by this
+        // app's own retained write (`OwnWrite`).
+        let own_deletion = matches!(&read, RecordRead::Fresh(r)
+            if replies::qualified_as(r, &target, &key, deletion_write)
+                && r.content == pubky_switch_client::app::RecordContent::Deleted);
+        if !own_deletion && !matches!(delivery::current(&target, &key, &read, true), Some(None)) {
             return Ok(None);
         }
         match read {
@@ -1719,7 +1725,7 @@ impl Paykit {
                 Ok(applied
                     .is_some_and(|current| {
                         current.application == deletion
-                            && replies::qualified_at(&current.record, &target, &key)
+                            && replies::qualified_as(&current.record, &target, &key, deletion_write)
                             && current.record.content
                                 == pubky_switch_client::app::RecordContent::Deleted
                     })

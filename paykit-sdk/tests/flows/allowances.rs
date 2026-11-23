@@ -362,7 +362,7 @@ enum AcceptanceGeneration {
 }
 
 /// Keep the service's records and prior verification key through an orderly advance.
-async fn advance_allowance_generation(
+pub(crate) async fn advance_allowance_generation(
     w: &World,
     payer: &mut Paykit,
 ) -> std::sync::Arc<pubky_switch_client::testing::ScriptedSwitch> {

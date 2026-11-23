@@ -289,8 +289,9 @@ impl Paykit {
                 let dated = held.ops.iter().any(|op| {
                     AppliedRecord::retained(&self.app, &record, op).is_some_and(|write| {
                         write.dates_payment_proof(&self.app, proof)
+                            // The sequence continues across an orderly generation change.
                             && before.is_none_or(|limit| {
-                                write.revision.generation == limit.revision.generation
+                                write.revision.generation <= limit.revision.generation
                                     && write.revision.seq < limit.revision.seq
                                     && write.at_ms <= limit.at_ms
                             })

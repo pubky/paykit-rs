@@ -224,6 +224,7 @@ impl Paykit {
             &view.counterparty,
             &view.allowance_id,
             opening.deletion,
+            &opening.deletion_write,
         ))
         .await?
         .ok_or_else(held)?;
