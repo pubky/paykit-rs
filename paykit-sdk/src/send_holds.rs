@@ -808,14 +808,14 @@ impl Paykit {
         if self.certificate_refused().is_some() {
             return Ok(());
         }
-        // Changes no later than a read this call already made are in the copy it took: that
-        // read isn't made again, nor the raise it left owed tried twice in one call (Paykit
-        // wire 5.6, Raising).
+        // Changes before a read this call already made are in the copy it took: that read
+        // isn't made again, nor the raise it left owed tried twice in one call (Paykit wire
+        // 5.6, Raising). One at the read's own time may not be, so it is read again.
         if self
             .protocol
             .delivery
             .lists_read_at()
-            .is_some_and(|read| told <= read)
+            .is_some_and(|read| told < read)
         {
             return self.local_delete(key::LISTS_TOLD).await;
         }
