@@ -4692,10 +4692,10 @@ async fn test_blocked_return_new_widening_below_a_waiting_raise_tried_at_once() 
 
 #[tokio::test]
 async fn test_blocked_return_wait_ended_by_a_clock_put_back_part_of_the_way() {
-    // Paykit wire 5.6, Raising: 50 seconds into a one-minute wait, the wallet's device clock
-    // goes back 40 seconds. The wallet saw a later time, so the wait is over: the raise is
-    // tried at that receive, and no wait outlasts its length while the app runs. The next
-    // wait counts from that try.
+    // Paykit wire 5.6, Raising: reopened, the wallet can't tell how long its raise waited, so
+    // it tries at once and waits two minutes. 100 seconds in, its device clock goes back 80
+    // seconds: the wallet saw a later time, so the wait is over and the raise is tried at
+    // that receive. The next wait counts from that try. No wait outlasts its length.
     let w = World::new();
     let storage = store();
     let (wallet, _shop, _phone, _contacts) =
@@ -4706,16 +4706,20 @@ async fn test_blocked_return_wait_ended_by_a_clock_put_back_part_of_the_way() {
     let mut wallet = w
         .load_on_clock(&w.alice, storage, app_id, Arc::clone(&device) as _)
         .await;
-    device.advance_ms(50_000);
-    wallet.receive(None).await.unwrap();
-    assert_eq!(raise_retry(&wallet).await, Some((2, 60_000)));
-    device.set_ms(device.now_ms() - 40_000);
+    // The first receive is the reopened wallet's first read; the raise goes at the next.
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(raise_retry(&wallet).await, Some((3, 120_000)));
+    device.advance_ms(100_000);
     wallet.receive(None).await.unwrap();
     assert_eq!(raise_retry(&wallet).await, Some((3, 120_000)));
-    // The new wait counts from that try, on the clock as it is now.
+    device.set_ms(device.now_ms() - 80_000);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(raise_retry(&wallet).await, Some((4, 240_000)));
     device.advance_ms(5_000);
     wallet.receive(None).await.unwrap();
-    assert_eq!(raise_retry(&wallet).await, Some((3, 120_000)));
+    assert_eq!(raise_retry(&wallet).await, Some((4, 240_000)));
 }
 
 #[tokio::test]

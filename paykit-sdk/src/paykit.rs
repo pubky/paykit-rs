@@ -406,8 +406,9 @@ pub struct Paykit {
     /// Whether the read of the lists in progress already left a raise unwritten: one read
     /// counts one try, however many raises it leaves unwritten ([`crate::floor::RaiseRetry`]).
     pub(crate) raise_tried_in_read: bool,
-    /// The latest device time this handle's retry check saw since the last unwritten try, so
-    /// a clock put back, part of the way included, ends a wait ([`crate::floor::RaiseRetry`]).
+    /// The latest device time this handle's retry check saw since its last unwritten try, so a
+    /// clock put back, part of the way included, ends a wait; none (0) before its first try,
+    /// when every wait is over ([`crate::floor::RaiseRetry`]).
     pub(crate) raise_clock_seen: std::sync::atomic::AtomicU64,
     /// How many activity records this handle bound ([`Paykit::activity_binds`]).
     #[cfg(feature = "test-support")]

@@ -190,9 +190,9 @@ impl OwedRaises {
 /// and a raise owed since, a new unblock's or a new widening's, whatever its time, is tried at
 /// the read of the lists it needs, starting the tries anew. The wait is counted from
 /// `tried_at_ms`, the last try's time on this device's clock, and derived from `tries`; a
-/// clock that went back since ends it, so no wait outlasts its own length (and, across a
-/// restart, a clock put back part of the way lengthens it by at most that much). The record
-/// only paces the tries: one that doesn't read is taken as none.
+/// clock that went back since ends it, as does a restart, after which the time waited can't
+/// be told, so no wait outlasts its own length. The record only paces the tries: one that
+/// doesn't read is taken as none.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RaiseRetry {
@@ -719,8 +719,13 @@ impl Paykit {
     /// Raising).
     async fn retry_due(&self, retry: &RaiseRetry) -> Result<bool> {
         let now = self.now();
-        // A clock this handle saw at a later time went back since, part of the way included:
-        // the wait is over (the stored time alone can't tell a partial step back).
+        // A handle that made no try since it started can't tell how long the raise waited,
+        // and a clock it saw at a later time since its last try went back, part of the way
+        // included: the wait is over either way (the stored time alone can't tell a partial
+        // step back).
+        if self.raise_clock_seen.load(Ordering::SeqCst) == 0 {
+            return Ok(true);
+        }
         let seen = self.raise_clock_seen.fetch_max(now, Ordering::SeqCst);
         Ok(now < seen || retry.waited(now) || self.floor_changed_since(retry).await?)
     }
