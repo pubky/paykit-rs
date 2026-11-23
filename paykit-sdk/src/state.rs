@@ -3948,6 +3948,14 @@ mod tests {
         let held = lost_with(4, lost_marks(1, 2));
         assert_eq!(held.clone().merge(marked.clone()).copy, None);
         assert_eq!(marked.clone().merge(held).deleted, [1, 9]);
+        let newer = lost_with(12, lost_marks(1, 2));
+        assert_eq!(
+            newer.merge(marked.clone()),
+            LostListRecord {
+                deleted: [1, 12],
+                copy: None
+            }
+        );
         let at = key::list_record_lost(&[1; 32]);
         let value = serde_json::to_value(&marked).expect("a lost record serializes");
         assert!(reads::<LostListRecord>(&at, value));

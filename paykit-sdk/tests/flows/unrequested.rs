@@ -2149,7 +2149,11 @@ async fn test_unrequested_put_back_of_the_known_history_after_a_newer_recreation
     let mut laptop = w.wallet("laptop").await;
     laptop.app_mut().read_record(&target).await.unwrap();
     put_list_record(&mut laptop, &target, Some(&both)).await;
-    restored.receive(None).await.unwrap();
+    // One receive takes the put-back and places the newer list over it; the next reads
+    // the placement.
+    for _ in 0..2 {
+        restored.receive(None).await.unwrap();
+    }
     assert_eq!(restored.held_lists().await.unwrap().len(), 0);
 }
 
