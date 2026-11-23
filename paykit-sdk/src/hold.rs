@@ -1209,6 +1209,16 @@ impl Paykit {
                         continue;
                     }
                     done.insert(msg_id.clone());
+                    // Kept before it is queued, so its outbox copy is never without it
+                    // ([`crate::send_holds::QueuedStop`]); the receive step drops it once no
+                    // copy is queued.
+                    if let Some(answer) = answer {
+                        self.local_put(
+                            &key::queued_stop(msg_id),
+                            &crate::send_holds::QueuedStop::stored(stored, answer.request_hash),
+                        )
+                        .await?;
+                    }
                     match self.app.queue_stored(stored.plaintext()).await {
                         Ok(msg_id) => {
                             let _ = self.send_message(&msg_id).await;
@@ -1405,7 +1415,7 @@ impl Paykit {
     /// The time the client judges a message's replay window by: the later of the device
     /// clock and the highest service time verified (`App::queue_stored`). No counterparty
     /// sets either.
-    fn window_now(&self) -> u64 {
+    pub(crate) fn window_now(&self) -> u64 {
         self.now().max(self.service_time().unwrap_or(0))
     }
 

@@ -3862,6 +3862,22 @@ async fn sale_status(shop: &Paykit, request: &RequestRef) -> Option<paykit_sdk::
         .map(|sale| sale.status)
 }
 
+/// The host's notices that `msg_id`, answering `request`, to bob was given up.
+async fn given_up_notices(w: &World, wallet: &Paykit, msg_id: &str, request: &RequestRef) -> usize {
+    wallet
+        .notices()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|notice| {
+            notice.kind == paykit_sdk::NoticeKind::MessageGivenUp
+                && notice.msg_id.as_deref() == Some(msg_id)
+                && notice.counterparty == Some(w.bob_id())
+                && notice.request_hash == Some(request.request_hash)
+        })
+        .count()
+}
+
 #[tokio::test]
 async fn test_blocked_rejection_held_in_the_outbox_given_up_past_its_replay_window() {
     let w = World::new();
@@ -3872,33 +3888,70 @@ async fn test_blocked_rejection_held_in_the_outbox_given_up_past_its_replay_wind
     assert_eq!(verdict(&wallet, &rejection).await, Some(true));
     wallet.block(&w.bob_id()).await.unwrap();
     assert_eq!(verdict(&wallet, &rejection).await, Some(false));
-    // 30 days past its `created_at`, less the clock tolerance, it is never sent: the receive
-    // ends its outbox copy and tells the host (Paykit spec 8.1, "Blocked counterparties").
+    // 30 days past its `created_at`, less the clock tolerance, it is never sent; while the
+    // copy of the deny list holds bob, nothing is decided on it and the host isn't told
+    // (Paykit spec 8.1, "Blocked counterparties").
     w.clock.advance_ms(31 * 24 * HOUR_MS);
     wallet.receive(None).await.unwrap();
-    assert_eq!(verdict(&wallet, &rejection).await, None);
-    let notices = wallet.notices().await.unwrap();
-    assert!(
-        notices.iter().any(
-            |notice| notice.kind == paykit_sdk::NoticeKind::MessageGivenUp
-                && notice.msg_id.as_deref() == Some(rejection.as_str())
-                && notice.counterparty == Some(w.bob_id())
-                && notice.request_hash == Some(request.request_hash)
-        ),
-        "{notices:?}"
-    );
-    // Unblocked, nothing of it goes.
+    assert_eq!(verdict(&wallet, &rejection).await, Some(false));
+    assert_eq!(given_up_notices(&w, &wallet, &rejection, &request).await, 0);
+    // At the first receive at which the copy is known and doesn't hold bob, its outbox copy
+    // ends and the host is told, once; nothing of it goes.
     let before = w.bob.switch().entries_from(&w.alice_id());
     wallet.unblock(&w.bob_id()).await.unwrap();
     wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
     wallet.receive(None).await.unwrap();
+    assert_eq!(verdict(&wallet, &rejection).await, None);
+    assert_eq!(given_up_notices(&w, &wallet, &rejection, &request).await, 1);
     wallet.flush().await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(given_up_notices(&w, &wallet, &rejection, &request).await, 1);
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
     shop.receive(None).await.unwrap();
     assert_eq!(
         sale_status(&shop, &request).await,
         Some(paykit_sdk::PayeeStatus::Requested)
     );
+}
+
+#[tokio::test]
+async fn test_blocked_stop_its_record_lost_given_up_past_its_replay_window() {
+    use paykit_lib::collections::Collection;
+    use paykit_lib::derive::natural_key;
+    use pubky_switch_client::app::{Collection as SwitchCollection, OpBatch, RecordTarget};
+
+    let w = World::new();
+    let (mut wallet, _shop, request) = received(&w, PaykitConfig::default()).await;
+    let target = RecordTarget::new(
+        SwitchCollection::new(
+            Collection::PayerActivity.name(),
+            Collection::PayerActivity.fixed_policy(),
+        ),
+        &natural_key::request_record(&request.payee, &request.request_hash),
+    );
+    let key = wallet.app().record_key(&target).unwrap();
+    let open = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    let rejection = wallet.reject_request(&request, None).await.unwrap();
+    // A later write of its request record holds neither the rejection nor any stop.
+    let rewrite = wallet
+        .app_mut()
+        .record_op(&target, open.content.value(), Vec::new())
+        .await
+        .unwrap();
+    wallet
+        .app_mut()
+        .submit_batch(OpBatch::for_protocol("paykit").entry(rewrite))
+        .await
+        .unwrap();
+    // Past its window the outbox copy never goes: it ends and the host is told once
+    // (Paykit spec 8.1, "Blocked counterparties").
+    w.clock.advance_ms(31 * 24 * HOUR_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(verdict(&wallet, &rejection).await, None);
+    assert_eq!(given_up_notices(&w, &wallet, &rejection, &request).await, 1);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(given_up_notices(&w, &wallet, &rejection, &request).await, 1);
 }
 
 #[tokio::test]
@@ -4114,4 +4167,81 @@ async fn test_blocked_withdrawal_goes_first_and_on_retry_but_its_resend_waits() 
     assert_eq!(verdict(&shop, &withdrawal).await, Some(false));
     shop.unblock(&w.alice_id()).await.unwrap();
     assert_eq!(verdict(&shop, &withdrawal).await, Some(true));
+}
+
+#[tokio::test]
+async fn test_blocked_stop_released_from_its_record_given_up_past_its_replay_window() {
+    let w = World::new();
+    let (mut wallet, _shop, request) = received(&w, PaykitConfig::default()).await;
+    let mut phone = w
+        .join_with(
+            &w.alice,
+            "phone",
+            AppScopes::new().pay().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            store(),
+        )
+        .await;
+    phone.block(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    let rejection = wallet.reject_request(&request, None).await.unwrap();
+    assert_eq!(verdict(&wallet, &rejection).await, None);
+    // Released from its record once bob is unblocked, into an outbox his inbox takes
+    // nothing from: the copy queued from the record ends past its window too, with the
+    // host told once. The client can't tell that no copy queued from signed plaintext went,
+    // so it is told as possibly delivered (Paykit spec 8.1, "Blocked counterparties").
+    phone.unblock(&w.bob_id()).await.unwrap();
+    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(verdict(&wallet, &rejection).await, Some(true));
+    w.clock.advance_ms(31 * 24 * HOUR_MS);
+    let told = |notices: Vec<paykit_sdk::Notice>| {
+        notices
+            .into_iter()
+            .filter(|notice| {
+                notice.kind == paykit_sdk::NoticeKind::PossiblyDelivered
+                    && notice.msg_id.as_deref() == Some(rejection.as_str())
+                    && notice.counterparty == Some(w.bob_id())
+            })
+            .count()
+    };
+    wallet.receive(None).await.unwrap();
+    assert_eq!(verdict(&wallet, &rejection).await, None);
+    assert_eq!(told(wallet.notices().await.unwrap()), 1);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(told(wallet.notices().await.unwrap()), 1);
+    assert_eq!(given_up_notices(&w, &wallet, &rejection, &request).await, 0);
+}
+
+#[tokio::test]
+async fn test_blocked_stop_withdrawn_by_the_host_raises_no_notice() {
+    let w = World::new();
+    let (mut wallet, _shop, request) = received(&w, PaykitConfig::default()).await;
+    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    let rejection = wallet.reject_request(&request, None).await.unwrap();
+    let kept = || async {
+        wallet
+            .app()
+            .protocol_scan("paykit", b"qs/")
+            .await
+            .unwrap()
+            .len()
+    };
+    assert_eq!(kept().await, 1);
+    // The host ends the copy itself: the client's report stays the host's, and the kept
+    // facts go once no copy is queued.
+    let withdrawn = wallet.app_mut().withdraw_queued(&w.bob_id()).await.unwrap();
+    assert_eq!(withdrawn, vec![rejection.clone()]);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(given_up_notices(&w, &wallet, &rejection, &request).await, 0);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"qs/")
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
 }

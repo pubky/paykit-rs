@@ -33,7 +33,7 @@
 //! | `off/<attempt_id>` | the original batch ID for an unresolved offline recording, committed with its signed operations before first submission (Paykit spec 8.4) | yes |
 //! | `j/<attempt_id>` | the payment journal: one payment, from before its `attempt` | yes |
 //! | `side/<msg_id>` | the side a cancellation is sent from, kept with the batch that queues it | |
-//! | `gs/<msg_id>` | a rejection or payer's cancellation past its 30 days whose outbox copy the receive step ends: its payee, request and signed hash, kept until the client's report of the end is taken with the host's notice (`send_holds.rs`); never restored | |
+//! | `qs/<msg_id>` | a rejection or payer's cancellation this app queued: its payee, request, signed hash and `created_at`, written in the commit that queues it, so the receive step ends its outbox copy past 30 days and tells the host whatever its record holds; gone once the copy leaves the outbox, or, once given up, with the client's report of the end taken with the host's notice (`send_holds.rs`); restored, not given up, since a restored outbox can hold the copy | |
 //! | `ar/<payee>/<app_id>` | a payee app's records that took part in its comparison, for its public endpoints | |
 //! | `ct` | the acceptance time of the last Paykit entry the receive step passed | |
 //! | `rh` | the cursor verdict, earlier holds and block windows for restored requests (`hold.rs`) | |
@@ -802,13 +802,13 @@ impl Stored for KeptSide {
     }
 }
 
-impl sealed::Sealed for crate::send_holds::ExpiredStop {}
+impl sealed::Sealed for crate::send_holds::QueuedStop {}
 
-/// A stop given up past its 30 days: of the message its key names.
-impl Stored for crate::send_holds::ExpiredStop {
+/// A stop this app queued: of the message its key names.
+impl Stored for crate::send_holds::QueuedStop {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
-            StateKey::ExpiredStop(msg_id) if self.msg_id == *msg_id => Ok(()),
+            StateKey::QueuedStop(msg_id) if self.msg_id == *msg_id => Ok(()),
             _ => corrupt(),
         }
     }
@@ -1865,6 +1865,8 @@ pub(crate) mod key {
     pub(crate) const PAYER_PASS_OWED: &str = "pp";
     pub(crate) const OWN_RESEND_OWED: &str = "ro";
     pub(crate) const HELD_ANSWERS: &str = "ha/";
+    /// `qs/<msg_id>`: the rejections and payer's cancellations this app queued.
+    pub(crate) const QUEUED_STOPS: &str = "qs/";
     pub(crate) const LISTED_CERT: &str = "lc";
     pub(crate) const NOTICES: &str = "nt/";
     pub(crate) const RESTORED_DELIVERIES: &str = "nt/outgoing/";
@@ -2175,8 +2177,8 @@ pub(crate) mod key {
         format!("ex/{msg_id}")
     }
 
-    pub(crate) fn expired_stop(msg_id: &str) -> String {
-        format!("gs/{msg_id}")
+    pub(crate) fn queued_stop(msg_id: &str) -> String {
+        format!("{QUEUED_STOPS}{msg_id}")
     }
 
     pub(crate) fn seen_records(payee: &[u8; 32], app_id: &[u8; 16]) -> String {
@@ -2426,8 +2428,8 @@ pub(crate) enum StateKey {
     Side(String),
     /// `ex/<msg_id>`: why an acceptance the app sent may go while sends are held.
     SendExemption(String),
-    /// `gs/<msg_id>`: a stop past its 30 days whose outbox copy is ended.
-    ExpiredStop(String),
+    /// `qs/<msg_id>`: a rejection or payer's cancellation the app queued.
+    QueuedStop(String),
     /// `ar/<payee>/<app>`: a payee app's records a reader has seen.
     SeenRecords {
         payee: [u8; 32],
@@ -2757,7 +2759,7 @@ impl StateKey {
                     "lgone" => Self::ListRecordLost(b64_32(rest)?),
                     "side" => Self::Side(msg_id(rest)?),
                     "ex" => Self::SendExemption(msg_id(rest)?),
-                    "gs" => Self::ExpiredStop(msg_id(rest)?),
+                    "qs" => Self::QueuedStop(msg_id(rest)?),
                     "ha" => {
                         let (payee, id) = rest.split_once('/')?;
                         Self::HeldAnswer {
@@ -3830,7 +3832,7 @@ mod tests {
             ),
             (key::side(id), StateKey::Side(id.into())),
             (key::send_exemption(id), StateKey::SendExemption(id.into())),
-            (key::expired_stop(id), StateKey::ExpiredStop(id.into())),
+            (key::queued_stop(id), StateKey::QueuedStop(id.into())),
             (
                 key::held_answer(&pubky, id),
                 StateKey::HeldAnswer {

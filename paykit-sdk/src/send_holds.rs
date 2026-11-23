@@ -13,9 +13,7 @@
 
 use std::collections::BTreeMap;
 
-use paykit_lib::collections::Collection;
 use paykit_lib::kinds::Kind;
-use paykit_lib::records::ActivitySide;
 use pubky_switch_client::app::{
     AppEvent, DeliveryOrigin, DeliveryView, KeptBatchStatus, QueuedMessage, SENT_RETENTION_MS,
 };
@@ -125,7 +123,10 @@ pub(crate) fn deny_decision(delivery: &DeliveryView<'_>) -> Result<DenyDecision>
 /// What ends a message held here:
 /// - a rejection or a payer's cancellation is never sent once 30 days have passed since
 ///   its `created_at`, less the clock tolerance; the receive step then ends its outbox copy
-///   and tells the host ([`Paykit::give_up_expired_stops`], Paykit spec 8.1);
+///   and tells the host ([`Paykit::give_up_expired_stops`], Paykit spec 8.1). Here the
+///   window is judged on the device clock, since the delivery view carries no service
+///   time; the receive step judges it on the later of the device clock and the service
+///   time verified, so it never ends a copy this still lets go;
 /// - a re-send ends at the client's replay deadline, its first acceptance plus 30 days
 ///   (Switch spec 11);
 /// - a request, period details, a list request and a subscription acceptance not
@@ -196,12 +197,15 @@ pub(crate) fn past_replay_window(created_at_ms: u64, now_ms: u64) -> bool {
             .saturating_add(SENT_RETENTION_MS)
 }
 
-/// A rejection or payer's cancellation past its 30 days whose outbox copy the receive step
-/// ends, kept at `gs/<msg_id>` from before the client ends it until its report of the end
-/// is taken, so the host is told of it once, crash or not (Paykit spec 8.1).
+/// A rejection or payer's cancellation this app queued, kept at `qs/<msg_id>` in the
+/// commit that queues it, for as long as its outbox copy is owed: what the receive step
+/// needs to end that copy past its 30 days and tell the host, which the outbox doesn't
+/// show (Paykit spec 8.1). `given_up` is set before the client ends the copy, and the
+/// entry goes once the client's report of the end is taken, so the host is told once,
+/// crash or not.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ExpiredStop {
+pub(crate) struct QueuedStop {
     pub(crate) msg_id: String,
     #[serde(with = "serde_b64")]
     pub(crate) payee: [u8; 32],
@@ -209,89 +213,101 @@ pub(crate) struct ExpiredStop {
     pub(crate) request_hash: [u8; 32],
     #[serde(with = "serde_b64")]
     pub(crate) hash: [u8; 32],
+    pub(crate) created_at_ms: u64,
+    pub(crate) given_up: bool,
+}
+
+impl QueuedStop {
+    /// The entry of `signed`, a stop answering the request `request_hash`, just signed.
+    pub(crate) fn signed(
+        signed: &pubky_switch_client::app::SignedMessage,
+        request_hash: [u8; 32],
+    ) -> Result<Self> {
+        let message = pubky_switch_core::message::Message::parse(
+            signed.plaintext().json(),
+            paykit_lib::kinds::OPAQUE_MEMBERS,
+        )?;
+        Ok(Self {
+            msg_id: message.msg_id,
+            payee: message.to,
+            request_hash,
+            hash: signed.hash(),
+            created_at_ms: message.created_at_ms,
+            given_up: false,
+        })
+    }
+
+    /// The entry of `stored`, a stop answering the request `request_hash`, queued again
+    /// from its record.
+    pub(crate) fn stored(
+        stored: &paykit_lib::records::StoredMessage,
+        request_hash: [u8; 32],
+    ) -> Self {
+        let message = stored.message();
+        Self {
+            msg_id: message.msg_id.clone(),
+            payee: message.to,
+            request_hash,
+            hash: stored.hash(),
+            created_at_ms: message.created_at_ms,
+            given_up: false,
+        }
+    }
 }
 
 impl Paykit {
     /// End the outbox copies of this app's rejections and payer's cancellations that are
     /// past 30 days from their `created_at`, less the clock tolerance, by the later of the
-    /// device clock and the service time verified: such a stop is never sent (Paykit spec
-    /// 8.1, "Blocked counterparties"), and a client original carries no deadline of its own.
-    /// Each is ended through the client's withdrawal, which reports it undelivered when no
-    /// try of it can have reached the payee's switch, and unknown otherwise; that report is
-    /// taken at once, the host told in the commit that takes it
-    /// ([`crate::NoticeKind::MessageGivenUp`] or [`crate::NoticeKind::PossiblyDelivered`]). The request
-    /// record that holds the stop keeps it, so no own app pays or accepts the request.
-    ///
-    /// A stop is found by the request record that holds it, signed by this app: one whose
-    /// record isn't held or doesn't read yet, such as one a kept batch will queue, is ended
-    /// at a later receive.
+    /// device clock and the service time verified: such a stop is never sent, and a client
+    /// original carries no deadline of its own. As for one held in its record
+    /// ([`Paykit::queue_own_again`]), the host is told at the first receive past that time
+    /// at which the copy of the deny list is known and doesn't hold the payee, with the
+    /// records listed and no scope key awaited (Paykit spec 8.1, "Blocked counterparties"),
+    /// whatever its request record holds now. Each is ended through the client's
+    /// withdrawal, which reports it undelivered when no try of it can have reached the
+    /// payee's switch, and unknown otherwise; that report is taken at once, the host told
+    /// in the commit that takes it ([`crate::NoticeKind::MessageGivenUp`] or
+    /// [`crate::NoticeKind::PossiblyDelivered`]). An entry whose copy the outbox no longer
+    /// holds, delivered, refused or ended otherwise, goes.
     pub(crate) async fn give_up_expired_stops(&mut self) -> Result<()> {
-        let stops = [
-            Kind::PaymentRequestRejection.as_str(),
-            Kind::PaymentRequestCancellation.as_str(),
-        ];
+        let kept = self.local_scan::<QueuedStop>(key::QUEUED_STOPS).await?;
+        if kept.is_empty() {
+            return Ok(());
+        }
         let queued: BTreeMap<String, QueuedMessage> = self
             .app
             .queued_messages(crate::protocol::BACKUP_NAME)
             .await?
             .into_iter()
-            .filter(|queued| !queued.resend && stops.contains(&queued.kind.as_str()))
+            .filter(|queued| !queued.resend)
             .map(|queued| (queued.msg_id.clone(), queued))
             .collect();
-        if queued.is_empty() {
-            return Ok(());
-        }
-        let own = self.identity();
-        let app_id = self.app_id();
+        let now = self.window_now();
+        let mut gone = Tx::default();
         let mut expired = Vec::new();
-        for held in self
-            .app
-            .records_of(Collection::PayerActivity.name())
-            .await?
-        {
-            let Some(value) = held.content.value() else {
-                continue;
-            };
-            let Some(record) = crate::records::bind_activity(
-                value,
-                &own,
-                ActivitySide::Payer,
-                None,
-                &held.key,
-                |t| self.app.record_key(t).ok(),
-                &|p| self.rail.settlement_id(p),
-            ) else {
-                continue;
-            };
-            for stored in [&record.response, &record.cancellation]
-                .into_iter()
-                .flatten()
-            {
-                let message = stored.message();
-                let Some(copy) = queued.get(&message.msg_id) else {
-                    continue;
-                };
-                let [request_hash] = message.refs.as_slice() else {
-                    continue;
-                };
-                if stored.sender() != own
-                    || stored.cert().app_id() != app_id
-                    || copy.hash != stored.hash()
-                    || copy.to != message.to
-                    || !self.past_replay_window(stored)
-                {
-                    continue;
+        for (_, stop) in kept {
+            let at = key::queued_stop(&stop.msg_id);
+            let owed = queued
+                .get(&stop.msg_id)
+                .is_some_and(|copy| copy.hash == stop.hash && copy.to == stop.payee);
+            if !owed {
+                // One given up keeps its entry until the client's report of the end is
+                // taken, which tells the host.
+                if !stop.given_up {
+                    gone.delete(&at);
                 }
-                expired.push(ExpiredStop {
-                    msg_id: message.msg_id.clone(),
-                    payee: message.to,
-                    request_hash: *request_hash,
-                    hash: copy.hash,
-                });
+                continue;
+            }
+            if past_replay_window(stop.created_at_ms, now)
+                && !self.delivery_held(&stop.payee).await?
+            {
+                expired.push(stop);
             }
         }
-        for stop in expired {
-            let at = key::expired_stop(&stop.msg_id);
+        self.local_commit(gone).await?;
+        for mut stop in expired {
+            let at = key::queued_stop(&stop.msg_id);
+            stop.given_up = true;
             self.local_put(&at, &stop).await?;
             if self
                 .app
@@ -309,7 +325,8 @@ impl Paykit {
     /// Take, in `tx`, the client's report that the outbox copy of a stop ended past its 30
     /// days ([`Paykit::give_up_expired_stops`]): the host is told it was given up when no
     /// try of it can have reached the payee's switch, and that it may have been delivered
-    /// otherwise. Whether `event` is such a report.
+    /// otherwise. Whether `event` is such a report: one about a stop the receive step
+    /// didn't give up stays for the host.
     pub(crate) async fn take_expired_stop(&self, tx: &mut Tx, event: &AppEvent) -> Result<bool> {
         let (msg_id, undelivered) = match event {
             AppEvent::MessageUndelivered {
@@ -320,8 +337,12 @@ impl Paykit {
             AppEvent::DeliveryUnknown { msg_id, .. } => (msg_id, false),
             _ => return Ok(false),
         };
-        let at = key::expired_stop(msg_id);
-        let Some(stop) = self.local_get::<ExpiredStop>(&at).await? else {
+        let at = key::queued_stop(msg_id);
+        let Some(stop) = self
+            .local_get::<QueuedStop>(&at)
+            .await?
+            .filter(|stop| stop.given_up)
+        else {
             return Ok(false);
         };
         let now = self.service_time().unwrap_or(0);

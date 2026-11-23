@@ -740,9 +740,7 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::Flagged
             | StateKey::StoredNote { .. }
             | StateKey::Taken(_) => continue,
-            // A stop given up waits for the client's report of its end, which a restore
-            // doesn't carry: the restored outbox's copy, if any, is ended again.
-            StateKey::ExpiredStop(_) => continue,
+
             // Only the original installation holds this duty. A restore reconciles its
             // shared end through the outgoing delivery notices.
             StateKey::OwedEnd(_) => continue,
@@ -873,6 +871,19 @@ pub(crate) fn restore_paykit_layer(
             }
             StateKey::Side(_) => {
                 state::restored::<KeptSide>(&key, &value, &binder).map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            // A restored outbox can hold the stop's copy, which the receive step still ends
+            // past its window. One the previous installation gave up is not given up here:
+            // the client's report of that end isn't restored, and the copy, if the restored
+            // outbox holds it, is ended again (Paykit spec 8.1).
+            StateKey::QueuedStop(_) => {
+                let mut stop =
+                    state::restored::<crate::send_holds::QueuedStop>(&key, &value, &binder)
+                        .map_err(|_| unread())?;
+                stop.given_up = false;
+                let value = state::encode(&stop).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }

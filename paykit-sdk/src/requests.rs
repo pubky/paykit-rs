@@ -2636,6 +2636,14 @@ impl Paykit {
                 ),
             )?;
         }
+        if answer != Answer::Accept && !held {
+            // A stop queued keeps what ends its outbox copy past its 30 days, in the commit
+            // that queues it (Paykit spec 8.1).
+            tx.put(
+                &key::queued_stop(signed.msg_id()),
+                &crate::send_holds::QueuedStop::signed(&signed, request.request_hash)?,
+            )?;
+        }
         if answer == Answer::Cancel {
             tx.put(
                 &key::side(signed.msg_id()),
