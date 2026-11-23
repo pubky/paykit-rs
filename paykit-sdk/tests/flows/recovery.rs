@@ -339,13 +339,14 @@ async fn test_recovery_repeat_refused_without_a_fresh_own_identity() {
             Arc::new(TestClock::new(w.clock.now_ms())),
         )
         .await;
-    let refused = wallet.resume_payments().await.unwrap_err();
+    // The repeat is refused for that entry alone, which is left pending for the next resume.
+    let resumed = wallet.resume_payments().await.unwrap();
     assert!(
         matches!(
-            refused.refusal(),
-            Some(paykit_sdk::Refusal::IdentityUnavailable(_))
+            resumed.as_slice(),
+            [paykit_sdk::PayOutcome::Pending { attempt_id: left, .. }] if *left == attempt_id
         ),
-        "{refused:?}"
+        "{resumed:?}"
     );
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
     assert_eq!(wallet.payments().await.unwrap()[0].stage, Stage::Paying);
@@ -419,13 +420,14 @@ async fn test_recovery_slow_failed_own_identity_read_refuses_the_repeat() {
         .confirmed_at()
         .is_some());
     homeserver.then(w.alice_id(), 61_000, true);
-    let refused = wallet.resume_payments().await.unwrap_err();
+    // The repeat is refused for that entry alone, which is left pending for the next resume.
+    let resumed = wallet.resume_payments().await.unwrap();
     assert!(
         matches!(
-            refused.refusal(),
-            Some(paykit_sdk::Refusal::IdentityUnavailable(_))
+            resumed.as_slice(),
+            [paykit_sdk::PayOutcome::Pending { attempt_id: left, .. }] if *left == attempt_id
         ),
-        "{refused:?}"
+        "{resumed:?}"
     );
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }

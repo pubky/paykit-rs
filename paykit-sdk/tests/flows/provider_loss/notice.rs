@@ -92,6 +92,19 @@ async fn payer_notice(world: &World) -> TestResult {
         };
         attempts.push(attempt_id);
     }
+    // Both method calls started: each entry is `Paying`, not held at `Attempted` before
+    // its dispatch, so the resume below meets two payments in flight.
+    let payments = payer.payments().await?;
+    for attempt in &attempts {
+        assert_eq!(rail.pay_calls(attempt), 1);
+        assert_eq!(
+            payments
+                .iter()
+                .find(|view| view.attempt_id == *attempt)
+                .map(|view| view.stage),
+            Some(paykit_sdk::Stage::Paying)
+        );
+    }
     // The journal holds its entries by attempt ID: the first fails before the notice, so
     // writing its outcome is what the notice holds.
     attempts.sort_by_key(|attempt| attempt.to_text());
