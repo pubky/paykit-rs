@@ -1071,6 +1071,27 @@ mod tests {
     }
 
     #[test]
+    fn test_identity_notices_bind_only_at_their_key_and_name_nothing() {
+        let kind = NoticeKind::BlockFloorHeld;
+        let key = key::identity_notice(kind);
+        let notice = KeptNotice::identity(kind, 5);
+        assert!(bind_notice(&key, &notice).is_ok(), "{kind:?}");
+        // Never kept acknowledged: acknowledging removes it.
+        let mut acknowledged = notice.clone();
+        acknowledged.acknowledged = true;
+        assert!(bind_notice(&key, &acknowledged).is_err());
+        let mut named = notice.clone();
+        named.counterparty = Some(b64(&[1; 32]));
+        assert!(bind_notice(&key, &named).is_err());
+        let mut other = notice.clone();
+        other.kind = NoticeKind::MessageGivenUp;
+        assert!(bind_notice(&key, &other).is_err());
+        // Nor at another notice's key.
+        let attempt = AttemptId::from_bytes([5; 16]);
+        assert!(bind_notice(&key::notice(&attempt, NoticeKind::HeldWithoutPay), &notice).is_err());
+    }
+
+    #[test]
     fn test_settlement_notices_bind_the_complete_subject() {
         let subjects = [
             SettlementSubject::Bucket(1023),
