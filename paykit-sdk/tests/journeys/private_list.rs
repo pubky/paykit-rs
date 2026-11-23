@@ -141,7 +141,7 @@ async fn updated_then_withdrawn(world: &World) -> TestResult {
 
     // Before any list, the payment waits for one.
     Box::pin(refused(&mut wallet, &rail, seller, |refusal| {
-        refusal == &Refusal::WaitingForList
+        matches!(refusal, Refusal::WaitingForList { .. })
     }))
     .await?;
 

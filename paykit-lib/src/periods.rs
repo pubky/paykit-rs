@@ -522,6 +522,16 @@ pub fn payer_may_use_rates(
         .all(|t| start <= *t && *t < expires_at)
 }
 
+/// Whether a destination has expired for the payer (Paykit spec 7.2, check the destination):
+/// its expiry is at or before the later of the payer's device clock and the highest service
+/// time it has verified, in Unix milliseconds. A payer that has verified no service time
+/// passes `None` and judges by its device clock alone. The expiry is a public record's finite
+/// `expires_at` or its `updated_at` plus the record age limit, a Private Payment List's
+/// `expires_at` or 30 days after its acceptance, or period details' `expires_at`.
+pub fn destination_expired(expires_at: u64, device_time: u64, service_time: Option<u64>) -> bool {
+    expires_at <= device_time.max(service_time.unwrap_or(0))
+}
+
 /// An evidence time in whole Unix seconds, such as a block timestamp, read as `.000`
 /// (Paykit wire 4.9); `None` past the last time the grammar writes.
 pub fn evidence_seconds(seconds: u64) -> Option<u64> {
@@ -736,6 +746,20 @@ mod tests {
             Some(t("2026-03-01T00:00:00Z"))
         );
         assert_eq!(evidence_seconds(u64::MAX), None);
+    }
+
+    #[test]
+    fn test_periods_destination_expired_by_the_later_clock() {
+        let exp = t("2026-03-01T00:00:00.500Z");
+        // At the later clock it has expired; a millisecond before, it hasn't.
+        assert!(destination_expired(exp, exp, None));
+        assert!(!destination_expired(exp, exp - 1, None));
+        // A device clock behind doesn't keep it usable once the service time reached it.
+        assert!(destination_expired(exp, exp - 10_000, Some(exp)));
+        assert!(!destination_expired(exp, exp - 10_000, Some(exp - 1)));
+        // A service time behind doesn't either once the device clock reached it.
+        assert!(destination_expired(exp, exp, Some(exp - 10_000)));
+        assert!(!destination_expired(exp, exp - 1, Some(exp - 10_000)));
     }
 
     #[test]
