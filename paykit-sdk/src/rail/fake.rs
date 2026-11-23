@@ -741,7 +741,7 @@ mod tests {
             serde_json::json!({ "rail": "fake", "tx": 1 }),
             serde_json::json!({ "rail": "other", "tx": "t1" }),
             serde_json::json!({ "rail": "fake", "tx": "t1", "type": "another" }),
-            serde_json::json!({ "example": "t1" }),
+            serde_json::json!({ "type": "example", "data": "t1" }),
         ] {
             assert_eq!(fake_settlement_id(&proof(other.clone())), None, "{other}");
         }

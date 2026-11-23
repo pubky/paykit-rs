@@ -5137,8 +5137,8 @@ fn test_activity_record_attempted_entry_naming_no_period_drops_without_a_claim()
 const SETTLEMENT_MARKS_DESCRIPTION: &str = "Wire 1.5, 5.7, spec 6: settlement bucket \
 values, their derivations and sealed encodings. accepted holds bob's one-time request, \
 Billing Period and payment-without-request marks. Each settlement ID is the lower-case hex \
-seed sealed/settlement_marks/<kind>/settlement, as UTF-8 text bytes given rather than read \
-from a proof, except kind 3 which uses identifiers.json's settlement_id. The occurrence keys refer to the requests in messages.json; kind 2 \
+seed sealed/settlement_marks/<kind>/txid, as UTF-8 text bytes given rather than read from a \
+proof, except kind 3 which uses identifiers.json's settlement_id. The occurrence keys refer to the requests in messages.json; kind 2 \
 uses the February period starting at 1772236800. Bucket, record key and mark tags follow \
 wire 1.5 under bob's naming key. The fixed policy reads and writes paykit_settlements. \
 Values are sealed at data epoch 1 with its key from keys.json, the nonce seed \
@@ -5163,7 +5163,7 @@ struct Credited {
     occurrence: Vec<u8>,
 }
 
-/// The seed label of a `settlement_marks` value of `kind`, by its use (`settlement` or `nonce`).
+/// The seed label of a `settlement_marks` value of `kind`, by its use (`txid`, the settlement ID's seed, or `nonce`).
 fn settlement_seed_label(kind: OccurrenceKind, what: &str) -> String {
     format!("sealed/settlement_marks/{}/{what}", kind.code())
 }
@@ -5171,12 +5171,9 @@ fn settlement_seed_label(kind: OccurrenceKind, what: &str) -> String {
 /// The settlements `settlement_marks` credits, one of each kind.
 fn credited() -> [Credited; 3] {
     let bob = pubky(BOB);
-    let settlement = |kind| {
-        hex(&crate::common::seed(&settlement_seed_label(
-            kind,
-            "settlement",
-        )))
-    };
+    // The seed label keeps its name so the values stay those of earlier sets; it names no
+    // payment method, and the settlement ID is given as bytes.
+    let settlement = |kind| hex(&crate::common::seed(&settlement_seed_label(kind, "txid")));
     [
         Credited {
             name: "a one-time request's mark",

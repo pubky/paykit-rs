@@ -1608,7 +1608,7 @@ async fn test_blocked_return_older_request_judged_by_a_newer_window() {
 async fn test_blocked_return_recurring_request_dated_in_a_window_opens_with_no_mark() {
     // The control: a recurring request of bob's dated inside his block's window opens with
     // no mark, where a one-time one would be paid only by hand. This base pays no recurring
-    // request automatically; the executor part takes the mark for it (S-BS-5).
+    // request automatically; the executor takes the mark for it (Paykit spec 8.2).
     let w = World::new();
     let mut wallet = contacts_wallet(&w, store()).await;
     let mut shop = w.shop().await;

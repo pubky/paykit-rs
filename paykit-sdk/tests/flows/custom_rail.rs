@@ -23,34 +23,69 @@ use serde_json::{json, Map, Value};
 use crate::common::{btc, endpoint, list_version, store, World};
 
 /// The fake rail, as a ledger whose proofs read `{ "type": "x-ledger", "entry": ... }`
-/// rather than the fake rail's own spelling.
+/// rather than the fake rail's own spelling, and which names the settlements of its own
+/// endpoints only ([`LEDGER_ENDPOINTS`]). An entry with an `output` names that output's settlement apart
+/// from the others of the entry.
 struct LedgerRail {
     fake: Arc<FakeRail>,
     last: Mutex<Option<Map<String, Value>>>,
     supplies_id: bool,
     /// The most the ledger may charge on top of a payment.
     fee: Option<paykit_lib::Decimal>,
+    /// Whether its proofs read `{ "type": "bitcoin-txid", "txid": "L-<entry>" }`: the
+    /// spelling of another method, and not a valid one there.
+    lookalike: bool,
 }
 
-fn to_ledger(proof: &Map<String, Value>) -> Map<String, Value> {
-    json!({ "type": "x-ledger", "entry": proof["tx"] })
-        .as_object()
-        .cloned()
-        .unwrap()
-}
+/// The list's endpoint paid without a request, whose settlements the ledger names.
+const LEDGER_ENDPOINT: &str = "btc-lightning-bolt12";
 
-fn to_fake(proof: &Map<String, Value>) -> Map<String, Value> {
-    json!({ "rail": "fake", "tx": proof["entry"] })
-        .as_object()
-        .cloned()
-        .unwrap()
+/// The endpoints whose settlements the ledger names: its own, and none of the others.
+const LEDGER_ENDPOINTS: [&str; 2] = ["btc-lightning-bolt11", LEDGER_ENDPOINT];
+
+impl LedgerRail {
+    fn to_ledger(&self, proof: &Map<String, Value>) -> Map<String, Value> {
+        let tx = proof["tx"].as_str().unwrap();
+        let value = if self.lookalike {
+            json!({ "type": "bitcoin-txid", "txid": format!("L-{tx}") })
+        } else {
+            json!({ "type": "x-ledger", "entry": tx })
+        };
+        value.as_object().cloned().unwrap()
+    }
+
+    /// The ledger's entry, and output if any, of one of its proofs.
+    fn entry(&self, proof: &Map<String, Value>) -> Option<String> {
+        if self.lookalike {
+            (proof.get("type")?.as_str()? == "bitcoin-txid")
+                .then(|| {
+                    proof
+                        .get("txid")?
+                        .as_str()?
+                        .strip_prefix("L-")
+                        .map(str::to_owned)
+                })
+                .flatten()
+        } else {
+            (proof.get("type")?.as_str()? == "x-ledger")
+                .then(|| proof.get("entry")?.as_str().map(str::to_owned))
+                .flatten()
+        }
+    }
+
+    fn to_fake(&self, proof: &Map<String, Value>) -> Map<String, Value> {
+        json!({ "rail": "fake", "tx": self.entry(proof) })
+            .as_object()
+            .cloned()
+            .unwrap()
+    }
 }
 
 impl LedgerRail {
     fn outcome(&self, outcome: RailOutcome) -> RailOutcome {
         match outcome {
             RailOutcome::Paid(mut paid) => {
-                paid.proof = to_ledger(&paid.proof);
+                paid.proof = self.to_ledger(&paid.proof);
                 *self.last.lock().unwrap() = Some(paid.proof.clone());
                 RailOutcome::Paid(paid)
             }
@@ -111,22 +146,25 @@ impl Rail for LedgerRail {
 
     fn verify(&self, check: ProofCheck) -> BoxFuture<'_, Result<Option<u64>, RailError>> {
         let mut check = check;
-        check.proof = to_fake(&check.proof);
+        check.proof = self.to_fake(&check.proof);
         Box::pin(async move { self.fake.verify(check).await })
     }
 
-    /// The ledger's entry names its settlement.
+    /// The ledger's entry names its settlement, with its output when it has one, at the
+    /// ledger's endpoints; elsewhere it names none.
     fn settlement_id(
         &self,
-        _: &paykit_lib::PaymentEndpointIdentifier,
+        endpoint_id: &paykit_lib::PaymentEndpointIdentifier,
         proof: &Map<String, Value>,
     ) -> Option<Vec<u8>> {
-        if !self.supplies_id {
+        if !self.supplies_id || !LEDGER_ENDPOINTS.contains(&endpoint_id.as_str()) {
             return None;
         }
-        (proof.get("type")?.as_str()? == "x-ledger")
-            .then(|| proof.get("entry")?.as_str().map(|e| e.as_bytes().to_vec()))
-            .flatten()
+        let entry = self.entry(proof)?;
+        Some(match proof.get("output").and_then(Value::as_u64) {
+            Some(output) => format!("{entry}:{output}").into_bytes(),
+            None => entry.into_bytes(),
+        })
     }
 }
 
@@ -168,10 +206,20 @@ fn proof_body(
     version: paykit_lib::ListVersion,
     proof: Map<String, Value>,
 ) -> Map<String, Value> {
+    proof_body_at(shop, version, LEDGER_ENDPOINT, proof)
+}
+
+/// [`proof_body`], paid to the list's endpoint `at`.
+fn proof_body_at(
+    shop: [u8; 16],
+    version: paykit_lib::ListVersion,
+    at: &str,
+    proof: Map<String, Value>,
+) -> Map<String, Value> {
     PaymentProof {
         attempt_id: AttemptId::generate().unwrap(),
         billing_period: None,
-        payment_endpoint_identifier: endpoint("btc-lightning-bolt12"),
+        payment_endpoint_identifier: endpoint(at),
         payment_app_id: shop,
         list_version: Some(version),
         amount: Some(btc("0.0015")),
@@ -191,6 +239,7 @@ async fn test_custom_rail_proof_credited_once_per_settlement() {
         fake: Arc::clone(&w.rail),
         last: Mutex::new(None),
         supplies_id: true,
+        lookalike: false,
         fee: None,
     });
     let mut wallet = joined(
@@ -230,7 +279,7 @@ async fn test_custom_rail_proof_credited_once_per_settlement() {
     // Another proof of that settlement, a replay, names the same record: still one.
     let proof = rail.last.lock().unwrap().clone().unwrap();
     let shop_id = shop.app_id();
-    let inject = |proof: Map<String, Value>| {
+    let inject_at = |at: &str, proof: Value| {
         w.inject(
             &w.alice,
             "wallet",
@@ -238,9 +287,10 @@ async fn test_custom_rail_proof_credited_once_per_settlement() {
             &[shop_id],
             "paykit.payment_proof",
             Vec::new(),
-            proof_body(shop_id, version, proof),
+            proof_body_at(shop_id, version, at, proof.as_object().cloned().unwrap()),
         );
     };
+    let inject = |proof: Map<String, Value>| inject_at(LEDGER_ENDPOINT, Value::Object(proof));
     inject(proof);
     shop.receive(None).await.unwrap();
     assert_eq!(shop.payee_activity().await.unwrap().len(), 1);
@@ -267,6 +317,93 @@ async fn test_custom_rail_proof_credited_once_per_settlement() {
         shop.receive(None).await.unwrap();
         assert_eq!(shop.payee_activity().await.unwrap().len(), 2, "{other}");
     }
+    // Two payments the method names apart, as two outputs of one entry, are two settlements:
+    // both are credited.
+    for output in [0, 1] {
+        inject(
+            json!({ "type": "x-ledger", "entry": "batch", "output": output })
+                .as_object()
+                .cloned()
+                .unwrap(),
+        );
+        shop.receive(None).await.unwrap();
+    }
+    assert_eq!(shop.payee_activity().await.unwrap().len(), 4);
+    // The method's answer is for the endpoint paid as well as the proof: the same proof at
+    // an endpoint the ledger names nothing for isn't credited, and at its own one is.
+    let same = json!({ "type": "x-ledger", "entry": "fifth" });
+    inject_at("btc-bitcoin-p2wpkh", same.clone());
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.payee_activity().await.unwrap().len(), 4);
+    inject_at(LEDGER_ENDPOINT, same);
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.payee_activity().await.unwrap().len(), 5);
+}
+
+#[tokio::test]
+async fn test_custom_rail_requested_proof_spelled_like_another_method_credited_by_the_rail() {
+    // The ledger's proofs here look like another method's, and aren't valid in that
+    // method's spelling. The ledger verifies them and names their settlement, so the payee
+    // credits the request: the rail's answer is the answer (Paykit wire 1.5).
+    let w = World::new();
+    let rail = Arc::new(LedgerRail {
+        fake: w.rail.clone(),
+        last: Mutex::new(None),
+        supplies_id: true,
+        fee: None,
+        lookalike: true,
+    });
+    let mut buyer = joined(
+        &w,
+        &w.alice,
+        "wallet",
+        AppScopes::new().pay().manage_contacts().build().unwrap(),
+        &rail,
+    )
+    .await;
+    let mut shop = joined(
+        &w,
+        &w.bob,
+        "shop",
+        AppScopes::new()
+            .request()
+            .manage_contacts()
+            .build()
+            .unwrap(),
+        &rail,
+    )
+    .await;
+    buyer.app_mut().invite(&w.bob_id()).await.unwrap();
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    let sent = shop
+        .send_request(
+            w.alice_id(),
+            crate::common::draft("1", pubky_switch_client::clock::Clock::now_ms(&*w.clock)),
+        )
+        .await
+        .unwrap()
+        .request
+        .unwrap();
+    buyer.receive(None).await.unwrap();
+    assert!(matches!(
+        Box::pin(buyer.pay_request(&sent, PayOptions::default()))
+            .await
+            .outcome
+            .unwrap(),
+        PayOutcome::Paid { .. }
+    ));
+    let proof = rail.last.lock().unwrap().clone().unwrap();
+    assert_eq!(proof["type"], "bitcoin-txid");
+    shop.receive(None).await.unwrap();
+    let record = shop
+        .payee_activity()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|v| v.request_hash == Some(sent.request_hash))
+        .unwrap()
+        .record;
+    assert!(shop.confirm_payment(&record).await.unwrap().is_some());
 }
 
 #[test]
@@ -359,6 +496,7 @@ async fn test_custom_rail_any_fee_paid_with_no_cap() {
             fake: Arc::clone(&w.rail),
             last: Mutex::new(None),
             supplies_id: true,
+            lookalike: false,
             fee: Some(paykit_lib::Decimal::parse(fee).unwrap()),
         });
         let outcome = pay_through(&w, &rail).await.unwrap();
@@ -395,6 +533,7 @@ async fn test_custom_rail_fee_cap_is_per_asset() {
             fake: Arc::clone(&w.rail),
             last: Mutex::new(None),
             supplies_id: true,
+            lookalike: false,
             fee: fee(),
         });
         let outcome = pay_through_with(&w, &rail, config).await;
@@ -424,6 +563,7 @@ async fn test_payee_deletion_a_restored_custom_receipt_waits_for_its_payment_met
         fake: Arc::clone(&w.rail),
         last: Mutex::new(None),
         supplies_id: true,
+        lookalike: false,
         fee: None,
     });
     let mut wallet = joined(
@@ -531,6 +671,7 @@ async fn test_custom_rail_requested_proof_without_a_settlement_id_keeps_its_own_
         fake: w.rail.clone(),
         last: Mutex::new(None),
         supplies_id: false,
+        lookalike: false,
         fee: None,
     });
     let mut buyer = joined(

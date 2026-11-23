@@ -1978,7 +1978,7 @@ impl Paykit {
             Box::pin(self.queue_stored_again(end)).await?;
             Box::pin(self.local_delete(&mark)).await?;
         }
-        // The reply placement phase can create a proved withdrawal. Deliver it
+        // The reply placement step can create a proved withdrawal. Deliver it
         // here, after that read and its conditional write have finished.
         for queued in self
             .app

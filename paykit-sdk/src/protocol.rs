@@ -135,8 +135,8 @@ pub struct PaykitProtocol {
     /// endpoints (`crate::own_record`): `PUBLISHES_UNKNOWN` until the SDK's constructors
     /// set it, as for a protocol a host registers itself, when only the scopes decide.
     publishes_record: std::sync::atomic::AtomicU8,
-    /// The app's rail, which names a proof's settlement (Paykit wire 1.5); without one, the
-    /// methods `paykit-lib` knows.
+    /// The app's rail, which names a proof's settlement (Paykit wire 1.5); without one, no
+    /// proof names a settlement.
     rail: Option<Arc<dyn Rail>>,
     /// The extension kinds the host's extension handles (Paykit spec 3.3).
     extensions: Vec<ExtensionKind>,

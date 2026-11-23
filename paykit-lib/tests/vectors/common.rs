@@ -205,14 +205,15 @@ pub const UNREQUESTED_SETTLEMENT: &str =
     "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b";
 
 /// The settlement reader of the set's example payment method, as a rail would supply it:
-/// its proof `{ "example": ... }` of the payment without a request names
+/// its proof `{ "type": "example", "data": ... }` of the payment without a request names
 /// [`UNREQUESTED_SETTLEMENT`], and every other proof names none (Paykit wire 1.5).
 pub fn example_settlement(
     _: &paykit_lib::PaymentEndpointIdentifier,
     proof: &serde_json::Map<String, Value>,
 ) -> Option<Vec<u8>> {
-    (proof.get("example").and_then(Value::as_str) == Some(UNREQUESTED_SETTLEMENT))
-        .then(|| UNREQUESTED_SETTLEMENT.as_bytes().to_vec())
+    (proof.get("type").and_then(Value::as_str) == Some("example")
+        && proof.get("data").and_then(Value::as_str) == Some(UNREQUESTED_SETTLEMENT))
+    .then(|| UNREQUESTED_SETTLEMENT.as_bytes().to_vec())
 }
 
 /// The label of bob's labelled selling scope, which his `hosted` app holds.

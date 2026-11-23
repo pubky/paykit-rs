@@ -458,14 +458,21 @@ async fn test_different_requests_compete_for_one_transaction_in_a_new_and_curren
     Ok(())
 }
 
-/// Distinct method transactions whose marks share a physical bucket.
+/// Distinct fake rail settlements whose marks share a physical bucket, each with the
+/// settlement ID the fake rail names it by.
 fn transactions_in_one_bucket<const N: usize>(
     naming: &pubky_switch_core::ident::NamingKey,
 ) -> TestResult<[([u8; 32], [u8; 32]); N]> {
-    let first = settlement_tag(naming, format!("{:064x}", 1).as_bytes());
+    let fake_id = |number: u64| {
+        let mut proof = serde_json::Map::new();
+        proof.insert("rail".into(), "fake".into());
+        proof.insert("tx".into(), format!("{number:064x}").into());
+        paykit_sdk::rail::fake_settlement_id(&proof).ok_or("no fake settlement")
+    };
+    let first = settlement_tag(naming, &fake_id(1)?);
     let mut same = Vec::new();
     for number in 1..100_000u64 {
-        let tag = settlement_tag(naming, format!("{number:064x}").as_bytes());
+        let tag = settlement_tag(naming, &fake_id(number)?);
         if settlement_bucket(&tag) == settlement_bucket(&first) {
             let mut id = [0; 32];
             id[24..].copy_from_slice(&number.to_be_bytes());
@@ -1196,7 +1203,7 @@ async fn credit_after_loss(world: &World, when: SettlementTime) -> TestResult {
         .identity_of(&seller.identity(), true)
         .await?;
     seller.app_mut().invite(&buyer.identity()).await?;
-    // A second output from the same transaction is never another settlement.
+    // A second proof the fake rail names in the same settlement is that settlement again.
     seller_wallets
         .rail
         .next(Behaviour::InSettlement(original.0));
