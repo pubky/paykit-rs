@@ -1258,9 +1258,12 @@ impl Paykit {
         }
         if self.app.cert().has_permission(Permission::ClaimsWrite) {
             // Read bound to its key and to the claim the receipt settles, as at the first read.
-            let obligation = receipt_claim(&stored, &attempt_id, |request, start| {
-                self.obligation(&sender, request, start)
-            });
+            let obligation = receipt_claim(
+                &stored,
+                &attempt_id,
+                |request, start| self.obligation(&sender, request, start),
+                |attempt| self.payment_obligation(attempt),
+            );
             let journaled = self.journal_entry_on(&attempt_id, &obligation).await?;
             let deadline = receipt_deadline(
                 &stored,
@@ -1310,6 +1313,7 @@ impl Paykit {
                 }
             }
             if let Some(entry) = settles.received {
+                entry.check_bound(|input| self.app.blind(input))?;
                 tx.put(&key::journal(&attempt_id), &entry)?;
             }
         }

@@ -9,7 +9,7 @@ import java.io.FileOutputStream
 import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicInteger
 
-private class CheckoutMethod(private val ledger: File) : ReceiptReader() {
+internal open class CheckoutMethod(private val ledger: File) : ReceiptReader() {
     val entered = CompletableDeferred<Unit>()
     val release = CompletableDeferred<Unit>()
     val calls = AtomicInteger()
@@ -60,7 +60,7 @@ private class CheckoutMethod(private val ledger: File) : ReceiptReader() {
         stored()?.takeIf { proofJson.contentEquals(originalProof(it)) }?.toByteArray()
 }
 
-private suspend fun NativeWallet.finishReceive() {
+internal suspend fun NativeWallet.finishReceive() {
     repeat(8) {
         val report = receive()
         if (!report.more) return
@@ -83,13 +83,15 @@ private suspend fun restoreCheckout(
         fixture.passRotationInterval()
         wallet.finishReceive()
         if (action == "doubt") {
+            // The host stops waiting and the wallet closes while the host's pay still runs:
+            // after the pay time limit the attempt stays recorded as possibly sent.
             val payment = async { wallet.payRequest(original, options) }
             method.entered.await()
             payment.cancelAndJoin()
-            method.release.complete(Unit)
             method.pendingLookup = true
-        }
-        wallet.shutdown()
+            wallet.shutdown()
+            method.release.complete(Unit)
+        } else wallet.shutdown()
         snapshot to original
     }
     val destination = EnrollmentStore()
@@ -353,6 +355,8 @@ private fun driveCheckout(recovery: CheckoutReview, restore: String? = null) = r
                             try {
                                 check(watch.await() == FeedWake.READY)
                                 method.entered.await()
+                                // The host stops waiting; the payment itself goes on and is
+                                // recorded once the host's pay answers.
                                 payment.cancelAndJoin()
                                 check(payment.isCancelled)
                             } finally {
@@ -367,9 +371,10 @@ private fun driveCheckout(recovery: CheckoutReview, restore: String? = null) = r
                     host.load(enrolled.appId).use { opened ->
                         var payer = opened
                         val original = payer.payments().single()
-                        check(original.stage == PaymentStage.PAYING && original.amount.value == "7")
-                        val resumed = payer.resumePayments()
-                        check(resumed.any { it is PaymentOutcome.Paid && it.attemptId == original.attemptId })
+                        check(original.stage in setOf(PaymentStage.RAIL_PAID, PaymentStage.ACCEPTANCE_OWED, PaymentStage.FINISHED))
+                        check(original.amount.value == "7")
+                        payer.resumePayments()
+                        check(method.calls.get() == 1)
                         shown?.let { old ->
                             payer.shutdown()
                             fixture.markDivergent(enrolled.appId, old.record)

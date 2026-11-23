@@ -50,12 +50,17 @@ pub(crate) fn check() {
         let nk = keys.identity(&pubky(st(case, "identity"))).naming_key();
         let (material, obligation) = match case.get("attempt_id") {
             Some(attempt) => {
-                // From the attempt ID alone: no payee, no naming key.
+                // The attempt ID blinded with the payer's naming key; no payee.
                 assert!(case.get("payee").is_none() && case.get("blinded_payee").is_none());
                 let attempt = AttemptId::parse(attempt.as_str().unwrap()).unwrap();
+                assert_eq!(
+                    b64(&nk.blind(&attempt.to_bytes())),
+                    st(case, "blinded_attempt_id"),
+                    "{name}"
+                );
                 (
-                    payment_obligation_material(&attempt),
-                    payment_obligation(&attempt),
+                    payment_obligation_material(&nk, &attempt),
+                    payment_obligation(&nk, &attempt),
                 )
             }
             None => {
@@ -138,9 +143,13 @@ fn derived(keys: &Keys) -> Vec<(Place<'static>, Value)> {
         let (material, obligation) = match case.get("attempt_id") {
             Some(attempt) => {
                 let attempt = AttemptId::parse(attempt.as_str().unwrap()).unwrap();
+                out.push((
+                    at("blinded_attempt_id"),
+                    json!(b64(&nk.blind(&attempt.to_bytes()))),
+                ));
                 (
-                    payment_obligation_material(&attempt),
-                    payment_obligation(&attempt),
+                    payment_obligation_material(&nk, &attempt),
+                    payment_obligation(&nk, &attempt),
                 )
             }
             None => {
