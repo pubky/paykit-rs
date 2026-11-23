@@ -1,7 +1,7 @@
-//! A payment the Switch client holds back (Switch spec 3.6, 10.1, 12.3, 12.4): an alarm, an
-//! app that left, a recovery notice. The client's own refusal reaches the caller, so the
-//! host can tell a recovery from a wait, on a first payment and on a repeat (Paykit spec
-//! 7.2).
+//! A payment the Switch client holds back (Switch spec 3.6, 12.3): an alarm or an app that
+//! left. The client's own refusal reaches the caller, so the host can tell a recovery from
+//! a wait, from a payment and from a resume (Paykit spec 7.2). The pay gate's own handling
+//! of each refusal is tested beside it in `pay.rs`.
 
 use paykit_sdk::rail::{Behaviour, RailDeclaration};
 use paykit_sdk::{PayOptions, PayOutcome, Paykit, PaykitError, Refusal};
@@ -65,7 +65,7 @@ async fn test_held_back_alarm_reaches_the_payment_and_the_repeat() {
         .outcome
         .unwrap_err();
     assert!(held_by(&refused, &ClientRefusal::Stopped), "{refused:?}");
-    // The repeat isn't reported as one that may pass later.
+    // The resume returns the client's refusal, never an outcome that reads as a wait.
     let resumed = wallet.resume_payments().await;
     assert!(
         matches!(&resumed, Err(error) if held_by(error, &ClientRefusal::Stopped)),

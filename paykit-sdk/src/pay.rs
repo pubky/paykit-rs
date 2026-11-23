@@ -849,16 +849,74 @@ fn unsupported(what: &str) -> PaykitError {
 }
 
 impl Paykit {
-    /// Refuse a payment at its start for what no wait changes: an alarm, an app that left, a
-    /// recovery notice or a restore question (Switch spec 3.6, 12.3, 12.4), before the reads
-    /// a payment makes first. Reconcile mode and the clocks are judged with the rest of
-    /// `may_attempt` just before the attempt.
+    /// Refuse a payment at its start for what no read of the payment clears: an alarm, an
+    /// app that left or a restore question (Switch spec 3.6, 12.3, 12.4), before the reads a
+    /// payment makes first. A recovery notice, which those reads may clear, reconcile mode
+    /// and the clocks are judged with the rest of `may_attempt` just before the attempt.
     pub(crate) fn refuse_held_back(&self) -> Result<()> {
         match self.app.may_attempt(false) {
-            Err(refusal) if !matches!(refusal, ClientRefusal::NotNow(_)) => Err(held_back(refusal)),
+            Err(refusal) if refused_for_good(&refusal) => Err(held_back(refusal)),
             _ => Ok(()),
         }
     }
+}
+
+/// Whether the Switch client refuses attempts until the user or a recovery acts: an alarm, an
+/// app that left or a restore question. A recovery notice may clear on the next own request,
+/// and its `NotNow` on a wait.
+fn refused_for_good(refusal: &ClientRefusal) -> bool {
+    !matches!(
+        refusal,
+        ClientRefusal::NotNow(_) | ClientRefusal::RecoveryRequired { .. }
+    )
+}
+
+/// What a first dispatch does with what held it at the pay gate.
+enum FirstHold {
+    /// Returned as it is: nothing is paid and the attempt stays `Attempted`, known
+    /// unsubmitted, for a resume to write it `failed` once the client lets it write.
+    Return(PaykitError),
+    /// The attempt is written `failed` for this refusal ([`Paykit::fail_attempt`]).
+    Fail(Refusal),
+}
+
+fn first_dispatch_hold(held: Held) -> FirstHold {
+    match held {
+        // Writes still go on in reconcile mode and with the clocks apart: the attempt is
+        // closed, so a later payment of the obligation isn't held behind it.
+        Held::Client(refusal @ ClientRefusal::NotNow(_)) => {
+            FirstHold::Fail(Refusal::NotNow(refusal.to_string()))
+        }
+        Held::Client(refusal) => FirstHold::Return(held_back(refusal)),
+        Held::Check(refusal @ Refusal::NotCurrent(_)) => FirstHold::Return(refusal.into()),
+        Held::OwnIdentity(refusal) | Held::Check(refusal) => FirstHold::Fail(refusal),
+    }
+}
+
+/// The outcome of a repeat the pay gate held, its first dispatch made: never paid now.
+fn repeat_hold(held: Held, attempt_id: AttemptId) -> Result<PayOutcome> {
+    match held {
+        // No payment of this app goes on without its own identity.json confirmed.
+        Held::OwnIdentity(refusal) => Err(refusal.into()),
+        // What may pass later: reconcile mode or the clocks, or the payee's identity.json not
+        // confirmed yet.
+        Held::Client(ClientRefusal::NotNow(_))
+        | Held::Check(
+            Refusal::NotNow(_) | Refusal::IdentityUnavailable(_) | Refusal::IdentityUnconfirmed,
+        ) => Ok(PayOutcome::Pending { attempt_id }),
+        // An alarm, an app that left, a recovery notice or a restore question: returned, so
+        // the caller recovers rather than waits.
+        Held::Client(refusal) => Err(held_back(refusal)),
+        // A destination refused, an attempt the claim or the identity no longer backs: "may
+        // be paid", for a receipt or the user.
+        Held::Check(_) => Ok(PayOutcome::Uncertain { attempt_id }),
+    }
+}
+
+/// Whether a resume goes on past an entry that failed with `error`, and returns it after the
+/// other entries: the Switch client's refusal of that entry's repeat.
+fn deferred(error: &PaykitError) -> bool {
+    matches!(error, PaykitError::Client(AppError::Refused(refusal)) if !matches!(refusal, ClientRefusal::NotNow(_)))
 }
 
 /// The Switch client's refusal of an attempt (Switch spec 3.6, 10.1, 12.3, 12.4), carried as
@@ -3140,12 +3198,11 @@ impl Paykit {
             .await?
         {
             Ok(doc) => doc,
-            // Nothing is paid and the attempt stays `Attempted`, known unsubmitted: a resume
-            // writes it `failed` once the client lets it.
-            Err(Held::Client(refusal)) => return Err(held_back(refusal)),
-            Err(Held::Check(refusal @ Refusal::NotCurrent(_))) => return Err(refusal.into()),
-            Err(Held::OwnIdentity(refusal) | Held::Check(refusal)) => {
-                return self.fail_attempt(&mut entry, refusal).await
+            Err(held) => {
+                return match first_dispatch_hold(held) {
+                    FirstHold::Return(error) => Err(error),
+                    FirstHold::Fail(refusal) => self.fail_attempt(&mut entry, refusal).await,
+                }
             }
         };
         // The entry stays `Attempted`, known unsubmitted, through the acceptance's journaling
@@ -4261,6 +4318,7 @@ impl Paykit {
             self.place_kept_cancellations().await?;
         }
         let mut out = Vec::new();
+        let mut held_back = None;
         for mut entry in self.journal().await? {
             // An outcome written whose acceptance is still owed: queued and placed now.
             // One that fails now stays owed for the next resume, and stops no other entry:
@@ -4304,7 +4362,13 @@ impl Paykit {
                         Some((step, Outcome::Open | Outcome::Unknown)) => {
                             entry.step = Some(step);
                             entry.stage = Stage::Paying;
-                            out.extend(self.resolve_dispatched(entry).await?);
+                            match self.resolve_dispatched(entry).await {
+                                Ok(outcomes) => out.extend(outcomes),
+                                Err(error) if deferred(&error) => {
+                                    held_back.get_or_insert(error);
+                                }
+                                Err(error) => return Err(error),
+                            }
                         }
                         Some((_, outcome)) => self.finish_resolved(&mut entry, outcome).await?,
                         // A claim without the attempt, or no claim at all, proves nothing
@@ -4319,7 +4383,13 @@ impl Paykit {
                         None => {
                             entry.step = None;
                             entry.stage = Stage::Paying;
-                            out.extend(self.resolve_dispatched(entry).await?);
+                            match self.resolve_dispatched(entry).await {
+                                Ok(outcomes) => out.extend(outcomes),
+                                Err(error) if deferred(&error) => {
+                                    held_back.get_or_insert(error);
+                                }
+                                Err(error) => return Err(error),
+                            }
                         }
                     }
                 }
@@ -4338,9 +4408,13 @@ impl Paykit {
                     Some((_, outcome)) => self.finish_resolved(&mut entry, outcome).await?,
                     None => self.set_stage(&mut entry, Stage::Abandoned).await?,
                 },
-                Stage::Paying => {
-                    out.extend(self.resolve_dispatched(entry).await?);
-                }
+                Stage::Paying => match self.resolve_dispatched(entry).await {
+                    Ok(outcomes) => out.extend(outcomes),
+                    Err(error) if deferred(&error) => {
+                        held_back.get_or_insert(error);
+                    }
+                    Err(error) => return Err(error),
+                },
                 Stage::RailPaid | Stage::RailFailed => {
                     out.push(self.report(&mut entry).await?);
                 }
@@ -4354,7 +4428,12 @@ impl Paykit {
         self.prune_journal().await?;
         // Last, after every payment's own work: what can't be delivered now stays queued.
         let _ = self.send_outbox().await;
-        Ok(out)
+        // A repeat the client held back is returned after the other entries' work, whose
+        // outcomes are written and read with `payments`.
+        match held_back {
+            Some(error) => Err(error),
+            None => Ok(out),
+        }
     }
 
     /// An own attempt the claim shows resolved already, by the user in another app or by
@@ -5364,27 +5443,10 @@ impl Paykit {
         let gate = self
             .pay_gate(entry, &carrier, claim, Initiator::Automatic, None, true)
             .await?;
-        Ok(Err(match gate {
-            Ok(doc) => return Ok(Ok(doc)),
-            // No payment of this app goes on without its own identity.json confirmed.
-            Err(Held::OwnIdentity(refusal)) => return Err(refusal.into()),
-            // What may pass later: reconcile mode or the clocks, or the payee's identity.json
-            // not confirmed yet.
-            Err(
-                Held::Client(ClientRefusal::NotNow(_))
-                | Held::Check(
-                    Refusal::NotNow(_)
-                    | Refusal::IdentityUnavailable(_)
-                    | Refusal::IdentityUnconfirmed,
-                ),
-            ) => PayOutcome::Pending { attempt_id },
-            // An alarm, an app that left, a recovery notice or a restore question: no wait
-            // changes it, and the caller recovers.
-            Err(Held::Client(refusal)) => return Err(held_back(refusal)),
-            // A destination refused, an attempt the claim or the identity no longer backs:
-            // "may be paid", for a receipt or the user.
-            Err(Held::Check(_)) => PayOutcome::Uncertain { attempt_id },
-        }))
+        match gate {
+            Ok(doc) => Ok(Ok(doc)),
+            Err(held) => repeat_hold(held, attempt_id).map(Err),
+        }
     }
 
     /// The gate before money moves, the same for a first dispatch and a repeat (Paykit spec
@@ -5605,6 +5667,89 @@ mod tests {
     use pubky_switch_client::error::{ClientError, TransportError};
 
     use super::*;
+
+    fn is_client(error: &PaykitError, expected: &ClientRefusal) -> bool {
+        matches!(error, PaykitError::Client(AppError::Refused(refusal)) if refusal == expected)
+    }
+
+    #[test]
+    fn test_pay_gate_client_refusal_is_returned_from_a_first_dispatch() {
+        for refusal in [
+            ClientRefusal::Stopped,
+            ClientRefusal::Left,
+            ClientRefusal::RestoreQuestionOpen,
+            ClientRefusal::RecoveryRequired { generation: 3 },
+        ] {
+            let FirstHold::Return(error) = first_dispatch_hold(Held::Client(refusal.clone()))
+            else {
+                panic!("{refusal:?} wrote the attempt failed");
+            };
+            assert!(is_client(&error, &refusal), "{error:?}");
+        }
+        // Writes go on: the attempt is closed, as before the client's refusal was typed.
+        let wait = ClientRefusal::NotNow("reconcile mode".into());
+        let FirstHold::Fail(Refusal::NotNow(why)) = first_dispatch_hold(Held::Client(wait.clone()))
+        else {
+            panic!("reconcile mode left the attempt open");
+        };
+        assert_eq!(why, wait.to_string());
+    }
+
+    #[test]
+    fn test_pay_gate_repeat_is_pending_only_for_a_wait() {
+        let attempt = AttemptId::from_bytes([4; 16]);
+        for refusal in [
+            ClientRefusal::Stopped,
+            ClientRefusal::Left,
+            ClientRefusal::RestoreQuestionOpen,
+            ClientRefusal::RecoveryRequired { generation: 3 },
+        ] {
+            let held = repeat_hold(Held::Client(refusal.clone()), attempt);
+            assert!(
+                matches!(&held, Err(error) if is_client(error, &refusal)),
+                "{held:?}"
+            );
+        }
+        assert!(matches!(
+            repeat_hold(
+                Held::Client(ClientRefusal::NotNow("clocks".into())),
+                attempt
+            ),
+            Ok(PayOutcome::Pending { .. })
+        ));
+        assert!(matches!(
+            repeat_hold(Held::Check(Refusal::NotNow("not yet".into())), attempt),
+            Ok(PayOutcome::Pending { .. })
+        ));
+        assert!(matches!(
+            repeat_hold(Held::Check(Refusal::Destination("expired".into())), attempt),
+            Ok(PayOutcome::Uncertain { .. })
+        ));
+    }
+
+    #[test]
+    fn test_pay_gate_resume_defers_only_the_clients_refusal() {
+        assert!(deferred(&held_back(ClientRefusal::Stopped)));
+        assert!(deferred(&held_back(ClientRefusal::RecoveryRequired {
+            generation: 3
+        })));
+        assert!(!deferred(&held_back(ClientRefusal::NotNow(
+            "clocks".into()
+        ))));
+        assert!(!deferred(&PaykitError::Refused(Refusal::NotFound)));
+        assert!(!deferred(&lost().into()));
+    }
+
+    #[test]
+    fn test_pay_gate_payment_refuses_early_only_what_no_read_clears() {
+        assert!(refused_for_good(&ClientRefusal::Stopped));
+        assert!(refused_for_good(&ClientRefusal::Left));
+        assert!(refused_for_good(&ClientRefusal::RestoreQuestionOpen));
+        assert!(!refused_for_good(&ClientRefusal::RecoveryRequired {
+            generation: 3
+        }));
+        assert!(!refused_for_good(&ClientRefusal::NotNow("clocks".into())));
+    }
 
     fn lost() -> AppError {
         AppError::Transport(TransportError::Connect("down".into()))
