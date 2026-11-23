@@ -1,6 +1,5 @@
 use crate::flights::{AppId, Flights, Wake};
 use crate::{fixed, runtime, WalletError, WalletHost};
-use paykit_sdk::Stage;
 use paykit_sdk::{AppEnv, Paykit, PaykitError};
 use pubky_switch_client::store::StoreHandle;
 use pubky_switch_client::transport::BoxFuture;
@@ -112,25 +111,17 @@ pub(crate) fn current_app() -> Option<AppId> {
 const SETTLE_RETRY: Duration = Duration::from_secs(2);
 const SETTLE_RETRY_CAP: Duration = Duration::from_secs(60);
 
-/// Record the late answers kept for this wallet: resume its payments, which take each kept
-/// answer through the method's lookup, then let go of every answer the journal no longer shows
-/// paying. Returns whether every one of them is recorded.
+/// Resume this wallet's payments after a host `pay` answered late: the resume takes each
+/// answer kept for this wallet through the method's lookup and asks the host about the rest. A
+/// resume that completes has recorded every kept answer; one that stops early, on a lookup or
+/// a store write, leaves them kept. Returns whether none is left.
 async fn settle(app: &mut Paykit, flights: &Flights, id: &AppId) -> bool {
-    if flights.late_of(id).is_empty() {
-        return true;
+    let kept = flights.late_of(id);
+    if app.resume_payments().await.is_err() {
+        return kept.is_empty();
     }
-    // A resume that stops early leaves the answers kept, and the settle runs again.
-    let _ = app.resume_payments().await;
-    let Ok(journal) = app.payments().await else {
-        return false;
-    };
-    for attempt in flights.late_of(id) {
-        let paying = journal
-            .iter()
-            .any(|entry| entry.attempt_id.to_text() == attempt && entry.stage == Stage::Paying);
-        if !paying {
-            flights.recorded(&attempt);
-        }
+    for attempt in kept {
+        flights.recorded(&attempt);
     }
     flights.late_of(id).is_empty()
 }

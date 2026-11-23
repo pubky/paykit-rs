@@ -164,6 +164,49 @@ async fn test_host_calls_running_pay_stops_counting_as_in_flight() {
     assert!(!flights.in_flight(&attempt));
 }
 
+/// What a `pay` answering after its limit leaves kept for the wallet to record.
+async fn kept_after_limit(app: Option<[u8; 16]>, answer: MethodOutcome) -> Option<MethodOutcome> {
+    use crate::flights::{Flights, Waited};
+    let flights = Flights::default();
+    let limit = std::time::Duration::from_secs(1);
+    let (answered, pay) = tokio::sync::oneshot::channel::<MethodOutcome>();
+    let pay = async move {
+        pay.await.map_err(|_| MethodError::Unavailable {
+            reason: "gone".into(),
+        })
+    };
+    let waited = within(flights.dispatch("late-attempt".into(), app, pay, limit)).await;
+    assert!(matches!(waited, Waited::StillRunning));
+    let _ = answered.send(answer);
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    flights.late("late-attempt")
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_host_calls_late_answer_kept_only_when_definitive_and_readable() {
+    let wallet = Some([1; 16]);
+    let paid = || MethodOutcome::Paid {
+        proof_json: br#"{"payment":"late-attempt"}"#.to_vec(),
+        paid_at_ms: None,
+    };
+    assert!(kept_after_limit(wallet, paid()).await.is_some());
+    assert!(kept_after_limit(wallet, MethodOutcome::Failed)
+        .await
+        .is_some());
+    // The host's lookup decides after anything else.
+    assert!(kept_after_limit(wallet, MethodOutcome::Pending)
+        .await
+        .is_none());
+    let unreadable = MethodOutcome::Paid {
+        proof_json: b"not json".to_vec(),
+        paid_at_ms: None,
+    };
+    assert!(kept_after_limit(wallet, unreadable).await.is_none());
+    assert!(kept_after_limit(None, paid()).await.is_none());
+}
+
 #[tokio::test(start_paused = true)]
 async fn test_host_calls_payments_in_flight_are_shared_by_every_host() {
     let first = HostRail::new(Arc::new(Stalled { history: true }), Vec::new());

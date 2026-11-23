@@ -126,15 +126,16 @@ pub enum FeedWake {
 #[uniffi::export]
 impl NativeWallet {
     /// Wait on the feed and apply the native loop's retry pause before returning.
-    /// The wait holds up no other wallet call. A host that stops waiting leaves the
-    /// durable cursor unchanged.
+    /// The wait holds up no other wallet call. A host that stops waiting ends the wait and
+    /// leaves the durable cursor unchanged.
     pub async fn feed_wait(&self, seconds: u32) -> Result<FeedWake, WalletError> {
         let wait = self
             .with_wallet(move |app| Box::pin(async move { Ok(app.app().feed_wait(seconds)) }))
             .await?;
         let pace = self.pace.clone();
-        // A host that stops waiting ends the long poll and the pause, so a restarted feed loop
-        // never holds two reads at once.
+        // A host that stops waiting (a cancelled Kotlin coroutine) ends the long poll and the
+        // pause, so a restarted feed loop never holds two reads at once. A cancelled Swift task
+        // keeps waiting for the answer.
         crate::runtime::run_while_waited(async move {
             let requested = wait.seconds();
             let started = std::time::Instant::now();

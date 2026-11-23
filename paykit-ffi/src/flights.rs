@@ -6,10 +6,11 @@
 //! A wallet command waits for the host's `pay` at most its limit. The host's call runs as a
 //! task of its own, so it always runs to its end. While it runs, the attempt is never
 //! dispatched again and the host's lookup is not asked: both answer "pending", the method's
-//! own answer for a payment in flight. An outcome that comes after the limit is kept under its
-//! attempt ID until that wallet's journal has recorded it; the wallet open for that App ID, or
-//! the next one to open, resumes its payments to record it, and keeps retrying while the
-//! journal still shows the attempt paying. A `pay` that never answers stops counting as in
+//! own answer for a payment in flight. When the host's `pay` answers after the limit, the
+//! wallet open for that App ID resumes its payments. A paid or failed outcome the SDK can read
+//! is kept under its attempt ID, so that resume takes it without asking the host; it stays kept,
+//! and the resume is retried, until a resume completes, or the next wallet to open for that App
+//! ID records it. A `pay` that never answers stops counting as in
 //! flight after [`STALE_AFTER`] times its limit: the host's lookup, which answers "pending"
 //! for any attempt `pay` was called with and that has not settled, then decides. Everything
 //! here is in memory: after a restart the host's lookup answers instead.
@@ -202,10 +203,17 @@ impl Answering {
         let Some(answer) = unsent else {
             return;
         };
-        // Only a definitive outcome is kept: after Pending or an error the host's lookup
-        // decides, as for any open attempt.
-        if let Ok(outcome @ (MethodOutcome::Paid { .. } | MethodOutcome::Failed)) = answer {
-            state.late.insert(self.attempt.clone(), (app, outcome));
+        // Only a definitive outcome the SDK can read, for a wallet that can record it, is kept:
+        // otherwise the host's lookup decides, as for any open attempt. The wallet resumes its
+        // payments either way.
+        if let (Some(owner), Ok(outcome @ (MethodOutcome::Paid { .. } | MethodOutcome::Failed))) =
+            (app, answer)
+        {
+            if outcome.clone().into_rail().is_ok() {
+                state
+                    .late
+                    .insert(self.attempt.clone(), (Some(owner), outcome));
+            }
         }
         drop(state);
         self.flights.wake(app);
@@ -218,7 +226,7 @@ impl Drop for Answering {
             return;
         }
         // The host's call ended without an answer: it panicked, or its runtime stopped. A
-        // waiting command sees no answer; the resume asks the host's lookup.
+        // waiting command sees no answer; the wallet's resume asks the host's lookup.
         let app = self
             .flights
             .state()

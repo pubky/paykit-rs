@@ -198,7 +198,7 @@ pub enum MethodOutcome {
     Pending,
 }
 impl MethodOutcome {
-    fn into_rail(self) -> Result<RailOutcome, RailError> {
+    pub(crate) fn into_rail(self) -> Result<RailOutcome, RailError> {
         Ok(match self {
             Self::Pending => RailOutcome::Pending,
             Self::Failed => RailOutcome::Failed,

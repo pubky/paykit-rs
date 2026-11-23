@@ -529,8 +529,11 @@ async fn later_checkout(
     }
     let lookups = account.lookups.load(Ordering::SeqCst);
     let calls = account.calls.load(Ordering::SeqCst);
-    // A method that can't look a payment up refuses paying, and only paying.
+    // A method that can't look a payment up refuses paying, and only paying: the wallet
+    // still opens.
     account.history.store(false, Ordering::SeqCst);
+    wallet.shutdown().await?;
+    let wallet = host.load(app_id.to_vec()).await?;
     let refused = Box::pin(wallet.pay_request(later.clone(), PaymentOptions::default())).await;
     assert!(matches!(
         refused,
