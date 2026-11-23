@@ -1354,6 +1354,164 @@ async fn test_public_read_unretained_conflicting_or_expired_record_is_refused() 
     }
 }
 
+#[tokio::test]
+async fn test_public_read_unretained_conflict_still_refused_after_a_reload() {
+    let w = World::new();
+    let storage = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&storage)).await;
+    let apps = bob_apps(&w, &["shop", "seller-wallet"]).await;
+    let original_time = w.clock.now_ms();
+    let expiry = Some(original_time + DAY_MS);
+    let original = one_endpoint("btc-lightning-bolt11", "lnbc1shop");
+    publish_app_at(&w, apps[0].0, original.clone(), original_time, expiry);
+    publish_now(
+        &w,
+        apps[1].0,
+        one_endpoint("btc-lightning-bolt12", "lno1wallet"),
+    );
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(offering(&read), [apps[0].1, apps[1].1]);
+
+    // A second body at the original time conflicts with it and is too large to keep.
+    w.clock.advance_ms(1000);
+    publish_app_at(&w, apps[0].0, many(3, 3 * MIB), original_time, expiry);
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(offering(&read), [apps[1].1]);
+
+    // After a reload the Homeserver serves the original body again. The conflict seen before
+    // still holds it: neither body is used.
+    let wallet_id = wallet.app_id();
+    drop(wallet);
+    let mut wallet = w
+        .load_on_clock(&w.alice, storage, wallet_id, Arc::clone(&w.clock))
+        .await;
+    publish_app_at(&w, apps[0].0, original, original_time, expiry);
+    for _ in 0..2 {
+        let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+        assert_eq!(offering(&read), [apps[1].1], "{read:?}");
+        assert_eq!(read.failures.len(), 1, "{:?}", read.failures);
+        assert_eq!(read.failures[0].app_id, apps[0].1);
+        assert!(
+            matches!(&read.failures[0].reason, PublicAppFailureReason::Refused(rule)
+                if rule.contains("a reader keeps")),
+            "{:?}",
+            read.failures
+        );
+    }
+
+    // A strictly later record ends the hold.
+    publish_app_at(
+        &w,
+        apps[0].0,
+        one_endpoint("btc-onchain-address", "bc1qlater"),
+        original_time + 2000,
+        expiry,
+    );
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(offering(&read), [apps[0].1, apps[1].1]);
+    assert!(read.failures.is_empty(), "{:?}", read.failures);
+}
+
+/// Whether the read refuses `app` alone for a group the reader couldn't keep.
+fn held_for_an_unkept_group(read: &PublicPaymentList, app: [u8; 16]) -> bool {
+    read.failures.len() == 1
+        && read.failures[0].app_id == app
+        && matches!(&read.failures[0].reason, PublicAppFailureReason::Refused(rule)
+            if rule.contains("a reader keeps"))
+}
+
+#[tokio::test]
+async fn test_public_read_record_at_an_unkept_groups_time_stays_refused() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let apps = bob_apps(&w, &["shop", "seller-wallet"]).await;
+    let start = w.clock.now_ms();
+    let expiry = Some(start + DAY_MS);
+    publish_app_at(
+        &w,
+        apps[0].0,
+        one_endpoint("btc-lightning-bolt11", "lnbc1shop"),
+        start,
+        expiry,
+    );
+    publish_now(
+        &w,
+        apps[1].0,
+        one_endpoint("btc-lightning-bolt12", "lno1wallet"),
+    );
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(offering(&read), [apps[0].1, apps[1].1]);
+
+    // A later group too large to keep, then a small body at that same time: the small one
+    // may conflict with the bodies not kept, so it is never used.
+    w.clock.advance_ms(1000);
+    let group = start + 1000;
+    publish_app_at(&w, apps[0].0, many(3, 3 * MIB), group, expiry);
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(offering(&read), [apps[1].1]);
+    publish_app_at(
+        &w,
+        apps[0].0,
+        one_endpoint("btc-onchain-address", "bc1qsame"),
+        group,
+        expiry,
+    );
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(offering(&read), [apps[1].1], "{read:?}");
+    assert!(
+        held_for_an_unkept_group(&read, apps[0].1),
+        "{:?}",
+        read.failures
+    );
+}
+
+#[tokio::test]
+async fn test_public_read_earlier_unkept_group_keeps_the_later_hold() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let apps = bob_apps(&w, &["shop", "seller-wallet"]).await;
+    let start = w.clock.now_ms();
+    let expiry = Some(start + DAY_MS);
+    publish_app_at(
+        &w,
+        apps[0].0,
+        one_endpoint("btc-lightning-bolt11", "lnbc1shop"),
+        start,
+        expiry,
+    );
+    publish_now(
+        &w,
+        apps[1].0,
+        one_endpoint("btc-lightning-bolt12", "lno1wallet"),
+    );
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(offering(&read), [apps[0].1, apps[1].1]);
+
+    // A group too large to keep, then an earlier one too large to keep: the hold stays at
+    // the later group, so a small body at the later time is still not used.
+    w.clock.advance_ms(2000);
+    publish_app_at(&w, apps[0].0, many(3, 3 * MIB), start + 2000, expiry);
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(offering(&read), [apps[1].1]);
+    publish_app_at(&w, apps[0].0, many(3, 3 * MIB), start + 1000, expiry);
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(offering(&read), [apps[1].1]);
+    publish_app_at(
+        &w,
+        apps[0].0,
+        one_endpoint("btc-onchain-address", "bc1qsame"),
+        start + 2000,
+        expiry,
+    );
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(offering(&read), [apps[1].1], "{read:?}");
+    assert!(
+        held_for_an_unkept_group(&read, apps[0].1),
+        "{:?}",
+        read.failures
+    );
+}
+
 /// A store that moves the world's clock on at the first read, once armed, of the records a
 /// reader keeps of a payee app (`ar/`).
 struct ClockOnSeenRead {

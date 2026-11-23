@@ -9,8 +9,9 @@
 //! Security: obligation IDs, record keys and settlement and occurrence tags are blinded with
 //! the naming key of the identity whose switch holds them, so the service can't tell which
 //! counterparty, request or settlement they name, and no payer can aim a settlement at a
-//! bucket or a tag. The obligation of a payment without a request is the one exception: it
-//! derives from the attempt ID alone and names no payee.
+//! bucket or a tag. The obligation of a payment without a request blinds its attempt ID the
+//! same way: one who holds only the attempt ID, such as the payee from the proof, can't
+//! compute its claim key. It names no payee.
 
 use pubky_switch_core::enc::{derive, hash, lp, u64be};
 use pubky_switch_core::ident::NamingKey;
@@ -111,17 +112,23 @@ pub fn request_obligation_blinded(
     )
 }
 
-/// The key material of a payment without a request's obligation: `lp("payment", attempt
-/// ID)` (Paykit wire 1.5).
-pub fn payment_obligation_material(attempt_id: &AttemptId) -> Vec<u8> {
-    lp(&[b"payment", &attempt_id.to_bytes()])
+/// The key material of a payment without a request's obligation: `lp("payment",
+/// blind(attempt ID))`, blinded with the payer's naming key (Paykit wire 1.5).
+pub fn payment_obligation_material(naming_key: &NamingKey, attempt_id: &AttemptId) -> Vec<u8> {
+    lp(&[b"payment", &naming_key.blind(&attempt_id.to_bytes())])
 }
 
 /// The obligation ID of a payment without a request (Paykit wire 1.5):
-/// `derive("paykit/v1/obligation", "payment", attempt ID)`. It names no payee and isn't
-/// blinded, so a former holder of the naming key can't test guesses of the payee against it.
-pub fn payment_obligation(attempt_id: &AttemptId) -> [u8; 32] {
-    derive(OBLIGATION_LABEL, &[b"payment", &attempt_id.to_bytes()])
+/// `derive("paykit/v1/obligation", "payment", blind(attempt ID))` under the payer's naming
+/// key. It names no payee, so a holder of the naming key can't test guesses of the payee
+/// against it.
+pub fn payment_obligation(naming_key: &NamingKey, attempt_id: &AttemptId) -> [u8; 32] {
+    payment_obligation_blinded(&naming_key.blind(&attempt_id.to_bytes()))
+}
+
+/// [`payment_obligation`] from the attempt ID already blinded with the payer's naming key.
+pub fn payment_obligation_blinded(blinded_attempt_id: &[u8; 32]) -> [u8; 32] {
+    derive(OBLIGATION_LABEL, &[b"payment", blinded_attempt_id])
 }
 
 /// Paykit's natural keys (Paykit wire 1.5, Switch spec 13.3): the inputs, blinded with the
@@ -341,8 +348,23 @@ mod tests {
         );
         let attempt = AttemptId::from_bytes([3; 16]);
         assert_eq!(
-            payment_obligation(&attempt),
-            blake3_derive(&payment_obligation_material(&attempt))
+            payment_obligation(&nk, &attempt),
+            blake3_derive(&payment_obligation_material(&nk, &attempt))
+        );
+        // Another payer's key or another attempt names another claim, and the attempt ID
+        // alone names none of them.
+        let other = NamingKey::from_bytes([8; 32]);
+        assert_ne!(
+            payment_obligation(&nk, &attempt),
+            payment_obligation(&other, &attempt)
+        );
+        assert_ne!(
+            payment_obligation(&nk, &attempt),
+            payment_obligation(&nk, &AttemptId::from_bytes([4; 16]))
+        );
+        assert_ne!(
+            payment_obligation(&nk, &attempt),
+            derive(OBLIGATION_LABEL, &[b"payment", &attempt.to_bytes()])
         );
     }
 
