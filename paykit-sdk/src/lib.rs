@@ -101,7 +101,7 @@ pub use divergent::DivergentRecord;
 pub use error::{PaykitError, Refusal, Result};
 pub use executor::ReservedByOtherApp;
 pub use extensions::{ExtensionMessage, MAX_EXTENSION_MESSAGES, MAX_EXTENSION_MESSAGES_PER_SENDER};
-pub use hold::HeldRequest;
+pub use hold::{AllowanceHold, HeldRequest};
 pub use journal::{PaymentView, Stage};
 pub use loss::{LossBoundary, RecoveryMembers, RecoveryReport};
 pub use marks::MAX_DROPPED_MARKS;

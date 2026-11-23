@@ -159,6 +159,12 @@ pub struct AllowanceView {
     /// list, without attempting a payment. A payment can still be refused first for the
     /// request's own state, such as a request held after the same restore.
     pub confirmation_needed: bool,
+    /// The Allowance with the hold in force when this view was read: the user's
+    /// confirmation is given for it ([`Paykit::confirm_allowance_executor`]).
+    pub hold: crate::AllowanceHold,
+    /// Whether the Allowance's grant, or its proposal before a grant, is of a generation a
+    /// provider loss ended (Paykit spec 8.3, "After provider loss").
+    pub(crate) granted_before_loss: bool,
     /// Whether the counterparty is on the identity's deny list, as the app last read it
     /// (Paykit spec 8.1, "Blocked counterparties"): nothing new from it is taken, its
     /// requests are paused and nothing is sent to it, so the host shows the Allowance as
@@ -2512,6 +2518,8 @@ impl Paykit {
             executor_app_id: None,
             consented: false,
             confirmation_needed: false,
+            granted_before_loss: false,
+            hold: self.allowance_hold(record).await?,
             blocked: Box::pin(self.blocked_as_known(&stored.sender())).await?,
         }))
     }
@@ -2537,6 +2545,18 @@ impl Paykit {
         view.executor_app_id = held
             .current_grant(&self.identity())
             .map(|(grant, _)| grant.app_id);
+        // The generation the user last confirmed it in: its grant's, or before a grant its
+        // proposal's. One a provider loss ended pays nothing automatically (Paykit spec 8.3).
+        let confirmed = held
+            .current_grant(&self.identity())
+            .map(|(grant, _)| grant.confirmed_generation)
+            .or(match held.proposal.body() {
+                Body::AllowanceProposal(proposal) => Some(proposal.allower_generation),
+                _ => None,
+            });
+        view.granted_before_loss = confirmed
+            .zip(self.app.own_identity().body().recovery_from)
+            .is_some_and(|(confirmed, lost)| confirmed <= lost);
         let consent = Box::pin(self.consent_state(&record)).await?;
         view.consented = consent == ConsentState::Held;
         view.confirmation_needed = matches!(
@@ -2578,6 +2598,8 @@ impl Paykit {
             executor_app_id: None,
             consented: false,
             confirmation_needed: false,
+            granted_before_loss: false,
+            hold: self.allowance_hold(&record).await?,
             blocked: Box::pin(self.blocked_as_known(&counterparty)).await?,
         })
     }
@@ -2660,6 +2682,16 @@ impl Paykit {
         if Box::pin(self.conflict_kept(record)).await? {
             return Ok(ConsentState::Removed(ConsentEnd::Conflicted));
         }
+        // A removal this app recorded is final, whatever the record shows now.
+        if let Some(ConsentEntry {
+            consent: Consent::Removed { reason },
+            ..
+        }) = self
+            .local_get::<ConsentEntry>(&key::consent(record))
+            .await?
+        {
+            return Ok(ConsentState::Removed(reason));
+        }
         let Some(shared) = Box::pin(self.app.shared_record(record)).await? else {
             return Ok(ConsentState::Waiting(WAITS_FOR_RECORD));
         };
@@ -2719,16 +2751,29 @@ impl Paykit {
                 return Ok(ConsentState::GrantKept);
             }
         }
+        let approved = self.execution_approved(record).await?;
         if self
             .local_get::<crate::executor::ExecutorHistory>(&key::executor_checkpoint(record))
             .await?
             .is_none()
         {
-            return Ok(ConsentState::Unrecorded);
+            // No grant of this app's own yet. One the user approved here for automatic
+            // execution, whose approval a restore or a `missed` item took since, waits for the
+            // user's confirmation, which grants it; any other is this app's to take up.
+            let approved_here = self
+                .local_get::<OriginalAllowance>(&key::original_allowance(record))
+                .await?
+                .map(|original| original.approved_for_execution())
+                .transpose()?
+                .flatten()
+                .is_some();
+            return Ok(if approved_here && !approved {
+                ConsentState::Unconsented { approved: false }
+            } else {
+                ConsentState::Unrecorded
+            });
         }
-        Ok(ConsentState::Unconsented {
-            approved: self.execution_approved(record).await?,
-        })
+        Ok(ConsentState::Unconsented { approved })
     }
 
     /// Whether this app keeps a rejection from `counterparty` of the Allowance at `record`

@@ -105,14 +105,14 @@ pub(crate) enum Standing {
 }
 
 impl Standing {
-    /// The refusal a payment under the Allowance at `record` gets, if any.
-    pub(crate) fn refusal(self, record: &[u8; 32]) -> Option<Refusal> {
+    /// The refusal a payment under the Allowance `hold` names gets, if any.
+    pub(crate) fn refusal(self, hold: &crate::AllowanceHold) -> Option<Refusal> {
         match self {
             Self::Payable => None,
             Self::NotTakenUp => Some(Refusal::NotNow(
                 "this app hasn't taken up the Allowance's execution".into(),
             )),
-            Self::Confirm => Some(Refusal::AllowanceConfirmationNeeded { record: *record }),
+            Self::Confirm => Some(Refusal::AllowanceConfirmationNeeded { hold: hold.clone() }),
             Self::Temporary(why) => Some(Refusal::NotNow(why.into())),
             Self::Final(refusal) => Some(refusal),
         }
@@ -160,6 +160,12 @@ pub(crate) fn standing(app: &Paykit, view: &AllowanceView, consent: ConsentState
     if expired {
         return Standing::Final(Refusal::AllowanceEnded);
     }
+    // After a provider loss an Allowance last confirmed in an earlier generation needs a new
+    // grant at this one (Paykit spec 8.3, "After provider loss"), which this version doesn't
+    // write: it pays nothing automatically, and confirming wouldn't change that.
+    if view.granted_before_loss {
+        return Standing::Final(Refusal::NotAutomatic(GRANTED_BEFORE_LOSS.into()));
+    }
     // Blocking pauses what is open with the counterparty and revokes nothing (Paykit spec
     // 8.1): unblocking ends the pause.
     match view.blocked {
@@ -191,13 +197,16 @@ pub(crate) fn standing(app: &Paykit, view: &AllowanceView, consent: ConsentState
     }
 }
 
+/// Why an Allowance last confirmed before a provider loss pays nothing automatically.
+pub(crate) const GRANTED_BEFORE_LOSS: &str = "the Allowance was granted before a provider loss; automatic payments under it need a new grant, which this version does not write";
+
 /// The refusal for an Allowance taken off this app's consent list for `reason`: final, as no
 /// later read puts it back (Paykit spec 8.3, "Executor", "Ends reach the executor").
 pub(super) fn removed_refusal(reason: ConsentEnd) -> Refusal {
     match reason {
         ConsentEnd::Ended => Refusal::AllowanceEnded,
         ConsentEnd::Conflicted => Refusal::AllowanceConflicted,
-        ConsentEnd::Rejected => Refusal::NotFound,
+        ConsentEnd::Rejected => Refusal::Rejected,
         ConsentEnd::HandedOff => Refusal::Usage("another app executes this Allowance".into()),
     }
 }
@@ -363,7 +372,11 @@ impl AllowanceReservation {
             // of usage of other terms do.
             match limit {
                 LimitKind::PerPayment => not_automatic(&why),
-                // Room a reserved entry holds comes back if it is released.
+                // Room another app's failed attempt holds comes back once the user releases
+                // it, and room a reserved entry holds once it is released.
+                LimitKind::Lifetime if checked.facts.releasable() => held(
+                    "the lifetime limit has no room while another app's failed attempt holds it: the user can release that attempt (reserved_by_other_apps)",
+                ),
                 LimitKind::Lifetime if checked.usage.reserved() == 0 => not_automatic(&why),
                 _ => held(&why),
             }
@@ -539,7 +552,7 @@ impl Paykit {
             || held("the accepted executor grant, ledger or wallet history is unavailable");
         let view = self.allowance(record).await?;
         let consent = Box::pin(self.consent_state(record)).await?;
-        if let Some(refusal) = standing(self, &view, consent).refusal(record) {
+        if let Some(refusal) = standing(self, &view, consent).refusal(&view.hold) {
             return Err(refusal.into());
         }
         if view.counterparty != *payee {
@@ -704,5 +717,25 @@ impl Paykit {
             }
         }
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_spend_removed_consent_refuses_as_its_end() {
+        // A removal refuses as the status path refuses the same end (Paykit spec 8.3).
+        assert_eq!(removed_refusal(ConsentEnd::Ended), Refusal::AllowanceEnded);
+        assert_eq!(
+            removed_refusal(ConsentEnd::Conflicted),
+            Refusal::AllowanceConflicted
+        );
+        assert_eq!(removed_refusal(ConsentEnd::Rejected), Refusal::Rejected);
+        assert!(matches!(
+            removed_refusal(ConsentEnd::HandedOff),
+            Refusal::Usage(_)
+        ));
     }
 }

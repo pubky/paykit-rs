@@ -109,11 +109,17 @@ async fn test_enrolled_allowance_confirmation_after_a_restore_that_isnt_clean() 
                         .unwrap_err();
                     assert_eq!(
                         asked.refusal(),
-                        Some(&paykit_sdk::Refusal::AllowanceConfirmationNeeded { record: key }),
+                        Some(&paykit_sdk::Refusal::AllowanceConfirmationNeeded {
+                            hold: restored.allowance(&key).await?.hold
+                        }),
                         "{asked:?}"
                     );
                 }
-                Box::pin(restored.confirm_allowance_executor(&key, UserConfirmed::new())).await?;
+                Box::pin(restored.confirm_allowance_executor(
+                    &restored.allowance(&key).await.unwrap().hold,
+                    UserConfirmed::new(),
+                ))
+                .await?;
                 let view = restored.allowance(&key).await?;
                 assert!(view.consented && !view.confirmation_needed, "{view:?}");
                 Box::pin(restored.resume_allowance_executor(&key)).await?;

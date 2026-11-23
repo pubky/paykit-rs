@@ -66,24 +66,28 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// Where the Allowance stands, as [`Paykit::resume_allowance_executor`] says, except that
-    /// this call never asks for the user's confirmation again. It can still refuse with
-    /// [`Refusal::NotNow`] when the original ledger or grant result can't be established
+    /// Where the Allowance stands, as [`Paykit::resume_allowance_executor`] says. The
+    /// confirmation is the user's for `hold`, the Allowance and the hold in force when it was
+    /// shown ([`crate::AllowanceView::hold`], [`Refusal::AllowanceConfirmationNeeded`]): once
+    /// a newer restore or `missed` item has set another hold, before this call or during its
+    /// read, it is refused with [`Refusal::AllowanceConfirmationNeeded`] naming the hold in
+    /// force now, nothing is written, and the host asks the user again. It can still refuse
+    /// with [`Refusal::NotNow`] when the original ledger or grant result can't be established
     /// yet, for example while the payment method's history is incomplete after a restore, or
-    /// another app changed either record: the host keeps the user's confirmation and calls
-    /// again with it later, without asking the user again. The service or store can fail too.
+    /// another app changed either record: the host keeps the user's confirmation with `hold`
+    /// and calls again with it later. The service or store can fail too.
     pub async fn confirm_allowance_executor(
         &mut self,
-        record: &[u8; 32],
-        confirmed: UserConfirmed,
+        hold: &crate::AllowanceHold,
+        _confirmed: UserConfirmed,
     ) -> Result<()> {
-        Box::pin(self.apply_executor_grant(record, Some(confirmed))).await
+        Box::pin(self.apply_executor_grant(&hold.record(), Some(hold))).await
     }
 
     async fn apply_executor_grant(
         &mut self,
         record: &[u8; 32],
-        confirmed: Option<UserConfirmed>,
+        confirmed: Option<&crate::AllowanceHold>,
     ) -> Result<()> {
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
@@ -96,20 +100,33 @@ impl Paykit {
             return Err(Refusal::ScopeMissing("paykit_allowance_execute".into()).into());
         }
         self.refuse_while_payer_pass_owed().await?;
-        // A first grant whose answer was lost lands first: until its batch is sent, nothing
+        // An Allowance already known to have stopped for good refuses so first, kept grant or
+        // not: nothing sent again changes it.
+        let shown = self.allowance(record).await?;
+        let consent = Box::pin(self.consent_state(record)).await?;
+        if let Standing::Final(refusal) = standing(self, &shown, consent) {
+            return Err(refusal.into());
+        }
+        // A first grant whose answer was lost lands next: until its batch is sent, nothing
         // more is decided, and once it applied, its consent is this call's to write.
         Box::pin(self.land_kept_grant(record)).await?;
-        // Where the Allowance stands decides next, by the classification a payment under it
+        // Where the Allowance stands decides then, by the classification a payment under it
         // follows: the user is asked to confirm only where confirming lifts the refusal.
         let shown = self.allowance(record).await?;
         let consent = Box::pin(self.consent_state(record)).await?;
-        match standing(self, &shown, consent) {
+        let standing = standing(self, &shown, consent);
+        match standing {
             Standing::Final(refusal) => return Err(refusal.into()),
             Standing::Temporary(why) => return Err(Refusal::NotNow(why.into()).into()),
-            Standing::Confirm if confirmed.is_none() => {
-                return Err(Refusal::AllowanceConfirmationNeeded { record: *record }.into());
-            }
             Standing::Confirm | Standing::Payable | Standing::NotTakenUp => {}
+        }
+        // The user's confirmation counts only under the hold it was given for: a restore or a
+        // `missed` item since, the read just made included, sets a hold the user hasn't seen
+        // (Paykit spec 7.2, 8.3). Checked after the last read, before anything is written.
+        if confirmed.is_some_and(|given| *given != shown.hold)
+            || (standing == Standing::Confirm && confirmed.is_none())
+        {
+            return Err(Refusal::AllowanceConfirmationNeeded { hold: shown.hold }.into());
         }
         let opening = Box::pin(self.approved_opening(record))
             .await?

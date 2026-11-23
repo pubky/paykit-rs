@@ -60,13 +60,16 @@ pub enum Refusal {
     /// again, since an end may be among what was lost (Paykit spec 8.3, "Ends reach the
     /// executor"). It is returned only where confirming lifts it, so not while the Allowance
     /// is ended, expired, executed by another app or its counterparty blocked. The host shows
-    /// the Allowance at `record` and, once the user confirms, calls
-    /// [`crate::Paykit::confirm_allowance_executor`]; if that answers
-    /// [`Refusal::NotNow`], it keeps the confirmation and calls again later.
+    /// the Allowance `hold` names and, once the user confirms, calls
+    /// [`crate::Paykit::confirm_allowance_executor`] with `hold`; if that answers
+    /// [`Refusal::NotNow`], it keeps the confirmation with `hold` and calls again later. The
+    /// confirmation counts only for the hold it was given under: after a newer restore or
+    /// `missed` item the call answers this refusal again, with the new hold, and the host
+    /// asks the user again.
     #[error("Paykit spec 8.3: the user must confirm this Allowance again")]
     AllowanceConfirmationNeeded {
-        /// The record key of the Allowance to confirm.
-        record: [u8; 32],
+        /// The Allowance to confirm, with the hold in force when it was shown.
+        hold: crate::AllowanceHold,
     },
     /// A payee activity record lost credit history to a delete. A new receipt cannot
     /// be issued for this occurrence, including by hand (Paykit spec 6).
@@ -157,14 +160,24 @@ pub enum Refusal {
     /// start").
     #[error("Paykit spec 8.2: the Billing Period hasn't started")]
     PeriodNotStarted,
-    /// The occurrence carries a manual-only mark or is funded under an Allowance.
-    #[error("Paykit spec 8.2, 8.3: this occurrence cannot be paid by the wallet's own policy")]
+    /// Not paid by this call's automatic payer (Paykit spec 8.2, 8.3), in one of three cases:
+    /// - the occurrence carries a manual-only mark: no wallet's policy and no Allowance's
+    ///   executor pays it automatically, and it is left for the user;
+    /// - asked of the wallet's own policy ([`crate::Paykit::pay_period_automatically`]), the
+    ///   Billing Period is funded under an Allowance: it is left for that Allowance's executor
+    ///   ([`crate::Paykit::pay_period_under_allowance`]);
+    /// - asked of an executor ([`crate::Paykit::pay_period_under_allowance`]), the Billing
+    ///   Period is funded under no Allowance: it is left for the wallet's own policy or the
+    ///   user.
+    #[error("Paykit spec 8.2, 8.3: this occurrence cannot be paid by this automatic payer")]
     ManualOnly,
     /// Not paid automatically, for good: the authenticated subscription and service time
-    /// don't authorize this automatic Billing Period (Paykit spec 8.2), the request or
+    /// don't authorize this automatic Billing Period (Paykit spec 8.2); the request or
     /// Billing Period doesn't qualify under the Allowance it is paid under, outside its terms
-    /// or with its lifetime limit used up and nothing reserved, or the Allowance the payment
-    /// was reserved under expired before its first dispatch (Paykit spec 8.3). The user may
+    /// or with its lifetime limit used up and nothing reserved or to release; the Allowance
+    /// the payment was reserved under expired before its first dispatch; or the Allowance was
+    /// granted before a provider loss, whose new grant this version doesn't write, so the user
+    /// can end it and set up a new one (Paykit spec 8.3, "After provider loss"). The user may
     /// still pay it by hand. At an open attempt's first dispatch this is an
     /// [`Self::AttemptFailed`].
     #[error("Paykit spec 8.2, 8.3: not paid automatically: {0}")]

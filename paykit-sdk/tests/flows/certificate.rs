@@ -46,16 +46,28 @@ pub(crate) fn renew(
     scopes: &RequestedScopes,
     after_ms: u64,
 ) -> AppCert {
-    let keys = w.alice.identity().app_keys("wallet");
+    renew_for(w, &w.alice, "wallet", app_id, scopes, after_ms)
+}
+
+/// [`renew`] for `signer`'s app `name`.
+pub(crate) fn renew_for(
+    w: &World,
+    signer: &pubky_switch_client::testing::TestSigner,
+    name: &str,
+    app_id: [u8; 16],
+    scopes: &RequestedScopes,
+    after_ms: u64,
+) -> AppCert {
+    let keys = signer.identity().app_keys(name);
     let names: Vec<&str> = scopes.scopes.iter().map(String::as_str).collect();
     let renewed = issue_cert(
-        w.alice.identity().key(),
+        signer.identity().key(),
         &keys,
         &AppSpec::new(&names).with_permissions(&scopes.permissions),
         w.clock.now_ms() + after_ms,
     )
     .unwrap();
-    w.alice
+    signer
         .switch()
         .signer_op(OpKind::CertPut {
             target_app_id: app_id,
@@ -67,7 +79,17 @@ pub(crate) fn renew(
 
 /// Alice's next `identity.json` lists `renewed` for the app, renewing `old`.
 pub(crate) fn list(w: &World, app_id: [u8; 16], old: &AppCert, renewed: &AppCert) {
-    w.alice
+    list_for(&w.alice, app_id, old, renewed);
+}
+
+/// [`list`] for `signer`'s app.
+pub(crate) fn list_for(
+    signer: &pubky_switch_client::testing::TestSigner,
+    app_id: [u8; 16],
+    old: &AppCert,
+    renewed: &AppCert,
+) {
+    signer
         .next_doc(|body| {
             body.apps.retain(|a| a.app_id != app_id);
             body.apps.push(ListedApp {

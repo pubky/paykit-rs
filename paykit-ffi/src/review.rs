@@ -219,12 +219,18 @@ pub enum RefusalKind {
     NotSubscribed,
     /// Automatic payment must wait for the period. Paying early requires explicit confirmation.
     PeriodNotStarted,
-    /// The occurrence carries a manual-only mark or is funded under an Allowance.
+    /// Not paid by this call's automatic payer: a manual-only mark leaves it for the user; a
+    /// Billing Period funded under an Allowance, asked of the wallet's own policy, is left for
+    /// that Allowance's executor; one funded under none, asked of an executor, is left for the
+    /// wallet's own policy or the user.
     ManualOnly,
     /// Not paid automatically, for good: the subscription or service time doesn't authorize
     /// automatic payment (Paykit spec 8.2), or the request or Billing Period doesn't qualify
     /// under its Allowance: outside its terms, or its lifetime limit used up with nothing
-    /// reserved (Paykit spec 8.3). The user may still pay it by hand.
+    /// reserved or to release, the Allowance the payment was reserved under expired before
+    /// its first dispatch, or it was granted before a provider loss, whose new grant this
+    /// version doesn't write: end it and set up a new one (Paykit spec 8.3). The user may still
+    /// pay it by hand.
     NotAutomatic,
     /// All retained period slots may have an open attempt.
     AttemptedPeriodsFull,
@@ -344,8 +350,8 @@ impl PaymentRefusal {
             Refusal::Cancelled => D::Cancelled,
             Refusal::AllowanceEnded => D::AllowanceEnded,
             Refusal::AllowanceConflicted => D::AllowanceConflicted,
-            Refusal::AllowanceConfirmationNeeded { record } => D::AllowanceConfirmationNeeded {
-                record: record.to_vec(),
+            Refusal::AllowanceConfirmationNeeded { hold } => D::AllowanceConfirmationNeeded {
+                record: hold.record().into(),
             },
             Refusal::CreditHistoryLost => D::CreditHistoryLost,
             Refusal::AlreadyPaid => D::AlreadyPaid,
