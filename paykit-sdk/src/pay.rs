@@ -2070,6 +2070,24 @@ impl Paykit {
             .iter()
             .filter_map(|l| crate::receive::list_version(&l.list).map(|v| (l.app_id, v)))
             .collect();
+        // A list held over its record, as when the record didn't read when it came, replaces
+        // the record's list once placed: until then that payee app's list isn't paid to, so
+        // nothing goes to a list a later one, a withdrawal included, replaces (Paykit wire
+        // 5.4). Its pair stays installed above.
+        let mut held = Vec::new();
+        for list in &lists {
+            let record = self
+                .app
+                .record_key(&crate::records::list_target(payee, &list.app_id))?;
+            if self
+                .local_get::<crate::records::KeptMessage>(&key::held_list(&record))
+                .await?
+                .is_some()
+            {
+                held.push(list.app_id);
+            }
+        }
+        lists.retain(|l| !held.contains(&l.app_id));
         // Only a current app's list counts (Paykit spec 8.4, 7.2): a removed app's list, of
         // whatever version it chose, would shadow the current apps' and then be refused by
         // the destination check. The payee's `identity.json` is the copy that check takes,
