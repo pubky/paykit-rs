@@ -4396,3 +4396,45 @@ async fn test_executor_restored_dispatch_resolved_with_no_claim_keeps_the_allowa
         "{paid:?}"
     );
 }
+
+#[tokio::test]
+async fn test_executor_pays_nothing_under_the_shared_post_loss_hold() {
+    // Paykit spec 8.1; Paykit wire 5.6, Shared post-loss hold: after a declared provider loss
+    // the executor pays no one-time request under the Allowance, one created long after the
+    // loss included. A confirmation of the executor after the loss is refused for now, since
+    // it can't establish the original grant and ledger, and changes nothing.
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    world.clock.advance_ms(60_000);
+    crate::provider_loss::declare_loss(&world);
+    let until = Box::pin(crate::provider_loss::follow_loss(&mut payer)).await;
+    let confirmed = Box::pin(payer.confirm_allowance_executor(&key, UserConfirmed::new()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(confirmed.refusal(), Some(paykit_sdk::Refusal::NotNow(_))),
+        "{confirmed}"
+    );
+    let now = world.clock.now_ms();
+    world
+        .clock
+        .advance_ms(until.saturating_sub(now) + 3_600_000);
+    let request = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("1", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    let refused = Box::pin(payer.pay_under_allowance(&request, &key))
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::NotAutomatic(why)) if why.contains("provider loss")
+        ),
+        "{refused}"
+    );
+    assert!(world.rail.all_pay_calls().is_empty());
+}
