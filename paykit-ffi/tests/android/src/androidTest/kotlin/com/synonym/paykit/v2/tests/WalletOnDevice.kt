@@ -15,9 +15,9 @@ import org.junit.runner.RunWith
 import java.io.File
 
 /**
- * A full checkout driven from the main thread. Strict mode ends the process on any disk or
- * network work there, so every wallet call, store and method callback has to run on Paykit's
- * own threads, whose 4 MiB stacks this device must accept.
+ * A full checkout driven from the main thread, on Paykit's 4 MiB threads, which this device
+ * must accept. Strict mode ends the process on disk or network work on the main thread, and
+ * the test records the thread of every store call and synchronous method callback.
  */
 @RunWith(AndroidJUnit4::class)
 class WalletOnDeviceTest {
@@ -45,20 +45,35 @@ class WalletOnDeviceTest {
     }
 }
 
-/** Records the threads Paykit calls the method's synchronous callbacks on. */
+/** The threads Paykit called the host's synchronous callbacks on. */
+private val callbackThreads = java.util.Collections.synchronizedList(mutableListOf<Thread>())
+private fun recorded() { callbackThreads += Thread.currentThread() }
+
 private class DeviceMethod(ledger: File) : CheckoutMethod(ledger) {
-    val threads = java.util.Collections.synchronizedList(mutableListOf<Thread>())
-    override fun selectEndpoints(candidates: List<EndpointCandidate>, amount: Amount?): SelectedEndpoints {
-        threads += Thread.currentThread()
-        return super.selectEndpoints(candidates, amount)
-    }
+    override fun declaration(): MethodDeclaration = super.declaration().also { recorded() }
+    override fun selectEndpoints(candidates: List<EndpointCandidate>, amount: Amount?): SelectedEndpoints =
+        super.selectEndpoints(candidates, amount).also { recorded() }
+    override fun transfer(endpoint: String, payload: String, amount: Amount): MethodTransfer =
+        super.transfer(endpoint, payload, amount).also { recorded() }
+    override fun fractionDigits(endpoint: String): UInt? = super.fractionDigits(endpoint).also { recorded() }
+    override fun settlementId(proofJson: ByteArray): ByteArray? = super.settlementId(proofJson).also { recorded() }
+}
+
+private class DeviceStore(private val inner: EnrollmentStore) : WalletStore {
+    override fun get(namespace: String, key: ByteArray): ByteArray? = inner.get(namespace, key).also { recorded() }
+    override fun scan(namespace: String, prefix: ByteArray, after: ByteArray?, limit: UInt): List<StoreEntry> =
+        inner.scan(namespace, prefix, after, limit).also { recorded() }
+    override fun acquire(namespace: String, owner: ByteArray): Boolean = inner.acquire(namespace, owner).also { recorded() }
+    override fun release(namespace: String, owner: ByteArray) = inner.release(namespace, owner).also { recorded() }
+    override fun commitIf(namespace: String, owner: ByteArray, writes: List<StoreWrite>): Boolean =
+        inner.commitIf(namespace, owner, writes).also { recorded() }
 }
 
 private suspend fun checkoutFromMain(directory: File) {
     check(Looper.myLooper() == Looper.getMainLooper())
     val method = DeviceMethod(File(directory, "settled"))
     method.release.complete(Unit)
-    val store = EnrollmentStore()
+    val store = DeviceStore(EnrollmentStore())
     enrolledTestCheckout(store, method).use { fixture ->
         method.clock = { fixture.nowMs() }
         val reference = ByteArray(16) { 23 }
@@ -80,7 +95,8 @@ private suspend fun checkoutFromMain(directory: File) {
                 wallet.finishReceive()
                 check(wallet.requestReceipts(sent).single().let { it.messageId == receipt && it.attemptId == paid.attemptId })
                 check(method.calls.get() == 1)
-                check(method.threads.isNotEmpty() && method.threads.none { it == Looper.getMainLooper().thread })
+                // Every store and synchronous method callback ran on Paykit's threads.
+                check(callbackThreads.isNotEmpty() && callbackThreads.none { it == Looper.getMainLooper().thread })
                 wallet.shutdown()
             }
         }
