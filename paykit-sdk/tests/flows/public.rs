@@ -2382,3 +2382,46 @@ async fn test_public_group_refusal_after_a_restore_names_the_later_floor() {
         "{list:?}"
     );
 }
+
+#[tokio::test]
+async fn test_public_restored_history_over_the_bound_never_brings_back_a_dropped_fallback() {
+    // A backup holds bob's record at T0 and 64 distinct bodies at T1, more than a reader
+    // keeps, with no floor: no reader writes that. Restored, the history is kept as a read
+    // keeps it, so the record at T0 is dropped and is never the fallback under the conflict
+    // at T1 (Switch spec 4.2; Paykit spec 4).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    let first = publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1a"),
+        t0,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    let mut records = vec![serde_json::from_slice::<Value>(&first).unwrap()];
+    let mut last = Vec::new();
+    for i in 0..64 {
+        last = publish_at(
+            &w,
+            one_endpoint("btc-lightning-bolt12", &format!("lno1b{i}")),
+            t0 + 1000,
+            expiry,
+        );
+        records.push(serde_json::from_slice(&last).unwrap());
+    }
+    let mut seen = seen_of(&wallet).await;
+    let mut value: Value = serde_json::from_slice(&seen[0].1).unwrap();
+    value["d"]["records"] = Value::Array(records);
+    value["d"]["unkept_at"] = Value::Null;
+    value["d"]["dropped_at"] = Value::Null;
+    seen[0].1 = serde_json::to_vec(&value).unwrap();
+    put_seen(&mut wallet, seen).await;
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut wallet = restored_over(&w, crate::common::store(), &backup).await;
+    serve(&w, &last);
+    assert!(listed(&mut wallet, &w).await.is_empty());
+}

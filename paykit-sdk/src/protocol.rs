@@ -1224,15 +1224,20 @@ pub(crate) fn restore_paykit_layer(
                     })?;
                 continue;
             }
-            StateKey::SeenRecords { .. } => {
+            StateKey::SeenRecords { payee, .. } => {
                 // They are the payee's, not the app's own: one that doesn't verify would fail
-                // every later public-endpoint read of that payee.
-                state::restored::<crate::app_records::SeenRecords>(&key, &value, &binder)
-                    .map_err(|_| {
-                        String::from(
-                            "Switch spec 4.2: a payee's seen app records in the backup don't verify",
-                        )
-                    })?;
+                // every later public-endpoint read of that payee. They are kept as a read
+                // keeps them, so a history over the bounds is cut and raises the floor.
+                let unread = || {
+                    String::from(
+                        "Switch spec 4.2: a payee's seen app records in the backup don't verify",
+                    )
+                };
+                let seen =
+                    state::restored::<crate::app_records::SeenRecords>(&key, &value, &binder)
+                        .map_err(|_| unread())?;
+                let kept = seen.canonical(&payee).ok_or_else(unread)?;
+                let value = state::encode(&kept).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -1620,7 +1625,14 @@ fn keep_installation_stops(
         let seen = state::restored::<crate::app_records::SeenRecords>(&at, &value, binder)
             .map_err(|_| "the installation holds seen app records that don't verify")?;
         match slot(writes, &at) {
-            None => writes.push(LocalWrite::Put { key: at, value }),
+            None => {
+                let kept = seen
+                    .canonical(&payee)
+                    .ok_or("the installation holds seen app records that don't verify")?;
+                let value =
+                    state::encode(&kept).map_err(|_| "seen app records cannot be retained")?;
+                writes.push(LocalWrite::Put { key: at, value });
+            }
             Some(i) => {
                 let LocalWrite::Put { value: held, .. } = &writes[i] else {
                     continue;

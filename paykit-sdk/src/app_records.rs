@@ -493,6 +493,13 @@ impl SeenRecords {
             })
     }
 
+    /// These seen records kept as a read keeps them ([`SeenRecords::merged`] with none): a
+    /// restored value over the bounds is cut to them, and what is cut raises the floor.
+    /// `None` when a record doesn't verify as `payee`'s.
+    pub(crate) fn canonical(&self, payee: &[u8; 32]) -> Option<Self> {
+        self.merged(&Self::default(), payee)
+    }
+
     /// The union of these seen records and `other`'s, both of one app of `payee` (Switch spec
     /// 4.2). The later of the two `dropped_at` comes first: every record of either at or
     /// before it is dropped, so a record one side dropped never comes back through the
