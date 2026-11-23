@@ -1665,6 +1665,107 @@ async fn test_acceptance_queued_once_the_call_is_made() {
         .is_some());
 }
 
+/// Alice's wallet holding bob's one-time request, its payment's fence unable to read the
+/// request record: the planning read and the final check's read go through, the fence's
+/// can't reach the switch. With `failed_write_fails`, the switch is unreachable for the
+/// write that would record the attempt failed too.
+async fn fence_unread(
+    w: &World,
+    failed_write_fails: bool,
+) -> (paykit_sdk::Paykit, RequestRef, paykit_sdk::PaykitError) {
+    use pubky_switch_client::testing::Fault;
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.alice.switch().fail_next(Fault::Unreachable {
+        path: "/records/".into(),
+        after: 2,
+    });
+    if failed_write_fails {
+        // The attempt's own batch goes through; the failed write's doesn't.
+        w.alice.switch().fail_next(Fault::Unreachable {
+            path: "/ops".into(),
+            after: 1,
+        });
+    }
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(w.rail.all_pay_calls().is_empty(), "{refused:?}");
+    (wallet, request, refused)
+}
+
+#[tokio::test]
+async fn test_fence_read_failure_writes_the_attempt_failed_and_a_new_payment_pays_once() {
+    // The fence's read failing, after `Paying` and just before the payment method's call, is
+    // the caller's error, not a pending payment: nothing was submitted, so the attempt is
+    // written failed with the switch's error as its cause, and a new payment goes at once
+    // (Paykit spec 7.2 step 1).
+    let w = World::new();
+    let (mut wallet, request, refused) = fence_unread(&w, false).await;
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::AttemptFailed(why))
+                if matches!(**why, paykit_sdk::Refusal::SwitchUnavailable(_))
+        ),
+        "{refused:?}"
+    );
+    let paid = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(w.rail.all_executions().len(), 1);
+    assert_eq!(w.rail.all_pay_calls().values().sum::<u64>(), 1);
+}
+
+#[tokio::test]
+async fn test_fence_read_failure_with_the_failed_write_failing_waits_for_a_resume() {
+    // As above, but the write that would record the attempt failed can't reach the switch
+    // either: the attempt stays known unsubmitted and the switch's error is returned. A new
+    // payment is refused as in progress until a resume writes the attempt failed; then it
+    // pays once.
+    let w = World::new();
+    let (mut wallet, request, refused) = fence_unread(&w, true).await;
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::SwitchUnavailable(_))
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(
+        wallet.payments().await.unwrap().remove(0).stage,
+        paykit_sdk::Stage::Attempted
+    );
+    let again = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(
+            again.refusal(),
+            Some(paykit_sdk::Refusal::PaymentInProgress)
+        ),
+        "{again:?}"
+    );
+    wallet.resume_payments().await.unwrap();
+    let paid = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(w.rail.all_executions().len(), 1);
+    assert_eq!(w.rail.all_pay_calls().values().sum::<u64>(), 1);
+}
+
 #[tokio::test]
 async fn test_fence_holds_a_marked_one_time_request_before_the_first_method_call() {
     use paykit_lib::records::{ActivityRecord, ActivitySide};
@@ -2629,6 +2730,15 @@ async fn manual_deny_boundary(
     change: Option<fn(&mut paykit_sdk::BlockedPayment)>,
     boundary: DenyBoundary,
 ) -> (World, PayOutcome) {
+    let (w, outcome) = manual_deny_boundary_result(change, boundary).await;
+    (w, outcome.unwrap())
+}
+
+/// [`manual_deny_boundary`], with the call's result as it is.
+async fn manual_deny_boundary_result(
+    change: Option<fn(&mut paykit_sdk::BlockedPayment)>,
+    boundary: DenyBoundary,
+) -> (World, paykit_sdk::Result<PayOutcome>) {
     let w = World::new();
     let store = Arc::new(HookedStore::default());
     let scopes = paykit_sdk::AppScopes::new()
@@ -2701,7 +2811,7 @@ async fn manual_deny_boundary(
             });
         }
     }));
-    let outcome = wallet.pay_request(&request, options).await.outcome.unwrap();
+    let outcome = wallet.pay_request(&request, options).await.outcome;
     (w, outcome)
 }
 
@@ -2739,8 +2849,19 @@ async fn test_final_check_manual_dispatch_binds_every_confirmed_payment_field() 
 
 #[tokio::test]
 async fn test_final_check_manual_confirmation_cannot_replace_a_due_deny_read() {
-    let (w, outcome) = manual_deny_boundary(Some(|_| {}), DenyBoundary::Unavailable).await;
-    assert!(matches!(outcome, PayOutcome::Pending { .. }), "{outcome:?}");
+    // The deny list due again can't be read just before the call: the user's confirmation of
+    // the blocked payee doesn't stand in for it. The attempt is written failed with the read's
+    // failure as its cause, and nothing is paid.
+    let (w, outcome) = manual_deny_boundary_result(Some(|_| {}), DenyBoundary::Unavailable).await;
+    let refused = outcome.unwrap_err();
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::AttemptFailed(why))
+                if matches!(**why, paykit_sdk::Refusal::SwitchUnavailable(_))
+        ),
+        "{refused:?}"
+    );
     assert!(w.rail.all_executions().is_empty());
 }
 

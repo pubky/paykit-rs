@@ -3372,9 +3372,10 @@ impl Paykit {
         if matches!(kind, Dispatch::First { .. }) {
             self.set_stage(&mut entry, Stage::Paying).await?;
         }
-        match Box::pin(self.payment_fence(&entry, payee, by, confirmed, kind)).await? {
-            FinalCheck::Pay => {}
-            stopped => return self.stopped_before_the_call(entry, kind, stopped).await,
+        match Box::pin(self.payment_fence(&entry, payee, by, confirmed, kind)).await {
+            Ok(FinalCheck::Pay) => {}
+            Ok(stopped) => return self.stopped_before_the_call(entry, kind, stopped).await,
+            Err(error) => return self.unread_at_the_fence(entry, kind, error).await,
         }
         let outcome = self.rail.pay(payment).await;
         // The call was made and the payment may be running, its outcome not known yet: only
@@ -3429,6 +3430,42 @@ impl Paykit {
             (Dispatch::First { .. }, stopped) => self.stopped_at_the_fence(entry, stopped).await,
             (Dispatch::Repeat { .. }, FinalCheck::Hold) => Ok(PayOutcome::Pending { attempt_id }),
             (Dispatch::Repeat { .. }, _) => Ok(PayOutcome::Uncertain { attempt_id }),
+        }
+    }
+
+    /// A dispatch whose fence failed, before the payment method's call: a read of the switch,
+    /// the store or the client failed, so nothing shows whether the payment may go now. The
+    /// failure is the caller's to see, never a pending payment. A repeat's entry stays
+    /// `Paying`, as the dispatch before it may have paid, and the error is returned.
+    ///
+    /// A first dispatch submitted nothing: it is written back to `Attempted`, known
+    /// unsubmitted, then written `failed`, as a refusal at the fence writes it (Paykit spec
+    /// 7.2 step 1), so the refusal names the attempt failed with the error as its cause and
+    /// a new payment may be made at once. The failed write needs the switch too: when it
+    /// can't be made, the entry stays `Attempted` and the fence's error is returned; a
+    /// resume writes the attempt `failed` later, and until then a new payment of the same
+    /// obligation is refused as in progress.
+    async fn unread_at_the_fence(
+        &mut self,
+        mut entry: JournalEntry,
+        kind: Dispatch,
+        error: PaykitError,
+    ) -> Result<PayOutcome> {
+        if !matches!(kind, Dispatch::First { .. }) {
+            return Err(error);
+        }
+        self.set_stage(&mut entry, Stage::Attempted).await?;
+        let why = error.refusal().cloned().unwrap_or_else(|| {
+            Refusal::NotNow(format!(
+                "Paykit spec 7.2: the checks before the payment method's call failed: {error}"
+            ))
+        });
+        match self.fail_attempt(&mut entry, why).await {
+            Err(failed) if matches!(failed.refusal(), Some(Refusal::AttemptFailed(_))) => {
+                Err(failed)
+            }
+            // The failed write didn't go: the entry is `Attempted` still.
+            _ => Err(error),
         }
     }
 
@@ -4914,10 +4951,10 @@ impl Paykit {
     ) -> Result<FinalCheck> {
         let mut may_take_answer = matches!(kind, Dispatch::First { .. });
         loop {
-            if self.dispatch_held(entry, by, kind).await.unwrap_or(true)
-                || Box::pin(self.period_recovery_held(entry))
-                    .await
-                    .unwrap_or(true)
+            // A read that fails here is the caller's error, not a hold: the switch may answer
+            // the next try ([`Paykit::unread_at_the_fence`]).
+            if self.dispatch_held(entry, by, kind).await?
+                || Box::pin(self.period_recovery_held(entry)).await?
             {
                 return Ok(FinalCheck::Hold);
             }
