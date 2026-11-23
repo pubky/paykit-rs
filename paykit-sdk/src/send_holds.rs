@@ -189,15 +189,22 @@ pub(crate) fn may_deliver(delivery: &DeliveryView<'_>, kind: Kind) -> Result<boo
 
 /// Whether `delivery` is the first delivery, or a retry of it, of a message the
 /// counterparty hold governs that is past its window: 30 days past its `created_at`, less
-/// the clock tolerance, by the highest service time the app verified that its state holds,
-/// and by the device clock only while it holds none, so neither a slow device clock sends
-/// late nor a fast one ends a message early. Such a
-/// message is never sent, whatever its kind and its other rules (Paykit spec 8.1, "Messages
-/// already queued"). What still goes when first sent while sends are held keeps the
-/// client's own deadline instead, as the hold doesn't govern it: a payment's proof, a
+/// the clock tolerance, by the highest service time the app verified that its state holds
+/// (written before every delivery Paykit starts), and by the device clock only while it
+/// holds none, so neither a slow device clock sends late nor a fast one ends a message
+/// early. Such a message is never sent, whatever its kind and its other rules (Paykit spec
+/// 8.1, "Messages already queued"), a subscription acceptance the user confirmed while its
+/// payee was blocked included. What still goes when first sent while sends are held keeps
+/// the client's own deadline instead, as the hold doesn't govern it: a payment's proof, a
 /// receipt, a payee's cancellation, the acceptance of a dispatched payment, the user's
 /// `allowance_end`, a list's withdrawal and an own app's `executor_notice`. A re-send keeps
 /// the client's replay deadline from its first acceptance (Switch spec 11).
+///
+/// Not every window has this rule: the client judges one it queues again from signed
+/// plaintext (`App::queue_stored`), which ends a held answer released from its record
+/// ([`Paykit::queue_own_again`]), by the later of the device clock and the service time,
+/// as `window_now` mirrors. Under a fast device clock such an answer can be given up while
+/// a stop already queued still goes.
 pub(crate) fn held_past_window(delivery: &DeliveryView<'_>) -> Result<bool> {
     if delivery.resend() {
         return Ok(false);

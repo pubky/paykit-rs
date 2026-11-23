@@ -135,12 +135,25 @@ impl Paykit {
         msg_id: &str,
     ) -> std::result::Result<Option<Delivery>, AppError> {
         self.require_first_read()?;
+        self.service_time_for_delivery().await?;
         Box::pin(self.app.flush_message(msg_id)).await
     }
 
     pub(crate) async fn send_outbox(&mut self) -> std::result::Result<OutboxReport, AppError> {
         self.require_first_read()?;
+        self.service_time_for_delivery().await?;
         Box::pin(self.app.flush_outbox()).await
+    }
+
+    /// Keep the client's current highest verified service time where the delivery hook
+    /// judges a held message's window by it, before the client delivers (Paykit spec 8.1).
+    async fn service_time_for_delivery(&mut self) -> std::result::Result<(), AppError> {
+        Box::pin(self.note_service_time())
+            .await
+            .map_err(|error| match error {
+                crate::error::PaykitError::Client(error) => error,
+                _ => AppError::Store(pubky_switch_client::store::StoreError::Corrupt),
+            })
     }
 
     pub(crate) async fn submit(
