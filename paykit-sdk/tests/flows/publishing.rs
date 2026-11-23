@@ -3188,9 +3188,11 @@ async fn test_publication_keeps_a_confirmation_until_a_receive_sends_its_list() 
         "{refused:?}"
     );
     assert_eq!(w.record_writes(&w.bob, &key), 1);
+    assert_eq!(shop.lists_waiting_to_send_again().await.unwrap(), [payer]);
     shop.unblock(&payer).await.unwrap();
     shop.receive(None).await.unwrap();
     assert_eq!(w.record_writes(&w.bob, &key), 2);
+    assert!(shop.lists_waiting_to_send_again().await.unwrap().is_empty());
     shop.publish_list_to(payer).await.unwrap();
     buyer.receive(None).await.unwrap();
     assert!(pays(&w, &mut buyer).await);

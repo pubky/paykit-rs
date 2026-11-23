@@ -887,6 +887,24 @@ impl Paykit {
         self.refuse_unknown_list(&shown.recipient).await
     }
 
+    /// The counterparties whose list the user confirmed sending again
+    /// ([`Paykit::send_list_again`]) and which hasn't been sent yet: a later call or receive
+    /// sends it once it can. Empty once each is sent, or its earlier list was accepted,
+    /// superseded or can no longer be paid.
+    ///
+    /// # Errors
+    ///
+    /// A store failure.
+    pub async fn lists_waiting_to_send_again(&self) -> Result<Vec<[u8; 32]>> {
+        Ok(self
+            .local_scan::<ListReservation>(key::LIST_RESERVATIONS)
+            .await?
+            .into_iter()
+            .filter(|(_, issue)| issue.confirmed)
+            .map(|(_, issue)| issue.recipient)
+            .collect())
+    }
+
     pub(crate) async fn tend_private_lists(
         &mut self,
         report: Option<&ReceiveReport>,
