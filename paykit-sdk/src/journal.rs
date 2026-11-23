@@ -180,14 +180,19 @@ pub(crate) enum TransferBound {
         cap: Option<String>,
     },
     /// The selected transfer the user confirmed: its amount remains bound for every
-    /// dispatch, and its largest fee when the user chose one above the cap.
+    /// dispatch, and its largest fee when the confirmation binds it: one above the cap, or
+    /// any fee of a transfer whose amount the method couldn't tell, whose asset, and so the
+    /// cap of its fee, is unknown.
     Confirmed {
-        /// The cap at planning, for a transfer that is what the user asked for.
+        /// The cap of the asset transferred at planning; `None` for none, or for an asset
+        /// the method couldn't tell.
         cap: Option<String>,
         /// The amount confirmed; `None` for one the method couldn't tell.
         amount: Option<KeptAmount>,
-        /// The largest fee the user chose above the cap, as a decimal; `None` when the
-        /// confirmation binds no fee: none, one within the cap, or no cap.
+        /// The largest fee the confirmation binds, as a decimal. `None` when it binds no fee
+        /// (a known transfer's fee within its cap, or with no cap for its asset), and for a
+        /// transfer the method couldn't tell that was shown with no fee, which binds it to
+        /// none.
         max_fee: Option<String>,
     },
 }
