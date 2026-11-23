@@ -4662,6 +4662,60 @@ async fn test_blocked_return_in_place_restore_keeps_the_highest_floor_seen() {
     assert!(restored.request(&before).await.unwrap().manual_only);
 }
 
+#[tokio::test]
+async fn test_blocked_return_in_place_restore_holds_only_requests_dated_before_its_floor() {
+    // Paykit wire 5.6, Raising; spec 8.1: no counterparty was ever blocked. The wallet pays
+    // twice after its backup and is restored in place: the restore isn't clean, so its first
+    // read of the lists raises the floor to that read's time. A one-time request created within
+    // the clock tolerance after it opens `manual_only` by the floor, with no block mark; one
+    // created after the floor plus the tolerance opens without it.
+    let w = World::new();
+    let storage = store();
+    let mut wallet = contacts_wallet(&w, Arc::clone(&storage)).await;
+    let mut shop = w.shop().await;
+    let backup = wallet.backup().await.unwrap();
+    for amount in ["1", "2"] {
+        let request = request_from(&mut shop, w.alice_id(), draft(amount, w.clock.now_ms())).await;
+        wallet.receive(None).await.unwrap();
+        let outcome = wallet
+            .pay_request(&request, paykit_sdk::PayOptions::default())
+            .await
+            .outcome
+            .unwrap();
+        assert!(
+            matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
+            "{outcome:?}"
+        );
+    }
+    drop(wallet);
+    let mut restored = Box::pin(Paykit::restore(
+        w.env(&w.alice, storage),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    for _ in 0..2 {
+        restored.receive(None).await.unwrap();
+    }
+    let floor = shared_floor(&restored).await;
+    let inside = request_from(&mut shop, w.alice_id(), draft("3", w.clock.now_ms())).await;
+    restored.receive(None).await.unwrap();
+    assert_eq!(block_marks(&restored).await, 0);
+    assert!(restored.request(&inside).await.unwrap().manual_only);
+    let floor = floor.expect("the restore raised the floor");
+    w.clock.advance_ms(
+        (floor + pubky_switch_core::records::CLOCK_TOLERANCE_MS).saturating_sub(w.clock.now_ms())
+            + 1_000,
+    );
+    let after = request_from(&mut shop, w.alice_id(), draft("4", w.clock.now_ms())).await;
+    restored.receive(None).await.unwrap();
+    assert!(!restored.request(&after).await.unwrap().manual_only);
+    assert_eq!(block_marks(&restored).await, 0);
+}
+
 /// Whether `app` still owes a widening: a `missed` item's (`bw/`) or a restore's (`rh`).
 async fn widening_owed(app: &Paykit) -> bool {
     let missed = !app

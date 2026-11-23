@@ -81,6 +81,12 @@ async fn payment_after_restart(wallet: &Paykit, attempt_id: &AttemptId) -> Resul
 and any unavailable public endpoint apps. Keep an explicit conservative fallback
 for future variants in non-exhaustive enums.
 
+After a restore that isn't clean, the wallet raises the identity's block floor to
+the time of its first read of the deny list. A one-time request created before that
+time plus the 5-minute clock tolerance opens `manual_only`, whatever its sender,
+blocked before or not: it is paid only by hand. One created later opens without it,
+unless a higher floor or a hold covers it too.
+
 ## Publish a public endpoint
 
 An app with plain `paykit_request` and record publication enabled can use
