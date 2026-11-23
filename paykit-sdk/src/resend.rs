@@ -103,12 +103,14 @@ impl Paykit {
     /// counterparty can't be made to answer. Returns the request's `msg_id`. Nothing is queued
     /// while sends to `counterparty` are held: while the copy of the deny list holds it, or, at an
     /// app holding `paykit_contacts`, while that copy isn't known, which a read of the lists is
-    /// tried for first (Paykit spec 8.1, "Blocked counterparties").
+    /// tried for first (Paykit spec 8.1, "Blocked counterparties"), and while a floor raise this
+    /// app owes for its unblock isn't written (Paykit wire 5.6, Raising).
     ///
     /// # Errors
     ///
     /// [`crate::Refusal::ScopeMissing`] without `paykit_contacts`. Sends wait while the
-    /// recipient is blocked, the deny list is unknown, or a prior overlapping request
+    /// recipient is blocked, the deny list is unknown, a floor raise for its unblock is
+    /// owed, or a prior overlapping request
     /// has an unresolved delivery. An empty selection fails validation. Client errors
     /// from queuing and sending are returned to the caller.
     pub async fn request_resend(
@@ -120,6 +122,7 @@ impl Paykit {
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
         self.refuse_while_sends_held(&counterparty).await?;
+        self.refuse_while_raise_owed_to(&counterparty).await?;
         if !self
             .recovery_request_permitted(&counterparty, &selection.request(), None)
             .await?
@@ -228,6 +231,8 @@ impl Paykit {
                     QueuedAskState::Queued => {
                         let msg_id = queued.msg_id.clone();
                         self.local_delete(&ask_key).await?;
+                        // Held, the queued message waits at its delivery (`may_deliver_to_contact`,
+                        // `floor::delivery_raise_holds`).
                         if !self.asks_held(&ask.sender).await? {
                             self.send_message(&msg_id).await?;
                             sent = sent.saturating_add(1);

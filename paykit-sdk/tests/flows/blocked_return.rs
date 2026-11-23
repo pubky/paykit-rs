@@ -3823,6 +3823,90 @@ async fn test_blocked_return_owed_raise_asks_the_unblocked_sender_nothing() {
         .unwrap()
         .is_some());
     assert!(asked(&wallet, &w.bob_id()).await.is_empty());
+    let error = wallet
+        .request_resend(
+            w.bob_id(),
+            paykit_sdk::ResendSelection::default().with_accepted_from_ms(0),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error.refusal(), Some(paykit_sdk::Refusal::NotNow(_))),
+        "{error}"
+    );
+    assert!(asked(&wallet, &w.bob_id()).await.is_empty());
+}
+
+#[tokio::test]
+async fn test_blocked_return_owed_raise_holds_an_ask_already_queued() {
+    // An ask to bob queued before he was blocked again waits in the outbox. Under the floor's
+    // hold another app unblocks him and the wallet can't write the raise it owes: neither its
+    // receive nor a flush delivers that ask (Paykit wire 5.6, Raising).
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    dropped_for_the_block(&w, &mut wallet, &mut shop).await;
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    let before = asked(&wallet, &w.bob_id()).await.len();
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/inbox".into(),
+            after: 0,
+        });
+    let _ = wallet
+        .request_resend(
+            w.bob_id(),
+            paykit_sdk::ResendSelection::default().with_accepted_from_ms(0),
+        )
+        .await;
+    assert_eq!(asked(&wallet, &w.bob_id()).await.len(), before);
+    let mut contacts = w
+        .join_with(
+            &w.alice,
+            "contacts",
+            AppScopes::new().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            store(),
+        )
+        .await;
+    contacts.block(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    let mut phone = payer_app(&w, "phone").await;
+    phone
+        .app_mut()
+        .put_record(
+            &floor_record(&w),
+            &paykit_lib::records::BlockFloorRecord::new(w.clock.now_ms())
+                .to_json()
+                .unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    w.alice
+        .switch()
+        .make_divergent([0x5b; 16], floor_key(&w, &wallet), [2; 32])
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(floor_held_divergent(&wallet).await);
+    contacts.unblock(&w.bob_id()).await.unwrap();
+    for _ in 0..2 {
+        w.clock.advance_ms(11 * MINUTE_MS);
+        wallet.receive(None).await.unwrap();
+    }
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"bf")
+        .await
+        .unwrap()
+        .is_some());
+    wallet.flush().await.unwrap();
+    assert_eq!(asked(&wallet, &w.bob_id()).await.len(), before);
 }
 
 #[tokio::test]

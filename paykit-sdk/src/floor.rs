@@ -80,6 +80,27 @@ pub(crate) fn floor_target(own: &[u8; 32]) -> RecordTarget {
     )
 }
 
+/// Whether an ask to the delivery's recipient waits for a raise its sender owes for that
+/// recipient's unblock ([`Paykit::raise_holds_sender`]), rechecked when it is delivered (Paykit
+/// wire 5.6, Raising).
+pub(crate) fn delivery_raise_holds(
+    delivery: &pubky_switch_client::app::DeliveryView<'_>,
+) -> Result<bool> {
+    if !delivery.cert().scopes().iter().any(|s| s == "paykit_pay") {
+        return Ok(false);
+    }
+    Ok(
+        crate::state::delivery_get::<PendingUnblocks>(delivery, key::BLOCK_FLOOR)?.is_some_and(
+            |pending| {
+                pending
+                    .senders
+                    .binary_search(&delivery.message().to)
+                    .is_ok()
+            },
+        ),
+    )
+}
+
 /// What an app knows of the shared floor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SharedFloor {
@@ -380,6 +401,20 @@ impl Paykit {
                 .local_get::<PendingUnblocks>(key::BLOCK_FLOOR)
                 .await?
                 .is_some_and(|pending| pending.senders.binary_search(sender).is_ok()))
+    }
+
+    /// Refuse an ask to `sender` while a raise this app owes for its unblock isn't written: it is
+    /// asked nothing until then (Paykit wire 5.6, Raising).
+    pub(crate) async fn refuse_while_raise_owed_to(&self, sender: &[u8; 32]) -> Result<()> {
+        if self.raise_holds_sender(sender).await? {
+            return Err(Refusal::NotNow(
+                "Paykit wire 5.6: the counterparty is asked nothing until the floor raise for its \
+                 unblock is written"
+                    .into(),
+            )
+            .into());
+        }
+        Ok(())
     }
 
     /// Whether the app owes a raise it can write now, while the floor isn't held divergent.

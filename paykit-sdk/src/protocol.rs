@@ -1536,7 +1536,9 @@ impl Protocol for PaykitProtocol {
                 crate::allowances::may_deliver_end(delivery).map_err(view_failure)
             }
             Ok(MessageKind::Paykit(Kind::ResendRequest)) => {
-                if !may_deliver_to_contact(delivery).map_err(view_failure)? {
+                if !may_deliver_to_contact(delivery).map_err(view_failure)?
+                    || crate::floor::delivery_raise_holds(delivery).map_err(view_failure)?
+                {
                     return Ok(false);
                 }
                 crate::reply_asks::may_deliver_request(delivery).map_err(view_failure)
