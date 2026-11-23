@@ -2410,6 +2410,12 @@ fn hold_list(
     target: &pubky_switch_client::app::RecordTarget,
     stored: &StoredMessage,
 ) -> Result<(), Fail> {
+    // Kept apart from the list, and first: only a record seen lost keeps a later absence
+    // from ending the hold, not a first write that was refused.
+    let lost = key::list_record_lost(&cx.record_key(target)?);
+    if state::cx_get::<bool>(cx, &lost)?.is_none() {
+        keep_local(cx, local(&lost, &true)?);
+    }
     let kept = key::held_list(&cx.record_key(target)?);
     if let Some(held) = state::cx_get::<KeptMessage>(cx, &kept)? {
         let held = held.stored(&cx.identity()).map_err(|_| Fail::corrupt())?;
@@ -2418,10 +2424,6 @@ fn hold_list(
         }
     }
     keep_local(cx, local(&kept, &KeptMessage::of(stored))?);
-    // Kept apart from the list: only a record seen lost keeps a later absence from ending
-    // the hold, not a first write that was refused.
-    let lost = key::list_record_lost(&cx.record_key(target)?);
-    keep_local(cx, local(&lost, &true)?);
     Ok(())
 }
 
@@ -2749,13 +2751,14 @@ impl Paykit {
     }
 
     /// Place the held lists once their record reads (Paykit wire 5.4): the record's update,
-    /// built on the version held with its marks kept, and the notice's delete, in one batch.
-    /// A record that still doesn't read, or is still deleted, keeps its list held, as does
-    /// one absent while the payer's side isn't listed yet, or absent after this app saw it
-    /// deleted or unreadable (`lgone/`). A list held because its first write was refused is
-    /// written onto the absent key. A list no newer than the record's is dropped. A placement that fails now is tried again at the
-    /// next receive, with no bound in time: one held list per payee app, replaced by a
-    /// newer one, and one write of it per receive.
+    /// built on the version held with its marks kept, and, at a later pass once the record
+    /// holds the list, the hold's delete in a commit of its own. A record that still doesn't
+    /// read, or is still deleted, keeps its list held, as does one absent while the payer's
+    /// side isn't listed yet, or absent after this app saw it deleted or unreadable
+    /// (`lgone/`, never cleared). A list held because its first write was refused is written
+    /// onto the absent key. A list no newer than the record's is dropped. A placement that
+    /// fails now is tried again at the next receive, with no bound in time: one held list
+    /// per payee app, replaced by a newer one, and one write of it per receive.
     pub(crate) async fn place_held_lists(&mut self) -> crate::error::Result<()> {
         for (rest, kept) in self.local_scan::<KeptMessage>(key::HELD_LISTS).await? {
             // One that can't be placed now stays held, for the next receive; the others are
@@ -2817,10 +2820,9 @@ impl Paykit {
                 return self.note_list_record_lost(&record_key).await
             }
         };
-        let mut tx = Tx::default();
-        tx.delete(&key::held_list(&record_key))
-            .delete(&key::list_record_lost(&record_key));
         match next_list_record(held, &list) {
+            // The write carries no local write: a batch that settles late could otherwise
+            // drop a newer hold. The hold goes at a later pass, once the record holds the list.
             Some(record) => {
                 let value = record.to_json()?;
                 let op = self
@@ -2829,11 +2831,14 @@ impl Paykit {
                     .await?;
                 let batch =
                     pubky_switch_client::app::OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
-                        .entry(op)
-                        .locals(tx.into_writes());
+                        .entry(op);
                 let _ = self.submit(batch).await;
             }
-            None => self.local_commit(tx).await?,
+            None => {
+                let mut tx = Tx::default();
+                tx.delete(&key::held_list(&record_key));
+                self.local_commit(tx).await?
+            }
         }
         Ok(())
     }
