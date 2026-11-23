@@ -4074,6 +4074,13 @@ async fn test_restore_older_in_place_keeps_a_kept_payee_cancellation() {
     )
     .await
     .unwrap();
+    // Before any read: the installation's kept cancellation stands.
+    assert!(app
+        .app()
+        .protocol_get("paykit", &key)
+        .await
+        .unwrap()
+        .is_some());
     app.receive(None).await.unwrap();
     app.reconcile().await.unwrap();
     app.end_reconcile(UserConfirmed::new()).await.unwrap();

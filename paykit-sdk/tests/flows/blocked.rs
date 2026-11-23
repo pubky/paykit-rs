@@ -3326,13 +3326,13 @@ async fn received_on(
     (wallet, shop, request)
 }
 
-/// `backup` restored in place over the installation on `storage`, reconciled.
+/// `backup` restored in place over the installation on `storage`.
 async fn restored_in_place(
     w: &World,
     storage: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
     backup: &paykit_sdk::PaykitBackup,
 ) -> Paykit {
-    let mut wallet = Paykit::restore(
+    Paykit::restore(
         w.env(&w.alice, storage),
         PaykitConfig::default(),
         backup,
@@ -3340,14 +3340,7 @@ async fn restored_in_place(
         w.timer(),
     )
     .await
-    .unwrap();
-    wallet.receive(None).await.unwrap();
-    wallet.reconcile().await.unwrap();
-    wallet
-        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
-        .await
-        .unwrap();
-    wallet
+    .unwrap()
 }
 
 #[tokio::test]
@@ -3365,7 +3358,22 @@ async fn test_blocked_own_block_after_the_backup_survives_an_older_in_place_rest
     wallet.block(&w.bob_id()).await.unwrap();
     drop(wallet);
     let mut wallet = restored_in_place(&w, storage, &backup).await;
+    // Before any read: the installation's block of bob stands.
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"bk/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     wallet.receive(None).await.unwrap();
+    wallet.reconcile().await.unwrap();
+    wallet
+        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
     let lists = wallet.app_mut().allow_list().await.unwrap();
     assert!(lists.deny.contains(&w.bob_id()));
     let refused = wallet
