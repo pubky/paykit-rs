@@ -2612,10 +2612,18 @@ async fn confirm_foreign_failure(case: ForeignFailure) {
     ))
     .await;
     // A larger request, sent now while the shop's certificate holds, paid only later.
+    let lasting = |value: &str| {
+        draft(value, world.clock.now_ms())
+            .with_proposal_expires_at_ms(world.clock.now_ms() + 3_650 * 24 * HOUR_MS)
+    };
     let larger = if case != ForeignFailure::LostRelease {
-        let lasting = draft("95", world.clock.now_ms())
-            .with_proposal_expires_at_ms(world.clock.now_ms() + 3_650 * 24 * HOUR_MS);
-        Some(Box::pin(request_from(&mut shop, payer.identity(), lasting)).await)
+        Some(Box::pin(request_from(&mut shop, payer.identity(), lasting("95"))).await)
+    } else {
+        None
+    };
+    // One that couldn't fit even with the failed attempt released.
+    let too_large = if case == ForeignFailure::BeforeDispatch {
+        Some(Box::pin(request_from(&mut shop, payer.identity(), lasting("105"))).await)
     } else {
         None
     };
@@ -2731,6 +2739,19 @@ async fn confirm_foreign_failure(case: ForeignFailure) {
             paykit_sdk::Refusal::NotAutomatic("the lifetime limit has no room".into())
         };
         assert_eq!(waits.refusal(), Some(&expected), "{waits:?}");
+        if let Some(too_large) = too_large.as_ref() {
+            let refused = Box::pin(payer.pay_under_allowance(too_large, &key))
+                .await
+                .outcome
+                .unwrap_err();
+            assert_eq!(
+                refused.refusal(),
+                Some(&paykit_sdk::Refusal::NotAutomatic(
+                    "the lifetime limit has no room".into()
+                )),
+                "{refused:?}"
+            );
+        }
     }
     let before_release = if case == ForeignFailure::BeforeDispatch {
         Some(Box::pin(payer.backup()).await.unwrap())

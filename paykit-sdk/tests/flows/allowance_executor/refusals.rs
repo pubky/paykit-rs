@@ -1175,13 +1175,104 @@ async fn test_allowance_refusals_confirmation_for_an_older_hold_asks_again() {
     assert!(payer.allowance(&key).await.unwrap().consented);
 }
 
+/// A store that, once armed, sets a new hold (`he`) in the commit that lands a kept first
+/// grant, as a restore verdict or a `missed` item read with it would.
+#[derive(Default)]
+struct HoldOnLanding {
+    inner: pubky_switch_client::store::MemoryStore,
+    armed: std::sync::atomic::AtomicBool,
+}
+
+impl HoldOnLanding {
+    fn with_hold(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> pubky_switch_client::store::WriteBatch {
+        use pubky_switch_client::store::{Write, WriteBatch};
+        let landing = batch.writes().iter().find_map(|write| match write {
+            Write::Delete { ns, key } if key.starts_with(b"p/paykit/gb/") => Some(ns.clone()),
+            _ => None,
+        });
+        let Some(ns) =
+            landing.filter(|_| self.armed.swap(false, std::sync::atomic::Ordering::SeqCst))
+        else {
+            return batch;
+        };
+        let mut out = WriteBatch::new();
+        for write in batch.into_writes() {
+            match write {
+                Write::Put { ns, key, value } => out.put(&ns, key, value).unwrap(),
+                Write::Delete { ns, key } => out.delete(&ns, key).unwrap(),
+                Write::DeletePrefix { ns, prefix } => out.delete_prefix(&ns, prefix).unwrap(),
+            };
+        }
+        let epoch = pubky_switch_core::enc::b64(&[0x5a; 16]);
+        out.put(
+            &ns,
+            b"p/paykit/he".to_vec(),
+            format!(r#"{{"v":1,"d":"{epoch}"}}"#),
+        )
+        .unwrap();
+        out
+    }
+}
+
+impl pubky_switch_client::store::StateStore for HoldOnLanding {
+    fn get(
+        &self,
+        ns: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+        self.inner.get(ns, key)
+    }
+
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    {
+        self.inner.scan(ns, prefix, after, limit)
+    }
+
+    fn commit(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        self.inner.commit(self.with_hold(batch))
+    }
+
+    fn acquire(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.inner.acquire(ns, owner)
+    }
+
+    fn commit_if(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.inner.commit_if(ns, owner, self.with_hold(batch))
+    }
+}
+
 #[tokio::test]
 async fn test_allowance_refusals_hold_set_while_landing_the_grant_asks_again() {
-    // The confirmed first grant's batch is kept; the read that lands it also takes a
-    // `missed` item. The same call consents nothing: the hold it was confirmed for isn't
-    // the one in force now.
+    // The confirmed first grant's batch is kept; the read that lands it also sets a new
+    // hold. The same call consents nothing: the hold it was confirmed for isn't the one in
+    // force now, and it asks again with the new one.
     use pubky_switch_client::testing::Fault;
-    let (w, mut payer, _shop, key) = Box::pin(super::accepted_not_granted(store())).await;
+    let disk = Arc::new(HoldOnLanding::default());
+    let (w, mut payer, _shop, key) =
+        Box::pin(super::accepted_not_granted(Arc::clone(&disk) as Arc<_>)).await;
     let shown = payer.allowance(&key).await.unwrap().hold;
     w.alice.switch().fail_next(Fault::Unanswered {
         path: "/ops".into(),
@@ -1190,24 +1281,18 @@ async fn test_allowance_refusals_hold_set_while_landing_the_grant_asks_again() {
     Box::pin(payer.confirm_allowance_executor(&shown, UserConfirmed::new()))
         .await
         .expect_err("the grant's batch is unanswered");
-    w.clock.advance_ms(1_000);
-    let now = w.clock.now_ms();
-    w.alice.switch().push_missed(1, now - 1_000, now);
+    disk.armed.store(true, std::sync::atomic::Ordering::SeqCst);
     let refused =
         refusal_of(Box::pin(payer.confirm_allowance_executor(&shown, UserConfirmed::new())).await);
     assert!(
-        matches!(&refused, Refusal::AllowanceConfirmationNeeded { hold } if *hold != shown)
-            || matches!(&refused, Refusal::NotNow(_)),
+        matches!(&refused, Refusal::AllowanceConfirmationNeeded { hold } if *hold != shown),
         "{refused:?}"
     );
-    Box::pin(crate::common::finish_listing(&mut payer)).await;
-    let view = payer.allowance(&key).await.unwrap();
-    assert!(!view.consented && view.confirmation_needed, "{view:?}");
-    assert_ne!(view.hold, shown);
-    Box::pin(payer.confirm_allowance_executor(&view.hold, UserConfirmed::new()))
-        .await
-        .unwrap();
-    assert!(payer.allowance(&key).await.unwrap().consented);
+    assert!(
+        !disk.armed.load(std::sync::atomic::Ordering::SeqCst),
+        "the grant landed"
+    );
+    assert!(!payer.allowance(&key).await.unwrap().consented);
 }
 
 #[tokio::test]

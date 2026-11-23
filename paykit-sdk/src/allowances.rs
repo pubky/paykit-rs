@@ -160,7 +160,10 @@ pub struct AllowanceView {
     /// request's own state, such as a request held after the same restore.
     pub confirmation_needed: bool,
     /// The Allowance with the hold in force when this view was read: the user's
-    /// confirmation is given for it ([`Paykit::confirm_allowance_executor`]).
+    /// confirmation is given for it ([`Paykit::confirm_allowance_executor`]). Every view
+    /// carries one, unlike [`crate::RequestView::held`]: the user's first take-up of an
+    /// Allowance is confirmed under it too, with `confirmation_needed` false. Where
+    /// `confirmation_needed` is true, the host shows the Allowance before passing it back.
     pub hold: crate::AllowanceHold,
     /// Whether the Allowance's grant, or its proposal before a grant, is of a generation a
     /// provider loss ended (Paykit spec 8.3, "After provider loss").

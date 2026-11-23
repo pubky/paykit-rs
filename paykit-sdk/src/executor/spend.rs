@@ -381,11 +381,27 @@ impl AllowanceReservation {
             // The per-payment range never makes room for this payment, nor the lifetime limit
             // once nothing is reserved; a reservation's release, a later period and a repair
             // of usage of other terms do.
+            // Releasing every releasable attempt would make room for this payment.
+            let release_fits = || {
+                let Some(cap) = &checked.terms.lifetime_amount_limit else {
+                    return false;
+                };
+                checked.facts.releasable().is_some_and(|freed| {
+                    checked
+                        .usage
+                        .lifetime()
+                        .scaled()
+                        .saturating_sub(freed)
+                        .checked_add(amount.value.scaled())
+                        .is_some_and(|sum| sum <= cap.scaled())
+                })
+            };
             match limit {
                 LimitKind::PerPayment => not_automatic(&why),
                 // Room another app's failed attempt holds comes back once the user releases
-                // it, and room a reserved entry holds once it is released.
-                LimitKind::Lifetime if checked.facts.releasable() => held(
+                // it, when that makes room for this payment, and room a reserved entry holds
+                // once it is released.
+                LimitKind::Lifetime if release_fits() => held(
                     "the lifetime limit has no room while another app's failed attempt holds it: the user can release that attempt (reserved_by_other_apps)",
                 ),
                 LimitKind::Lifetime if checked.usage.reserved() == 0 => not_automatic(&why),

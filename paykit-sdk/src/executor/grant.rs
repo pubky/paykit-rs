@@ -349,16 +349,20 @@ impl Paykit {
         // `promote_consent`, at once, once the grant applied.
         // Kept to send again, the batch leaves its ID at `gb/`, which it deletes when it
         // applies: a resume lands it first and never builds a second grant over it.
+        // The user's approval goes with the batch, keyed by the hold it was given under: a
+        // batch refused leaves none, and one kept lands it with the grant.
         let marker = key::grant_batch(record).into_bytes();
-        let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
+        let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
             .entry(op)
             .local(state::local_put(&key, &ExecutorHistory(vec![checkpoint]))?)
             .keep_id_at(marker.clone())
             .local(LocalWrite::Delete { key: marker });
         if confirmed.is_some() {
             let hold = self.current_hold().await?;
-            self.local_put(&key::execution_approval(record, hold.as_ref()), &true)
-                .await?;
+            batch = batch.local(state::local_put(
+                &key::execution_approval(record, hold.as_ref()),
+                &true,
+            )?);
         }
         self.app.submit_batch(batch).await?;
         let applied = self
