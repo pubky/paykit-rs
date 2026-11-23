@@ -1384,6 +1384,26 @@ async fn answered_during_paying(
 }
 
 #[tokio::test]
+async fn test_fence_seller_switch_failing_during_paying_pays_the_unchanged_document() {
+    // The seller's switch can't be read when the lookup that the final payment check left
+    // running ends, during the commit that journals `Paying`: the Homeserver still serves
+    // the document the payment was checked against, so nothing changed, and the payment of
+    // the signed request goes ahead as it would have one check earlier (Paykit spec 7.2).
+    let w = World::new();
+    let (_, _, request, mut wallet) = answered_during_paying(&w, |w| {
+        w.router.remove(BOB_ORIGIN);
+    })
+    .await;
+    w.rail.next(Behaviour::InTransaction([17; 32]));
+    let paid = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+}
+
+#[tokio::test]
 async fn test_fence_unchanged_seller_during_paying_completes_the_original_attempt() {
     use paykit_sdk::rail::{Rail, RailOutcome, FAKE_LONGEST_COMPLETION_MS};
 
