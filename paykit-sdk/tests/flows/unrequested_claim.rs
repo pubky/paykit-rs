@@ -539,3 +539,49 @@ async fn test_unrequested_claim_offline_public_payment_never_takes_the_unblinded
     assert_eq!(planted.attempts[0].outcome, Outcome::Open);
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
+
+async fn journal_on_the_unblinded_claim_refused(mode: Mode) {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = shop_for(&w, mode, &mut wallet).await;
+    let paid = wallet.pay_without_request(to_bob(&w, mode)).await.outcome;
+    let Ok(PayOutcome::Paid { attempt_id, .. }) = paid else {
+        panic!("{paid:?}");
+    };
+    let good: serde_json::Value =
+        serde_json::from_slice(&wallet.backup().await.unwrap().to_bytes().unwrap()).unwrap();
+    let mut state = crate::restore::layer_of(&good);
+    let journal = state
+        .iter()
+        .position(|(k, _)| k.starts_with(b"j/"))
+        .expect("the payment is journaled");
+    assert_eq!(
+        state[journal].1["d"]["obligation"],
+        serde_json::Value::String(pubky_switch_core::enc::b64(&claim_key(
+            &wallet,
+            &attempt_id
+        )))
+    );
+    // An entry on the attempt's unblinded derivation, as an earlier build wrote it, is a
+    // corrupt store: refused, not taken or migrated (Paykit wire 1.5).
+    state[journal].1["d"]["obligation"] =
+        serde_json::Value::String(pubky_switch_core::enc::b64(&unblinded(&attempt_id)));
+    let target = store();
+    crate::restore::refused_restore(
+        &w,
+        crate::restore::with_layer(&good, state),
+        Arc::clone(&target),
+    )
+    .await;
+    crate::restore::nothing_restored(&w, target, wallet.app_id()).await;
+}
+
+#[tokio::test]
+async fn test_unrequested_claim_journal_of_a_list_payment_on_the_unblinded_claim_refused() {
+    journal_on_the_unblinded_claim_refused(Mode::List).await;
+}
+
+#[tokio::test]
+async fn test_unrequested_claim_journal_of_a_public_payment_on_the_unblinded_claim_refused() {
+    journal_on_the_unblinded_claim_refused(Mode::Public).await;
+}

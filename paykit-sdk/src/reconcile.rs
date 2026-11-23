@@ -790,7 +790,7 @@ impl Paykit {
                 entry.end_before_the_call();
             }
             entry.stage = Stage::Finished;
-            batch = batch.local(crate::pay::journal_write(entry)?);
+            batch = batch.local(self.journal_write(entry)?);
         }
         let applied = self.submit(batch).await?;
         if let Some(own) = entry

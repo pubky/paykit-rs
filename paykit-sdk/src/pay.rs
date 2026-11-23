@@ -1021,16 +1021,17 @@ pub(crate) struct ListAsk {
     pub(crate) asked_at_ms: u64,
 }
 
-/// The local write that journals `entry` in a batch. The entry is checked first
-/// ([`JournalEntry::check`]), the shape every read back checks before binding it to its key
-/// (`state::Stored`), so no path persists a state recovery would refuse: one that fails is a
-/// bug, refused as a corrupt store, with nothing written.
-pub(crate) fn journal_write(entry: &JournalEntry) -> Result<LocalWrite> {
-    entry.check()?;
-    state::local_put(&key::journal(&entry.attempt()?), entry)
-}
-
 impl Paykit {
+    /// The local write that journals `entry` in a batch. The entry is checked first, its
+    /// claim key bound to what it pays as every read back binds it
+    /// ([`JournalEntry::check_bound`], `state::Stored`), so no path persists a state
+    /// recovery would refuse: one that fails is a bug, refused as a corrupt store, with
+    /// nothing written.
+    pub(crate) fn journal_write(&self, entry: &JournalEntry) -> Result<LocalWrite> {
+        entry.check_bound(|input| self.app.blind(input))?;
+        state::local_put(&key::journal(&entry.attempt()?), entry)
+    }
+
     /// Pay a one-time request by hand (Paykit spec 7.2, 8.1 step 3).
     ///
     /// # Errors
@@ -1721,8 +1722,9 @@ impl Paykit {
     }
 
     /// The journal entry of `attempt`, read back checked and bound to its key: of that
-    /// attempt, its claim key the one its payee and request blind to, its record the one its
-    /// request or attempt names (`state::Stored`).
+    /// attempt, its claim key the one its payee and request, or its attempt for a payment
+    /// without a request, blind to, its record the one its request or attempt names
+    /// (`state::Stored`).
     ///
     /// # Errors
     ///
@@ -1746,10 +1748,10 @@ impl Paykit {
         JournalEntry::on_claim(self.journal_entry(attempt).await?, obligation)
     }
 
-    /// Journal `entry`, checked first as [`journal_write`] does: only a state a resume and a
-    /// restore read back is persisted.
+    /// Journal `entry`, checked first as [`Paykit::journal_write`] does: only a state a
+    /// resume and a restore read back is persisted.
     async fn save(&mut self, entry: &JournalEntry) -> Result<()> {
-        entry.check()?;
+        entry.check_bound(|input| self.app.blind(input))?;
         self.local_put(&key::journal(&entry.attempt()?), entry)
             .await
     }
@@ -2917,7 +2919,7 @@ impl Paykit {
         // The journal moves to `Attempted` with the batch's answer, never before.
         let mut attempted = entry.clone();
         attempted.stage = Stage::Attempted;
-        batch = batch.local(journal_write(&attempted)?);
+        batch = batch.local(self.journal_write(&attempted)?);
         if Box::pin(self.period_recovery_held(&entry)).await? {
             return Err(Refusal::NotNow(crate::loss::LOSS_DOUBT.into()).into());
         }
@@ -3310,7 +3312,7 @@ impl Paykit {
             Some(write) => {
                 let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
                     .entry(write)
-                    .local(journal_write(&finished)?);
+                    .local(self.journal_write(&finished)?);
                 match self.submit(batch).await {
                     Ok(_) => {}
                     Err(error) if error.code() == Some(ErrorCode::Conflict) => {
@@ -3687,7 +3689,7 @@ impl Paykit {
             };
             finished.record_held = false;
             finished.proof_msg_id = proof.as_ref().map(|p| p.msg_id().to_owned());
-            batch = batch.local(journal_write(&finished)?);
+            batch = batch.local(self.journal_write(&finished)?);
             if batch.is_empty() {
                 if let Some(PaidProof::New(proof)) = proof {
                     self.app.queue_signed(*proof).await?;

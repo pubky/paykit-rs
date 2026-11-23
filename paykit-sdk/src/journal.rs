@@ -660,8 +660,8 @@ impl JournalEntry {
     ///   read; the destination's members read and agree;
     /// - a payment of a request has its payment reference, and its record's natural key is
     ///   the request's, or, for a Billing Period, the period's, which owes no acceptance; a
-    ///   payment without a request has neither, nor a period, owes no acceptance, and its
-    ///   claim key is the attempt's;
+    ///   payment without a request has neither, nor a period, and owes no acceptance (its
+    ///   claim key, blinded, is checked by [`JournalEntry::check_bound`]);
     /// - an acceptance is kept with its plaintext, which reads, and only when owed;
     /// - the method's proof is kept from `RailPaid` on, and before any payment time or
     ///   proof message; a `Finished` entry marked failed by the method holds no proof;
