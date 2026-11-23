@@ -3201,8 +3201,12 @@ impl Paykit {
         }
         let now = self.now();
         let last = self.local_get::<u64>(key::LISTS_READ).await?;
-        // A raise owed that can be written goes at the next receive, whatever the copy's age.
-        if last.is_some_and(|read| lists_read_is_fresh(read, now)) && !self.raise_owed().await? {
+        // A raise owed that can be written goes at the next receive, whatever the copy's age,
+        // with one read of the lists in a pass.
+        if last.is_some_and(|read| lists_read_is_fresh(read, now))
+            && !self.raise_owed().await?
+            && !Box::pin(self.missed_widening_unread()).await?
+        {
             return Ok(());
         }
         if self.floor_write_is_kept().await? {
@@ -3288,6 +3292,7 @@ impl Paykit {
         lists: pubky_switch_client::client::answers::AllowList,
         read_at: u64,
     ) -> crate::error::Result<Vec<[u8; 32]>> {
+        self.lists_read_this_pass = true;
         let (mut deny, mut tx) = self.judged_deny(lists.deny).await?;
         deny.sort_unstable();
         deny.dedup();
@@ -3341,10 +3346,11 @@ impl Paykit {
             match Box::pin(self.commit_with_floor(pending.to_ms, tx)).await {
                 Ok(()) => {}
                 // A raise that can't be written, for now or while the divergence hold stands,
-                // leaves the unblock's senders held (`bf`) and is tried again at the next
-                // read; it never leaves the lists unread, which would hold every payment,
-                // intake and send (Paykit spec 8.1; Paykit wire 5.6).
-                Err(error) if crate::floor::is_raise_unwritten(&error) => {}
+                // or that still conflicts after its retry, leaves the unblock's senders held
+                // (`bf`) and is tried again at the next read; it never leaves the lists unread,
+                // which would hold every payment, intake and send (Paykit spec 8.1; Paykit
+                // wire 5.6).
+                Err(error) if crate::floor::is_raise_left_owed(&error) => {}
                 Err(error) => return Err(error),
             }
             self.local_put(key::LISTS_READ, &read_at).await?;
