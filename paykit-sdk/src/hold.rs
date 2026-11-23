@@ -1187,7 +1187,7 @@ impl Paykit {
                         label.as_ref(),
                         &record_held.key,
                         |t| self.app.record_key(t).ok(),
-                        &|p| self.rail.settlement_id(p),
+                        &|endpoint, proof| self.rail.settlement_id(endpoint, proof),
                     )
                 });
                 // A record that doesn't open, read or bind shows nothing to send now: the
