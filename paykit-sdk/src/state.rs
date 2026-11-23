@@ -727,8 +727,10 @@ struct LostCopy {
     /// Its list's version.
     generation: u64,
     counter: u64,
-    /// Its list's message hash.
-    hash: [u8; 32],
+    /// Its list's message hash; `None` once two lists were seen at that version, as a
+    /// restore can merge: then only a newer version is taken.
+    #[serde(deserialize_with = "Option::deserialize")]
+    hash: Option<[u8; 32]>,
 }
 
 /// A single-use endpoint used, as a [`LostListRecord`] keeps it (Paykit wire 5.4 `used`).
@@ -772,7 +774,7 @@ impl LostCopy {
             marks: marks_of(record),
             generation: version.generation(),
             counter: version.counter(),
-            hash: record.list.hash(),
+            hash: Some(record.list.hash()),
         })
     }
 
@@ -780,17 +782,19 @@ impl LostCopy {
         (self.generation, self.counter)
     }
 
-    /// Both copies' marks, and the newer list; of two lists at one version, the one with
-    /// the greater hash, so a write of either is held to it.
+    /// Both copies' marks, and the newer list; of two lists at one version, neither: an
+    /// equivocation, so only a newer version is taken after it (Paykit wire 4.13).
     fn merge(self, other: Self) -> Self {
+        let (generation, counter) = std::cmp::max(self.version(), other.version());
+        let hash = match self.version().cmp(&other.version()) {
+            std::cmp::Ordering::Greater => self.hash,
+            std::cmp::Ordering::Less => other.hash,
+            std::cmp::Ordering::Equal => self.hash.filter(|_| self.hash == other.hash),
+        };
         let mut marks = self.marks;
         marks.extend(other.marks);
         marks.sort();
         marks.dedup();
-        let (generation, counter, hash) = std::cmp::max(
-            (self.generation, self.counter, self.hash),
-            (other.generation, other.counter, other.hash),
-        );
         Self {
             marks,
             generation,
@@ -805,7 +809,9 @@ impl LostCopy {
             return false;
         };
         let newer = later.version() > self.version()
-            || (later.version() == self.version() && later.hash == self.hash);
+            || (later.version() == self.version()
+                && self.hash.is_some()
+                && later.hash == self.hash);
         newer
             && self
                 .marks
@@ -869,15 +875,20 @@ impl LostListRecord {
 
 impl sealed::Sealed for LostListRecord {}
 
-/// Its copy's marks are valid, in ascending order and each once, as every writer keeps
-/// them, and its list version is one.
+/// Its delete's version is one a delete has, a write's after `{0, 0}` (Switch wire 1.7,
+/// 6.3); its copy's marks are valid, in ascending order and each once, as every writer
+/// keeps them, and its list version is one.
 impl Stored for LostListRecord {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
-        let valid = self.copy.as_ref().is_none_or(|copy| {
-            paykit_lib::ListVersion::new(copy.generation, copy.counter).is_ok()
-                && copy.marks.iter().all(LostMark::valid)
-                && copy.marks.windows(2).all(|pair| pair[0] < pair[1])
-        });
+        const MAX_INT: u64 = (1 << 53) - 1;
+        let [generation, seq] = self.deleted;
+        let deleted = (1..=MAX_INT).contains(&seq) && generation <= MAX_INT;
+        let valid = deleted
+            && self.copy.as_ref().is_none_or(|copy| {
+                paykit_lib::ListVersion::new(copy.generation, copy.counter).is_ok()
+                    && copy.marks.iter().all(LostMark::valid)
+                    && copy.marks.windows(2).all(|pair| pair[0] < pair[1])
+            });
         match family {
             StateKey::ListRecordLost(_) if valid => Ok(()),
             _ => corrupt(),
@@ -3571,6 +3582,19 @@ mod tests {
             &at,
             lost(copy(serde_json::json!([]), 0))
         ));
+        // A tie at the list's version keeps no hash.
+        let mut tie = copy(serde_json::json!([]), 2);
+        tie["hash"] = serde_json::Value::Null;
+        assert!(reads::<LostListRecord>(&at, lost(tie)));
+        // A delete's version is a write's: never `{0, 0}`, a version 0 or past the integers.
+        for deleted in [
+            serde_json::json!([0, 0]),
+            serde_json::json!([1, 0]),
+            serde_json::json!([1, 9_007_199_254_740_992u64]),
+        ] {
+            let at_version = serde_json::json!({ "deleted": deleted, "copy": null });
+            assert!(!reads::<LostListRecord>(&at, at_version));
+        }
         // Every member is written, and a bare mark is no value of this family.
         assert!(!reads::<LostListRecord>(
             &at,
@@ -3599,7 +3623,7 @@ mod tests {
             marks,
             generation: 1,
             counter,
-            hash: [hash; 32],
+            hash: Some([hash; 32]),
         };
         let lost = |deleted: u64, copy: Option<LostCopy>| LostListRecord {
             deleted: [1, deleted],
@@ -3612,11 +3636,23 @@ mod tests {
         assert_eq!(one.clone().merge(two.clone()), merged);
         assert_eq!(two.clone().merge(one.clone()), merged);
         assert_eq!(one.clone().merge(lost(2, None)), lost(4, None));
-        // Two lists at one version: the one with the greater hash, whichever side holds it.
+        // Two lists at one version: neither, whichever side holds which; the same list
+        // twice stays itself.
         let low = lost(4, Some(copy(2, 1, vec![mark(1)])));
         let high = lost(4, Some(copy(2, 9, vec![mark(1)])));
-        assert_eq!(low.clone().merge(high.clone()), high);
-        assert_eq!(high.clone().merge(low), high);
+        let neither = LostListRecord {
+            deleted: [1, 4],
+            copy: Some(LostCopy {
+                hash: None,
+                ..copy(2, 1, vec![mark(1)])
+            }),
+        };
+        assert_eq!(low.clone().merge(high.clone()), neither);
+        assert_eq!(high.clone().merge(low.clone()), neither);
+        assert_eq!(low.clone().merge(low.clone()), low);
+        // A newer list after the tie is the newer one's.
+        let newer = lost(5, Some(copy(3, 4, vec![mark(1)])));
+        assert_eq!(neither.clone().merge(newer.clone()), newer);
         // A delete reported again, or an older one, changes nothing; a newer one is merged.
         assert_eq!(two.clone().then(lost(6, None)), two);
         assert_eq!(two.clone().then(lost(5, None)), two);

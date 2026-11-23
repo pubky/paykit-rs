@@ -1909,12 +1909,8 @@ impl Protocol for PaykitProtocol {
         Ok(writes)
     }
 
-    /// A `payment_lists` record's mark ends at its delete too, so the delete is seen
-    /// whoever wrote it, another installation of this app included: the marks it held go
-    /// into `lgone/` in that commit ([`Self::record_lifetime_ended`]; Paykit spec 6).
     fn mark_ends_at_delete(&self, collection: &str) -> bool {
         collection == Collection::AllowanceProposals.name()
-            || collection == Collection::PaymentLists.name()
     }
 
     fn record_lifetime_ended(
@@ -1923,15 +1919,6 @@ impl Protocol for PaykitProtocol {
         version: pubky_switch_core::ops::RecordVersion,
         context: &ReceiveContext<'_>,
     ) -> Result<Vec<LocalWrite>, StoreFailure> {
-        if record.collection.name == Collection::PaymentLists.name() {
-            let seen = context.record_seen(&record.key).map_err(store_failure)?;
-            return crate::receive::list_record_deleted(
-                context,
-                &record.key,
-                version,
-                seen.as_deref(),
-            );
-        }
         crate::allowances::lifetime_ended(record, version, context)
     }
 
@@ -1996,16 +1983,26 @@ impl Protocol for PaykitProtocol {
         }
         if deletion.collection == paykit_lib::collections::Collection::PaymentLists.name() {
             // The delete is kept as seen in the commit that observes it, from the feed or a
-            // read, with the marks of the copy seen before it: a later absence, such as the
-            // service forgetting it or a restore that empties the copy of records, never
-            // places a list there, and a later value is taken only with those marks (Paykit
-            // spec 6, Paykit wire 4.13 and 5).
+            // read, with the marks of its exact predecessor if this app read it: a later
+            // absence, such as the service forgetting it or a restore that empties the copy
+            // of records, never places a list there, and a later value is taken only under
+            // the family's rules against that copy (Paykit spec 6, Paykit wire 4.13 and 5).
+            // A copy older than what the delete took, such as one from before a write this
+            // app couldn't read, may lack marks the delete took: it is no copy.
+            //
+            // The limit: the client reports only another app's delete here, so a delete by
+            // another installation of this App ID, which only a faulty own app writes, is
+            // seen as a delete only by a list arriving over it ([`crate::receive`]
+            // `hold_list`), with no copy, until the client reports it.
+            let exact = deletion
+                .exact_value
+                .filter(|_| deletion.exact_version_authenticated);
             return Ok(Some(PutBack::Observe {
                 observed: crate::receive::list_record_deleted(
                     cx,
                     deletion.key,
                     deletion.version,
-                    deletion.seen,
+                    exact,
                 )?,
             }));
         }
