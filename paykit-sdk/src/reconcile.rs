@@ -725,9 +725,11 @@ impl Paykit {
             // `done` or `failed` finishes its journal entry, `done` with the record's update,
             // and writes no claim entry, there being none to write on.
             None if resolution != Resolution::Unknown
-                && entry
-                    .as_ref()
-                    .is_some_and(|e| e.restored && e.open() && e.may_have_dispatched()) =>
+                && entry.as_ref().is_some_and(|e| {
+                    e.restored
+                        && e.open()
+                        && (e.may_have_dispatched() || e.stage == Stage::RailPaid)
+                }) =>
             {
                 (Basis::Owner, None)
             }
@@ -802,9 +804,12 @@ impl Paykit {
         if let Some(write) = record_write {
             batch = batch.entry(write);
         }
+        // An Allowance ledger's outcome goes only beside the claim entry it records: a
+        // ledger successor with no claim entry in its batch can't be verified again (Paykit
+        // spec 8.3), as at a payment's outcome. With no claim, the reservation stays counted.
         if let Some(own) = entry
             .as_ref()
-            .filter(|_| basis == Basis::Owner && resolution != Resolution::Unknown)
+            .filter(|_| on_claim && basis == Basis::Owner && resolution != Resolution::Unknown)
         {
             batch =
                 Box::pin(self.executor_outcome(own, resolution == Resolution::Done, batch)).await?;
@@ -834,7 +839,7 @@ impl Paykit {
         let applied = self.submit(batch).await?;
         if let Some(own) = entry
             .as_ref()
-            .filter(|_| basis == Basis::Owner && resolution != Resolution::Unknown)
+            .filter(|_| on_claim && basis == Basis::Owner && resolution != Resolution::Unknown)
         {
             Box::pin(self.keep_executor_reply(own, &applied.proofs)).await?;
         }

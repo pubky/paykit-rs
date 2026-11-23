@@ -478,8 +478,9 @@ pub const BACKUP_NAME: &str = "paykit";
 /// its entries marked restored (Paykit spec 7.2). The journal's checks are
 /// [`JournalEntry::check_restored`]'s, as every runtime read checks an entry, its claim
 /// keys blinded under the backup's naming key, each entry at its own attempt's key, and at
-/// most one open entry
-/// for one obligation, since a payment in progress blocks any other. `Err` names the rule,
+/// most one open entry not restored before for one obligation, since a payment in progress
+/// blocks any other; an entry an earlier restore left open beside it is that payment's
+/// doubt, never dispatched again. `Err` names the rule,
 /// without content: nothing is written. Pure: it is called at backup time too.
 ///
 /// The layer's schema is closed (`state::StateKey`): a key no builder of the SDK writes is

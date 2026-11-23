@@ -3242,3 +3242,76 @@ async fn test_provider_loss_restored_dispatch_left_open_beside_a_new_one_restore
     restored_open.sort();
     assert_eq!(restored_open, both);
 }
+
+#[tokio::test]
+async fn test_provider_loss_restored_dispatch_paid_whose_outcome_isnt_written_is_already_paid() {
+    // As in the restored dispatch the method shows paid, but the outcome's write at the new
+    // service doesn't go through: the entry holds the method's proof, unwritten. It is
+    // already paid, never a payment the user may confirm again, and the user's `done`
+    // writes its outcome with the proof (Paykit spec 7.2).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut laptop = w.wallet("laptop").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    laptop.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    let backup = wallet.backup().await.unwrap();
+    w.rail.settle(&attempt_id, true);
+    drop(wallet);
+    w.clock.advance_ms(60_000);
+    let next = declare_loss(&w);
+    follow_loss(&mut laptop).await;
+    let mut app = restored(&w, &backup).await;
+    follow_generation(&mut app).await;
+    // The outcome's write at the new service fails during reconciliation.
+    for _ in 0..2 {
+        next.fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/ops".into(),
+            after: 0,
+        });
+    }
+    app.reconcile().await.unwrap();
+    app.end_reconcile(UserConfirmed::new()).await.unwrap();
+    assert_eq!(
+        stage_of(&app, &attempt_id).await,
+        paykit_sdk::Stage::RailPaid
+    );
+    let obligation = app.payments().await.unwrap()[0].obligation;
+    let options = crate::common::over_hold(&app, &request).await;
+    let again = app.pay_request(&request, options).await.outcome;
+    assert_eq!(
+        again.as_ref().err().and_then(PaykitError::refusal),
+        Some(&Refusal::AlreadyPaid),
+        "{again:?}"
+    );
+    app.resolve_attempt(
+        &obligation,
+        attempt_id,
+        paykit_sdk::Resolution::Done,
+        UserConfirmed::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        stage_of(&app, &attempt_id).await,
+        paykit_sdk::Stage::Finished
+    );
+    // Its proof goes with the outcome's batch, sent at the next flush.
+    app.flush().await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        shop.payee_activity().await.unwrap()[0].status,
+        paykit_sdk::PayeeStatus::ProofReceived
+    );
+    assert_eq!(executions(&w), 1);
+}

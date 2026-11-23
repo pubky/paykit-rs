@@ -1768,8 +1768,9 @@ impl Paykit {
 
     /// The attempts a restore left unresolved for the obligation, which make it "may be
     /// paid" (Paykit spec 7.2); an open entry of this app's otherwise is a payment in
-    /// progress, and a restored dispatch the user resolved as paid with no claim to write
-    /// it on is [`Refusal::AlreadyPaid`].
+    /// progress. A restored dispatch the user resolved as paid with no claim to write it on,
+    /// and one the method reported paid whose outcome isn't written yet, are
+    /// [`Refusal::AlreadyPaid`].
     pub(crate) async fn restored_attempts(&self, obligation: &[u8; 32]) -> Result<Vec<AttemptId>> {
         let mut restored = Vec::new();
         for entry in self.journal().await? {
@@ -1783,6 +1784,11 @@ impl Paykit {
             }
             if !entry.open() {
                 continue;
+            }
+            // A restored dispatch the method reported paid holds its proof: paid, whether or
+            // not its outcome is written yet (Paykit spec 7.2).
+            if entry.restored && entry.rail_proof.is_some() {
+                return Err(Refusal::AlreadyPaid.into());
             }
             if !entry.restored {
                 return Err(Refusal::PaymentInProgress.into());
@@ -4518,6 +4524,16 @@ impl Paykit {
     /// payment (Paykit spec 8.1, 8.3), so the attempt stays open and the user's payment
     /// method's history or a receipt settles it. A payment without a request has nothing a payee cancels.
     async fn repeat_withheld(&mut self, entry: &JournalEntry) -> Result<bool> {
+        // The user said an earlier restored dispatch of the obligation was paid: no attempt
+        // of it is carried out again (Paykit spec 7.2, 8.4).
+        if self
+            .journal()
+            .await?
+            .iter()
+            .any(|other| other.obligation == entry.obligation && other.user_paid)
+        {
+            return Ok(true);
+        }
         // An earlier-generation dispatch is never repeated after a provider loss
         // (Paykit spec 7.3).
         if self.dispatched_before_loss(entry).await? {

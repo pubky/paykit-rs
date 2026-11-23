@@ -3904,3 +3904,104 @@ async fn test_restore_user_failed_beside_another_apps_open_attempt_is_stopped_by
     );
     assert_eq!(w.rail.all_executions().len(), 1);
 }
+
+#[tokio::test]
+async fn test_restore_user_paid_kept_across_another_backup_and_restore() {
+    // The user's `done` on a restored payment no claim shows is kept in the journal, and a
+    // backup taken after it carries it: restored again, the request is still refused as
+    // already paid (Paykit spec 7.2, 8.4).
+    let w = World::new();
+    let (mut app, request, payment) =
+        restored_unrecorded(&w, draft("1", w.clock.now_ms()), async |_, _| {}).await;
+    app.resolve_attempt(
+        &payment.obligation,
+        payment.attempt_id,
+        paykit_sdk::Resolution::Done,
+        UserConfirmed::new(),
+    )
+    .await
+    .unwrap();
+    let backup = app.backup().await.unwrap();
+    drop(app);
+    let mut again = restored(&w, &backup).await;
+    again.reconcile().await.unwrap();
+    again.end_reconcile(UserConfirmed::new()).await.unwrap();
+    let options = crate::common::over_hold(&again, &request).await;
+    let refused = again.pay_request(&request, options).await.outcome;
+    assert_eq!(
+        refused
+            .as_ref()
+            .err()
+            .and_then(paykit_sdk::PaykitError::refusal),
+        Some(&Refusal::AlreadyPaid),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_restore_user_unknown_with_no_claim_refused() {
+    // With no claim to mark it on, `unknown` is refused, and the payment stays open as
+    // potentially paid (Paykit spec 7.3).
+    let w = World::new();
+    let (mut app, _request, payment) =
+        restored_unrecorded(&w, draft("1", w.clock.now_ms()), async |_, _| {}).await;
+    let refused = app
+        .resolve_attempt(
+            &payment.obligation,
+            payment.attempt_id,
+            paykit_sdk::Resolution::Unknown,
+            UserConfirmed::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::NotFound), "{refused:?}");
+    let stage = app.payments().await.unwrap()[0].stage;
+    assert_ne!(stage, paykit_sdk::Stage::Finished);
+}
+
+#[tokio::test]
+async fn test_restore_repeat_withheld_once_the_user_says_an_earlier_dispatch_paid() {
+    // The user pays over the doubt of a restored payment no claim shows, on an idempotent
+    // method with no history, and the new attempt is left in flight; then the user resolves
+    // the restored payment as paid. A resume never repeats the new attempt (Paykit spec 7.2,
+    // 8.4).
+    let w = World::new();
+    let (mut app, request, payment) =
+        restored_unrecorded(&w, draft("1", w.clock.now_ms()), async |_, _| {}).await;
+    w.rail.set_declaration(
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
+    );
+    let options = crate::common::over_hold(&app, &request).await;
+    let refused = app.pay_request(&request, options.clone()).await.outcome;
+    w.rail.next(Behaviour::Hang);
+    let pending = app
+        .pay_request(
+            &request,
+            options.with_may_be_paid_confirmed(crate::provider_loss::doubt_of(&refused)),
+        )
+        .await
+        .outcome
+        .unwrap();
+    let PayOutcome::Pending {
+        attempt_id: newer, ..
+    } = pending
+    else {
+        panic!("pending: {pending:?}")
+    };
+    assert_eq!(w.rail.pay_calls(&newer), 1);
+    app.resolve_attempt(
+        &payment.obligation,
+        payment.attempt_id,
+        paykit_sdk::Resolution::Done,
+        UserConfirmed::new(),
+    )
+    .await
+    .unwrap();
+    app.resume_payments().await.unwrap();
+    assert_eq!(w.rail.pay_calls(&newer), 1);
+}

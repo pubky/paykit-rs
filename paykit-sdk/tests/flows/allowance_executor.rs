@@ -3667,3 +3667,61 @@ async fn test_executor_expired_allowance_repeats_no_dispatch() {
         .unwrap();
     assert_eq!(entry.outcome, None);
 }
+
+#[tokio::test]
+async fn test_executor_restored_dispatch_resolved_with_no_claim_keeps_the_allowance_usable() {
+    // The executor's payment is left pending, and a backup holds it in flight. A provider
+    // loss follows: the new service holds no claim for it. Restored from the backup there,
+    // the dispatch is open with no claim showing it, and the user resolves it as not paid:
+    // its entry finishes, no ledger write goes without a claim entry beside it, and the
+    // Allowance is still read (Paykit spec 7.2, 8.3, 8.4).
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    world.rail.set_history_payer(payer.identity());
+    let request = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("5", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    world.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let id = Box::pin(payer.pay_under_allowance(&request, &key))
+        .await
+        .outcome
+        .unwrap()
+        .attempt_id();
+    let obligation = payer.payments().await.unwrap()[0].obligation;
+    let backup = payer.backup().await.unwrap();
+    drop(payer);
+    world.clock.advance_ms(60_000);
+    crate::provider_loss::declare_loss(&world);
+    let mut restored = Box::pin(paykit_sdk::Paykit::restore(
+        world.env(&world.alice, crate::common::store()),
+        Default::default(),
+        &backup,
+        world.rail.clone(),
+        world.timer(),
+    ))
+    .await
+    .unwrap();
+    Box::pin(crate::provider_loss::follow_loss(&mut restored)).await;
+    assert!(restored
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .is_none());
+    Box::pin(restored.resolve_attempt(
+        &obligation,
+        id,
+        paykit_sdk::Resolution::Failed,
+        UserConfirmed::new(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        restored.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Finished
+    );
+    Box::pin(restored.reconcile_allowance(&key)).await.unwrap();
+}
