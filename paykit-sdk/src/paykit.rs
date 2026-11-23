@@ -1374,6 +1374,7 @@ mod tests {
             payable_until_ms: None,
         };
         assert_send(&wallet.send_list_again(&unknown, confirmed));
+        assert_send(&wallet.lists_waiting_to_send_again());
         assert_send(&wallet.spam_count(&key));
         assert_send(&wallet.send_request(key, draft));
         assert_send(&wallet.message_delivery(""));

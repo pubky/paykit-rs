@@ -3,7 +3,7 @@
 use super::{
     counter_unavailable, target, ListRecipient, ListReservation, UnknownListDelivery, DAY, HOUR,
 };
-use crate::error::{PaykitError, Result};
+use crate::error::Result;
 use crate::notices::{KeptNotice, NoticeKind};
 use crate::state::{key, StateKey, Tx};
 use crate::Paykit;
@@ -207,10 +207,11 @@ impl Paykit {
             .await?
         {
             let at = format!("{}{rest}", key::RESTORED_DELIVERIES);
+            // `local_scan` read every key of the family bound to its notice already.
             let Some(StateKey::RestoredDelivery { to, msg_id, hash }) =
                 StateKey::parse(at.as_bytes())
             else {
-                return Err(PaykitError::corrupt());
+                continue;
             };
             if notice.kind != NoticeKind::ListDeliveryUnknown {
                 continue;

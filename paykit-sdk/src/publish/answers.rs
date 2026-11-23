@@ -515,7 +515,9 @@ pub(crate) fn note_proof(
     let Some(version) = proof.list_version else {
         return Ok(());
     };
-    if proof.payment_app_id != cx.app_id() || !cx.cert().holds_scope(SCOPE) {
+    // Only a payee app holding plain `paykit_request` takes a proof without a request this
+    // far (Switch wire 5.1 check 10; `writes_payee_label`).
+    if proof.payment_app_id != cx.app_id() {
         return Ok(());
     }
     let sender = stored.sender();
@@ -523,7 +525,11 @@ pub(crate) fn note_proof(
     let Some(mut recipient) = state::cx_get::<ListRecipient>(cx, &at)? else {
         return Ok(());
     };
-    let held = state::cx_get::<ListReservation>(cx, &key::list_reservation(&sender))?;
+    // Only a nonempty list can be paid from: a proof naming a withdrawal's version shows
+    // nothing, since counters are sequential and a payer holding one version can name the
+    // next without having it.
+    let held = state::cx_get::<ListReservation>(cx, &key::list_reservation(&sender))?
+        .filter(|issue| issue.revision.is_some());
     if observe_version(&mut recipient, held.as_ref(), Some(version), stored)? {
         keep_local(cx, local(&at, &recipient)?);
     }

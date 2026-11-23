@@ -3739,3 +3739,395 @@ async fn test_publication_takes_a_list_request_naming_the_unknown_withdrawal_as_
     shop.withdraw_list_from(payer).await.unwrap();
     assert_eq!(w.record_writes(&w.bob, &key), 2);
 }
+
+/// The shop `shop`, holding `paykit_request` and `paykit_contacts` on `store`: it reads the
+/// lists, so it can block the payer.
+async fn contacts_shop(
+    w: &World,
+    store: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+) -> Paykit {
+    w.join_with(
+        &w.bob,
+        "shop",
+        paykit_sdk::AppScopes::new()
+            .request()
+            .manage_contacts()
+            .build()
+            .unwrap(),
+        paykit_sdk::PaykitConfig::default(),
+        store,
+    )
+    .await
+}
+
+/// Alice's wallet's proof of a payment without a request to the shop app `shop`, of the fake
+/// rail's settlement `tx`, naming `version` of that app's list. Returns its `msg_id`.
+fn proof_naming(
+    w: &World,
+    shop: [u8; 16],
+    version: Option<paykit_sdk::ListVersion>,
+    tx: &str,
+) -> String {
+    let body = paykit_lib::bodies::PaymentProof {
+        attempt_id: paykit_lib::AttemptId::generate().unwrap(),
+        billing_period: None,
+        payment_endpoint_identifier: crate::common::endpoint("btc-lightning-bolt12"),
+        payment_app_id: shop,
+        list_version: version,
+        amount: Some(btc("0.001")),
+        allowance_id: None,
+        label: None,
+        payment_reference: None,
+        proof: serde_json::json!({ "rail": "fake", "tx": tx })
+            .as_object()
+            .cloned()
+            .unwrap(),
+    }
+    .to_body(0)
+    .unwrap();
+    w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop],
+        "paykit.payment_proof",
+        Vec::new(),
+        body,
+    )
+}
+
+/// The shop's payee record of the payment without a request settled by the fake rail's `tx`.
+fn settlement_record(tx: &str) -> RecordTarget {
+    let collection = paykit_lib::collections::Collection::PayeeActivity;
+    RecordTarget::new(
+        Collection::new(collection.name(), collection.policy(None)),
+        &natural_key::payee_payment_record(
+            &crate::common::endpoint("btc-lightning-bolt12"),
+            format!("fake:{tx}").as_bytes(),
+        ),
+    )
+}
+
+/// Whether the shop's record `target` holds the message `msg_id`.
+async fn record_holds(shop: &Paykit, target: &RecordTarget, msg_id: &str) -> bool {
+    let key = shop.app().record_key(target).unwrap();
+    let held = shop.app().shared_record(&key).await.unwrap().unwrap();
+    String::from_utf8_lossy(held.content.value().unwrap()).contains(msg_id)
+}
+
+#[tokio::test]
+async fn test_publication_proof_naming_an_unknown_withdrawal_leaves_it_unknown() {
+    let w = World::new();
+    let buyer = w.wallet("wallet").await;
+    let payer = buyer.identity();
+    let mut shop = contacts_shop(&w, crate::common::store()).await;
+    shop.app_mut().invite(&payer).await.unwrap();
+    shop.receive(None).await.unwrap();
+    shop.set_list_endpoints(offered("lno1first")).await.unwrap();
+    shop.publish_list_to(payer).await.unwrap();
+    let (_, key) = unknown_list(&w, &mut shop, payer, async |shop| {
+        shop.withdraw_list_from(payer).await.unwrap();
+    })
+    .await;
+    shop.receive(None).await.unwrap();
+    let shown = unknown_shown(shop.withdraw_list_from(payer).await.unwrap_err());
+    assert!(shown.withdrawal());
+    // Nothing is paid from an empty list, and a payer holding the list before it can name
+    // the next counter without having it: the proof shows nothing (Paykit spec 9).
+    w.clock.advance_ms(1);
+    proof_naming(&w, shop.app_id(), Some(shown.version()), "t1");
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        unknown_shown(shop.withdraw_list_from(payer).await.unwrap_err()),
+        shown
+    );
+    assert_eq!(list_notices(&shop).await.len(), 1);
+    assert_eq!(w.record_writes(&w.bob, &key), 2);
+}
+
+/// Bob's shop, on a store showing no seen marks, holds an unknown list to alice; another of
+/// bob's apps then writes the shop's record of alice's settlement `t1` with a value that
+/// doesn't read. Returns the shop, the list shown and its record key.
+async fn unknown_list_over_an_unread_settlement(
+    w: &World,
+) -> (Paykit, paykit_sdk::UnknownListDelivery, [u8; 32]) {
+    use pubky_switch_client::app::OpBatch;
+
+    let seen = std::sync::Arc::new(crate::outcome_record::NoSeenMarks::default());
+    let base =
+        std::sync::Arc::clone(&seen) as std::sync::Arc<dyn pubky_switch_client::store::StateStore>;
+    let payer = w.alice_id();
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+            paykit_sdk::PaykitConfig::default(),
+            base,
+        )
+        .await;
+    let mut seller_wallet = w
+        .join(
+            &w.bob,
+            "seller-wallet",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    shop.app_mut().invite(&payer).await.unwrap();
+    shop.set_list_endpoints(offered("lno1first")).await.unwrap();
+    let (_, key) = unknown_list(w, &mut shop, payer, async |shop| {
+        shop.publish_list_to(payer).await.unwrap();
+    })
+    .await;
+    shop.receive(None).await.unwrap();
+    let shown = unknown_shown(shop.publish_list_to(payer).await.unwrap_err());
+    proof_naming(w, shop.app_id(), None, "t1");
+    shop.receive(None).await.unwrap();
+    seen.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    seller_wallet.receive(None).await.unwrap();
+    let op = seller_wallet
+        .app_mut()
+        .record_op(
+            &settlement_record("t1"),
+            Some(crate::outcome_record::INVALID),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    seller_wallet
+        .app_mut()
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    let record = shop.app().record_key(&settlement_record("t1")).unwrap();
+    let held = shop.app().shared_record(&record).await.unwrap().unwrap();
+    assert_eq!(held.content.value(), Some(crate::outcome_record::INVALID));
+    (shop, shown, key)
+}
+
+/// The replies `shop` keeps before their record (`pr/`).
+async fn kept_replies(shop: &Paykit) -> usize {
+    shop.app()
+        .protocol_scan("paykit", b"pr/")
+        .await
+        .unwrap()
+        .len()
+}
+
+#[tokio::test]
+async fn test_publication_proof_kept_over_an_unread_settlement_record_settles_the_unknown_list() {
+    let w = World::new();
+    let buyer = w.wallet("wallet").await;
+    let payer = buyer.identity();
+    let (mut shop, shown, key) = unknown_list_over_an_unread_settlement(&w).await;
+    // The record can't show its counterparty: the proof is kept as a reply before its
+    // record, and kept, it shows the list version it was paid from (Paykit spec 8.1, 9).
+    w.clock.advance_ms(1);
+    proof_naming(&w, shop.app_id(), Some(shown.version()), "t1");
+    shop.receive(None).await.unwrap();
+    assert_eq!(kept_replies(&shop).await, 1);
+    shop.publish_list_to(payer).await.unwrap();
+    assert_eq!(w.record_writes(&w.bob, &key), 1);
+    assert!(list_notices(&shop).await.is_empty());
+}
+
+#[tokio::test]
+async fn test_publication_proof_dropped_to_make_room_leaves_the_list_unknown() {
+    use pubky_switch_client::clock::Clock;
+
+    let w = World::new();
+    let buyer = w.wallet("wallet").await;
+    let payer = buyer.identity();
+    let (mut shop, shown, key) = unknown_list_over_an_unread_settlement(&w).await;
+    // Alice's kept replies reach their bound, all accepted after her proof: the proof,
+    // accepted earliest, is the one dropped, as never processed (Paykit spec 8.1).
+    let at = w.clock.now_ms() + 1;
+    w.clock.set_ms(at + 10);
+    for i in 0..paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER {
+        w.inject(
+            &w.alice,
+            "wallet",
+            &w.bob,
+            &[shop.app_id()],
+            "paykit.payment_request_acceptance",
+            vec![[u8::try_from(i).unwrap(); 32]],
+            serde_json::Map::new(),
+        );
+    }
+    w.clock.set_ms(at);
+    let dropped = proof_naming(&w, shop.app_id(), Some(shown.version()), "t1");
+    w.clock.set_ms(at + 20);
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        kept_replies(&shop).await,
+        paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER
+    );
+    let kept = shop
+        .app()
+        .protocol_scan("paykit", b"pr/")
+        .await
+        .unwrap()
+        .into_iter()
+        .any(|(at, _)| String::from_utf8_lossy(&at).contains(&dropped));
+    assert!(!kept);
+    // Dropped, it shows nothing of the list.
+    assert_eq!(
+        unknown_shown(shop.publish_list_to(payer).await.unwrap_err()),
+        shown
+    );
+    assert_eq!(list_notices(&shop).await.len(), 1);
+    assert_eq!(w.record_writes(&w.bob, &key), 1);
+}
+
+/// The shop's list to alice ends unknown, and her proof of settlement `t1`, naming no list
+/// version, opens the shop's record of it. Returns the shop, the list shown and its key.
+async fn unknown_list_after_a_settlement(
+    w: &World,
+    payer: [u8; 32],
+) -> (Paykit, paykit_sdk::UnknownListDelivery, [u8; 32]) {
+    let mut shop = contacts_shop(w, crate::common::store()).await;
+    shop.app_mut().invite(&payer).await.unwrap();
+    shop.receive(None).await.unwrap();
+    shop.set_list_endpoints(offered("lno1first")).await.unwrap();
+    let (_, key) = unknown_list(w, &mut shop, payer, async |shop| {
+        shop.publish_list_to(payer).await.unwrap();
+    })
+    .await;
+    shop.receive(None).await.unwrap();
+    let shown = unknown_shown(shop.publish_list_to(payer).await.unwrap_err());
+    proof_naming(w, shop.app_id(), None, "t1");
+    shop.receive(None).await.unwrap();
+    (shop, shown, key)
+}
+
+#[tokio::test]
+async fn test_publication_blocked_proof_of_a_held_settlement_leaves_the_list_unknown() {
+    let w = World::new();
+    let buyer = w.wallet("wallet").await;
+    let payer = buyer.identity();
+    let (mut shop, shown, key) = unknown_list_after_a_settlement(&w, payer).await;
+    // A blocked payer's proof of a settlement the shop holds updates that record, but its
+    // sender isn't admitted: it shows nothing of the list (Paykit spec 8.1, 9).
+    shop.block(&payer).await.unwrap();
+    w.clock.advance_ms(1);
+    let again = proof_naming(&w, shop.app_id(), Some(shown.version()), "t1");
+    shop.receive(None).await.unwrap();
+    assert!(record_holds(&shop, &settlement_record("t1"), &again).await);
+    assert_eq!(list_notices(&shop).await.len(), 1);
+    shop.unblock(&payer).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        unknown_shown(shop.publish_list_to(payer).await.unwrap_err()),
+        shown
+    );
+    assert_eq!(w.record_writes(&w.bob, &key), 1);
+}
+
+#[tokio::test]
+async fn test_publication_proof_of_a_held_settlement_while_the_lists_are_unknown_leaves_the_list_unknown(
+) {
+    let w = World::new();
+    let buyer = w.wallet("wallet").await;
+    let payer = buyer.identity();
+    let (mut shop, shown, key) = unknown_list_after_a_settlement(&w, payer).await;
+    // The due read of the lists fails: whether the payer is blocked isn't known, so its
+    // proof updating the held record shows nothing of the list (Paykit spec 8.1, 9).
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/allow".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: serde_json::Value::Null,
+        });
+    let again = proof_naming(&w, shop.app_id(), Some(shown.version()), "t1");
+    shop.receive(None).await.unwrap();
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"lr")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(record_holds(&shop, &settlement_record("t1"), &again).await);
+    shop.receive(None).await.unwrap();
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"lr")
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        unknown_shown(shop.publish_list_to(payer).await.unwrap_err()),
+        shown
+    );
+    assert_eq!(list_notices(&shop).await.len(), 1);
+    assert_eq!(w.record_writes(&w.bob, &key), 1);
+}
+
+/// The shop's list to the payer ends unknown, the user confirms sending it again while
+/// sends to the payer are held, and the confirmation waits. Returns the shop, the list
+/// shown and its record key.
+async fn confirmed_while_blocked(
+    w: &World,
+    payer: [u8; 32],
+) -> (Paykit, paykit_sdk::UnknownListDelivery, [u8; 32]) {
+    use paykit_sdk::{Refusal, UserConfirmed};
+
+    let mut shop = contacts_shop(w, crate::common::store()).await;
+    shop.app_mut().invite(&payer).await.unwrap();
+    shop.receive(None).await.unwrap();
+    shop.set_list_endpoints(offered("lno1first")).await.unwrap();
+    let (_, key) = unknown_list(w, &mut shop, payer, async |shop| {
+        shop.publish_list_to(payer).await.unwrap();
+    })
+    .await;
+    let shown = unknown_shown(shop.publish_list_to(payer).await.unwrap_err());
+    shop.block(&payer).await.unwrap();
+    let refused = shop
+        .send_list_again(&shown, UserConfirmed::new())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        "{refused:?}"
+    );
+    assert_eq!(shop.lists_waiting_to_send_again().await.unwrap(), [payer]);
+    (shop, shown, key)
+}
+
+#[tokio::test]
+async fn test_publication_waiting_confirmation_leaves_the_list_once_the_earlier_list_arrived() {
+    let w = World::new();
+    let buyer = w.wallet("wallet").await;
+    let payer = buyer.identity();
+    let (mut shop, shown, _) = confirmed_while_blocked(&w, payer).await;
+    shop.unblock(&payer).await.unwrap();
+    // The payer's list request names the earlier version: it arrived, so nothing waits to
+    // be sent again, before any publication runs (Paykit spec 9).
+    w.clock.advance_ms(1);
+    ask_shop(&w, &shop, Some(shown.version()));
+    shop.app_mut().receive(None).await.unwrap();
+    assert!(shop.lists_waiting_to_send_again().await.unwrap().is_empty());
+    shop.receive(None).await.unwrap();
+    assert!(shop.lists_waiting_to_send_again().await.unwrap().is_empty());
+    shop.publish_list_to(payer).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_publication_waiting_confirmation_stays_after_the_earlier_list_expired() {
+    let w = World::new();
+    let buyer = w.wallet("wallet").await;
+    let payer = buyer.identity();
+    let (mut shop, _, key) = confirmed_while_blocked(&w, payer).await;
+    // Nothing can be paid from the earlier list any more, but the user's confirmation is
+    // still kept, and still sent once it can be.
+    w.clock
+        .advance_ms(paykit_lib::bodies::PRIVATE_LIST_MAX_AGE_MS + crate::common::HOUR_MS);
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.lists_waiting_to_send_again().await.unwrap(), [payer]);
+    shop.unblock(&payer).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert_eq!(w.record_writes(&w.bob, &key), 2);
+    assert!(shop.lists_waiting_to_send_again().await.unwrap().is_empty());
+}

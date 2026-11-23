@@ -897,13 +897,35 @@ impl Paykit {
     ///
     /// A store failure.
     pub async fn lists_waiting_to_send_again(&self) -> Result<Vec<[u8; 32]>> {
-        Ok(self
+        let settings = self.local_get::<ListSettings>(key::LIST_SETTINGS).await?;
+        let mut waiting = Vec::new();
+        for (_, issue) in self
             .local_scan::<ListReservation>(key::LIST_RESERVATIONS)
             .await?
-            .into_iter()
-            .filter(|(_, issue)| issue.confirmed)
-            .map(|(_, issue)| issue.recipient)
-            .collect())
+        {
+            if !issue.confirmed {
+                continue;
+            }
+            let Some(recipient) = self
+                .local_get::<ListRecipient>(&key::list_recipient(&issue.recipient))
+                .await?
+            else {
+                continue;
+            };
+            // What the next publication sends it, as `publish_recipient` decides: the
+            // confirmed version goes only for the same list, not yet known to have arrived.
+            let revision = settings
+                .as_ref()
+                .filter(|s| recipient.chosen && !recipient.withdraw && !s.endpoints.is_empty())
+                .map(ListSettings::revision);
+            if issue.choice == recipient.choice
+                && issue.revision == revision
+                && recipient.answers.first(&issue).is_none()
+            {
+                waiting.push(issue.recipient);
+            }
+        }
+        Ok(waiting)
     }
 
     pub(crate) async fn tend_private_lists(
