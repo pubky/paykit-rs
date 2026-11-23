@@ -478,6 +478,17 @@ pub(crate) fn may_send(view: &DeliveryView<'_>) -> std::result::Result<bool, Sto
             return Ok(false);
         }
         if list.payment_endpoints.is_empty() {
+            // A withdrawal goes while sends are held, on its first delivery, its retries and
+            // a restore's re-send; sent again in answer to a `resend_request`, Section 9
+            // decides it, which needs a deny copy that permits the counterparty (Paykit
+            // spec 8.1, "Messages already queued"; 9).
+            if view.resend()
+                && (!crate::receive::reads_lists(view.cert().scopes())
+                    || crate::send_holds::deny_decision(view)?
+                        != crate::send_holds::DenyDecision::Permits)
+            {
+                return Ok(false);
+            }
             return Ok(issue.revision.is_none());
         }
         let settings = crate::state::view_get::<ListSettings>(local, key::LIST_SETTINGS)?;

@@ -4071,3 +4071,47 @@ async fn test_blocked_stops_past_their_replay_window_never_go() {
     wallet.app_mut().flush_outbox().await.unwrap();
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
 }
+
+#[tokio::test]
+async fn test_blocked_withdrawal_goes_first_and_on_retry_but_its_resend_waits() {
+    use paykit_lib::Kind;
+
+    let w = World::new();
+    let _wallet = w.wallet("wallet").await;
+    let mut shop = contacts_shop(&w).await;
+    shop.set_list_endpoints(crate::publishing::offered("lno1first"))
+        .await
+        .unwrap();
+    shop.publish_list_to(w.alice_id()).await.unwrap();
+    // The withdrawal is queued while alice's inbox takes nothing, then alice is blocked.
+    shop.app_mut().hold_queued(&w.alice_id()).await.unwrap();
+    shop.withdraw_list_from(w.alice_id()).await.unwrap();
+    let withdrawal = verdicts(&shop)
+        .await
+        .into_iter()
+        .find(|(kind, ..)| kind == Kind::PrivatePaymentList.as_str())
+        .map(|(_, id, _)| id)
+        .unwrap();
+    shop.block(&w.alice_id()).await.unwrap();
+    // Its first delivery goes while she is blocked, and so does a retry after a failed try
+    // (Paykit spec 8.1, "Messages already queued").
+    assert_eq!(verdict(&shop, &withdrawal).await, Some(true));
+    shop.app_mut().release_queued(&w.alice_id()).await.unwrap();
+    w.alice.switch().fail_next(Fault::Unreachable {
+        path: "inbox".into(),
+        after: 0,
+    });
+    let _ = shop.flush().await;
+    assert_eq!(verdict(&shop, &withdrawal).await, Some(true));
+    shop.flush().await.unwrap();
+    assert!(sent_of(&shop, &w.alice_id(), &[Kind::PrivatePaymentList])
+        .await
+        .contains(&withdrawal));
+    // Sent again as an answer to a `resend_request`, it waits while she is blocked: Section 9
+    // decides re-sends, which need a deny copy that permits her (Paykit spec 8.1, 9).
+    shop.app_mut().hold_queued(&w.alice_id()).await.unwrap();
+    shop.app_mut().resend(&withdrawal).await.unwrap();
+    assert_eq!(verdict(&shop, &withdrawal).await, Some(false));
+    shop.unblock(&w.alice_id()).await.unwrap();
+    assert_eq!(verdict(&shop, &withdrawal).await, Some(true));
+}

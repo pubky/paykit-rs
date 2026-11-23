@@ -18,7 +18,7 @@ pub(super) fn target(shop: &Paykit, recipient: &[u8; 32], generation: u64) -> Re
     )
 }
 
-pub(super) fn offered(
+pub(crate) fn offered(
     offer: &str,
 ) -> std::collections::BTreeMap<paykit_lib::PaymentEndpointIdentifier, PaymentEndpointPayload> {
     [(
