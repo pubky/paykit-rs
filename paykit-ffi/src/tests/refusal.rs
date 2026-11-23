@@ -506,7 +506,13 @@ fn every_other_failure() -> Vec<WalletError> {
         .map(|code| PaykitError::Client(switch_answer(code, None)))
         .collect();
     // A full quota by the limit it names (Switch wire 9.3).
-    for limit in ["inbox", "storage", "connect_requests", "record_origins"] {
+    for limit in [
+        "inbox",
+        "storage",
+        "connect_requests",
+        "open_attempts",
+        "attempts",
+    ] {
         let mut answer = switch_answer(ErrorCode::QuotaExceeded, None);
         if let AppError::Switch(ClientError::Switch { current, .. }) = &mut answer {
             *current = serde_json::json!({ "limit": limit });
@@ -784,7 +790,17 @@ fn test_wallet_errors_attempt_failed_comes_as_its_cause() {
 fn test_wallet_errors_full_quota_comes_as_what_frees_it() {
     for (limit, case, code) in [
         (Some("inbox"), "retry_later", "switch_quota_wait"),
-        (Some("open_attempts"), "retry_later", "switch_quota_wait"),
+        (Some("sender_share"), "retry_later", "switch_quota_wait"),
+        (Some("claim_share"), "retry_later", "switch_quota_wait"),
+        (
+            Some("open_attempts"),
+            "needs_user",
+            "switch_quota_open_attempts",
+        ),
+        (Some("record_keys"), "needs_user", "switch_quota_full"),
+        (Some("conversations"), "needs_user", "switch_quota_full"),
+        (Some("deny"), "needs_user", "switch_quota_full"),
+        (Some("invite_codes"), "needs_user", "switch_quota_full"),
         (Some("storage"), "needs_user", "switch_quota_full"),
         (Some("contacts"), "needs_user", "switch_quota_full"),
         (Some("claims"), "retry_later", "switch_quota_wait"),
@@ -794,7 +810,11 @@ fn test_wallet_errors_full_quota_comes_as_what_frees_it() {
             "switch_quota_connect_requests",
         ),
         (Some("attempts"), "permanent", "switch_quota_final"),
-        (Some("record_origins"), "permanent", "switch_quota_final"),
+        (
+            Some("record_origins"),
+            "needs_user",
+            "switch_quota_exceeded",
+        ),
         (Some("a later limit"), "needs_user", "switch_quota_exceeded"),
         (None, "needs_user", "switch_quota_exceeded"),
     ] {
@@ -807,6 +827,7 @@ fn test_wallet_errors_full_quota_comes_as_what_frees_it() {
         let (found, failure) = categorized(answer.into()).expect("a categorized failure");
         assert_eq!((found, failure.code.as_str()), (case, code), "{limit:?}");
         assert_eq!(failure.service_code.as_deref(), Some("quota_exceeded"));
+        assert_eq!(failure.quota_limit().as_deref(), limit);
     }
 }
 
@@ -914,5 +935,68 @@ fn meaning_of(case: &str) -> &'static str {
         "permanent" => "the answer is final",
         "recovery" => "the wallet stopped for a recovery",
         _ => panic!("no case {case}"),
+    }
+}
+
+#[test]
+fn test_wallet_errors_pending_endpoint_change_keeps_what_its_cause_needs() {
+    for (inner, case) in [
+        (AppError::Transport(TransportError::Timeout), "retry_later"),
+        (
+            AppError::Refused(AppRefusal::Usage("expiry".into())),
+            "needs_user",
+        ),
+        (
+            AppError::Refused(AppRefusal::WontDeliver(
+                pubky_switch_client::app::WontDeliver::GivenUp,
+            )),
+            "needs_user",
+        ),
+        (AppError::Refused(AppRefusal::Gone), "recovery"),
+        (
+            AppError::Kept {
+                batch_id: [4; 16],
+                error: Box::new(AppError::Transport(TransportError::Timeout)),
+            },
+            "outcome_unknown",
+        ),
+    ] {
+        let (found, failure) =
+            categorized(PaykitError::PublicEndpointChangePending(inner).into()).unwrap();
+        assert_eq!(
+            (found, failure.code.as_str()),
+            (case, "public_endpoint_change_pending")
+        );
+    }
+}
+
+#[test]
+fn test_wallet_errors_sdk_refusals_take_the_table_code_through_the_conversion() {
+    // The guide's table is built from the refusal kinds; the conversion a host's errors take
+    // must land on the same code and case.
+    for (refusal, case, code) in [
+        (Refusal::FloorHeld, "needs_user", "floor_held"),
+        (Refusal::NotFound, "permanent", "not_found"),
+        (Refusal::Rejected, "permanent", "rejected"),
+        (
+            Refusal::RecordHeld("unreadable".into()),
+            "needs_user",
+            "record_held",
+        ),
+        (
+            Refusal::NotCurrent("removed".into()),
+            "recovery",
+            "not_current",
+        ),
+        (
+            Refusal::SwitchUnavailable("down".into()),
+            "retry_later",
+            "switch_unavailable",
+        ),
+        (Refusal::Usage("bad".into()), "not_sent", "usage"),
+        (Refusal::NotNow("wait".into()), "needs_user", "not_now"),
+    ] {
+        let (found, failure) = categorized(PaykitError::Refused(refusal).into()).unwrap();
+        assert_eq!((found, failure.code.as_str()), (case, code));
     }
 }

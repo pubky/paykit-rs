@@ -113,6 +113,7 @@ pub struct WalletFailure {
     pub(crate) context: String,
     pub(crate) service_code: Option<String>,
     pub(crate) retry_after_ms: Option<u64>,
+    pub(crate) quota_limit: Option<String>,
     pub(crate) kept_batch: Option<Vec<u8>>,
     pub(crate) switch_refusal: Option<Arc<crate::SwitchRefusal>>,
     pub(crate) refusal: Option<Arc<PaymentRefusal>>,
@@ -125,6 +126,7 @@ impl std::fmt::Debug for WalletFailure {
             .field("code", &self.code)
             .field("service_code", &self.service_code)
             .field("retry_after_ms", &self.retry_after_ms)
+            .field("quota_limit", &self.quota_limit)
             .field("kept_batch", &self.kept_batch.is_some())
             .field("switch_refusal", &self.switch_refusal)
             .field("refusal", &self.refusal)
@@ -150,6 +152,11 @@ impl WalletFailure {
     /// When to try again, in milliseconds, when the service said.
     pub fn retry_after_ms(&self) -> Option<u64> {
         self.retry_after_ms
+    }
+    /// The budget a full quota names (`quota_exceeded`'s `current.limit`, Switch wire 9.3),
+    /// such as `storage` or `contacts`, so the host can say which one to clear.
+    pub fn quota_limit(&self) -> Option<String> {
+        self.quota_limit.clone()
     }
     /// A Switch batch kept for this call, which the wallet sends again by itself.
     pub fn kept_batch(&self) -> Option<Vec<u8>> {
@@ -255,6 +262,7 @@ fn failure(category: Category, code: &str) -> (Category, WalletFailure) {
             context: String::new(),
             service_code: None,
             retry_after_ms: None,
+            quota_limit: None,
             kept_batch: None,
             switch_refusal: None,
             refusal: None,
@@ -391,19 +399,21 @@ fn service_category(code: pubky_switch_core::http::ErrorCode) -> (Category, Stri
 fn quota_category(limit: Option<&str>) -> (Category, String) {
     use Category::*;
     let (category, code) = match limit {
-        // Frees with time: the recipient's apps reading their feed, the app's own attempts
-        // resolving, or the service deleting old claims.
-        Some("inbox" | "sender_share" | "open_attempts" | "claims" | "claim_share") => {
+        // Frees with time: the recipient's apps reading their feed, or the service deleting
+        // old claims.
+        Some("inbox" | "sender_share" | "claims" | "claim_share") => {
             (RetryLater, "switch_quota_wait")
         }
+        // Frees as this app's open attempts resolve, some only by the user's answer.
+        Some("open_attempts") => (NeedsUser, "switch_quota_open_attempts"),
         // Frees only after the user removes something, through another app or the signer.
         Some(
             "storage" | "record_keys" | "contacts" | "conversations" | "deny" | "invite_codes",
         ) => (NeedsUser, "switch_quota_full"),
         // Nothing applied; the recipient may answer its pending requests, or never.
         Some("connect_requests") => (NotSent, "switch_quota_connect_requests"),
-        // Final for this obligation, or in this history: no deletion frees it.
-        Some("attempts" | "record_origins") => (Permanent, "switch_quota_final"),
+        // Final for this obligation: no more attempts fit its claim.
+        Some("attempts") => (Permanent, "switch_quota_final"),
         // A limit these bindings don't know: shown, never retried by itself.
         _ => (NeedsUser, "switch_quota_exceeded"),
     };
@@ -484,6 +494,17 @@ fn client_failure(e: &AppError) -> (Category, WalletFailure) {
             {
                 failure.retry_after_ms = retry_after.map(|s| s.saturating_mul(1000));
             }
+            if let ClientError::Switch {
+                code: pubky_switch_core::http::ErrorCode::QuotaExceeded,
+                current,
+                ..
+            } = switch
+            {
+                failure.quota_limit = current
+                    .get("limit")
+                    .and_then(|limit| limit.as_str())
+                    .map(Into::into);
+            }
             (category, failure)
         }
         _ => failure(CLIENT_UNCLASSIFIED.0, CLIENT_UNCLASSIFIED.1),
@@ -551,7 +572,8 @@ impl From<PaykitError> for WalletError {
                 failure.code = "public_endpoint_change_pending".into();
                 let category = match category {
                     Recovery => Recovery,
-                    RetryLater | OutcomeUnknown => RetryLater,
+                    OutcomeUnknown => OutcomeUnknown,
+                    RetryLater => RetryLater,
                     NeedsUser | NotSent | Permanent => NeedsUser,
                 };
                 (category, failure)
