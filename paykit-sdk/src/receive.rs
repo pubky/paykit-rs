@@ -3302,28 +3302,6 @@ impl Paykit {
         let mut owed = self
             .local_get::<crate::floor::PendingUnblocks>(key::BLOCK_FLOOR)
             .await?;
-        // A sender blocked again is held by the block, not by the raise of its earlier unblock:
-        // its next unblock raises the floor anew (Paykit wire 5.6, Raising).
-        let reblocked = owed.as_ref().is_some_and(|pending| {
-            pending
-                .senders
-                .iter()
-                .any(|sender| deny.binary_search(sender).is_ok())
-        });
-        if let Some(pending) = owed.as_mut() {
-            pending
-                .senders
-                .retain(|sender| deny.binary_search(sender).is_err());
-        }
-        if owed
-            .as_ref()
-            .is_some_and(|pending| pending.senders.is_empty())
-        {
-            owed = None;
-        }
-        if reblocked && owed.is_none() {
-            tx.delete(key::BLOCK_FLOOR);
-        }
         if self.holds("paykit_pay") {
             let closed: Vec<_> = previous
                 .into_iter()
@@ -3562,28 +3540,6 @@ impl Paykit {
         self.local_commit(tx).await
     }
 
-    /// Drop `pubky` from the unblocks whose raise is owed (`bf`), in `tx`, once the switch took
-    /// its block again: the block holds it now, and its next unblock raises the floor anew
-    /// (Paykit wire 5.6, Raising).
-    async fn drop_owed_unblock(&self, tx: &mut Tx, pubky: &[u8; 32]) -> crate::error::Result<()> {
-        let Some(mut pending) = self
-            .local_get::<crate::floor::PendingUnblocks>(key::BLOCK_FLOOR)
-            .await?
-        else {
-            return Ok(());
-        };
-        let Ok(at) = pending.senders.binary_search(pubky) else {
-            return Ok(());
-        };
-        pending.senders.remove(at);
-        if pending.senders.is_empty() {
-            tx.delete(key::BLOCK_FLOOR);
-        } else {
-            tx.put(key::BLOCK_FLOOR, &pending)?;
-        }
-        Ok(())
-    }
-
     /// The block of [`Paykit::list_own`]: marked and in the copy first, then sent. The mark
     /// goes once the switch took it, and names the batch the client keeps it in. Only an
     /// answer that shows the block was neither applied nor kept puts the mark and the copy
@@ -3622,7 +3578,6 @@ impl Paykit {
             match self.deny_at_switch(pubky).await {
                 Ok(()) => {
                     tx.delete(&mark);
-                    self.drop_owed_unblock(&mut tx, pubky).await?;
                 }
                 Err(error) if error.kept_batch().is_some() => {
                     let kept = OwnBlockMark {

@@ -4536,49 +4536,6 @@ async fn test_blocked_return_owed_raise_takes_period_details_and_holds_a_one_tim
     assert_eq!(wallet.requests().await.unwrap().len(), 1);
 }
 
-/// Under the floor's hold another app unblocks bob, and the wallet owes the raise for it
-/// (`bf`), which it can't write.
-async fn unblocked_by_another_app_under_the_hold(w: &World) -> (Paykit, Paykit, Paykit) {
-    let mut wallet = contacts_wallet(w, store()).await;
-    let mut shop = w.shop().await;
-    dropped_for_the_block(w, &mut wallet, &mut shop).await;
-    let mut phone = payer_app(w, "phone").await;
-    phone
-        .app_mut()
-        .put_record(
-            &floor_record(w),
-            &paykit_lib::records::BlockFloorRecord::new(1)
-                .to_json()
-                .unwrap(),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
-    wallet.receive(None).await.unwrap();
-    w.alice
-        .switch()
-        .make_divergent([0x5c; 16], floor_key(w, &wallet), [3; 32])
-        .unwrap();
-    wallet.receive(None).await.unwrap();
-    assert!(floor_held_divergent(&wallet).await);
-    let mut contacts = w
-        .join_with(
-            &w.alice,
-            "contacts",
-            AppScopes::new().manage_contacts().build().unwrap(),
-            PaykitConfig::default(),
-            store(),
-        )
-        .await;
-    contacts.unblock(&w.bob_id()).await.unwrap();
-    for _ in 0..2 {
-        w.clock.advance_ms(11 * MINUTE_MS);
-        wallet.receive(None).await.unwrap();
-    }
-    assert!(unblock_raise_owed(&wallet).await);
-    (wallet, shop, contacts)
-}
-
 #[tokio::test]
 async fn test_blocked_return_raise_writes_the_floor_held_over_a_lower_write_refused() {
     // Paykit wire 5.6, Seen floor and permanence: the wallet holds a floor and another app
@@ -4624,50 +4581,6 @@ async fn test_blocked_return_raise_writes_the_floor_held_over_a_lower_write_refu
     let mut reader = payer_app(&w, "reader").await;
     reader.receive(None).await.unwrap();
     assert_eq!(shared_floor(&reader).await, Some(high));
-}
-
-#[tokio::test]
-async fn test_blocked_return_request_held_for_the_raise_dropped_once_its_sender_is_blocked_again() {
-    // Paykit wire 5.6, Raising: another app unblocks bob under the hold, so the wallet owes
-    // the raise for him, and his one-time request waits for it. He is blocked again: at the
-    // wallet's next read of the lists the block holds him, not the raise, and the request is
-    // dropped and counted as from a blocked sender, long before it would be parked.
-    let w = World::new();
-    let (mut wallet, mut shop, mut contacts) = unblocked_by_another_app_under_the_hold(&w).await;
-    let request = request_from(&mut shop, w.alice_id(), draft("9", w.clock.now_ms())).await;
-    w.clock.advance_ms(5_000);
-    wallet.receive(None).await.unwrap();
-    assert!(wallet.request(&request).await.is_err());
-    let counted = wallet.spam_count(&w.bob_id()).await.unwrap();
-    contacts.block(&w.bob_id()).await.unwrap();
-    w.clock.advance_ms(11 * MINUTE_MS);
-    wallet.receive(None).await.unwrap();
-    assert!(!unblock_raise_owed(&wallet).await);
-    assert_eq!(wallet.spam_count(&w.bob_id()).await.unwrap(), counted + 1);
-    assert!(wallet.request(&request).await.is_err());
-    assert!(wallet.app_mut().parked_entries().await.unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn test_blocked_return_own_reblock_drops_the_owed_unblock() {
-    // Paykit wire 5.6, Raising: the user blocks bob again while the raise for another app's
-    // unblock of him is owed under the hold. The block holds him now, and his next unblock
-    // raises the floor anew, so the raise owed for him goes.
-    let w = World::new();
-    let (mut wallet, _shop, _contacts) = unblocked_by_another_app_under_the_hold(&w).await;
-    wallet.block(&w.bob_id()).await.unwrap();
-    assert!(!unblock_raise_owed(&wallet).await);
-}
-
-#[tokio::test]
-async fn test_blocked_return_reblock_read_in_the_lists_drops_the_owed_unblock() {
-    // As above, with the block by the other app, seen at the wallet's next read of the lists.
-    let w = World::new();
-    let (mut wallet, _shop, mut contacts) = unblocked_by_another_app_under_the_hold(&w).await;
-    contacts.block(&w.bob_id()).await.unwrap();
-    w.clock.advance_ms(11 * MINUTE_MS);
-    wallet.receive(None).await.unwrap();
-    assert!(!unblock_raise_owed(&wallet).await);
 }
 
 #[tokio::test]
