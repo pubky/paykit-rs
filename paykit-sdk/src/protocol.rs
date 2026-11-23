@@ -2479,6 +2479,27 @@ mod receive_tests {
         assert_eq!(widening(&missed)["d"]["windows"][0]["floor_ms"], 0);
     }
 
+    #[test]
+    fn test_missed_widening_raises_to_the_read_that_first_passed_the_item() {
+        // Paykit wire 5.6, Raising; spec 7.2, What a `missed` item loses: the widening raises
+        // the floor to the earlier of the item's last acceptance time and the authenticated
+        // time of the feed page that first passed it (`read_at_ms`), which the client keeps
+        // across a retried or delayed callback, never the time the callback runs at.
+        let at = |read_at_ms, accepted_until_ms| {
+            widening(&MissedEntries {
+                read_at_ms,
+                seq: 1,
+                entries: 1,
+                accepted_from_ms: 10,
+                accepted_until_ms,
+            })["d"]["windows"][0]["floor_ms"]
+                .clone()
+        };
+        assert_eq!(at(15, 20), 15);
+        assert_eq!(at(30, 20), 20);
+        assert_eq!(at(40, u64::MAX), 40);
+    }
+
     /// The keys `missed()` puts, with their values as JSON.
     fn missed_puts(missed: &MissedEntries) -> Vec<(String, serde_json::Value)> {
         PaykitProtocol::new()
