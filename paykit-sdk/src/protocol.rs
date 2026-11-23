@@ -1444,7 +1444,12 @@ pub(crate) fn restore_paykit_layer(
 ///   backup's are, so it is reported, never sent on this restore's word (Paykit spec 8.1,
 ///   "Blocked counterparties");
 /// - every block of its own the list doesn't show yet, which the restored app writes
-///   again (Paykit spec 8.1).
+///   again (Paykit spec 8.1);
+/// - the payee app records it has seen, where it has seen a newer one than the backup, so a
+///   record older than one seen is never used again (Switch spec 4.2);
+/// - a list it holds over a record that doesn't read, where it is newer than the backup's,
+///   so a later list, a withdrawal included, is never lost under an older one (Paykit wire
+///   5.4).
 ///
 /// Each is read bound to its key, as every runtime read binds it; one that doesn't verify
 /// refuses the restore, as for the other families merged from the installation: a restore
@@ -1512,6 +1517,61 @@ fn keep_installation_stops(
             .map_err(|_| "the installation holds an own block that doesn't verify")?;
         if mark.blocked() && !written(writes, &at) {
             writes.push(LocalWrite::Put { key: at, value });
+        }
+    }
+    let slot = |writes: &[LocalWrite], at: &[u8]| {
+        writes
+            .iter()
+            .position(|w| matches!(w, LocalWrite::Put { key, .. } if key.as_slice() == at))
+    };
+    for (at, value) in restoring
+        .previous_local_scan(b"ar/")
+        .map_err(|_| "the installation's seen app records cannot be read")?
+    {
+        let Some(StateKey::SeenRecords { payee, .. }) = StateKey::parse(&at) else {
+            return Err("the installation holds an invalid seen app records key".into());
+        };
+        let seen = state::restored::<crate::app_records::SeenRecords>(&at, &value, binder)
+            .map_err(|_| "the installation holds seen app records that don't verify")?;
+        match slot(writes, &at) {
+            None => writes.push(LocalWrite::Put { key: at, value }),
+            Some(i) => {
+                let LocalWrite::Put { value: held, .. } = &writes[i] else {
+                    continue;
+                };
+                let backup = state::restored::<crate::app_records::SeenRecords>(&at, held, binder)
+                    .map_err(|_| "the backup's seen app records don't verify")?;
+                if seen.newest_at(&payee) > backup.newest_at(&payee) {
+                    writes[i] = LocalWrite::Put { key: at, value };
+                }
+            }
+        }
+    }
+    let own = binder.identity();
+    for (at, value) in restoring
+        .previous_local_scan(key::HELD_LISTS.as_bytes())
+        .map_err(|_| "the installation's held lists cannot be read")?
+    {
+        let held = state::restored::<KeptMessage>(&at, &value, binder)
+            .map_err(|_| "the installation holds a held list that doesn't verify")?;
+        let version = |kept: &KeptMessage| {
+            kept.stored(own)
+                .ok()
+                .as_ref()
+                .and_then(crate::receive::list_version)
+        };
+        match slot(writes, &at) {
+            None => writes.push(LocalWrite::Put { key: at, value }),
+            Some(i) => {
+                let LocalWrite::Put { value: kept, .. } = &writes[i] else {
+                    continue;
+                };
+                let backup = state::restored::<KeptMessage>(&at, kept, binder)
+                    .map_err(|_| "the backup's held list doesn't verify")?;
+                if version(&held) > version(&backup) {
+                    writes[i] = LocalWrite::Put { key: at, value };
+                }
+            }
         }
     }
     Ok(())

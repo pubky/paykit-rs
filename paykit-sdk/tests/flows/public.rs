@@ -1454,3 +1454,56 @@ async fn test_public_record_past_its_age_limit_at_dispatch_names_no_clock_behind
     assert!(!shown.contains("the device clock is behind"), "{shown}");
     assert!(w.rail.all_executions().is_empty());
 }
+
+#[tokio::test]
+async fn test_public_older_record_after_an_older_in_place_restore_not_used() {
+    // The wallet sees bob's record, is backed up, then sees a newer record that replaces the
+    // endpoint. Restored in place from the older backup, the records the installation has
+    // seen are kept: a stale copy of the older record served again never replaces the newer
+    // one, and the payment goes to the newer record's endpoint (Switch spec 4.2).
+    let w = World::new();
+    let storage = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", std::sync::Arc::clone(&storage)).await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    let older = publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1old"),
+        t0,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    let backup = wallet.backup().await.unwrap();
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1new"),
+        t0 + 1000,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
+    drop(wallet);
+    let mut wallet = paykit_sdk::Paykit::restore(
+        w.env(&w.alice, storage),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet.reconcile().await.unwrap();
+    wallet.end_reconcile(UserConfirmed::new()).await.unwrap();
+    serve(&w, &older);
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
+    // A record newer than both is used as usual.
+    publish_at(
+        &w,
+        one_endpoint("btc-bitcoin-p2wpkh", "bc1qnewest"),
+        t0 + 2000,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-bitcoin-p2wpkh"]);
+}

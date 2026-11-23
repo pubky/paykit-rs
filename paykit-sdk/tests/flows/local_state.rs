@@ -1115,3 +1115,102 @@ async fn test_local_state_journal_expiry_without_an_allowance_is_corrupt() {
     let error = wallet.resume_payments().await.unwrap_err();
     assert!(corrupt(&error), "{error:?}");
 }
+
+#[tokio::test]
+async fn test_local_state_held_withdrawal_survives_an_older_in_place_restore() {
+    // The wallet holds bob's list and is backed up. The list record then stops reading, and
+    // bob withdraws the list: the withdrawal is held over the record. Restored in place from
+    // the older backup, the installation's held withdrawal stays: once the record reads
+    // again with the older list, the withdrawal is placed over it, and nothing is paid to
+    // the withdrawn list (Paykit wire 5.4).
+    let w = World::new();
+    let storage = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", std::sync::Arc::clone(&storage)).await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
+    wallet.receive(None).await.unwrap();
+    let target = lists_of(&w, &shop.app_id());
+    let record = wallet.app().record_key(&target).unwrap();
+    let readable = wallet
+        .app()
+        .shared_record(&record)
+        .await
+        .unwrap()
+        .unwrap()
+        .content
+        .value()
+        .unwrap()
+        .to_vec();
+    let backup = wallet.backup().await.unwrap();
+    wallet
+        .app_mut()
+        .put_record(&target, b"{}", Vec::new())
+        .await
+        .unwrap();
+    w.list_to_alice_with(
+        &mut shop,
+        &[wallet.app_id()],
+        list_version(1, 2),
+        std::collections::BTreeMap::new(),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
+    wallet.app_mut().flush_cursor().await.unwrap();
+    drop(wallet);
+    let mut wallet = paykit_sdk::Paykit::restore(
+        w.env(&w.alice, storage),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
+    wallet.receive(None).await.unwrap();
+    wallet.reconcile().await.unwrap();
+    wallet
+        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+    // The record reads again, with the older list.
+    wallet
+        .app_mut()
+        .put_record(&target, &readable, Vec::new())
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    let paid = wallet
+        .pay_without_request(paykit_sdk::UnrequestedPayment::new(
+            w.bob_id(),
+            crate::common::btc("1"),
+        ))
+        .await
+        .outcome;
+    assert!(
+        !matches!(paid, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "paid a withdrawn list: {paid:?}"
+    );
+    // A list bob sends later is paid to as usual.
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 3))
+        .await;
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    let paid = wallet
+        .pay_without_request(paykit_sdk::UnrequestedPayment::new(
+            w.bob_id(),
+            crate::common::btc("1"),
+        ))
+        .await
+        .outcome
+        .unwrap();
+    assert!(
+        matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
+        "{paid:?}"
+    );
+}

@@ -407,6 +407,18 @@ impl SeenRecords {
             })
     }
 
+    /// The latest time these seen records reach: the newest kept record's `updated_at`, or
+    /// the time of a group the reader couldn't keep, whichever is later. `None` when a kept
+    /// record doesn't verify as `payee`'s.
+    pub(crate) fn newest_at(&self, payee: &[u8; 32]) -> Option<u64> {
+        let mut newest = self.unkept_at;
+        for signed in &self.records {
+            let at = AppRecord::verify(signed, payee).ok()?.updated_at();
+            newest = Some(newest.map_or(at, |n| n.max(at)));
+        }
+        newest
+    }
+
     /// The view the records give, at the reader's clock `now`. A kept record that no longer
     /// verifies is a corrupt store.
     fn view(&self, payee: &[u8; 32], now: u64) -> Result<(RecordView, Vec<AppRecord>)> {
