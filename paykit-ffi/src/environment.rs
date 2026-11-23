@@ -1,5 +1,5 @@
 use crate::{HostRail, PaymentMethod, WalletError, WalletStore};
-use paykit_sdk::{PaymentEndpointIdentifier, Rail, Timer};
+use paykit_sdk::{PaymentEndpointIdentifier, Timer};
 use pubky_switch_client::app::{HomeserverReader, HomeserverWriter};
 use pubky_switch_client::clock::{Clock, SystemClock};
 
@@ -110,7 +110,7 @@ pub struct WalletHost {
     pub(crate) home: Arc<dyn HomeserverReader>,
     pub(crate) writer: Arc<dyn HomeserverWriter>,
     pub(crate) store: Arc<dyn WalletStore>,
-    pub(crate) rail: Arc<dyn Rail>,
+    pub(crate) rail: Arc<HostRail>,
     pub(crate) timer: Arc<dyn Timer>,
 }
 #[uniffi::export]
@@ -137,7 +137,7 @@ impl WalletHost {
             home: home.clone(),
             writer: home,
             store,
-            rail: Arc::new(HostRail::new(method, identifiers)?),
+            rail: Arc::new(HostRail::new(method, identifiers)),
             timer: Arc::new(RuntimeTimer),
         }))
     }

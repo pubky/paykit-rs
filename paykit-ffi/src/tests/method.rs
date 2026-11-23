@@ -15,6 +15,8 @@ pub(super) struct Account {
     clock: Arc<dyn pubky_switch_client::clock::Clock>,
     pub calls: AtomicUsize,
     pub lookups: AtomicUsize,
+    /// The method declares a history it can look a payment up in.
+    pub history: AtomicBool,
     pub park: AtomicBool,
     pub entered: Notify,
     pub finish: Notify,
@@ -35,6 +37,7 @@ impl Account {
             clock,
             calls: AtomicUsize::new(0),
             lookups: AtomicUsize::new(0),
+            history: AtomicBool::new(true),
             park: AtomicBool::new(true),
             entered: Notify::new(),
             finish: Notify::new(),
@@ -60,7 +63,7 @@ impl PaymentMethod for Account {
         MethodDeclaration {
             idempotent: true,
             idempotency_retention_ms: None,
-            history: true,
+            history: self.history.load(Ordering::SeqCst),
             history_retention_ms: None,
             history_survives_restore: true,
             longest_completion_ms: 1000,
@@ -177,7 +180,7 @@ async fn test_method_history_distinguishes_complete_empty_from_missing_and_unava
         directory.path(),
         Arc::new(pubky_switch_client::clock::TestClock::new(0)),
     ));
-    let rail = HostRail::new(account.clone(), Vec::new()).unwrap();
+    let rail = HostRail::new(account.clone(), Vec::new());
     let payer = [17; 32];
     assert_eq!(
         rail.allowance_history(payer).await.unwrap(),
@@ -202,8 +205,7 @@ fn test_method_declaration_forwards_the_payment_time_tolerance() {
             Arc::new(pubky_switch_client::clock::TestClock::new(0)),
         )),
         Vec::new(),
-    )
-    .unwrap();
+    );
     assert_eq!(rail.declaration().payment_time_tolerance_ms, 7_200_000);
     assert_eq!(rail.declaration().longest_completion_ms, 1000);
 }

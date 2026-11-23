@@ -183,7 +183,7 @@ pub struct MethodPayment {
     pub payment_reference: Option<String>,
 }
 /// The outcome of a dispatch, as the method reports it.
-#[derive(uniffi::Enum)]
+#[derive(Clone, uniffi::Enum)]
 pub enum MethodOutcome {
     /// Verified success.
     Paid {
@@ -198,7 +198,7 @@ pub enum MethodOutcome {
     Pending,
 }
 impl MethodOutcome {
-    fn into_rail(self) -> Result<RailOutcome, RailError> {
+    pub(crate) fn into_rail(self) -> Result<RailOutcome, RailError> {
         Ok(match self {
             Self::Pending => RailOutcome::Pending,
             Self::Failed => RailOutcome::Failed,
@@ -268,6 +268,9 @@ pub trait PaymentMethod: Send + Sync {
     /// Submit the selected endpoint payment under its original idempotency key.
     async fn pay(&self, payment: MethodPayment) -> Result<MethodOutcome, MethodError>;
     /// Look up the original attempt by its idempotency key without starting a transfer.
+    /// Answer `Pending`, never null, for any attempt ID `pay` was called with that hasn't
+    /// settled, from the moment `pay` starts and across restarts. Null means `pay` was never
+    /// called with this ID, which lets the payment be made again.
     async fn payment(&self, attempt_id: String) -> Result<Option<MethodOutcome>, MethodError>;
     /// Complete account-wide dispatch inventory, including manual, failed and pending attempts.
     /// Return null for incomplete coverage and an empty list only for proven empty history.
@@ -292,22 +295,18 @@ pub(crate) struct HostRail {
 }
 
 impl HostRail {
-    /// Use the host's method for the given Payment Endpoint Identifiers. A method whose
-    /// history can't show a dispatch's outcome is refused: a payment the wallet stopped
-    /// waiting for is settled only through that lookup (Paykit spec 7.2).
+    /// Use the host's method for the given Payment Endpoint Identifiers, with the record of
+    /// payments in flight this process shares.
     pub(crate) fn new(
         method: Arc<dyn PaymentMethod>,
         identifiers: Vec<PaymentEndpointIdentifier>,
-    ) -> Result<Self, crate::WalletError> {
-        if !in_callback(|| method.declaration()).history {
-            return Err(crate::WalletError::invalid("payment method history"));
-        }
-        Ok(Self {
+    ) -> Self {
+        Self {
             method,
             identifiers,
-            flights: Default::default(),
+            flights: crate::flights::Flights::process(),
             pay_limit: crate::runtime::PAY_LIMIT,
-        })
+        }
     }
 
     /// Wait for the host's `pay` at most `limit` instead.
@@ -316,10 +315,28 @@ impl HostRail {
         self.pay_limit = limit;
         self
     }
+
+    /// Keep a record of payments in flight of its own, as another device would.
+    #[cfg(any(test, feature = "test-wallet"))]
+    pub(crate) fn with_own_flights(mut self) -> Self {
+        self.flights = Default::default();
+        self
+    }
+
+    pub(crate) fn flights(&self) -> &crate::flights::Flights {
+        &self.flights
+    }
+
+    /// Whether the method can find a dispatch again by its attempt ID. Without that a payment
+    /// the wallet stopped waiting for could never be settled, so paying is refused; every
+    /// other wallet call works with any declaration (Paykit spec 7.2).
+    pub(crate) fn has_lookup(&self) -> bool {
+        in_callback(|| self.method.declaration()).history
+    }
 }
 
 /// Wait for a host lookup at most [`HOST_CALL_LIMIT`]; past it the answer is "not now".
-async fn bounded<T>(
+pub(crate) async fn bounded<T>(
     call: impl std::future::Future<Output = Result<T, MethodError>>,
 ) -> Result<T, RailError> {
     tokio::time::timeout(HOST_CALL_LIMIT, call)
@@ -401,11 +418,18 @@ impl Rail for HostRail {
                 attempt_id: attempt.clone(),
                 payment_reference: p.payment_reference,
             };
+            // Authoritative: nothing is submitted, so the SDK may record the attempt failed.
+            if !self.has_lookup() {
+                return Err(RailError::Refused(
+                    "payment method can't look up a payment by its attempt ID".into(),
+                ));
+            }
             let method = self.method.clone();
             let pay = async move { method.pay(payment).await };
+            let app = crate::wallet::current_app();
             match self
                 .flights
-                .dispatch(attempt, pay, self.pay_limit, crate::wallet::settle_target())
+                .dispatch(attempt, app, pay, self.pay_limit)
                 .await
             {
                 Waited::Answered(answer) => answer?.into_rail(),
@@ -423,10 +447,11 @@ impl Rail for HostRail {
         Box::pin(async move {
             let attempt = id.to_text();
             // In flight at the host: pending, and the host is not asked while its `pay` runs.
-            if self.flights.running(&attempt) {
+            if self.flights.in_flight(&attempt) {
                 return Ok(Some(RailOutcome::Pending));
             }
-            if let Some(outcome) = self.flights.take_late(&attempt) {
+            // The method's own late answer, kept until the journal records it.
+            if let Some(outcome) = self.flights.late(&attempt) {
                 return outcome.into_rail().map(Some);
             }
             bounded(self.method.payment(attempt))
