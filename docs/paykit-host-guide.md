@@ -389,7 +389,11 @@ collections after the Switch has finished its feed read. An explicit `reconcile`
 read and retain committed duties from `wallet.app_mut().unacknowledged_events()`.
 Wait for a later successful `receive` so the SDK can process its duties, then
 acknowledge for `"paykit"` with `App::ack_events_for` up to the last duty in
-that successful report. Use the app-wide `App::ack_events` only after the
+that successful report. After every successful `receive`, acknowledge the duties the SDK leaves to the
+host: the SDK acknowledges its own in order, so one left unacknowledged, such as
+one a restore tells again, stops it before every later duty, and dismissing a
+notice whose stored entry such a later duty names is refused with `Usage` until
+then. Use the app-wide `App::ack_events` only after the
 other responsible protocols have handled their duties too. Keep the deletion
 notice and any surviving confirmed receipt together when showing a missing
 shared record.
@@ -490,4 +494,4 @@ The method declares `payment_time_tolerance_ms` with its declaration. The payee 
 | `Refusal::CertificateRefused` | Seek a suitable certificate from the signer and keep Paykit actions paused meanwhile. |
 | `Refusal::SwitchUnavailable` | Show the own Switch as unavailable and keep payment actions waiting. From a payment, directly or as an `AttemptFailed` cause, it means nothing was paid, not a payment in flight: retry the payment once the switch answers. If the retry is refused with `PaymentInProgress`, call `Paykit::resume_payments` and retry once the earlier attempt is resolved; the resume records it failed when the switch takes that write. |
 | `Refusal::Blocked` | Show the blocked recipient and the exact payment to the user before any supported override. |
-| `Refusal::Divergent` | Show the returned records and the exact confirmation asked for. Run receive while the record still has writes waiting. |
+| `Refusal::Divergent` | Show the returned records and the exact confirmation asked for. Run receive while the record still has writes waiting. A credit refused this way is released only by confirming, with `confirm_divergent`, the records this refusal returns (`may_hold_credit`): a record confirmed as `divergent_records()` lists it doesn't count for a credit, and one still owed that confirmation may be missing from that list. Then ask for the credit again. |

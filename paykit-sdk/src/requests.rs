@@ -265,7 +265,7 @@ pub enum MessageDelivery {
     /// "Waiting for them to admit you": the recipient's switch answered `403 not_admitted`,
     /// first at `since_ms` (app clock), as a payee's does to a payer it doesn't admit yet,
     /// or a payer's to a payee it hasn't invited. The message stays queued, and goes once
-    /// the recipient adds this identity as a contact or invites it (Switch spec 7), or is
+    /// the recipient keeps this identity as a peer or invites it (Switch spec 7), or is
     /// given up after [`pubky_switch_client::app::UNDELIVERABLE_MS`] (Switch spec 11).
     WaitingForAdmission {
         /// The first such answer, app clock, in Unix milliseconds.

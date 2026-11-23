@@ -903,10 +903,10 @@ WalletEventData from app::AppEvent {
     },
     /// The verified service and identity inventories differ.
     ListsDiffer {
-        /// Contacts and deny list entries added back.
+        /// Kept peers and deny list entries added back.
         added: u64,
-        /// Contacts the service holds that the app never saw added; shown, not removed.
-        unverified_contacts: u64,
+        /// Kept peers the service holds that the app never saw added; shown, not removed.
+        unverified_kept_peers: u64,
         /// Invite codes withdrawn.
         withdrawn_codes: u64,
     },
@@ -921,6 +921,15 @@ WalletEventData from app::AppEvent {
     ProviderRecovered {
         /// The generation recovered at.
         generation: u64,
+    },
+    /// After a provider loss, `over` of the app's deny entries don't fit the replacement's
+    /// deny list and nothing of the list was merged: the user unblocks that many peers, and
+    /// the recovery is followed again (Switch docs/app-host-guide.md).
+    RecoveryDenyListFull {
+        /// The generation being recovered.
+        generation: u64,
+        /// How many of the app's new deny entries don't fit.
+        over: u64,
     },
     /// A newer provider change superseded this one.
     ProviderChangeSuperseded {

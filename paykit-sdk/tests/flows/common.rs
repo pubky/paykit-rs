@@ -7,7 +7,7 @@
 //! lists and invite codes, the directory, peer copies of `identity.json` and the inbox. The
 //! identities admit each other as real apps do: a payer invites the payee it buys from (a
 //! conversation it starts, as at a checkout), and the first message an app sends a
-//! counterparty writes its conversation entry, so the counterparty's replies are admitted
+//! counterparty writes its reply grant, so the counterparty's replies are admitted
 //! (Paykit spec 1, Switch spec 7).
 
 use std::sync::Arc;

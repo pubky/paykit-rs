@@ -46,7 +46,7 @@ pub const ALLOWANCE_EXECUTE: &str = "paykit_allowance_execute";
 pub const SETTLEMENTS: &str = "paykit_settlements";
 /// Read and publish reports from the apps listed at a provider loss.
 pub const RECOVERY: &str = "paykit_recovery";
-/// `paykit_contacts`: read the contacts, conversation entries and deny list (Paykit spec 3.1).
+/// `paykit_contacts`: read the kept peers, reply grants and deny list (Paykit spec 3.1).
 pub const CONTACTS: &str = "paykit_contacts";
 /// `paykit_manage_contacts`: change the contacts and the deny list (Paykit spec 3.1).
 pub const MANAGE_CONTACTS: &str = "paykit_manage_contacts";
@@ -206,7 +206,7 @@ pub enum PaykitScope {
     /// `paykit_allowance_execute`: act as an Allowance executor; requires `paykit_allowance`,
     /// `paykit_pay` and `paykit_contacts`, so the executor reads the deny list.
     AllowanceExecute,
-    /// `paykit_contacts`: read the contacts, conversation entries and deny list.
+    /// `paykit_contacts`: read the kept peers, reply grants and deny list.
     Contacts,
     /// `paykit_manage_contacts`: change the contacts and the deny list; requires
     /// `paykit_contacts`.
@@ -293,12 +293,10 @@ impl PaykitScope {
             Self::Pay => &[
                 Permission::ClaimsRead,
                 Permission::ClaimsWrite,
-                Permission::ConversationAdd,
+                Permission::ReplyAdd,
             ],
-            Self::Allowance => &[Permission::ClaimsRead, Permission::ConversationAdd],
-            Self::Request | Self::RequestLabel(_) | Self::Extension(_) => {
-                &[Permission::ConversationAdd]
-            }
+            Self::Allowance => &[Permission::ClaimsRead, Permission::ReplyAdd],
+            Self::Request | Self::RequestLabel(_) | Self::Extension(_) => &[Permission::ReplyAdd],
             Self::Contacts => &[Permission::ListsRead],
             Self::ManageContacts => &[Permission::ListsManage],
             Self::AllowanceExecute | Self::Settlements | Self::Recovery => &[],
@@ -679,24 +677,21 @@ mod tests {
         for (scopes, want) in [
             (
                 vec!["paykit_pay"],
-                vec!["claims.read", "claims.write", "conversation.add"],
+                vec!["claims.read", "claims.write", "reply.add"],
             ),
-            (vec!["paykit_request"], vec!["conversation.add"]),
-            (vec!["paykit_request:shop1"], vec!["conversation.add"]),
-            (
-                vec!["paykit_allowance"],
-                vec!["claims.read", "conversation.add"],
-            ),
+            (vec!["paykit_request"], vec!["reply.add"]),
+            (vec!["paykit_request:shop1"], vec!["reply.add"]),
+            (vec!["paykit_allowance"], vec!["claims.read", "reply.add"]),
             (
                 vec!["paykit_pay", "paykit_allowance", "paykit_allowance_execute"],
-                vec!["claims.read", "claims.write", "conversation.add"],
+                vec!["claims.read", "claims.write", "reply.add"],
             ),
             (vec!["paykit_contacts"], vec!["lists.read"]),
             (
                 vec!["paykit_contacts", "paykit_manage_contacts"],
                 vec!["lists.read", "lists.manage"],
             ),
-            (vec!["paykit_ext:paykit-x1"], vec!["conversation.add"]),
+            (vec!["paykit_ext:paykit-x1"], vec!["reply.add"]),
             (vec!["paykit_ext:cap"], vec![]),
             (vec!["future_scope", "paykit_pay:x"], vec![]),
             (vec!["chat", "chat:room1"], vec![]),
@@ -872,7 +867,7 @@ mod tests {
                 "paykit_request:shop1",
                 "paykit_settlements"
             ]))),
-            vec!["conversation.add"]
+            vec!["reply.add"]
         );
         assert_eq!(
             keyed_scopes(&owned(&["paykit_request:shop1", "paykit_settlements"])),
@@ -1078,7 +1073,7 @@ mod tests {
     }
 
     const LISTS_READ: Permission = Permission::ListsRead;
-    const ADD: Permission = Permission::ConversationAdd;
+    const ADD: Permission = Permission::ReplyAdd;
 
     #[test]
     fn test_scopes_classify_another_protocols_scopes() {
@@ -1132,7 +1127,7 @@ mod tests {
 
     #[test]
     fn test_scopes_certificate_with_another_protocol_holding_paykit_permissions_accepted() {
-        // A payee that also chats: Paykit's lists.read and conversation.add, and the chat's
+        // A payee that also chats: Paykit's lists.read and reply.add, and the chat's
         // lists.manage.
         check_certificate(&cert(
             &PAYEE_AND_CHAT,
@@ -1423,7 +1418,7 @@ mod tests {
         check_scopes(&scopes).unwrap();
         assert_eq!(
             names(&permissions_for(&scopes)),
-            ["lists.read", "conversation.add"],
+            ["lists.read", "reply.add"],
             "{scopes:?}"
         );
         assert!(!holds_other_protocol(&scopes));

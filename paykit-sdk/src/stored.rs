@@ -485,6 +485,13 @@ impl Paykit {
                 Box::pin(self.take_divergent_event(record, id)).await?;
                 true
             }
+            // Kept peers or reply grants a restore brought back unverified are the client's
+            // to verify again, and the host learns of the event from the report (Switch spec 7
+            // and 12.4; Switch docs/app-host-guide.md, `AppEvent::ListsUnverified`). Paykit
+            // keeps nothing from it, so it takes it: an untaken event would stop Paykit's own
+            // acknowledgements in order before every later one, as a restore tells it again
+            // first (Paykit spec 1, "Duties and host events").
+            AppEvent::ListsUnverified { .. } => true,
             // The Switch owns the member and its expiry policy, including any pending
             // edit. Normal record upkeep runs after this receive completes.
             AppEvent::MemberChanged { protocol, .. }

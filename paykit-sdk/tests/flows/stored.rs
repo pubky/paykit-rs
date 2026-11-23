@@ -2088,6 +2088,41 @@ async fn test_stored_given_up_message_stays_given_up_after_a_restore() {
 }
 
 #[tokio::test]
+async fn test_stored_lists_told_again_before_a_given_up_message_dont_stop_its_forget() {
+    // A restore tells again, first, that the lists it brought back are unverified, then the
+    // given-up message's stored entry. Paykit keeps nothing from the first and takes it, so
+    // its acknowledgements in order reach the second, and the notice's acknowledgement
+    // forgets the entry (Paykit spec 1, "Duties and host events").
+    use pubky_switch_client::app::AppEvent;
+    let w = World::new();
+    let (wallet, given) = given_up_signed(&w).await;
+    let mut app = restored_unlisted(&w, wallet).await;
+    let told = app.app_mut().unacknowledged_events().await.unwrap();
+    let lists = told
+        .iter()
+        .position(|e| matches!(e, AppEvent::ListsUnverified { .. }))
+        .unwrap();
+    let parked = told
+        .iter()
+        .position(|e| matches!(e, AppEvent::Parked { .. }))
+        .unwrap();
+    assert!(lists < parked);
+    app.reconcile().await.unwrap();
+    app.end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+    app.receive(None).await.unwrap();
+    assert!(app
+        .app_mut()
+        .pending_duty_events()
+        .await
+        .unwrap()
+        .is_empty());
+    app.acknowledge_notice(&given.notice.id).await.unwrap();
+    assert!(app.app_mut().parked_entries().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn test_stored_given_up_message_sent_again_after_a_restore_has_no_effect() {
     // The sender sends the given-up message again after the restore: it stays processed.
     let w = World::new();

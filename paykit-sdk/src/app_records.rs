@@ -922,7 +922,7 @@ mod tests {
     fn test_app_records_record_with_wrong_permissions_ignored() {
         use pubky_switch_core::scopes::Permission;
         // The Switch takes both certificates; Paykit's verifiers refuse them (Paykit wire
-        // 3.1): `paykit_request` needs exactly `conversation.add`.
+        // 3.1): `paykit_request` needs exactly `reply.add`.
         let missing = Party::with_permissions(
             "bob",
             "shop",
@@ -936,7 +936,7 @@ mod tests {
             &[
                 Permission::ClaimsRead,
                 Permission::ListsRead,
-                Permission::ConversationAdd,
+                Permission::ReplyAdd,
             ],
         );
         for app in [&missing, &extra] {

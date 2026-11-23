@@ -1957,7 +1957,7 @@ impl Protocol for PaykitProtocol {
     }
 
     /// A provider loss (Switch spec 12.6 steps 2 and 4): ask every counterparty with Paykit
-    /// activity to send again from the old cursor's time, and add their conversation entries
+    /// activity to send again from the old cursor's time, and add their reply grants
     /// back.
     fn provider_lost(
         &self,
@@ -1967,14 +1967,14 @@ impl Protocol for PaykitProtocol {
         // A store that fails, or a peer key that doesn't read, is the step's failure, never
         // an empty list of counterparties: the recovery asks again.
         let peers = state::view_scan::<u64>(view, key::PEERS).map_err(view_failure)?;
-        let mut conversations = Vec::with_capacity(peers.len());
+        let mut reply_peers = Vec::with_capacity(peers.len());
         for (rest, _) in peers {
             let peer = unb64_array::<32>(&rest)
                 .map_err(|_| StoreFailure::of_entry(StoreError::Corrupt))?;
-            conversations.push(peer);
+            reply_peers.push(peer);
         }
         let mut actions = LossActions {
-            conversations,
+            reply_peers,
             local: vec![local_write(
                 &key::missed(loss.accepted_from_ms),
                 &loss.accepted_from_ms,
@@ -1984,12 +1984,12 @@ impl Protocol for PaykitProtocol {
         Ok(actions)
     }
 
-    fn adds_conversation(&self, kind: &str) -> bool {
-        // Paykit wire 4.12: a resend_request adds no conversation entry.
+    fn adds_reply(&self, kind: &str) -> bool {
+        // Paykit wire 4.12: a resend_request adds no reply grant.
         kind != Kind::ResendRequest.as_str()
     }
 
-    fn message_adds_conversation(&self, message: &Message, _: &MessagePlaintext) -> bool {
+    fn message_adds_reply(&self, message: &Message, _: &MessagePlaintext) -> bool {
         // A withdrawal never admits its recipient to the publisher's inbox (Paykit wire 4.13).
         message.kind != Kind::PrivatePaymentList.as_str()
             || paykit_lib::bodies::PrivatePaymentList::from_body(&message.body)
@@ -2372,10 +2372,10 @@ mod tests {
     }
 
     #[test]
-    fn test_protocol_resend_request_adds_no_conversation() {
+    fn test_protocol_resend_request_adds_no_reply_grant() {
         let p = protocol();
-        assert!(!p.adds_conversation("paykit.resend_request"));
-        assert!(p.adds_conversation("paykit.payment_request"));
+        assert!(!p.adds_reply("paykit.resend_request"));
+        assert!(p.adds_reply("paykit.payment_request"));
     }
 
     #[test]
@@ -2582,7 +2582,7 @@ mod receive_tests {
     }
 
     #[test]
-    fn test_protocol_only_a_readable_nonempty_private_list_can_add_a_conversation() {
+    fn test_protocol_only_a_readable_nonempty_private_list_can_add_a_reply_grant() {
         let shop = Party::new("shop", "shop", &["paykit_request", "paykit_settlements"]);
         let p = protocol_of(&shop);
         for (endpoints, expected) in [
@@ -2604,7 +2604,7 @@ mod receive_tests {
             )
             .unwrap();
             let plaintext = message.sign(&shop.keys).unwrap();
-            assert_eq!(p.message_adds_conversation(&message, &plaintext), expected);
+            assert_eq!(p.message_adds_reply(&message, &plaintext), expected);
         }
     }
 
@@ -2826,7 +2826,7 @@ mod receive_tests {
             "wallet",
             &["paykit_pay", "paykit_contacts"],
         ));
-        // A payee app's scopes need exactly `lists.read` and `conversation.add` (Paykit wire
+        // A payee app's scopes need exactly `lists.read` and `reply.add` (Paykit wire
         // 3.1): one without them, or with `claims.read` beside them, is a certificate the Switch
         // takes and Paykit refuses.
         let missing = Party::with_permissions(
@@ -2842,7 +2842,7 @@ mod receive_tests {
             &[
                 Permission::ClaimsRead,
                 Permission::ListsRead,
-                Permission::ConversationAdd,
+                Permission::ReplyAdd,
             ],
         );
         for app in [&missing, &extra] {

@@ -45,7 +45,7 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// The first read's failure, or the Switch client's refusal without `conversation.add`.
+    /// The first read's failure, or the Switch client's refusal without `reply.add`.
     pub async fn allow_connect(&mut self, payee: &[u8; 32]) -> Result<()> {
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;

@@ -1228,7 +1228,7 @@ mod tests {
             &[
                 Permission::ClaimsRead,
                 Permission::ListsRead,
-                Permission::ConversationAdd,
+                Permission::ReplyAdd,
             ],
         );
         for app in [&missing, &extra] {
