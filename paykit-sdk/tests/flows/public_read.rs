@@ -1386,6 +1386,9 @@ async fn test_public_read_unretained_conflict_still_refused_after_a_reload() {
         .load_on_clock(&w.alice, storage, wallet_id, Arc::clone(&w.clock))
         .await;
     publish_app_at(&w, apps[0].0, original, original_time, expiry);
+    // Refused naming the time a later record must pass.
+    let floor = "after that time can be used";
+    let at = format!("{original_time} ms");
     for _ in 0..2 {
         let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
         assert_eq!(offering(&read), [apps[1].1], "{read:?}");
@@ -1393,7 +1396,7 @@ async fn test_public_read_unretained_conflict_still_refused_after_a_reload() {
         assert_eq!(read.failures[0].app_id, apps[0].1);
         assert!(
             matches!(&read.failures[0].reason, PublicAppFailureReason::Refused(rule)
-                if rule.contains("a reader keeps")),
+                if rule.contains("a reader keeps") && rule.contains(&at) && rule.contains(&floor)),
             "{:?}",
             read.failures
         );

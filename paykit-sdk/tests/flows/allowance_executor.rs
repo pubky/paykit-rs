@@ -4519,6 +4519,13 @@ async fn test_executor_older_in_place_restore_keeps_a_kept_end_and_its_removal()
     Box::pin(restored.end_reconcile(UserConfirmed::new()))
         .await
         .unwrap();
+    // No approval for execution of the removed Allowance came back with the restore.
+    assert!(restored
+        .app()
+        .protocol_scan("paykit", b"xa/")
+        .await
+        .unwrap()
+        .is_empty());
     // The end is the stop the installation kept, and the ordinary passes place it in the
     // Allowance record: the record shows it ended, with no stop left to place.
     assert_eq!(
