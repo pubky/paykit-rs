@@ -45,6 +45,18 @@ pub enum WalletNoticeKind {
     SettlementCreditedTwice,
     /// A bounded recovery family discarded a window before a request covering it was delivered.
     DroppedMessagesLost,
+    /// The identity's block floor is held after it was seen divergent: no automatic one-time
+    /// payment goes and each request can still be paid by hand. Shown once, and again at each
+    /// reopen.
+    BlockFloorHeld,
+    /// A block floor raise the wallet owes isn't written yet, with no divergence hold: until it
+    /// is, an unblocked sender's one-time requests wait and it is asked nothing, and while a
+    /// widening's raise waits no one is asked to re-send.
+    /// Shown once while it stands; it goes when the raise is written.
+    FloorRaiseWaiting,
+    /// Automatic one-time payments for the identity are held for good after a provider loss;
+    /// each request can still be paid by hand. Shown once, and again after each reopen.
+    AutomaticPaymentsHeld,
     /// A native case that this binding does not recognize.
     Other,
 }
@@ -66,6 +78,9 @@ impl From<paykit_sdk::NoticeKind> for WalletNoticeKind {
             K::SettlementMarksChanged => Self::SettlementMarksChanged,
             K::SettlementCreditedTwice => Self::SettlementCreditedTwice,
             K::DroppedMessagesLost => Self::DroppedMessagesLost,
+            K::BlockFloorHeld => Self::BlockFloorHeld,
+            K::FloorRaiseWaiting => Self::FloorRaiseWaiting,
+            K::AutomaticPaymentsHeld => Self::AutomaticPaymentsHeld,
             _ => Self::Other,
         }
     }

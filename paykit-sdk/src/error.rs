@@ -263,6 +263,15 @@ pub enum Refusal {
     /// or the clocks disagreeing (Switch spec 10.1, 12.4).
     #[error("not now: {0}")]
     NotNow(String),
+    /// The identity's block floor was seen divergent, and nothing can show what the hidden
+    /// upload held: no raise of the floor can be written, so an unblock or a widening that
+    /// needs one waits, and no automatic one-time payment goes (Paykit wire 5.6, Divergent
+    /// floor). Payments by hand, Billing Periods and payments without a request go on under
+    /// their own rules. Retrying changes nothing until the shared post-loss hold stands too,
+    /// when the unblock or widening goes without the raise (Unblocking under the divergence
+    /// hold).
+    #[error("Paykit wire 5.6: the block floor is held after it was seen divergent, so no raise of it can be written and this waits until the shared post-loss hold stands too; each request can still be paid by hand, and Billing Periods and payments without a request go on")]
+    FloorHeld,
     /// A value the caller gave breaks a rule: the text names it.
     #[error("usage: {0}")]
     Usage(String),
