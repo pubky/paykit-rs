@@ -1925,7 +1925,12 @@ impl Protocol for PaykitProtocol {
     ) -> Result<Vec<LocalWrite>, StoreFailure> {
         if record.collection.name == Collection::PaymentLists.name() {
             let seen = context.record_seen(&record.key).map_err(store_failure)?;
-            return crate::receive::list_record_deleted(context, &record.key, seen.as_deref());
+            return crate::receive::list_record_deleted(
+                context,
+                &record.key,
+                version,
+                seen.as_deref(),
+            );
         }
         crate::allowances::lifetime_ended(record, version, context)
     }
@@ -1996,7 +2001,12 @@ impl Protocol for PaykitProtocol {
             // places a list there, and a later value is taken only with those marks (Paykit
             // spec 6, Paykit wire 4.13 and 5).
             return Ok(Some(PutBack::Observe {
-                observed: crate::receive::list_record_deleted(cx, deletion.key, deletion.seen)?,
+                observed: crate::receive::list_record_deleted(
+                    cx,
+                    deletion.key,
+                    deletion.version,
+                    deletion.seen,
+                )?,
             }));
         }
         crate::deletions::observe_payee_deletion(deletion, cx, &|proof| self.settlement_id(proof))

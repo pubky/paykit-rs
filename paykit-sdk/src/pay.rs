@@ -2008,16 +2008,9 @@ impl Paykit {
         }
         let mut read = Vec::new();
         for (list, version) in self.lists_read_of(payee).await? {
-            // Over a `payment_lists` record seen deleted, a list is paid only from a value
-            // holding every single-use mark known, and none with no copy known; another waits
-            // (Paykit spec 6, "Visible deletion without a copy").
-            let at = key::list_record_lost(
-                &self
-                    .app
-                    .record_key(&list_target(&list.payee, &list.app_id))?,
-            );
-            let lost = self.local_get::<crate::state::LostListRecord>(&at).await?;
-            if lost.is_none_or(|lost| lost.admits(&list)) {
+            // Over a `payment_lists` record seen deleted, a list is paid only from a value the
+            // family's rules take; another waits (Paykit spec 6).
+            if self.list_admitted(&list).await? {
                 read.push((list, version));
             }
         }

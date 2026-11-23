@@ -496,6 +496,22 @@ impl Paykit {
             .collect())
     }
 
+    /// Whether `list`, a `payment_lists` value read at its key, may be used: over a record
+    /// this app saw deleted, only one that holds every single-use mark its copy held and a
+    /// list no older than the copy's, or the same one, and none with no copy known
+    /// ([`crate::state::LostListRecord`]; Paykit spec 6, "Visible deletion without a copy").
+    pub(crate) async fn list_admitted(&self, list: &PaymentListRecord) -> Result<bool> {
+        let record = self
+            .app
+            .record_key(&list_target(&list.payee, &list.app_id))?;
+        let lost = self
+            .local_get::<crate::state::LostListRecord>(&crate::state::key::list_record_lost(
+                &record,
+            ))
+            .await?;
+        Ok(lost.is_none_or(|lost| lost.admits(list)))
+    }
+
     /// As [`Paykit::lists_of`], each with the version of the write whose content it is: the
     /// write the app took, never one it refused (Switch spec 8.2).
     pub(crate) async fn lists_read_of(

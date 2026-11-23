@@ -2150,3 +2150,99 @@ async fn put_list_record(
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn test_unrequested_delete_seen_again_keeps_its_marks_and_a_put_back_places_the_list() {
+    for restore in [false, true] {
+        let w = World::new();
+        let mut wallet = w.wallet("wallet").await;
+        let mut phone = w.wallet("phone").await;
+        let mut shop = w.shop().await;
+        let (_, marked) =
+            pay_single_use_then_delete_elsewhere(&w, &mut wallet, &mut phone, &mut shop).await;
+        let target = shop_list_target(&w, &shop);
+        // The wallet sees the delete with its copy, and holds a newer list over it.
+        wallet.receive(None).await.unwrap();
+        w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 2))
+            .await;
+        wallet.receive(None).await.unwrap();
+        assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
+        // The same delete is reported again: by a read while it is current, or by the
+        // listing of a restore onto a fresh store.
+        let mut wallet = if restore {
+            let backup = wallet.backup().await.unwrap();
+            drop(wallet);
+            let mut restored = restored_onto(&w, crate::common::store(), &backup).await;
+            restored.receive(None).await.unwrap();
+            restored
+        } else {
+            wallet.app_mut().read_record(&target).await.unwrap();
+            wallet
+        };
+        // Another own app puts the record back holding every mark: the list is placed
+        // there, and its new single-use endpoint is paid.
+        put_list_record(&mut phone, &target, Some(&marked)).await;
+        wallet.receive(None).await.unwrap();
+        wallet.receive(None).await.unwrap();
+        assert!(
+            wallet.held_lists().await.unwrap().is_empty(),
+            "restore {restore}"
+        );
+        let paid = wallet
+            .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+            .await
+            .outcome;
+        assert!(
+            matches!(paid, Ok(PayOutcome::Paid { .. })),
+            "restore {restore}: {paid:?}"
+        );
+        assert_eq!(w.rail.all_executions().len(), 2, "restore {restore}");
+    }
+}
+
+#[tokio::test]
+async fn test_unrequested_older_list_over_a_forgotten_delete_not_paid() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice_with(
+        &mut shop,
+        &[wallet.app_id()],
+        list_version(1, 1),
+        lightning("lno1withdrawn"),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    let target = shop_list_target(&w, &shop);
+    phone.app_mut().read_record(&target).await.unwrap();
+    let (_, older) = list_record(&phone, &w).await;
+    // The payee replaces its endpoint with a newer list; the wallet takes it.
+    w.list_to_alice_with(
+        &mut shop,
+        &[wallet.app_id()],
+        list_version(1, 2),
+        lightning("lno1newoffer"),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    // The record is deleted, the wallet sees it, and the service forgets it.
+    phone.app_mut().read_record(&target).await.unwrap();
+    put_list_record(&mut phone, &target, None).await;
+    wallet.receive(None).await.unwrap();
+    let key = wallet.app().record_key(&target).unwrap();
+    w.alice.switch().drop_record(&key).unwrap();
+    // A newly joined app writes the older list back, holding every mark.
+    let mut tablet = w.wallet("tablet").await;
+    put_list_record(&mut tablet, &target, Some(&older)).await;
+    wallet.receive(None).await.unwrap();
+    let again = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-lightning-bolt12"))
+        .await
+        .outcome;
+    assert!(
+        !matches!(again, Ok(PayOutcome::Paid { .. })),
+        "a withdrawn endpoint was paid: {again:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
