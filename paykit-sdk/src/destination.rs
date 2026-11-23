@@ -63,6 +63,7 @@ use pubky_switch_client::app::{
 use pubky_switch_client::transport::BoxFuture;
 use pubky_switch_core::records::{AppCert, AppRecord, IdentityDoc, Standing};
 
+use crate::app_records::PublicAppFailureReason;
 use crate::error::{Refusal, Result};
 use crate::journal::Destination;
 use crate::paykit::Paykit;
@@ -289,8 +290,20 @@ impl Paykit {
         by: Initiator,
         confirmed: Option<UserConfirmed>,
     ) -> Result<std::result::Result<PeerIdentity, Refusal>> {
-        if let Err(why) = carries(payee, destination, carrier, request_hash, self.clocks()) {
-            return Ok(Err(Refusal::Destination(why)));
+        let clocks = self.clocks();
+        if let Err(why) = carries(payee, destination, carrier, request_hash, clocks) {
+            // A record whose expiry only the service's time shows is judged below with the
+            // identity's age limit too, which may show it expired on the device clock: the
+            // refusal then names no clock behind (Paykit spec 4, 7.2).
+            let device_only = Clocks {
+                service: None,
+                ..clocks
+            };
+            let by_service_alone = matches!(carrier, Carrier::Record(_))
+                && carries(payee, destination, carrier, request_hash, device_only).is_ok();
+            if !by_service_alone {
+                return Ok(Err(Refusal::Destination(why)));
+            }
         }
         // Switch spec 4.3 asks for the switch's confirmation for public endpoints only; a
         // request's or a list's endpoint is the payee's verified message (Paykit spec 7.2).
@@ -320,9 +333,18 @@ impl Paykit {
                 .await?;
                 match checked {
                     Ok((checked, records)) if records.iter().any(|r|
-                        record_carries(payee, destination, &r.record, self.clocks()).is_ok()) => identity = checked,
+                        record_carries(payee, destination, &r.record, None, self.clocks()).is_ok()) => identity = checked,
+                    // A record the read found expired keeps its reason, a device clock behind
+                    // the service's time included (Paykit spec 7.2).
                     Ok(_) => return Ok(Err(Refusal::Destination(
-                        "Paykit spec 7.2: the payee app no longer offers the selected public endpoint".into(),
+                        failures
+                            .into_iter()
+                            .find_map(|failure| match failure.reason {
+                                PublicAppFailureReason::Expired(why)
+                                    if failure.app_id == destination.app_id => Some(why),
+                                _ => None,
+                            })
+                            .unwrap_or_else(|| "Paykit spec 7.2: the payee app no longer offers the selected public endpoint".into()),
                     ))),
                     Err(refusal) => return Ok(Err(refusal)),
                 }
@@ -411,7 +433,8 @@ impl Paykit {
             device: now,
             service: self.service_time(),
         };
-        carries(payee, destination, carrier, request_hash, clocks).map_err(Refusal::Destination)?;
+        carries_under(payee, destination, carrier, request_hash, Some(doc), clocks)
+            .map_err(Refusal::Destination)?;
         current(doc, &destination.app_id, carrier, clocks).map_err(Refusal::Destination)
     }
 }
@@ -610,9 +633,26 @@ pub(crate) fn carries(
     request_hash: Option<&[u8; 32]>,
     clocks: Clocks,
 ) -> std::result::Result<(), String> {
+    carries_under(payee, destination, carrier, request_hash, None, clocks)
+}
+
+/// [`carries`], a record judged also by the age limit of `doc`, the payee's
+/// `identity.json`, when it is known: the earliest limit passed then names the refusal, so
+/// it says the device clock is behind only when no limit has passed on the device clock.
+pub(crate) fn carries_under(
+    payee: &[u8; 32],
+    destination: &Destination,
+    carrier: &Carrier,
+    request_hash: Option<&[u8; 32]>,
+    doc: Option<&IdentityDoc>,
+    clocks: Clocks,
+) -> std::result::Result<(), String> {
     let carrier = match carrier {
         Carrier::Message(message) => message,
-        Carrier::Record(record) => return record_carries(payee, destination, record, clocks),
+        Carrier::Record(record) => {
+            let age_limit = doc.map(|doc| record.trusted_until(doc.record_max_age_ms() / 1000));
+            return record_carries(payee, destination, record, age_limit, clocks);
+        }
     };
     if &carrier.sender() != payee {
         return Err("Paykit spec 6: the destination comes from another identity".into());
@@ -698,6 +738,7 @@ fn record_carries(
     payee: &[u8; 32],
     destination: &Destination,
     record: &AppRecord,
+    age_limit: Option<u64>,
     clocks: Clocks,
 ) -> std::result::Result<(), String> {
     if destination.source().map_err(|e| e.to_string())? != DestinationSource::Public {
@@ -718,22 +759,34 @@ fn record_carries(
     {
         return Err("Paykit spec 7.2: the record doesn't carry the destination".into());
     }
-    check_record_time(record, clocks)
+    check_record_time(record, age_limit, clocks)
 }
 
-/// Time limits signed into the record itself (Paykit spec 4): an `updated_at` ahead of the
-/// device clock, and an `expires_at` passed by either clock. The identity document supplies
-/// the additional age limit when the payer checks the publishing app.
+/// A record's time limits (Paykit spec 4): an `updated_at` ahead of the device clock, and,
+/// passed by either clock, its signed `expires_at` and the identity's age limit
+/// `age_limit`, the end of the record's `updated_at` plus `record_max_age`, when the
+/// payee's `identity.json` is known. The earliest limit passed names the refusal, so it
+/// says the device clock is behind only when the device clock shows no limit passed.
 pub(crate) fn check_record_time(
     record: &AppRecord,
+    age_limit: Option<u64>,
     clocks: Clocks,
 ) -> std::result::Result<(), String> {
     if record.is_ahead(clocks.device) {
         return Err("Paykit spec 4: the record's updated_at is ahead of the device clock".into());
     }
-    if let Some(at) = record.expires_at().filter(|at| clocks.past(*at)) {
+    let limits = [
+        record.expires_at().map(|at| (at, "its expires_at")),
+        age_limit.map(|at| (at, "the identity's record age limit")),
+    ];
+    if let Some((at, limit)) = limits
+        .into_iter()
+        .flatten()
+        .filter(|(at, _)| clocks.past(*at))
+        .min_by_key(|(at, _)| *at)
+    {
         return Err(format!(
-            "Paykit spec 4: the record is past its expires_at{}",
+            "Paykit spec 4: the record is past {limit}{}",
             clocks.note(at)
         ));
     }

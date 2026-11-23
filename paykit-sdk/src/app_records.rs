@@ -264,15 +264,9 @@ fn check_record_lifetime_and_certificate(
     doc: &IdentityDoc,
     clocks: Clocks,
 ) -> std::result::Result<(), PublicAppFailureReason> {
-    crate::destination::check_record_time(record, clocks)
+    let age_limit = record.trusted_until(doc.record_max_age_ms() / 1000);
+    crate::destination::check_record_time(record, Some(age_limit), clocks)
         .map_err(PublicAppFailureReason::Expired)?;
-    let until = record.trusted_until(doc.record_max_age_ms() / 1000);
-    if clocks.past(until) {
-        return Err(PublicAppFailureReason::Expired(format!(
-            "Paykit spec 4: the record is past the identity's record age limit{}",
-            clocks.note(until)
-        )));
-    }
     let carrier = Carrier::Record(Box::new(record.clone()));
     // The app's standing, with the record's certificate (the record age limit passed above).
     current(doc, app_id, &carrier, clocks).map_err(PublicAppFailureReason::Refused)

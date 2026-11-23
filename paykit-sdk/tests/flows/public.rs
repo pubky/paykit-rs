@@ -1296,3 +1296,161 @@ async fn test_public_same_identifier_from_two_apps_pays_the_first_by_app_id() {
         "{value}"
     );
 }
+
+#[tokio::test]
+async fn test_public_record_past_its_age_limit_on_the_device_clock_names_no_clock_behind() {
+    // The record's updated_at plus the 90-day age limit has passed on the device clock too;
+    // only its later expires_at is passed by the service's time alone. The device clock
+    // shows the record expired, so the refusal says nothing of a clock behind (Paykit spec
+    // 7.2, check the destination).
+    let w = World::new();
+    let wallet_store = crate::common::store();
+    let wallet = w
+        .wallet_on("wallet", std::sync::Arc::clone(&wallet_store))
+        .await;
+    let app_id = wallet.app_id();
+    drop(wallet);
+    let _shop = w.shop().await;
+    let expires = w.clock.now_ms() + 90 * DAY_MS + HOUR_MS;
+    publish(&w, tip_jar(), Some(expires));
+    w.clock.set_ms(expires);
+    let behind = std::sync::Arc::new(pubky_switch_client::clock::TestClock::new(expires - 10_000));
+    let mut wallet = w
+        .load_on_clock(&w.alice, wallet_store, app_id, behind)
+        .await;
+    wallet.receive(None).await.unwrap();
+    let refused = wallet
+        .pay_without_request(public_to_bob(&w))
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NoDestination(_))),
+        "{refused:?}"
+    );
+    let shown = format!("{refused:?}");
+    assert!(shown.contains("record age limit"), "{shown}");
+    assert!(!shown.contains("the device clock is behind"), "{shown}");
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_public_record_read_again_before_dispatch_keeps_the_clock_note() {
+    // The device clock runs 10 s behind the service. Bob's identity.json and record are read
+    // 10 minutes 20 s before the record's age limit, and the payment is planned 9 minutes
+    // later on that copy. Just after the attempt is recorded both clocks reach the limit: the
+    // copy is no longer fresh, the record is read again before dispatch, and only the
+    // service's time has reached the limit, so the refusal says the device clock is behind
+    // (Paykit spec 7.2, check the destination).
+    let w = World::new();
+    let base = std::sync::Arc::new(crate::period_payments::StageStore::default());
+    let wallet = w
+        .wallet_on(
+            "wallet",
+            std::sync::Arc::clone(&base)
+                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    let app_id = wallet.app_id();
+    drop(wallet);
+    let _shop = w.shop().await;
+    publish(&w, tip_jar(), None);
+    let expires = w.clock.now_ms() + 90 * DAY_MS;
+    let read = expires - 10 * 60_000 - 20_000;
+    w.clock.set_ms(read);
+    let device = std::sync::Arc::new(pubky_switch_client::clock::TestClock::new(read - 10_000));
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            std::sync::Arc::clone(&base)
+                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+            app_id,
+            std::sync::Arc::clone(&device),
+        )
+        .await;
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.public_endpoints(&w.bob_id(), None).await.is_ok());
+    w.clock.set_ms(read + 9 * 60_000);
+    device.set_ms(read + 9 * 60_000 - 10_000);
+    let service = std::sync::Arc::clone(&w.clock);
+    let moved = std::sync::Arc::clone(&device);
+    base.on_stage("recorded", move || {
+        service.set_ms(expires);
+        moved.set_ms(expires - 10_000);
+    });
+    let refused = wallet
+        .pay_without_request(public_to_bob(&w))
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(Refusal::AttemptFailed(inner)) if matches!(&**inner, Refusal::Destination(_))
+        ),
+        "{refused:?}"
+    );
+    assert!(
+        format!("{refused:?}").contains("the device clock is behind"),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_public_record_past_its_age_limit_at_dispatch_names_no_clock_behind() {
+    // The record's age limit falls 20 s before its expires_at, and the device clock runs
+    // 10 s behind the service. Planned a minute before either, just after the attempt is
+    // recorded the device clock passes the age limit and only the service's time passes
+    // expires_at. The device clock shows the record expired, so the refusal before dispatch
+    // says nothing of a clock behind (Paykit spec 4, 7.2).
+    let w = World::new();
+    let base = std::sync::Arc::new(crate::period_payments::StageStore::default());
+    let wallet = w
+        .wallet_on(
+            "wallet",
+            std::sync::Arc::clone(&base)
+                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    let app_id = wallet.app_id();
+    drop(wallet);
+    let _shop = w.shop().await;
+    let age_limit = w.clock.now_ms() + 90 * DAY_MS;
+    publish(&w, tip_jar(), Some(age_limit + 20_000));
+    w.clock.set_ms(age_limit - 60_000);
+    let device = std::sync::Arc::new(pubky_switch_client::clock::TestClock::new(
+        age_limit - 70_000,
+    ));
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            std::sync::Arc::clone(&base)
+                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+            app_id,
+            std::sync::Arc::clone(&device),
+        )
+        .await;
+    wallet.receive(None).await.unwrap();
+    let service = std::sync::Arc::clone(&w.clock);
+    base.on_stage("recorded", move || {
+        service.set_ms(age_limit + 25_000);
+        device.set_ms(age_limit + 15_000);
+    });
+    let refused = wallet
+        .pay_without_request(public_to_bob(&w))
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(Refusal::AttemptFailed(inner)) if matches!(&**inner, Refusal::Destination(_))
+        ),
+        "{refused:?}"
+    );
+    let shown = format!("{refused:?}");
+    assert!(shown.contains("record age limit"), "{shown}");
+    assert!(!shown.contains("the device clock is behind"), "{shown}");
+    assert!(w.rail.all_executions().is_empty());
+}
