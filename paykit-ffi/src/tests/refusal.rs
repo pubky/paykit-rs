@@ -425,7 +425,12 @@ fn every_refusal_kind() -> Vec<RefusalKind> {
         RefusalKind::AttemptFailed,
         RefusalKind::NoDestination,
         RefusalKind::UnsupportedEndpoint,
-        RefusalKind::WaitingForList,
+        RefusalKind::WaitingForList {
+            device_clock_behind: false,
+        },
+        RefusalKind::WaitingForList {
+            device_clock_behind: true,
+        },
         RefusalKind::IdentityUnavailable,
         RefusalKind::IdentityUnconfirmed,
         RefusalKind::PaymentInProgress,
@@ -473,7 +478,7 @@ fn every_refusal_kind() -> Vec<RefusalKind> {
             | K::AttemptFailed
             | K::NoDestination
             | K::UnsupportedEndpoint
-            | K::WaitingForList
+            | K::WaitingForList { .. }
             | K::IdentityUnavailable
             | K::IdentityUnconfirmed
             | K::PaymentInProgress

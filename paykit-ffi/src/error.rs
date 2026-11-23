@@ -235,7 +235,13 @@ pub(crate) fn refusal_category(kind: &crate::RefusalKind) -> (Category, &'static
         // The SDK gives its reason as text only, and the reasons span every case, from a wait
         // to an alarm: shown to the user, it is never retried by itself.
         K::NotNow => (NeedsUser, "not_now"),
-        K::WaitingForList => (RetryLater, "waiting_for_list"),
+        K::WaitingForList {
+            device_clock_behind: false,
+        } => (RetryLater, "waiting_for_list"),
+        // The list expired only by the service's time: the device clock is behind it.
+        K::WaitingForList {
+            device_clock_behind: true,
+        } => (NeedsUser, "waiting_for_list_clock_behind"),
         K::SwitchUnavailable => (RetryLater, "switch_unavailable"),
         K::PaymentInProgress => (RetryLater, "payment_in_progress"),
         K::BeingHandledByOtherWallet => (RetryLater, "being_handled_by_other_wallet"),
