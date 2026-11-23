@@ -226,7 +226,8 @@ pub(crate) struct QueuedStop {
 pub(crate) enum GivenUp {
     /// The record holds the stop, or lost it with a write: the host is told.
     Told,
-    /// The record is gone, or holds another stop that covers it: nothing is told.
+    /// The record is gone, or holds another stop that covers it: nothing is told of it
+    /// as given up, though a possible delivery still is.
     Silent,
 }
 
@@ -328,7 +329,14 @@ impl Paykit {
                 match Box::pin(self.answer_record(&stop.payee, &stop.request_hash, &stop.msg_id))
                     .await?
                 {
-                    AnswerRecord::Undecided => continue,
+                    // Nothing is decided, and no decision left by an end that didn't happen
+                    // applies to a report the host causes meanwhile.
+                    AnswerRecord::Undecided => {
+                        if stop.given_up.take().is_some() {
+                            self.local_put(&at, &stop).await?;
+                        }
+                        continue;
+                    }
                     AnswerRecord::Holds | AnswerRecord::Lacks => Some(GivenUp::Told),
                     AnswerRecord::Gone | AnswerRecord::Covered => Some(GivenUp::Silent),
                 };
@@ -370,7 +378,10 @@ impl Paykit {
             return Ok(false);
         };
         tx.delete(&at);
-        if given_up == GivenUp::Silent {
+        // Only a stop never delivered goes untold once its record is gone or covered: one
+        // that may have been delivered is always told, with or without a record (Paykit spec
+        // 8.1, "Undelivered messages"; 9).
+        if undelivered && given_up == GivenUp::Silent {
             return Ok(true);
         }
         let now = self.service_time().unwrap_or(0);

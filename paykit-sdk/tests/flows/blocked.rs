@@ -4346,3 +4346,95 @@ async fn test_blocked_stop_its_record_unread_waits_past_its_replay_window() {
     assert_eq!(verdict(&wallet, &rejection).await, Some(false));
     assert_eq!(notices_of(&wallet, &rejection).await, 0);
 }
+
+#[tokio::test]
+async fn test_blocked_stop_tried_its_record_deleted_reported_possibly_delivered() {
+    use paykit_lib::collections::Collection;
+    use paykit_lib::derive::natural_key;
+    use pubky_switch_client::app::{Collection as SwitchCollection, OpBatch, RecordTarget};
+
+    let w = World::new();
+    let (mut wallet, _shop, request) = received(&w, PaykitConfig::default()).await;
+    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    let rejection = wallet.reject_request(&request, None).await.unwrap();
+    // One try reaches bob's switch, its answer lost: its outcome is unknown.
+    wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
+    w.bob.switch().fail_next(Fault::LoseAnswer {
+        path: "/inbox".into(),
+    });
+    wallet.app_mut().flush_outbox().await.unwrap();
+    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    assert_eq!(verdict(&wallet, &rejection).await, Some(true));
+    let target = RecordTarget::new(
+        SwitchCollection::new(
+            Collection::PayerActivity.name(),
+            Collection::PayerActivity.fixed_policy(),
+        ),
+        &natural_key::request_record(&request.payee, &request.request_hash),
+    );
+    let delete = wallet
+        .app_mut()
+        .record_op(&target, None, Vec::new())
+        .await
+        .unwrap();
+    wallet
+        .app_mut()
+        .submit_batch(OpBatch::for_protocol("paykit").entry(delete))
+        .await
+        .unwrap();
+    // Gone with its record, the stop is given up unannounced, but its possible delivery is
+    // still told (Paykit spec 8.1, "Undelivered messages"; 9).
+    w.clock.advance_ms(31 * 24 * HOUR_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(verdict(&wallet, &rejection).await, None);
+    wallet.receive(None).await.unwrap();
+    let notices = wallet.notices().await.unwrap();
+    let of = |kind| {
+        notices
+            .iter()
+            .filter(|n| n.kind == kind && n.msg_id.as_deref() == Some(rejection.as_str()))
+            .count()
+    };
+    assert_eq!(
+        of(paykit_sdk::NoticeKind::PossiblyDelivered),
+        1,
+        "{notices:?}"
+    );
+    assert_eq!(of(paykit_sdk::NoticeKind::MessageGivenUp), 0, "{notices:?}");
+}
+
+#[tokio::test]
+async fn test_blocked_stop_undecided_drops_an_earlier_decision() {
+    let (w, mut wallet, request, _, rejection) =
+        rejection_queued_then(async |_, _, _, _| Some(b"{}".to_vec())).await;
+    // A decision to tell, left by an end that didn't happen.
+    let (key, value) = wallet
+        .app()
+        .protocol_scan("paykit", b"qs/")
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let mut kept: serde_json::Value = serde_json::from_slice(&value).unwrap();
+    kept["d"]["given_up"] = serde_json::json!("told");
+    wallet
+        .app_mut()
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put {
+                key,
+                value: serde_json::to_vec(&kept).unwrap(),
+            }],
+        )
+        .await
+        .unwrap();
+    // The record doesn't read: nothing is decided, the earlier decision included, so the
+    // host's own withdrawal of the copy stays the host's (Paykit spec 8.1).
+    w.clock.advance_ms(31 * 24 * HOUR_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(verdict(&wallet, &rejection).await, Some(false));
+    wallet.app_mut().withdraw_queued(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(given_up_notices(&w, &wallet, &rejection, &request).await, 0);
+}
