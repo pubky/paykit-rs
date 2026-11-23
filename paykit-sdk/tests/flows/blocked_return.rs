@@ -3858,6 +3858,107 @@ async fn test_blocked_return_missed_item_under_the_hold_read_in_its_receive() {
     assert!(missed_widening_read(&wallet).await);
 }
 
+#[tokio::test]
+async fn test_blocked_return_missed_item_holds_a_due_mark_ask_while_its_read_fails() {
+    // Paykit wire 5.6, Raising: with no hold, a `missed` item comes while carol is blocked and
+    // bob's mark is due. Its widening is owed before its read of the lists, so bob's ask
+    // waits; the reads failing in that receive, its own after the feed included, nothing is
+    // raised and no ask is made. Once a read applies the widening and its raise, bob's ask is
+    // made.
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    wallet.app_mut().invite(&w.carol_id()).await.unwrap();
+    wallet.block(&w.carol_id()).await.unwrap();
+    let _shop = w.shop().await;
+    let since = w.clock.now_ms();
+    due_mark(&mut wallet, &w.bob_id(), since - 2_000).await;
+    w.alice
+        .switch()
+        .push_missed(1, since - 1_000, since + MINUTE_MS);
+    for _ in 0..6 {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+                path: "/allow".into(),
+                after: 0,
+            });
+    }
+    let _ = wallet.receive(None).await;
+    assert!(widening_owed(&wallet).await);
+    assert!(!mark_asked(&wallet).await);
+    assert_eq!(asked_since(&wallet, &w.bob_id(), since).await, 0);
+    for _ in 0..6 {
+        let _ = wallet.app_mut().allow_list().await;
+    }
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    assert!(!widening_owed(&wallet).await);
+    assert!(shared_floor(&wallet).await.is_some());
+    assert!(mark_asked(&wallet).await);
+}
+
+#[tokio::test]
+async fn test_blocked_return_missed_item_read_in_its_receive_at_a_contacts_only_app() {
+    // Paykit wire 5.6, Raising: an app holding `paykit_contacts` alone, which writes no
+    // floor, takes a `missed` item while carol is blocked: the item's read of the lists is
+    // made in that receive, and carol is marked from it.
+    let w = World::new();
+    let mut contacts = w
+        .join_with(
+            &w.alice,
+            "contacts",
+            AppScopes::new().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            store(),
+        )
+        .await;
+    contacts.block(&w.carol_id()).await.unwrap();
+    contacts.receive(None).await.unwrap();
+    let since = w.clock.now_ms();
+    w.alice
+        .switch()
+        .push_missed(1, since - 1_000, since + MINUTE_MS);
+    contacts.receive(None).await.unwrap();
+    assert!(!widening_owed(&contacts).await);
+    assert!(block_marks(&contacts).await > 0);
+}
+
+#[tokio::test]
+async fn test_blocked_return_missed_item_over_a_refused_lower_write_applied_with_no_notice() {
+    // Paykit wire 5.6, Raising; Seen floor and permanence: the wallet refused a lower floor
+    // write and keeps the higher. A `missed` item comes while carol is blocked: its read of
+    // the lists, made once the records are listed again, writes the held floor over the
+    // lower write in that receive, and the host is told of no raise waiting.
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    wallet.app_mut().invite(&w.carol_id()).await.unwrap();
+    wallet.block(&w.carol_id()).await.unwrap();
+    let high = w.clock.now_ms() + 24 * 60 * MINUTE_MS;
+    let mut phone = payer_app(&w, "phone").await;
+    for floor in [high, 1] {
+        phone
+            .app_mut()
+            .put_record(
+                &floor_record(&w),
+                &paykit_lib::records::BlockFloorRecord::new(floor)
+                    .to_json()
+                    .unwrap(),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(shared_floor(&wallet).await, Some(high));
+    let since = w.clock.now_ms();
+    w.alice
+        .switch()
+        .push_missed(1, since - 1_000, since + MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    assert!(!widening_owed(&wallet).await);
+    assert_eq!(raise_waiting_notices(&wallet).await, 0);
+}
+
 /// Whether the unverified mark's ask was made: its request signed and queued.
 async fn mark_asked(app: &Paykit) -> bool {
     app.app()

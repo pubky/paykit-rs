@@ -1211,9 +1211,7 @@ impl Paykit {
                 ..ReceiveSummary::default()
             });
         }
-        // A `missed` item this read took waits for its read of the lists, with or without the
-        // divergence hold: it is made now, before any ask (Paykit wire 5.6, Raising).
-        if Box::pin(self.take_restore_verdict()).await? || self.owed_raises().await?.unread() {
+        if Box::pin(self.take_restore_verdict()).await? {
             Box::pin(self.refresh_lists_when_due()).await?;
         }
         // Restore-held blocks go before the other outgoing work, after the first page.
@@ -1234,6 +1232,12 @@ impl Paykit {
         // a narrower one included: they are listed now, or stay unlisted for the next
         // receive or write (`Paykit::list_under_new_cert`).
         let records_unlisted = Box::pin(self.list_under_new_cert()).await?;
+        // A `missed` item this read took waits for its read of the lists, with or without the
+        // divergence hold and whatever the app's scopes: it is made now, its records listed,
+        // before any ask (Paykit wire 5.6, Raising).
+        if Box::pin(self.missed_widening_unread()).await? {
+            Box::pin(self.refresh_lists_when_due()).await?;
+        }
         let pending_read = records_unlisted.is_none().then_some(&report);
         let keys = Box::pin(self.scope_keys_awaited()).await?;
         // The entries the client stored for good: their messages, kept above, written into

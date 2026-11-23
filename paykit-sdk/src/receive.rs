@@ -3203,7 +3203,10 @@ impl Paykit {
         let last = self.local_get::<u64>(key::LISTS_READ).await?;
         // A raise owed that can be written goes at the next receive, whatever the copy's age,
         // with one read of the lists in a pass.
-        if last.is_some_and(|read| lists_read_is_fresh(read, now)) && !self.raise_owed().await? {
+        if last.is_some_and(|read| lists_read_is_fresh(read, now))
+            && !self.raise_owed().await?
+            && !Box::pin(self.missed_widening_unread()).await?
+        {
             return Ok(());
         }
         if self.floor_write_is_kept().await? {

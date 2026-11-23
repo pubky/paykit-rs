@@ -835,6 +835,16 @@ impl Paykit {
         Ok(())
     }
 
+    /// Whether a `missed` item's widening waits for its read of the lists (Paykit wire 5.6,
+    /// Raising), whatever this app's scopes.
+    pub(crate) async fn missed_widening_unread(&self) -> Result<bool> {
+        Ok(self
+            .local_scan::<MissedWidening>(key::BLOCKED_WIDENINGS)
+            .await?
+            .iter()
+            .any(|(_, widening)| widening.deny.is_none()))
+    }
+
     /// Retain the first list that follows each missed item before any floor write.
     pub(crate) async fn keep_missed_list(&mut self, deny: &[[u8; 32]]) -> Result<()> {
         let mut pending = self
