@@ -628,7 +628,7 @@ impl Paykit {
         accepted: bool,
     ) -> Result<(ListVersion, Option<MissingAnswers>)> {
         let local = ListVersion::new(prior.generation, prior.counter)?;
-        self.own_identity_confirmed(false).await?;
+        self.own_identity_confirmed(false).await??;
         if self.app.own_identity().generation() != prior.generation {
             return Ok((local, prior.missing));
         }
@@ -796,7 +796,7 @@ impl Paykit {
         ) {
             return Ok(());
         }
-        self.own_identity_confirmed(false).await?;
+        self.own_identity_confirmed(false).await??;
         let generation = self.app.own_identity().generation();
         if issue.generation > generation
             || (issue.generation < generation
@@ -829,7 +829,7 @@ impl Paykit {
         if !due {
             return Ok(());
         }
-        self.own_identity_confirmed(false).await?;
+        self.own_identity_confirmed(false).await??;
         if self.app.own_identity().generation() != generation || !self.holds(SCOPE) {
             return Err(counter_unavailable().into());
         }

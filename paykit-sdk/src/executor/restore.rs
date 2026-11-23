@@ -381,10 +381,12 @@ impl Paykit {
         let allowance = allowance_target(&checkpoint.counterparty, &id);
         let ledger_target = ledger_target(&checkpoint.counterparty, &id);
         let ledger_key = self.app.record_key(&ledger_target)?;
-        let RecordRead::Fresh(current_grant) =
-            Box::pin(self.app.read_record_fresh(&allowance)).await?
-        else {
-            return Ok(None);
+        let current_grant = match Box::pin(self.app.read_record_fresh(&allowance)).await? {
+            RecordRead::Fresh(current_grant) => current_grant,
+            RecordRead::Kept { reason, .. } => {
+                return crate::pay::kept_read_stop(&reason).map_or(Ok(None), Err)
+            }
+            _ => return Ok(None),
         };
         let current_ledger = match Box::pin(self.app.read_record_fresh(&ledger_target)).await? {
             RecordRead::Fresh(value) => value,
@@ -397,6 +399,9 @@ impl Paykit {
                     .raise_rollback(crate::protocol::BACKUP_NAME, MISSING_LEDGER)
                     .await?;
                 return Err(pubky_switch_client::app::AppError::Alarm(alarm).into());
+            }
+            RecordRead::Kept { reason, .. } => {
+                return crate::pay::kept_read_stop(&reason).map_or(Ok(None), Err)
             }
             _ => return Ok(None),
         };
@@ -823,7 +828,12 @@ impl Paykit {
                     self.rail.settlement_id(endpoint, proof)
                 })?;
                 let target = crate::activity::ActivityTarget::payer(natural).record_target();
-                let _ = self.app.read_record_fresh(&target).await?;
+                if let RecordRead::Kept { reason, .. } = self.app.read_record_fresh(&target).await?
+                {
+                    if let Some(stop) = crate::pay::kept_read_stop(&reason) {
+                        return Err(stop);
+                    }
+                }
                 let dated = self.app.shared_evidence().await?.ops.iter().any(|op| {
                     AppliedRecord::retained(&self.app, &target, op)
                         .is_some_and(|write| write.dates_payment_proof(&self.app, proof))

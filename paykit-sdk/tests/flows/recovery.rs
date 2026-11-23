@@ -1198,3 +1198,64 @@ async fn test_recovery_repeat_over_a_newer_request_record_refused_withheld() {
     );
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
+
+#[tokio::test]
+async fn test_recovery_repeat_ends_the_resume_at_a_store_failure_in_its_identity_read() {
+    // Two payments in flight on an idempotent method without a history: a resume repeats
+    // each, and reads the own identity.json again before the repeat. A newer one is
+    // published, so the first repeat's read commits it, and that one commit fails. A store
+    // failure stops the wallet as a whole: the resume returns it, and the later payment is
+    // neither repeated nor written.
+    use pubky_switch_client::store::{Fault, FaultStore};
+    let w = World::new();
+    w.rail.set_declaration(idempotent_without_history());
+    let faulty = Arc::new(FaultStore::new(store(), Fault::None));
+    let base = Arc::clone(&faulty) as Arc<dyn pubky_switch_client::store::StateStore>;
+    let mut wallet = w
+        .wallet_with("wallet", Arc::clone(&base), crate::common::day_window())
+        .await;
+    let mut shop = w.shop().await;
+    let requests = [
+        request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await,
+        request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await,
+    ];
+    wallet.receive(None).await.unwrap();
+    for request in &requests {
+        w.rail.next(Behaviour::Hang);
+        let outcome = wallet
+            .pay_request(request, PayOptions::default())
+            .await
+            .outcome
+            .unwrap();
+        assert!(matches!(outcome, PayOutcome::Pending { .. }), "{outcome:?}");
+    }
+    let order = wallet.payments().await.unwrap();
+    assert!(order.iter().all(|p| p.stage == Stage::Paying));
+    let later = order[1].attempt_id;
+    let doc = w.alice.sign_next(|_| {}).unwrap();
+    w.alice.switch().deliver_identity(&doc).unwrap();
+    // Past the 60 s of the last confirmation, a repeat reads the own identity.json again.
+    w.clock.advance_ms(61_000);
+    // The first commit of the own identity copy fails.
+    let own = format!("ident/{}/", pubky_switch_core::enc::pubky_id(&w.alice_id()));
+    faulty.fail_put_once(own.as_bytes());
+    let resumed = wallet.resume_payments().await;
+    assert!(
+        matches!(
+            &resumed,
+            Err(paykit_sdk::PaykitError::Client(
+                pubky_switch_client::app::AppError::Store(_)
+            ))
+        ),
+        "{resumed:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&later), 1);
+    let later = wallet
+        .payments()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|p| p.attempt_id == later)
+        .unwrap();
+    assert_eq!(later.stage, Stage::Paying);
+}

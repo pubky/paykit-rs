@@ -425,8 +425,12 @@ impl Paykit {
         let target = allowance_target(&entry.payee, &id);
         let key = self.app.record_key(&target)?;
         let ledger_key = self.app.record_key(&ledger_target(&entry.payee, &id))?;
-        let Ok((checked, _)) = self.current_executor_record(&target).await else {
-            return Ok(true);
+        let (checked, _) = match self.current_executor_record(&target).await {
+            Ok(read) => read,
+            Err(error) => {
+                crate::pay::unless_stop(error)?;
+                return Ok(true);
+            }
         };
         let repeat = matches!(kind, Dispatch::Repeat { .. });
         if repeat {

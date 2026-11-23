@@ -15,6 +15,9 @@ use crate::common::{draft, enrolled_wallet, request_from, store, TestTimer};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
+/// How many times the fixture pays a request a check held before its dispatch.
+const MAX_HELD_PAYMENTS: usize = 3;
+
 #[tokio::test]
 async fn test_payer_keeps_its_own_recovery_notice_and_payment_hold_after_reopen() -> TestResult {
     for backend in [Backend::Scripted, Backend::Service] {
@@ -82,18 +85,30 @@ async fn payer_notice(world: &World) -> TestResult {
     assert_eq!(payer.request(&request).await?.status, RequestStatus::Open);
     let mut attempts = Vec::new();
     for unpaid in &in_flight {
-        rail.next(paykit_sdk::rail::Behaviour::Hang);
-        let PayOutcome::Pending { attempt_id, .. } =
-            Box::pin(payer.pay_request(unpaid, PayOptions::default()))
-                .await
-                .outcome?
-        else {
-            return Err("a payment did not stay in flight".into());
-        };
-        attempts.push(attempt_id);
+        // The last check before money moves can hold a payment, as a host would see it, when
+        // a read during that check fails: `Pending`, with the method not called. A host
+        // follows it as the wallet says: a resume closes it unpaid, and the request is paid
+        // again. Each is tried at most `MAX_HELD_PAYMENTS` times, and must end in flight.
+        let mut started = None;
+        for _ in 0..MAX_HELD_PAYMENTS {
+            rail.next(paykit_sdk::rail::Behaviour::Hang);
+            let PayOutcome::Pending { attempt_id, .. } =
+                Box::pin(payer.pay_request(unpaid, PayOptions::default()))
+                    .await
+                    .outcome?
+            else {
+                return Err("a payment did not stay in flight".into());
+            };
+            if rail.pay_calls(&attempt_id) == 1 {
+                started = Some(attempt_id);
+                break;
+            }
+            Box::pin(payer.resume_payments()).await?;
+        }
+        attempts.push(started.ok_or("a payment was held before its dispatch every time")?);
     }
-    // Both method calls started: each entry is `Paying`, not held at `Attempted` before
-    // its dispatch, so the resume below meets two payments in flight.
+    // Both method calls started: each entry is `Paying`, so the resume below meets two
+    // payments in flight.
     let payments = payer.payments().await?;
     for attempt in &attempts {
         assert_eq!(rail.pay_calls(attempt), 1);

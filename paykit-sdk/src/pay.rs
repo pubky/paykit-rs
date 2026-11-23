@@ -958,6 +958,38 @@ pub(crate) fn unless_stop(error: impl Into<PaykitError>) -> Result<()> {
     Ok(())
 }
 
+/// [`unless_stop`] for a failure that may come from another identity's switch, such as a
+/// lookup of a payee: only a stop of this app's own state counts there, an alarm, a store
+/// failure or the Switch client's refusal. A service answer in it may be about the other
+/// identity's account, never this wallet's.
+pub(crate) fn unless_local_stop(error: impl Into<PaykitError>) -> Result<()> {
+    let error = error.into();
+    if error.code().is_none() && stops_resume(&error) {
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// The wallet-wide stop a read of this app's own record carries in the reason it kept the
+/// earlier copy: the switch refusing the read with an answer [`stops_resume`] counts, which
+/// the read keeps as its code. `None` for any other reason.
+pub(crate) fn kept_read_stop(reason: &pubky_switch_client::app::KeptReason) -> Option<PaykitError> {
+    let pubky_switch_client::app::KeptReason::SwitchRefused { code } = reason else {
+        return None;
+    };
+    let error = PaykitError::Client(AppError::Switch(
+        pubky_switch_client::error::ClientError::Switch {
+            status: code.status(),
+            code: *code,
+            message: "the switch refused the record's read".into(),
+            current: serde_json::Value::Null,
+            known_version: None,
+            retry_after: None,
+        },
+    ));
+    stops_resume(&error).then_some(error)
+}
+
 /// The Switch client's refusal of an attempt (Switch spec 3.6, 10.1, 12.3, 12.4), carried as
 /// the client reports it: an alarm, an app that left or a recovery notice is not a wait, and
 /// the caller tells them apart by the refusal.
@@ -3018,7 +3050,7 @@ impl Paykit {
         entry.selected_period_details(&self.identity())?;
         // The own identity.json, read again and confirmed, before any write: no attempt
         // without a copy revalidated in the last 60 s (Paykit spec 4, Switch spec 12.6).
-        self.own_identity_confirmed(true).await?;
+        self.own_identity_confirmed(true).await??;
         // The payee's identity.json, before any write: a payment the user started whose
         // payee's switch couldn't confirm it needs the user's confirmation first, and an
         // automatic one isn't made (Paykit spec 7.2 step 1, Switch spec 4.3).
@@ -3280,7 +3312,7 @@ impl Paykit {
     pub(crate) async fn own_identity_confirmed(
         &mut self,
         refresh: bool,
-    ) -> std::result::Result<(), Refusal> {
+    ) -> Result<std::result::Result<(), Refusal>> {
         if refresh || !self.own_identity_fresh() {
             // A Homeserver that can't be read now confirms nothing (`Unavailable`), and the
             // confirmation held still counts if it is fresh once the read is over. An error
@@ -3289,20 +3321,23 @@ impl Paykit {
             let refreshed = self.app.refresh_identity().await;
             // The refresh can take a renewal into the own record.
             self.note_own_record_write(&refreshed);
+            // A wallet-wide stop is returned as it is ([`unless_stop`]); any other failure
+            // refuses this payment.
             if let Err(error) = refreshed {
-                return Err(Refusal::IdentityUnavailable(format!(
-                    "Paykit spec 4: the own identity.json can't be read again: {error}"
-                )));
+                let why =
+                    format!("Paykit spec 4: the own identity.json can't be read again: {error}");
+                unless_stop(error)?;
+                return Ok(Err(Refusal::IdentityUnavailable(why)));
             }
         }
         // Freshness is judged on the clock after the read, never on a time read before it: a
         // slow read that fails can't stretch the 60 s (Paykit spec 4).
         if self.own_identity_fresh() {
-            return Ok(());
+            return Ok(Ok(()));
         }
-        Err(Refusal::IdentityUnavailable(
+        Ok(Err(Refusal::IdentityUnavailable(
             "Paykit spec 4: the own identity.json wasn't confirmed in the last 60 s".into(),
-        ))
+        )))
     }
 
     /// Whether the own `identity.json` was confirmed less than [`REVALIDATION_MS`] before the
@@ -5484,7 +5519,15 @@ impl Paykit {
         if let Err(refusal) = self.transfer_holds(entry, payee, automatic_first)? {
             return Ok(FinalCheck::Refused(refusal));
         }
-        let may_attempt = self.app.may_attempt(by == Initiator::Automatic).is_ok();
+        // A stop of the app as a whole raised during an await is returned, the entry still
+        // `Attempted`, known unsubmitted; a wait holds the payment back.
+        let may_attempt = match self.app.may_attempt(by == Initiator::Automatic) {
+            Ok(()) => true,
+            Err(refusal) => {
+                unless_stop(held_back(refusal))?;
+                false
+            }
+        };
         let (now, own_fresh) = self.dispatch_time();
         match kind {
             Dispatch::Repeat {
@@ -5660,7 +5703,7 @@ impl Paykit {
             Ok(doc) => doc,
             Err(refusal) => return Ok(Err(Held::Check(refusal))),
         };
-        if let Err(refusal) = self.own_identity_confirmed(refresh).await {
+        if let Err(refusal) = self.own_identity_confirmed(refresh).await? {
             return Ok(Err(Held::OwnIdentity(refusal)));
         }
         // Nothing time-bound is judged before an await and trusted after it: the own
