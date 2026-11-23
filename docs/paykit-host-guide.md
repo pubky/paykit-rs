@@ -530,6 +530,7 @@ Two rules override a code's case. A failure with a `keptBatch` comes as `Outcome
 | `identity_unconfirmed` | `Refusal::IdentityUnconfirmed` | `NeedsUser` | Ask before paying a payee whose switch couldn't confirm its apps; then set `unconfirmedIdentityConfirmed`. |
 | `scope_missing` | `Refusal::ScopeMissing` | `NeedsUser` | Ask the user to approve the missing scope in their signer. |
 | `not_subscribed` | `Refusal::NotSubscribed` | `NeedsUser` | The recurring request isn't accepted: the payer accepts it, and the payee waits for that. |
+| `floor_held` | `Refusal::FloorHeld` | `NeedsUser` | The identity's block floor is held after it was seen divergent: the unblock or widening that needs a raise waits, and retrying changes nothing until the shared post-loss hold stands too. Tell the user that each request can still be paid by hand. |
 | `waiting_for_list` | `Refusal::WaitingForList` | `RetryLater` | A newer Private Payment List was asked for: pay once it arrives. Paying a public destination is a separate choice. |
 | `waiting_for_list_clock_behind` | `Refusal::WaitingForList` with `device_clock_behind` | `NeedsUser` | The payee's list expired by the service's time while the device clock is behind it: ask the user to correct the clock. Paying a public destination is a separate choice. |
 | `payment_in_progress` | `Refusal::PaymentInProgress` | `RetryLater` | Wait for the open attempt, or `resumePayments`, then call again. |

@@ -436,6 +436,7 @@ fn every_refusal_kind() -> Vec<RefusalKind> {
         RefusalKind::PaymentInProgress,
         RefusalKind::NotCurrent,
         RefusalKind::NotNow,
+        RefusalKind::FloorHeld,
         RefusalKind::Usage,
         RefusalKind::RecordHeld,
         RefusalKind::CertificateRefused,
@@ -484,6 +485,7 @@ fn every_refusal_kind() -> Vec<RefusalKind> {
             | K::PaymentInProgress
             | K::NotCurrent
             | K::NotNow
+            | K::FloorHeld
             | K::Usage
             | K::RecordHeld
             | K::CertificateRefused
