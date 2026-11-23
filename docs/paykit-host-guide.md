@@ -539,9 +539,9 @@ Two rules override a code's case. A failure with a `keptBatch` comes as `Outcome
 | `being_handled_by_other_wallet` | `Refusal::BeingHandledByOtherWallet` | `RetryLater` | Another own wallet holds the attempt; read again later. |
 | `identity_unavailable` | `Refusal::IdentityUnavailable` | `RetryLater` | `receive` refreshes the identity; call again after it. |
 | `attempted_periods_full` | `Refusal::AttemptedPeriodsFull` | `RetryLater` | Wait for an open period attempt to finish. |
-| `no_destination` | `Refusal::NoDestination` | `NotSent` | Show why no endpoint could be used; pay again when the payee has one, or choose another destination. |
+| `no_destination` | `Refusal::NoDestination` | `NotSent` | No endpoint could be used; the payment result's public failures name the payee apps that couldn't be read. Pay again when the payee has one, or choose another destination. |
 | `unsupported_endpoint` | `Refusal::UnsupportedEndpoint` | `NotSent` | Choose an endpoint or method that pays it. |
-| `destination` | `Refusal::Destination` | `NotSent` | Show the failed destination check; pay again when the payee has a usable endpoint. |
+| `destination` | `Refusal::Destination` | `NotSent` | The destination failed its check before anything was written. Pay again when the payee has a usable endpoint for this request; a request whose destination names an app that is gone needs a new request from the payee. |
 | `label` | `Refusal::Label` | `NotSent` | Send under a selling label the app holds. |
 | `recurring` | `Refusal::Recurring` | `NotSent` | Pay a recurring request by its Billing Periods. |
 | `attempt_failed` | `Refusal::AttemptFailed` | as its cause | The attempt was written and failed before money moved, and nothing was paid. It comes as the case of `attemptedFailure()`, and follows that refusal's row; a confirmation passes `attemptedFailure()` back. |
@@ -560,7 +560,7 @@ Two rules override a code's case. A failure with a `keptBatch` comes as `Outcome
 | `not_current` | `Refusal::NotCurrent` | `Recovery` | Refresh authority and reconcile the attempt under the current provider and certificate. |
 | `record_held` | `Refusal::RecordHeld` | `NeedsUser` | One request's payer record is held: it doesn't read, or can't be rebuilt. Show it for that request; other requests go on, and nothing retries it. It goes on once the record reads again; having it written again needs a call these bindings don't offer yet. A record whose payment history was lost to a delete holds that obligation for good, and the refusal doesn't yet say which of the two it is. |
 | `certificate_refused` | `Refusal::CertificateRefused`, `AppRefusal::Certificate` | `Recovery` | Get a suitable certificate from the signer; keep Paykit actions paused. |
-| `not_now` | `Refusal::NotNow` | `NeedsUser` | Provisional. Show `refusal.reason()`. Its reasons range from a wait to an alarm, so never retry it by itself; call again after `receive` or once the user acts on the reason. |
+| `not_now` | `Refusal::NotNow` | `NeedsUser` | Provisional. The SDK gives this refusal a text reason only, which the bindings don't pass on, and its reasons range from a wait to an alarm: never retry it by itself. Show the user that the wallet can't do this now, and call again after `receive`, `reconcile` or the user's own action. |
 | `usage` | `Refusal::Usage` | `NotSent` | Provisional. A value given breaks a Paykit rule: fix the call. |
 | `not_automatic` | `Refusal::NotAutomatic` | `Permanent` | Provisional. Not paid automatically: the user can still pay it by hand. |
 | `stopped` | `AppRefusal::Stopped`, from a payment too | `Recovery` | The wallet stopped on an alarm: show `restoreState().alarm` and recover. |
@@ -571,8 +571,8 @@ Two rules override a code's case. A failure with a `keptBatch` comes as `Outcome
 | `chain` | `ClientError::Chain` | `Recovery` | The service signed a head that doesn't verify: handled as a rollback alarm. |
 | `own_recovery_required` | `ClientError::OwnRecoveryRequired` | `Recovery` | A recovery notice holds writes to this service. `receive` clears one that isn't permanent; one that stays needs the recovery. |
 | `approval_refused` | `AppRefusal::Approval` | `Permanent` | The approval doesn't pass its checks: ask for a new one. |
-| `client_not_now` | `AppRefusal::NotNow`: reconcile mode, the clocks apart, a read still owed | `NeedsUser` | Provisional. Show the reason and act on it: finish the reconciliation, correct the device clock, or `receive`; then call again. |
-| `kept_batches_ahead` | `AppRefusal::KeptBatchesAhead` | `RetryLater` | Earlier kept batches go first: `receive`, then call again. |
+| `client_not_now` | `AppRefusal::NotNow`: reconcile mode, the clocks apart, a read still owed | `NeedsUser` | Provisional. The Switch client gives a text reason only, which the bindings don't pass on: finish the reconciliation, check the device clock, or `receive`; then call again. |
+| `kept_batches_ahead` | `AppRefusal::KeptBatchesAhead` | `OutcomeUnknown` | The call's own batch was kept unsent behind earlier kept batches, which the wallet sends in order over its next reads: follow `more` on `receive`, then reconcile. Don't make the call again. A restore doesn't carry kept batches, so after one, reconcile decides. |
 | `client_usage` | `AppRefusal::Usage`, `ClientError::Usage` | `NotSent` | A value given breaks a Switch rule: fix the call. |
 | `carried_too_large` | `AppRefusal::CarriedTooLarge` | `NotSent` | Acknowledge the duty events acted on, then restore again. |
 | `wont_deliver` | `AppRefusal::WontDeliver` | `Permanent` | The message can no longer be delivered safely. |

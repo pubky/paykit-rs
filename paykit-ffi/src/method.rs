@@ -72,12 +72,14 @@ pub struct MethodDeclaration {
 }
 
 /// A Payment Endpoint Identifier the method pays, and the fractional digits it supports for
-/// that endpoint's transfer amount (`None`: as many as the amount has).
+/// that endpoint's transfer amount.
 #[derive(Clone, uniffi::Record)]
 pub struct EndpointSupport {
     /// The Payment Endpoint Identifier the method pays.
     pub identifier: String,
-    /// The fractional digits the method supports for this endpoint.
+    /// The fractional digits the method supports for this endpoint, at most 18. Name them for
+    /// every endpoint the method pays: `None` makes a payment of a request to this endpoint
+    /// unusable, and a payee credits nothing paid to it.
     pub fraction_digits: Option<u32>,
 }
 

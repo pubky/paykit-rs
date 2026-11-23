@@ -957,8 +957,7 @@ fn deferred(error: &PaykitError) -> bool {
 /// awaits a recovery, which the host handles as a recovery; the Switch client's refusal of
 /// the entry's step; its wait, kept batches ahead included; `409 conflict`; the switch busy or unreachable (`429`, `503`,
 /// the network); the payment method that can't tell now; the own identity not readable or the
-/// SDK's own wait. A paid entry whose outcome record couldn't be written is an outcome, not an
-/// error, and ranks above all of these. A wallet-wide stop ([`stops_resume`]) is never ranked:
+/// SDK's own wait. A wallet-wide stop ([`stops_resume`]) is never ranked:
 /// it ends the resume.
 pub(crate) fn entry_failure_rank(error: &PaykitError) -> u8 {
     use pubky_switch_core::http::ErrorCode as E;
@@ -979,6 +978,17 @@ pub(crate) fn entry_failure_rank(error: &PaykitError) -> u8 {
         PaykitError::Rail(_) => 2,
         PaykitError::Refused(Refusal::IdentityUnavailable(_) | Refusal::NotNow(_)) => 1,
         _ => 0,
+    }
+}
+
+/// Keeps the most severe of the entry failures a resume has met ([`entry_failure_rank`]): a
+/// later failure replaces the kept one only when it ranks higher, so a tie keeps the first.
+pub(crate) fn keep_most_severe(kept: &mut Option<PaykitError>, error: PaykitError) {
+    if kept
+        .as_ref()
+        .is_none_or(|held| entry_failure_rank(&error) > entry_failure_rank(held))
+    {
+        *kept = Some(error);
     }
 }
 
@@ -4403,12 +4413,8 @@ impl Paykit {
                         if stops_resume(&error) {
                             return Err(error);
                         }
-                        if deferred(&error)
-                            && held_back.as_ref().is_none_or(|held| {
-                                entry_failure_rank(&error) > entry_failure_rank(held)
-                            })
-                        {
-                            held_back = Some(error);
+                        if deferred(&error) {
+                            keep_most_severe(&mut held_back, error);
                         }
                     }
                 }
@@ -4419,12 +4425,7 @@ impl Paykit {
                 Err(error) if deferred(&error) => {
                     // The most severe refusal is what the caller gets: a recovery before a
                     // wait.
-                    if held_back
-                        .as_ref()
-                        .is_none_or(|held| entry_failure_rank(&error) > entry_failure_rank(held))
-                    {
-                        held_back = Some(error);
-                    }
+                    keep_most_severe(&mut held_back, error);
                 }
                 Err(error) => return Err(error),
             }
@@ -4434,8 +4435,14 @@ impl Paykit {
             Box::pin(self.record_ledger_outcomes()).await?;
         }
         self.prune_journal().await?;
-        // Last, after every payment's own work: what can't be delivered now stays queued.
-        let _ = self.send_outbox().await;
+        // Last, after every payment's own work: what can't be delivered now stays queued, but
+        // a wallet-wide stop met on the flush is returned.
+        if let Err(error) = self.send_outbox().await {
+            let error = PaykitError::from(error);
+            if stops_resume(&error) {
+                return Err(error);
+            }
+        }
         // A repeat the client held back is returned after the other entries' work, whose
         // outcomes are written and read with `payments`.
         match held_back {
@@ -5880,6 +5887,22 @@ mod tests {
                 pair[1]
             );
         }
+        // A resume keeps the most severe whichever entry meets it first, and a tie the first.
+        let mut kept = None;
+        keep_most_severe(&mut kept, answer(E::Unavailable));
+        keep_most_severe(&mut kept, answer(E::RecoveryRequired));
+        keep_most_severe(&mut kept, answer(E::Conflict));
+        assert_eq!(
+            kept.as_ref().and_then(PaykitError::code),
+            Some(E::RecoveryRequired)
+        );
+        let mut kept = None;
+        keep_most_severe(&mut kept, held_back(ClientRefusal::Usage("first".into())));
+        keep_most_severe(&mut kept, held_back(ClientRefusal::Usage("second".into())));
+        assert!(matches!(
+            kept,
+            Some(PaykitError::Client(AppError::Refused(ClientRefusal::Usage(ref text)))) if text == "first"
+        ));
         // A held recovery notice stops the wallet; the switch's own answer defers the entry.
         assert!(!deferred(&held_back(ClientRefusal::RecoveryRequired {
             generation: 3

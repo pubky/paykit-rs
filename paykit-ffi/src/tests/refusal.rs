@@ -827,7 +827,9 @@ fn test_wallet_errors_full_quota_comes_as_what_frees_it() {
         let (found, failure) = categorized(answer.into()).expect("a categorized failure");
         assert_eq!((found, failure.code.as_str()), (case, code), "{limit:?}");
         assert_eq!(failure.service_code.as_deref(), Some("quota_exceeded"));
-        assert_eq!(failure.quota_limit().as_deref(), limit);
+        // Only a limit name of Switch wire 9.3 is passed on, never the service's other text.
+        let known = limit.filter(|limit| *limit != "a later limit" && *limit != "record_origins");
+        assert_eq!(failure.quota_limit().as_deref(), known);
     }
 }
 

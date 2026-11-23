@@ -154,7 +154,8 @@ impl WalletFailure {
         self.retry_after_ms
     }
     /// The budget a full quota names (`quota_exceeded`'s `current.limit`, Switch wire 9.3),
-    /// such as `storage` or `contacts`, so the host can say which one to clear.
+    /// such as `storage` or `contacts`, so the host can say which one to clear; `None` for a
+    /// name these bindings don't know.
     pub fn quota_limit(&self) -> Option<String> {
         self.quota_limit.clone()
     }
@@ -194,8 +195,9 @@ impl WalletError {
 
 /// The Switch client's chain proof failing: handled as a rollback alarm.
 const CHAIN: (Category, &str) = (Category::Recovery, "chain");
-/// A write waiting behind kept batches, which a read sends first.
-const KEPT_BATCHES_AHEAD: (Category, &str) = (Category::RetryLater, "kept_batches_ahead");
+/// A write kept unsent behind earlier kept batches: the client returns it only with the
+/// call's own batch kept, so it may still apply.
+const KEPT_BATCHES_AHEAD: (Category, &str) = (Category::OutcomeUnknown, "kept_batches_ahead");
 /// A Switch client failure these bindings don't know.
 const CLIENT_UNCLASSIFIED: (Category, &str) = (Category::OutcomeUnknown, "client_unclassified");
 /// A payment method failure these bindings don't know.
@@ -394,6 +396,28 @@ fn service_category(code: pubky_switch_core::http::ErrorCode) -> (Category, Stri
     (category, format!("switch_{}", code.as_str()))
 }
 
+/// A limit name of Switch wire 9.3, as the bindings' own text: a name the answer gives that
+/// isn't one of them is never passed on, since the answer's text is the service's.
+fn known_quota_limit(limit: &str) -> Option<&'static str> {
+    [
+        "inbox",
+        "sender_share",
+        "storage",
+        "record_keys",
+        "claims",
+        "claim_share",
+        "attempts",
+        "open_attempts",
+        "contacts",
+        "conversations",
+        "deny",
+        "invite_codes",
+        "connect_requests",
+    ]
+    .into_iter()
+    .find(|known| *known == limit)
+}
+
 /// The action a full quota calls for, by the limit the answer names and what frees it
 /// (Switch wire 9.3).
 fn quota_category(limit: Option<&str>) -> (Category, String) {
@@ -503,6 +527,7 @@ fn client_failure(e: &AppError) -> (Category, WalletFailure) {
                 failure.quota_limit = current
                     .get("limit")
                     .and_then(|limit| limit.as_str())
+                    .and_then(known_quota_limit)
                     .map(Into::into);
             }
             (category, failure)
