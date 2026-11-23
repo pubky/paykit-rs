@@ -24,6 +24,7 @@ mod extensions;
 mod final_check;
 mod hold_confirmation;
 mod labels;
+mod list_reads;
 mod local_state;
 mod mixed_protocols;
 mod mixed_versions;

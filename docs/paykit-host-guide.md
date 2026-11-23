@@ -373,8 +373,14 @@ usual payment restrictions again before dispatch. A missed period remains availa
 
 Read `notices` and `payee_deletion_notices` by their stable identities. Acknowledge
 each through its matching SDK API after recording or showing it. Handle Switch
-duty events from `ReceiveSummary::report`. If `records_unlisted` says the listing
-has more to read, call `receive(None)` again. The wallet can still be listing
+duty events from `ReceiveSummary::report`. Call `receive` on startup and after a
+feed wake. It returns one bounded report. Use `more` to decide when to read another
+page: while `ReceiveSummary::report.more` is set, the read stopped on one of its
+per-call budgets, such as its feed pages, with more to read now, so call
+`receive(None)` again without waiting. Nothing it left is lost or reordered: the next
+read goes on from there. The loop ends at the first summary whose `report.more` is
+unset; a host that caps its rounds reads the rest at its next wake. If
+`records_unlisted` says the listing has more to read, call `receive(None)` again. The wallet can still be listing
 collections after the Switch has finished its feed read. An explicit `reconcile` or
 `end_reconcile` can also run its own listing. Follow the action named in its
 `NotNow` result to resume that scan. After a receive error,
