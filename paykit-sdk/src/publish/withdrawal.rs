@@ -200,23 +200,17 @@ impl Paykit {
     /// bring the notice back, unacknowledged, until the next receive prunes it again.
     pub(super) async fn prune_list_notices(&mut self) -> Result<()> {
         let now = self.service_time().unwrap_or(0);
-        let held = self
-            .app
-            .protocol_scan(
-                crate::protocol::BACKUP_NAME,
-                key::RESTORED_DELIVERIES.as_bytes(),
-            )
-            .await?;
         let mut tx = Tx::default();
         let mut settled_any = false;
-        for (raw, _) in held {
-            let Some(StateKey::RestoredDelivery { to, msg_id, hash }) = StateKey::parse(&raw)
+        for (rest, notice) in self
+            .local_scan::<KeptNotice>(key::RESTORED_DELIVERIES)
+            .await?
+        {
+            let at = format!("{}{rest}", key::RESTORED_DELIVERIES);
+            let Some(StateKey::RestoredDelivery { to, msg_id, hash }) =
+                StateKey::parse(at.as_bytes())
             else {
                 return Err(PaykitError::corrupt());
-            };
-            let at = String::from_utf8(raw).map_err(|_| PaykitError::corrupt())?;
-            let Some(notice) = self.kept_notice(&at).await? else {
-                continue;
             };
             if notice.kind != NoticeKind::ListDeliveryUnknown {
                 continue;
