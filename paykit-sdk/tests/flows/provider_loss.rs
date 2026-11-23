@@ -2960,3 +2960,106 @@ async fn test_provider_loss_reconcile_retains_journaled_orphan_after_loss() {
 async fn test_provider_loss_reconcile_retains_journaled_orphan_without_loss() {
     journaled_orphan_report(false).await;
 }
+
+/// Alice's wallet dispatches a payment the method leaves pending, is backed up with it in
+/// flight and lost; the signer declares a provider loss, which the laptop follows, so the new
+/// service holds the request's record but no claim
+/// for the obligation, and the wallet is restored from that backup there. `paid` settles the
+/// dispatch paid before the restore; otherwise the method's history loses it.
+async fn restored_dispatch_without_a_claim(
+    paid: bool,
+) -> (World, Paykit, RequestRef, paykit_sdk::AttemptId) {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut laptop = w.wallet("laptop").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    laptop.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let pending = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    let PayOutcome::Pending { attempt_id, .. } = pending else {
+        panic!("pending: {pending:?}")
+    };
+    let backup = wallet.backup().await.unwrap();
+    if paid {
+        w.rail.settle(&attempt_id, true);
+    } else {
+        w.rail.forget_history(&attempt_id);
+    }
+    drop(wallet);
+    w.clock.advance_ms(60_000);
+    declare_loss(&w);
+    // The laptop follows the loss first: the request's record reaches the new service.
+    follow_loss(&mut laptop).await;
+    let mut app = restored(&w, &backup).await;
+    follow_loss(&mut app).await;
+    app.receive(None).await.unwrap();
+    let obligation = app.payments().await.unwrap()[0].obligation;
+    assert!(
+        app.app_mut()
+            .read_claim(&obligation)
+            .await
+            .unwrap()
+            .is_none(),
+        "the new service holds no claim for it"
+    );
+    (w, app, request, attempt_id)
+}
+
+/// The stage of `attempt_id`'s journal entry.
+async fn stage_of(app: &Paykit, attempt_id: &paykit_sdk::AttemptId) -> paykit_sdk::Stage {
+    app.payments()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|p| p.attempt_id == *attempt_id)
+        .expect("the payment is journaled")
+        .stage
+}
+
+#[tokio::test]
+async fn test_provider_loss_restored_dispatch_without_a_claim_the_method_shows_paid_keeps_its_proof(
+) {
+    let (w, mut app, request, attempt_id) = restored_dispatch_without_a_claim(true).await;
+    app.resume_payments().await.unwrap();
+    // The method's history shows it paid: the payment keeps its proof, never given up.
+    let stage = stage_of(&app, &attempt_id).await;
+    assert_ne!(stage, paykit_sdk::Stage::Abandoned);
+    // Nothing pays it again, even once the user states it wasn't paid before the loss.
+    let obligation = app.payments().await.unwrap()[0].obligation;
+    let loss = kept_loss(&app).await;
+    app.confirm_not_paid_before_loss(&obligation, &loss, UserConfirmed::new())
+        .await
+        .unwrap();
+    let options = crate::common::over_hold(&app, &request).await;
+    let again = app.pay_request(&request, options).await.outcome;
+    assert!(
+        !matches!(again, Ok(PayOutcome::Paid { .. })),
+        "paid twice: {again:?}"
+    );
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+    assert_eq!(executions(&w), 1);
+}
+
+#[tokio::test]
+async fn test_provider_loss_restored_dispatch_without_a_claim_or_history_stays_doubtful() {
+    let (w, mut app, request, attempt_id) = restored_dispatch_without_a_claim(false).await;
+    app.resume_payments().await.unwrap();
+    // Neither the claim nor the method can tell: the dispatch stays open as potentially paid.
+    let stage = stage_of(&app, &attempt_id).await;
+    assert_ne!(stage, paykit_sdk::Stage::Abandoned);
+    let obligation = app.payments().await.unwrap()[0].obligation;
+    let loss = kept_loss(&app).await;
+    app.confirm_not_paid_before_loss(&obligation, &loss, UserConfirmed::new())
+        .await
+        .unwrap();
+    let options = crate::common::over_hold(&app, &request).await;
+    let again = app.pay_request(&request, options).await.outcome;
+    assert_eq!(doubt_of(&again).restored, vec![attempt_id], "{again:?}");
+    assert_eq!(executions(&w), 1);
+}
