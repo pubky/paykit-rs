@@ -109,10 +109,12 @@ jobs:
       run:
         shell: bash
     env:
-      OUT: ${{ runner.temp }}/hosts
       PAYKIT_TEST_ISSUER: ${{ github.workspace }}/target/release/examples/wallet-test-issuer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Generated sources and libraries stay out of the cached target directory.
+      - name: Choose the output directory
+        run: echo "OUT=$RUNNER_TEMP/hosts" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: stable
@@ -181,10 +183,12 @@ jobs:
       run:
         shell: bash
     env:
-      OUT: ${{ runner.temp }}/hosts
       PAYKIT_TEST_ISSUER: ${{ github.workspace }}/target/release/examples/wallet-test-issuer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Generated sources and libraries stay out of the cached target directory.
+      - name: Choose the output directory
+        run: echo "OUT=$RUNNER_TEMP/hosts" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: stable
@@ -240,16 +244,14 @@ jobs:
       # A checkout from the main actor, on the runtime's 4 MiB threads.
       - name: Run the wallet on an iOS simulator
         working-directory: paykit-ffi/tests
-        env:
-          PAYKIT_APPLE_PACKAGE: ${{ runner.temp }}/hosts/apple
         run: |
           device=$(xcrun simctl list devices available --json | python3 -c '
           import json, sys
           runtimes = json.load(sys.stdin)["devices"]
           print(next(d["udid"] for r in sorted(runtimes, reverse=True) if ".iOS-" in r
                      for d in runtimes[r] if d["name"].startswith("iPhone")))')
-          xcodebuild test -scheme PaykitWalletDevice-Package -destination "id=$device" \
-            -derivedDataPath "$OUT/ios-derived"
+          PAYKIT_APPLE_PACKAGE="$OUT/apple" xcodebuild test -scheme PaykitWalletDevice-Package \
+            -destination "id=$device" -derivedDataPath "$OUT/ios-derived"
       - name: Refuse native panics
         run: |
           if grep -n "panicked at" "$OUT/consumers.log"; then exit 1; fi

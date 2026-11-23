@@ -13,7 +13,9 @@
 //! ID records it. A `pay` that never answers stops counting as in
 //! flight after [`STALE_AFTER`] times its limit: the host's lookup, which answers "pending"
 //! for any attempt `pay` was called with and that has not settled, then decides. Everything
-//! here is in memory: after a restart the host's lookup answers instead.
+//! here is in memory: a kept answer, with its proof, and the entry of a `pay` that never
+//! answers stay until a wallet of that app records it or the process ends. After a restart
+//! the host's lookup answers instead.
 use crate::{MethodError, MethodOutcome};
 use std::{
     collections::HashMap,

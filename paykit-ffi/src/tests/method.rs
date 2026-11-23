@@ -17,6 +17,10 @@ pub(super) struct Account {
     pub lookups: AtomicUsize,
     /// The method declares a history it can look a payment up in.
     pub history: AtomicBool,
+    /// A proof check never answers.
+    pub stall_verify: AtomicBool,
+    /// After its charge, `pay` throws instead of answering.
+    pub throw_after_charge: AtomicBool,
     pub park: AtomicBool,
     pub entered: Notify,
     pub finish: Notify,
@@ -38,6 +42,8 @@ impl Account {
             calls: AtomicUsize::new(0),
             lookups: AtomicUsize::new(0),
             history: AtomicBool::new(true),
+            stall_verify: AtomicBool::new(false),
+            throw_after_charge: AtomicBool::new(false),
             park: AtomicBool::new(true),
             entered: Notify::new(),
             finish: Notify::new(),
@@ -110,6 +116,11 @@ impl PaymentMethod for Account {
         if self.park.load(Ordering::SeqCst) {
             self.finish.notified().await;
         }
+        if self.throw_after_charge.load(Ordering::SeqCst) {
+            return Err(MethodError::Unavailable {
+                reason: "answer lost after the charge".into(),
+            });
+        }
         Ok(Self::paid(&p.attempt_id))
     }
     async fn payment(&self, id: String) -> Result<Option<MethodOutcome>, MethodError> {
@@ -156,6 +167,9 @@ impl PaymentMethod for Account {
         Ok(Some(rows.collect::<Result<_, _>>().unwrap()))
     }
     async fn verify(&self, p: MethodProof) -> Result<Option<u64>, MethodError> {
+        if self.stall_verify.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
         let proof: serde_json::Value = serde_json::from_slice(&p.proof_json).unwrap();
         if proof["payment"].as_str() != Some(p.attempt_id.as_str()) {
             return Ok(None);

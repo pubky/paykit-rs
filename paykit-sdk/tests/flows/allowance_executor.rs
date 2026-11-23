@@ -3425,6 +3425,51 @@ async fn resume_seller_proposal(lose_answer: bool) {
     assert!(granted.consented);
 }
 
+#[tokio::test]
+async fn test_executor_holds_a_period_whose_record_diverges_after_paying_is_journaled() {
+    use crate::period_payments::{diverge_at_paying, period_key, StageStore};
+    use paykit_lib::periods::{AnchoredRule, PeriodRef, Recurrence, Unit};
+
+    // Right after the executor journals the period's `Paying`, a view shows its period
+    // record divergent: the dispatch is held and the rail is never called (Paykit spec 6).
+    let base = std::sync::Arc::new(StageStore::default());
+    let storage =
+        std::sync::Arc::clone(&base) as std::sync::Arc<dyn pubky_switch_client::store::StateStore>;
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant_in(storage, terms())).await;
+    world.rail.set_history_payer(payer.identity());
+    let start = world.clock.now_ms() / 1_000 * 1_000;
+    let schedule = Recurrence::new(
+        AnchoredRule::new(start, 1, Unit::Hour).unwrap(),
+        start,
+        None,
+    )
+    .unwrap();
+    let period = PeriodRef::from(schedule.periods(1).unwrap()[0]);
+    let req = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("70", start).with_recurrence(schedule),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    Box::pin(payer.accept_subscription_under_allowance(&req, &key))
+        .await
+        .unwrap();
+    Box::pin(shop.receive(None)).await.unwrap();
+    let record = period_key(&payer, &req, period);
+    diverge_at_paying(&base, payer.app_id(), record);
+    let outcome = Box::pin(payer.pay_period_under_allowance(&req, &period))
+        .await
+        .outcome
+        .unwrap();
+    assert!(
+        matches!(outcome, paykit_sdk::PayOutcome::Pending { .. }),
+        "{outcome:?}"
+    );
+    assert!(world.rail.all_executions().is_empty());
+    assert!(base.fired(), "the record diverged after Paying");
+}
+
 /// An Allowance that expires at `expires`, its reservation written 5 s before and its batch's
 /// answer taking `delay_ms`, so the first dispatch is judged at `expires - 5_000 + delay_ms`.
 /// Returns the payment's outcome, the executions and the ledger entry's outcome.

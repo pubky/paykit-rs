@@ -270,7 +270,9 @@ pub trait PaymentMethod: Send + Sync {
     /// Look up the original attempt by its idempotency key without starting a transfer.
     /// Answer `Pending`, never null, for any attempt ID `pay` was called with that hasn't
     /// settled, from the moment `pay` starts and across restarts. Null means `pay` was never
-    /// called with this ID, which lets the payment be made again.
+    /// called with this ID, which lets the payment be made again: a null answered while `pay`
+    /// is still submitting, once Paykit asks again after four times the pay limit, lets the
+    /// payment be made twice.
     async fn payment(&self, attempt_id: String) -> Result<Option<MethodOutcome>, MethodError>;
     /// Complete account-wide dispatch inventory, including manual, failed and pending attempts.
     /// Return null for incomplete coverage and an empty list only for proven empty history.
@@ -292,6 +294,7 @@ pub(crate) struct HostRail {
     identifiers: Vec<PaymentEndpointIdentifier>,
     flights: crate::flights::Flights,
     pay_limit: std::time::Duration,
+    lookup_limit: std::time::Duration,
 }
 
 impl HostRail {
@@ -306,6 +309,7 @@ impl HostRail {
             identifiers,
             flights: crate::flights::Flights::process(),
             pay_limit: crate::runtime::PAY_LIMIT,
+            lookup_limit: HOST_CALL_LIMIT,
         }
     }
 
@@ -313,6 +317,13 @@ impl HostRail {
     #[cfg(any(test, feature = "test-wallet"))]
     pub(crate) fn with_pay_limit(mut self, limit: std::time::Duration) -> Self {
         self.pay_limit = limit;
+        self
+    }
+
+    /// Wait for the host's lookups at most `limit` instead.
+    #[cfg(test)]
+    pub(crate) fn with_lookup_limit(mut self, limit: std::time::Duration) -> Self {
+        self.lookup_limit = limit;
         self
     }
 
@@ -335,11 +346,13 @@ impl HostRail {
     }
 }
 
-/// Wait for a host lookup at most [`HOST_CALL_LIMIT`]; past it the answer is "not now".
-pub(crate) async fn bounded<T>(
+/// Wait for a host lookup at most `limit` ([`HOST_CALL_LIMIT`]); past it the answer is
+/// "not now".
+async fn bounded<T>(
+    limit: std::time::Duration,
     call: impl std::future::Future<Output = Result<T, MethodError>>,
 ) -> Result<T, RailError> {
-    tokio::time::timeout(HOST_CALL_LIMIT, call)
+    tokio::time::timeout(limit, call)
         .await
         .map_err(|_| RailError::Unavailable("payment method did not answer in time".into()))?
         .map_err(Into::into)
@@ -454,7 +467,7 @@ impl Rail for HostRail {
             if let Some(outcome) = self.flights.late(&attempt) {
                 return outcome.into_rail().map(Some);
             }
-            bounded(self.method.payment(attempt))
+            bounded(self.lookup_limit, self.method.payment(attempt))
                 .await?
                 .map(MethodOutcome::into_rail)
                 .transpose()
@@ -466,7 +479,11 @@ impl Rail for HostRail {
         payer: [u8; 32],
     ) -> BoxFuture<'_, Result<Option<Vec<AllowanceDispatch>>, RailError>> {
         Box::pin(async move {
-            let Some(history) = bounded(self.method.allowance_history(payer.to_vec())).await?
+            let Some(history) = bounded(
+                self.lookup_limit,
+                self.method.allowance_history(payer.to_vec()),
+            )
+            .await?
             else {
                 return Ok(None);
             };
@@ -488,13 +505,16 @@ impl Rail for HostRail {
         Box::pin(async move {
             let proof_json = serde_json::to_vec(&p.proof)
                 .map_err(|_| RailError::Unavailable("invalid proof".into()))?;
-            bounded(self.method.verify(MethodProof {
-                endpoint: p.endpoint_id.as_str().into(),
-                payload: p.payload.map(|p| p.as_str().to_owned()),
-                amount: (&p.amount).into(),
-                attempt_id: p.attempt_id.to_text(),
-                proof_json,
-            }))
+            bounded(
+                self.lookup_limit,
+                self.method.verify(MethodProof {
+                    endpoint: p.endpoint_id.as_str().into(),
+                    payload: p.payload.map(|p| p.as_str().to_owned()),
+                    amount: (&p.amount).into(),
+                    attempt_id: p.attempt_id.to_text(),
+                    proof_json,
+                }),
+            )
             .await
         })
     }
