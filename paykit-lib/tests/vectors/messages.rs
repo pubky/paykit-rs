@@ -268,13 +268,18 @@ fn check_contents(keys: &Keys, read: &HashMap<String, Read>) {
         list.expires_at,
         read["private_payment_list"].message.created_at_ms + 30 * 86_400_000
     );
-    // The proof of a payment without a request names its settlement.
+    // The proof of a payment without a request names its settlement through its method's
+    // reader, not through Paykit.
     let Body::PaymentProof(unrequested) = &read["payment_proof_unrequested"].body else {
         panic!("a proof")
     };
     assert_eq!(
-        unrequested.settlement_id().unwrap(),
-        b"4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b".to_vec()
+        crate::common::example_settlement(
+            &unrequested.payment_endpoint_identifier,
+            &unrequested.proof
+        )
+        .unwrap(),
+        crate::common::UNREQUESTED_SETTLEMENT.as_bytes().to_vec()
     );
     // The receipt confirms the proof's attempt.
     let (Body::PaymentReceipt(receipt), Body::PaymentProof(proof)) =

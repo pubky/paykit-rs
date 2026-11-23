@@ -2514,6 +2514,7 @@ async fn seller_stop_after_attempt(stop_at: StopAt) {
                             tablet.app().naming_key(),
                             &key,
                             None,
+                            &|_, proof| paykit_sdk::rail::fake_settlement_id(proof),
                         )
                         .unwrap();
                         record.manual_only = true;
