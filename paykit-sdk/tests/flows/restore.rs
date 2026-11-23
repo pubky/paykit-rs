@@ -3628,3 +3628,68 @@ async fn test_restore_rebuilds_a_priced_outcome_without_authorizing_another_disp
         .unwrap()
         .is_some());
 }
+
+#[tokio::test]
+async fn test_restore_attempt_whose_batch_never_reached_the_claim_is_judged_by_the_history() {
+    // The backup holds a payment journaled before its attempt's batch reached the switch,
+    // and the restore finds no claim for it at the same service: the restored journal can't
+    // tell whether a batch applied, so the claim's silence proves nothing (Paykit spec 8.4).
+    // A history authoritative across a restore that shows nothing means it never started:
+    // it is written failed and the request may be paid. Under one that doesn't survive a
+    // restore, the payment stays open as potentially paid, in the doubt (Paykit spec 7.2).
+    for authoritative in [true, false] {
+        let w = World::new();
+        if !authoritative {
+            w.rail.set_declaration(
+                paykit_sdk::RailDeclaration::new(
+                    paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+                    paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+                )
+                .with_history(true),
+            );
+        }
+        let mut wallet = w.wallet("wallet").await;
+        let mut shop = w.shop().await;
+        let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        wallet.receive(None).await.unwrap();
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+                path: "/ops".into(),
+                after: 0,
+            });
+        let kept = wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .outcome
+            .unwrap_err();
+        assert!(kept.kept_batch().is_some(), "{kept:?}");
+        let attempt_id = wallet.payments().await.unwrap()[0].attempt_id;
+        let backup = wallet.backup().await.unwrap();
+        drop(wallet);
+        let mut app = restored(&w, &backup).await;
+        app.reconcile().await.unwrap();
+        app.end_reconcile(UserConfirmed::new()).await.unwrap();
+        let entry = app
+            .payments()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|p| p.attempt_id == attempt_id)
+            .unwrap();
+        let options = crate::common::over_hold(&app, &request).await;
+        let again = app.pay_request(&request, options).await.outcome;
+        if authoritative {
+            assert_eq!(entry.stage, paykit_sdk::Stage::Finished);
+            assert!(matches!(again, Ok(PayOutcome::Paid { .. })), "{again:?}");
+        } else {
+            assert_ne!(entry.stage, paykit_sdk::Stage::Finished);
+            assert_eq!(
+                crate::provider_loss::doubt_of(&again).restored,
+                vec![attempt_id],
+                "{again:?}"
+            );
+        }
+        assert!(w.rail.executions(&attempt_id) == 0, "{authoritative}");
+    }
+}

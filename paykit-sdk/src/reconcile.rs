@@ -662,7 +662,11 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// [`Refusal::NotFound`] for a claim without the attempt; [`Refusal::AlreadyPaid`] for
+    /// [`Refusal::NotFound`] for a claim without the attempt, unless it is this app's own
+    /// restored dispatch still open, which no claim shows, as after a provider loss: the
+    /// user's `done` or `failed` then finishes its journal entry, `done` with the record's
+    /// update, and writes no claim entry (Paykit spec 7.2, 8.4), while `unknown` is refused;
+    /// [`Refusal::AlreadyPaid`] for
     /// `failed` or `unknown` on an own attempt the method reported paid; [`Refusal::RecordHeld`] for a
     /// `done` whose record can't be updated, with nothing written; the switch's refusal, such
     /// as `409 conflict`, for a resolution its rows don't allow now.
@@ -688,31 +692,46 @@ impl Paykit {
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
         self.records_known().await?;
-        let read = self
-            .app
-            .read_claim(obligation)
-            .await?
-            .ok_or(Refusal::NotFound)?;
-        let Some(held) = read.view.attempt(&attempt.to_bytes()) else {
-            return Err(Refusal::NotFound.into());
-        };
-        let basis = if held.owner == self.app_id() {
-            Basis::Owner
-        } else {
-            Basis::Reconcile
-        };
-        let step = read.view.step;
-        let op = match resolution {
-            Resolution::Done => ClaimOp::done(*obligation, step, attempt.to_bytes(), basis, None)?,
-            Resolution::Unknown => ClaimOp::unknown(*obligation, step, attempt.to_bytes()),
-            Resolution::Failed => ClaimOp::failed(*obligation, step, attempt.to_bytes()),
-        };
         // The journal entry of an own attempt is finished with the resolution, in its batch:
         // the user decided, so it neither blocks another payment as one in progress nor is
         // resumed, and never dispatched again (Paykit spec 7.2, "No second execution").
         // Read bound to its key and to `obligation`: an entry of another attempt, or of this
         // attempt on another claim, is a corrupt store, and nothing is written.
         let mut entry = self.journal_entry_on(&attempt, obligation).await?;
+        let read = self.app.read_claim(obligation).await?;
+        let (basis, op) = match read
+            .as_ref()
+            .and_then(|read| Some((read.view.step, read.view.attempt(&attempt.to_bytes())?)))
+        {
+            Some((step, held)) => {
+                let basis = if held.owner == self.app_id() {
+                    Basis::Owner
+                } else {
+                    Basis::Reconcile
+                };
+                let op = match resolution {
+                    Resolution::Done => {
+                        ClaimOp::done(*obligation, step, attempt.to_bytes(), basis, None)?
+                    }
+                    Resolution::Unknown => ClaimOp::unknown(*obligation, step, attempt.to_bytes()),
+                    Resolution::Failed => ClaimOp::failed(*obligation, step, attempt.to_bytes()),
+                };
+                (basis, Some(op))
+            }
+            // No claim shows the attempt, as after a provider loss or once the claim is gone
+            // past its window: an own restored dispatch still open stays "potentially paid",
+            // and only a receipt or the user can resolve it (Paykit spec 7.2, 8.4). The user's
+            // `done` or `failed` finishes its journal entry, `done` with the record's update,
+            // and writes no claim entry, there being none to write on.
+            None if resolution != Resolution::Unknown
+                && entry
+                    .as_ref()
+                    .is_some_and(|e| e.restored && e.open() && e.may_have_dispatched()) =>
+            {
+                (Basis::Owner, None)
+            }
+            None => return Err(Refusal::NotFound.into()),
+        };
         // An own payment the method reported made is never `failed` or `unknown`: either
         // would free the claim for a second payment, and its proof would never go (Paykit
         // spec 7.2, "Failed means definitively not paid"). It is resolved `done`, or by
@@ -772,9 +791,12 @@ impl Paykit {
             Some(target) => Some(self.done_record(target, &attempt, entry.as_ref()).await?),
             None => None,
         };
-        let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
-            .op(op.kind())
-            .obligation_deadline(*obligation, deadline);
+        let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME);
+        if let Some(op) = op {
+            batch = batch
+                .op(op.kind())
+                .obligation_deadline(*obligation, deadline);
+        }
         if let Some(write) = record_write {
             batch = batch.entry(write);
         }
@@ -784,6 +806,14 @@ impl Paykit {
         {
             batch =
                 Box::pin(self.executor_outcome(own, resolution == Resolution::Done, batch)).await?;
+        }
+        // With no claim entry, record or ledger write to make, only the journal changes:
+        // the entry finishes locally.
+        if batch.is_empty() {
+            if let Some(entry) = entry.as_mut().filter(|e| e.open()) {
+                self.set_stage(entry, Stage::Finished).await?;
+            }
+            return Ok(());
         }
         if let Some(entry) = entry.as_mut().filter(|e| e.open()) {
             if resolution == Resolution::Failed {

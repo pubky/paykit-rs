@@ -3114,3 +3114,125 @@ async fn test_provider_loss_restored_dispatch_without_a_claim_or_history_stays_d
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     assert_eq!(executions(&w), 2);
 }
+
+/// The restored dispatch of [`restored_dispatch_without_a_claim`], its method silent,
+/// resolved by the user as `resolution` after a resume left it open.
+async fn resolved_without_a_claim(
+    resolution: paykit_sdk::Resolution,
+) -> (World, Paykit, RequestRef, paykit_sdk::AttemptId) {
+    let (w, mut app, _shop, request, attempt_id) = restored_dispatch_without_a_claim(false).await;
+    app.resume_payments().await.unwrap();
+    let obligation = app.payments().await.unwrap()[0].obligation;
+    app.resolve_attempt(&obligation, attempt_id, resolution, UserConfirmed::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        stage_of(&app, &attempt_id).await,
+        paykit_sdk::Stage::Finished
+    );
+    (w, app, request, attempt_id)
+}
+
+/// Whether `app`'s journal still holds `attempt_id` once the clock is past the claim's
+/// window and a resume ran on a verified service time there.
+async fn journaled_past_the_window(
+    w: &World,
+    app: &mut Paykit,
+    attempt_id: &paykit_sdk::AttemptId,
+) -> bool {
+    w.clock
+        .advance_ms(2 * 24 * crate::common::HOUR_MS + pubky_switch_core::claims::RECONCILIATION_MS);
+    app.receive(None).await.unwrap();
+    app.resume_payments().await.unwrap();
+    app.payments()
+        .await
+        .unwrap()
+        .iter()
+        .any(|p| p.attempt_id == *attempt_id)
+}
+
+#[tokio::test]
+async fn test_provider_loss_restored_dispatch_without_a_claim_the_user_resolves_paid() {
+    // No claim shows the restored dispatch and the method can't tell: the user, seen "may
+    // already be paid", resolves it as paid. Its journal entry finishes, the request's
+    // record shows it paid, and the doubt no longer names the attempt: what remains is the
+    // provider loss's, as for any request payable before it. With no claim to write on, and
+    // no Late recording from a restored journal, nothing is SETTLED at the new service
+    // (Paykit spec 7.2, 7.3, 8.4). Past the claim's window the entry is dropped.
+    let (w, mut app, request, attempt_id) =
+        resolved_without_a_claim(paykit_sdk::Resolution::Done).await;
+    let key = app.request(&request).await.unwrap().record;
+    let record = app.app().shared_record(&key).await.unwrap().unwrap();
+    let value: serde_json::Value = serde_json::from_slice(record.content.value().unwrap()).unwrap();
+    assert_eq!(value["status"], "paid", "{value}");
+    let options = crate::common::over_hold(&app, &request).await;
+    let refused = app.pay_request(&request, options).await.outcome;
+    let doubt = doubt_of(&refused);
+    assert!(doubt.restored.is_empty(), "{refused:?}");
+    assert!(doubt.before_loss.is_some(), "{refused:?}");
+    assert_eq!(executions(&w), 1);
+    assert!(!journaled_past_the_window(&w, &mut app, &attempt_id).await);
+}
+
+#[tokio::test]
+async fn test_provider_loss_restored_dispatch_without_a_claim_the_user_resolves_not_paid() {
+    // The user resolves the same restored dispatch as not paid: its entry finishes, the
+    // doubt no longer names it, and a payment the user then makes over the loss is made;
+    // past the claim's window the resolved entry is dropped (Paykit spec 7.2).
+    let (w, mut app, request, attempt_id) =
+        resolved_without_a_claim(paykit_sdk::Resolution::Failed).await;
+    let options = crate::common::over_hold(&app, &request).await;
+    let refused = app.pay_request(&request, options.clone()).await.outcome;
+    let doubt = doubt_of(&refused);
+    assert!(doubt.restored.is_empty(), "{refused:?}");
+    let paid = app
+        .pay_request(&request, options.with_may_be_paid_confirmed(doubt))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(executions(&w), 2);
+    assert!(!journaled_past_the_window(&w, &mut app, &attempt_id).await);
+}
+
+#[tokio::test]
+async fn test_provider_loss_restored_dispatch_left_open_beside_a_new_one_restores_again() {
+    // The user pays over the restored dispatch's doubt, and the method leaves the new payment
+    // pending: two open entries for the obligation, one restored. A backup of that restores,
+    // and both attempts are in the doubt the restored app shows (Paykit spec 7.2, 12.4).
+    let (w, mut app, _shop, request, attempt_id) = restored_dispatch_without_a_claim(false).await;
+    app.resume_payments().await.unwrap();
+    let options = crate::common::over_hold(&app, &request).await;
+    let refused = app.pay_request(&request, options.clone()).await.outcome;
+    w.rail.next(Behaviour::Hang);
+    let pending = app
+        .pay_request(
+            &request,
+            options.with_may_be_paid_confirmed(doubt_of(&refused)),
+        )
+        .await
+        .outcome
+        .unwrap();
+    let PayOutcome::Pending {
+        attempt_id: newer, ..
+    } = pending
+    else {
+        panic!("pending: {pending:?}")
+    };
+    let backup = app.backup().await.unwrap();
+    drop(app);
+    let mut again = restored(&w, &backup).await;
+    again.receive(None).await.unwrap();
+    let mut both = vec![attempt_id, newer];
+    both.sort();
+    let mut restored_open: Vec<_> = again
+        .payments()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|p| p.restored)
+        .map(|p| p.attempt_id)
+        .collect();
+    restored_open.sort();
+    assert_eq!(restored_open, both);
+}

@@ -1252,7 +1252,10 @@ pub(crate) fn restore_paykit_layer(
         // ([`JournalEntry::check_restored`]): checked here, before anything is written.
         let mut entry =
             state::restored::<JournalEntry>(&key, &value, &binder).map_err(|_| bad())?;
-        if entry.open() && !open.insert(entry.obligation) {
+        // An app has one payment of an obligation in progress at a time; an entry an earlier
+        // restore left open beside it is that payment's doubt, which the user paid over, and
+        // is never dispatched again (Paykit spec 7.2, 12.4).
+        if entry.open() && !entry.restored && !open.insert(entry.obligation) {
             return Err("Paykit spec 7.2: two open journal entries for one obligation".into());
         }
         if entry.offline == Some(crate::journal::OfflineRecording::AwaitingRecording)
