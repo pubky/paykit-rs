@@ -1059,6 +1059,7 @@ impl Paykit {
         options: PayOptions,
         public_failures: &mut Vec<PublicAppFailure>,
     ) -> Result<Plan> {
+        self.refuse_held_back()?;
         self.refresh_own()?;
         if options.quote_only {
             self.require_first_read()?;
@@ -1077,7 +1078,7 @@ impl Paykit {
         };
         self.app
             .may_attempt(automatic)
-            .map_err(crate::pay::not_now)?;
+            .map_err(crate::pay::held_back)?;
         self.refuse_while_payer_pass_owed().await?;
         let parent = ActivityTarget::payer(natural_key::request_record(
             &request.payee,

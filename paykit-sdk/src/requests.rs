@@ -2558,7 +2558,7 @@ impl Paykit {
         // payee it goes only on the user's confirmation, below. It is never held.
         let (blocked, held) = if allowance.is_some() {
             self.refuse_while_payer_pass_owed().await?;
-            self.app.may_attempt(true).map_err(crate::pay::not_now)?;
+            self.app.may_attempt(true).map_err(crate::pay::held_back)?;
             (self.denied(&request.payee).await?, false)
         } else if answer == Answer::Accept {
             (self.denied_for_user(&request.payee).await?, false)

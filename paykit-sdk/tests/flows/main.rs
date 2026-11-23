@@ -22,6 +22,7 @@ mod divergent;
 mod erasure;
 mod extensions;
 mod final_check;
+mod held_back;
 mod hold_confirmation;
 mod labels;
 mod list_reads;

@@ -57,14 +57,40 @@ async fn payer_notice(world: &World) -> TestResult {
         draft("1", world.now_ms()),
     ))
     .await;
+    // A payment left in flight: its repeat meets the notice too.
+    rail.set_declaration(
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
+    );
+    let in_flight = Box::pin(request_from(
+        &mut seller,
+        payer.identity(),
+        draft("2", world.now_ms()),
+    ))
+    .await;
     Box::pin(payer.receive(None)).await?;
     assert_eq!(payer.request(&request).await?.status, RequestStatus::Open);
+    rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let PayOutcome::Pending {
+        attempt_id: held, ..
+    } = Box::pin(payer.pay_request(&in_flight, PayOptions::default()))
+        .await
+        .outcome?
+    else {
+        return Err("the first payment did not stay in flight".into());
+    };
 
     let owner = world.identity("buyer")?;
     let origin = "https://buyer.public.test";
     let generation = payer.app().own_identity().generation();
     Box::pin(world.set_account_missing(origin, &owner, true)).await?;
-    let reopened = Box::pin(reopen_held_payer(world, payer, &request, storage, &rail)).await;
+    let reopened = Box::pin(reopen_held_payer(
+        world, payer, &request, storage, &rail, held,
+    ))
+    .await;
     Box::pin(world.set_account_missing(origin, &owner, false)).await?;
     let mut payer = reopened?;
     assert!(payer.app().recovery_required().is_some());
@@ -76,7 +102,7 @@ async fn payer_notice(world: &World) -> TestResult {
     assert!(read.report.events.iter().any(|event| matches!(
         event, AppEvent::RecoveryNoticeCleared { generation: cleared, .. } if *cleared == generation
     )));
-    assert!(rail.all_pay_calls().is_empty());
+    assert_eq!(rail.all_pay_calls(), BTreeMap::from([(held, 1)]));
 
     let PayOutcome::Paid { attempt_id, .. } =
         Box::pin(payer.pay_request(&request, PayOptions::default()))
@@ -86,9 +112,8 @@ async fn payer_notice(world: &World) -> TestResult {
         return Err("the request did not pay after the recovery notice cleared".into());
     };
     Box::pin(payer.resume_payments()).await?;
-    let expected = BTreeMap::from([(attempt_id, 1)]);
-    assert_eq!(rail.all_pay_calls(), expected);
-    assert_eq!(rail.all_executions(), expected);
+    assert_eq!(rail.pay_calls(&attempt_id), 1);
+    assert_eq!(rail.all_executions().get(&attempt_id), Some(&1));
     Ok(())
 }
 
@@ -98,6 +123,7 @@ async fn reopen_held_payer(
     request: &RequestRef,
     storage: Arc<FaultStore>,
     rail: &Arc<FakeRail>,
+    held: paykit_lib::AttemptId,
 ) -> TestResult<Paykit> {
     // A stopped read must reach the host even when resend upkeep cannot read its queue.
     storage.fail_scan(b"p/paykit/ask/", 0);
@@ -155,11 +181,17 @@ async fn reopen_held_payer(
         generation: notice.generation,
     };
     assert!(
-        matches!(blocked.refusal(), Some(paykit_sdk::Refusal::NotNow(message)) if message == &reason.to_string()),
+        matches!(&blocked, paykit_sdk::PaykitError::Client(AppError::Refused(refused)) if refused == &reason),
         "{blocked}"
     );
-    assert!(Box::pin(payer.resume_payments()).await?.is_empty());
-    assert!(rail.all_pay_calls().is_empty());
-    assert!(rail.all_executions().is_empty());
+    // The repeat isn't reported as one that may pass later: the client's refusal or the
+    // switch's own answer says the account awaits a recovery.
+    let resumed = Box::pin(payer.resume_payments()).await;
+    assert!(
+        matches!(&resumed, Err(paykit_sdk::PaykitError::Client(AppError::Refused(refused))) if refused == &reason)
+            || matches!(&resumed, Err(error) if error.code() == Some(pubky_switch_core::http::ErrorCode::RecoveryRequired)),
+        "{resumed:?}"
+    );
+    assert_eq!(rail.all_pay_calls(), BTreeMap::from([(held, 1)]));
     Ok(payer)
 }

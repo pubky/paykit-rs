@@ -79,7 +79,7 @@ impl Paykit {
         let lookup_answered = self.inspect_ready_lookup(&entry.payee, |_| ()).is_some();
         self.require_pay()?;
         self.transfer_holds(entry, peer, false)??;
-        self.app.may_attempt(false).map_err(not_now)?;
+        self.app.may_attempt(false).map_err(held_back)?;
         let (now, own_fresh) = self.dispatch_time();
         let Some((_, denied)) = read
             .zip(copy)
