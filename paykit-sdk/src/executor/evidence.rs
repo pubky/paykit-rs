@@ -26,6 +26,17 @@ enum Purpose {
     Authorizes,
 }
 
+impl Purpose {
+    /// Whether an operation of `generation` serves this purpose, the account being at
+    /// `current` with the last provider loss at `recovery_from` ([`AppliedOperation::applied`]).
+    fn admits(self, generation: u64, current: u64, recovery_from: Option<u64>) -> bool {
+        match self {
+            Self::Evidence => super::in_grant_history(generation, current, recovery_from),
+            Self::Authorizes => generation == current,
+        }
+    }
+}
+
 struct AppliedOperation {
     op: SignedOp,
     proof: TransitionProof,
@@ -53,16 +64,13 @@ impl AppliedOperation {
     /// Whether this applied operation's generation fits `purpose` ([`Self::applied`]).
     fn fit_for(self, app: &App, purpose: Purpose) -> Option<Self> {
         let current = app.own_identity();
-        let generation = self.op.body().generation;
-        match purpose {
-            Purpose::Evidence => super::in_grant_history(
-                generation,
+        purpose
+            .admits(
+                self.op.body().generation,
                 current.generation(),
                 current.body().recovery_from,
-            ),
-            Purpose::Authorizes => generation == current.generation(),
-        }
-        .then_some(self)
+            )
+            .then_some(self)
     }
 
     fn verify_original(app: &App, kept: &KeptOp) -> Option<Self> {
@@ -736,6 +744,28 @@ impl AppliedRecord {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn test_evidence_authorization_admits_only_the_current_generation() {
+        // An opening answered in an earlier generation authorizes no new attempt, after an
+        // orderly change or a move as after a loss (Pubky Switch spec, Section 12.5).
+        assert!(Purpose::Authorizes.admits(3, 3, None));
+        assert!(!Purpose::Authorizes.admits(2, 3, None));
+        assert!(!Purpose::Authorizes.admits(2, 3, Some(2)));
+        assert!(!Purpose::Authorizes.admits(4, 3, None));
+    }
+
+    #[test]
+    fn test_evidence_admits_the_grant_history_after_the_last_loss() {
+        // Evidence of what happened counts from an earlier generation of the same history,
+        // never from one a provider loss ended, nor from a later one (Paykit spec 8.3).
+        assert!(Purpose::Evidence.admits(3, 3, None));
+        assert!(Purpose::Evidence.admits(1, 3, None));
+        assert!(Purpose::Evidence.admits(3, 4, Some(2)));
+        assert!(!Purpose::Evidence.admits(2, 4, Some(2)));
+        assert!(!Purpose::Evidence.admits(1, 4, Some(2)));
+        assert!(!Purpose::Evidence.admits(5, 4, None));
+    }
     use super::*;
 
     #[test]
