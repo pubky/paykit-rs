@@ -2063,8 +2063,8 @@ impl Paykit {
         }
         let mut read = Vec::new();
         for (list, version) in self.lists_read_of(payee).await? {
-            // Over a `payment_lists` record seen deleted, a list is paid only from a value the
-            // family's rules take; another waits (Paykit spec 6).
+            // Over a `payment_lists` record seen deleted, no list is paid from: it waits
+            // (Paykit spec 6; wire 5, "Incomplete protected-record contract").
             if self.list_admitted(&list).await? {
                 read.push((list, version));
             }

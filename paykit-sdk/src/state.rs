@@ -710,30 +710,24 @@ impl Stored for OwnBlockMark {
     }
 }
 
-/// What this app knew of a `payment_lists` record when it saw it deleted
-/// (`lgone/<record key>`; Paykit spec 6, "Visible deletion without a copy"; Paykit wire 5,
-/// "A visible delete without a copy"): the newest delete seen, and the single-use endpoints
-/// its copy held used with the version and hash of the copy's list, or none known when it
-/// held no copy. While it is kept, a later value at that key is taken only under the
-/// family's rules against that copy (Paykit wire 4.13, 5.4 "Seen lists"): it holds every
-/// one of these marks, and its list is newer than the copy's, or the same one. With no copy
-/// none is taken. An unmarked create after the service forgot the delete, a create kept in
-/// a batch that lands late, or an older list written back, proves nothing about what the
-/// delete took, and could let an endpoint already paid, or withdrawn, be paid. An absence
-/// of the record keeps its list held too.
+/// That this app saw a `payment_lists` record deleted, or read a value at its key carrying
+/// `lost_to_delete` (`lgone/<record key>`; Paykit spec 6, "Visible deletion without a
+/// copy"; Paykit wire 5, "A visible delete without a copy" and "Incomplete
+/// protected-record contract"): the newest such version, and the delete's item hash. While
+/// it is kept, no value at that key is taken, and no list of that payee app is used, for
+/// any list version and whatever marks a value holds: a later authorization over a delete
+/// needs the Switch's lineage proof and its Paykit mapping, which this revision lacks, so
+/// wire 5 withholds it. An absence of the record keeps its list held too.
 ///
-/// Its size is that of one record's `used` entries, one for each list version a single-use
-/// endpoint was paid at, read from a value within the largest the switch takes (Switch wire
-/// 6.2), or a restore's union of two such sets, and never more than [`MAX_LOST_MARKS`]: a
-/// union past it keeps no copy. It is never removed: a value the family's
-/// rules take is taken with it kept, while removing it would let a later absence of the
-/// record, or a value without the marks, read as a record never deleted, since no backup
+/// It is never removed: removing it would let a later absence of the record, or a value
+/// without the marks the delete took, read as a record never deleted, since no backup
 /// carries the client's own mark of what it saw, nor does a fresh store hold it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LostListRecord {
-    /// The record version of the newest delete seen: a report of it again, or of an older
-    /// one, as a covering read or a restore's listing gives, changes nothing.
+    /// The record version of the newest delete seen, or of a write naming one: a report of
+    /// it again, or of an older one, as a covering read or a restore's listing gives,
+    /// changes nothing.
     deleted: [u64; 2],
     /// That delete's item hash, as the client reports a delete it verified (Switch wire
     /// 6.6), which tells two deletes at one version apart, as a recovery can upload them
@@ -741,204 +735,19 @@ pub(crate) struct LostListRecord {
     /// seen. Only an exact match is the same delete: any other at its version is merged.
     #[serde(deserialize_with = "Option::deserialize")]
     item: Option<[u8; 32]>,
-    /// The copy's marks and list; `None` for a delete seen with no copy.
-    #[serde(deserialize_with = "Option::deserialize")]
-    copy: Option<LostCopy>,
-    /// Whether a value carrying `lost_to_delete` was read at the key: then no later value
-    /// is taken, whatever the copy, which is kept as what was known of the record (Paykit
-    /// spec 6; wire 5).
-    marked: bool,
-}
-
-/// The fewest bytes a `used` entry takes in a `payment_lists` value, with the comma after it:
-/// `{"version":{"generation":1,"counter":1},"endpoint":"a","attempt_id":"<22 characters>"}`
-/// is 93 (Paykit wire 5.4). The last entry has no comma, but the rest of the value, its list
-/// above all, is far longer than one byte.
-const SMALLEST_USED_ENTRY: usize = 94;
-
-/// The most marks a [`LostCopy`] keeps, 2,788: the most `used` entries one `payment_lists`
-/// value can hold, since a value is at most the largest JSON the switch seals, 262,140 bytes
-/// (Switch wire 6.2), and each entry takes at least [`SMALLEST_USED_ENTRY`]. The marks of any
-/// one record read fit; only a union of two copies, as a restore or a delete seen over a
-/// different copy merges, can pass it. Such a union collapses to no copy, never to some of
-/// its marks: dropping one could let an endpoint already paid be paid again.
-const MAX_LOST_MARKS: usize = pubky_switch_core::sealed::MAX_JSON_LEN / SMALLEST_USED_ENTRY;
-
-/// What a [`LostListRecord`] keeps of the copy held before the delete.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LostCopy {
-    /// The marks of its `used` entries, in ascending order, each once.
-    marks: Vec<LostMark>,
-    /// Its list's version.
-    generation: u64,
-    counter: u64,
-    /// Its list's message hash; `None` once two lists were seen at that version, as a
-    /// restore can merge: then only a newer version is taken.
-    #[serde(deserialize_with = "Option::deserialize")]
-    hash: Option<[u8; 32]>,
-}
-
-/// A single-use endpoint used, as a [`LostListRecord`] keeps it (Paykit wire 5.4 `used`).
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LostMark {
-    generation: u64,
-    counter: u64,
-    endpoint: String,
-    attempt_id: [u8; 16],
-}
-
-impl LostMark {
-    fn valid(&self) -> bool {
-        paykit_lib::ListVersion::new(self.generation, self.counter).is_ok()
-            && paykit_lib::PaymentEndpointIdentifier::parse(&self.endpoint).is_ok()
-    }
-}
-
-/// The marks of `record`'s `used` entries, in ascending order, each once.
-fn marks_of(record: &paykit_lib::records::PaymentListRecord) -> Vec<LostMark> {
-    let mut marks: Vec<LostMark> = record
-        .used
-        .iter()
-        .map(|used| LostMark {
-            generation: used.version.generation(),
-            counter: used.version.counter(),
-            endpoint: used.endpoint.as_str().to_owned(),
-            attempt_id: used.attempt_id.to_bytes(),
-        })
-        .collect();
-    marks.sort();
-    marks.dedup();
-    marks
-}
-
-impl LostCopy {
-    fn of(record: &paykit_lib::records::PaymentListRecord) -> Option<Self> {
-        let version = crate::receive::list_version(&record.list)?;
-        Some(Self {
-            marks: marks_of(record),
-            generation: version.generation(),
-            counter: version.counter(),
-            hash: Some(record.list.hash()),
-        })
-    }
-
-    fn version(&self) -> (u64, u64) {
-        (self.generation, self.counter)
-    }
-
-    /// Whether it holds at most [`MAX_LOST_MARKS`] marks: the one check of that bound, at
-    /// decode ([`Stored::bind`]) and wherever a copy is made or merged.
-    fn within_bound(&self) -> bool {
-        self.marks.len() <= MAX_LOST_MARKS
-    }
-
-    /// The copy if it is [`Self::within_bound`]; `None`, no copy, past it, so no value is
-    /// taken at the key and its list stays held. A copy of one record read always fits;
-    /// only a merge can pass it, and the check on a single copy guards that assumption.
-    fn bounded(self) -> Option<Self> {
-        self.within_bound().then_some(self)
-    }
-
-    /// Both copies' marks, and the newer list; of two lists at one version, neither: an
-    /// equivocation, so only a newer version is taken after it (Paykit wire 4.13). `None`
-    /// past [`MAX_LOST_MARKS`] marks ([`Self::bounded`]).
-    fn merge(self, other: Self) -> Option<Self> {
-        let (generation, counter) = std::cmp::max(self.version(), other.version());
-        let hash = match self.version().cmp(&other.version()) {
-            std::cmp::Ordering::Greater => self.hash,
-            std::cmp::Ordering::Less => other.hash,
-            std::cmp::Ordering::Equal => self.hash.filter(|_| self.hash == other.hash),
-        };
-        let mut marks = self.marks;
-        marks.extend(other.marks);
-        marks.sort();
-        marks.dedup();
-        Self {
-            marks,
-            generation,
-            counter,
-            hash,
-        }
-        .bounded()
-    }
-
-    /// Whether the family's rules take `record` over this copy (Paykit wire 4.13, 5.4).
-    fn admits(&self, record: &paykit_lib::records::PaymentListRecord) -> bool {
-        Self::of(record).is_some_and(|later| self.takes(&later))
-    }
-
-    /// The rules of [`Self::admits`] on `later`, a value's marks and list: a newer list, or
-    /// the same one where a single list is known at this version, holding every mark.
-    fn takes(&self, later: &Self) -> bool {
-        let newer = later.version() > self.version()
-            || (later.version() == self.version() && later.hash == self.hash);
-        newer
-            && self
-                .marks
-                .iter()
-                .all(|mark| later.marks.binary_search(mark).is_ok())
-    }
 }
 
 impl LostListRecord {
-    /// The delete at record version `deleted`, seen over `copy`, the last value of the
-    /// record this app read, if any.
+    /// The delete at record version `deleted`, of item hash `item` if the report gave it,
+    /// or a value carrying `lost_to_delete` written at that version: it names a delete that
+    /// lost content, which this app may never have seen (Paykit spec 6; wire 5).
     pub(crate) fn over(
         deleted: pubky_switch_core::ops::RecordVersion,
         item: Option<[u8; 32]>,
-        copy: Option<&paykit_lib::records::PaymentListRecord>,
     ) -> Self {
         Self {
             deleted: [deleted.generation, deleted.version],
             item,
-            copy: copy.and_then(LostCopy::of).and_then(LostCopy::bounded),
-            marked: false,
-        }
-    }
-
-    /// The delete at record version `deleted` over `exact`, its exact predecessor, joined
-    /// with `seen`, the client's mark of what this app saw at the key, should the two
-    /// differ: the copy keeps both, every mark of either, the newer list, and no hash for
-    /// two lists at one version ([`LostCopy::merge`]). The pinned client offers no exact
-    /// predecessor while it holds a refused write after it, so today they differ only if
-    /// a client does. With no exact predecessor, no copy: what the delete took isn't known.
-    pub(crate) fn over_exact(
-        deleted: pubky_switch_core::ops::RecordVersion,
-        item: Option<[u8; 32]>,
-        exact: Option<&paykit_lib::records::PaymentListRecord>,
-        seen: Option<&paykit_lib::records::PaymentListRecord>,
-    ) -> Self {
-        let copy =
-            exact
-                .and_then(LostCopy::of)
-                .and_then(|copy| match seen.and_then(LostCopy::of) {
-                    Some(seen) => copy.merge(seen),
-                    None => copy.bounded(),
-                });
-        Self {
-            deleted: [deleted.generation, deleted.version],
-            item,
-            copy,
-            marked: false,
-        }
-    }
-
-    /// A value at the key carrying `lost_to_delete`, written at record version `written`:
-    /// it names a delete that lost content, which this app may never have seen, so no
-    /// later value at the key is taken (Paykit spec 6; wire 5). Its version is the write's,
-    /// at or after the delete it answers. Its own marks and list are kept as the copy, and
-    /// merged with any copy an entry holds ([`Self::merge`]), so nothing it showed is lost.
-    pub(crate) fn marked(
-        written: pubky_switch_core::ops::RecordVersion,
-        value: Option<&paykit_lib::records::PaymentListRecord>,
-    ) -> Self {
-        Self {
-            deleted: [written.generation, written.version],
-            item: None,
-            copy: value.and_then(LostCopy::of).and_then(LostCopy::bounded),
-            marked: true,
         }
     }
 
@@ -948,31 +757,9 @@ impl LostListRecord {
         self.deleted == [version.generation, version.version] && self.item.is_some()
     }
 
-    /// The entry once a delete at `deleted`, of item hash `item`, was written over the
-    /// delete it keeps, with no write between them: the later delete took nothing the
-    /// earlier hadn't, so the copy stays.
-    pub(crate) fn moved(
-        self,
-        deleted: pubky_switch_core::ops::RecordVersion,
-        item: Option<[u8; 32]>,
-    ) -> Self {
-        let deleted = [deleted.generation, deleted.version];
-        Self {
-            item: if deleted > self.deleted {
-                item
-            } else {
-                self.item
-            },
-            deleted: std::cmp::max(self.deleted, deleted),
-            copy: self.copy,
-            marked: self.marked,
-        }
-    }
-
     /// The entry after `seen`, a delete seen now, is kept with it: the same delete, by its
-    /// item hash, or an older one, reported again changes nothing, as what it knew of the
-    /// copy was kept at its first report; a newer one, or another at the same version, is
-    /// merged in.
+    /// item hash, or an older one, reported again changes nothing; a newer one, or another
+    /// at the same version, is merged in.
     pub(crate) fn then(self, seen: Self) -> Self {
         match seen.deleted.cmp(&self.deleted) {
             std::cmp::Ordering::Less => self,
@@ -981,17 +768,9 @@ impl LostListRecord {
         }
     }
 
-    /// Both kept, as after a restore: a value is then taken only under the rules of each,
-    /// and none is when either knew no copy, or when their marks together pass
-    /// [`MAX_LOST_MARKS`]. Once either was marked, none is taken anyway, so the copy one
-    /// side knew is kept with it rather than lost: what either side knew survives.
+    /// Both kept, as after a restore: the newer version, with its item hash, and none for
+    /// two different deletes at one version.
     pub(crate) fn merge(self, other: Self) -> Self {
-        let marked = self.marked || other.marked;
-        let copy = match (self.copy, other.copy) {
-            (Some(one), Some(other)) => one.merge(other),
-            (Some(one), None) | (None, Some(one)) if marked => Some(one),
-            _ => None,
-        };
         let item = match self.deleted.cmp(&other.deleted) {
             std::cmp::Ordering::Greater => self.item,
             std::cmp::Ordering::Less => other.item,
@@ -1000,47 +779,19 @@ impl LostListRecord {
         Self {
             deleted: std::cmp::max(self.deleted, other.deleted),
             item,
-            copy,
-            marked,
         }
-    }
-
-    /// Whether `record`, a value read at the key, may be taken: it holds every mark known,
-    /// and its list is the copy's or newer (Paykit wire 4.13, 5.4).
-    pub(crate) fn admits(&self, record: &paykit_lib::records::PaymentListRecord) -> bool {
-        !self.marked && self.copy.as_ref().is_some_and(|copy| copy.admits(record))
-    }
-
-    /// The entry once `record`, which it admits, was read: its marks, a superset of those
-    /// known, and its list; `None` when nothing changes.
-    pub(crate) fn after(&self, record: &paykit_lib::records::PaymentListRecord) -> Option<Self> {
-        let grown = Self {
-            deleted: self.deleted,
-            item: self.item,
-            copy: LostCopy::of(record).and_then(LostCopy::bounded),
-            marked: self.marked,
-        };
-        (self.admits(record) && grown != *self).then_some(grown)
     }
 }
 
 impl sealed::Sealed for LostListRecord {}
 
 /// Its delete's version is one a delete has: a write's, of a generation of at least 1
-/// (Switch wire 1.7, 3.3, 6.3); its copy's marks are valid, in ascending order and each once, as every writer
-/// keeps them, and at most [`MAX_LOST_MARKS`], and its list version is one.
+/// (Switch wire 1.7, 3.3, 6.3).
 impl Stored for LostListRecord {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         const MAX_INT: u64 = (1 << 53) - 1;
         let [generation, seq] = self.deleted;
-        let deleted = (1..=MAX_INT).contains(&seq) && (1..=MAX_INT).contains(&generation);
-        let valid = deleted
-            && self.copy.as_ref().is_none_or(|copy| {
-                paykit_lib::ListVersion::new(copy.generation, copy.counter).is_ok()
-                    && copy.marks.iter().all(LostMark::valid)
-                    && copy.marks.windows(2).all(|pair| pair[0] < pair[1])
-                    && copy.within_bound()
-            });
+        let valid = (1..=MAX_INT).contains(&seq) && (1..=MAX_INT).contains(&generation);
         match family {
             StateKey::ListRecordLost(_) if valid => Ok(()),
             _ => corrupt(),
@@ -3796,50 +3547,14 @@ mod tests {
     }
 
     #[test]
-    fn test_state_lost_list_record_bound_to_ordered_valid_marks() {
+    fn test_state_lost_list_record_bound_to_a_delete_version() {
         let at = key::list_record_lost(&[1; 32]);
-        let mark = |counter: u64, endpoint: &str| {
-            serde_json::json!({
-                "generation": 1, "counter": counter, "endpoint": endpoint,
-                "attempt_id": vec![7u8; 16],
-            })
-        };
-        let copy = |marks: serde_json::Value, counter: u64| {
-            serde_json::json!({
-                "marks": marks, "generation": 1, "counter": counter, "hash": vec![9u8; 32],
-            })
-        };
-        let lost = |copy: serde_json::Value| serde_json::json!({ "deleted": [1, 4], "item": null, "copy": copy, "marked": false });
-        assert!(reads::<LostListRecord>(&at, lost(serde_json::Value::Null)));
+        let lost = serde_json::json!({ "deleted": [1, 4], "item": null });
+        assert!(reads::<LostListRecord>(&at, lost.clone()));
         assert!(reads::<LostListRecord>(
             &at,
-            lost(copy(serde_json::json!([]), 1))
+            serde_json::json!({ "deleted": [1, 4], "item": vec![6u8; 32] })
         ));
-        assert!(reads::<LostListRecord>(
-            &at,
-            lost(copy(
-                serde_json::json!([mark(1, "btc-a"), mark(2, "btc-a")]),
-                2
-            ))
-        ));
-        // Out of order, twice, at a version that isn't one, of an invalid identifier, or of
-        // a list whose version isn't one.
-        for marks in [
-            serde_json::json!([mark(2, "btc-a"), mark(1, "btc-a")]),
-            serde_json::json!([mark(1, "btc-a"), mark(1, "btc-a")]),
-            serde_json::json!([mark(0, "btc-a")]),
-            serde_json::json!([mark(1, "..")]),
-        ] {
-            assert!(!reads::<LostListRecord>(&at, lost(copy(marks, 2))));
-        }
-        assert!(!reads::<LostListRecord>(
-            &at,
-            lost(copy(serde_json::json!([]), 0))
-        ));
-        // A tie at the list's version keeps no hash.
-        let mut tie = copy(serde_json::json!([]), 2);
-        tie["hash"] = serde_json::Value::Null;
-        assert!(reads::<LostListRecord>(&at, lost(tie)));
         // A delete's version is a write's: never `{0, 0}`, a version or a generation 0, or
         // past the integers.
         for deleted in [
@@ -3848,311 +3563,72 @@ mod tests {
             serde_json::json!([0, 5]),
             serde_json::json!([1, 9_007_199_254_740_992u64]),
         ] {
-            let at_version = serde_json::json!({ "deleted": deleted, "item": null, "copy": null, "marked": false });
+            let at_version = serde_json::json!({ "deleted": deleted, "item": null });
             assert!(!reads::<LostListRecord>(&at, at_version));
         }
-        // Every member is written, and a bare mark is no value of this family.
-        assert!(!reads::<LostListRecord>(
-            &at,
-            serde_json::json!({ "copy": null })
-        ));
+        // Every member is written, no other is, and a bare mark is no value of this family.
         assert!(!reads::<LostListRecord>(
             &at,
             serde_json::json!({ "deleted": [1, 4] })
         ));
-        assert!(!reads::<bool>(&at, serde_json::json!(true)));
         assert!(!reads::<LostListRecord>(
-            &key::held_list(&[1; 32]),
-            lost(serde_json::Value::Null)
+            &at,
+            serde_json::json!({ "deleted": [1, 4], "item": null, "copy": null })
         ));
+        assert!(!reads::<bool>(&at, serde_json::json!(true)));
+        assert!(!reads::<LostListRecord>(&key::held_list(&[1; 32]), lost));
     }
 
-    #[test]
-    fn test_state_lost_list_record_merge_keeps_the_newer_list_and_every_mark() {
-        let mark = |counter: u64| LostMark {
-            generation: 1,
-            counter,
-            endpoint: "btc-a".into(),
-            attempt_id: [7; 16],
-        };
-        let copy = |counter: u64, hash: u8, marks: Vec<LostMark>| LostCopy {
-            marks,
-            generation: 1,
-            counter,
-            hash: Some([hash; 32]),
-        };
-        let lost = |deleted: u64, copy: Option<LostCopy>| LostListRecord {
-            deleted: [1, deleted],
-            item: None,
-            copy,
-            marked: false,
-        };
-        let one = lost(4, Some(copy(2, 1, vec![mark(1)])));
-        let two = lost(6, Some(copy(1, 2, vec![mark(2)])));
-        // A restore keeps both: every mark, and the newer list, whichever side holds it.
-        let merged = lost(6, Some(copy(2, 1, vec![mark(1), mark(2)])));
-        assert_eq!(one.clone().merge(two.clone()), merged);
-        assert_eq!(two.clone().merge(one.clone()), merged);
-        assert_eq!(one.clone().merge(lost(2, None)), lost(4, None));
-        // Two lists at one version: neither, whichever side holds which; the same list
-        // twice stays itself.
-        let low = lost(4, Some(copy(2, 1, vec![mark(1)])));
-        let high = lost(4, Some(copy(2, 9, vec![mark(1)])));
-        let neither = LostListRecord {
-            deleted: [1, 4],
-            item: None,
-            copy: Some(LostCopy {
-                hash: None,
-                ..copy(2, 1, vec![mark(1)])
-            }),
-            marked: false,
-        };
-        assert_eq!(low.clone().merge(high.clone()), neither);
-        assert_eq!(high.clone().merge(low.clone()), neither);
-        assert_eq!(low.clone().merge(low.clone()), low);
-        // A newer list after the tie is the newer one's.
-        let newer = lost(5, Some(copy(3, 4, vec![mark(1)])));
-        assert_eq!(neither.clone().merge(newer.clone()), newer);
-        // A delete reported again by its item, or an older one, changes nothing; a newer
-        // one is merged.
-        let item = |entry: LostListRecord| LostListRecord {
-            item: Some([6; 32]),
-            ..entry
-        };
-        assert_eq!(
-            item(two.clone()).then(item(lost(6, None))),
-            item(two.clone())
-        );
-        assert_eq!(two.clone().then(lost(5, None)), two);
-        assert_eq!(two.clone().then(lost(7, None)), lost(7, None));
-    }
-
-    /// `count` marks from counter `from` on, each once and in order.
-    fn lost_marks(from: u64, count: usize) -> Vec<LostMark> {
-        (from..)
-            .take(count)
-            .map(|counter| LostMark {
-                generation: 1,
-                counter,
-                endpoint: "btc-a".into(),
-                attempt_id: [7; 16],
-            })
-            .collect()
-    }
-
-    fn lost_with(deleted: u64, marks: Vec<LostMark>) -> LostListRecord {
+    /// The entry for a delete at version `deleted` of generation 1, with item hash `item`.
+    fn lost_at(deleted: u64, item: Option<u8>) -> LostListRecord {
         LostListRecord {
             deleted: [1, deleted],
-            item: None,
-            copy: Some(LostCopy {
-                marks,
-                generation: 1,
-                counter: 1,
-                hash: Some([1; 32]),
-            }),
-            marked: false,
+            item: item.map(|byte| [byte; 32]),
         }
     }
 
     #[test]
-    fn test_state_lost_list_record_merges_past_the_mark_bound_keep_no_copy() {
-        assert_eq!(MAX_LOST_MARKS, 2_788);
-        // Three disjoint snapshots, each already the merge of two, that any two of fit
-        // the bound together and all three don't.
-        let third = MAX_LOST_MARKS / 3 + 1;
-        let half = third / 2;
-        let snapshot = |n: u64| {
-            let from = 1 + n * third as u64;
-            lost_with(n + 4, lost_marks(from, half)).merge(lost_with(
-                n + 4,
-                lost_marks(from + half as u64, third - half),
-            ))
-        };
-        let [one, two, three] = [snapshot(0), snapshot(1), snapshot(2)];
-        let two_of = one.merge(two);
+    fn test_state_lost_list_record_keeps_the_newest_delete() {
+        // A restore keeps the newer delete, whichever side holds it.
         assert_eq!(
-            two_of.copy.as_ref().map(|copy| copy.marks.len()),
-            Some(2 * third)
+            lost_at(4, Some(1)).merge(lost_at(6, Some(2))),
+            lost_at(6, Some(2))
         );
-        // The third passes it: no copy, never some of the marks, so no value is taken.
-        let all = two_of.merge(three);
         assert_eq!(
-            all,
-            LostListRecord {
-                deleted: [1, 6],
-                item: None,
-                copy: None,
-                marked: false,
-            }
+            lost_at(6, Some(2)).merge(lost_at(4, Some(1))),
+            lost_at(6, Some(2))
         );
-        // It stays so through every later merge or delete, and stays small.
-        let later = all
-            .merge(lost_with(9, lost_marks(1, 1)))
-            .then(lost_with(10, lost_marks(1, 1)));
+        // A delete reported again by its item, or an older one, changes nothing; a newer
+        // one is kept.
         assert_eq!(
-            later,
-            LostListRecord {
-                deleted: [1, 10],
-                item: None,
-                copy: None,
-                marked: false,
-            }
+            lost_at(6, Some(2)).then(lost_at(6, Some(2))),
+            lost_at(6, Some(2))
         );
-        let stored = serde_json::to_vec(&later).expect("a lost record serializes");
-        assert!(stored.len() < 64, "{} bytes", stored.len());
-    }
-
-    #[test]
-    fn test_state_lost_list_record_marked_keeps_what_either_side_knew() {
-        let written = pubky_switch_core::ops::RecordVersion {
-            generation: 1,
-            version: 9,
-        };
-        let marked = LostListRecord::marked(written, None);
         assert_eq!(
-            marked,
-            LostListRecord {
-                deleted: [1, 9],
-                item: None,
-                copy: None,
-                marked: true
-            }
+            lost_at(6, Some(2)).then(lost_at(5, None)),
+            lost_at(6, Some(2))
         );
-        // Over a delete seen with a copy, in either order and whichever is newer, the
-        // entry is marked and keeps the copy: no value is taken, and nothing known is lost.
-        for deleted in [4, 12] {
-            let held = lost_with(deleted, lost_marks(1, 2));
-            let kept = LostListRecord {
-                deleted: [1, deleted.max(9)],
-                item: None,
-                marked: true,
-                ..held.clone()
-            };
-            assert_eq!(held.clone().merge(marked.clone()), kept);
-            assert_eq!(marked.clone().merge(held), kept);
-        }
-        // Two markers keep the newer version; two copies under a marker their union.
-        let older = LostListRecord::marked(
-            pubky_switch_core::ops::RecordVersion {
-                generation: 1,
-                version: 3,
-            },
-            None,
-        );
-        assert_eq!(older.merge(marked.clone()), marked);
-        let both = lost_with(4, lost_marks(1, 1))
-            .merge(marked.clone())
-            .merge(lost_with(5, lost_marks(2, 1)));
-        assert_eq!(
-            both,
-            LostListRecord {
-                deleted: [1, 9],
-                item: None,
-                marked: true,
-                ..lost_with(9, lost_marks(1, 2))
-            }
-        );
-        // A delete seen without a copy, unmarked, still keeps none.
-        let unknown = LostListRecord {
-            deleted: [1, 4],
-            item: None,
-            copy: None,
-            marked: false,
-        };
-        assert_eq!(lost_with(4, lost_marks(1, 2)).merge(unknown).copy, None);
+        assert_eq!(lost_at(6, Some(2)).then(lost_at(7, None)), lost_at(7, None));
         let at = key::list_record_lost(&[1; 32]);
-        let value = serde_json::to_value(&marked).expect("a lost record serializes");
+        let value = serde_json::to_value(lost_at(7, None)).expect("a lost record serializes");
         assert!(reads::<LostListRecord>(&at, value));
     }
 
     #[test]
     fn test_state_lost_list_record_tells_deletes_at_one_version_apart_by_item() {
-        let at = |item: Option<u8>, marks: Vec<LostMark>| LostListRecord {
-            item: item.map(|byte| [byte; 32]),
-            ..lost_with(4, marks)
-        };
-        let one = at(Some(1), lost_marks(1, 1));
-        // The same delete, by its item hash, reported again changes nothing.
-        assert_eq!(one.clone().then(at(Some(1), lost_marks(2, 1))), one);
+        let one = lost_at(4, Some(1));
         // Another delete at the same version, as a recovery can upload, or one whose item
-        // isn't known, is merged: a later value must hold the marks of both, and the entry
-        // no longer names one delete (Paykit spec 6).
-        for other in [at(Some(2), lost_marks(2, 1)), at(None, lost_marks(2, 1))] {
-            let merged = one.clone().then(other);
-            assert_eq!(merged.item, None);
-            assert_eq!(merged.copy, lost_with(4, lost_marks(1, 2)).copy);
+        // isn't known, is merged: the entry no longer names one delete (Paykit spec 6).
+        for other in [lost_at(4, Some(2)), lost_at(4, None)] {
+            assert_eq!(one.clone().then(other), lost_at(4, None));
         }
-        // Only a delete known by its item is the one a later delete may be built on.
+        // Only a delete known by its item is the one a later report may name again.
         let version = pubky_switch_core::ops::RecordVersion {
             generation: 1,
             version: 4,
         };
         assert!(one.deleted_at(version));
-        assert!(!at(None, lost_marks(1, 1)).deleted_at(version));
-        let moved = one.moved(
-            pubky_switch_core::ops::RecordVersion {
-                generation: 1,
-                version: 6,
-            },
-            Some([3; 32]),
-        );
-        assert_eq!((moved.deleted, moved.item), ([1, 6], Some([3; 32])));
-    }
-
-    #[test]
-    fn test_state_lost_list_record_keeps_a_copy_up_to_the_mark_bound() {
-        let at = key::list_record_lost(&[1; 32]);
-        // Two halves meeting at the bound keep every mark.
-        let half = MAX_LOST_MARKS / 2;
-        let full = lost_with(4, lost_marks(1, half)).merge(lost_with(
-            4,
-            lost_marks(1 + half as u64, MAX_LOST_MARKS - half),
-        ));
-        assert_eq!(full, lost_with(4, lost_marks(1, MAX_LOST_MARKS)));
-        let value = serde_json::to_value(&full).expect("a lost record serializes");
-        assert!(reads::<LostListRecord>(&at, value));
-        // One mark past it, merged or stored, is no copy, or refused.
-        let past = full
-            .clone()
-            .merge(lost_with(4, lost_marks(1 + MAX_LOST_MARKS as u64, 1)));
-        assert_eq!(past.copy, None);
-        let mut value = serde_json::to_value(&full).expect("a lost record serializes");
-        value["copy"]["marks"]
-            .as_array_mut()
-            .expect("marks are an array")
-            .push(serde_json::json!({
-                "generation": 1, "counter": 1 + MAX_LOST_MARKS as u64, "endpoint": "btc-a",
-                "attempt_id": vec![7u8; 16],
-            }));
-        assert!(!reads::<LostListRecord>(&at, value));
-    }
-
-    #[test]
-    fn test_state_lost_copy_takes_only_a_newer_list_or_the_same_one() {
-        let mark = LostMark {
-            generation: 1,
-            counter: 1,
-            endpoint: "btc-a".into(),
-            attempt_id: [7; 16],
-        };
-        let copy = |counter: u64, hash: Option<u8>, marks: Vec<LostMark>| LostCopy {
-            marks,
-            generation: 1,
-            counter,
-            hash: hash.map(|h| [h; 32]),
-        };
-        let seen = copy(2, Some(1), vec![mark.clone()]);
-        // The same list, or a newer one, holding every mark.
-        assert!(seen.takes(&copy(2, Some(1), vec![mark.clone()])));
-        assert!(seen.takes(&copy(3, Some(4), vec![mark.clone()])));
-        // Not an older list, another at the seen version, or one dropping a mark.
-        assert!(!seen.takes(&copy(1, Some(1), vec![mark.clone()])));
-        assert!(!seen.takes(&copy(2, Some(2), vec![mark.clone()])));
-        assert!(!seen.takes(&copy(3, Some(4), Vec::new())));
-        // After a tie, only a newer version, whatever its hash.
-        let tie = copy(2, None, vec![mark.clone()]);
-        assert!(!tie.takes(&copy(2, Some(1), vec![mark.clone()])));
-        assert!(tie.takes(&copy(3, Some(1), vec![mark])));
+        assert!(!lost_at(4, None).deleted_at(version));
     }
 
     #[test]

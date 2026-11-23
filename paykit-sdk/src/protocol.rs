@@ -787,7 +787,7 @@ pub(crate) fn restore_paykit_layer(
         if list_loss_marker(value).is_none() {
             continue;
         }
-        let marked = receive::marked_entry(value, &own, &record.key, record.version, None, |t| {
+        let marked = receive::marked_entry(value, &record.key, record.version, None, |t| {
             binder.record_key(t).ok()
         });
         if let Some(lost) = marked {
@@ -2124,51 +2124,19 @@ impl Protocol for PaykitProtocol {
         // so none comes here.
         if deletion.collection == paykit_lib::collections::Collection::PaymentLists.name() {
             // The delete is kept as seen in the commit that observes it, from the feed or a
-            // read, with the marks of its exact predecessor if this app read it: a later
-            // absence, such as the service forgetting it or a restore that empties the copy
-            // of records, never places a list there, and a later value is taken only under
-            // the family's rules against that copy (Paykit spec 6, Paykit wire 4.13 and 5).
-            // A copy older than what the delete took, such as one from before a write this
-            // app couldn't read, may lack marks the delete took: it is no copy.
+            // read: no later absence or value places a list there (Paykit spec 6; wire 5,
+            // "Incomplete protected-record contract").
             //
             // The limit: the client reports only another app's delete here, so a delete by
             // another installation of this App ID, which only a faulty own app writes, is
             // seen as a delete only by a list arriving over it ([`crate::receive`]
-            // `hold_list`), with no copy, until the client reports it.
-            let exact = deletion
-                .exact_value
-                .filter(|_| deletion.exact_version_authenticated);
-            // A delete built on the delete this app holds, taken on its own evidence, has no
-            // write between them, so it took nothing the first one hadn't: the entry moves
-            // to it and keeps its copy. The client gives a deleted predecessor no value. A
-            // held delete a view shows divergent, as after a provider loss's conflicting
-            // upload, isn't taken as that evidence.
-            let base = deletion.base.expected_version;
-            let over_delete = deletion.base.held
-                && cx
-                    .record_at(deletion.key)
-                    .map_err(store_failure)?
-                    .is_some_and(|held| {
-                        held.content == pubky_switch_client::app::RecordContent::Deleted
-                            && held.version == base
-                            && held.authenticated
-                            && !held.divergent
-                            && !held.doubtful
-                            && !held.flagged
-                            && !held.not_taken
-                            && !held.different_write_at_held_version
-                    });
+            // `hold_list`), until the client reports it.
             return Ok(Some(PutBack::Observe {
                 observed: crate::receive::list_record_deleted(
                     cx,
                     deletion.key,
                     deletion.version,
                     Some(deletion.item_hash),
-                    crate::receive::DeleteSource {
-                        exact,
-                        seen: deletion.seen,
-                        over_delete: over_delete.then_some(base),
-                    },
                 )?,
             }));
         }
@@ -3777,62 +3745,6 @@ mod receive_tests {
                 &without_acceptance(&value)
             ));
         }
-    }
-
-    #[test]
-    fn test_protocol_list_copy_over_a_refused_exact_predecessor_keeps_the_marks_seen() {
-        // Should a delete's exact predecessor be a write dropping a mark the app saw, as a
-        // client could offer, the copy keeps the mark: the pinned client offers none then.
-        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
-        let bob = Party::new(
-            "bob",
-            "shop",
-            &["paykit_request", "paykit_settlements", "paykit_contacts"],
-        );
-        let version = paykit_lib::ListVersion::new(1, 7).unwrap();
-        let list = bob.message(
-            &alice,
-            "paykit.private_payment_list",
-            vec![],
-            object(json!({
-                "version": { "generation": 1, "counter": 7 },
-                "expires_at": pubky_switch_core::time::rfc3339(NOW + 3_600_000),
-                "payment_endpoints": {
-                    "btc-bitcoin-p2wpkh": { "payload": "bc1q", "single_use": true }
-                }
-            })),
-        );
-        let record = |used: Vec<paykit_lib::records::UsedEndpoint>| PaymentListRecord {
-            payee: bob.id(),
-            app_id: list.message().from.app_id,
-            list: list.clone(),
-            used,
-            msg_ids: Vec::new(),
-            unknown: Default::default(),
-        };
-        let seen = record(vec![paykit_lib::records::UsedEndpoint {
-            version,
-            endpoint: paykit_lib::PaymentEndpointIdentifier::parse("btc-bitcoin-p2wpkh").unwrap(),
-            attempt_id: paykit_lib::AttemptId::from_bytes([3; 16]),
-            origin: Default::default(),
-        }]);
-        let refused = record(Vec::new());
-        let deleted = pubky_switch_core::ops::RecordVersion::new(1, 9);
-        let lost =
-            crate::state::LostListRecord::over_exact(deleted, None, Some(&refused), Some(&seen));
-        assert!(!lost.admits(&refused));
-        assert!(lost.admits(&seen));
-        // With no exact predecessor, no copy: nothing is taken.
-        let unknown = crate::state::LostListRecord::over_exact(deleted, None, None, Some(&seen));
-        assert!(!unknown.admits(&seen));
-        // A value seen that doesn't bind, such as a put-back carrying `lost_to_delete`,
-        // leaves no copy: the exact predecessor alone could lack the marks it stands for.
-        let bind = |value: &[u8]| (value == b"exact").then(|| refused.clone());
-        let over = |seen: Option<&[u8]>| {
-            crate::receive::lost_over(deleted, None, Some(b"exact"), seen, bind)
-        };
-        assert!(over(None).admits(&refused));
-        assert!(!over(Some(b"put-back")).admits(&refused));
     }
 
     #[test]

@@ -625,20 +625,34 @@ async fn test_unrequested_list_over_a_record_that_doesnt_read_keeps_single_use_m
     assert_eq!(w.rail.all_executions().len(), 1);
 }
 
-/// A store whose reads of Paykit's kept list deletes (`lgone/`) fail once armed.
+/// A store whose reads of Paykit's kept list deletes (`lgone/`) fail once `lost_reads` is
+/// armed, and whose commits keeping a batch the client signed fail once `batch_keeps` is.
 #[derive(Default)]
-struct FailLostReads {
+struct FailingListStore {
     inner: pubky_switch_client::store::MemoryStore,
-    armed: std::sync::atomic::AtomicBool,
+    lost_reads: std::sync::atomic::AtomicBool,
+    batch_keeps: std::sync::atomic::AtomicBool,
 }
 
-impl pubky_switch_client::store::StateStore for FailLostReads {
+impl FailingListStore {
+    /// Whether `batch` is to fail: armed, it keeps a batch, as its next creation number shows.
+    fn fails(&self, batch: &pubky_switch_client::store::WriteBatch) -> bool {
+        use pubky_switch_client::store::Write;
+        self.batch_keeps.load(std::sync::atomic::Ordering::SeqCst)
+            && batch.writes().iter().any(|write| match write {
+                Write::Put { key, .. } | Write::Delete { key, .. } => key.ends_with(b"keptn"),
+                Write::DeletePrefix { .. } => false,
+            })
+    }
+}
+
+impl pubky_switch_client::store::StateStore for FailingListStore {
     fn get(
         &self,
         ns: &str,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
-        if self.armed.load(std::sync::atomic::Ordering::SeqCst)
+        if self.lost_reads.load(std::sync::atomic::Ordering::SeqCst)
             && key.windows(6).any(|part| part == b"lgone/")
         {
             return Err(pubky_switch_client::error::StoreError::Unavailable);
@@ -661,6 +675,9 @@ impl pubky_switch_client::store::StateStore for FailLostReads {
         &self,
         batch: pubky_switch_client::store::WriteBatch,
     ) -> Result<(), pubky_switch_client::error::StoreError> {
+        if self.fails(&batch) {
+            return Err(pubky_switch_client::error::StoreError::Unavailable);
+        }
         self.inner.commit(batch)
     }
 
@@ -680,6 +697,9 @@ impl pubky_switch_client::store::StateStore for FailLostReads {
         batch: pubky_switch_client::store::WriteBatch,
     ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
     {
+        if self.fails(&batch) {
+            return Err(pubky_switch_client::error::StoreError::Unavailable);
+        }
         self.inner.commit_if(ns, owner, batch)
     }
 }
@@ -687,7 +707,7 @@ impl pubky_switch_client::store::StateStore for FailLostReads {
 #[tokio::test]
 async fn test_unrequested_held_list_placement_reports_a_store_failure_keeping_its_hold() {
     let w = World::new();
-    let failing = std::sync::Arc::new(FailLostReads::default());
+    let failing = std::sync::Arc::new(FailingListStore::default());
     let mut wallet = w
         .wallet_on(
             "wallet",
@@ -706,14 +726,60 @@ async fn test_unrequested_held_list_placement_reports_a_store_failure_keeping_it
     // The store fails reading the kept delete while the held list is placed: the receive
     // reports it, rather than end as if the hold were checked (Paykit spec 6).
     failing
-        .armed
+        .lost_reads
         .store(true, std::sync::atomic::Ordering::SeqCst);
     assert!(wallet.receive(None).await.is_err());
     failing
-        .armed
+        .lost_reads
         .store(false, std::sync::atomic::Ordering::SeqCst);
     wallet.receive(None).await.unwrap();
     assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_unrequested_held_list_placement_reports_a_failed_batch_keep_keeping_its_hold() {
+    let w = World::new();
+    let failing = std::sync::Arc::new(FailingListStore::default());
+    let mut wallet = w
+        .wallet_on(
+            "wallet",
+            std::sync::Arc::clone(&failing)
+                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
+    wallet.receive(None).await.unwrap();
+    // A newer list whose record write is refused is held, the record still reading.
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 2))
+        .await;
+    crate::common::refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
+    // The store fails keeping the placement's batch: the receive reports it, rather than
+    // end as if the write were sent or refused by the switch (Paykit spec 6).
+    failing
+        .batch_keeps
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let error = wallet.receive(None).await.unwrap_err();
+    assert!(
+        matches!(
+            error,
+            paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::Store(_))
+        ),
+        "{error:?}"
+    );
+    failing
+        .batch_keeps
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let held = wallet.held_lists().await.unwrap();
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0].version, list_version(1, 2));
+    // Healed, the next receives place it.
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.held_lists().await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -806,7 +872,9 @@ async fn test_unrequested_list_after_a_delete_stays_held_and_its_single_use_endp
     assert_eq!(w.rail.all_executions().len(), 1);
     assert_eq!(w.record_writes(&w.alice, &key), writes);
 
-    // A write over the delete that drops the mark the wallet saw is ignored: still held.
+    // A write over the delete, one dropping the mark the wallet saw or one keeping it,
+    // places nothing: a later authorization over a delete is withheld (Paykit spec 6; wire
+    // 5, "Incomplete protected-record contract").
     let put = |value: &serde_json::Value| serde_json::to_vec(value).unwrap();
     let mut unmarked = marked.clone();
     unmarked["used"] = serde_json::json!([]);
@@ -823,19 +891,21 @@ async fn test_unrequested_list_after_a_delete_stays_held_and_its_single_use_endp
             .unwrap();
         wallet.receive(None).await.unwrap();
         wallet.receive(None).await.unwrap();
-        if value == &unmarked {
-            assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
-        }
+        let held = wallet.held_lists().await.unwrap();
+        assert_eq!(held.len(), 1, "{held:?}");
+        assert_eq!(held[0].version, list_version(1, 2));
+        waiting(
+            wallet
+                .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+                .await
+                .outcome,
+        );
     }
-    // One that keeps it places the held list with the mark.
-    assert!(wallet.held_lists().await.unwrap().is_empty());
-    let (_, placed) = list_record(&wallet, &w).await;
-    assert_eq!(placed["used"].as_array().unwrap().len(), 1, "{placed}");
     assert_eq!(w.rail.all_executions().len(), 1);
 
-    // The delete stays known after the placement: restored from a backup taken now, after
-    // the service forgets the record, the list sent again over the absent key is held, never
-    // written afresh without the mark.
+    // The delete stays known: restored from a backup taken now, after the service forgets
+    // the record, the list sent again over the absent key is held, never written afresh
+    // without the mark.
     let backup = wallet.backup().await.unwrap();
     drop(wallet);
     w.alice.switch().drop_record(&key).unwrap();
@@ -1856,87 +1926,6 @@ async fn test_unrequested_hold_over_a_delete_survives_an_in_place_restore_from_b
 }
 
 #[tokio::test]
-async fn test_unrequested_placement_settling_late_keeps_a_newer_hold() {
-    use pubky_switch_client::app::OpBatch;
-    use pubky_switch_client::testing::Fault;
-
-    let w = World::new();
-    let mut wallet = w.wallet("wallet").await;
-    let mut phone = w.wallet("phone").await;
-    let mut shop = w.shop().await;
-    let (key, marked) =
-        pay_single_use_then_delete_elsewhere(&w, &mut wallet, &mut phone, &mut shop).await;
-    let target = shop_list_target(&w, &shop);
-    wallet.receive(None).await.unwrap();
-    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 2))
-        .await;
-    wallet.receive(None).await.unwrap();
-    assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
-    // The phone puts the record back with the mark; the wallet places its held list there,
-    // and the answer to that write is lost: its batch is kept, to settle later.
-    let op = phone
-        .app_mut()
-        .record_op(
-            &target,
-            Some(&serde_json::to_vec(&marked).unwrap()),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
-    phone
-        .app_mut()
-        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
-        .await
-        .unwrap();
-    w.alice.switch().fail_next(Fault::LoseAnswer {
-        path: "/ops".into(),
-    });
-    let _ = wallet.receive(None).await;
-    // Before it settles, the record is deleted again and a newer list is held over it.
-    phone.app_mut().read_record(&target).await.unwrap();
-    let op = phone
-        .app_mut()
-        .record_op(&target, None, Vec::new())
-        .await
-        .unwrap();
-    phone
-        .app_mut()
-        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
-        .await
-        .unwrap();
-    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 3))
-        .await;
-    w.alice.switch().fail_next(Fault::Unreachable {
-        path: "/ops".into(),
-        after: 0,
-    });
-    let _ = wallet.receive(None).await;
-    let held = wallet.held_lists().await.unwrap();
-    assert_eq!(held.len(), 1, "{held:?}");
-    assert_eq!(held[0].version, list_version(1, 3));
-    // The kept batch settles: the newer hold stays, and the paid endpoint stays unpaid
-    // after the service forgets the delete.
-    wallet.receive(None).await.unwrap();
-    wallet.receive(None).await.unwrap();
-    let held = wallet.held_lists().await.unwrap();
-    assert_eq!(held.len(), 1, "{held:?}");
-    assert_eq!(held[0].version, list_version(1, 3));
-    w.alice.switch().drop_record(&key).unwrap();
-    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 3))
-        .await;
-    wallet.receive(None).await.unwrap();
-    let again = wallet
-        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
-        .await
-        .outcome;
-    assert!(
-        !matches!(again, Ok(PayOutcome::Paid { .. })),
-        "the paid single-use endpoint was paid again: {again:?}"
-    );
-    assert_eq!(w.rail.all_executions().len(), 1);
-}
-
-#[tokio::test]
 async fn test_unrequested_list_held_for_a_refused_write_stays_held_over_a_later_delete() {
     use pubky_switch_client::app::OpBatch;
 
@@ -2335,7 +2324,7 @@ async fn put_list_record(
 }
 
 #[tokio::test]
-async fn test_unrequested_delete_seen_again_keeps_its_marks_and_a_put_back_places_the_list() {
+async fn test_unrequested_delete_seen_again_keeps_the_list_held_over_a_put_back() {
     for restore in [false, true] {
         let w = World::new();
         let mut wallet = w.wallet("wallet").await;
@@ -2344,7 +2333,7 @@ async fn test_unrequested_delete_seen_again_keeps_its_marks_and_a_put_back_place
         let (_, marked) =
             pay_single_use_then_delete_elsewhere(&w, &mut wallet, &mut phone, &mut shop).await;
         let target = shop_list_target(&w, &shop);
-        // The wallet sees the delete with its copy, and holds a newer list over it.
+        // The wallet sees the delete, and holds a newer list over it.
         wallet.receive(None).await.unwrap();
         w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 2))
             .await;
@@ -2362,24 +2351,26 @@ async fn test_unrequested_delete_seen_again_keeps_its_marks_and_a_put_back_place
             wallet.app_mut().read_record(&target).await.unwrap();
             wallet
         };
-        // Another own app puts the record back holding every mark: the list is placed
-        // there, and its new single-use endpoint is paid.
+        // Another own app puts the record back holding every mark: the list stays held,
+        // and nothing is paid from it (Paykit spec 6; wire 5, "Incomplete protected-record
+        // contract").
         put_list_record(&mut phone, &target, Some(&marked)).await;
         wallet.receive(None).await.unwrap();
         wallet.receive(None).await.unwrap();
-        assert!(
-            wallet.held_lists().await.unwrap().is_empty(),
+        assert_eq!(
+            wallet.held_lists().await.unwrap().len(),
+            1,
             "restore {restore}"
         );
-        let paid = wallet
+        let again = wallet
             .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
             .await
             .outcome;
         assert!(
-            matches!(paid, Ok(PayOutcome::Paid { .. })),
-            "restore {restore}: {paid:?}"
+            !matches!(again, Ok(PayOutcome::Paid { .. })),
+            "restore {restore}: {again:?}"
         );
-        assert_eq!(w.rail.all_executions().len(), 2, "restore {restore}");
+        assert_eq!(w.rail.all_executions().len(), 1, "restore {restore}");
     }
 }
 
@@ -2889,69 +2880,6 @@ async fn test_unrequested_loss_marker_kept_only_for_a_list_bound_to_its_key() {
 }
 
 #[tokio::test]
-async fn test_unrequested_loss_marker_over_a_kept_copy_keeps_both_through_restores() {
-    let w = World::new();
-    let storage = crate::common::store();
-    let mut wallet = w.wallet_on("wallet", storage.clone()).await;
-    let mut phone = w.wallet("phone").await;
-    let mut shop = w.shop().await;
-    let (_, marked) =
-        pay_single_use_then_delete_elsewhere(&w, &mut wallet, &mut phone, &mut shop).await;
-    let target = shop_list_target(&w, &shop);
-    // The wallet sees the delete with its copy: one mark, and the list.
-    wallet.receive(None).await.unwrap();
-    let copy_only = wallet.backup().await.unwrap();
-    let kept = lost_entries(&copy_only);
-    assert_eq!(kept.len(), 1, "{kept:?}");
-    assert_eq!(kept[0]["marked"], false);
-    let copy = kept[0]["copy"].clone();
-    assert_eq!(copy["marks"].as_array().unwrap().len(), 1, "{copy}");
-    // A put-back that keeps the mark, and shows a second, names the delete: the entry is
-    // marked and keeps both marks.
-    let mut put_back = marked.clone();
-    let mut second = put_back["used"][0].clone();
-    second["attempt_id"] = serde_json::json!(pubky_switch_core::enc::b64(&[9u8; 16]));
-    put_back["used"].as_array_mut().unwrap().push(second);
-    put_back["lost_to_delete"] = serde_json::json!(pubky_switch_core::enc::b64(&[5u8; 32]));
-    put_list_record(&mut phone, &target, Some(&put_back)).await;
-    wallet.receive(None).await.unwrap();
-    let both = wallet.backup().await.unwrap();
-    let held = lost_entries(&both);
-    assert_eq!(held.len(), 1, "{held:?}");
-    assert_eq!(held[0]["marked"], true);
-    assert_eq!(
-        held[0]["copy"]["marks"].as_array().unwrap().len(),
-        2,
-        "{held:?}"
-    );
-    let copy = held[0]["copy"].clone();
-    // Restored in place from the backup that held only the copy, and onto a fresh store from
-    // the one that held both: each keeps the mark and the copy (Paykit spec 6).
-    drop(wallet);
-    let mut in_place = restored_onto(&w, storage, &copy_only).await;
-    let after = lost_entries(&in_place.backup().await.unwrap());
-    assert_eq!(after.len(), 1, "{after:?}");
-    assert_eq!(after[0]["marked"], true);
-    assert_eq!(after[0]["copy"], copy);
-    drop(in_place);
-    // A later write drops the marker but keeps every mark of the copy. Restored onto a fresh
-    // store, the wallet reads only that write, and still doesn't take it: once marked, no
-    // value is (Paykit spec 6; wire 5). A newer list then stays held over it.
-    let mut unmarked = put_back.clone();
-    unmarked.as_object_mut().unwrap().remove("lost_to_delete");
-    phone.app_mut().read_record(&target).await.unwrap();
-    put_list_record(&mut phone, &target, Some(&unmarked)).await;
-    let mut fresh = restored_onto(&w, crate::common::store(), &both).await;
-    assert_eq!(lost_entries(&fresh.backup().await.unwrap()), held);
-    w.list_to_alice(&mut shop, &[fresh.app_id()], list_version(1, 2))
-        .await;
-    for _ in 0..2 {
-        fresh.receive(None).await.unwrap();
-    }
-    assert_eq!(fresh.held_lists().await.unwrap().len(), 1);
-}
-
-#[tokio::test]
 async fn test_unrequested_loss_marker_kept_when_the_rest_of_its_value_does_not_read() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -2961,7 +2889,7 @@ async fn test_unrequested_loss_marker_kept_when_the_rest_of_its_value_does_not_r
         pay_single_use_then_delete_elsewhere(&w, &mut wallet, &mut phone, &mut shop).await;
     let target = shop_list_target(&w, &shop);
     // A put-back naming the delete whose `used` doesn't read: its payee and app still bind
-    // the key, so the marker is kept, with no copy (Paykit spec 6; wire 5).
+    // the key, so the marker is kept (Paykit spec 6; wire 5).
     let mut put_back = marked_put_back(&marked, 5);
     put_back["used"] = serde_json::json!([{ "endpoint": 7 }]);
     put_list_record(&mut phone, &target, Some(&put_back)).await;
@@ -2969,8 +2897,6 @@ async fn test_unrequested_loss_marker_kept_when_the_rest_of_its_value_does_not_r
     tablet.receive(None).await.unwrap();
     let kept = lost_entries(&tablet.backup().await.unwrap());
     assert_eq!(kept.len(), 1, "{kept:?}");
-    assert_eq!(kept[0]["marked"], true);
-    assert_eq!(kept[0]["copy"], serde_json::Value::Null);
 }
 
 #[tokio::test]
@@ -2991,7 +2917,6 @@ async fn test_unrequested_two_loss_markers_keep_the_newer_write() {
     let held = tablet.app().shared_record(&key).await.unwrap().unwrap();
     let kept = lost_entries(&tablet.backup().await.unwrap());
     assert_eq!(kept.len(), 1, "{kept:?}");
-    assert_eq!(kept[0]["marked"], true);
     assert_eq!(
         kept[0]["deleted"],
         serde_json::json!([held.version.generation, held.version.version])
@@ -3018,7 +2943,6 @@ async fn test_unrequested_loss_marker_written_by_another_installation_of_the_app
     tablet.receive(None).await.unwrap();
     let kept = lost_entries(&tablet.backup().await.unwrap());
     assert_eq!(kept.len(), 1, "{kept:?}");
-    assert_eq!(kept[0]["marked"], true);
 }
 
 #[tokio::test]
@@ -3303,36 +3227,6 @@ async fn test_unrequested_later_write_changing_lost_to_delete_taken() {
 }
 
 #[tokio::test]
-async fn test_unrequested_delete_over_a_delete_keeps_the_copy_and_a_put_back_places_the_list() {
-    let w = World::new();
-    let mut wallet = w.wallet("wallet").await;
-    let mut phone = w.wallet("phone").await;
-    let mut shop = w.shop().await;
-    let (_, marked) =
-        pay_single_use_then_delete_elsewhere(&w, &mut wallet, &mut phone, &mut shop).await;
-    let target = shop_list_target(&w, &shop);
-    wallet.receive(None).await.unwrap();
-    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 2))
-        .await;
-    wallet.receive(None).await.unwrap();
-    // The phone deletes the record again, over its first delete, with no write between.
-    put_list_record(&mut phone, &target, None).await;
-    wallet.receive(None).await.unwrap();
-    // An honest put-back holding every mark places the held list, and its new single-use
-    // endpoint is paid.
-    put_list_record(&mut phone, &target, Some(&marked)).await;
-    wallet.receive(None).await.unwrap();
-    wallet.receive(None).await.unwrap();
-    assert!(wallet.held_lists().await.unwrap().is_empty());
-    let paid = wallet
-        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
-        .await
-        .outcome;
-    assert!(matches!(paid, Ok(PayOutcome::Paid { .. })), "{paid:?}");
-    assert_eq!(w.rail.all_executions().len(), 2);
-}
-
-#[tokio::test]
 async fn test_unrequested_loss_marker_of_a_recovery_upload_kept_through_an_in_place_restore() {
     use pubky_switch_client::client::answers::{RecoveryUpload, UploadedOp};
     use pubky_switch_client::client::{Credentials, SwitchClient};
@@ -3482,4 +3376,56 @@ async fn test_unrequested_loss_marker_of_a_recovery_upload_kept_through_an_in_pl
         "the paid single-use endpoint was paid again: {again:?}"
     );
     assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_unrequested_list_keeping_every_known_mark_after_a_delete_stays_held_and_unpaid() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let (key, marked) =
+        pay_single_use_then_delete_elsewhere(&w, &mut wallet, &mut phone, &mut shop).await;
+    let target = shop_list_target(&w, &shop);
+    wallet.receive(None).await.unwrap();
+    // Another app puts back the very copy the wallet read before the delete, the list with
+    // every mark it knew, and the shop sends a newer list over it. Neither is taken: a later
+    // authorization over a delete needs a lineage proof this revision lacks (Paykit spec 6;
+    // wire 5, "Incomplete protected-record contract").
+    put_list_record(&mut phone, &target, Some(&marked)).await;
+    wallet.receive(None).await.unwrap();
+    let writes = w.record_writes(&w.alice, &key);
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 2))
+        .await;
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    let again = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome;
+    assert!(
+        !matches!(again, Ok(PayOutcome::Paid { .. })),
+        "a list over the delete was paid from: {again:?}"
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
+    assert_eq!(w.record_writes(&w.alice, &key), writes);
+    let held = wallet.held_lists().await.unwrap();
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0].version, list_version(1, 2));
+    // The payee is still paid through a request's own destination.
+    let request = crate::common::request_from(
+        &mut shop,
+        w.alice_id(),
+        crate::common::draft("0.00025", w.clock.now_ms()),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(w.rail.all_executions().len(), 2);
 }

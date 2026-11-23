@@ -522,8 +522,7 @@ impl Paykit {
                 let mut found: std::collections::BTreeMap<_, (Destination, Carrier)> =
                     std::collections::BTreeMap::new();
                 for list in self.lists_of(&obligation.payee).await? {
-                    // A value over a delete seen that the family's rules don't take names
-                    // nothing (Paykit spec 6).
+                    // A value over a delete seen names nothing (Paykit spec 6; wire 5).
                     if required.is_some_and(|app| app != list.app_id)
                         || !self.list_admitted(&list).await?
                     {
