@@ -490,23 +490,10 @@ pub(crate) fn may_send(view: &DeliveryView<'_>) -> std::result::Result<bool, Sto
         if !crate::receive::reads_lists(view.cert().scopes()) {
             return Ok(true);
         }
-        if crate::state::view_get::<u64>(local, key::LISTS_READ)?.is_none() {
-            return Ok(false);
-        }
-        if let Some(mark) = crate::state::view_get::<crate::state::OwnBlockMark>(
-            local,
-            &key::own_block(&message.to),
-        )? {
-            let kept = match mark.unblock_batch() {
-                Some(id) => matches!(view.kept_batch(id)?, Some(KeptBatchStatus::Kept { .. })),
-                None => false,
-            };
-            return Ok(mark.counts(kept) == Some(false));
-        }
-        Ok(
-            !crate::state::view_get::<Vec<[u8; 32]>>(local, key::DENIED)?
-                .is_some_and(|ids| ids.contains(&message.to)),
-        )
+        // A nonempty list goes only on the deny decision every held send is judged by: a
+        // copy past its refresh interval or not known doesn't authorize it (Paykit spec 8.1,
+        // "Messages already queued").
+        Ok(crate::send_holds::deny_decision(view)? == crate::send_holds::DenyDecision::Permits)
     }
     allowed(view).map_err(crate::protocol::view_failure)
 }
@@ -1010,7 +997,7 @@ impl Paykit {
         if let Some(issue) = prior.as_mut() {
             if issue.delivery == FirstDelivery::Open
                 && recipient.answers.first(issue).is_none()
-                && self.take_prior_list_delivery(&issue.id).await?
+                && self.take_delivery_duty(&issue.id).await?
             {
                 if let Some(taken) = self.local_get::<ListReservation>(&at).await? {
                     issue.delivery = taken.delivery;

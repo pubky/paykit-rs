@@ -1202,7 +1202,9 @@ impl Paykit {
                         }
                         continue;
                     }
-                    if self.sends_held(&counterparty).await? {
+                    // Released only on the deny decision its delivery takes, so it is
+                    // never queued to wait as one not known (Paykit spec 8.1).
+                    if self.delivery_held(&counterparty).await? {
                         still_held.insert(msg_id.clone());
                         continue;
                     }

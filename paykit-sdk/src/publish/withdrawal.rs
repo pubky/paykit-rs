@@ -206,8 +206,7 @@ impl Paykit {
         if issue.choice != recipient.choice {
             return Ok(None);
         }
-        if issue.delivery == FirstDelivery::Open && self.take_prior_list_delivery(&issue.id).await?
-        {
+        if issue.delivery == FirstDelivery::Open && self.take_delivery_duty(&issue.id).await? {
             let Some(taken) = self.local_get::<ListReservation>(&at).await? else {
                 return Ok(None);
             };

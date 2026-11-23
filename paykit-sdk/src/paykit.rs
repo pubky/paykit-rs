@@ -1244,6 +1244,8 @@ impl Paykit {
             && Box::pin(self.scope_keys_awaited()).await?.is_none()
         {
             Box::pin(self.queue_restore_asks()).await?;
+            // A stop held in the outbox past its 30 days is never sent (Paykit spec 8.1).
+            Box::pin(self.give_up_expired_stops()).await?;
             Box::pin(self.queue_own_again()).await?;
             Box::pin(self.note_imported_receipt_batches()).await?;
         }

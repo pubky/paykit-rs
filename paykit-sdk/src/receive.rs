@@ -3573,6 +3573,31 @@ impl Paykit {
         Ok(!self.deny_copy_known().await? || self.denied_as_last_read(pubky).await?)
     }
 
+    /// Whether a message to `pubky` that the counterparty hold governs would wait at its
+    /// delivery now, on the deny decision the delivery takes
+    /// ([`crate::send_holds::deny_decision`]): while the copy holds `pubky`, and while it
+    /// isn't known or is [`LISTS_REFRESH_MS`] old or more (Paykit spec 8.1, "Messages
+    /// already queued"). An answer released from its record on this judgement is never
+    /// queued only to wait as one not known.
+    pub(crate) async fn delivery_held(&self, pubky: &[u8; 32]) -> crate::error::Result<bool> {
+        if !reads_lists(self.app.cert().scopes()) {
+            return Ok(false);
+        }
+        let fresh = self
+            .local_get::<u64>(key::LISTS_READ)
+            .await?
+            .is_some_and(|read| lists_read_is_fresh(read, self.now()));
+        if !fresh
+            || self
+                .local_get::<Vec<[u8; 32]>>(key::DENIED)
+                .await?
+                .is_none()
+        {
+            return Ok(true);
+        }
+        self.denied_as_last_read(pubky).await
+    }
+
     /// Refuse a send the user asks for to `pubky` while sends to it are held
     /// ([`Paykit::sends_held`]), with [`crate::Refusal::NotNow`]: a due or unknown deny
     /// list is read first ([`Paykit::refresh_lists_when_due`]), and a read that fails leaves

@@ -2527,10 +2527,11 @@ impl Paykit {
         } else if answer == Answer::Accept {
             (self.denied_for_user(&request.payee).await?, false)
         } else {
-            // Judged on a fresh copy: one past its refresh interval is read first, so a
-            // block another own app wrote holds the answer in its record, not the outbox.
+            // Judged on a fresh copy, as its delivery is: one past its refresh interval is
+            // read first, so a block another own app wrote holds the answer in its record,
+            // not the outbox, and so does a copy the read leaves stale or not known.
             self.refresh_lists_when_due().await?;
-            (false, self.sends_held(&request.payee).await?)
+            (false, self.delivery_held(&request.payee).await?)
         };
         let (target, mut record) = self.payer_request(request).await?;
         let (_, body) = request_of(&record).ok_or(Refusal::NotFound)?;

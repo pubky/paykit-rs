@@ -33,6 +33,7 @@
 //! | `off/<attempt_id>` | the original batch ID for an unresolved offline recording, committed with its signed operations before first submission (Paykit spec 8.4) | yes |
 //! | `j/<attempt_id>` | the payment journal: one payment, from before its `attempt` | yes |
 //! | `side/<msg_id>` | the side a cancellation is sent from, kept with the batch that queues it | |
+//! | `gs/<msg_id>` | a rejection or payer's cancellation past its 30 days whose outbox copy the receive step ends: its payee, request and signed hash, kept until the client's report of the end is taken with the host's notice (`send_holds.rs`); never restored | |
 //! | `ar/<payee>/<app_id>` | a payee app's records that took part in its comparison, for its public endpoints | |
 //! | `ct` | the acceptance time of the last Paykit entry the receive step passed | |
 //! | `rh` | the cursor verdict, earlier holds and block windows for restored requests (`hold.rs`) | |
@@ -794,6 +795,18 @@ impl Stored for KeptSide {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
             StateKey::Side(msg_id) if self.msg_id == *msg_id => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for crate::send_holds::ExpiredStop {}
+
+/// A stop given up past its 30 days: of the message its key names.
+impl Stored for crate::send_holds::ExpiredStop {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::ExpiredStop(msg_id) if self.msg_id == *msg_id => Ok(()),
             _ => corrupt(),
         }
     }
@@ -2160,6 +2173,10 @@ pub(crate) mod key {
         format!("ex/{msg_id}")
     }
 
+    pub(crate) fn expired_stop(msg_id: &str) -> String {
+        format!("gs/{msg_id}")
+    }
+
     pub(crate) fn seen_records(payee: &[u8; 32], app_id: &[u8; 16]) -> String {
         format!("ar/{}/{}", b64(payee), b64(app_id))
     }
@@ -2398,6 +2415,8 @@ pub(crate) enum StateKey {
     Side(String),
     /// `ex/<msg_id>`: why an acceptance the app sent may go while sends are held.
     SendExemption(String),
+    /// `gs/<msg_id>`: a stop past its 30 days whose outbox copy is ended.
+    ExpiredStop(String),
     /// `ar/<payee>/<app>`: a payee app's records a reader has seen.
     SeenRecords {
         payee: [u8; 32],
@@ -2726,6 +2745,7 @@ impl StateKey {
                     "lh" => Self::HeldList(b64_32(rest)?),
                     "side" => Self::Side(msg_id(rest)?),
                     "ex" => Self::SendExemption(msg_id(rest)?),
+                    "gs" => Self::ExpiredStop(msg_id(rest)?),
                     "ha" => {
                         let (payee, id) = rest.split_once('/')?;
                         Self::HeldAnswer {
@@ -3794,6 +3814,7 @@ mod tests {
             (key::held_list(&pubky), StateKey::HeldList(pubky)),
             (key::side(id), StateKey::Side(id.into())),
             (key::send_exemption(id), StateKey::SendExemption(id.into())),
+            (key::expired_stop(id), StateKey::ExpiredStop(id.into())),
             (
                 key::held_answer(&pubky, id),
                 StateKey::HeldAnswer {

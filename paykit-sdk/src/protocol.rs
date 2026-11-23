@@ -726,6 +726,9 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::Flagged
             | StateKey::StoredNote { .. }
             | StateKey::Taken(_) => continue,
+            // A stop given up waits for the client's report of its end, which a restore
+            // doesn't carry: the restored outbox's copy, if any, is ended again.
+            StateKey::ExpiredStop(_) => continue,
             // Only the original installation holds this duty. A restore reconciles its
             // shared end through the outgoing delivery notices.
             StateKey::OwedEnd(_) => continue,
@@ -1465,8 +1468,9 @@ impl Protocol for PaykitProtocol {
     /// A Private Payment List must still match the current sharing choice (Paykit spec 8.4).
     /// Requests, period details, list requests, rejections, payer cancellations and
     /// subscription acceptances go only while the deny decision permits them, however
-    /// long ago they were queued; a payee's cancellation and a payment's acceptance, proof
-    /// and receipt still go when first sent, but not as a re-send (Paykit spec 8.1, 9).
+    /// long ago they were queued, and a rejection or payer cancellation never once it is
+    /// past its 30 days; a payee's cancellation and a payment's acceptance, proof and
+    /// receipt still go when first sent, but not as a re-send (Paykit spec 8.1, 9).
     fn may_send(
         &self,
         delivery: &pubky_switch_client::app::DeliveryView<'_>,
