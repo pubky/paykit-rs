@@ -84,14 +84,17 @@ impl SendExemption {
 pub(crate) enum DenyDecision {
     Permits,
     Blocked,
-    /// The copy is older than its refresh interval, never read, or an own change is
-    /// undecided: the send waits for a read of the lists.
+    /// The copy is older than its refresh interval, never read, an own change is
+    /// undecided, or a deny change or gap the client told isn't followed by a read yet: the
+    /// send waits for a read of the lists.
     Unknown,
 }
 
 pub(crate) fn deny_decision(delivery: &DeliveryView<'_>) -> Result<DenyDecision> {
     let read = state::delivery_get::<u64>(delivery, key::LISTS_READ)?;
-    if !read.is_some_and(|at| receive::lists_read_is_fresh(at, delivery.now_ms())) {
+    if !read.is_some_and(|at| receive::lists_read_is_fresh(at, delivery.now_ms()))
+        || state::delivery_get::<u64>(delivery, key::LISTS_TOLD)?.is_some()
+    {
         return Ok(DenyDecision::Unknown);
     }
     let Some(denied) = state::delivery_get::<Vec<[u8; 32]>>(delivery, key::DENIED)? else {
@@ -133,11 +136,12 @@ pub(crate) fn deny_decision(delivery: &DeliveryView<'_>) -> Result<DenyDecision>
 ///   the service time verified, the device clock only while none is known;
 /// - a re-send ends at the client's replay deadline, its first acceptance plus 30 days
 ///   (Switch spec 11);
-/// - a request, period details, a list request and a subscription acceptance not
-///   confirmed while blocked are never sent past the same window either: past it, the
-///   copy stays queued and never goes, and the host gets no notice of it yet. Its record
-///   keeps its effect (Paykit spec 8.1): a subscription it accepted stays accepted, and
-///   its periods may still be paid, each payment reported by its proof.
+/// - a request, period details, a list request, a subscription acceptance not confirmed
+///   while blocked and a `resend_request` are never sent past the same window either: the
+///   receive step ends the copy as it does a stop's, and tells the host when an activity
+///   record holds the message ([`QueuedStop`]). Its record keeps its effect (Paykit spec
+///   8.1): a subscription it accepted stays accepted, and its periods may still be paid,
+///   each payment reported by its proof.
 pub(crate) fn may_deliver(delivery: &DeliveryView<'_>, kind: Kind) -> Result<bool> {
     let cert = delivery.cert();
     if paykit_lib::scopes::check_certificate(cert).is_err()
@@ -189,14 +193,19 @@ pub(crate) fn may_deliver(delivery: &DeliveryView<'_>, kind: Kind) -> Result<boo
 }
 
 /// The service time a Paykit delivery operation observed from a response it got, shared in
-/// memory between [`Paykit`] and its protocol's delivery hook and never stored: a message
-/// the counterparty hold governs goes only inside such an operation, on the time it observed
-/// (Paykit spec 8.1, "Messages already queued"). A flush no Paykit operation started, by
-/// another protocol or through the client directly, observed nothing, so such a message
-/// waits, kept, for the next one.
+/// memory between [`Paykit`] and its protocol's delivery hook and never stored: the first
+/// delivery, or a retry of it, of a message the counterparty hold governs goes only inside
+/// such an operation, on the time it observed (Paykit spec 8.1, "Messages already queued").
+/// A flush no Paykit operation started, by another protocol or through the client directly,
+/// observed nothing, so such a message waits, kept, for the next one. A re-send needs no
+/// observed time: the client's replay deadline ends it, and it goes, inside an operation or
+/// not, only on a deny decision that permits it, which a deny change told makes unknown
+/// until the lists are read again (Switch spec 11; Paykit spec 8.1, 9).
 #[derive(Debug, Default)]
 pub(crate) struct DeliveryClock {
     state: std::sync::Mutex<ClockState>,
+    /// The last gap's deny list, while no change followed it ([`Paykit::take_learned_lists`]).
+    gap: std::sync::Mutex<Option<Vec<[u8; 32]>>>,
 }
 
 #[derive(Debug, Default)]
@@ -205,8 +214,8 @@ struct ClockState {
     begun: u64,
     /// The operation under way, if any.
     current: Option<u64>,
-    /// The operation that observed a service time, and that time.
-    observed: Option<(u64, u64)>,
+    /// The operation that observed a service time, that time, and the device clock then.
+    observed: Option<(u64, u64, u64)>,
     /// The operation whose read of the time or of the lists failed: it reads the time no
     /// more ([`Paykit::observe_for_delivery`]).
     failed: Option<u64>,
@@ -248,25 +257,40 @@ impl DeliveryClock {
             .is_ok_and(|state| state.current.is_some() && state.failed == state.current)
     }
 
-    /// Keep `at_ms`, a service time from a response, as the current operation's.
-    pub(crate) fn observe(&self, at_ms: u64) {
+    /// Keep what the client last told of the deny list: a gap's list, or `None`.
+    pub(crate) fn learned(&self, gap: Option<&Vec<[u8; 32]>>) {
+        if let Ok(mut kept) = self.gap.lock() {
+            *kept = gap.cloned();
+        }
+    }
+
+    /// The gap's list kept, which this takes.
+    fn take_gap(&self) -> Option<Vec<[u8; 32]>> {
+        self.gap.lock().ok().and_then(|mut kept| kept.take())
+    }
+
+    /// Keep `at_ms`, a service time from a response, as the current operation's, at
+    /// `now_ms` on the device clock.
+    pub(crate) fn observe(&self, at_ms: u64, now_ms: u64) {
+        let earlier = self.observed(now_ms);
         if let Ok(mut state) = self.state.lock() {
             if let Some(op) = state.current {
-                let at_ms = match state.observed {
-                    Some((seen, earlier)) if seen == op => earlier.max(at_ms),
-                    _ => at_ms,
-                };
-                state.observed = Some((op, at_ms));
+                let at_ms = earlier.map_or(at_ms, |earlier| earlier.max(at_ms));
+                state.observed = Some((op, at_ms, now_ms));
             }
         }
     }
 
-    /// The service time the current operation observed; `None` outside an operation, or
-    /// before it observed one, which holds every governed message.
-    pub(crate) fn observed(&self) -> Option<u64> {
+    /// The service time the current operation observed, aged by the device time since, at
+    /// `now_ms`, so a call that runs on, through retries or a slow payment, never sends past
+    /// a window it crossed meanwhile; `None` outside an operation, or before it observed
+    /// one, which holds every governed message.
+    pub(crate) fn observed(&self, now_ms: u64) -> Option<u64> {
         let state = self.state.lock().ok()?;
         match (state.current, state.observed) {
-            (Some(op), Some((seen, at_ms))) if op == seen => Some(at_ms),
+            (Some(op), Some((seen, at_ms, then))) if op == seen => {
+                Some(at_ms.saturating_add(now_ms.saturating_sub(then)))
+            }
             _ => None,
         }
     }
@@ -358,7 +382,8 @@ pub(crate) fn past_replay_window(created_at_ms: u64, now_ms: u64) -> bool {
 
 /// A held message this app queued, kept at `qs/<msg_id>` in the commit that queues it,
 /// for as long as its outbox copy is owed: a rejection or payer's cancellation, a payment
-/// request, period details, a list request or a subscription acceptance. It holds what
+/// request, period details, a list request, a subscription acceptance or a
+/// `resend_request`. It holds what
 /// the receive step needs to end that copy past its 30 days and tell the host, which the
 /// outbox doesn't show (Paykit spec 8.1, "Messages already queued"): its counterparty, its
 /// request, its signed hash and time, and the activity record that holds it, if any.
@@ -405,6 +430,9 @@ pub(crate) enum HeldKind {
     ListRequest,
     /// A subscription acceptance that reports no payment.
     SubscriptionAcceptance,
+    /// A `resend_request`, which no activity record holds: its end settles the delivery
+    /// evidence of an overlapping recovery request (Paykit spec 7.2).
+    ResendRequest,
 }
 
 /// The activity record a held message was recorded in, as kept: its side, natural key and
@@ -510,6 +538,18 @@ impl QueuedStop {
             given_up: None,
             told: false,
         })
+    }
+
+    /// Put in `tx` the entry of `signed`, a `resend_request` just signed, in the commit that
+    /// queues it: held past its window it is never sent, and its end is what lets an
+    /// overlapping recovery request go (Paykit spec 7.2, 8.1).
+    pub(crate) fn put_resend_request(
+        tx: &mut Tx,
+        signed: &pubky_switch_client::app::SignedMessage,
+    ) -> Result<()> {
+        let stop = Self::signed(signed, HeldKind::ResendRequest, None, None)?;
+        tx.put(&key::queued_stop(&stop.msg_id), &stop)?;
+        Ok(())
     }
 
     /// The entry of `stored`, a stop answering the request `request_hash`, queued again
@@ -626,7 +666,7 @@ impl Paykit {
     /// delivery operation's.
     pub(crate) fn observe_service_time(&self) {
         if let Some(at) = self.service_time() {
-            self.protocol.delivery.observe(at);
+            self.protocol.delivery.observe(at, self.now());
         }
     }
 
@@ -635,7 +675,9 @@ impl Paykit {
     /// answers (Paykit spec 8.1). A read that fails observes nothing, and such messages
     /// wait for the next operation; the operation tries no other.
     pub(crate) async fn observe_for_delivery(&mut self) -> Result<()> {
-        if self.protocol.delivery.observed().is_some() || self.protocol.delivery.has_failed() {
+        if self.protocol.delivery.observed(self.now()).is_some()
+            || self.protocol.delivery.has_failed()
+        {
             return Ok(());
         }
         let waiting = match self.app.queued_messages(crate::protocol::BACKUP_NAME).await {
@@ -689,6 +731,42 @@ impl Paykit {
             }
         }
         Ok(())
+    }
+
+    /// Take a deny change or gap the client told (`lt`), after the read of the feed that
+    /// told it: a gap whose list is the copy's, as this app's own reads of the lists owe one,
+    /// leaves the copy as it is; anything else, a restart included, reads the lists again,
+    /// so the change takes effect before the sends that follow (Paykit spec 8.1, "Messages
+    /// already queued"). A read that fails leaves the copy not known, as any does; one whose
+    /// floor raise isn't answered leaves the raise owed (Paykit wire 5.6): neither ends the
+    /// receive, only a store failure or an alarm does.
+    pub(crate) async fn take_learned_lists(&mut self) -> Result<()> {
+        let gap = self.protocol.delivery.take_gap();
+        if self.certificate_refused().is_some()
+            || self.local_get::<u64>(key::LISTS_TOLD).await?.is_none()
+        {
+            return Ok(());
+        }
+        if let Some(list) = gap {
+            let mut list = self.judged_deny(list).await?.0;
+            list.sort_unstable();
+            list.dedup();
+            if self.local_get::<Vec<[u8; 32]>>(key::DENIED).await? == Some(list) {
+                return self.local_delete(key::LISTS_TOLD).await;
+            }
+        }
+        // A read this call made that failed is not tried again in it (Paykit wire 4.1).
+        if self.protocol.delivery.has_failed() {
+            return Ok(());
+        }
+        match Box::pin(self.read_lists_now()).await {
+            Err(PaykitError::Client(error))
+                if matches!(error.unkept(), AppError::Alarm(_) | AppError::Store(_)) =>
+            {
+                Err(error.into())
+            }
+            _ => Ok(()),
+        }
     }
 
     /// End the outbox copies of this app's held messages ([`QueuedStop`]) that are past 30

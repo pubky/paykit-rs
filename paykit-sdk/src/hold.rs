@@ -1258,9 +1258,18 @@ impl Paykit {
                         .await?;
                     }
                     match self.app.queue_stored(stored.plaintext()).await {
-                        Ok(msg_id) => {
-                            let _ = self.send_message(&msg_id).await;
-                        }
+                        // What can't go now stays queued; a local failure is the call's.
+                        Ok(msg_id) => match self.send_message(&msg_id).await {
+                            Err(error)
+                                if matches!(
+                                    error.unkept(),
+                                    AppError::Alarm(_) | AppError::Store(_)
+                                ) =>
+                            {
+                                return Err(error.into())
+                            }
+                            _ => {}
+                        },
                         // Refused for good: nothing is queued; the pass doesn't ask again. A
                         // held answer never went, so the host is told.
                         Err(AppError::Refused(ClientRefusal::WontDeliver(_))) => {
@@ -1323,6 +1332,13 @@ impl Paykit {
                 if done.contains(&answer.msg_id) {
                     gone.push(answer.clone());
                 }
+                continue;
+            }
+            // One a pass queued before it stopped short of its last commit is the outbox's
+            // now, which its entry (`qs/`) ends: never told given up while its copy may go
+            // (Paykit spec 8.1, "Undelivered messages").
+            if self.app.delivery(&answer.msg_id).await?.is_some() {
+                gone.push(answer.clone());
                 continue;
             }
             match Box::pin(self.answer_record(&answer.payee, &answer.request_hash, &answer.msg_id))

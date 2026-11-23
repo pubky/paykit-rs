@@ -617,6 +617,7 @@ impl Stored for u64 {
             | StateKey::Resent { .. }
             | StateKey::ResentDay { .. }
             | StateKey::ListsRead
+            | StateKey::ListsTold
             | StateKey::ServiceTime => Ok(()),
             // A generation recovered at follows another.
             StateKey::LossRecorded if *self > 0 => Ok(()),
@@ -1888,6 +1889,8 @@ pub(crate) mod key {
     pub(crate) const LIST_DISCOVERY: &str = "ld";
     pub(crate) const LISTS_READ: &str = "lr";
     pub(crate) const SERVICE_TIME: &str = "sv";
+    /// `lt`: a deny change or gap the client told, not followed by a read of the lists.
+    pub(crate) const LISTS_TOLD: &str = "lt";
     pub(crate) const HELD_LISTS: &str = "lh/";
     pub(crate) const LISTS_LOST: &str = "lgone/";
     pub(crate) const RECORDS_UNLISTED: &str = "nl";
@@ -2496,6 +2499,8 @@ pub(crate) enum StateKey {
     ListsRead,
     /// `sv`: the highest service time verified, for the delivery hook.
     ServiceTime,
+    /// `lt`: a deny change or gap told and not followed by a read of the lists.
+    ListsTold,
     /// `lh/<record key>`: a list held over a record that didn't read.
     HeldList([u8; 32]),
     /// `lgone/<record key>`: a `payment_lists` record seen deleted or unreadable.
@@ -2728,6 +2733,7 @@ impl StateKey {
             "lc" => Self::ListedCert,
             "lr" => Self::ListsRead,
             "sv" => Self::ServiceTime,
+            "lt" => Self::ListsTold,
             "dl" => Self::Denied,
             "fg" => Self::Flagged,
             "fk" => Self::FloorKept,
@@ -3964,6 +3970,7 @@ mod tests {
             ),
             (key::LISTS_READ.into(), StateKey::ListsRead),
             (key::SERVICE_TIME.into(), StateKey::ServiceTime),
+            (key::LISTS_TOLD.into(), StateKey::ListsTold),
             (key::DENIED.into(), StateKey::Denied),
             (key::own_block(&pubky), StateKey::OwnBlock(pubky)),
             (

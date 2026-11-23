@@ -44,6 +44,7 @@ use pubky_switch_client::app::{
     RecordExpiry, RecordMarkContext, RecordRepair, RecordSuccessor, ResendNeeded, RestoreContext,
     StoreFailure, WriteBase,
 };
+use pubky_switch_client::app::{DenyListChange, DenyListGap};
 use pubky_switch_client::error::StoreError;
 use pubky_switch_core::enc::{serde_b64, unb64_array};
 use pubky_switch_core::message::{Message, MessagePlaintext};
@@ -849,7 +850,8 @@ pub(crate) fn restore_paykit_layer(
             // The time of the last read of the lists isn't restored: the copy of the deny
             // list the backup holds may be stale by any time, so the list is read again before
             // any payment (Paykit spec 8.1).
-            StateKey::ListsRead => continue,
+            // A deny change told goes with it: a restore reads the lists again anyway.
+            StateKey::ListsRead | StateKey::ListsTold => continue,
             // Nor the service time the delivery hook judges by: the restore's first read
             // writes it again, and until then the device clock alone judges.
             StateKey::ServiceTime => continue,
@@ -1680,7 +1682,7 @@ impl Protocol for PaykitProtocol {
         }
         // No message the counterparty hold governs goes past its window, whichever rules
         // its kind has besides (Paykit spec 8.1, "Messages already queued").
-        if crate::send_holds::held_past_window(delivery, self.delivery.observed())
+        if crate::send_holds::held_past_window(delivery, self.delivery.observed(delivery.now_ms()))
             .map_err(view_failure)?
         {
             return Ok(false);
@@ -1938,6 +1940,22 @@ impl Protocol for PaykitProtocol {
             // marks its sender to ask again once the key is held (`stored.rs`, `marks.rs`).
             Err(Fail::AwaitsKey { data_epoch }) => Outcome::AwaitKey { data_epoch },
         }
+    }
+
+    /// A deny change the feed shows takes effect before the next delivery decision: none is
+    /// taken on the copy of the lists until they are read again, and the copy's deny list
+    /// stays, so that read sees an unblock (Paykit spec 8.1, "Messages already queued";
+    /// Paykit wire 5.6).
+    fn deny_list_changed(&self, _: &DenyListChange) -> Result<Vec<LocalWrite>, StoreFailure> {
+        self.delivery.learned(None);
+        Ok(vec![local_write(key::LISTS_TOLD, &1u64)?])
+    }
+
+    /// A gap in the deny list's history (Switch spec 8.3), taken as a change, with its list
+    /// kept for the receive ([`Paykit::take_learned_lists`]).
+    fn deny_list_gap(&self, gap: &DenyListGap) -> Result<Vec<LocalWrite>, StoreFailure> {
+        self.delivery.learned(gap.list_read.then_some(&gap.denied));
+        Ok(vec![local_write(key::LISTS_TOLD, &1u64)?])
     }
 
     /// Entries the app can't read: ask the sender to send again (Paykit spec 9).

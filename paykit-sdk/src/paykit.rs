@@ -1079,7 +1079,11 @@ impl Paykit {
         // Whether the client may list at this read's start ([`Paykit::records_listed`]).
         let keys_held_before = self.holds_scope_keys();
         let received = Box::pin(self.app.receive(wait)).await;
-        if received.is_ok() {
+        // A read that stopped before any page got no response to observe (Paykit spec 8.1).
+        if received
+            .as_ref()
+            .is_ok_and(|r| !r.stopped || r.held_cursor.is_some())
+        {
             self.observe_service_time();
         }
         // A read can take another device's record or a renewal into the own record.
@@ -1093,6 +1097,8 @@ impl Paykit {
             }
             Err(error) => return Err(error.into()),
         };
+        // A deny change or gap the read told takes effect before the sends that follow it.
+        Box::pin(self.take_learned_lists()).await?;
         // A successful call can stop while keys or a listing wait, before any page.
         // Only a page's verdict under the confirmed current identity opens outgoing work.
         if report.held_cursor.is_some() && self.app.identity_confirmed_at().is_some() {

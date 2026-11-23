@@ -486,6 +486,7 @@ impl Paykit {
         let mut tx = Tx::default();
         tx.put(&key::dropped_replies(&mark.sender), &mark)?;
         tx.put(&k, &held)?;
+        crate::send_holds::QueuedStop::put_resend_request(&mut tx, &signed)?;
         self.app
             .queue_signed_with(crate::protocol::BACKUP_NAME, signed, &tx.into_writes())
             .await?;

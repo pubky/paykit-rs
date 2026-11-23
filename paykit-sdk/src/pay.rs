@@ -4374,8 +4374,14 @@ impl Paykit {
             Box::pin(self.record_ledger_outcomes()).await?;
         }
         self.prune_journal().await?;
-        // Last, after every payment's own work: what can't be delivered now stays queued.
-        let _ = self.send_outbox().await;
+        // Last, after every payment's own work: what can't be delivered now stays queued,
+        // and a local failure is the call's.
+        match self.send_outbox().await {
+            Err(error) if matches!(error.unkept(), AppError::Alarm(_) | AppError::Store(_)) => {
+                return Err(error.into())
+            }
+            _ => {}
+        }
         Ok(out)
     }
 

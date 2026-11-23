@@ -387,8 +387,10 @@ Allowances with it that resume paying automatically, from the same calls, so the
 can end any they no longer want before its next period is due. An unblocked subscription
 pays its later periods automatically; cancelling or ending it is the explicit stop.
 Messages held while the counterparty was blocked go once it is unblocked, unless they
-are more than 30 days old. Those are given up and never sent, and
-`NoticeKind::MessageGivenUp` names each one an activity record holds.
+are more than 30 days old. Those are given up and never sent from this installation, and
+`NoticeKind::MessageGivenUp` names each one an activity record holds. The notice says
+only that this installation never saw the message accepted: after a restore, the device
+the backup came from may have delivered it.
 
 ## Notices and errors
 

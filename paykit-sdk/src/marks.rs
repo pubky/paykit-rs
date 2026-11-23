@@ -1105,6 +1105,7 @@ impl Paykit {
         }
         held.drop_mark().queued = Some(queued);
         tx.put(key, &held)?;
+        crate::send_holds::QueuedStop::put_resend_request(&mut tx, &signed)?;
         self.app
             .queue_signed_with(crate::protocol::BACKUP_NAME, signed, &tx.into_writes())
             .await?;
