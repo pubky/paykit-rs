@@ -350,8 +350,8 @@ const SEEN_RECORDS_BYTES: usize = (pubky_switch_client::store::MAX_VALUE_BYTES /
 /// payee dated ahead were read while the device clock ran fast and then dropped: until the
 /// clock reaches it, a record dropped with them may be kept and used again, as without a
 /// floor, and once the clock reaches it, such a record is not used. Every value a reader
-/// writes holds the floor at or before its newest kept record or `unkept_at`, so a restored
-/// value further ahead is refused ([`SeenRecords::verifies`]). Only public records are
+/// writes holds the floor before its newest kept record or at or before `unkept_at`, so a
+/// restored value further ahead is refused ([`SeenRecords::verifies`]). Only public records are
 /// compared here; a Private Payment List or a request's own destination never is.
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -452,14 +452,14 @@ impl SeenRecords {
     }
 
     /// Whether the kept records each are `payee`'s, verified as its signer signed it, and of
-    /// app `app_id`, and there is one at least, a group the reader couldn't keep or a record
-    /// dropped, with `dropped_at` at or before the newest kept record or `unkept_at`, as
-    /// every value a reader writes holds it: checked
+    /// app `app_id`, and there is one at least or a group the reader couldn't keep, with
+    /// `dropped_at` before the newest kept record or at or before `unkept_at`, as every value
+    /// a reader writes holds it, a merge's included: checked
     /// before a restore installs a copy (`p/ar/<payee>/<app>`), so none can fail every later
     /// read of the payee. A group's time isn't signed, so one ahead of the clock holds
     /// nothing ([`SeenRecords::before_unkept`]).
     pub(crate) fn verifies(&self, payee: &[u8; 32], app_id: &[u8; 16]) -> bool {
-        let mut newest = self.unkept_at;
+        let mut newest = None;
         for signed in &self.records {
             match AppRecord::verify(signed, payee) {
                 Ok(record) if record.cert().app_id() == *app_id => {
@@ -468,7 +468,11 @@ impl SeenRecords {
                 _ => return false,
             }
         }
-        newest.is_some() && self.dropped_at <= newest
+        (newest.is_some() || self.unkept_at.is_some())
+            && self.dropped_at.is_none_or(|at| {
+                newest.is_some_and(|newest| newest > at)
+                    || self.unkept_at.is_some_and(|unkept| at <= unkept)
+            })
     }
 
     /// The union of these seen records and `other`'s, both of one app of `payee` (Switch spec
@@ -1261,6 +1265,9 @@ mod tests {
         // is refused.
         let damaged = seen(Vec::new(), Some(u64::MAX));
         assert!(!damaged.verifies(&bob.id(), &bob.app_id()));
+        // A floor at the newest record kept is refused too; one before it verifies.
+        assert!(!seen(vec![signed(1, tip_jar())], Some(NOW + 1)).verifies(&bob.id(), &bob.app_id()));
+        assert!(seen(vec![signed(1, tip_jar())], Some(NOW)).verifies(&bob.id(), &bob.app_id()));
         let mut merged = damaged.merged(&older, &bob.id()).unwrap();
         assert!(merged.records.is_empty());
         let current = record(&signed(1, tip_jar()));
@@ -1319,7 +1326,8 @@ mod tests {
             let held: SeenRecords = serde_json::from_value(value).unwrap();
             assert!(held.verifies(&bob.id(), &bob.app_id()));
         }
-        // A floor past everything kept is no value a reader writes.
+        // A floor past everything kept, or at the newest record kept, is no value a reader
+        // writes: a merge would drop that record and keep the floor alone.
         for value in [
             json!({"records": [], "unkept_at": null, "dropped_at": 5}),
             json!({"records": [], "unkept_at": 5, "dropped_at": 6}),
