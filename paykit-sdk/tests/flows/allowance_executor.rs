@@ -4657,3 +4657,41 @@ async fn test_executor_attempt_answered_by_the_earlier_generation_is_not_acted_o
         .router
         .add_switch(crate::common::ALICE_ORIGIN, &service);
 }
+
+#[tokio::test]
+async fn test_executor_reservation_whose_answer_was_lost_counts_across_a_change() {
+    // A payment's reservation applies at the service and its answer is lost, so the app's
+    // checkpoint lacks it; the service's generation then changes in an orderly way. Later
+    // reads count that reservation from its opening, as evidence of what happened, and the
+    // Allowance goes on paying (Pubky Switch spec, Section 12.5).
+    use pubky_switch_client::testing::Fault;
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    world.rail.set_history_payer(payer.identity());
+    let request = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("1", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    world.alice.switch().fail_next(Fault::LoseAnswer {
+        path: "/ops".into(),
+    });
+    let lost = Box::pin(payer.pay_under_allowance(&request, &key)).await;
+    assert!(lost.outcome.is_err(), "{lost:?}");
+    let _service = Box::pin(crate::allowances::advance_allowance_generation(
+        &world, &mut payer,
+    ))
+    .await;
+    let _ = Box::pin(payer.resume_payments()).await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    assert!(Box::pin(payer.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .is_some());
+    let paid = Box::pin(pays_under(&world, &mut shop, &mut payer, &key, "2")).await;
+    assert!(
+        matches!(paid.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "{paid:?}"
+    );
+}

@@ -552,14 +552,31 @@ impl AppliedRecord {
 
     /// A current claim read settles the claim state. The independently retained opening
     /// and its proof must name the ledger writer, generation, application batch and time.
+    /// `just_made`: the reservation this app is making now, whose opening authorizes its
+    /// dispatch; otherwise one that already applied, whose opening is evidence of what
+    /// happened ([`AppliedOperation::applied`]).
     pub(super) fn reservation(
         &self,
         app: &App,
         kept: &KeptOp,
         entry: &LedgerEntry,
         read: &pubky_switch_client::app::ClaimRead,
+        just_made: bool,
     ) -> Option<(ReservationClaim, u64)> {
-        self.opening(app, kept, &entry.obligation, entry.attempt_id, read, None)
+        let purpose = if just_made {
+            Purpose::Authorizes
+        } else {
+            Purpose::Evidence
+        };
+        self.opening_for(
+            app,
+            kept,
+            &entry.obligation,
+            entry.attempt_id,
+            read,
+            None,
+            purpose,
+        )
     }
 
     /// The complete ledger already accepted this reservation. Its original opening
@@ -592,15 +609,33 @@ impl AppliedRecord {
         read: &pubky_switch_client::app::ClaimRead,
         accepted_under: Option<(&Condition, u64)>,
     ) -> Option<(ReservationClaim, u64)> {
+        // Counting an attempt that applied: its opening is evidence of what happened.
+        self.opening_for(
+            app,
+            kept,
+            obligation,
+            id,
+            read,
+            accepted_under,
+            Purpose::Evidence,
+        )
+    }
+
+    // The opening's inputs, named as `opening` names them, and what it is verified for.
+    #[allow(clippy::too_many_arguments)]
+    fn opening_for(
+        &self,
+        app: &App,
+        kept: &KeptOp,
+        obligation: &[u8; 32],
+        id: paykit_lib::AttemptId,
+        read: &pubky_switch_client::app::ClaimRead,
+        accepted_under: Option<(&Condition, u64)>,
+        purpose: Purpose,
+    ) -> Option<(ReservationClaim, u64)> {
         // The native upload inventory can attach a renewed certificate with the same
         // signing key. The certificate of the accepted ledger also proves an opening
         // only when it verifies that operation and was in force at its proved time.
-        // An opening a complete ledger accepted is evidence of what happened; the opening of
-        // the reservation being made now authorizes its dispatch.
-        let purpose = match accepted_under {
-            Some(_) => Purpose::Evidence,
-            None => Purpose::Authorizes,
-        };
         let applied = AppliedOperation::applied(app, kept, purpose).or_else(|| {
             let applied = AppliedOperation::with_certificate(app, kept, self.cert.clone())?
                 .fit_for(app, purpose)?;

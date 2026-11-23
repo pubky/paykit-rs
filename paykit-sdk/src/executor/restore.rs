@@ -492,7 +492,13 @@ impl Paykit {
                         let with_claim = self.app.shared_evidence().await?;
                         let Some(((opening, seq), original)) =
                             with_claim.ops.iter().find_map(|op| {
-                                Some((current.reservation(&self.app, op, entry, &claim)?, op))
+                                // The reservation this read was asked to establish is the
+                                // one being made; any other already applied.
+                                let just_made = matches!(source, LedgerRead::Applied(_));
+                                Some((
+                                    current.reservation(&self.app, op, entry, &claim, just_made)?,
+                                    op,
+                                ))
                             })
                         else {
                             return Ok(None);
