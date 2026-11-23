@@ -2358,7 +2358,8 @@ fn list_effect(cx: &mut ReceiveContext<'_>, stored: &StoredMessage, seq: u64) ->
         // list is held too (Paykit spec 6).
         None if lost.is_some() => return hold_list(cx, &target, stored, None),
         None => None,
-        // Over a delete seen, a value is taken only with every mark known (Paykit spec 6).
+        // Over a delete seen, a value is taken only with every mark known and a list no older
+        // than the one seen, nor another at its version (Paykit spec 6, wire 4.13 and 5.4).
         Some(RecordContent::Value(value)) => match PaymentListRecord::read(&value, &own) {
             Ok(held) if lost.as_ref().is_none_or(|lost| lost.admits(&held)) => Some(held),
             _ => return hold_list(cx, &target, stored, None),
@@ -2887,7 +2888,8 @@ impl Paykit {
             // on the absent key once a write of it lands.
             None if lost.is_some() => return Ok(()),
             None => None,
-            // Over a delete seen, only a value holding every mark known (Paykit spec 6).
+            // Over a delete seen, only a value holding every mark known and a list no older
+            // than the one seen, nor another at its version (Paykit spec 6, wire 5.4).
             Some(RecordContent::Value(value)) => match PaymentListRecord::read(&value, &own) {
                 Ok(held) if lost.as_ref().is_none_or(|lost| lost.admits(&held)) => Some(held),
                 _ => return Ok(()),
@@ -2931,14 +2933,19 @@ impl Paykit {
         version: RecordVersion,
     ) -> crate::error::Result<()> {
         let at = key::list_record_lost(record_key);
-        if self.local_get::<LostListRecord>(&at).await?.is_some() {
-            return Ok(());
-        }
         let own = self.identity();
         let seen = self.app.record_seen(record_key).await?;
         let copy = seen.and_then(|value| PaymentListRecord::read(&value, &own).ok());
-        self.local_put(&at, &LostListRecord::over(version, copy.as_ref()))
-            .await
+        let lost = LostListRecord::over(version, copy.as_ref());
+        // As at an observed delete: the same delete, or an older one, changes nothing.
+        let lost = match self.local_get::<LostListRecord>(&at).await? {
+            Some(held) => match held.clone().then(lost) {
+                same if same == held => return Ok(()),
+                changed => changed,
+            },
+            None => lost,
+        };
+        self.local_put(&at, &lost).await
     }
 
     /// Place the messages kept before their records (Paykit spec 8.1): the payer's replies

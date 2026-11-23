@@ -2246,3 +2246,47 @@ async fn test_unrequested_older_list_over_a_forgotten_delete_not_paid() {
     );
     assert!(w.rail.all_executions().is_empty());
 }
+
+#[tokio::test]
+async fn test_unrequested_other_list_at_the_same_version_over_a_forgotten_delete_not_paid() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice_with(
+        &mut shop,
+        &[wallet.app_id()],
+        list_version(1, 2),
+        lightning("lno1newoffer"),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    let target = shop_list_target(&w, &shop);
+    // The record is deleted, the wallet sees it, and the service forgets it.
+    phone.app_mut().read_record(&target).await.unwrap();
+    put_list_record(&mut phone, &target, None).await;
+    wallet.receive(None).await.unwrap();
+    let key = wallet.app().record_key(&target).unwrap();
+    w.alice.switch().drop_record(&key).unwrap();
+    // A newly joined app writes another list signed at the same version: equivocation, which
+    // the version rule refuses (Paykit wire 5.4, "Seen lists").
+    let mut laptop = w.wallet("laptop").await;
+    w.list_to_alice_with(
+        &mut shop,
+        &[laptop.app_id()],
+        list_version(1, 2),
+        lightning("lno1other"),
+    )
+    .await;
+    laptop.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let again = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-lightning-bolt12"))
+        .await
+        .outcome;
+    assert!(
+        !matches!(again, Ok(PayOutcome::Paid { .. })),
+        "another list at the seen version was paid: {again:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+}

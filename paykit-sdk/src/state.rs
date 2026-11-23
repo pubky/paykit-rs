@@ -47,7 +47,7 @@
 //! | `lp/<recipient>/<generation>/<message hash>` | outstanding original publication batch IDs, kept atomically before submission and retained across restore | yes |
 //! | `lres/<recipient>` | the applied list, its publisher and original signed message, its first delivery outcome (open, undelivered or unknown) and any kept confirmation of another version, prior offers' latest possible expiry, and the interval of an outstanding withdrawal | yes |
 //! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read, or reads without the marks `lgone/` knows: never written over it, which could drop its single-use marks, until the record reads again with them, or reads absent and was never seen deleted (`lgone/`); deleted once the record holds the list | |
-//! | `lgone/<record key>` | set in the commit in which this app sees the `payment_lists` record deleted, with the single-use marks its copy held, or none known with no copy (`LostListRecord`): a later absence of it, as after a forgotten delete or a restore, keeps a list held there, and a later value is taken only if it holds every mark known, none with no copy; never cleared, and a restore keeps the union of the installation's and the backup's | yes |
+//! | `lgone/<record key>` | set in the commit in which this app sees the `payment_lists` record deleted, with the single-use marks its copy held, or none known with no copy (`LostListRecord`): a later absence of it, as after a forgotten delete or a restore, keeps a list held there, and a later value is taken only if it holds every mark known and its list is no older than the one seen nor another at that version, none with no copy; never cleared, and a restore keeps the union of the installation's and the backup's | yes |
 //! | `kc/<record key>/<certificate hash>/<feed generation>` | a payee's cancellation of a request, kept until it is placed in the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
 //! | `lr` | when the app last read the lists, on the device clock; absent before the first read and after a due read failed, when new activity waits (Paykit wire 4.1); never restored, so a restored app reads the deny list again before any payment | |
@@ -3612,6 +3612,11 @@ mod tests {
         assert_eq!(one.clone().merge(two.clone()), merged);
         assert_eq!(two.clone().merge(one.clone()), merged);
         assert_eq!(one.clone().merge(lost(2, None)), lost(4, None));
+        // Two lists at one version: the one with the greater hash, whichever side holds it.
+        let low = lost(4, Some(copy(2, 1, vec![mark(1)])));
+        let high = lost(4, Some(copy(2, 9, vec![mark(1)])));
+        assert_eq!(low.clone().merge(high.clone()), high);
+        assert_eq!(high.clone().merge(low), high);
         // A delete reported again, or an older one, changes nothing; a newer one is merged.
         assert_eq!(two.clone().then(lost(6, None)), two);
         assert_eq!(two.clone().then(lost(5, None)), two);
