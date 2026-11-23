@@ -11,7 +11,8 @@
 //!   a request into the record of its settlement, a receipt beside the proof it names, and
 //!   period details and a Billing Period's proof into the period record, once the request
 //!   record they are checked against is held.
-//!   Meanwhile a Private Payment List is held over its record (`lh/`), the newer kept, and a
+//!   Meanwhile a Private Payment List is held over its record (`lh/`), the newer kept, and
+//!   placed as any held list is ([`Paykit::place_held_lists`]); a
 //!   request is shown unrecorded ([`crate::RequestStatus::Unrecorded`]). A payee's
 //!   cancellation needs nothing here: its stop is kept with the cursor move, with no write
 //!   at the switch (`kc/`, Paykit spec 8.1). An Allowance proposal or answer is tried
@@ -1260,9 +1261,12 @@ impl Paykit {
         }
         if self.app.cert().has_permission(Permission::ClaimsWrite) {
             // Read bound to its key and to the claim the receipt settles, as at the first read.
-            let obligation = receipt_claim(&stored, &attempt_id, |request, start| {
-                self.obligation(&sender, request, start)
-            });
+            let obligation = receipt_claim(
+                &stored,
+                &attempt_id,
+                |request, start| self.obligation(&sender, request, start),
+                |attempt| self.payment_obligation(attempt),
+            );
             let journaled = self.journal_entry_on(&attempt_id, &obligation).await?;
             let deadline = receipt_deadline(
                 &stored,
@@ -1312,6 +1316,7 @@ impl Paykit {
                 }
             }
             if let Some(entry) = settles.received {
+                entry.check_bound(|input| self.app.blind(input))?;
                 tx.put(&key::journal(&attempt_id), &entry)?;
             }
         }

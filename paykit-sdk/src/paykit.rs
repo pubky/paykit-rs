@@ -844,6 +844,12 @@ impl Paykit {
         self.app.highest_service_time()
     }
 
+    /// The obligation of a payment without a request: its attempt ID blinded with the
+    /// payer's naming key (Paykit wire 1.5).
+    pub(crate) fn payment_obligation(&self, attempt_id: &paykit_lib::AttemptId) -> [u8; 32] {
+        paykit_lib::derive::payment_obligation_blinded(&self.app.blind(&attempt_id.to_bytes()))
+    }
+
     /// The obligation ID of a request, or of its Billing Period starting at
     /// `period_start_secs` (0 for a one-time request), blinded through the client with the
     /// identity's naming key (Paykit spec 7.1, Paykit wire 1.5).
@@ -1377,7 +1383,6 @@ mod tests {
         };
         assert_send(&wallet.send_list_again(&unknown, confirmed));
         assert_send(&wallet.spam_count(&key));
-        assert_send(&wallet.place_held_list_without_marks(&key, &[0; 16], confirmed));
         assert_send(&wallet.send_request(key, draft));
         assert_send(&wallet.message_delivery(""));
         assert_send(&wallet.payee_activity());

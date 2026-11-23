@@ -33,7 +33,7 @@ use paykit_lib::bodies::{
     PaymentProof, PaymentRequest, PaymentRequestAcceptance, PrivatePaymentListRequest,
     RequestDestination,
 };
-use paykit_lib::derive::{natural_key, payment_obligation};
+use paykit_lib::derive::natural_key;
 use paykit_lib::kinds::Kind;
 use paykit_lib::periods::PeriodRef;
 use paykit_lib::records::{
@@ -1021,16 +1021,17 @@ pub(crate) struct ListAsk {
     pub(crate) asked_at_ms: u64,
 }
 
-/// The local write that journals `entry` in a batch. The entry is checked first
-/// ([`JournalEntry::check`]), the shape every read back checks before binding it to its key
-/// (`state::Stored`), so no path persists a state recovery would refuse: one that fails is a
-/// bug, refused as a corrupt store, with nothing written.
-pub(crate) fn journal_write(entry: &JournalEntry) -> Result<LocalWrite> {
-    entry.check()?;
-    state::local_put(&key::journal(&entry.attempt()?), entry)
-}
-
 impl Paykit {
+    /// The local write that journals `entry` in a batch. The entry is checked first, its
+    /// claim key bound to what it pays as every read back binds it
+    /// ([`JournalEntry::check_bound`], `state::Stored`), so no path persists a state
+    /// recovery would refuse: one that fails is a bug, refused as a corrupt store, with
+    /// nothing written.
+    pub(crate) fn journal_write(&self, entry: &JournalEntry) -> Result<LocalWrite> {
+        entry.check_bound(|input| self.app.blind(input))?;
+        state::local_put(&key::journal(&entry.attempt()?), entry)
+    }
+
     /// Pay a one-time request by hand (Paykit spec 7.2, 8.1 step 3).
     ///
     /// # Errors
@@ -1532,7 +1533,7 @@ impl Paykit {
             refuse_blocked(true, shown, options.blocked_confirmed.as_ref())?;
         }
         let attempt_id = AttemptId::generate()?;
-        let obligation = payment_obligation(&attempt_id);
+        let obligation = self.payment_obligation(&attempt_id);
         let deadline = match self.app.read_claim(&obligation).await {
             Ok(_) => Some(
                 self.recent_service_time(&obligation)
@@ -1565,7 +1566,7 @@ impl Paykit {
             user_started: true,
             allowance: None,
             attempt_id: attempt_id.to_text(),
-            obligation: payment_obligation(&attempt_id),
+            obligation: self.payment_obligation(&attempt_id),
             payee: payment.payee,
             request_hash: None,
             natural_key: natural.clone(),
@@ -1721,8 +1722,9 @@ impl Paykit {
     }
 
     /// The journal entry of `attempt`, read back checked and bound to its key: of that
-    /// attempt, its claim key the one its payee and request blind to, its record the one its
-    /// request or attempt names (`state::Stored`).
+    /// attempt, its claim key the one its payee and request, or its attempt for a payment
+    /// without a request, blind to, its record the one its request or attempt names
+    /// (`state::Stored`).
     ///
     /// # Errors
     ///
@@ -1746,10 +1748,10 @@ impl Paykit {
         JournalEntry::on_claim(self.journal_entry(attempt).await?, obligation)
     }
 
-    /// Journal `entry`, checked first as [`journal_write`] does: only a state a resume and a
-    /// restore read back is persisted.
+    /// Journal `entry`, checked first as [`Paykit::journal_write`] does: only a state a
+    /// resume and a restore read back is persisted.
     async fn save(&mut self, entry: &JournalEntry) -> Result<()> {
-        entry.check()?;
+        entry.check_bound(|input| self.app.blind(input))?;
         self.local_put(&key::journal(&entry.attempt()?), entry)
             .await
     }
@@ -2917,7 +2919,7 @@ impl Paykit {
         // The journal moves to `Attempted` with the batch's answer, never before.
         let mut attempted = entry.clone();
         attempted.stage = Stage::Attempted;
-        batch = batch.local(journal_write(&attempted)?);
+        batch = batch.local(self.journal_write(&attempted)?);
         if Box::pin(self.period_recovery_held(&entry)).await? {
             return Err(Refusal::NotNow(crate::loss::LOSS_DOUBT.into()).into());
         }
@@ -3318,7 +3320,7 @@ impl Paykit {
             Some(write) => {
                 let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
                     .entry(write)
-                    .local(journal_write(&finished)?);
+                    .local(self.journal_write(&finished)?);
                 match self.submit(batch).await {
                     Ok(_) => {}
                     Err(error) if error.code() == Some(ErrorCode::Conflict) => {
@@ -3380,9 +3382,10 @@ impl Paykit {
         if matches!(kind, Dispatch::First { .. }) {
             self.set_stage(&mut entry, Stage::Paying).await?;
         }
-        match Box::pin(self.payment_fence(&entry, payee, by, confirmed, kind)).await? {
-            FinalCheck::Pay => {}
-            stopped => return self.stopped_before_the_call(entry, kind, stopped).await,
+        match Box::pin(self.payment_fence(&entry, payee, by, confirmed, kind)).await {
+            Ok(FinalCheck::Pay) => {}
+            Ok(stopped) => return self.stopped_before_the_call(entry, kind, stopped).await,
+            Err(error) => return self.unread_at_the_fence(entry, kind, error).await,
         }
         let outcome = self.rail.pay(payment).await;
         // The call was made and the payment may be running, its outcome not known yet: only
@@ -3437,6 +3440,41 @@ impl Paykit {
             (Dispatch::First { .. }, stopped) => self.stopped_at_the_fence(entry, stopped).await,
             (Dispatch::Repeat { .. }, FinalCheck::Hold) => Ok(PayOutcome::Pending { attempt_id }),
             (Dispatch::Repeat { .. }, _) => Ok(PayOutcome::Uncertain { attempt_id }),
+        }
+    }
+
+    /// A dispatch whose fence failed, before the payment method's call: a read of the switch,
+    /// the store or the client failed, so nothing shows whether the payment may go now. The
+    /// failure is the caller's to see, never a pending payment. A repeat's entry stays
+    /// `Paying`, as the dispatch before it may have paid, and the error is returned.
+    ///
+    /// A first dispatch submitted nothing: it is written back to `Attempted`, known
+    /// unsubmitted, then written `failed`, as a refusal at the fence writes it (Paykit spec
+    /// 7.2 step 1), so a new payment may be made at once. A refusal is returned as the
+    /// failed attempt's cause; any other error as it is. The failed write needs the switch too: when it
+    /// can't be made, the entry stays `Attempted` and the fence's error is returned; a
+    /// resume writes the attempt `failed` later, and until then a new payment of the same
+    /// obligation is refused as in progress.
+    async fn unread_at_the_fence(
+        &mut self,
+        mut entry: JournalEntry,
+        kind: Dispatch,
+        error: PaykitError,
+    ) -> Result<PayOutcome> {
+        if !matches!(kind, Dispatch::First { .. }) {
+            return Err(error);
+        }
+        self.set_stage(&mut entry, Stage::Attempted).await?;
+        match self.write_outcome(&mut entry, false, false).await {
+            // Written failed: a refusal is the failed attempt's cause; any other error, such
+            // as the switch's own answer with its code and retry time, or a store failure, is
+            // returned as it is.
+            Ok(_) => match error.refusal() {
+                Some(why) => Err(Refusal::AttemptFailed(Box::new(why.clone())).into()),
+                None => Err(error),
+            },
+            // The failed write didn't go: the entry is `Attempted` still.
+            Err(_) => Err(error),
         }
     }
 
@@ -3695,7 +3733,7 @@ impl Paykit {
             };
             finished.record_held = false;
             finished.proof_msg_id = proof.as_ref().map(|p| p.msg_id().to_owned());
-            batch = batch.local(journal_write(&finished)?);
+            batch = batch.local(self.journal_write(&finished)?);
             if batch.is_empty() {
                 if let Some(PaidProof::New(proof)) = proof {
                     self.app.queue_signed(*proof).await?;
@@ -4922,10 +4960,11 @@ impl Paykit {
     ) -> Result<FinalCheck> {
         let mut may_take_answer = matches!(kind, Dispatch::First { .. });
         loop {
-            if self.dispatch_held(entry, by, kind).await.unwrap_or(true)
-                || Box::pin(self.period_recovery_held(entry))
-                    .await
-                    .unwrap_or(true)
+            // A check that fails here, a payment by hand's fresh reads or the store, is the
+            // caller's error, not a hold ([`Paykit::unread_at_the_fence`]). An automatic
+            // payment's checks take a read that fails as a hold themselves.
+            if self.dispatch_held(entry, by, kind).await?
+                || Box::pin(self.period_recovery_held(entry)).await?
             {
                 return Ok(FinalCheck::Hold);
             }

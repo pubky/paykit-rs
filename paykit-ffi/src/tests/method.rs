@@ -14,6 +14,13 @@ pub(super) struct Account {
     /// The clock the account stamps each payment's verified time from.
     clock: Arc<dyn pubky_switch_client::clock::Clock>,
     pub calls: AtomicUsize,
+    pub lookups: AtomicUsize,
+    /// The method declares a history it can look a payment up in.
+    pub history: AtomicBool,
+    /// A proof check never answers.
+    pub stall_verify: AtomicBool,
+    /// After its charge, `pay` throws instead of answering.
+    pub throw_after_charge: AtomicBool,
     pub park: AtomicBool,
     pub entered: Notify,
     pub finish: Notify,
@@ -33,6 +40,10 @@ impl Account {
             file,
             clock,
             calls: AtomicUsize::new(0),
+            lookups: AtomicUsize::new(0),
+            history: AtomicBool::new(true),
+            stall_verify: AtomicBool::new(false),
+            throw_after_charge: AtomicBool::new(false),
             park: AtomicBool::new(true),
             entered: Notify::new(),
             finish: Notify::new(),
@@ -58,7 +69,7 @@ impl PaymentMethod for Account {
         MethodDeclaration {
             idempotent: true,
             idempotency_retention_ms: None,
-            history: true,
+            history: self.history.load(Ordering::SeqCst),
             history_retention_ms: None,
             history_survives_restore: true,
             longest_completion_ms: 1000,
@@ -105,9 +116,15 @@ impl PaymentMethod for Account {
         if self.park.load(Ordering::SeqCst) {
             self.finish.notified().await;
         }
+        if self.throw_after_charge.load(Ordering::SeqCst) {
+            return Err(MethodError::Unavailable {
+                reason: "answer lost after the charge".into(),
+            });
+        }
         Ok(Self::paid(&p.attempt_id))
     }
     async fn payment(&self, id: String) -> Result<Option<MethodOutcome>, MethodError> {
+        self.lookups.fetch_add(1, Ordering::SeqCst);
         let paid = Connection::open(&self.file)
             .unwrap()
             .query_row("SELECT attempt FROM payments WHERE attempt=?1", [id], |r| {
@@ -150,6 +167,9 @@ impl PaymentMethod for Account {
         Ok(Some(rows.collect::<Result<_, _>>().unwrap()))
     }
     async fn verify(&self, p: MethodProof) -> Result<Option<u64>, MethodError> {
+        if self.stall_verify.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
         let proof: serde_json::Value = serde_json::from_slice(&p.proof_json).unwrap();
         if proof["payment"].as_str() != Some(p.attempt_id.as_str()) {
             return Ok(None);
@@ -174,10 +194,7 @@ async fn test_method_history_distinguishes_complete_empty_from_missing_and_unava
         directory.path(),
         Arc::new(pubky_switch_client::clock::TestClock::new(0)),
     ));
-    let rail = HostRail {
-        method: account.clone(),
-        identifiers: Vec::new(),
-    };
+    let rail = HostRail::new(account.clone(), Vec::new());
     let payer = [17; 32];
     assert_eq!(
         rail.allowance_history(payer).await.unwrap(),
@@ -196,13 +213,13 @@ async fn test_method_history_distinguishes_complete_empty_from_missing_and_unava
 fn test_method_declaration_forwards_the_payment_time_tolerance() {
     use paykit_sdk::Rail;
     let directory = tempfile::tempdir().unwrap();
-    let rail = HostRail {
-        method: Arc::new(Account::open(
+    let rail = HostRail::new(
+        Arc::new(Account::open(
             directory.path(),
             Arc::new(pubky_switch_client::clock::TestClock::new(0)),
         )),
-        identifiers: Vec::new(),
-    };
+        Vec::new(),
+    );
     assert_eq!(rail.declaration().payment_time_tolerance_ms, 7_200_000);
     assert_eq!(rail.declaration().longest_completion_ms, 1000);
 }
