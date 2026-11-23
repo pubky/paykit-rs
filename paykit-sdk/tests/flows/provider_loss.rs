@@ -3294,6 +3294,21 @@ async fn test_provider_loss_restored_dispatch_paid_whose_outcome_isnt_written_is
         Some(&Refusal::AlreadyPaid),
         "{again:?}"
     );
+    // Holding its proof, it is never marked `unknown`.
+    let unknown = app
+        .resolve_attempt(
+            &obligation,
+            attempt_id,
+            paykit_sdk::Resolution::Unknown,
+            UserConfirmed::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        unknown.refusal(),
+        Some(&Refusal::AlreadyPaid),
+        "{unknown:?}"
+    );
     app.resolve_attempt(
         &obligation,
         attempt_id,

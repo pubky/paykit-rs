@@ -733,6 +733,14 @@ impl Paykit {
             {
                 (Basis::Owner, None)
             }
+            // A restored dispatch the method reported paid is never marked `unknown`: it
+            // holds its proof (Paykit spec 7.2, "Failed means definitively not paid").
+            None if entry
+                .as_ref()
+                .is_some_and(|e| e.restored && e.open() && e.rail_proof.is_some()) =>
+            {
+                return Err(Refusal::AlreadyPaid.into())
+            }
             None => return Err(Refusal::NotFound.into()),
         };
         // An own payment the method reported made is never `failed` or `unknown`: either
