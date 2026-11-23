@@ -295,33 +295,21 @@ fn test_wallet_errors_kept_batch_makes_the_outcome_unknown() {
 
 #[test]
 fn test_kept_switch_refusals_retain_the_original_batch_and_recovery_generation() {
-    for pending in [false, true] {
-        let kept = AppError::Kept {
-            batch_id: [7; 16],
-            error: Box::new(AppError::Refused(AppRefusal::RecoveryRequired {
-                generation: 13,
-            })),
-        };
-        let error = if pending {
-            PaykitError::PublicEndpointChangePending(kept)
-        } else {
-            PaykitError::Client(kept)
-        };
-        // A recovery outranks the kept batch, and a pending public endpoint edit says so.
-        let (category, failure) = categorized(error.into()).unwrap();
-        assert_eq!(category, "recovery");
-        let code = if pending {
-            "public_endpoint_change_pending"
-        } else {
-            "recovery_required"
-        };
-        assert_eq!(failure.code, code);
-        assert_eq!(failure.kept_batch.as_deref(), Some([7; 16].as_slice()));
-        assert!(matches!(
-            failure.switch_refusal.clone().unwrap().kind(),
-            SwitchRefusalKind::RecoveryRequired { generation: 13 }
-        ));
-    }
+    let kept = AppError::Kept {
+        batch_id: [7; 16],
+        error: Box::new(AppError::Refused(AppRefusal::RecoveryRequired {
+            generation: 13,
+        })),
+    };
+    // A recovery outranks the kept batch, which the failure still names.
+    let (category, failure) = categorized(PaykitError::Client(kept).into()).unwrap();
+    assert_eq!(category, "recovery");
+    assert_eq!(failure.code, "recovery_required");
+    assert_eq!(failure.kept_batch.as_deref(), Some([7; 16].as_slice()));
+    assert!(matches!(
+        failure.switch_refusal.clone().unwrap().kind(),
+        SwitchRefusalKind::RecoveryRequired { generation: 13 }
+    ));
     let (category, failure) = categorized(AppError::Refused(AppRefusal::Gone).into()).unwrap();
     assert_eq!(category, "recovery");
     assert!(matches!(
@@ -557,7 +545,7 @@ fn every_other_failure() -> Vec<WalletError> {
         }));
     }
     errors.extend([
-        PaykitError::PublicEndpointChangePending(AppError::Transport(TransportError::Timeout)),
+        PaykitError::PublicEndpointChangePending(AppError::Refused(AppRefusal::NotNow(reason()))),
         PaykitError::Rail(RailError::Unavailable(reason())),
         PaykitError::Rail(RailError::Refused(reason())),
         PaykitError::Rail(RailError::InvalidSelection(reason())),
@@ -694,14 +682,14 @@ fn test_wallet_errors_match_the_host_guide_table() {
     let rows = guide_rows();
     let guide: BTreeMap<_, _> = rows.iter().cloned().collect();
     assert_eq!(guide.len(), rows.len(), "a code has two rows in the guide");
-    // An attempt that failed comes as its cause's case, which the table says in words.
-    assert_eq!(
-        guide.get("attempt_failed").map(String::as_str),
-        Some("as its cause")
-    );
-    produced.remove("attempt_failed");
+    // An attempt that failed, and a pending public endpoint change, come as their cause's
+    // case, which the table says in words.
     let mut guide = guide;
-    guide.remove("attempt_failed");
+    for code in ["attempt_failed", "public_endpoint_change_pending"] {
+        assert_eq!(guide.get(code).map(String::as_str), Some("as its cause"));
+        produced.remove(code);
+        guide.remove(code);
+    }
     for (code, case) in &produced {
         assert_eq!(
             guide.get(code).map(String::as_str),
@@ -942,26 +930,22 @@ fn meaning_of(case: &str) -> &'static str {
 
 #[test]
 fn test_wallet_errors_pending_endpoint_change_keeps_what_its_cause_needs() {
+    // The SDK builds it from a bare refusal of the Switch client to sign the own record: a
+    // sibling's policy, a read owed, or a stop of the client.
     for (inner, case) in [
-        (AppError::Transport(TransportError::Timeout), "retry_later"),
         (
             AppError::Refused(AppRefusal::Usage("expiry".into())),
             "needs_user",
         ),
         (
-            AppError::Refused(AppRefusal::WontDeliver(
-                pubky_switch_client::app::WontDeliver::GivenUp,
-            )),
+            AppError::Refused(AppRefusal::NotNow("a read owed".into())),
             "needs_user",
         ),
-        (AppError::Refused(AppRefusal::Gone), "recovery"),
         (
-            AppError::Kept {
-                batch_id: [4; 16],
-                error: Box::new(AppError::Transport(TransportError::Timeout)),
-            },
-            "outcome_unknown",
+            AppError::Refused(AppRefusal::RecoveryRequired { generation: 4 }),
+            "recovery",
         ),
+        (AppError::Refused(AppRefusal::Stopped), "recovery"),
     ] {
         let (found, failure) =
             categorized(PaykitError::PublicEndpointChangePending(inner).into()).unwrap();

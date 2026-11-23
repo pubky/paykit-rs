@@ -589,9 +589,10 @@ impl From<PaykitError> for WalletError {
                 }
                 _ => client_failure(error),
             },
-            // The edit is saved and published once what stopped its signing clears. A wait
-            // clears by itself; a recovery stays one; anything else needs the user or a
-            // sibling app to act, since the saved edit means "not sent" or "final" is untrue.
+            // The edit is saved and published once what stopped its signing clears. The SDK
+            // builds this from a refusal of the Switch client: a recovery stays one, kept
+            // batches ahead keep their doubt, and anything else needs the user or a sibling
+            // app to act, since the saved edit means "not sent" or "final" is untrue.
             PaykitError::PublicEndpointChangePending(error) => {
                 let (category, mut failure) = client_failure(error);
                 failure.code = "public_endpoint_change_pending".into();
