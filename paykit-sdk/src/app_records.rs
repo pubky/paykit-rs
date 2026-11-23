@@ -576,8 +576,8 @@ fn takes_part(record: &AppRecord, held: &[AppRecord], view: &RecordView, now: u6
 
 impl Paykit {
     /// Whether the payee app records this app keeps, judged now, still use `record`, the one
-    /// a public payment selected: no record later than it is usable, none conflicts with it,
-    /// and it isn't at or before the floor (Switch spec 4.2; Paykit spec 4). A payment that
+    /// a public payment selected, also as the earlier record kept under a conflict, and it
+    /// isn't at or before the floor (Switch spec 4.2; Paykit spec 4). A payment that
     /// reuses a read checks this before it pays, so it never pays a record the comparison it
     /// would make now has left behind. A local read only.
     pub(crate) async fn seen_still_uses(
@@ -591,8 +591,8 @@ impl Paykit {
         };
         let (view, _) = seen.view(payee, self.now())?;
         let hash = |r: &AppRecord| r.signed().doc_hash().ok();
+        // Under a conflict the record used is the earlier one the Switch rule keeps using.
         Ok(seen.admits(record)
-            && !view.in_conflict()
             && view
                 .used()
                 .is_some_and(|used| hash(used).is_some() && hash(used) == hash(record)))
