@@ -4252,3 +4252,133 @@ async fn test_executor_holds_a_period_whose_record_diverges_after_paying_is_jour
     assert!(world.rail.all_executions().is_empty());
     assert!(base.fired(), "the record diverged after Paying");
 }
+
+#[tokio::test]
+async fn test_executor_older_in_place_restore_keeps_a_kept_end_and_its_removal() {
+    // The executor is backed up with its Allowance granted. The shop then ends it: the
+    // executor reads the end, keeps it as the stop and removes the Allowance from its
+    // consent list, but the end's placement in the record doesn't reach the switch, and the
+    // read is acknowledged, so the inbox no longer holds the end. Restored in place from the
+    // older backup, with the shop sending nothing again, the installation's stop and
+    // removal stay: no payment goes under the ended Allowance (Paykit spec 8.3).
+    use pubky_switch_client::testing::Fault;
+    let storage = crate::common::store();
+    let (world, mut payer, mut shop, key) =
+        Box::pin(first_grant_in(storage.clone(), terms())).await;
+    world.rail.set_history_payer(payer.identity());
+    let request = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("5", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    let backup = payer.backup().await.unwrap();
+    let accepted = shop.allowances().await.unwrap().pop().unwrap();
+    Box::pin(shop.end_allowance(&accepted.record))
+        .await
+        .unwrap();
+    for _ in 0..4 {
+        world.alice.switch().fail_next(Fault::Unreachable {
+            path: "/ops".into(),
+            after: 0,
+        });
+    }
+    let _ = Box::pin(payer.receive(None)).await;
+    assert_eq!(
+        Box::pin(crate::allowances::consent_entry(&payer, &key)).await,
+        Some(json!({ "removed": { "reason": "ended" } }))
+    );
+    // The read is acknowledged once the switch answers again.
+    let mut flushed = payer.app_mut().flush_cursor().await;
+    for _ in 0..4 {
+        if flushed.is_ok() {
+            break;
+        }
+        flushed = payer.app_mut().flush_cursor().await;
+    }
+    flushed.unwrap();
+    drop(payer);
+    let mut restored = Box::pin(paykit_sdk::Paykit::restore(
+        world.env(&world.alice, storage),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&world.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        world.timer(),
+    ))
+    .await
+    .unwrap();
+    Box::pin(crate::common::finish_listing(&mut restored)).await;
+    let mut reconciled = Box::pin(restored.reconcile()).await;
+    for _ in 0..8 {
+        let Err(error) = &reconciled else { break };
+        assert!(
+            matches!(error.refusal(), Some(paykit_sdk::Refusal::NotNow(_))),
+            "{error}"
+        );
+        reconciled = Box::pin(restored.reconcile()).await;
+    }
+    reconciled.unwrap();
+    Box::pin(restored.end_reconcile(UserConfirmed::new()))
+        .await
+        .unwrap();
+    // The end is the stop the installation kept, and the ordinary passes place it in the
+    // Allowance record: the record shows it ended, with no stop left to place.
+    assert_eq!(
+        restored.allowance(&key).await.unwrap().status,
+        AllowanceStatus::Ended
+    );
+    assert!(restored
+        .app()
+        .protocol_scan("paykit", b"ae/")
+        .await
+        .unwrap()
+        .is_empty());
+    // The removal is the installation's: no confirmation of the user's brings the
+    // Allowance back.
+    assert_eq!(
+        Box::pin(crate::allowances::consent_entry(&restored, &key)).await,
+        Some(json!({ "removed": { "reason": "ended" } }))
+    );
+    let confirmed = Box::pin(restored.confirm_allowance_executor(&key, UserConfirmed::new())).await;
+    assert!(confirmed.is_err(), "{confirmed:?}");
+    let paid = Box::pin(restored.pay_under_allowance(&request, &key))
+        .await
+        .outcome;
+    assert!(
+        !matches!(paid, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "paid under an ended Allowance: {paid:?}"
+    );
+    assert!(world.rail.all_executions().is_empty());
+    // The ended Allowance stays ended. A new one, proposed to the shop and accepted, is
+    // granted and on the consent list.
+    let proposal = Box::pin(restored.propose_executable_allowance(
+        shop.identity(),
+        terms(),
+        UserConfirmed::new(),
+    ))
+    .await
+    .unwrap();
+    Box::pin(shop.receive(None)).await.unwrap();
+    let offer = shop
+        .allowances()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|a| a.allowance_id == proposal.allowance_id)
+        .unwrap();
+    Box::pin(shop.accept_allowance(&offer.record))
+        .await
+        .unwrap();
+    Box::pin(restored.receive(None)).await.unwrap();
+    Box::pin(restored.resume_allowance_executor(&proposal.record))
+        .await
+        .unwrap();
+    assert!(
+        restored
+            .allowance(&proposal.record)
+            .await
+            .unwrap()
+            .consented
+    );
+}

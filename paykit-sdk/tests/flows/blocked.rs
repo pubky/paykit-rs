@@ -3304,3 +3304,123 @@ async fn test_blocked_restore_reports_a_held_rejection_once_its_record_reads() {
     wallet.receive(None).await.unwrap();
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), after_asks);
 }
+
+/// Alice's wallet on `storage`, holding bob's one-time request, as [`received`] makes it.
+async fn received_on(
+    w: &World,
+    storage: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+) -> (Paykit, Paykit, RequestRef) {
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new().pay().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            storage,
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    (wallet, shop, request)
+}
+
+/// `backup` restored in place over the installation on `storage`, reconciled.
+async fn restored_in_place(
+    w: &World,
+    storage: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+    backup: &paykit_sdk::PaykitBackup,
+) -> Paykit {
+    let mut wallet = Paykit::restore(
+        w.env(&w.alice, storage),
+        PaykitConfig::default(),
+        backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet.reconcile().await.unwrap();
+    wallet
+        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+    wallet
+}
+
+#[tokio::test]
+async fn test_blocked_own_block_after_the_backup_survives_an_older_in_place_restore() {
+    // The wallet is backed up, then blocks bob while its switch doesn't answer: the block is
+    // kept as the installation's mark. Restored in place from the older backup, the mark
+    // stays and the block is written again, so the list at the switch holds bob and the
+    // payment is refused. The user can unblock bob again, and the unblock sticks (Paykit
+    // spec 8.1).
+    let w = World::new();
+    let storage = store();
+    let (mut wallet, _shop, request) = received_on(&w, std::sync::Arc::clone(&storage)).await;
+    let backup = wallet.backup().await.unwrap();
+    keep_ops(&w, 1);
+    wallet.block(&w.bob_id()).await.unwrap();
+    drop(wallet);
+    let mut wallet = restored_in_place(&w, storage, &backup).await;
+    wallet.receive(None).await.unwrap();
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(lists.deny.contains(&w.bob_id()));
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::Blocked { .. })),
+        "{refused:?}"
+    );
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(!lists.deny.contains(&w.bob_id()));
+}
+
+#[tokio::test]
+async fn test_blocked_held_rejection_after_the_backup_survives_an_older_in_place_restore() {
+    // The wallet is backed up holding bob's request, then blocks bob and rejects it: the
+    // rejection is in the request record, and its message is held, not sent. Restored in
+    // place from the older backup, the installation's held rejection stays, marked
+    // restored: the request stays rejected, and once bob is unblocked the rejection is
+    // reported as possibly delivered, for the user to send again, never sent on the
+    // restore's word (Paykit spec 8.1, "Blocked counterparties").
+    let w = World::new();
+    let storage = store();
+    let (mut wallet, mut shop, request) = received_on(&w, std::sync::Arc::clone(&storage)).await;
+    let backup = wallet.backup().await.unwrap();
+    wallet.block(&w.bob_id()).await.unwrap();
+    let msg_id = wallet.reject_request(&request, None).await.unwrap();
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"ha/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    drop(wallet);
+    let mut wallet = restored_in_place(&w, storage, &backup).await;
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        paykit_sdk::RequestStatus::Rejected
+    );
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(crate::common::possibly_delivered(&wallet, &msg_id).await);
+    // The request stays rejected; a new request of bob's is paid.
+    let next = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let options = crate::common::over_hold(&wallet, &next).await;
+    let paid = wallet.pay_request(&next, options).await.outcome.unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+}

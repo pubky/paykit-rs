@@ -3647,3 +3647,75 @@ async fn test_restore_rebuilds_a_priced_outcome_without_authorizing_another_disp
         .unwrap()
         .is_some());
 }
+
+#[tokio::test]
+async fn test_restore_older_in_place_keeps_a_kept_payee_cancellation() {
+    // The wallet is backed up holding bob's request. Bob then cancels it: the wallet keeps
+    // the cancellation as the stop, but its placement in the request record doesn't reach
+    // the switch, and the read is acknowledged, so the inbox no longer holds it. Restored in
+    // place from the older backup, the installation's stop stays: even once the user has
+    // seen the request may have been cancelled, it isn't paid (Paykit spec 8.1).
+    use pubky_switch_client::testing::Fault;
+    let w = World::new();
+    let storage = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&storage)).await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    let app_id = wallet.app_id();
+    for _ in 0..4 {
+        w.alice.switch().fail_next(Fault::Unreachable {
+            path: "/ops".into(),
+            after: 0,
+        });
+    }
+    crate::one_time::cancel_to(&w, &[app_id], request.request_hash);
+    let _ = wallet.receive(None).await;
+    let key = crate::one_time::stop_key(&w, &wallet, request.request_hash);
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", &key)
+        .await
+        .unwrap()
+        .is_some());
+    let mut flushed = wallet.app_mut().flush_cursor().await;
+    for _ in 0..4 {
+        if flushed.is_ok() {
+            break;
+        }
+        flushed = wallet.app_mut().flush_cursor().await;
+    }
+    flushed.unwrap();
+    drop(wallet);
+    let mut app = Paykit::restore(
+        w.env(&w.alice, storage),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    app.receive(None).await.unwrap();
+    app.reconcile().await.unwrap();
+    app.end_reconcile(UserConfirmed::new()).await.unwrap();
+    let options = crate::common::over_hold(&app, &request).await;
+    let paid = app.pay_request(&request, options).await.outcome;
+    assert!(
+        !matches!(paid, Ok(PayOutcome::Paid { .. })),
+        "paid a cancelled request: {paid:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    // The ordinary passes place the kept cancellation in the request record.
+    assert_eq!(
+        app.request(&request).await.unwrap().status,
+        RequestStatus::Cancelled
+    );
+    // The request stays cancelled; a new request of bob's is paid.
+    let next = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    app.receive(None).await.unwrap();
+    let options = crate::common::over_hold(&app, &next).await;
+    let paid = app.pay_request(&next, options).await.outcome.unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+}

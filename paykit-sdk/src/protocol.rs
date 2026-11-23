@@ -1428,7 +1428,92 @@ pub(crate) fn restore_paykit_layer(
     // A previous publication can outlive both the backup and a narrowed certificate.
     // Discovery waits until this app holds plain paykit_request (Paykit spec 8.4.1).
     writes.push(state::local_put(key::LIST_DISCOVERY, &true).map_err(|e| e.to_string())?);
+    keep_installation_stops(restoring, &binder, &mut writes)?;
     Ok(writes)
+}
+
+/// The installation's protective state, which an older backup restored in place can
+/// predate, is merged with the backup's as a union, never replaced by it:
+///
+/// - every stop it keeps: a payee's cancellation not yet placed in its request record
+///   (Paykit spec 8.1) and a counterparty's Allowance end not yet placed in its record
+///   (Paykit spec 8.3);
+/// - every Allowance it removed from its consent list, which stays removed for good (Paykit
+///   spec 8.3, "After a restore");
+/// - every answer it holds back, a rejection or a cancellation, marked restored as the
+///   backup's are, so it is reported, never sent on this restore's word (Paykit spec 8.1,
+///   "Blocked counterparties");
+/// - every block of its own the list doesn't show yet, which the restored app writes
+///   again (Paykit spec 8.1).
+///
+/// Each is read bound to its key, as every runtime read binds it; one that doesn't verify
+/// refuses the restore. An entry the backup also holds is kept as the backup holds it; a
+/// removal replaces the backup's entry for its Allowance, and the mark that this restore
+/// holds that consent goes with it.
+fn keep_installation_stops(
+    restoring: &RestoreContext<'_>,
+    binder: &state::Binder<'_>,
+    writes: &mut Vec<LocalWrite>,
+) -> Result<(), String> {
+    let written = |writes: &[LocalWrite], at: &[u8]| {
+        writes
+            .iter()
+            .any(|w| matches!(w, LocalWrite::Put { key, .. } if key.as_slice() == at))
+    };
+    for prefix in [key::KEPT_CANCELLATIONS, key::ALLOWANCE_ENDS] {
+        for (at, value) in restoring
+            .previous_local_scan(prefix.as_bytes())
+            .map_err(|_| "the installation's kept stops cannot be read")?
+        {
+            state::restored::<KeptMessage>(&at, &value, binder)
+                .map_err(|_| "the installation holds a kept stop that doesn't verify")?;
+            if !written(writes, &at) {
+                writes.push(LocalWrite::Put { key: at, value });
+            }
+        }
+    }
+    for (at, value) in restoring
+        .previous_local_scan(key::CONSENTS.as_bytes())
+        .map_err(|_| "the installation's consent list cannot be read")?
+    {
+        let entry = state::restored::<ConsentEntry>(&at, &value, binder)
+            .map_err(|_| "the installation holds a consent entry that doesn't verify")?;
+        if !matches!(entry.consent, crate::allowances::Consent::Removed { .. }) {
+            continue;
+        }
+        let Some(StateKey::Consent(record)) = StateKey::parse(&at) else {
+            return Err("the installation holds an invalid consent key".into());
+        };
+        let held = key::restore_consent(&record);
+        writes.retain(|w| {
+            !matches!(w, LocalWrite::Put { key, .. }
+                if key.as_slice() == at.as_slice() || key.as_slice() == held.as_bytes())
+        });
+        writes.push(LocalWrite::Put { key: at, value });
+    }
+    for (at, value) in restoring
+        .previous_local_scan(key::HELD_ANSWERS.as_bytes())
+        .map_err(|_| "the installation's held answers cannot be read")?
+    {
+        let mut answer = state::restored::<crate::hold::HeldAnswer>(&at, &value, binder)
+            .map_err(|_| "the installation holds a held answer that doesn't verify")?;
+        if !written(writes, &at) {
+            answer.restored = true;
+            let value = state::encode(&answer).map_err(|_| "a held answer cannot be retained")?;
+            writes.push(LocalWrite::Put { key: at, value });
+        }
+    }
+    for (at, value) in restoring
+        .previous_local_scan(key::OWN_BLOCKS.as_bytes())
+        .map_err(|_| "the installation's own blocks cannot be read")?
+    {
+        let mark = state::restored::<state::OwnBlockMark>(&at, &value, binder)
+            .map_err(|_| "the installation holds an own block that doesn't verify")?;
+        if mark.blocked() && !written(writes, &at) {
+            writes.push(LocalWrite::Put { key: at, value });
+        }
+    }
+    Ok(())
 }
 
 /// Refuses `backup` when the provider loss its Paykit layer keeps (`pl`) was recovered at a
