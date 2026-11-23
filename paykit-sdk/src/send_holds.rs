@@ -238,6 +238,8 @@ struct ClockState {
     /// The operation whose read of the time or of the lists failed: it reads the time no
     /// more ([`Paykit::observe_for_delivery`]).
     failed: Option<u64>,
+    /// The operation that read the lists, and the service time its answer verified.
+    lists_read: Option<(u64, u64)>,
 }
 
 impl DeliveryClock {
@@ -274,6 +276,22 @@ impl DeliveryClock {
         self.state
             .lock()
             .is_ok_and(|state| state.current.is_some() && state.failed == state.current)
+    }
+
+    /// Note that the current operation read the lists, its answer verifying `at_ms`.
+    pub(crate) fn lists_read(&self, at_ms: u64) {
+        if let Ok(mut state) = self.state.lock() {
+            state.lists_read = state.current.map(|op| (op, at_ms));
+        }
+    }
+
+    /// The service time the current operation's read of the lists verified, if it read them.
+    fn lists_read_at(&self) -> Option<u64> {
+        let state = self.state.lock().ok()?;
+        match (state.current, state.lists_read) {
+            (Some(op), Some((read, at_ms))) if op == read => Some(at_ms),
+            _ => None,
+        }
     }
 
     /// Keep what the client last told of the deny list: a gap's list, or `None`.
@@ -776,17 +794,30 @@ impl Paykit {
 
     /// Take a deny change or gap the client told (`lt`), after the read of the feed that
     /// told it: a gap whose list is the copy's, as this app's own reads of the lists owe one,
-    /// leaves the copy as it is; anything else, a restart included, reads the lists again,
+    /// or changes no later than the service time a read of the lists in this call verified,
+    /// leave the copy as it is; anything else, a restart included, reads the lists again,
     /// so the change takes effect before the sends that follow (Paykit spec 8.1, "Messages
     /// already queued"). A read that fails leaves the copy not known, as any does; one whose
     /// floor raise isn't answered leaves the raise owed (Paykit wire 5.6): neither ends the
     /// receive, only a store failure or an alarm does.
     pub(crate) async fn take_learned_lists(&mut self) -> Result<()> {
         let gap = self.protocol.delivery.take_gap();
-        if self.certificate_refused().is_some()
-            || self.local_get::<u64>(key::LISTS_TOLD).await?.is_none()
-        {
+        let Some(told) = self.local_get::<u64>(key::LISTS_TOLD).await? else {
             return Ok(());
+        };
+        if self.certificate_refused().is_some() {
+            return Ok(());
+        }
+        // Changes no later than a read this call already made are in the copy it took: that
+        // read isn't made again, nor the raise it left owed tried twice in one call (Paykit
+        // wire 5.6, Raising).
+        if self
+            .protocol
+            .delivery
+            .lists_read_at()
+            .is_some_and(|read| told <= read)
+        {
+            return self.local_delete(key::LISTS_TOLD).await;
         }
         if let Some(list) = gap {
             let mut list = self.judged_deny(list).await?.0;

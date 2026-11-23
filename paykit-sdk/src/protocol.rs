@@ -1958,16 +1958,17 @@ impl Protocol for PaykitProtocol {
     /// taken on the copy of the lists until they are read again, and the copy's deny list
     /// stays, so that read sees an unblock (Paykit spec 8.1, "Messages already queued";
     /// Paykit wire 5.6).
-    fn deny_list_changed(&self, _: &DenyListChange) -> Result<Vec<LocalWrite>, StoreFailure> {
+    fn deny_list_changed(&self, change: &DenyListChange) -> Result<Vec<LocalWrite>, StoreFailure> {
         self.delivery.learned(None);
-        Ok(vec![local_write(key::LISTS_TOLD, &1u64)?])
+        // Its service time, the latest of those told, as the feed tells them in order.
+        Ok(vec![local_write(key::LISTS_TOLD, &change.at_ms)?])
     }
 
     /// A gap in the deny list's history (Switch spec 8.3), taken as a change, with its list
     /// kept for the receive ([`Paykit::take_learned_lists`]).
     fn deny_list_gap(&self, gap: &DenyListGap) -> Result<Vec<LocalWrite>, StoreFailure> {
         self.delivery.learned(gap.list_read.then_some(&gap.denied));
-        Ok(vec![local_write(key::LISTS_TOLD, &1u64)?])
+        Ok(vec![local_write(key::LISTS_TOLD, &u64::MAX)?])
     }
 
     /// Entries the app can't read: ask the sender to send again (Paykit spec 9).

@@ -3382,6 +3382,9 @@ impl Paykit {
             self.put_service_time(&mut tx).await?;
             self.local_commit(tx).await?;
         }
+        if let Some(at) = verified {
+            self.protocol.delivery.lists_read(at);
+        }
         Ok(deny)
     }
 
