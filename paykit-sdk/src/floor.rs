@@ -345,6 +345,15 @@ fn write_base(held: Option<&[u8]>, seen: Option<&[u8]>, floor: Option<u64>) -> B
         .unwrap_or_else(|| BlockFloorRecord::new(floor.unwrap_or(0)))
 }
 
+/// Whether the switch's current floor write is one the app didn't take on the service's word
+/// alone (`not_taken`): its writer's standing can't be established, and it may hold a higher
+/// floor than the copy the app trusts, so no raise is written over it, below it or not; the
+/// raise waits as for a floor that can't be read until a write the app takes replaces it
+/// (Paykit wire 5.6, Seen floor and permanence).
+fn write_not_taken(held: Option<&SharedRecord>) -> bool {
+    held.is_some_and(|held| held.not_taken)
+}
+
 /// What a raise to `to_ms` does, from the shared floor and the floor the switch holds now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Raise {
@@ -724,15 +733,20 @@ impl Paykit {
         }
         let key = self.app.record_key(&floor_target(&self.identity()))?;
         if let Some(read) = self.floor_read_now().await? {
+            if write_not_taken(read.as_ref()) {
+                return Ok((SharedFloor::Unknown, None));
+            }
             let at_switch = value(read.as_ref());
             return Ok((self.floor_of_read(&key, read.as_ref()).await?, at_switch));
         }
         let copy = self.app.shared_record(&key).await?;
+        if write_not_taken(copy.as_ref()) {
+            return Ok((SharedFloor::Unknown, None));
+        }
         // A current write the app refused, a lower floor it ignores: the copy keeps the higher
         // floor it trusts, which the switch doesn't hold, so nothing at the switch spares the
         // raise, and it writes that floor over the write (Paykit wire 5.6, Seen floor and
-        // permanence). A write it didn't take on the service's word alone may hold a higher
-        // floor, and is never written over with a lower one.
+        // permanence).
         let at_switch = value(copy.as_ref().filter(|held| !held.flagged));
         if at_switch.is_some_and(|floor| floor >= to_ms) {
             return Ok((SharedFloor::Unknown, None));
@@ -1046,6 +1060,22 @@ mod tests {
 
     fn value(floor_ms: u64) -> RecordContent {
         RecordContent::Value(BlockFloorRecord::new(floor_ms).to_json().unwrap())
+    }
+
+    #[test]
+    fn test_floor_write_not_taken_holds_the_raise_a_refused_one_does_not() {
+        let taken = held(value(70), true, false);
+        assert!(!write_not_taken(None) && !write_not_taken(Some(&taken)));
+        let refused = SharedRecord {
+            flagged: true,
+            ..taken.clone()
+        };
+        assert!(!write_not_taken(Some(&refused)));
+        let not_taken = SharedRecord {
+            not_taken: true,
+            ..taken
+        };
+        assert!(write_not_taken(Some(&not_taken)));
     }
 
     #[test]
