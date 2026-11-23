@@ -3823,10 +3823,14 @@ async fn test_blocked_return_kept_floor_batch_holds_an_open_restore_verdict() {
         serde_json::json!("open"),
         "reconcile takes no verdict while the floor batch is kept"
     );
-    restored
+    let refused = restored
         .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
         .await
         .expect_err("reconcile mode waits for the kept floor batch");
+    assert!(
+        matches!(refused.refusal(), Some(paykit_sdk::Refusal::NotNow(why)) if why.contains("floor")),
+        "{refused:?}"
+    );
     assert_eq!(verdict(&restored).await, serde_json::json!("open"));
     // Once the batch lands, the verdict is decided. Faults left unused keep it a few reads
     // more.

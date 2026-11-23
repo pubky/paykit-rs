@@ -347,7 +347,9 @@ impl Paykit {
         let kept =
             |status: Option<KeptBatchStatus>| matches!(status, Some(KeptBatchStatus::Kept { .. }));
         if kept(self.app.kept_batch(id).await?) {
-            Box::pin(self.receive(None)).await?;
+            // What the read brings is the host's to see at its next receive.
+            let summary = Box::pin(self.receive(None)).await?;
+            self.remember_read(summary);
             if kept(self.app.kept_batch(id).await?) {
                 return Err(Refusal::NotNow(
                     "the executor grant's write waits to be sent again".into(),

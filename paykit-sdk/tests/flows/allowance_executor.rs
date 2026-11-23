@@ -3802,7 +3802,7 @@ async fn test_executor_resume_retried_without_a_read_lands_a_kept_grant() {
     // the kept batch again, builds no second grant, and consents (Paykit spec 8.3).
     use pubky_switch_client::testing::Fault;
     for applied in [true, false] {
-        let (world, mut payer, _shop, key) =
+        let (world, mut payer, mut shop, key) =
             Box::pin(accepted_not_granted(crate::common::store())).await;
         world.alice.switch().fail_next(if applied {
             Fault::LoseAnswer {
@@ -3818,12 +3818,25 @@ async fn test_executor_resume_retried_without_a_read_lands_a_kept_grant() {
             .await
             .expect_err("the grant's batch is kept");
         assert!(!Box::pin(granted(&payer, &key)).await, "{applied}");
+        // A request arrives meanwhile: the read that lands the grant takes it, and the
+        // host's next receive still tells of it.
+        Box::pin(request_from(
+            &mut shop,
+            world.alice_id(),
+            draft("1", world.clock.now_ms()),
+        ))
+        .await;
         Box::pin(payer.resume_allowance_executor(&key))
             .await
             .unwrap_or_else(|error| panic!("{applied}: {error:?}"));
         assert!(Box::pin(granted(&payer, &key)).await, "{applied}");
         assert!(payer.allowance(&key).await.unwrap().consented, "{applied}");
         assert_eq!(Box::pin(grants(&payer, &key)).await, 1, "{applied}");
+        let report = Box::pin(payer.receive(None)).await.unwrap();
+        assert!(
+            crate::allowances::received(&report, "paykit.payment_request"),
+            "{applied}: {report:?}"
+        );
     }
 }
 
@@ -3867,6 +3880,43 @@ async fn test_executor_notice_while_the_grant_batch_is_kept_is_kept_as_a_removal
     Box::pin(payer.resume_allowance_executor(&key))
         .await
         .expect_err("the notice removed the Allowance");
+    assert_eq!(
+        Box::pin(crate::allowances::consent_entry(&payer, &key)).await,
+        Some(json!({ "removed": { "reason": "ended" } }))
+    );
+}
+
+#[tokio::test]
+async fn test_executor_end_seen_before_the_consent_is_kept_as_a_removal() {
+    // The first grant's batch applies and its answer is lost. The shop ends the Allowance,
+    // and the wallet's next read both lands the kept grant and reads the end, before any
+    // consent exists. The end is kept as a removal: a resume consents nothing (Paykit spec
+    // 8.3, "even before it has added it").
+    use pubky_switch_client::testing::Fault;
+    let (world, mut payer, mut shop, key) =
+        Box::pin(accepted_not_granted(crate::common::store())).await;
+    world.alice.switch().fail_next(Fault::LoseAnswer {
+        path: "/ops".into(),
+    });
+    Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .expect_err("the grant's answer is lost");
+    let accepted = shop.allowances().await.unwrap().pop().unwrap();
+    Box::pin(shop.end_allowance(&accepted.record))
+        .await
+        .unwrap();
+    Box::pin(payer.receive(None)).await.unwrap();
+    assert!(
+        Box::pin(granted(&payer, &key)).await,
+        "the kept grant landed"
+    );
+    assert_eq!(
+        Box::pin(crate::allowances::consent_entry(&payer, &key)).await,
+        Some(json!({ "removed": { "reason": "ended" } }))
+    );
+    Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .expect_err("the Allowance ended");
     assert_eq!(
         Box::pin(crate::allowances::consent_entry(&payer, &key)).await,
         Some(json!({ "removed": { "reason": "ended" } }))

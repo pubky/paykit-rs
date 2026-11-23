@@ -72,7 +72,7 @@ fn refusal(error: &PaykitError) -> Option<&Refusal> {
 }
 
 /// Whether `summary` shows a message of `kind` received.
-fn received(summary: &paykit_sdk::ReceiveSummary, kind: &str) -> bool {
+pub(super) fn received(summary: &paykit_sdk::ReceiveSummary, kind: &str) -> bool {
     summary
         .report
         .events

@@ -259,7 +259,9 @@ application or unverified ledger change leaves the grant held. When the grant's
 write gets no answer, the Allowance isn't consented yet even if the grant later
 applies: retry `Paykit::resume_allowance_executor` until it succeeds. Each retry
 sends the kept grant again first, so no `receive` is needed in between, and no
-second grant is built. After a
+second grant is built. If the client instead gives the grant's batch up with an
+unknown outcome (`AppEvent::KeptBatchDropped`), the grant may have applied without
+this app's record of it, and the resume stays held. After a
 restore that isn't clean or a `missed` item, the user confirms again before the
 first grant, as for any Allowance that requires consent again: show the
 counterparty, terms and this executor before calling
