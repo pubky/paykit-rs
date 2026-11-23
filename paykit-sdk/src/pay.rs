@@ -2089,6 +2089,10 @@ impl Paykit {
         // The apps whose list record is paused: never asked for a newer list, by name or by
         // a request naming no app, which they could answer (Paykit spec 8.4, wire 4.14).
         let mut paused_apps: Vec<[u8; 16]> = Vec::new();
+        // Each list held over a paused record that holds no readable list, with its record:
+        // judged against the payee's identity.json below, like a readable list, before its
+        // pause counts.
+        let mut paused_held: Vec<([u8; 16], ListVersion, [u8; 32])> = Vec::new();
         // A held list that doesn't read, or is kept under another record's key, gives no
         // hint here and stops nothing: placing it reports it (Paykit wire 5.4).
         for (rest, kept) in self
@@ -2116,9 +2120,25 @@ impl Paykit {
                     }
                 }
                 None if Box::pin(self.pause_at(&record)).await?.blocks_by_hand() => {
-                    paused_apps.push(app_id);
+                    paused_held.push((app_id, version, record));
                 }
                 None => held_only.push((app_id, version)),
+            }
+        }
+        // A list kept over its record until the user confirms it, as one that came after
+        // the record was paused, names that record too (Paykit spec 6): its app is judged
+        // as one whose list is held over a paused record. A readable record's pause is
+        // judged with its list below.
+        for (app_id, version, record) in self.lists_kept_over(payee).await? {
+            if app.is_some_and(|a| a != app_id)
+                || lists.iter().any(|l| l.app_id == app_id)
+                || held_only.iter().any(|(a, _)| *a == app_id)
+                || paused_held.iter().any(|(a, _, _)| *a == app_id)
+            {
+                continue;
+            }
+            if Box::pin(self.pause_at(&record)).await?.blocks_by_hand() {
+                paused_held.push((app_id, version, record));
             }
         }
         // The newest pair the wallet holds of each app's list, installed or held over its
@@ -2146,7 +2166,7 @@ impl Paykit {
         // so it plays no part, paused or not, and only a list that would otherwise be usable
         // pauses the payment (Paykit spec 8.4). A read that fails is the payment's refusal:
         // without it, no list is taken as a current app's, nor as a removed app's.
-        let identity = if lists.is_empty() && held_only.is_empty() && paused_apps.is_empty() {
+        let identity = if lists.is_empty() && held_only.is_empty() && paused_held.is_empty() {
             None
         } else {
             match self
@@ -2182,6 +2202,27 @@ impl Paykit {
                     None => false,
                 }
             });
+        }
+        // A list held over a paused record is judged the same: of an app that copy doesn't
+        // count, it plays no part; of a higher generation, its pause counts for nothing, and
+        // its app is asked naming the pair held. Only then does its pause stop the payment
+        // and every request its app could answer (Paykit spec 8.4; wire 4.13, 4.14).
+        let mut paused_held_records: Vec<[u8; 32]> = Vec::new();
+        if let Some(identity) = &identity {
+            for (app_id, version, record) in paused_held {
+                if identity.doc.listed_cert(&app_id).is_none()
+                    || identity.doc.lists_removed(&app_id)
+                {
+                    continue;
+                }
+                if version.generation() > identity.doc.generation() {
+                    installed.push((app_id, version));
+                    ahead.push((app_id, version));
+                    continue;
+                }
+                paused_apps.push(app_id);
+                paused_held_records.push(record);
+            }
         }
         // A list whose record is divergent, or was seen so, may be stale: the upload may hold
         // a newer one, withdrawing or replacing a destination. None of its endpoints,
@@ -2326,9 +2367,10 @@ impl Paykit {
             }
         }
         held.extend(ahead);
-        // A current app of the payee's whose list the wallet holds none of, installed or held:
-        // a request naming it, with no pair, asks it too, beside the ones naming a pair, so a
-        // list that can be paid may come (Paykit spec 8.4, wire 4.14).
+        // A current app of the payee's whose list the wallet holds none of that counts, or
+        // whose installed list the destination check refuses: a request naming it, with no
+        // pair, asks it too, beside the ones naming a pair, so a list that can be paid may
+        // come (Paykit spec 8.4, wire 4.14).
         let others: Vec<[u8; 16]> = match (&identity, app) {
             (Some(identity), None) if !held.is_empty() || !paused_apps.is_empty() => identity
                 .doc
@@ -2338,7 +2380,6 @@ impl Paykit {
                 .map(|listed| listed.app_id)
                 .filter(|app_id| {
                     !identity.doc.lists_removed(app_id)
-                        && !installed.iter().any(|(a, _)| a == app_id)
                         && !held.iter().any(|(a, _)| a == app_id)
                         && !paused_apps.contains(app_id)
                 })
@@ -2405,6 +2446,15 @@ impl Paykit {
                 "a current Private Payment List is needed to quote this endpoint{note}"
             ))
             .into());
+        }
+        // With nothing to ask but a paused app, as a payment naming one, the payment waits for
+        // the user's confirmation of its record, not for a list (Paykit spec 8.4).
+        let asks_nothing = match app {
+            Some(app) => paused_apps.contains(&app),
+            None => held.is_empty() && others.is_empty() && !paused_apps.is_empty(),
+        };
+        if asks_nothing {
+            Box::pin(self.refuse_while_paused(&paused_held_records)).await?;
         }
         self.ask_for_lists(payee, app, &held, &installed, &others, &paused_apps)
             .await?;
