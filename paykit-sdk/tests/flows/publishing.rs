@@ -2487,6 +2487,7 @@ async fn give_up_withdrawal(shop: &mut Paykit, payer: [u8; 32]) -> ListPublicati
 #[tokio::test]
 async fn test_publication_reselecting_one_contact_retires_only_its_withdrawal_retry() {
     use crate::common::HOUR_MS;
+    use paykit_lib::ListVersion;
     use paykit_sdk::AppScopes;
 
     let w = World::new();
@@ -2494,7 +2495,17 @@ async fn test_publication_reselecting_one_contact_retires_only_its_withdrawal_re
     let mut carol = w
         .join(&w.carol, "carol", AppScopes::new().pay().build().unwrap())
         .await;
-    let mut shop = w.shop().await;
+    let mut shop = w
+        .join(
+            &w.bob,
+            "shop",
+            AppScopes::new()
+                .request()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+        )
+        .await;
     carol.app_mut().invite(&shop.identity()).await.unwrap();
     shop.set_list_endpoints(offered("lno1current"))
         .await
@@ -2512,12 +2523,35 @@ async fn test_publication_reselecting_one_contact_retires_only_its_withdrawal_re
     let reselected = published(&shop, &alice).await;
     assert_eq!(reselected.last().unwrap().version.counter(), 3);
     assert!(!reselected.last().unwrap().withdrawn);
+    shop.app_mut()
+        .remove_conversation(&carol.identity())
+        .await
+        .unwrap();
+    let before = shop.app_mut().allow_list().await.unwrap();
+    assert!(!before.contacts.contains(&carol.identity()));
+    assert!(!before
+        .conversations
+        .iter()
+        .any(|c| c.pubky == carol.identity()));
+    let before_retry = published(&shop, &carol).await;
+    assert_eq!(before_retry.len(), 1);
+    assert_eq!(before_retry[0].version, ListVersion::new(1, 1).unwrap());
+    assert!(!before_retry[0].withdrawn);
     w.clock.advance_ms(HOUR_MS / 2);
     shop.receive(None).await.unwrap();
     assert_eq!(published(&shop, &alice).await, reselected);
     let left = published(&shop, &carol).await;
-    assert_eq!(left.last().unwrap().version.counter(), 3);
-    assert!(left.last().unwrap().withdrawn);
+    assert_eq!(left.len(), 2);
+    assert_eq!(left[0], before_retry[0]);
+    let withdrawal = &left[1];
+    assert_eq!(withdrawal.version, ListVersion::new(1, 3).unwrap());
+    assert!(withdrawal.withdrawn);
+    assert_eq!(withdrawal.repeats, 0);
+    assert!(matches!(
+        shop.app().delivery(&withdrawal.id).await.unwrap(),
+        Some(pubky_switch_client::app::Delivery::Accepted { .. })
+    ));
+    assert_eq!(shop.app_mut().allow_list().await.unwrap(), before);
 
     // A second withdrawal starts from its own issue, even after the old interval elapsed.
     let second = give_up_withdrawal(&mut shop, alice.identity()).await;
@@ -2531,6 +2565,22 @@ async fn test_publication_reselecting_one_contact_retires_only_its_withdrawal_re
     assert_eq!(latest.last().unwrap().version.counter(), 5);
     assert!(latest.last().unwrap().withdrawn);
     assert_eq!(published(&shop, &carol).await, left);
+
+    let before_resend = shop.app_mut().allow_list().await.unwrap();
+    assert_eq!(before_resend, before);
+    assert!(matches!(
+        shop.app_mut().resend(&withdrawal.id).await.unwrap(),
+        pubky_switch_client::app::Delivery::Accepted { .. }
+    ));
+    let resent = published(&shop, &carol).await;
+    assert_eq!(
+        resent.last().unwrap(),
+        &Published {
+            repeats: 1,
+            ..withdrawal.clone()
+        }
+    );
+    assert_eq!(shop.app_mut().allow_list().await.unwrap(), before_resend);
 }
 
 #[tokio::test]

@@ -679,7 +679,7 @@ async fn test_unrequested_list_after_a_delete_stays_held_and_its_single_use_endp
         assert!(
             matches!(
                 refused.as_ref().err().and_then(|e| e.refusal()),
-                Some(Refusal::WaitingForList)
+                Some(Refusal::WaitingForList { .. })
             ),
             "{refused:?}"
         );
@@ -1556,7 +1556,7 @@ async fn test_unrequested_list_held_over_a_forgotten_delete_stays_held_after_a_f
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert_eq!(w.rail.all_executions().len(), 1);
