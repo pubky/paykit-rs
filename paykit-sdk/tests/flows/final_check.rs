@@ -2942,11 +2942,12 @@ async fn test_resume_reports_every_entry_whose_write_is_held_behind_a_kept_batch
 
 #[tokio::test]
 async fn test_resume_ends_at_the_switchs_answer_that_the_wallet_must_stop() {
-    // The made payment's outcome write is answered that the app is no longer current, or
-    // that the account awaits a recovery: a stop of the wallet as a whole. The resume
+    // The made payment's outcome write is answered that the app is no longer current, that
+    // its certificate expired, or that the account awaits a recovery: a stop of the wallet
+    // as a whole. The resume
     // returns it and asks the method about no later entry, so the second stays `Paying`.
     use pubky_switch_core::http::ErrorCode as E;
-    for code in [E::NotCurrent, E::RecoveryRequired] {
+    for code in [E::NotCurrent, E::CertExpired, E::RecoveryRequired] {
         let (w, mut wallet, attempt_id, _) = made_then_in_flight().await;
         w.rail.settle(&attempt_id, true);
         w.alice

@@ -915,8 +915,9 @@ fn repeat_hold(held: Held, attempt_id: AttemptId) -> Result<PayOutcome> {
 
 /// Whether `error` stops the wallet as a whole: an alarm, the local store failing, the
 /// Switch client's word that the app stopped, left or is gone, holds a recovery notice, or
-/// has a restore question open, or the switch's answer that the app is no longer current or
-/// that the account awaits a recovery (Switch spec 3.6, 12.2, 12.3, 12.4, Switch wire 7.6).
+/// has a restore question open, or the switch's answer that the app is no longer current, that
+/// its certificate expired, or that the account awaits a recovery (Switch spec 3.6, 8.2, 12.2,
+/// 12.3, 12.4, Switch wire 7.6).
 /// A resume ends at it at once and returns it: nothing more is written, looked up or
 /// pruned.
 pub(crate) fn stops_resume(error: &PaykitError) -> bool {
@@ -924,7 +925,10 @@ pub(crate) fn stops_resume(error: &PaykitError) -> bool {
     let PaykitError::Client(client) = error else {
         return false;
     };
-    if matches!(error.code(), Some(E::NotCurrent | E::RecoveryRequired)) {
+    if matches!(
+        error.code(),
+        Some(E::NotCurrent | E::CertExpired | E::RecoveryRequired)
+    ) {
         return true;
     }
     matches!(
@@ -4352,7 +4356,7 @@ impl Paykit {
     /// A wallet-wide stop, at which the resume ends at once: an alarm, a store failure, the
     /// Switch client's word that the app stopped, left or is gone, holds a recovery notice
     /// or has a restore question open, or the switch's answer that the app is no longer
-    /// current or that the account awaits a recovery. The client's and the rail's errors
+    /// current, that its certificate expired, or that the account awaits a recovery. The client's and the rail's errors
     /// from the work before and after the entries: the first read, the first flush, the
     /// recheck of failed attempts, the ledger and pruning.
     pub async fn resume_payments(&mut self) -> Result<Vec<PayOutcome>> {
@@ -5909,6 +5913,7 @@ mod tests {
         // So does the switch's answer that the app is no longer current, or that the account
         // awaits a recovery.
         assert!(stops_resume(&answer(E::NotCurrent)));
+        assert!(stops_resume(&answer(E::CertExpired)));
         assert!(stops_resume(&answer(E::RecoveryRequired)));
         // One entry's wait, refusal, conflict or network failure leaves only that entry.
         for left in [
