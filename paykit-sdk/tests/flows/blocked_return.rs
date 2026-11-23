@@ -4580,6 +4580,53 @@ async fn unblocked_by_another_app_under_the_hold(w: &World) -> (Paykit, Paykit, 
 }
 
 #[tokio::test]
+async fn test_blocked_return_raise_writes_the_floor_held_over_a_lower_write_refused() {
+    // Paykit wire 5.6, Seen floor and permanence: the wallet holds a floor and another app
+    // writes a lower one, which the wallet refuses, keeping the higher. The switch holds the
+    // lower write, so the raise the wallet owes for another app's unblock isn't spared by the
+    // floor it holds: it writes that higher floor over the lower write.
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    dropped_for_the_block(&w, &mut wallet, &mut shop).await;
+    let high = w.clock.now_ms() + 24 * 60 * MINUTE_MS;
+    let mut phone = payer_app(&w, "phone").await;
+    for floor in [high, 1] {
+        phone
+            .app_mut()
+            .put_record(
+                &floor_record(&w),
+                &paykit_lib::records::BlockFloorRecord::new(floor)
+                    .to_json()
+                    .unwrap(),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(shared_floor(&wallet).await, Some(high));
+    let mut contacts = w
+        .join_with(
+            &w.alice,
+            "contacts",
+            AppScopes::new().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            store(),
+        )
+        .await;
+    contacts.unblock(&w.bob_id()).await.unwrap();
+    for _ in 0..2 {
+        w.clock.advance_ms(11 * MINUTE_MS);
+        wallet.receive(None).await.unwrap();
+    }
+    assert!(!unblock_raise_owed(&wallet).await);
+    let mut reader = payer_app(&w, "reader").await;
+    reader.receive(None).await.unwrap();
+    assert_eq!(shared_floor(&reader).await, Some(high));
+}
+
+#[tokio::test]
 async fn test_blocked_return_request_held_for_the_raise_dropped_once_its_sender_is_blocked_again() {
     // Paykit wire 5.6, Raising: another app unblocks bob under the hold, so the wallet owes
     // the raise for him, and his one-time request waits for it. He is blocked again: at the

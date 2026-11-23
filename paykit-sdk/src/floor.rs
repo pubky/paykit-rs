@@ -728,7 +728,12 @@ impl Paykit {
             return Ok((self.floor_of_read(&key, read.as_ref()).await?, at_switch));
         }
         let copy = self.app.shared_record(&key).await?;
-        let at_switch = value(copy.as_ref());
+        // A current write the app refused, a lower floor it ignores: the copy keeps the higher
+        // floor it trusts, which the switch doesn't hold, so nothing at the switch spares the
+        // raise, and it writes that floor over the write (Paykit wire 5.6, Seen floor and
+        // permanence). A write it didn't take on the service's word alone may hold a higher
+        // floor, and is never written over with a lower one.
+        let at_switch = value(copy.as_ref().filter(|held| !held.flagged));
         if at_switch.is_some_and(|floor| floor >= to_ms) {
             return Ok((SharedFloor::Unknown, None));
         }
