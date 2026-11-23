@@ -237,7 +237,8 @@ pub enum RefusalKind {
     /// The call doesn't apply now: the text says why.
     NotNow,
     /// The identity's block floor is held after it was seen divergent: no unblock or widening
-    /// that needs a raise goes, and retrying changes nothing.
+    /// that needs a raise goes, and retrying changes nothing until the shared post-loss hold
+    /// stands too.
     FloorHeld,
     /// A value the protocol or the host gave breaks a rule: the text names it.
     Usage,

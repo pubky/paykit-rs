@@ -505,3 +505,106 @@ async fn unblock_owed(app: &Paykit) -> bool {
         .unwrap()
         .is_some()
 }
+
+#[tokio::test]
+async fn test_shared_hold_unblocks_under_both_holds_while_the_floor_cant_be_read() {
+    // Paykit spec 8.1; Paykit wire 5.6, Unblocking under the divergence hold: under both
+    // holds the user's unblock goes without the raise even while the floor can't be read,
+    // here while a wider certificate's scope keys are awaited.
+    let w = World::new();
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            paykit_sdk::AppScopes::new()
+                .pay()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+            PaykitConfig::default(),
+            store(),
+        )
+        .await;
+    let me = wallet.app_id();
+    wallet.app_mut().invite(&w.carol_id()).await.unwrap();
+    wallet.block(&w.carol_id()).await.unwrap();
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            "block_floor",
+            paykit_lib::collections::Collection::BlockFloor.fixed_policy(),
+        ),
+        &paykit_lib::derive::natural_key::block_floor(&w.alice_id()),
+    );
+    wallet
+        .app_mut()
+        .put_record(
+            &target,
+            &paykit_lib::records::BlockFloorRecord::new(1)
+                .to_json()
+                .unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let key = wallet.app().record_key(&target).unwrap();
+    w.alice
+        .switch()
+        .make_divergent([0x5c; 16], key, [3; 32])
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(60_000);
+    let next = declare_loss(&w);
+    follow_loss(&mut wallet).await;
+    // Renewed at the new service to read more, the new scope's keys not given: the floor
+    // can't be read now.
+    let first = wallet.app().cert().clone();
+    let scopes = paykit_sdk::AppScopes::new()
+        .pay()
+        .manage_contacts()
+        .request()
+        .build()
+        .unwrap();
+    let names: Vec<&str> = scopes.scopes.iter().map(String::as_str).collect();
+    let wider = pubky_switch_client::testing::issue_cert(
+        w.alice.identity().key(),
+        &w.alice.identity().app_keys("wallet"),
+        &pubky_switch_client::testing::AppSpec::new(&names).with_permissions(&scopes.permissions),
+        w.clock.now_ms() + 1_000,
+    )
+    .unwrap();
+    next.signer_op(pubky_switch_core::ops::OpKind::CertPut {
+        target_app_id: me,
+        cert: wider.signed().clone(),
+    })
+    .unwrap();
+    let _ = wallet.receive(None).await;
+    let doc = w
+        .alice
+        .sign_next(|body| {
+            body.apps.retain(|listed| listed.app_id != me);
+            body.apps.push(pubky_switch_core::records::ListedApp {
+                app_id: me,
+                cert: wider.hash(),
+            });
+            body.renewed.push(pubky_switch_core::records::RenewedCert {
+                app_id: me,
+                cert: first.hash(),
+                until: None,
+            });
+        })
+        .unwrap();
+    next.deliver_identity(&doc).unwrap();
+    for _ in 0..2 {
+        let _ = wallet.receive(None).await;
+    }
+    assert_eq!(wallet.app().cert().hash(), wider.hash());
+    assert!(wallet.app().own_identity().body().recovery_from.is_some());
+    wallet.unblock(&w.carol_id()).await.unwrap();
+    assert!(!wallet
+        .app_mut()
+        .allow_list()
+        .await
+        .unwrap()
+        .deny
+        .contains(&w.carol_id()));
+}

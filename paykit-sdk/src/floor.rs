@@ -745,6 +745,12 @@ impl Paykit {
     /// [`Refusal::FloorHeld`] while the divergence hold stands without the shared post-loss
     /// hold; [`Refusal::NotNow`] while the floor can't be read; the client's errors.
     async fn floor_batch(&mut self, to_ms: u64) -> Result<Option<OpBatch>> {
+        // Under both holds the unblock or widening goes without the raise, whatever the floor
+        // reads now, even while it can't be read (Paykit wire 5.6, Unblocking under the
+        // divergence hold).
+        if self.floor_kept().await?.divergent && self.shared_loss_hold().await? {
+            return Ok(None);
+        }
         let (shared, at_switch) = self.floor_for_write(to_ms).await?;
         let (floor, to) = match raise_of(shared, at_switch, to_ms) {
             Raise::Spared => return Ok(None),

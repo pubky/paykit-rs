@@ -107,7 +107,8 @@ pub enum NoticeKind {
     /// The identity's block floor was seen divergent after a provider loss and is held for
     /// good (Paykit wire 5.6, Divergent floor): no automatic one-time payment goes, every
     /// one-time request is paid only by hand, and an unblock or a widening that needs the
-    /// floor raised waits ([`crate::Refusal::FloorHeld`]). Raised when the hold is first kept
+    /// floor raised waits ([`crate::Refusal::FloorHeld`]), unless the shared post-loss hold
+    /// stands too, when it goes without the raise. Raised when the hold is first kept
     /// and again at each load while it stands; it names no attempt, message or counterparty.
     BlockFloorHeld,
     /// A block floor raise this wallet owes was tried and isn't written, with no divergence

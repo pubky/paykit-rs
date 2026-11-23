@@ -1632,7 +1632,6 @@ async fn test_provider_loss_the_final_activity_read_precedes_the_payment_method_
     assert_eq!(executions(&w), 1);
 }
 
-/// The doubt a payment was refused with, as [`Refusal::MayBePaid`] shows it.
 /// Whether `outcome` is the refusal of an automatic payment under the shared post-loss hold
 /// (Paykit spec 8.1).
 pub(super) fn held_after_loss(outcome: &paykit_sdk::Result<PayOutcome>) -> bool {
@@ -1642,6 +1641,7 @@ pub(super) fn held_after_loss(outcome: &paykit_sdk::Result<PayOutcome>) -> bool 
     )
 }
 
+/// The doubt a payment was refused with, as [`Refusal::MayBePaid`] shows it.
 pub(crate) fn doubt_of(paid: &paykit_sdk::Result<PayOutcome>) -> PaymentDoubt {
     match paid.as_ref().err().and_then(PaykitError::refusal) {
         Some(Refusal::MayBePaid {
