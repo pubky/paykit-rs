@@ -103,7 +103,10 @@ async fn issue() -> Payment {
         .unwrap()
         .to_vec();
     let id = rail
-        .settlement_id(rail.last.lock().unwrap().as_ref().unwrap())
+        .settlement_id(
+            &crate::common::endpoint("btc-lightning-bolt12"),
+            rail.last.lock().unwrap().as_ref().unwrap(),
+        )
         .unwrap();
     let target = target(&paykit_lib::derive::natural_key::payee_payment_record(
         &endpoint("btc-lightning-bolt12"),

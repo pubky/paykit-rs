@@ -1126,6 +1126,14 @@ impl paykit_sdk::Rail for ShiftingRail {
     > {
         self.fake.verify(check)
     }
+
+    fn settlement_id(
+        &self,
+        endpoint_id: &paykit_lib::PaymentEndpointIdentifier,
+        proof: &serde_json::Map<String, serde_json::Value>,
+    ) -> Option<Vec<u8>> {
+        self.fake.settlement_id(endpoint_id, proof)
+    }
 }
 
 #[tokio::test]

@@ -24,8 +24,9 @@ use pubky_switch_core::sealed::{aad, pad, RecordValue, SealedValue};
 use serde_json::Value;
 
 use crate::common::{
-    arr, b64n, generated, hex, message_json, paykit, pubky, quoted, recertified, st, unhex32,
-    writing, Keys, Place, ALICE, ALLOWANCE_ID, BOB, UNREQUESTED_TXID,
+    arr, b64n, example_settlement, generated, hex, message_json, paykit, pubky, quoted,
+    recertified, st, unhex32, writing, Keys, Place, ALICE, ALLOWANCE_ID, BOB,
+    UNREQUESTED_SETTLEMENT,
 };
 
 #[test]
@@ -451,6 +452,7 @@ fn check_labelled(keys: &Keys, l: &Value) {
         &nk,
         &record_key,
         Some(&shop1),
+        &example_settlement,
     )
     .unwrap();
     assert_eq!(
@@ -467,7 +469,9 @@ fn check_labelled(keys: &Keys, l: &Value) {
         request_hash(&message_json("payment_request_acceptance_labelled"))
     );
     assert_ne!(
-        record.record_key(&bob, &nk, None).unwrap(),
+        record
+            .record_key(&bob, &nk, None, &example_settlement)
+            .unwrap(),
         record_key,
         "the fixed policy's key is another"
     );
@@ -486,7 +490,9 @@ fn check_labelled(keys: &Keys, l: &Value) {
         );
         let read = ActivityRecord::read(value(case), &bob, ActivitySide::Payee).unwrap();
         assert_eq!(
-            b64(&read.record_key(&bob, &nk, label.as_ref()).unwrap()),
+            b64(&read
+                .record_key(&bob, &nk, label.as_ref(), &example_settlement)
+                .unwrap()),
             st(case, "record_key"),
             "{name}"
         );
@@ -497,6 +503,7 @@ fn check_labelled(keys: &Keys, l: &Value) {
             &nk,
             &key(case),
             label.as_ref(),
+            &example_settlement,
         )
         .unwrap_err()
         .to_string();
@@ -524,12 +531,17 @@ fn check_labelled(keys: &Keys, l: &Value) {
         &anks,
         &key(&case),
         None,
+        &example_settlement,
     )
     .unwrap();
     assert_eq!(payer.to_json().unwrap(), value(&case));
     assert_eq!(
-        payer.record_key(&alice, &anks, Some(&shop1)).unwrap(),
-        payer.record_key(&alice, &anks, None).unwrap()
+        payer
+            .record_key(&alice, &anks, Some(&shop1), &example_settlement)
+            .unwrap(),
+        payer
+            .record_key(&alice, &anks, None, &example_settlement)
+            .unwrap()
     );
 }
 
@@ -648,8 +660,13 @@ fn reader(record: &ActivityRecord) -> [u8; 32] {
 /// The record key of `base` with its reader's naming key, under the fixed policy.
 fn base_key(keys: &Keys, base: &ActivityRecord) -> [u8; 32] {
     let own = reader(base);
-    base.record_key(&own, &keys.identity(&own).naming_key(), None)
-        .unwrap()
+    base.record_key(
+        &own,
+        &keys.identity(&own).naming_key(),
+        None,
+        &example_settlement,
+    )
+    .unwrap()
 }
 
 /// Bind `value`, a record of `side`, at `key` under the fixed policy, as its reader.
@@ -670,6 +687,7 @@ fn bind_activity(
         &keys.identity(&own).naming_key(),
         key,
         None,
+        &example_settlement,
     )
 }
 
@@ -1719,7 +1737,9 @@ fn labelled_cases(keys: &Keys) -> Vec<(Place<'static>, Value)> {
             ),
             (
                 Place::At(format!("{at}/record_key")),
-                json!(b64(&read.record_key(&bob, &nk, label.as_ref()).unwrap())),
+                json!(b64(&read
+                    .record_key(&bob, &nk, label.as_ref(), &example_settlement)
+                    .unwrap())),
             ),
             (Place::At(format!("{at}/value")), json!(value)),
         ]);
@@ -5117,8 +5137,8 @@ fn test_activity_record_attempted_entry_naming_no_period_drops_without_a_claim()
 const SETTLEMENT_MARKS_DESCRIPTION: &str = "Wire 1.5, 5.7, spec 6: settlement bucket \
 values, their derivations and sealed encodings. accepted holds bob's one-time request, \
 Billing Period and payment-without-request marks. Each settlement ID is the lower-case hex \
-seed sealed/settlement_marks/<kind>/txid, except kind 3 which uses identifiers.json's \
-bitcoin-txid settlement. The occurrence keys refer to the requests in messages.json; kind 2 \
+seed sealed/settlement_marks/<kind>/settlement, as UTF-8 text bytes given rather than read \
+from a proof, except kind 3 which uses identifiers.json's settlement_id. The occurrence keys refer to the requests in messages.json; kind 2 \
 uses the February period starting at 1772236800. Bucket, record key and mark tags follow \
 wire 1.5 under bob's naming key. The fixed policy reads and writes paykit_settlements. \
 Values are sealed at data epoch 1 with its key from keys.json, the nonce seed \
@@ -5143,7 +5163,7 @@ struct Credited {
     occurrence: Vec<u8>,
 }
 
-/// The seed label of a `settlement_marks` value of `kind`, by its use (`txid` or `nonce`).
+/// The seed label of a `settlement_marks` value of `kind`, by its use (`settlement` or `nonce`).
 fn settlement_seed_label(kind: OccurrenceKind, what: &str) -> String {
     format!("sealed/settlement_marks/{}/{what}", kind.code())
 }
@@ -5151,12 +5171,17 @@ fn settlement_seed_label(kind: OccurrenceKind, what: &str) -> String {
 /// The settlements `settlement_marks` credits, one of each kind.
 fn credited() -> [Credited; 3] {
     let bob = pubky(BOB);
-    let txid = |kind| hex(&crate::common::seed(&settlement_seed_label(kind, "txid")));
+    let settlement = |kind| {
+        hex(&crate::common::seed(&settlement_seed_label(
+            kind,
+            "settlement",
+        )))
+    };
     [
         Credited {
             name: "a one-time request's mark",
             kind: OccurrenceKind::OneTimeRequest,
-            settlement_id: txid(OccurrenceKind::OneTimeRequest),
+            settlement_id: settlement(OccurrenceKind::OneTimeRequest),
             occurrence: natural_key::request_record(
                 &bob,
                 &request_hash(&message_json("payment_request")),
@@ -5165,7 +5190,7 @@ fn credited() -> [Credited; 3] {
         Credited {
             name: "a Billing Period's mark",
             kind: OccurrenceKind::BillingPeriod,
-            settlement_id: txid(OccurrenceKind::BillingPeriod),
+            settlement_id: settlement(OccurrenceKind::BillingPeriod),
             occurrence: natural_key::period_record(
                 &bob,
                 &request_hash(&message_json("payment_request_recurring")),
@@ -5175,10 +5200,10 @@ fn credited() -> [Credited; 3] {
         Credited {
             name: "a payment without a request's mark",
             kind: OccurrenceKind::PaymentWithoutRequest,
-            settlement_id: UNREQUESTED_TXID.to_owned(),
+            settlement_id: UNREQUESTED_SETTLEMENT.to_owned(),
             occurrence: natural_key::payee_payment_record(
                 &PaymentEndpointIdentifier::parse("btc-bitcoin-p2wpkh").unwrap(),
-                UNREQUESTED_TXID.as_bytes(),
+                UNREQUESTED_SETTLEMENT.as_bytes(),
             ),
         },
     ]

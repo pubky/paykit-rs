@@ -199,9 +199,21 @@ pub const APPS: [AppSeed; 6] = [
 /// The extension kind bob's `cap` app accepts, under its scope `paykit_ext:paykit-cap`.
 pub const CAP_EXTENSION_KIND: &str = "paykit-cap.offer";
 
-/// The `bitcoin-txid` settlement of the vectors' payment without a request (Paykit wire 1.5).
-pub const UNREQUESTED_TXID: &str =
+/// The settlement ID of the vectors' payment without a request, as given bytes: the set's
+/// proofs are of no real payment method, and Paykit reads none of them (Paykit wire 1.5).
+pub const UNREQUESTED_SETTLEMENT: &str =
     "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b";
+
+/// The settlement reader of the set's example payment method, as a rail would supply it:
+/// its proof `{ "example": ... }` of the payment without a request names
+/// [`UNREQUESTED_SETTLEMENT`], and every other proof names none (Paykit wire 1.5).
+pub fn example_settlement(
+    _: &paykit_lib::PaymentEndpointIdentifier,
+    proof: &serde_json::Map<String, Value>,
+) -> Option<Vec<u8>> {
+    (proof.get("example").and_then(Value::as_str) == Some(UNREQUESTED_SETTLEMENT))
+        .then(|| UNREQUESTED_SETTLEMENT.as_bytes().to_vec())
+}
 
 /// The label of bob's labelled selling scope, which his `hosted` app holds.
 pub const SHOP1: &str = "shop1";

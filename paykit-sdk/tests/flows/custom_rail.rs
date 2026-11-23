@@ -23,7 +23,7 @@ use serde_json::{json, Map, Value};
 use crate::common::{btc, endpoint, list_version, store, World};
 
 /// The fake rail, as a ledger whose proofs read `{ "type": "x-ledger", "entry": ... }`
-/// rather than the `bitcoin-txid` spelling `paykit-lib` knows.
+/// rather than the fake rail's own spelling.
 struct LedgerRail {
     fake: Arc<FakeRail>,
     last: Mutex<Option<Map<String, Value>>>,
@@ -33,14 +33,14 @@ struct LedgerRail {
 }
 
 fn to_ledger(proof: &Map<String, Value>) -> Map<String, Value> {
-    json!({ "type": "x-ledger", "entry": proof["txid"] })
+    json!({ "type": "x-ledger", "entry": proof["tx"] })
         .as_object()
         .cloned()
         .unwrap()
 }
 
 fn to_fake(proof: &Map<String, Value>) -> Map<String, Value> {
-    json!({ "type": "bitcoin-txid", "txid": proof["entry"] })
+    json!({ "rail": "fake", "tx": proof["entry"] })
         .as_object()
         .cloned()
         .unwrap()
@@ -116,7 +116,11 @@ impl Rail for LedgerRail {
     }
 
     /// The ledger's entry names its settlement.
-    fn settlement_id(&self, proof: &Map<String, Value>) -> Option<Vec<u8>> {
+    fn settlement_id(
+        &self,
+        _: &paykit_lib::PaymentEndpointIdentifier,
+        proof: &Map<String, Value>,
+    ) -> Option<Vec<u8>> {
         if !self.supplies_id {
             return None;
         }
@@ -249,15 +253,57 @@ async fn test_custom_rail_proof_credited_once_per_settlement() {
     );
     shop.receive(None).await.unwrap();
     assert_eq!(shop.payee_activity().await.unwrap().len(), 2);
-    // A proof whose spelling the rail reads no settlement from isn't credited.
-    inject(
-        json!({ "type": "x-other", "entry": "third" })
-            .as_object()
-            .cloned()
-            .unwrap(),
-    );
-    shop.receive(None).await.unwrap();
-    assert_eq!(shop.payee_activity().await.unwrap().len(), 2);
+    // A proof whose spelling the rail reads no settlement from isn't credited, whatever
+    // method it looks like: Paykit reads no proof itself (Paykit wire 1.5).
+    for other in [
+        json!({ "type": "x-other", "entry": "third" }),
+        json!({
+            "type": "bitcoin-txid",
+            "txid": "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"
+        }),
+        json!({ "rail": "fake", "tx": "t1" }),
+    ] {
+        inject(other.as_object().cloned().unwrap());
+        shop.receive(None).await.unwrap();
+        assert_eq!(shop.payee_activity().await.unwrap().len(), 2, "{other}");
+    }
+}
+
+#[test]
+fn test_custom_rail_paykit_reads_no_proof_itself() {
+    // Paykit defines no settlement ID and knows no payment method's proof: the rail the
+    // host supplies reads its own proofs (Paykit wire 1.5). Only the test rail, behind the
+    // test-only feature, has a proof spelling of its own.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut files = Vec::new();
+    for dir in ["paykit-lib/src", "paykit-sdk/src"] {
+        let mut stack = vec![root.join(dir)];
+        while let Some(at) = stack.pop() {
+            for entry in std::fs::read_dir(&at).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs")
+                    && !path.ends_with("paykit-sdk/src/rail/fake.rs")
+                {
+                    files.push(path);
+                }
+            }
+        }
+    }
+    assert!(files.len() > 20, "{files:?}");
+    for path in files {
+        let text = std::fs::read_to_string(&path).unwrap();
+        for needle in [
+            "bitcoin-txid",
+            "\"txid\"",
+            "proof.get(",
+            ".proof.get(",
+            "derive::settlement_id",
+        ] {
+            assert!(!text.contains(needle), "{}: {needle}", path.display());
+        }
+    }
 }
 
 /// Alice's wallet and bob's shop on `rail`, the wallet holding the shop's list, and the
@@ -425,7 +471,9 @@ async fn test_payee_deletion_a_restored_custom_receipt_waits_for_its_payment_met
         ),
         &paykit_lib::derive::natural_key::payee_payment_record(
             &endpoint("btc-lightning-bolt12"),
-            &rail.settlement_id(&proof).unwrap(),
+            &rail
+                .settlement_id(&endpoint("btc-lightning-bolt12"), &proof)
+                .unwrap(),
         ),
     );
     let mut seller_wallet = joined(

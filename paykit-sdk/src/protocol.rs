@@ -238,13 +238,15 @@ impl PaykitProtocol {
         true
     }
 
-    /// The settlement ID of a proof's `proof` object: the rail's, or else the one
-    /// `paykit-lib` knows.
-    fn settlement_id(&self, proof: &Map<String, Value>) -> Option<Vec<u8>> {
-        match &self.rail {
-            Some(rail) => rail.settlement_id(proof),
-            None => paykit_lib::derive::settlement_id(proof),
-        }
+    /// The settlement ID of a proof's `proof` object, as the rail names it (Paykit wire 1.5).
+    /// A protocol without a rail ([`PaykitProtocol::new`]) pays and credits nothing, so no
+    /// proof names a settlement for it.
+    fn settlement_id(
+        &self,
+        endpoint_id: &paykit_lib::PaymentEndpointIdentifier,
+        proof: &Map<String, Value>,
+    ) -> Option<Vec<u8>> {
+        self.rail.as_ref()?.settlement_id(endpoint_id, proof)
     }
 
     /// Set the own identity and certificate, after a join, a load or a renewal.
@@ -1598,7 +1600,9 @@ impl Protocol for PaykitProtocol {
         // certificate the Switch takes and Paykit refuses writes nothing.
         check_certificate(restoring.cert())
             .map_err(|error| format!("the backup's certificate: {error}"))?;
-        restore_paykit_layer(layer, restoring, &|proof| self.settlement_id(proof))
+        restore_paykit_layer(layer, restoring, &|endpoint, proof| {
+            self.settlement_id(endpoint, proof)
+        })
     }
 
     /// Check the applied original before delivering any Allowance reply (Paykit spec
@@ -1833,8 +1837,8 @@ impl Protocol for PaykitProtocol {
                     return crate::extensions::extension_effect(cx, message);
                 }
                 let stored = stored_copy(message).map_err(Fail::Drop)?;
-                receive::effect(cx, &stored, message.position(), &|proof| {
-                    self.settlement_id(proof)
+                receive::effect(cx, &stored, message.position(), &|endpoint, proof| {
+                    self.settlement_id(endpoint, proof)
                 })
                 .map(|()| Outcome::Apply(Effect::default()))
             });
@@ -2090,7 +2094,9 @@ impl Protocol for PaykitProtocol {
                 observed: vec![local_write(&key::list_record_lost(deletion.key), &true)?],
             }));
         }
-        crate::deletions::observe_payee_deletion(deletion, cx, &|proof| self.settlement_id(proof))
+        crate::deletions::observe_payee_deletion(deletion, cx, &|endpoint, proof| {
+            self.settlement_id(endpoint, proof)
+        })
     }
 
     fn record_put_back_successor(
@@ -2099,7 +2105,9 @@ impl Protocol for PaykitProtocol {
         successor: &RecordSuccessor<'_>,
         cx: &ReceiveContext<'_>,
     ) -> Result<PutBackSuccessor, StoreFailure> {
-        crate::deletions::receipt_publication(deletion, successor, cx, &|p| self.settlement_id(p))
+        crate::deletions::receipt_publication(deletion, successor, cx, &|endpoint, proof| {
+            self.settlement_id(endpoint, proof)
+        })
     }
 
     /// Whether a newer write goes back on what the app saw (Paykit wire 5.3, 5.4): drops or
@@ -2648,7 +2656,7 @@ mod receive_tests {
                 None,
                 &key(target),
                 |t| Some(key(t)),
-                &|_| None,
+                &|_, _| None,
             )
         };
         assert!(read(&first).unwrap().receipt.is_some());

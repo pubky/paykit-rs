@@ -522,7 +522,11 @@ impl Rail for HostRail {
         })
     }
 
-    fn settlement_id(&self, proof: &Map<String, Value>) -> Option<Vec<u8>> {
+    fn settlement_id(
+        &self,
+        _endpoint_id: &PaymentEndpointIdentifier,
+        proof: &Map<String, Value>,
+    ) -> Option<Vec<u8>> {
         let proof = serde_json::to_vec(proof).ok()?;
         in_callback(|| self.method.settlement_id(proof))
     }

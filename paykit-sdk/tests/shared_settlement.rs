@@ -22,9 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use paykit_lib::bodies::RequestDestination;
-use paykit_lib::derive::{
-    natural_key, occurrence_tag, settlement_bucket, settlement_id, settlement_tag,
-};
+use paykit_lib::derive::{natural_key, occurrence_tag, settlement_bucket, settlement_tag};
 use paykit_lib::identifiers::{
     PaymentEndpointIdentifier, PaymentEndpointPayload, PaymentReference,
 };
@@ -838,12 +836,14 @@ async fn check_period_mark(
         naming,
         &record.key,
         None,
+        &|_, proof| paykit_sdk::rail::fake_settlement_id(proof),
     )?;
     let signed = activity.proof.as_ref().ok_or("missing period proof")?;
     let Body::PaymentProof(proof) = signed.body() else {
         return Err("expected a payment proof".into());
     };
-    let id = settlement_id(&proof.proof).ok_or("missing method settlement ID")?;
+    let id =
+        paykit_sdk::rail::fake_settlement_id(&proof.proof).ok_or("missing method settlement ID")?;
     let tag = settlement_tag(naming, &id);
     let number = settlement_bucket(&tag);
     let key = SettlementBucket::record_key(number, naming)?;
@@ -993,6 +993,7 @@ async fn reconcile_fractional_periods(world: &World) -> TestResult {
             buyer.app().naming_key(),
             &key,
             None,
+            &|_, proof| paykit_sdk::rail::fake_settlement_id(proof),
         )?;
         // A retained request can name an attempt whose separate period record is absent.
         activity.attempted_periods.push(listed.start_secs());
