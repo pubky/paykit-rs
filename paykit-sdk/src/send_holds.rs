@@ -343,11 +343,13 @@ pub(crate) fn past_replay_window(created_at_ms: u64, now_ms: u64) -> bool {
 /// needs to end that copy past its 30 days and tell the host, which the outbox doesn't
 /// show (Paykit spec 8.1). `given_up` is set before the client ends the copy, with whether
 /// the host is told. The entry stays, a backup and restore included, until neither the
-/// outbox nor an unacknowledged report names its message, so a report a restore carries
-/// is taken again as it was decided, and acknowledged (Paykit spec 9). `told` is set in the
-/// commit that takes the report, and restored with the entry, so a report taken again,
-/// after a restore in place included, tells the host nothing twice even once the host
-/// has acknowledged the notice (Paykit spec 8.1).
+/// outbox nor an unacknowledged report names its message and, once told, the host has
+/// acknowledged its given-up notice, so a report a restore carries is taken again as it
+/// was decided, and acknowledged (Paykit spec 9), and an in-place restore keeps that
+/// notice with it. `told` is set in the commit that takes the report, or that raises the
+/// notice of a held answer the client won't queue, and restored with the entry, so a
+/// report taken again, after a restore in place included, tells the host nothing twice
+/// (Paykit spec 8.1).
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct QueuedStop {
