@@ -724,6 +724,8 @@ impl Paykit {
     /// host that retries after one reads [`Paykit::payee_activity`] after its next write
     /// first.
     pub async fn send_request(&mut self, to: [u8; 32], draft: RequestDraft) -> Result<SentRequest> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.send_request_inner(to, draft)).await
     }
@@ -978,6 +980,8 @@ impl Paykit {
     /// tolerance, after its payment deadline, or outside the validity of the destination or
     /// rates it was paid by, unless the record holds its receipt already; the rail's errors.
     pub async fn verify_payment(&mut self, record: &[u8; 32]) -> Result<Option<u64>> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.verify_payment_inner(record)).await
     }
@@ -1463,6 +1467,8 @@ impl Paykit {
     /// ([`crate::DivergentRecord::may_hold_credit`]), or the messages kept over it wait to
     /// be written.
     pub async fn confirm_payment(&mut self, record: &[u8; 32]) -> Result<Option<String>> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.confirm_payment_with(record, ReceiptDetails::new())
             .await
     }
@@ -1482,6 +1488,8 @@ impl Paykit {
         record: &[u8; 32],
         details: ReceiptDetails,
     ) -> Result<Option<String>> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.confirm_payment_with_inner(record, details)).await
     }
@@ -1627,6 +1635,8 @@ impl Paykit {
         record: &[u8; 32],
         reason: Option<String>,
     ) -> Result<String> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.cancel_sent_request_inner(record, reason)).await
     }
@@ -1668,6 +1678,7 @@ impl Paykit {
                 &KeptSide {
                     msg_id: signed.msg_id().to_owned(),
                     side: SideTag::Payee,
+                    label: target.label().map(|label| label.as_str().to_owned()),
                 },
             )?;
             match self
@@ -2403,6 +2414,8 @@ impl Paykit {
         request: &RequestRef,
         reason: Option<String>,
     ) -> Result<String> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
@@ -2438,6 +2451,8 @@ impl Paykit {
         request: &RequestRef,
         reason: Option<String>,
     ) -> Result<String> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
@@ -2482,6 +2497,8 @@ impl Paykit {
     /// network, `429`, `503`) is no error: it is reported sent, [`MessageDelivery::Kept`], so
     /// the host doesn't accept again.
     pub async fn accept_subscription(&mut self, request: &RequestRef) -> Result<SentMessage> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.accept_subscription_with(request, AcceptOptions::default())
             .await
     }
@@ -2498,6 +2515,8 @@ impl Paykit {
         request: &RequestRef,
         options: AcceptOptions,
     ) -> Result<SentMessage> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.accept_subscription_as(request, options, None).await
     }
 
@@ -2514,6 +2533,8 @@ impl Paykit {
         request: &RequestRef,
         allowance: &[u8; 32],
     ) -> Result<SentMessage> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.accept_subscription_as(request, AcceptOptions::default(), Some(allowance))
             .await
     }
@@ -2549,7 +2570,7 @@ impl Paykit {
         // An answer goes to no counterparty whose sends are held (Paykit spec 8.1, "Blocked
         // counterparties"). A rejection or a payer's cancellation is still a stop: it is
         // recorded as when they aren't, and only its message waits ([`Paykit::record_held`]);
-        // a copy of the deny list not known is read first. An acceptance takes paying's gate
+        // a copy of the deny list past its refresh interval or not known is read first. An acceptance takes paying's gate
         // instead (Paykit spec 8.1, 8.2): the deny list as judged for a payment the user
         // starts, read first when the copy is older than 10 minutes or not known, a read that
         // fails being the call's error, so it never goes on a copy not known; to a blocked
@@ -2561,10 +2582,11 @@ impl Paykit {
         } else if answer == Answer::Accept {
             (self.denied_for_user(&request.payee).await?, false)
         } else {
-            if !self.deny_copy_known().await? {
-                self.refresh_lists_when_due().await?;
-            }
-            (false, self.sends_held(&request.payee).await?)
+            // Judged on a fresh copy, as its delivery is: one past its refresh interval is
+            // read first, so a block another own app wrote holds the answer in its record,
+            // not the outbox, and so does a copy the read leaves stale or not known.
+            self.refresh_lists_when_due().await?;
+            (false, self.delivery_held(&request.payee).await?)
         };
         let (target, mut record) = self.payer_request(request).await?;
         let (_, body) = request_of(&record).ok_or(Refusal::NotFound)?;
@@ -2656,12 +2678,34 @@ impl Paykit {
             // The hold ends with the acceptance, and stays when it isn't recorded.
             tx.put(&end.confirmation(), &true)?;
         }
+        if answer == Answer::Accept && blocked {
+            // The user confirmed accepting this blocked payee's subscription: its original
+            // delivery may go while sends to the payee are held, written with the response
+            // and its queued message (Paykit spec 8.1, 8.2).
+            tx.put(
+                &key::send_exemption(signed.msg_id()),
+                &crate::send_holds::SendExemption::confirmed_while_blocked(
+                    signed.msg_id(),
+                    request.payee,
+                    request.request_hash,
+                ),
+            )?;
+        }
+        if answer != Answer::Accept && !held {
+            // A stop queued keeps what ends its outbox copy past its 30 days, in the commit
+            // that queues it (Paykit spec 8.1).
+            tx.put(
+                &key::queued_stop(signed.msg_id()),
+                &crate::send_holds::QueuedStop::signed(&signed, request.request_hash)?,
+            )?;
+        }
         if answer == Answer::Cancel {
             tx.put(
                 &key::side(signed.msg_id()),
                 &KeptSide {
                     msg_id: signed.msg_id().to_owned(),
                     side: SideTag::Payer,
+                    label: None,
                 },
             )?;
         }
@@ -2776,6 +2820,9 @@ impl Paykit {
         // An acceptance recorded and queued is sent whatever a try to deliver it now gives;
         // a rejection's or cancellation's failed try is the call's error, as before.
         if answer != Answer::Accept {
+            // Its delivery is judged on a fresh copy of the deny list, which the time spent
+            // recording it may have aged (Paykit spec 8.1, "Messages already queued").
+            self.refresh_lists_when_due().await?;
             self.send_message(&msg_id).await?;
         }
         Ok((msg_id.clone(), Some(self.delivered(&msg_id).await?)))
