@@ -1527,10 +1527,11 @@ impl Protocol for PaykitProtocol {
     /// deny copy. An original user end has its own delivery rule (Paykit spec 3.1).
     /// A Private Payment List must still match the current sharing choice (Paykit spec 8.4).
     /// Requests, period details, list requests, rejections, payer cancellations and
-    /// subscription acceptances go only while the deny decision permits them, however
-    /// long ago they were queued, and a rejection or payer cancellation never once it is
-    /// past its 30 days; a payee's cancellation and a payment's acceptance, proof and
-    /// receipt still go when first sent, but not as a re-send (Paykit spec 8.1, 9).
+    /// subscription acceptances go only while the deny decision permits them, and none of
+    /// them once it is 30 days past its `created_at`, less the clock tolerance; a payee's
+    /// cancellation and a payment's acceptance, proof and receipt still go when first
+    /// sent, under a certificate that sends them, but not as a re-send (Paykit spec 3.1,
+    /// 8.1, 9).
     fn may_send(
         &self,
         delivery: &pubky_switch_client::app::DeliveryView<'_>,

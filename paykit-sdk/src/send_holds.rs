@@ -136,9 +136,9 @@ pub(crate) fn deny_decision(delivery: &DeliveryView<'_>) -> Result<DenyDecision>
 /// - a re-send ends at the client's replay deadline, its first acceptance plus 30 days
 ///   (Switch spec 11);
 /// - a request, period details, a list request and a subscription acceptance not
-///   confirmed while blocked are never sent past the same window either. Until the
-///   receive step gives them up with their notices, the host sees the copy stay queued,
-///   with nothing sent or paid and no notice yet.
+///   confirmed while blocked are never sent past the same window either: past it, the
+///   copy stays queued and never goes, nothing is paid for it, and the host gets no notice
+///   of it yet.
 pub(crate) fn may_deliver(delivery: &DeliveryView<'_>, kind: Kind) -> Result<bool> {
     let cert = delivery.cert();
     if paykit_lib::scopes::check_certificate(cert).is_err()
@@ -208,9 +208,10 @@ pub(crate) fn past_replay_window(created_at_ms: u64, now_ms: u64) -> bool {
 /// show (Paykit spec 8.1). `given_up` is set before the client ends the copy, with whether
 /// the host is told. The entry stays, a backup and restore included, until neither the
 /// outbox nor an unacknowledged report names its message, so a report a restore carries
-/// is taken again as it was decided, and acknowledged (Paykit spec 9). Taking it again
-/// tells the host nothing twice: its notice is kept at the message's key, and one of a
-/// possible delivery stays acknowledged once the host has seen it.
+/// is taken again as it was decided, and acknowledged (Paykit spec 9). `told` is set in the
+/// commit that takes the report, and restored with the entry, so a report taken again,
+/// after a restore in place included, tells the host nothing twice even once the host
+/// has acknowledged the notice (Paykit spec 8.1).
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct QueuedStop {
@@ -224,6 +225,7 @@ pub(crate) struct QueuedStop {
     pub(crate) created_at_ms: u64,
     #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) given_up: Option<GivenUp>,
+    pub(crate) told: bool,
 }
 
 /// How a stop's outbox copy past its window is ended, by what its request record says of
@@ -255,6 +257,7 @@ impl QueuedStop {
             hash: signed.hash(),
             created_at_ms: message.created_at_ms,
             given_up: None,
+            told: false,
         })
     }
 
@@ -272,6 +275,7 @@ impl QueuedStop {
             hash: stored.hash(),
             created_at_ms: message.created_at_ms,
             given_up: None,
+            told: false,
         }
     }
 }
@@ -409,13 +413,19 @@ impl Paykit {
             _ => return Ok(false),
         };
         let at = key::queued_stop(msg_id);
-        let Some((stop, given_up)) = self
+        let Some((mut stop, given_up)) = self
             .local_get::<QueuedStop>(&at)
             .await?
             .and_then(|stop| stop.given_up.map(|given_up| (stop, given_up)))
         else {
             return Ok(false);
         };
+        // Told once: a report taken again tells nothing more.
+        if stop.told {
+            return Ok(true);
+        }
+        stop.told = true;
+        tx.put(&at, &stop)?;
         // Only a stop never delivered goes untold once its record is gone or covered: one
         // that may have been delivered is always told, with or without a record (Paykit spec
         // 8.1, "Undelivered messages"; 9).
@@ -485,6 +495,7 @@ mod tests {
             hash: [3; 32],
             created_at_ms: 4,
             given_up: Some(GivenUp::Silent),
+            told: true,
         };
         let json = serde_json::to_value(&stop).unwrap();
         assert_eq!(

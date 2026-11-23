@@ -3350,7 +3350,7 @@ async fn test_blocked_answers_queued_before_a_block_wait_and_a_payments_report_g
     assert!(
         matches!(
             waiting.as_ref().err().and_then(|e| e.refusal()),
-            Some(Refusal::WaitingForList)
+            Some(Refusal::WaitingForList { .. })
         ),
         "{waiting:?}"
     );
@@ -4765,4 +4765,65 @@ async fn test_blocked_message_of_a_kind_that_does_not_parse_waits() {
         .await
         .unwrap();
     assert_eq!(verdict(&wallet, &msg_id).await, Some(false));
+}
+
+#[tokio::test]
+async fn test_blocked_given_up_stop_told_once_across_an_in_place_restore() {
+    let w = World::new();
+    let storage = store();
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new().pay().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            storage.clone(),
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut shop = w.shop().await;
+    let first = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let second = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    let withdrawn = wallet.reject_request(&first, None).await.unwrap();
+    let rejection = wallet.reject_request(&second, None).await.unwrap();
+    // The host ends one copy itself: its report stays the host's, so the reports after it
+    // stay unacknowledged too.
+    assert!(wallet
+        .app_mut()
+        .withdraw_message("paykit", &withdrawn)
+        .await
+        .unwrap());
+    w.clock.advance_ms(31 * 24 * HOUR_MS);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(given_up_notices(&w, &wallet, &rejection, &second).await, 1);
+    let id = wallet
+        .notices()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|n| n.msg_id.as_deref() == Some(rejection.as_str()))
+        .unwrap()
+        .id;
+    wallet.acknowledge_notice(&id).await.unwrap();
+    assert_eq!(duties_of(&mut wallet, &rejection).await, 1);
+    // Restored in place, the store keeps the report under its ID while its taken mark
+    // goes: taken again, it tells the host nothing more (Paykit spec 8.1).
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut wallet = Paykit::restore(
+        w.env(&w.alice, storage),
+        PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    for _ in 0..3 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(given_up_notices(&w, &wallet, &rejection, &second).await, 0);
 }
