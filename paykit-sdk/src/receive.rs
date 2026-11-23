@@ -3196,9 +3196,13 @@ impl Paykit {
     pub(crate) async fn refresh_lists_when_due(&mut self) -> crate::error::Result<()> {
         // No Paykit action under a certificate Paykit refuses, a read made as the app and a
         // local write included (Paykit spec 7.2, "The restored certificate").
-        if self.certificate_refused().is_some() || !reads_lists(self.app.cert().scopes()) {
+        if self.certificate_refused().is_some()
+            || !reads_lists(self.app.cert().scopes())
+            || self.protocol.delivery.has_failed()
+        {
             return Ok(());
         }
+        Box::pin(self.take_learned_lists()).await?;
         let now = self.now();
         let last = self.local_get::<u64>(key::LISTS_READ).await?;
         // A raise owed that can be written goes at the next receive, whatever the copy's age.
@@ -3214,8 +3218,13 @@ impl Paykit {
                 result => result.map(|_| ()),
             },
             Err(error @ (AppError::Alarm(_) | AppError::Store(_))) => Err(error.into()),
-            Err(_) if last.is_some() => self.local_delete(key::LISTS_READ).await,
-            Err(_) => Ok(()),
+            Err(_) => {
+                self.protocol.delivery.read_failed();
+                if last.is_some() {
+                    self.local_delete(key::LISTS_READ).await?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -3243,6 +3252,7 @@ impl Paykit {
             },
             Err(error @ (AppError::Alarm(_) | AppError::Store(_))) => Err(error.into()),
             Err(_) => {
+                self.protocol.delivery.read_failed();
                 self.local_delete(key::LISTS_READ).await?;
                 Ok(false)
             }
@@ -3369,7 +3379,7 @@ impl Paykit {
     /// The marks the list shows landed go, in the returned commit, and so does an unblock
     /// that counts no more ([`Paykit::own_change`]), so a block another own app made since
     /// isn't overridden by it.
-    async fn judged_deny(
+    pub(crate) async fn judged_deny(
         &self,
         mut deny: Vec<[u8; 32]>,
     ) -> crate::error::Result<(Vec<[u8; 32]>, Tx)> {

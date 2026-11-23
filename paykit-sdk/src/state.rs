@@ -617,6 +617,7 @@ impl Stored for u64 {
             | StateKey::Resent { .. }
             | StateKey::ResentDay { .. }
             | StateKey::ListsRead
+            | StateKey::ListsTold
             | StateKey::ServiceTime => Ok(()),
             // A generation recovered at follows another.
             StateKey::LossRecorded if *self > 0 => Ok(()),
@@ -1888,6 +1889,8 @@ pub(crate) mod key {
     pub(crate) const LIST_DISCOVERY: &str = "ld";
     pub(crate) const LISTS_READ: &str = "lr";
     pub(crate) const SERVICE_TIME: &str = "sv";
+    /// `lt`: a deny change or gap the client told, not taken yet (`Paykit::take_learned_lists`).
+    pub(crate) const LISTS_TOLD: &str = "lt";
     pub(crate) const HELD_LISTS: &str = "lh/";
     pub(crate) const LISTS_LOST: &str = "lgone/";
     pub(crate) const RECORDS_UNLISTED: &str = "nl";
@@ -1898,6 +1901,8 @@ pub(crate) mod key {
     pub(crate) const HELD_ANSWERS: &str = "ha/";
     /// `qs/<msg_id>`: the rejections and payer's cancellations this app queued.
     pub(crate) const QUEUED_STOPS: &str = "qs/";
+    /// `ex/<msg_id>`: why an outgoing acceptance may go while sends are held.
+    pub(crate) const SEND_EXEMPTIONS: &str = "ex/";
     pub(crate) const LISTED_CERT: &str = "lc";
     pub(crate) const NOTICES: &str = "nt/";
     pub(crate) const RESTORED_DELIVERIES: &str = "nt/outgoing/";
@@ -2494,6 +2499,8 @@ pub(crate) enum StateKey {
     ListsRead,
     /// `sv`: the highest service time verified, for the delivery hook.
     ServiceTime,
+    /// `lt`: a deny change or gap told and not taken yet.
+    ListsTold,
     /// `lh/<record key>`: a list held over a record that didn't read.
     HeldList([u8; 32]),
     /// `lgone/<record key>`: a `payment_lists` record seen deleted or unreadable.
@@ -2726,6 +2733,7 @@ impl StateKey {
             "lc" => Self::ListedCert,
             "lr" => Self::ListsRead,
             "sv" => Self::ServiceTime,
+            "lt" => Self::ListsTold,
             "dl" => Self::Denied,
             "fg" => Self::Flagged,
             "fk" => Self::FloorKept,
