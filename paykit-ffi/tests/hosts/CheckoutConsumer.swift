@@ -16,11 +16,11 @@ private actor PaymentGate {
 }
 
 private enum CheckoutStep: Equatable, Sendable {
-    case feedReady, methodEntered, paymentCancelled
+    case feedReady, methodEntered
 }
 
 private enum CheckoutFailure: Error {
-    case timedOut, unexpectedWake(FeedWake), paymentReturned, missingStep
+    case timedOut, unexpectedWake(FeedWake), missingStep
 }
 
 private final class CheckoutMethod: ReceiptReader, @unchecked Sendable {
@@ -116,10 +116,16 @@ private func restoreCheckout(
     try await fixture.passRotationInterval()
     try await wallet.finishReceive()
     if action == "doubt" {
-        try await interruptPayment(payer: wallet, method: method, request: original, options: options)
+        // The wallet stops waiting at its pay time limit and closes while the host's pay
+        // still runs: the attempt stays recorded as possibly sent.
+        let open = try await payThenCancel(payer: wallet, method: method, request: original, options: options, release: false)
+        if case .outcome(.paid) = open.decision { preconditionFailure("an unanswered payment was recorded paid") }
         method.holdLookup()
+        try await wallet.shutdown()
+        await method.release.signal()
+    } else {
+        try await wallet.shutdown()
     }
-    try await wallet.shutdown()
 
     let store = EnrollmentStore()
     let host = fixture.hostForStore(store: store)
@@ -212,10 +218,14 @@ private func restoreCheckout(
     }
 }
 
-private func interruptPayment(
+/// Start the payment and cancel its Swift task once the host's method is paying. A cancelled
+/// task still waits for the wallet's answer, and the payment itself always goes on. With
+/// `release` the method answers at once; without it the wallet stops waiting at its pay time
+/// limit and records the payment as possibly sent.
+private func payThenCancel(
     payer: NativeWallet, method: CheckoutMethod, request: RequestId, options: PaymentOptions,
-    waitingAt fixture: CheckoutFixture? = nil
-) async throws {
+    waitingAt fixture: CheckoutFixture? = nil, release: Bool
+) async throws -> PaymentResult {
     let report = method.progress.continuation
     let timer = DispatchSource.makeTimerSource(queue: .global())
     timer.setEventHandler { report.finish(throwing: CheckoutFailure.timedOut) }
@@ -235,15 +245,9 @@ private func interruptPayment(
             } catch { report.finish(throwing: error) }
         }
     }
-    let paying = Task {
-        do {
-            try await fixture?.waitForHeldFeed()
-            try Task.checkCancellation()
-            _ = try await payer.payRequest(id: request, options: options)
-            report.finish(throwing: CheckoutFailure.paymentReturned)
-        } catch is CancellationError {
-            report.yield(.paymentCancelled)
-        } catch { report.finish(throwing: error) }
+    let paying = Task { () throws -> PaymentResult in
+        try await fixture?.waitForHeldFeed()
+        return try await payer.payRequest(id: request, options: options)
     }
 
     do {
@@ -259,14 +263,14 @@ private func interruptPayment(
             throw CheckoutFailure.missingStep
         }
         paying.cancel()
-        guard try await steps.next() == .paymentCancelled else { throw CheckoutFailure.missingStep }
     } catch {
         watch?.cancel()
         paying.cancel()
         await method.release.signal()
         throw error
     }
-    await method.release.signal()
+    if release { await method.release.signal() }
+    return try await paying.value
 }
 
 private extension NativeWallet {
@@ -426,17 +430,16 @@ private func driveCheckout(_ recovery: CheckoutReview, restore: String? = nil) a
     case .ordinary: break
     }
     try await payer.finishReceive()
-    try await interruptPayment(payer: payer, method: method, request: request, options: options, waitingAt: fixture)
+    let charged = try await payThenCancel(payer: payer, method: method, request: request, options: options, waitingAt: fixture, release: true)
+    guard case .outcome(.paid) = charged.decision else { preconditionFailure("the payment was not recorded paid") }
     try await payer.shutdown()
 
     var reopened = try await host.load(appId: enrolled.appId)
     let entries = try await reopened.payments()
-    precondition(entries.count == 1 && entries[0].stage == .paying && entries[0].amount.value == "7")
-    let resumed = try await reopened.resumePayments()
-    precondition(resumed.contains {
-        if case let .paid(id, _) = $0 { return id == entries[0].attemptId }
-        return false
-    })
+    precondition(entries.count == 1 && [.railPaid, .acceptanceOwed, .finished].contains(entries[0].stage))
+    precondition(entries[0].amount.value == "7")
+    _ = try await reopened.resumePayments()
+    precondition(method.calls == 1)
     if let shown {
         try await reopened.shutdown()
         try await fixture.markDivergent(appId: enrolled.appId, record: shown.record)

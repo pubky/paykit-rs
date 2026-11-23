@@ -143,9 +143,10 @@ impl LeaseOwner {
         if self.result.borrow().as_ref().is_some_and(Result::is_ok) {
             return Ok(());
         }
-        let result = self
-            .host
-            .release(self.namespace.clone(), self.token.to_vec());
+        let result = crate::runtime::in_callback(|| {
+            self.host
+                .release(self.namespace.clone(), self.token.to_vec())
+        });
         self.record(result.clone());
         result
     }
@@ -210,10 +211,11 @@ impl WalletStoreSession {
                 result: watch::channel(None).0,
                 releasing: Mutex::new(()),
             });
-            match owner
-                .host
-                .acquire(owner.namespace.clone(), owner.token.to_vec())
-            {
+            match crate::runtime::in_callback(|| {
+                owner
+                    .host
+                    .acquire(owner.namespace.clone(), owner.token.to_vec())
+            }) {
                 Ok(true) => Ok(Arc::new(Self {
                     runtime,
                     ownership: owner,
@@ -237,9 +239,11 @@ impl WalletStoreSession {
         let held = self.clone();
         let key = key.to_vec();
         tokio::task::spawn_blocking(move || {
-            held.ownership
-                .host
-                .get(held.ownership.namespace.clone(), key)
+            crate::runtime::in_callback(|| {
+                held.ownership
+                    .host
+                    .get(held.ownership.namespace.clone(), key)
+            })
         })
         .await
         .map_err(|_| StoreError::Unknown)?
@@ -275,7 +279,9 @@ impl WalletStoreSession {
 impl StateStore for WalletStoreSession {
     fn get(&self, ns: &str, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
         self.owns(ns)?;
-        Ok(self.ownership.host.get(ns.into(), key.into())?)
+        Ok(crate::runtime::in_callback(|| {
+            self.ownership.host.get(ns.into(), key.into())
+        })?)
     }
     fn scan(
         &self,
@@ -285,13 +291,14 @@ impl StateStore for WalletStoreSession {
         limit: u32,
     ) -> Result<Vec<KeyValue>, StoreError> {
         self.owns(ns)?;
-        Ok(self
-            .ownership
-            .host
-            .scan(ns.into(), prefix.into(), after.map(Vec::from), limit)?
-            .into_iter()
-            .map(|e| (e.key, e.value))
-            .collect())
+        Ok(crate::runtime::in_callback(|| {
+            self.ownership
+                .host
+                .scan(ns.into(), prefix.into(), after.map(Vec::from), limit)
+        })?
+        .into_iter()
+        .map(|e| (e.key, e.value))
+        .collect())
     }
     fn commit(&self, batch: WriteBatch) -> Result<(), StoreError> {
         let owner = &self.ownership;
@@ -305,10 +312,11 @@ impl StateStore for WalletStoreSession {
                 Write::DeletePrefix { prefix, .. } => StoreWrite::DeletePrefix { prefix },
             })
             .collect();
-        if owner
-            .host
-            .commit_if(owner.namespace.clone(), owner.token.to_vec(), writes)?
-        {
+        if crate::runtime::in_callback(|| {
+            owner
+                .host
+                .commit_if(owner.namespace.clone(), owner.token.to_vec(), writes)
+        })? {
             Ok(())
         } else {
             Err(StoreError::NotOwner)
