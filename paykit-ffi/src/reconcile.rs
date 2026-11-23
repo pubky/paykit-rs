@@ -36,28 +36,30 @@ pub enum ConfirmedResolution {
     Failed,
 }
 
-#[uniffi::export(async_runtime = "tokio")]
+#[uniffi::export]
 impl NativeWallet {
     /// Compare the durable journal, method history and authenticated shared records.
     pub async fn reconcile(&self) -> Result<WalletReconciliation, WalletError> {
-        self.with_wallet(async |app| {
-            let r = app.reconcile().await?;
-            Ok(WalletReconciliation {
-                resolved: r.resolved.into_iter().map(Into::into).collect(),
-                doubtful: r
-                    .doubtful
-                    .into_iter()
-                    .map(|d| DoubtfulPayment {
-                        obligation: d.obligation.into(),
-                        attempts: d.attempts.iter().map(|i| i.to_text()).collect(),
-                        payee: d.payee.map(Vec::from),
-                        request_hash: d.request_hash.map(Vec::from),
-                        before_loss: d
-                            .before_loss
-                            .map(|loss| ProviderLossBoundary::for_payment(d.obligation, loss)),
-                    })
-                    .collect(),
-                payer_skipped: r.payer_skipped,
+        self.with_wallet(move |app| {
+            Box::pin(async move {
+                let r = app.reconcile().await?;
+                Ok(WalletReconciliation {
+                    resolved: r.resolved.into_iter().map(Into::into).collect(),
+                    doubtful: r
+                        .doubtful
+                        .into_iter()
+                        .map(|d| DoubtfulPayment {
+                            obligation: d.obligation.into(),
+                            attempts: d.attempts.iter().map(|i| i.to_text()).collect(),
+                            payee: d.payee.map(Vec::from),
+                            request_hash: d.request_hash.map(Vec::from),
+                            before_loss: d
+                                .before_loss
+                                .map(|loss| ProviderLossBoundary::for_payment(d.obligation, loss)),
+                        })
+                        .collect(),
+                    payer_skipped: r.payer_skipped,
+                })
             })
         })
         .await
@@ -70,28 +72,33 @@ impl NativeWallet {
         &self,
         payment: std::sync::Arc<crate::PaymentBeforeLoss>,
     ) -> Result<(), WalletError> {
-        self.with_wallet(async |app| {
-            Ok(app
-                .confirm_not_paid_before_loss(
-                    &payment.obligation,
-                    &payment.loss,
-                    paykit_sdk::UserConfirmed::new(),
-                )
-                .await?)
+        self.with_wallet(move |app| {
+            Box::pin(async move {
+                Ok(app
+                    .confirm_not_paid_before_loss(
+                        &payment.obligation,
+                        &payment.loss,
+                        paykit_sdk::UserConfirmed::new(),
+                    )
+                    .await?)
+            })
         })
         .await
     }
 
     /// List the observed divergent records, including those whose held messages still await receive.
     pub async fn divergent_records(&self) -> Result<Vec<crate::Divergence>, WalletError> {
-        Ok(self
-            .lock()
-            .await?
-            .divergent_records()
-            .await?
-            .into_iter()
-            .map(Into::into)
-            .collect())
+        self.with_wallet(|app| {
+            Box::pin(async move {
+                Ok(app
+                    .divergent_records()
+                    .await?
+                    .into_iter()
+                    .map(Into::into)
+                    .collect())
+            })
+        })
+        .await
     }
 
     /// The user permits this wallet to proceed over the exact record version and warning shown.
@@ -101,10 +108,12 @@ impl NativeWallet {
         &self,
         observation: std::sync::Arc<crate::DivergentObservation>,
     ) -> Result<(), WalletError> {
-        self.with_wallet(async |app| {
-            Ok(app
-                .confirm_divergent(&observation.0, paykit_sdk::UserConfirmed::new())
-                .await?)
+        self.with_wallet(move |app| {
+            Box::pin(async move {
+                Ok(app
+                    .confirm_divergent(&observation.0, paykit_sdk::UserConfirmed::new())
+                    .await?)
+            })
         })
         .await
     }
@@ -124,15 +133,17 @@ impl NativeWallet {
             ConfirmedResolution::Unknown => paykit_sdk::Resolution::Unknown,
             ConfirmedResolution::Failed => paykit_sdk::Resolution::Failed,
         };
-        self.with_wallet(async |app| {
-            Ok(app
-                .resolve_attempt(
-                    &obligation,
-                    attempt,
-                    resolution,
-                    paykit_sdk::UserConfirmed::new(),
-                )
-                .await?)
+        self.with_wallet(move |app| {
+            Box::pin(async move {
+                Ok(app
+                    .resolve_attempt(
+                        &obligation,
+                        attempt,
+                        resolution,
+                        paykit_sdk::UserConfirmed::new(),
+                    )
+                    .await?)
+            })
         })
         .await
     }
@@ -140,8 +151,8 @@ impl NativeWallet {
     /// End Paykit reconciliation after the user reviewed the restored wallet and confirmed.
     /// Other protocols complete their own reconciliation independently.
     pub async fn end_confirmed_reconciliation(&self) -> Result<(), WalletError> {
-        self.with_wallet(async |app| {
-            Ok(app.end_reconcile(paykit_sdk::UserConfirmed::new()).await?)
+        self.with_wallet(move |app| {
+            Box::pin(async move { Ok(app.end_reconcile(paykit_sdk::UserConfirmed::new()).await?) })
         })
         .await
     }
