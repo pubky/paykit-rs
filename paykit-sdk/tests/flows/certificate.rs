@@ -82,7 +82,7 @@ pub(crate) fn list(w: &World, app_id: [u8; 16], old: &AppCert, renewed: &AppCert
     list_for(&w.alice, app_id, old, renewed);
 }
 
-/// [`list`] for `signer`'s app.
+/// [`list`] in `signer`'s next `identity.json`.
 pub(crate) fn list_for(
     signer: &pubky_switch_client::testing::TestSigner,
     app_id: [u8; 16],

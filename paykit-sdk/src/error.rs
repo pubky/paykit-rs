@@ -219,8 +219,17 @@ pub enum Refusal {
     /// user is told the app is waiting for the payee's list. The user may choose to pay to
     /// the payee's public endpoints instead ([`crate::PaymentMode::Public`]); the app never
     /// switches on its own.
-    #[error("Paykit spec 8.4: waiting for the payee's Private Payment List")]
-    WaitingForList,
+    #[error(
+        "Paykit spec 8.4: waiting for the payee's Private Payment List{}",
+        if *device_clock_behind { "; a list expired by the service's time: the device clock is behind it" } else { "" }
+    )]
+    WaitingForList {
+        /// Whether a list of the payee's has expired only by the service's time: its expiry
+        /// is at or before the highest service time verified, but after the device clock,
+        /// which is behind the service's time. The user is told so (Paykit spec 7.2, check
+        /// the destination).
+        device_clock_behind: bool,
+    },
     /// The client gave up this counterparty's current Private Payment List with an
     /// unknown outcome. If it was a withdrawal, the counterparty may keep paying the
     /// earlier list; if not, it may lack the list. Nothing more is sent on its own: only
