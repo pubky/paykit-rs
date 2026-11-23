@@ -942,6 +942,18 @@ pub(crate) fn stops_resume(error: &PaykitError) -> bool {
     )
 }
 
+/// The one rule for a failure a step meets after work it can't take back, which the step
+/// otherwise reports as its own outcome, best effort: a wallet-wide stop ([`stops_resume`])
+/// is returned, so nothing more is written, looked up or pruned; anything else is the step's
+/// own uncertainty, left to the outcome it reports and to a later resume.
+pub(crate) fn unless_stop(error: impl Into<PaykitError>) -> Result<()> {
+    let error = error.into();
+    if stops_resume(&error) {
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// The Switch client's refusal of an attempt (Switch spec 3.6, 10.1, 12.3, 12.4), carried as
 /// the client reports it: an alarm, an app that left or a recovery notice is not a wait, and
 /// the caller tells them apart by the refusal.
@@ -1837,7 +1849,9 @@ impl Paykit {
             }
         }
         if let Some(msg_id) = entry.proof_msg_id.clone() {
-            let _ = self.send_message(&msg_id).await;
+            if let Err(error) = self.send_message(&msg_id).await {
+                unless_stop(error)?;
+            }
         }
         Ok(PayOutcome::Paid {
             attempt_id: *attempt_id,
@@ -2710,7 +2724,9 @@ impl Paykit {
             .await?;
             // Queued, the request goes at the next flush if this one fails: the refusal still
             // tells the user the app waits for the payee.
-            let _ = self.send_message(&msg_id).await;
+            if let Err(error) = self.send_message(&msg_id).await {
+                unless_stop(error)?;
+            }
         }
         Ok(())
     }
@@ -3453,7 +3469,9 @@ impl Paykit {
         self.save(entry).await?;
         if let Some(msg_id) = entry.acceptance_msg_id.clone() {
             // Not awaited for paying: a delivery failure leaves it queued.
-            let _ = self.send_message(&msg_id).await;
+            if let Err(error) = self.send_message(&msg_id).await {
+                unless_stop(error)?;
+            }
         }
         Ok(())
     }
@@ -3585,7 +3603,9 @@ impl Paykit {
             outcome,
             Ok(RailOutcome::Pending) | Err(RailError::Unavailable(_))
         ) {
-            let _ = self.release_acceptance(&mut entry, acceptance).await;
+            if let Err(error) = self.release_acceptance(&mut entry, acceptance).await {
+                unless_stop(error)?;
+            }
             None
         } else {
             acceptance
@@ -3648,7 +3668,8 @@ impl Paykit {
         kind: Dispatch,
         error: PaykitError,
     ) -> Result<PayOutcome> {
-        if !matches!(kind, Dispatch::First { .. }) {
+        // A wallet-wide stop is returned as it is: nothing more is written.
+        if !matches!(kind, Dispatch::First { .. }) || stops_resume(&error) {
             return Err(error);
         }
         self.set_stage(&mut entry, Stage::Attempted).await?;
@@ -3661,7 +3682,10 @@ impl Paykit {
                 None => Err(error),
             },
             // The failed write didn't go: the entry is `Attempted` still.
-            Err(_) => Err(error),
+            Err(write) => {
+                unless_stop(write)?;
+                Err(error)
+            }
         }
     }
 
@@ -3713,7 +3737,9 @@ impl Paykit {
                 entry.rail_proof = Some(proof);
                 entry.paid_at_ms = paid_at_ms;
                 self.set_stage(entry, Stage::RailPaid).await?;
-                let _ = self.release_acceptance(entry, acceptance).await;
+                if let Err(error) = self.release_acceptance(entry, acceptance).await {
+                    unless_stop(error)?;
+                }
             }
             RailOutcome::Failed => {
                 entry.failed_by_method = true;
@@ -3723,7 +3749,9 @@ impl Paykit {
                 // The method shows the payment running, so its acceptance may go (Paykit spec
                 // 7.2 step 2); one the dispatch couldn't queue is queued now, best effort, at
                 // every resume that finds it still pending.
-                let _ = self.release_acceptance(entry, acceptance).await;
+                if let Err(error) = self.release_acceptance(entry, acceptance).await {
+                    unless_stop(error)?;
+                }
                 return Ok(PayOutcome::Pending { attempt_id });
             }
         }
@@ -3743,8 +3771,13 @@ impl Paykit {
                     reason: "the payment method reported a failure".into(),
                 });
             }
-            if !matches!(self.record_offline_attempt(entry).await, Ok(true)) {
-                return Ok(PayOutcome::PaidOutcomeUnwritten { attempt_id });
+            match self.record_offline_attempt(entry).await {
+                Ok(true) => {}
+                Ok(false) => return Ok(PayOutcome::PaidOutcomeUnwritten { attempt_id }),
+                Err(error) => {
+                    unless_stop(error)?;
+                    return Ok(PayOutcome::PaidOutcomeUnwritten { attempt_id });
+                }
             }
         }
         // Recording an Allowance outcome also authenticates the current ledger. Keep
@@ -3761,20 +3794,17 @@ impl Paykit {
             Err(error)
                 if error.kept_batch().is_none() && error.code() == Some(ErrorCode::NotCurrent) =>
             {
-                // An app that isn't current can write nothing (Paykit spec 7.3).
-                self.set_stage(entry, Stage::Finished).await?;
-                return Ok(if paid {
-                    PayOutcome::PaidUnreported { attempt_id }
-                } else {
-                    PayOutcome::Failed {
-                        attempt_id,
-                        reason: "the app isn't current".into(),
-                    }
-                });
+                // An app that isn't current can write nothing (Paykit spec 7.3), and the
+                // switch's answer stops the wallet as a whole ([`stops_resume`]): it is
+                // returned, the entry left as it is, with the payment made in the journal.
+                return Err(error);
             }
             // Money moved: a failure to write it is never the payment's error (Paykit spec
-            // 7.2); the journal keeps the proof for a resume.
-            Err(_) if paid => return Ok(PayOutcome::PaidOutcomeUnwritten { attempt_id }),
+            // 7.2), unless it stops the wallet; the journal keeps the proof for a resume.
+            Err(error) if paid => {
+                unless_stop(error)?;
+                return Ok(PayOutcome::PaidOutcomeUnwritten { attempt_id });
+            }
             Err(error) => return Err(error),
         }
         if !paid {
@@ -3786,7 +3816,9 @@ impl Paykit {
         if let Some(msg_id) = entry.proof_msg_id.clone() {
             // After the payment and its outcome's batch: a delivery failure leaves the proof
             // queued for the next flush, and decides nothing about paying.
-            let _ = self.send_message(&msg_id).await;
+            if let Err(error) = self.send_message(&msg_id).await {
+                unless_stop(error)?;
+            }
         }
         Ok(PayOutcome::Paid {
             attempt_id,
@@ -3827,6 +3859,7 @@ impl Paykit {
                 if !entry.owes_acceptance()? {
                     return Err(error);
                 }
+                unless_stop(error)?;
             }
         }
         let attempt_id = entry.attempt()?;
@@ -5182,8 +5215,12 @@ impl Paykit {
         if Box::pin(self.executor_dispatch_held(entry, kind)).await? {
             return Ok(None);
         }
-        let Ok(deny) = self.deny_list_now().await else {
-            return Ok(None);
+        let deny = match self.deny_list_now().await {
+            Ok(deny) => deny,
+            Err(error) => {
+                unless_stop(error)?;
+                return Ok(None);
+            }
         };
         if deny.contains(&entry.payee) {
             return Ok(None);
@@ -5213,7 +5250,11 @@ impl Paykit {
         }
         let (record, stamp) = match self.fresh_request_stamped(&target).await {
             Ok((Fresh::Held(record), Some(stamp))) => (*record, stamp),
-            Ok(_) | Err(_) => return Ok(None),
+            Ok(_) => return Ok(None),
+            Err(error) => {
+                unless_stop(error)?;
+                return Ok(None);
+            }
         };
         let allowance = entry
             .allowance
