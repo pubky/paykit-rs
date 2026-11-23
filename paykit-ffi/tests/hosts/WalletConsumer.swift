@@ -171,7 +171,7 @@ class ReceiptReader: WalletHomeserver, PaymentMethod, @unchecked Sendable {
     func put(identity: Data, path: String, bytes: Data) async throws { preconditionFailure("unexpected public write") }
     func delete(identity: Data, path: String) async throws { preconditionFailure("unexpected public delete") }
     func declaration() -> MethodDeclaration {
-        MethodDeclaration(idempotent: true, idempotencyRetentionMs: nil, history: true, historyRetentionMs: nil, historySurvivesRestore: true, longestCompletionMs: 3_600_000)
+        MethodDeclaration(idempotent: true, idempotencyRetentionMs: nil, history: true, historyRetentionMs: nil, historySurvivesRestore: true, longestCompletionMs: 3_600_000, paymentTimeToleranceMs: 0)
     }
     func selectEndpoints(candidates: [EndpointCandidate], amount: Amount?) throws -> SelectedEndpoints {
         var payable: [UInt32] = []
@@ -197,6 +197,8 @@ class ReceiptReader: WalletHomeserver, PaymentMethod, @unchecked Sendable {
     func settlementId(proofJson: Data) -> Data? { nil }
 }
 
+// The issuer runs as a separate process, which a device test can't start.
+#if !PAYKIT_DEVICE_TEST
 private func walletRows(_ issuer: String, _ mode: String) throws -> [String] {
     let producer = Process()
     producer.executableURL = URL(fileURLWithPath: issuer)
@@ -418,8 +420,8 @@ private enum WalletConsumer {
             _ = try await next.prepareEnrollment(reference: reference, clientId: "wallet.example", clientKey: key, capabilities: caps, authSecret: Data(repeating: 10, count: 32))
             preconditionFailure("changed secret accepted")
         } catch WalletError.EnrollmentConflict {}
-        // The Rust future can stop awaiting this blocking callback. Until its actual
-        // commit finishes the same physical namespace must remain exclusively owned.
+        // Cancelling the Swift task does not stop the call: its commit keeps the physical
+        // namespace exclusively owned until it finishes, and the task still gets its answer.
         let interrupted = Data(repeating: 13, count: 16)
         let pending = try await next.beginEnrollment(reference: interrupted)
         let interruptedCaps = pending.appRecordPath + ":rw"
@@ -432,16 +434,14 @@ private enum WalletConsumer {
         precondition(arrived)
         task.cancel()
         do {
-            _ = try await task.value
-            preconditionFailure("the blocked Swift task continued waiting")
-        } catch is CancellationError {}
-        do {
             _ = try await next.beginEnrollment(reference: interrupted)
-            preconditionFailure("the detached commit lost ownership")
+            preconditionFailure("the running commit lost ownership")
         } catch WalletError.Storage(let failure) {
             guard case .InUse = failure else { throw failure }
         }
         store.continueWrite()
+        let answered = try await task.value
+        precondition(answered.appId == pending.appId)
         let released = await store.waitForChange(true)
         precondition(released)
         let reopened = host()
@@ -481,3 +481,4 @@ private enum WalletConsumer {
         try await acknowledgeRecovery(issuer, cleared: true)
     }
 }
+#endif

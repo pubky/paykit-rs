@@ -11,7 +11,8 @@ use pubky_switch_client::testing::Fault;
 use pubky_switch_core::claims::Outcome;
 
 use crate::common::{
-    asked, draft, list_version, mark_senders, refuse_writes, request_from, seed_marks, store, World,
+    asked, btc, draft, endpoint, list_version, mark_senders, refuse_writes, request_from,
+    seed_marks, store, World,
 };
 use pubky_switch_core::records::DAY_MS;
 
@@ -851,6 +852,37 @@ async fn test_stored_refused_list_held_notes_its_sender() {
     wallet.receive(None).await.unwrap();
     assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
     assert_eq!(kept(&wallet, "peer/").await.len(), 1);
+}
+
+#[tokio::test]
+async fn test_stored_refused_first_list_placed_once_a_write_lands() {
+    // The first list's record write is refused, so no record exists: the list is held only
+    // until a later write lands, never kept from its own payee for good.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
+    refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert!(wallet.held_lists().await.unwrap().is_empty());
+    let paid = wallet
+        .pay_without_request(
+            paykit_sdk::UnrequestedPayment::new(w.bob_id(), btc("0.0015")).with_options(
+                PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")),
+            ),
+        )
+        .await
+        .outcome
+        .unwrap();
+    assert!(
+        matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
+        "{paid:?}"
+    );
 }
 
 #[tokio::test]

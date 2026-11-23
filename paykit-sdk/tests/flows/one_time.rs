@@ -413,9 +413,12 @@ async fn test_one_time_payee_activity_store_failure_is_an_error() {
     request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     assert_eq!(shop.payee_activity().await.unwrap().len(), 1);
-    // The collection lists, but its record can't be read again: the store failure is the
-    // answer, never a list that silently leaves the record out.
+    // The list reads each record once, from its listing: a record that couldn't be read
+    // again is still listed.
     failing.arm();
+    assert_eq!(shop.payee_activity().await.unwrap().len(), 1);
+    // A listing that fails is the answer, never a list that silently leaves records out.
+    failing.arm_scans();
     let error = shop.payee_activity().await.unwrap_err();
     assert!(
         matches!(

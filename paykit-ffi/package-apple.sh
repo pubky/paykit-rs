@@ -9,7 +9,7 @@ generated=$1/swift
 device=$2
 simulator=$3
 package=$4
-for input in "$generated/PaykitV2.swift" "$generated/WalletFuture.swift" \
+for input in "$generated/PaykitV2.swift" \
     "$generated/WalletRedaction.swift" "$generated/PaykitV2FFI.h" \
     "$generated/PaykitV2FFI.modulemap" "$device" "$simulator"; do
     test -s "$input" || { echo "Missing package input $input" >&2; exit 1; }
@@ -22,6 +22,6 @@ cp "$generated/PaykitV2FFI.modulemap" "$headers/module.modulemap"
 xcodebuild -create-xcframework -library "$device" -headers "$headers" \
     -library "$simulator" -headers "$headers" -output "$package/PaykitV2FFI.xcframework"
 mkdir -p "$package/Sources/PaykitV2"
-cp "$generated/PaykitV2.swift" "$generated/WalletFuture.swift" \
-    "$generated/WalletRedaction.swift" "$package/Sources/PaykitV2/"
+cp "$generated/PaykitV2.swift" "$generated/WalletRedaction.swift" \
+    "$package/Sources/PaykitV2/"
 cp "$(dirname "$0")/swift/Package.swift" "$package/Package.swift"

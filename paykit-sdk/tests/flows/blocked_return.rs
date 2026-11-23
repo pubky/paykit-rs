@@ -1256,8 +1256,11 @@ async fn test_blocked_return_repeat_of_a_request_paid_only_by_hand_not_made() {
     // resume makes no repeat: a repeat is an automatic payment.
     let w = World::new();
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let mut wallet = contacts_wallet_with(&w, store(), crate::common::day_window()).await;
     let mut shop = w.shop().await;
@@ -2127,8 +2130,11 @@ async fn test_blocked_return_floor_raised_again_before_the_new_app_reads_still_p
     // request: the request shows as paid only by hand, and a resume makes no repeat of it.
     let w = World::new();
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let mut wallet = contacts_wallet(&w, store()).await;
     wallet.app_mut().invite(&w.carol_id()).await.unwrap();
@@ -2381,8 +2387,11 @@ async fn test_blocked_return_dispatch_of_a_request_dated_before_the_floor_not_re
     // a resume makes no repeat of its dispatch.
     let w = World::new();
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let mut wallet = contacts_wallet_with(&w, store(), crate::common::day_window()).await;
     wallet.app_mut().invite(&w.carol_id()).await.unwrap();
@@ -2444,8 +2453,11 @@ async fn phone_paying_carol_through(
     transport: Arc<dyn Transport>,
 ) -> (Paykit, Paykit, Paykit, paykit_sdk::RequestRef) {
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let mut wallet = contacts_wallet(w, store()).await;
     wallet.app_mut().invite(&w.carol_id()).await.unwrap();
@@ -3197,8 +3209,11 @@ async fn test_blocked_return_floor_kept_copy_not_taken_for_the_switch_at_a_dispa
     // called and the attempt is known unsubmitted.
     let w = World::new();
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let mut wallet = contacts_wallet(&w, store()).await;
     wallet.app_mut().invite(&w.carol_id()).await.unwrap();
@@ -3673,4 +3688,178 @@ async fn test_blocked_return_entry_held_while_the_notices_owed_are_full() {
     bob_dropped_for_carol(&w, &wallet).await;
     assert_eq!(lost_for(&wallet, &w.bob_id()).await, 0);
     assert_eq!(lost_owed(&wallet).await, 0);
+}
+
+#[tokio::test]
+async fn test_blocked_return_kept_floor_raise_holds_the_restore_verdict() {
+    // The restore's raise of the block floor goes unanswered and is kept, the batch carrying
+    // the restore's hold as it was. Reconcile mode can't end while it is kept, so no verdict
+    // is decided that the kept batch could later write back over.
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let _shop = w.shop().await;
+    wallet.app_mut().deny(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    crate::common::restore_with_unknown_cursor(&mut restored).await;
+    // Every batch of this receive goes unanswered, the floor's raise among them.
+    for _ in 0..4 {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Unanswered {
+                path: "/ops".into(),
+                after: 0,
+            });
+    }
+    let _ = restored.receive(None).await;
+    let before = verdict(&restored).await;
+    restored.reconcile().await.unwrap();
+    restored
+        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .expect_err("reconcile mode waits for the kept raise");
+    assert_eq!(verdict(&restored).await, before);
+}
+
+#[tokio::test]
+async fn test_blocked_return_kept_floor_batch_holds_an_open_restore_verdict() {
+    // The state set up directly: a restored wallet whose restore verdict is still open while
+    // a floor batch is kept. A floor batch carries the hold as it was, so a verdict decided
+    // while it is kept could be written back over when it lands. Neither reconcile, which
+    // takes the verdict before it writes, nor ending reconcile mode decides it while the
+    // batch is kept; once it lands, the verdict is decided (Paykit spec 7.2, 8.1).
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let _shop = w.shop().await;
+    wallet.app_mut().deny(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    crate::common::restore_with_unknown_cursor(&mut restored).await;
+    restored.receive(None).await.unwrap();
+    // A batch the client keeps: a write to the deny list that can't be sent.
+    for _ in 0..2 {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+                path: "/ops".into(),
+                after: 0,
+            });
+    }
+    let kept = restored
+        .app_mut()
+        .deny(&[7; 32])
+        .await
+        .expect_err("the deny list's write can't be sent")
+        .kept_batch()
+        .expect("the client keeps the write");
+    // That batch stands in for a kept floor batch, and the verdict is still open.
+    let raw = restored
+        .app()
+        .protocol_get("paykit", b"rh")
+        .await
+        .unwrap()
+        .unwrap();
+    let mut hold: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+    // An open hold as a restore holds it before its verdict: its own widening still owed,
+    // and no re-send asked yet.
+    hold["d"]["verdict"] = serde_json::json!("open");
+    hold["d"]["asks_queued"] = serde_json::json!(false);
+    hold["d"]["asked"] = serde_json::json!([]);
+    if hold["d"]["widening_from_ms"].is_null() {
+        hold["d"]["widening_from_ms"] = serde_json::json!(0);
+        hold["d"]["widening_read"] = serde_json::Value::Null;
+    }
+    restored
+        .app_mut()
+        .protocol_commit(
+            "paykit",
+            &[
+                pubky_switch_client::app::LocalWrite::Put {
+                    key: b"rh".to_vec(),
+                    value: serde_json::to_vec(&hold).unwrap(),
+                },
+                pubky_switch_client::app::LocalWrite::Put {
+                    key: b"fb".to_vec(),
+                    value: kept.to_vec(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    // The kept batch can't be sent again meanwhile.
+    for _ in 0..4 {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+                path: "/ops".into(),
+                after: 0,
+            });
+    }
+    let _ = restored.reconcile().await;
+    assert_eq!(
+        verdict(&restored).await,
+        serde_json::json!("open"),
+        "reconcile takes no verdict while the floor batch is kept"
+    );
+    let refused = restored
+        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .expect_err("reconcile mode waits for the kept floor batch");
+    assert!(
+        matches!(refused.refusal(), Some(paykit_sdk::Refusal::NotNow(why)) if why.contains("floor")),
+        "{refused:?}"
+    );
+    assert_eq!(verdict(&restored).await, serde_json::json!("open"));
+    // Once the batch lands, the verdict is decided. Faults left unused keep it a few reads
+    // more.
+    for _ in 0..6 {
+        let _ = restored.receive(None).await;
+        let _ = restored.reconcile().await;
+        if verdict(&restored).await != serde_json::json!("open") {
+            break;
+        }
+    }
+    assert!(
+        restored
+            .app()
+            .protocol_get("paykit", b"fb")
+            .await
+            .unwrap()
+            .is_none(),
+        "the floor batch landed"
+    );
+    assert_ne!(verdict(&restored).await, serde_json::json!("open"));
+}
+
+/// The restore's verdict as Paykit keeps it (`rh`).
+async fn verdict(app: &Paykit) -> serde_json::Value {
+    let raw = app
+        .app()
+        .protocol_get("paykit", b"rh")
+        .await
+        .unwrap()
+        .unwrap();
+    serde_json::from_slice::<serde_json::Value>(&raw).unwrap()["d"]["verdict"].clone()
 }

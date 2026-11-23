@@ -11,7 +11,8 @@
 //!   a request into the record of its settlement, a receipt beside the proof it names, and
 //!   period details and a Billing Period's proof into the period record, once the request
 //!   record they are checked against is held.
-//!   Meanwhile a Private Payment List is held over its record (`lh/`), the newer kept, and a
+//!   Meanwhile a Private Payment List is held over its record (`lh/`), the newer kept, and
+//!   placed as any held list is ([`Paykit::place_held_lists`]); a
 //!   request is shown unrecorded ([`crate::RequestStatus::Unrecorded`]). A payee's
 //!   cancellation needs nothing here: its stop is kept with the cursor move, with no write
 //!   at the switch (`kc/`, Paykit spec 8.1). An Allowance proposal or answer is tried
@@ -73,6 +74,7 @@ use crate::activity::{ActivityTarget, Role};
 use crate::error::{PaykitError, Result};
 use crate::notices::{KeptNotice, NoticeKind, StoredHandle};
 use crate::paykit::Paykit;
+use crate::publish::FirstDelivery;
 use crate::receive::{
     failure_view, receipt_claim, receipt_deadline, receipt_on_record, receipt_settles, FailureView,
     ReceiptClaim, ReceiptSettles, SwitchClaim,
@@ -409,16 +411,19 @@ impl Paykit {
         self.local_commit(gone).await
     }
 
-    /// A host can change its list after native delivery finished and before its next
-    /// receive. Record the previous issue's first non-delivery while its ID still
-    /// identifies that recipient's reservation. Its duty keeps its ordinary ack order.
-    pub(crate) async fn take_prior_list_nondelivery(&mut self, msg_id: &str) -> Result<bool> {
+    /// A host can change or withdraw its list again after native delivery finished and
+    /// before its next receive. Record the previous issue's first non-delivery or unknown
+    /// delivery while its ID still identifies that recipient's reservation. Its duty
+    /// keeps its ordinary ack order.
+    pub(crate) async fn take_prior_list_delivery(&mut self, msg_id: &str) -> Result<bool> {
         for duty in self.app.pending_duty_events().await? {
             if duty
                 .owners
                 .iter()
                 .any(|owner| owner == crate::protocol::BACKUP_NAME)
-                && matches!(&duty.event, AppEvent::MessageUndelivered { msg_id: id, resend: false, .. } if id == msg_id)
+                && matches!(&duty.event,
+                    AppEvent::MessageUndelivered { msg_id: id, resend: false, .. }
+                    | AppEvent::DeliveryUnknown { msg_id: id, .. } if id == msg_id)
             {
                 let id = duty.event.id().ok_or_else(PaykitError::corrupt)?;
                 return self.take_stored_event(&duty.event, &key::taken(&id)).await;
@@ -491,7 +496,19 @@ impl Paykit {
                 msg_id,
                 resend: false,
                 ..
-            } if self.take_undelivered_list(&mut tx, msg_id).await? => true,
+            } if self
+                .take_list_delivery(&mut tx, msg_id, FirstDelivery::Undelivered)
+                .await? =>
+            {
+                true
+            }
+            AppEvent::DeliveryUnknown { msg_id, .. }
+                if self
+                    .take_list_delivery(&mut tx, msg_id, FirstDelivery::Unknown)
+                    .await? =>
+            {
+                true
+            }
             _ => self.take_reply_ask_duty(&mut tx, event).await?,
         };
         if taken {
@@ -1241,9 +1258,12 @@ impl Paykit {
         }
         if self.app.cert().has_permission(Permission::ClaimsWrite) {
             // Read bound to its key and to the claim the receipt settles, as at the first read.
-            let obligation = receipt_claim(&stored, &attempt_id, |request, start| {
-                self.obligation(&sender, request, start)
-            });
+            let obligation = receipt_claim(
+                &stored,
+                &attempt_id,
+                |request, start| self.obligation(&sender, request, start),
+                |attempt| self.payment_obligation(attempt),
+            );
             let journaled = self.journal_entry_on(&attempt_id, &obligation).await?;
             let deadline = receipt_deadline(
                 &stored,
@@ -1293,6 +1313,7 @@ impl Paykit {
                 }
             }
             if let Some(entry) = settles.received {
+                entry.check_bound(|input| self.app.blind(input))?;
                 tx.put(&key::journal(&attempt_id), &entry)?;
             }
         }

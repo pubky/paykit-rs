@@ -95,3 +95,163 @@ jobs:
           toolchain: "1.91.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo check --workspace --all-features
+
+  # The generated Kotlin and Swift consumers drive the bindings the way a wallet
+  # does. The plain consumers use the production library; the checkout consumers
+  # use the test-wallet library and run every restore decision. Both use the
+  # Scripted switch. The issuer is built last because building an example adds
+  # the dev-dependency features to the library it links.
+  kotlin-host:
+    name: Kotlin host
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      PAYKIT_TEST_ISSUER: ${{ github.workspace }}/target/release/examples/wallet-test-issuer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Generated sources and libraries stay out of the cached target directory.
+      - name: Choose the output directory
+        run: echo "OUT=$RUNNER_TEMP/hosts" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+          targets: x86_64-linux-android
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+        with:
+          gradle-version: "9.9.0"
+      - name: Build the host libraries and generate the bindings
+        run: |
+          for variant in wallet checkout; do
+            features=bindgen
+            if [ "$variant" = checkout ]; then features=bindgen,test-wallet; fi
+            cargo build --locked --release -p paykit-ffi --features "$features" --lib --bin paykit-bindgen
+            mkdir -p "$OUT/$variant/lib"
+            cp target/release/libpaykit_v2.so "$OUT/$variant/lib/"
+            paykit-ffi/generate-bindings.sh target/release/paykit-bindgen \
+              "$OUT/$variant/lib/libpaykit_v2.so" "$OUT/$variant"
+          done
+          cargo build --locked --release -p paykit-ffi --example wallet-test-issuer
+      - name: Run the wallet consumer
+        run: |
+          gradle -p paykit-ffi/tests/hosts --no-daemon -Pbindings="$OUT/wallet/kotlin" \
+            -PnativeLibraryDir="$OUT/wallet/lib" run 2>&1 | tee -a "$OUT/consumers.log"
+      - name: Run the checkout consumer
+        run: |
+          gradle -p paykit-ffi/tests/hosts --no-daemon -Pbindings="$OUT/checkout/kotlin" \
+            -PnativeLibraryDir="$OUT/checkout/lib" -PcheckoutTest=true run 2>&1 | tee -a "$OUT/consumers.log"
+          for decision in confirm refuse doubt; do
+            PAYKIT_TEST_RESTORE=$decision gradle -p paykit-ffi/tests/hosts --no-daemon \
+              -Pbindings="$OUT/checkout/kotlin" -PnativeLibraryDir="$OUT/checkout/lib" \
+              -PcheckoutTest=true run 2>&1 | tee -a "$OUT/consumers.log"
+          done
+      - name: Build the test wallet for Android
+        run: |
+          # The runner image's own variables are not in the workflow's env context.
+          export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_ROOT}"
+          cargo install cargo-ndk --version 4.1.2 --locked
+          cargo ndk -t x86_64 --platform 28 -o "$OUT/jniLibs" build --locked --release -p paykit-ffi --features test-wallet --lib
+      - name: Enable the emulator's hardware acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      # A checkout from the main thread under strict mode, on the runtime's 4 MiB threads.
+      - name: Run the wallet on an Android emulator
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 36
+          arch: x86_64
+          target: google_apis
+          script: gradle -p paykit-ffi/tests/android --no-daemon -Pbindings="$OUT/checkout/kotlin" -PjniLibs="$OUT/jniLibs" connectedAndroidTest
+      - name: Refuse native panics and uncaught host exceptions
+        run: |
+          if grep -nE "panicked at|Exception in thread" "$OUT/consumers.log"; then exit 1; fi
+
+  swift-host:
+    name: Swift host
+    runs-on: macos-26
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      PAYKIT_TEST_ISSUER: ${{ github.workspace }}/target/release/examples/wallet-test-issuer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Generated sources and libraries stay out of the cached target directory.
+      - name: Choose the output directory
+        run: echo "OUT=$RUNNER_TEMP/hosts" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Build the host libraries and generate the bindings
+        run: |
+          for variant in wallet checkout; do
+            features=bindgen
+            if [ "$variant" = checkout ]; then features=bindgen,test-wallet; fi
+            cargo build --locked --release -p paykit-ffi --features "$features" --lib --bin paykit-bindgen
+            mkdir -p "$OUT/$variant/lib"
+            cp target/release/libpaykit_v2.dylib "$OUT/$variant/lib/"
+            paykit-ffi/generate-bindings.sh target/release/paykit-bindgen \
+              "$OUT/$variant/lib/libpaykit_v2.dylib" "$OUT/$variant"
+          done
+          cargo build --locked --release -p paykit-ffi --example wallet-test-issuer
+      - name: Build the Swift consumers
+        run: |
+          for variant in wallet checkout; do
+            dir=$OUT/$variant
+            sources=(paykit-ffi/tests/hosts/WalletConsumer.swift)
+            flags=()
+            if [ "$variant" = checkout ]; then
+              sources+=(paykit-ffi/tests/hosts/CheckoutConsumer.swift)
+              flags=(-D PAYKIT_CHECKOUT_TEST)
+            fi
+            swiftc -swift-version 5 -I "$dir/swift" -Xcc "-fmodule-map-file=$dir/swift/PaykitV2FFI.modulemap" \
+              -emit-library -emit-module -module-name PaykitV2 "$dir"/swift/*.swift \
+              -emit-module-path "$dir/PaykitV2.swiftmodule" -o "$dir/libPaykitV2.dylib" \
+              -L "$dir/lib" -lpaykit_v2
+            swiftc -swift-version 6 -parse-as-library "${flags[@]}" -I "$dir" -I "$dir/swift" \
+              -Xcc "-fmodule-map-file=$dir/swift/PaykitV2FFI.modulemap" "${sources[@]}" \
+              -L "$dir" -lPaykitV2 -L "$dir/lib" -lpaykit_v2 -o "$dir/consumer"
+          done
+      - name: Run the wallet consumer
+        run: |
+          DYLD_LIBRARY_PATH="$OUT/wallet:$OUT/wallet/lib" "$OUT/wallet/consumer" 2>&1 | tee -a "$OUT/consumers.log"
+      - name: Run the checkout consumer
+        run: |
+          export DYLD_LIBRARY_PATH="$OUT/checkout:$OUT/checkout/lib"
+          "$OUT/checkout/consumer" 2>&1 | tee -a "$OUT/consumers.log"
+          for decision in confirm refuse doubt; do
+            PAYKIT_TEST_RESTORE=$decision "$OUT/checkout/consumer" 2>&1 | tee -a "$OUT/consumers.log"
+          done
+      - name: Build the test wallet for iOS
+        run: |
+          for target in aarch64-apple-ios aarch64-apple-ios-sim; do
+            cargo build --locked --release -p paykit-ffi --features test-wallet --lib --target "$target"
+          done
+          paykit-ffi/package-apple.sh "$OUT/checkout" target/aarch64-apple-ios/release/libpaykit_v2.a \
+            target/aarch64-apple-ios-sim/release/libpaykit_v2.a "$OUT/apple"
+      # A checkout from the main actor, on the runtime's 4 MiB threads.
+      - name: Run the wallet on an iOS simulator
+        working-directory: paykit-ffi/tests
+        run: |
+          device=$(xcrun simctl list devices available --json | python3 -c '
+          import json, sys
+          runtimes = json.load(sys.stdin)["devices"]
+          print(next(d["udid"] for r in sorted(runtimes, reverse=True) if ".iOS-" in r
+                     for d in runtimes[r] if d["name"].startswith("iPhone")))')
+          PAYKIT_APPLE_PACKAGE="$OUT/apple" xcodebuild test -scheme PaykitWalletDevice-Package \
+            -destination "id=$device" -derivedDataPath "$OUT/ios-derived"
+      - name: Refuse native panics
+        run: |
+          if grep -n "panicked at" "$OUT/consumers.log"; then exit 1; fi

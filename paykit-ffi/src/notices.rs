@@ -26,6 +26,10 @@ pub enum WalletNoticeKind {
     AllowanceWithdrawalConfirmed,
     /// An original outgoing message found after restore may have reached its recipient.
     PossiblyDelivered,
+    /// A counterparty's current Private Payment List was given up with an unknown outcome.
+    /// For a withdrawal the counterparty may keep paying the earlier list; otherwise it may
+    /// lack the list. Only the user can authorize another version.
+    ListDeliveryUnknown,
     /// Messages a blocked counterparty's inbox accepted from `Notice::lost_from_ms` to
     /// `Notice::lost_until_ms`, which the app dropped for the user's block to ask for again once
     /// the counterparty is unblocked, can no longer come back: its sender keeps them no longer,
@@ -55,6 +59,7 @@ impl From<paykit_sdk::NoticeKind> for WalletNoticeKind {
             K::AllowanceAcceptanceBeforeLoss => Self::AllowanceAcceptanceBeforeLoss,
             K::AllowanceWithdrawalConfirmed => Self::AllowanceWithdrawalConfirmed,
             K::PossiblyDelivered => Self::PossiblyDelivered,
+            K::ListDeliveryUnknown => Self::ListDeliveryUnknown,
             K::BlockedMessagesLost => Self::BlockedMessagesLost,
             K::SettlementBucketFull => Self::SettlementBucketFull,
             K::CreditNeedsUser => Self::CreditNeedsUser,
@@ -217,62 +222,70 @@ impl DeletionNotice {
         }
     }
 }
-#[uniffi::export(async_runtime = "tokio")]
+#[uniffi::export]
 impl NativeWallet {
     /// List the Paykit notices awaiting individual acknowledgment.
     pub async fn notices(&self) -> Result<Vec<WalletNotice>, WalletError> {
-        Ok(self
-            .lock()
-            .await?
-            .notices()
-            .await?
-            .into_iter()
-            .map(|n| WalletNotice {
-                id: n.id,
-                kind: n.kind.into(),
-                settlement: n.settlement.map(Into::into),
-                attempt_id: n.attempt_id.map(|id| id.to_text()),
-                message_id: n.msg_id,
-                counterparty: n.counterparty.map(Vec::from),
-                settlement_marks: n
-                    .settlement_marks
+        self.with_wallet(|app| {
+            Box::pin(async move {
+                Ok(app
+                    .notices()
+                    .await?
                     .into_iter()
-                    .map(|mark| SettlementMark {
-                        settlement: mark.settlement.into(),
-                        occurrence_kind: mark.kind.code(),
-                        occurrence: mark.occurrence.into(),
+                    .map(|n| WalletNotice {
+                        id: n.id,
+                        kind: n.kind.into(),
+                        settlement: n.settlement.map(Into::into),
+                        attempt_id: n.attempt_id.map(|id| id.to_text()),
+                        message_id: n.msg_id,
+                        counterparty: n.counterparty.map(Vec::from),
+                        settlement_marks: n
+                            .settlement_marks
+                            .into_iter()
+                            .map(|mark| SettlementMark {
+                                settlement: mark.settlement.into(),
+                                occurrence_kind: mark.kind.code(),
+                                occurrence: mark.occurrence.into(),
+                            })
+                            .collect(),
+                        request_hash: n.request_hash.map(Vec::from),
+                        message_hash: n.message_hash.map(Vec::from),
+                        raised_at_ms: n.raised_at_ms,
+                        lost_from_ms: n.lost_from_ms,
+                        lost_until_ms: n.lost_until_ms,
                     })
-                    .collect(),
-                request_hash: n.request_hash.map(Vec::from),
-                message_hash: n.message_hash.map(Vec::from),
-                raised_at_ms: n.raised_at_ms,
-                lost_from_ms: n.lost_from_ms,
-                lost_until_ms: n.lost_until_ms,
+                    .collect())
             })
-            .collect())
+        })
+        .await
     }
     /// Acknowledge the notice after handling its effects durably.
     pub async fn acknowledge_notice(&self, id: String) -> Result<(), WalletError> {
-        self.with_wallet(async |app| Ok(app.acknowledge_notice(&id).await?))
+        self.with_wallet(move |app| Box::pin(async move { Ok(app.acknowledge_notice(&id).await?) }))
             .await
     }
     /// List pending notices about deleted payee records.
     pub async fn payee_deletion_notices(&self) -> Result<Vec<Arc<DeletionNotice>>, WalletError> {
-        Ok(self
-            .lock()
-            .await?
-            .payee_deletion_notices()
-            .await?
-            .into_iter()
-            .map(|n| Arc::new(DeletionNotice(n)))
-            .collect())
+        self.with_wallet(|app| {
+            Box::pin(async move {
+                Ok(app
+                    .payee_deletion_notices()
+                    .await?
+                    .into_iter()
+                    .map(|n| Arc::new(DeletionNotice(n)))
+                    .collect())
+            })
+        })
+        .await
     }
     /// Acknowledge the exact deletion notice after handling it.
     pub async fn acknowledge_payee_deletion(
         &self,
         notice: Arc<DeletionNotice>,
     ) -> Result<(), WalletError> {
-        self.with_wallet(async |app| Ok(app.acknowledge_payee_deletion(&notice.0).await?))
-            .await
+        self.with_wallet(move |app| {
+            Box::pin(async move { Ok(app.acknowledge_payee_deletion(&notice.0).await?) })
+        })
+        .await
     }
 }

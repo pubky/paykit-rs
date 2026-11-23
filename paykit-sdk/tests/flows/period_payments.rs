@@ -177,7 +177,7 @@ fn period_natural(request: &RequestRef, period: PeriodRef) -> Vec<u8> {
 }
 
 /// The shared record key of `request`'s period record of `period`, as `app` keys it.
-fn period_key(app: &Paykit, request: &RequestRef, period: PeriodRef) -> [u8; 32] {
+pub(super) fn period_key(app: &Paykit, request: &RequestRef, period: PeriodRef) -> [u8; 32] {
     app.app()
         .record_key(&natural_target(&period_natural(request, period)))
         .unwrap()
@@ -505,20 +505,34 @@ async fn confirm_period_settlement(terms: SettlementTerms, after_start_ms: u64, 
         let period = &activity[0].periods[0];
         assert_eq!(period.billing_period, january());
         assert!(period.paid);
-        assert_eq!(
-            seller_wallet.verify_payment(&period.record).await.unwrap(),
-            credited.then_some(paid_at)
-        );
-        let receipt = seller_wallet.confirm_payment(&period.record).await.unwrap();
+        // A payment verified at a time the period doesn't allow is flagged, never credited.
+        let outside = Refusal::PaymentTimeOutside {
+            paid_at_ms: paid_at,
+        };
+        let verified = seller_wallet.verify_payment(&period.record).await;
+        let receipt = if credited {
+            assert_eq!(verified.unwrap(), Some(paid_at));
+            seller_wallet.confirm_payment(&period.record).await.unwrap()
+        } else {
+            assert_eq!(verified.unwrap_err().refusal(), Some(&outside));
+            let refused = seller_wallet
+                .confirm_payment(&period.record)
+                .await
+                .unwrap_err();
+            assert_eq!(refused.refusal(), Some(&outside));
+            None
+        };
         assert_eq!(receipt.is_some(), credited);
         if let Some(previous) = &issued {
             assert_eq!(receipt.as_ref(), Some(previous));
         }
         issued = receipt;
-        assert_eq!(
-            seller_wallet.confirm_payment(&period.record).await.unwrap(),
-            issued
-        );
+        if credited {
+            assert_eq!(
+                seller_wallet.confirm_payment(&period.record).await.unwrap(),
+                issued
+            );
+        }
         let activity = seller_wallet.payee_activity().await.unwrap();
         assert_eq!(activity[0].periods[0].credited, credited);
         assert_eq!(
@@ -1534,8 +1548,11 @@ async fn test_period_payments_standing_rate_policy_checks_each_occurrence_and_ke
 ) {
     let w = World::new();
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let base = store();
     let mut wallet = w.wallet_on("wallet", base.clone()).await;
@@ -1752,8 +1769,11 @@ async fn test_period_payments_a_rate_quote_cannot_override_automatic_holds() {
 async fn test_period_payments_priced_repeat_requires_unexpired_selected_rates() {
     let (w, _shop, mut wallet, request, _) = Box::pin(priced_period_on(false, store(), None)).await;
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let shown = crate::conversion::priced_of(
         &by_user(&mut wallet, &request, january(), PayOptions::default())
@@ -1902,8 +1922,11 @@ async fn test_period_payments_recorded_attempt_rechecks_the_period_rate_issuer()
 async fn test_period_payments_priced_repeat_preserves_selected_rate_and_amount() {
     let (w, _shop, mut wallet, request, _) = Box::pin(priced_period_on(false, store(), None)).await;
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let shown = crate::conversion::priced_of(
         &by_user(&mut wallet, &request, january(), PayOptions::default())
@@ -2196,7 +2219,7 @@ type StageHook = Box<dyn FnOnce() + Send>;
 /// A store that runs a hook once, right after the commit of the first journal write at a
 /// stage.
 #[derive(Default)]
-struct StageStore {
+pub(super) struct StageStore {
     inner: MemoryStore,
     hook: std::sync::Mutex<Option<(&'static str, StageHook)>>,
 }
@@ -2204,6 +2227,11 @@ struct StageStore {
 impl StageStore {
     fn on_stage(&self, stage: &'static str, hook: impl FnOnce() + Send + 'static) {
         *self.hook.lock().unwrap() = Some((stage, Box::new(hook)));
+    }
+
+    /// Whether the hook armed last has run.
+    pub(super) fn fired(&self) -> bool {
+        self.hook.lock().unwrap().is_none()
     }
 }
 
@@ -2461,21 +2489,10 @@ async fn seller_stop_after_attempt(stop_at: StopAt) {
     assert_eq!(w.rail.all_executions().len(), 1);
 }
 
-#[tokio::test]
-async fn test_period_payments_period_record_divergent_after_the_paying_commit_holds_it() {
-    // Right after the wallet journals January's `Paying` by hand, a view shows January's
-    // period record divergent: the dispatch is held, nothing paid, as the check before it
-    // judges every pause after its last read (Paykit spec 6).
-    let w = World::new();
-    let base = Arc::new(StageStore::default());
-    let mut shop = w.shop().await;
-    let mut wallet = w
-        .wallet_on("wallet", Arc::clone(&base) as Arc<dyn StateStore>)
-        .await;
-    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
-    let record = period_key(&wallet, &request, january());
-    let store = Arc::clone(&base) as Arc<dyn StateStore>;
-    let app = wallet.app_id();
+/// Right after the first journal write at `Paying`, a view shows `record` divergent, as a
+/// conflicting write would: the stage hook marks it in `app`'s namespace of `base`.
+pub(super) fn diverge_at_paying(base: &Arc<StageStore>, app: [u8; 16], record: [u8; 32]) {
+    let store = Arc::clone(base) as Arc<dyn StateStore>;
     base.on_stage("paying", move || {
         let ns = pubky_switch_client::store::client_namespace(&app);
         let key = format!("rcdiv/{}", pubky_switch_core::enc::b64(&record));
@@ -2485,11 +2502,39 @@ async fn test_period_payments_period_record_divergent_after_the_paying_commit_ho
             .unwrap();
         store.commit(batch).unwrap();
     });
-    let outcome = by_user(&mut wallet, &request, january(), PayOptions::default())
-        .await
+}
+
+#[tokio::test]
+async fn test_period_payments_period_record_divergent_after_the_paying_commit_holds_it() {
+    // Right after the wallet journals January's `Paying`, by hand or by its policy, a view
+    // shows January's period record divergent: the dispatch is held, nothing paid, as the
+    // check before it judges every pause after its last read (Paykit spec 6).
+    for automatic in [false, true] {
+        let w = World::new();
+        let base = Arc::new(StageStore::default());
+        let mut shop = w.shop().await;
+        let mut wallet = w
+            .wallet_on("wallet", Arc::clone(&base) as Arc<dyn StateStore>)
+            .await;
+        let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+        let record = period_key(&wallet, &request, january());
+        diverge_at_paying(&base, wallet.app_id(), record);
+        let outcome = if automatic {
+            by_policy(&mut wallet, &request, january()).await
+        } else {
+            by_user(&mut wallet, &request, january(), PayOptions::default()).await
+        }
         .unwrap();
-    assert!(matches!(outcome, PayOutcome::Pending { .. }), "{outcome:?}");
-    assert!(w.rail.all_executions().is_empty());
+        assert!(
+            matches!(outcome, PayOutcome::Pending { .. }),
+            "automatic {automatic}: {outcome:?}"
+        );
+        assert!(w.rail.all_executions().is_empty(), "automatic {automatic}");
+        assert!(
+            base.fired(),
+            "automatic {automatic}: the record diverged after Paying"
+        );
+    }
 }
 
 #[tokio::test]
@@ -2556,8 +2601,11 @@ async fn resumed_period_repeat(
     between: impl AsyncFnOnce(&mut Paykit, [u8; 32]),
 ) -> (u64, PayOutcome) {
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let mut shop = w.shop().await;
     let mut wallet = w
@@ -2605,8 +2653,11 @@ async fn resume_marked_subscription(
     after_mark: impl AsyncFnOnce(&mut Paykit, [u8; 32]),
 ) -> (paykit_lib::AttemptId, Vec<PayOutcome>, ActivityRecord) {
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(idempotent),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(idempotent),
     );
     let storage = store();
     let mut wallet = w
@@ -3273,8 +3324,11 @@ async fn test_period_payments_by_policy_repeat_completes_past_the_window() {
     // dispatch (Paykit spec 8.2).
     let w = World::new();
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let mut shop = w.shop().await;
     let mut wallet = w
@@ -3338,8 +3392,11 @@ async fn test_period_payments_by_policy_reads_the_deny_list_fresh() {
 async fn test_period_payments_by_policy_resume_honors_a_new_manual_only_mark() {
     let w = World::new();
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let mut shop = w.shop().await;
     let mut wallet = w

@@ -33,7 +33,7 @@ use paykit_lib::bodies::{
     PaymentProof, PaymentRequest, PaymentRequestAcceptance, PrivatePaymentListRequest,
     RequestDestination,
 };
-use paykit_lib::derive::{natural_key, payment_obligation};
+use paykit_lib::derive::natural_key;
 use paykit_lib::kinds::Kind;
 use paykit_lib::periods::PeriodRef;
 use paykit_lib::records::{
@@ -955,8 +955,9 @@ pub(crate) enum FinalCheck {
     Pay,
     /// Not now: nothing is paid and the attempt stays open.
     Hold,
-    /// A repeat past the idempotency retention, or one that might not complete before its
-    /// attempt is orphaned: never made.
+    /// A repeat past the idempotency retention, one that might not complete before its
+    /// attempt is orphaned, or one under an Allowance that has expired: never made, and the
+    /// attempt stays "may be paid".
     Lapsed,
     /// The client refused the payee's late switch answer, such as an equivocation (Switch
     /// wire 3.3): nothing is paid, and the refusal is the caller's.
@@ -972,6 +973,15 @@ pub(crate) enum FinalCheck {
 /// key forgotten. A retention kept for good holds whatever the clock.
 pub(crate) fn retained(retention: Option<u64>, journaled_at_ms: u64, now: u64) -> bool {
     retention.is_none_or(|r| now.checked_sub(journaled_at_ms).is_some_and(|age| age < r))
+}
+
+/// Whether the Allowance an attempt was reserved under has expired by the later of the
+/// device clock `now` and the highest service time verified, `service_time`.
+fn allowance_expired(entry: &JournalEntry, now: u64, service_time: Option<u64>) -> bool {
+    entry.allowance.is_some()
+        && entry
+            .allowance_expires_at_ms
+            .is_some_and(|expiry| expiry <= now.max(service_time.unwrap_or(0)))
 }
 
 /// Whether `bound` has passed (Paykit spec 7.2, "Kept proofs"): it lies before the earlier
@@ -1011,16 +1021,17 @@ pub(crate) struct ListAsk {
     pub(crate) asked_at_ms: u64,
 }
 
-/// The local write that journals `entry` in a batch. The entry is checked first
-/// ([`JournalEntry::check`]), the shape every read back checks before binding it to its key
-/// (`state::Stored`), so no path persists a state recovery would refuse: one that fails is a
-/// bug, refused as a corrupt store, with nothing written.
-pub(crate) fn journal_write(entry: &JournalEntry) -> Result<LocalWrite> {
-    entry.check()?;
-    state::local_put(&key::journal(&entry.attempt()?), entry)
-}
-
 impl Paykit {
+    /// The local write that journals `entry` in a batch. The entry is checked first, its
+    /// claim key bound to what it pays as every read back binds it
+    /// ([`JournalEntry::check_bound`], `state::Stored`), so no path persists a state
+    /// recovery would refuse: one that fails is a bug, refused as a corrupt store, with
+    /// nothing written.
+    pub(crate) fn journal_write(&self, entry: &JournalEntry) -> Result<LocalWrite> {
+        entry.check_bound(|input| self.app.blind(input))?;
+        state::local_put(&key::journal(&entry.attempt()?), entry)
+    }
+
     /// Pay a one-time request by hand (Paykit spec 7.2, 8.1 step 3).
     ///
     /// # Errors
@@ -1336,6 +1347,7 @@ impl Paykit {
             offline: None,
             restored: false,
             journaled_at_ms: self.now(),
+            allowance_expires_at_ms: None,
             carrier: None,
             carrier_record: None,
             attempt_proof: None,
@@ -1535,7 +1547,7 @@ impl Paykit {
             refuse_blocked(true, shown, options.blocked_confirmed.as_ref())?;
         }
         let attempt_id = AttemptId::generate()?;
-        let obligation = payment_obligation(&attempt_id);
+        let obligation = self.payment_obligation(&attempt_id);
         let deadline = match self.app.read_claim(&obligation).await {
             Ok(_) => Some(
                 self.recent_service_time(&obligation)
@@ -1568,7 +1580,7 @@ impl Paykit {
             user_started: true,
             allowance: None,
             attempt_id: attempt_id.to_text(),
-            obligation: payment_obligation(&attempt_id),
+            obligation: self.payment_obligation(&attempt_id),
             payee: payment.payee,
             request_hash: None,
             natural_key: natural.clone(),
@@ -1591,6 +1603,7 @@ impl Paykit {
             offline: None,
             restored: false,
             journaled_at_ms: self.now(),
+            allowance_expires_at_ms: None,
             carrier: None,
             carrier_record: None,
             attempt_proof: None,
@@ -1723,8 +1736,9 @@ impl Paykit {
     }
 
     /// The journal entry of `attempt`, read back checked and bound to its key: of that
-    /// attempt, its claim key the one its payee and request blind to, its record the one its
-    /// request or attempt names (`state::Stored`).
+    /// attempt, its claim key the one its payee and request, or its attempt for a payment
+    /// without a request, blind to, its record the one its request or attempt names
+    /// (`state::Stored`).
     ///
     /// # Errors
     ///
@@ -1748,10 +1762,10 @@ impl Paykit {
         JournalEntry::on_claim(self.journal_entry(attempt).await?, obligation)
     }
 
-    /// Journal `entry`, checked first as [`journal_write`] does: only a state a resume and a
-    /// restore read back is persisted.
+    /// Journal `entry`, checked first as [`Paykit::journal_write`] does: only a state a
+    /// resume and a restore read back is persisted.
     async fn save(&mut self, entry: &JournalEntry) -> Result<()> {
-        entry.check()?;
+        entry.check_bound(|input| self.app.blind(input))?;
         self.local_put(&key::journal(&entry.attempt()?), entry)
             .await
     }
@@ -2919,7 +2933,7 @@ impl Paykit {
         // The journal moves to `Attempted` with the batch's answer, never before.
         let mut attempted = entry.clone();
         attempted.stage = Stage::Attempted;
-        batch = batch.local(journal_write(&attempted)?);
+        batch = batch.local(self.journal_write(&attempted)?);
         if Box::pin(self.period_recovery_held(&entry)).await? {
             return Err(Refusal::NotNow(crate::loss::LOSS_DOUBT.into()).into());
         }
@@ -3312,7 +3326,7 @@ impl Paykit {
             Some(write) => {
                 let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
                     .entry(write)
-                    .local(journal_write(&finished)?);
+                    .local(self.journal_write(&finished)?);
                 match self.submit(batch).await {
                     Ok(_) => {}
                     Err(error) if error.code() == Some(ErrorCode::Conflict) => {
@@ -3355,8 +3369,9 @@ impl Paykit {
         match check {
             FinalCheck::Pay => {}
             FinalCheck::Hold => return Ok(PayOutcome::Pending { attempt_id }),
-            // The method may have forgotten the key: the repeat isn't made, and the attempt
-            // stays "may be paid" (Paykit spec 7.2).
+            // The method may have forgotten the key, the repeat may not complete in time, or
+            // its Allowance has expired: the repeat isn't made, and the attempt stays "may be
+            // paid" (Paykit spec 7.2, 8.3).
             FinalCheck::Lapsed => return Ok(PayOutcome::Uncertain { attempt_id }),
             // A refused answer stops the payment. A first dispatch submitted nothing, so it
             // is written `failed` and refused with the answer's refusal; a repeat may follow
@@ -3373,9 +3388,10 @@ impl Paykit {
         if matches!(kind, Dispatch::First { .. }) {
             self.set_stage(&mut entry, Stage::Paying).await?;
         }
-        match Box::pin(self.payment_fence(&entry, payee, by, confirmed, kind)).await? {
-            FinalCheck::Pay => {}
-            stopped => return self.stopped_before_the_call(entry, kind, stopped).await,
+        match Box::pin(self.payment_fence(&entry, payee, by, confirmed, kind)).await {
+            Ok(FinalCheck::Pay) => {}
+            Ok(stopped) => return self.stopped_before_the_call(entry, kind, stopped).await,
+            Err(error) => return self.unread_at_the_fence(entry, kind, error).await,
         }
         let outcome = self.rail.pay(payment).await;
         // The call was made and the payment may be running, its outcome not known yet: only
@@ -3430,6 +3446,41 @@ impl Paykit {
             (Dispatch::First { .. }, stopped) => self.stopped_at_the_fence(entry, stopped).await,
             (Dispatch::Repeat { .. }, FinalCheck::Hold) => Ok(PayOutcome::Pending { attempt_id }),
             (Dispatch::Repeat { .. }, _) => Ok(PayOutcome::Uncertain { attempt_id }),
+        }
+    }
+
+    /// A dispatch whose fence failed, before the payment method's call: a read of the switch,
+    /// the store or the client failed, so nothing shows whether the payment may go now. The
+    /// failure is the caller's to see, never a pending payment. A repeat's entry stays
+    /// `Paying`, as the dispatch before it may have paid, and the error is returned.
+    ///
+    /// A first dispatch submitted nothing: it is written back to `Attempted`, known
+    /// unsubmitted, then written `failed`, as a refusal at the fence writes it (Paykit spec
+    /// 7.2 step 1), so a new payment may be made at once. A refusal is returned as the
+    /// failed attempt's cause; any other error as it is. The failed write needs the switch too: when it
+    /// can't be made, the entry stays `Attempted` and the fence's error is returned; a
+    /// resume writes the attempt `failed` later, and until then a new payment of the same
+    /// obligation is refused as in progress.
+    async fn unread_at_the_fence(
+        &mut self,
+        mut entry: JournalEntry,
+        kind: Dispatch,
+        error: PaykitError,
+    ) -> Result<PayOutcome> {
+        if !matches!(kind, Dispatch::First { .. }) {
+            return Err(error);
+        }
+        self.set_stage(&mut entry, Stage::Attempted).await?;
+        match self.write_outcome(&mut entry, false, false).await {
+            // Written failed: a refusal is the failed attempt's cause; any other error, such
+            // as the switch's own answer with its code and retry time, or a store failure, is
+            // returned as it is.
+            Ok(_) => match error.refusal() {
+                Some(why) => Err(Refusal::AttemptFailed(Box::new(why.clone())).into()),
+                None => Err(error),
+            },
+            // The failed write didn't go: the entry is `Attempted` still.
+            Err(_) => Err(error),
         }
     }
 
@@ -3688,7 +3739,7 @@ impl Paykit {
             };
             finished.record_held = false;
             finished.proof_msg_id = proof.as_ref().map(|p| p.msg_id().to_owned());
-            batch = batch.local(journal_write(&finished)?);
+            batch = batch.local(self.journal_write(&finished)?);
             if batch.is_empty() {
                 if let Some(PaidProof::New(proof)) = proof {
                     self.app.queue_signed(*proof).await?;
@@ -4568,9 +4619,10 @@ impl Paykit {
     ///    request's or a list's endpoint, by the switch's rules for a public endpoint;
     /// 4. the own `identity.json` is confirmed in the last 60 s, and lists this app at the
     ///    attempt's service and generation;
-    /// 5. for a repeat, the method's idempotency retention hasn't ended, and the repeat can
-    ///    complete before its attempt is orphaned ([`FinalCheck::Lapsed`]); for a first
-    ///    dispatch, the attempt is within its pre-dispatch budget;
+    /// 5. for a repeat, the method's idempotency retention hasn't ended, the Allowance it
+    ///    was reserved under hasn't expired, and the repeat can complete before its attempt
+    ///    is orphaned ([`FinalCheck::Lapsed`]); for a first dispatch, the attempt is within
+    ///    its pre-dispatch budget and the Allowance it was reserved under hasn't expired;
     /// 6. the app may still make the attempt: no alarm or restore question raised meanwhile,
     ///    for an automatic payment the clocks within the tolerance, and its certificate
     ///    holds `paykit_pay`, so an app a renewal reduced moves no money on any path, a repeat at a
@@ -4914,10 +4966,11 @@ impl Paykit {
     ) -> Result<FinalCheck> {
         let mut may_take_answer = matches!(kind, Dispatch::First { .. });
         loop {
-            if self.dispatch_held(entry, by, kind).await.unwrap_or(true)
-                || Box::pin(self.period_recovery_held(entry))
-                    .await
-                    .unwrap_or(true)
+            // A check that fails here, a payment by hand's fresh reads or the store, is the
+            // caller's error, not a hold ([`Paykit::unread_at_the_fence`]). An automatic
+            // payment's checks take a read that fails as a hold themselves.
+            if self.dispatch_held(entry, by, kind).await?
+                || Box::pin(self.period_recovery_held(entry)).await?
             {
                 return Ok(FinalCheck::Hold);
             }
@@ -5090,6 +5143,12 @@ impl Paykit {
                 if !retained(idempotency_retention_ms, entry.journaled_at_ms, now) {
                     return Ok(FinalCheck::Lapsed);
                 }
+                // An expired Allowance pays nothing more (Paykit spec 8.3): no repeat of a
+                // dispatch that may have gone, and the attempt stays open as possibly paid,
+                // for the method's history or a receipt to settle, never written failed.
+                if allowance_expired(entry, now, self.service_time()) {
+                    return Ok(FinalCheck::Lapsed);
+                }
                 if !self.repeat_completes_before_orphaned(
                     now,
                     read_at,
@@ -5103,6 +5162,15 @@ impl Paykit {
             Dispatch::First { answered, .. } => {
                 if let Err(refusal) = self.within_budget(&answered, now) {
                     return Ok(FinalCheck::Refused(refusal));
+                }
+                // An expired Allowance pays nothing more (Paykit spec 8.3): the reservation's
+                // window bounds when the attempt was written, this when its first dispatch
+                // goes. Nothing was submitted, so the attempt is written `failed`; a repeat is
+                // stopped above instead, as `Lapsed`, since the first call may have paid.
+                if allowance_expired(entry, now, self.service_time()) {
+                    return Ok(FinalCheck::Refused(Refusal::NotAutomatic(
+                        "the Allowance expired before dispatch".into(),
+                    )));
                 }
                 if automatic_first
                     && entry.period()?.is_some_and(|period| {

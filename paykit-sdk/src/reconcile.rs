@@ -32,7 +32,7 @@
 
 use paykit_lib::bodies::RequestDestination;
 use paykit_lib::collections::Collection;
-use paykit_lib::derive::{natural_key, payment_obligation};
+use paykit_lib::derive::natural_key;
 use paykit_lib::periods::{BillingPeriod, PeriodRef};
 use paykit_lib::records::{ActivityRecord, ActivitySide, DestinationSource, RecordBinding};
 use paykit_lib::{AttemptId, Body};
@@ -170,7 +170,7 @@ impl Paykit {
                 Ok(RecordBinding::Unrequested) => {
                     if let Some(attempt) = record.attempt_id {
                         out.push(Obligation {
-                            claim_key: payment_obligation(&attempt),
+                            claim_key: self.payment_obligation(&attempt),
                             payee: record.counterparty,
                             request_hash: None,
                             record: record.clone(),
@@ -619,6 +619,7 @@ impl Paykit {
             offline: None,
             restored: true,
             journaled_at_ms: self.now(),
+            allowance_expires_at_ms: None,
             carrier: None,
             carrier_record: None,
             attempt_proof: None,
@@ -789,7 +790,7 @@ impl Paykit {
                 entry.end_before_the_call();
             }
             entry.stage = Stage::Finished;
-            batch = batch.local(crate::pay::journal_write(entry)?);
+            batch = batch.local(self.journal_write(entry)?);
         }
         let applied = self.submit(batch).await?;
         if let Some(own) = entry
@@ -821,7 +822,7 @@ impl Paykit {
             |why: &str| -> crate::error::PaykitError { Refusal::RecordHeld(why.into()).into() };
         let natural = match entry {
             Some(entry) => Some(entry.natural_key.clone()),
-            None if *obligation == payment_obligation(attempt) => {
+            None if *obligation == self.payment_obligation(attempt) => {
                 Some(natural_key::payer_payment_record(&own, attempt))
             }
             None => {

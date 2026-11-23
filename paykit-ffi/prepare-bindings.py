@@ -61,58 +61,5 @@ def redact(kotlin_path, swift_path):
     swift_path.write_text("\n".join(swift))
 
 
-def swift_cancellation(source):
-    # Throwing calls can report native cancellation. Nonthrowing callbacks keep
-    # their generated completion semantics.
-    swift = source.read_text()
-
-    def wire(match):
-        call = match[0]
-        poll = re.search(r"pollFunc: (ffi_\w+_rust_future_poll_\w+),", call)
-        if not poll:
-            raise ValueError("missing native Swift poll")
-        cancel = poll[1].replace("_poll_", "_cancel_")
-        return call.replace(poll[0], poll[0] + "\n            cancelFunc: " + cancel + ",")
-
-    swift, count = re.subn(r"try\s+await uniffiRustCallAsync\(.*?\n        \)", wire, swift, flags=re.DOTALL)
-    if not count:
-        raise ValueError("missing throwing Swift functions")
-
-    def replace_once(original, replacement):
-        nonlocal swift
-        if swift.count(original) != 1:
-            raise ValueError("unexpected UniFFI Swift template: " + original)
-        swift = swift.replace(original, replacement)
-
-    replace_once("    completeFunc: (UInt64,", "    cancelFunc: ((UInt64) -> Void)? = nil,\n    completeFunc: (UInt64,")
-    replace_once("    pollFunc: (UInt64,", "    pollFunc: @escaping (UInt64,")
-    replace_once("""            pollFunc(
-                rustFuture,
-                uniffiFutureContinuationCallback,
-                uniffiContinuationHandleMap.insert(obj: $0)
-            )""", """            let continuation = uniffiContinuationHandleMap.insert(obj: $0)
-            WalletPoller.shared.schedule {
-                pollFunc(rustFuture, uniffiFutureContinuationCallback, continuation)
-            }""")
-    replace_once("    let rustFuture = rustFutureFunc()", """    if cancelFunc != nil { try Task.checkCancellation() }
-    let rustFuture = rustFutureFunc()
-    let lifetime = cancelFunc.map { WalletFuture(rustFuture, cancel: $0) }""")
-    replace_once("        freeFunc(rustFuture)", """        if let lifetime { lifetime.finish(freeFunc) } else { freeFunc(rustFuture) }""")
-    start = swift.index("    var pollResult: Int8;")
-    end = swift.index("\n}", start)
-    body = "\n".join("    " + line if line else "" for line in swift[start:end].splitlines())
-    swift = swift[:start] + "    func result() async throws -> T {\n" + body + """
-    }
-    guard let lifetime else { return try await result() }
-    return try await withTaskCancellationHandler {
-        try await result()
-    } onCancel: {
-        lifetime.cancel()
-    }""" + swift[end:]
-    replace_once('fatalError("Cancellation not supported yet")', 'throw CancellationError()')
-    source.write_text(swift)
-
-
 if __name__ == "__main__":
     redact(Path(sys.argv[1]), Path(sys.argv[2]))
-    swift_cancellation(Path(sys.argv[3]))

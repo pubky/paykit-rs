@@ -415,6 +415,9 @@ fn period_record_unread() -> PaykitError {
     Refusal::NotNow("Paykit wire 5.3: the period record held doesn't read".into()).into()
 }
 
+/// Period records with their keys, by the key of the request record they belong to.
+pub(crate) type PeriodsByRequest = HashMap<[u8; 32], Vec<([u8; 32], ActivityRecord)>>;
+
 impl Paykit {
     /// Open against the held write, or check the service before creating a period at zero.
     async fn period_payment_base(
@@ -487,37 +490,36 @@ impl Paykit {
 
     /// The period records of `collection` this app holds that bind, with their keys, by the
     /// request they belong to; [`period_views`] shows them.
-    pub(crate) async fn periods_of(
-        &self,
-        collection: Collection,
-    ) -> Result<HashMap<[u8; 32], Vec<([u8; 32], ActivityRecord)>>> {
-        let own = self.identity();
+    pub(crate) async fn periods_of(&self, collection: Collection) -> Result<PeriodsByRequest> {
         let side = match collection {
             Collection::PayeeActivity => ActivitySide::Payee,
             _ => ActivitySide::Payer,
         };
-        let mut out: HashMap<[u8; 32], Vec<([u8; 32], ActivityRecord)>> = HashMap::new();
+        let mut bound = Vec::new();
         for held in self.app.records_of(collection.name()).await? {
-            let (Some(value), Some(label)) =
-                (held.content.value(), collection.policy_label(&held.policy))
-            else {
+            let Some(label) = collection.policy_label(&held.policy) else {
                 continue;
             };
-            let Some(record) = crate::records::bind_activity(
-                value,
-                &own,
-                side,
-                label.as_ref(),
-                &held.key,
-                |t| self.app.record_key(t).ok(),
-                &|p| self.rail.settlement_id(p),
-            ) else {
-                continue;
-            };
+            if let Some(record) = self.bind_held(&held, side, label.as_ref()) {
+                bound.push((held.key, label, record));
+            }
+        }
+        self.group_periods(bound)
+    }
+
+    /// The period records among `bound`, records each bound at its key under the label its
+    /// policy gives it, by the request record they belong to ([`Paykit::periods_of`]).
+    pub(crate) fn group_periods(
+        &self,
+        bound: impl IntoIterator<Item = ([u8; 32], Option<paykit_lib::Label>, ActivityRecord)>,
+    ) -> Result<PeriodsByRequest> {
+        let own = self.identity();
+        let mut out = PeriodsByRequest::new();
+        for (key, label, record) in bound {
             if let Some(parent) = period_request_target(&record, &own, label.as_ref()) {
                 out.entry(self.activity_key(&parent)?)
                     .or_default()
-                    .push((held.key, record));
+                    .push((key, record));
             }
         }
         Ok(out)
@@ -1394,6 +1396,7 @@ impl Paykit {
             proof_msg_id: None,
             restored: false,
             journaled_at_ms: self.now(),
+            allowance_expires_at_ms: None,
             carrier: None,
             carrier_record: None,
             attempt_proof: None,

@@ -241,6 +241,11 @@ pub struct ReceiveSummary {
     /// A received message's entry receipt identifies any invitation redeemed for that
     /// delivery. This service observation does not authorize a payment or replace the
     /// signed request and its seller-scope checks.
+    ///
+    /// The read is bounded. While `report.more` is set, it stopped on one of its per-call
+    /// budgets, such as its feed pages, with more to read now, and the host calls
+    /// [`Paykit::receive`] again without waiting, until a summary has it unset: nothing it
+    /// left is lost or reordered.
     pub report: ReceiveReport,
     /// The `msg_id`s of the messages received, each with its effect committed with the
     /// cursor move (Switch spec 8.2).
@@ -384,6 +389,13 @@ pub struct Paykit {
     /// The capabilities the join checked, which its first update signs as they are
     /// (`crate::own_record`); `None` otherwise.
     pub(crate) capability_snapshot: Option<Vec<paykit_lib::PaymentEndpointIdentifier>>,
+    /// How many activity records this handle bound ([`Paykit::activity_binds`]).
+    #[cfg(feature = "test-support")]
+    pub(crate) activity_binds: std::sync::atomic::AtomicU64,
+    /// The certificates this handle verified (`crate::records::Certificates`): empty when it
+    /// is built, at a load, a join or a restore, so each certificate is verified in full the
+    /// first time this handle reads it.
+    pub(crate) certificates: std::sync::Mutex<crate::records::Certificates>,
 }
 
 impl std::fmt::Debug for Paykit {
@@ -449,7 +461,19 @@ impl Paykit {
             first_read_summary: None,
             own_record_unknown: false,
             capability_snapshot: None,
+            #[cfg(feature = "test-support")]
+            activity_binds: std::sync::atomic::AtomicU64::new(0),
+            certificates: std::sync::Mutex::default(),
         }
+    }
+
+    /// How many activity records this handle has bound since it was built: each bind checks
+    /// every stored message the record holds (Paykit wire 5.3). For tests that guard how
+    /// often a read binds a record.
+    #[cfg(feature = "test-support")]
+    pub fn activity_binds(&self) -> u64 {
+        self.activity_binds
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Join from an approval (Switch spec 12.1), as a Paykit App: the client's join, with
@@ -844,6 +868,12 @@ impl Paykit {
         self.app.highest_service_time()
     }
 
+    /// The obligation of a payment without a request: its attempt ID blinded with the
+    /// payer's naming key (Paykit wire 1.5).
+    pub(crate) fn payment_obligation(&self, attempt_id: &paykit_lib::AttemptId) -> [u8; 32] {
+        paykit_lib::derive::payment_obligation_blinded(&self.app.blind(&attempt_id.to_bytes()))
+    }
+
     /// The obligation ID of a request, or of its Billing Period starting at
     /// `period_start_secs` (0 for a one-time request), blinded through the client with the
     /// identity's naming key (Paykit spec 7.1, Paykit wire 1.5).
@@ -1072,7 +1102,7 @@ impl Paykit {
         count
     }
 
-    fn remember_read(&mut self, summary: ReceiveSummary) {
+    pub(crate) fn remember_read(&mut self, summary: ReceiveSummary) {
         self.first_read_summary = Some(Box::new(match self.first_read_summary.take() {
             Some(earlier) => summary.after(*earlier),
             None => summary,
@@ -1363,8 +1393,19 @@ mod tests {
         assert_send(&wallet.end_reconcile(confirmed));
         assert_send(&wallet.request_resend(key, ResendSelection::default()));
         assert_send(&wallet.held_lists());
+        assert_send(&wallet.set_list_endpoints(std::collections::BTreeMap::new()));
+        assert_send(&wallet.publish_list_to(key));
+        assert_send(&wallet.withdraw_list_from(key));
+        let unknown = crate::UnknownListDelivery {
+            recipient: key,
+            version: paykit_lib::ListVersion::new(1, 1).unwrap(),
+            msg_id: String::new(),
+            withdrawal: true,
+            payable_until_ms: None,
+        };
+        assert_send(&wallet.send_list_again(&unknown, confirmed));
+        assert_send(&wallet.lists_waiting_to_send_again());
         assert_send(&wallet.spam_count(&key));
-        assert_send(&wallet.place_held_list_without_marks(&key, &[0; 16], confirmed));
         assert_send(&wallet.send_request(key, draft));
         assert_send(&wallet.message_delivery(""));
         assert_send(&wallet.payee_activity());

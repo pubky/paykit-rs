@@ -255,10 +255,17 @@ After the original exchange applies, the approving payer calls
 `Paykit::resume_allowance_executor` with the permanent Allowance handle to
 complete its first executor grant. Repeating that call or reopening the same
 wallet preserves the original grant. A sibling wallet, missing original
-application or unverified ledger change leaves the grant held. After a restore
-that requires consent again, show the counterparty, terms and this executor
-before calling `Paykit::confirm_allowance_executor`. These calls establish the
-first grant.
+application or unverified ledger change leaves the grant held. When the grant's
+write gets no answer, the Allowance isn't consented yet even if the grant later
+applies: retry `Paykit::resume_allowance_executor` until it succeeds. Each retry
+sends the kept grant again first, so no `receive` is needed in between, and no
+second grant is built. If the client instead gives the grant's batch up with an
+unknown outcome (`AppEvent::KeptBatchDropped`), the grant may have applied without
+this app's record of it, and the resume stays held. After a
+restore that isn't clean or a `missed` item, the user confirms again before the
+first grant, as for any Allowance that requires consent again: show the
+counterparty, terms and this executor before calling
+`Paykit::confirm_allowance_executor`. These calls establish the first grant.
 
 Call `Paykit::reconcile_allowance` to read this executor's verified usage.
 The method adapter supplies `Rail::allowance_history` for the payer's entire
@@ -366,8 +373,14 @@ usual payment restrictions again before dispatch. A missed period remains availa
 
 Read `notices` and `payee_deletion_notices` by their stable identities. Acknowledge
 each through its matching SDK API after recording or showing it. Handle Switch
-duty events from `ReceiveSummary::report`. If `records_unlisted` says the listing
-has more to read, call `receive(None)` again. The wallet can still be listing
+duty events from `ReceiveSummary::report`. Call `receive` on startup and after a
+feed wake. It returns one bounded report. Use `more` to decide when to read another
+page: while `ReceiveSummary::report.more` is set, the read stopped on one of its
+per-call budgets, such as its feed pages, with more to read now, so call
+`receive(None)` again without waiting. Nothing it left is lost or reordered: the next
+read goes on from there. The loop ends at the first summary whose `report.more` is
+unset; a host that caps its rounds reads the rest at its next wake. If
+`records_unlisted` says the listing has more to read, call `receive(None)` again. The wallet can still be listing
 collections after the Switch has finished its feed read. An explicit `reconcile` or
 `end_reconcile` can also run its own listing. Follow the action named in its
 `NotNow` result to resume that scan. After a receive error,
@@ -396,6 +409,7 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `NoticeKind::AllowanceAcceptanceBeforeLoss` | Show that the identified acceptance cannot open a budget after the payer’s declared provider loss. The proposing wallet withdraws only its verified original pending write. An uncertain read or a later lifetime keeps that record intact. The seller ends its matching accepted Allowance when the withdrawal arrives. |
 | `NoticeKind::AllowanceWithdrawalConfirmed` | The seller returned its signed end for the proposal and acceptance this wallet withdrew. The notice identifies that end. The original Allowance stays closed after acknowledgement and reopen. |
 | `NoticeKind::PossiblyDelivered` | Reconcile the original message with its recipient using its ID and signed hash. Acknowledging the notice records that the host has seen it. It authorizes no send or replacement. |
+| `NoticeKind::ListDeliveryUnknown` | The counterparty may not have this list. For a withdrawal it may keep paying the earlier list; otherwise it may lack the list. Acknowledging the notice authorizes nothing. `publish_list_to` for a chosen counterparty and `withdraw_list_from` for a withdrawn one report `Refusal::ListDeliveryUnknown`; a call that changes the list sends the new version instead. |
 | `NoticeKind::BlockedMessagesLost` | Show the affected counterparty and acceptance-time range. Consult the payment method for payments that may have been among the lost messages. |
 | `NoticeKind::SettlementBucketFull` | Show that the payee cannot add a mark to this bucket. A warning from a bucket read has no payer. Explain that issuing a receipt without a mark can let the merchant's other wallets credit the same settlement again. |
 | `NoticeKind::SettlementMarksChanged` | Show the bucket and the own app that signed its current value. The wallet checks the current write again and restores the retained marks that fit. |
@@ -420,6 +434,10 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `PublicAppFailureReason::Expired` | Wait for a current record from that app. A public record reaches its limit at any finite signed deadline or at the maximum age in the payee's signed identity document (90 days by default). |
 | `PublicAppFailureReason::OverBound` | This app's endpoints did not fit within the lookup bounds. Use the reason when explaining an incomplete lookup. |
 
+## The payment method's time tolerance
+
+The method declares `payment_time_tolerance_ms` with its declaration. The payee credits a request only on evidence dated at or after the request's `created_at` less this tolerance. Choose it to cover the method's time precision (at least 1,000 ms for times in whole seconds), the skew of the clock that dates the evidence, and the method's own timestamp rules. Two hours is a conservative early tolerance for a Bitcoin block timestamp. A block timestamp ahead of real time can also put a payment made in time past a deadline, and no tolerance covers that. A Lightning method that reads its own node's settle time needs a few minutes. The tolerance never widens a deadline. The time `verify` returns decides credit, so return the time the payment's evidence dates it, never a placeholder.
+
 ## Refusals
 
 | Case | What to show or do |
@@ -441,6 +459,7 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `Refusal::DeadlinePassed` | Show the expired deadline and stop the old attempt. |
 | `Refusal::Recurring` | Use subscription and Billing Period APIs for this request. |
 | `Refusal::MaybeCredited` | Show that the occurrence may already be credited. Wait for evidence or the supported explicit confirmation. |
+| `Refusal::PaymentTimeOutside` | The payment method verified the payment, but at a time the request doesn't allow: before the request less the method's declared tolerance, or past its payment deadline or its destination's or rates' validity. Nothing is credited or receipted, and nothing is recorded: the request stays `ProofReceived`, and `verify_payment` or `confirm_payment` refuses the same way again. Show the funds as received and the request as unpaid, for the user to settle with the payer. |
 | `Refusal::SettlementBucketFull` | Wait for the payee to decide whether to issue an unmarked receipt. Pass the explicit choice through `ReceiptDetails::with_unmarked_credit_confirmed`. |
 | `Refusal::Subscribed` | Show that the recurring request is already accepted. |
 | `Refusal::NotSubscribed` | Wait until the payer accepts the recurring request. |
@@ -453,6 +472,7 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `Refusal::NoDestination` | Show why no endpoint could be used, including failed public app reads if available. |
 | `Refusal::UnsupportedEndpoint` | Ask the user to choose a compatible endpoint or payment method. |
 | `Refusal::WaitingForList` | Show that a newer Private Payment List was requested. A public destination is a separate user choice. |
+| `Refusal::ListDeliveryUnknown` | Show the counterparty, whether the list was a withdrawal and how long the earlier or current list may be paid. `withdraw_list_from` has already recorded the counterparty as withdrawn. Pass the same value to `send_list_again` only after the user confirms another version. `Ok` means nothing of unknown outcome is left. `NotNow` keeps the confirmation: a later call or receive sends the list once it can, which for a nonempty list to a blocked counterparty is after the block ends; `lists_waiting_to_send_again` lists the counterparties still waiting. |
 | `Refusal::Transfer` | Show the actual transfer or fee quote and return that exact quote only on confirmation. |
 | `Refusal::PricedByRate` | Obtain authorization for this exact quote from the user or their bounded policy (Scheduling a Billing Period). |
 | `Refusal::IdentityUnavailable` | Refresh the required identity before retrying. |
@@ -463,6 +483,6 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `Refusal::Usage` | Correct the supplied API input, such as a payment under an Allowance asked of an app that isn't its executor. |
 | `Refusal::RecordHeld` | A payer record with payment history lost to deletion permanently holds that obligation. For a temporarily unreadable record, resume when it can be read or repaired. |
 | `Refusal::CertificateRefused` | Seek a suitable certificate from the signer and keep Paykit actions paused meanwhile. |
-| `Refusal::SwitchUnavailable` | Show the own Switch as unavailable and keep payment actions waiting. |
+| `Refusal::SwitchUnavailable` | Show the own Switch as unavailable and keep payment actions waiting. From a payment, directly or as an `AttemptFailed` cause, it means nothing was paid, not a payment in flight: retry the payment once the switch answers. If the retry is refused with `PaymentInProgress`, call `Paykit::resume_payments` and retry once the earlier attempt is resolved; the resume records it failed when the switch takes that write. |
 | `Refusal::Blocked` | Show the blocked recipient and the exact payment to the user before any supported override. |
 | `Refusal::Divergent` | Show the returned records and the exact confirmation asked for. Run receive while the record still has writes waiting. |

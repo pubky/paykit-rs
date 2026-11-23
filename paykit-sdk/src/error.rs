@@ -124,6 +124,17 @@ pub enum Refusal {
         "Paykit spec 8.4: whether this payment is credited to another occurrence can't be told now"
     )]
     MaybeCredited,
+    /// The payment method verified the payment, but its verified payment time, `paid_at_ms`,
+    /// lies outside what the occurrence allows: before the request's time less the method's
+    /// declared tolerance, after the occurrence's deadline, or outside the validity of the
+    /// destination or the rates it was paid by (Paykit spec 7.1, 8.2). Nothing is
+    /// credited or receipted on this evidence: the occurrence stays unpaid, and the funds
+    /// are the payee's received funds, for its user to settle with the payer.
+    #[error("Paykit spec 7.1: the verified payment time lies outside what the request allows")]
+    PaymentTimeOutside {
+        /// The verified payment time, in Unix milliseconds.
+        paid_at_ms: u64,
+    },
     /// The settlement mark cannot be stored. A receipt without it leaves other
     /// occurrences at risk of a second credit (Paykit wire 5.7, Full).
     #[error("Paykit wire 5.7: bucket {bucket} cannot store the mark; this payment may be credited again")]
@@ -150,10 +161,11 @@ pub enum Refusal {
     #[error("Paykit spec 8.2, 8.3: this occurrence cannot be paid by the wallet's own policy")]
     ManualOnly,
     /// Not paid automatically, for good: the authenticated subscription and service time
-    /// don't authorize this automatic Billing Period (Paykit spec 8.2), or the request or
-    /// Billing Period doesn't qualify under the Allowance it is paid under: outside its
-    /// terms, or its lifetime limit used up with nothing reserved (Paykit spec 8.3). The
-    /// user may still pay it by hand. At an open attempt's first dispatch this is an
+    /// don't authorize this automatic Billing Period (Paykit spec 8.2), the request or
+    /// Billing Period doesn't qualify under the Allowance it is paid under, outside its terms
+    /// or with its lifetime limit used up and nothing reserved, or the Allowance the payment
+    /// was reserved under expired before its first dispatch (Paykit spec 8.3). The user may
+    /// still pay it by hand. At an open attempt's first dispatch this is an
     /// [`Self::AttemptFailed`].
     #[error("Paykit spec 8.2, 8.3: not paid automatically: {0}")]
     NotAutomatic(String),
@@ -196,6 +208,15 @@ pub enum Refusal {
     /// switches on its own.
     #[error("Paykit spec 8.4: waiting for the payee's Private Payment List")]
     WaitingForList,
+    /// The client gave up this counterparty's current Private Payment List with an
+    /// unknown outcome. If it was a withdrawal, the counterparty may keep paying the
+    /// earlier list; if not, it may lack the list. Nothing more is sent on its own: only
+    /// the user, shown this value, can authorize another version
+    /// ([`crate::Paykit::send_list_again`]; Paykit spec 8.4, 9). Unlike other refusals, the
+    /// call that returns it may have recorded the host's choice first:
+    /// [`crate::Paykit::withdraw_list_from`] records the counterparty as withdrawn.
+    #[error("Paykit spec 9: the delivery of the counterparty's current list is unknown")]
+    ListDeliveryUnknown(Box<crate::UnknownListDelivery>),
     /// The payment method would transfer another amount or asset, an amount it can't tell, or
     /// a fee above the app's cap, and the user didn't choose it (Paykit spec 7.2 step 1).
     /// `quote` is what it would transfer, to show the user; paying it anyway carries it back

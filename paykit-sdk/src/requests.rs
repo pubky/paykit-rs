@@ -604,6 +604,16 @@ fn first_kept_stop(
     Ok(Some(applicable.swap_remove(first).1))
 }
 
+/// The values a list read of the requests shares across its records, each read once when
+/// first needed: the hold's own values, the copy of the deny list, and the block floor with
+/// the raise owed. Nothing is written between the reads, as the list reads take `&self`.
+#[derive(Default)]
+pub(crate) struct ListReads {
+    hold: crate::hold::HoldReads,
+    denied: Option<std::collections::HashSet<[u8; 32]>>,
+    floor: Option<(crate::floor::SharedFloor, Option<u64>)>,
+}
+
 /// The request in a record, with its body.
 pub(crate) fn request_of(record: &ActivityRecord) -> Option<(&StoredMessage, &PaymentRequest)> {
     let stored = record.request.as_ref()?;
@@ -866,17 +876,9 @@ impl Paykit {
         let label = Collection::PayeeActivity
             .policy_label(&held.policy)
             .ok_or(Refusal::NotFound)?;
-        let value = held.content.value().ok_or(Refusal::NotFound)?;
-        let bound = crate::records::bind_activity(
-            value,
-            &self.identity(),
-            ActivitySide::Payee,
-            label.as_ref(),
-            &held.key,
-            |t| self.app.record_key(t).ok(),
-            &|p| self.rail.settlement_id(p),
-        )
-        .ok_or(Refusal::NotFound)?;
+        let bound = self
+            .bind_held(held, ActivitySide::Payee, label.as_ref())
+            .ok_or(Refusal::NotFound)?;
         let target = ActivityTarget::payee(
             bound.natural_key_with(&self.identity(), &|p| self.rail.settlement_id(p))?,
             label.as_ref(),
@@ -890,45 +892,54 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// A store failure, also one reading a single record: the list is never partial.
+    /// A store failure: the list is never partial.
     pub async fn payee_activity(&self) -> Result<Vec<PayeeActivity>> {
         self.refuse_while_unlisted().await?;
-        let mut periods = self.periods_of(Collection::PayeeActivity).await?;
-        let mut out = Vec::new();
-        for held in self
-            .app
-            .records_of(Collection::PayeeActivity.name())
-            .await?
-        {
+        // Each record is read and bound once, under the label its policy gives it, and its
+        // period records are found among the same bound records, as `periods_of` finds them.
+        let collection = Collection::PayeeActivity;
+        let mut bound = Vec::new();
+        for held in self.app.records_of(collection.name()).await? {
             match self.bound_payee_record(&held) {
-                // A period record is shown with its request's.
-                Ok((_, record))
-                    if record.request.is_none()
-                        && record
-                            .binding()
-                            .is_ok_and(|b| matches!(b, RecordBinding::Period { .. })) => {}
-                Ok((_, record)) => {
-                    let mut view = payee_view(held.key, &record, None);
-                    if let Some(children) = periods.remove(&held.key) {
-                        view.periods = crate::periods::period_views(children, &record);
-                    }
-                    // Shown divergent when its record, or one of its period records, is
-                    // paused or its latest view divergent (Paykit spec 6).
-                    let mut divergent = false;
-                    for key in
-                        std::iter::once(held.key).chain(view.periods.iter().map(|p| p.record))
-                    {
-                        let pause = Box::pin(self.pause_seen(&key)).await?;
-                        divergent |= pause.paused || pause.divergent;
-                    }
-                    view.divergent = divergent;
-                    out.push(view);
-                }
+                Ok((_, record)) => bound.push((held, record)),
                 // A record that doesn't bind, or isn't held under a Paykit policy, isn't acted
                 // on (Paykit wire 5.3): it is left out. A failure to read it is not.
                 Err(PaykitError::Refused(Refusal::NotFound) | PaykitError::Lib(_)) => {}
                 Err(error) => return Err(error),
             }
+        }
+        let mut periods = self.group_periods(bound.iter().filter_map(|(held, record)| {
+            let label = collection.policy_label(&held.policy)?;
+            Some((held.key, label, record.clone()))
+        }))?;
+        let shared: std::collections::HashMap<[u8; 32], &pubky_switch_client::app::SharedRecord> =
+            bound.iter().map(|(held, _)| (held.key, held)).collect();
+        let mut out = Vec::new();
+        for (held, record) in &bound {
+            // A period record is shown with its request's.
+            if record.request.is_none()
+                && record
+                    .binding()
+                    .is_ok_and(|b| matches!(b, RecordBinding::Period { .. }))
+            {
+                continue;
+            }
+            let mut view = payee_view(held.key, record, None);
+            if let Some(children) = periods.remove(&held.key) {
+                view.periods = crate::periods::period_views(children, record);
+            }
+            // Shown divergent when its record, or one of its period records, is paused or
+            // its latest view divergent (Paykit spec 6).
+            let mut divergent = false;
+            for key in std::iter::once(held.key).chain(view.periods.iter().map(|p| p.record)) {
+                let pause = match shared.get(&key) {
+                    Some(shared) => Box::pin(self.pause_seen_held(shared)).await?,
+                    None => Box::pin(self.pause_seen(&key)).await?,
+                };
+                divergent |= pause.paused || pause.divergent;
+            }
+            view.divergent = divergent;
+            out.push(view);
         }
         Ok(out)
     }
@@ -959,7 +970,11 @@ impl Paykit {
     /// [`Refusal::NotFound`] for a record without a proof; [`Refusal::NotNow`] for a Billing
     /// Period's record whose request record the app holds but can't open or bind yet;
     /// [`Refusal::MaybeCredited`] while
-    /// whether another record credits the settlement can't be told; the rail's errors.
+    /// whether another record credits the settlement can't be told;
+    /// [`Refusal::PaymentTimeOutside`] for a payment the method verified at a time the
+    /// occurrence doesn't allow: before the request's `created_at` less the method's declared
+    /// tolerance, after its payment deadline, or outside the validity of the destination or
+    /// rates it was paid by, unless the record holds its receipt already; the rail's errors.
     pub async fn verify_payment(&mut self, record: &[u8; 32]) -> Result<Option<u64>> {
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.verify_payment_inner(record)).await
@@ -1147,18 +1162,32 @@ impl Paykit {
                     }
                     crate::conversion::Priced::Unusable(_) => return Ok(None),
                 };
-                let period_deadline = match binding {
+                // The last payment time the occurrence allows, inclusive: a Billing Period's
+                // deadline, or a one-time request's payment deadline (Paykit spec 7.1). The
+                // proposal expiry bounds the attempt only (Paykit wire 4.5), so a payment
+                // started inside it and settled just after is still credited, as in v0.1.
+                let deadline = match binding {
                     RecordBinding::Period { billing_period, .. } => {
                         request.period_payment_deadline(&billing_period)?
                     }
-                    _ => None,
+                    RecordBinding::Request { .. } => request.payment_deadline_ms(),
+                    RecordBinding::Unrequested => None,
                 };
+                // Evidence dated before the request doesn't prove it, less the tolerance the
+                // payment method declares for evidence dated early (Paykit spec 7.1, "Not
+                // before the request"): the request's signed `created_at`, which every own app
+                // reads alike, is the time the payee recorded it.
+                let not_before = stored_request
+                    .message()
+                    .created_at_ms
+                    .saturating_sub(self.rail.declaration().payment_time_tolerance_ms);
                 (
                     amount,
                     payload,
                     destination_expires,
                     rate_window,
-                    period_deadline,
+                    deadline,
+                    Some(not_before),
                 )
             }
             // A period record whose request record the app holds but can't open or bind yet,
@@ -1177,10 +1206,11 @@ impl Paykit {
                 None,
                 None,
                 None,
+                None,
             ),
             None => return Err(Refusal::NotFound.into()),
         };
-        let (amount, payload, destination_expires, rate_window, period_deadline) = payment;
+        let (amount, payload, destination_expires, rate_window, deadline, not_before) = payment;
         let settlement_id = self.rail.settlement_id(&proof.proof);
         let typed = proof.proof.get("type").filter(|value| !value.is_null());
         let known_method = typed.and_then(Value::as_str) == Some("bitcoin-txid")
@@ -1212,19 +1242,31 @@ impl Paykit {
             attempt_id: proof.attempt_id,
             proof: proof.proof.clone(),
         };
-        // The method's evidence dates the payment, never this proof's arrival. A details
-        // destination must be unexpired; rates include both signed interval boundaries
-        // (Paykit spec 8.2, Paykit wire 4.9). Same-asset payments use no rate interval.
-        let verified = self.rail.verify(check).await?.filter(|paid_at| {
-            period_deadline.is_none_or(|deadline| *paid_at <= deadline)
-                && destination_expires.is_none_or(|expires| *paid_at < expires)
-                && rate_window.is_none_or(|(start, expires)| {
-                    paykit_lib::periods::rates_apply(start, expires, *paid_at)
-                })
-        });
-        let Some(paid_at) = verified else {
+        // The method's evidence dates the payment, never this proof's arrival. It must be
+        // no earlier than the request, within the method's tolerance, and no later than the
+        // occurrence's deadline. A details destination must be unexpired; rates include both
+        // signed interval boundaries (Paykit spec 7.1, 7.2, 8.2, Paykit wire 4.9). Same-asset
+        // payments use no rate interval. The tolerance widens only the lower bound.
+        let Some(paid_at) = self.rail.verify(check).await? else {
             return Ok(None);
         };
+        let in_time = not_before.is_none_or(|earliest| paid_at >= earliest)
+            && deadline.is_none_or(|deadline| paid_at <= deadline)
+            && destination_expires.is_none_or(|expires| paid_at < expires)
+            && rate_window.is_none_or(|(start, expires)| {
+                paykit_lib::periods::rates_apply(start, expires, paid_at)
+            });
+        // The method verified the payment, but not within what the occurrence allows: the
+        // evidence is flagged, never credited on its own (Paykit spec 7.1, "Not before the
+        // request"). The funds are the payee's received funds all the same.
+        // A record that holds the receipt already is credited: another own app's method may
+        // date the evidence differently, and the credit stands (Paykit spec 8.1 step 4).
+        if bound.receipt.is_none() && !in_time {
+            return Err(Refusal::PaymentTimeOutside {
+                paid_at_ms: paid_at,
+            }
+            .into());
+        }
         let settlement = if bound.receipt.is_some() {
             None
         } else {
@@ -1800,8 +1842,12 @@ impl Paykit {
         &self,
         target: &ActivityTarget,
     ) -> Result<Option<StoredMessage>> {
-        let record = self.held_activity(target).await?;
+        // No kept copy stops nothing, whatever the record holds: it is read only for copies.
         let copies = self.kept_stop_copies(target).await?;
+        if copies.is_empty() {
+            return Ok(None);
+        }
+        let record = self.held_activity(target).await?;
         first_kept_stop(copies.into_values(), record.as_ref(), |a, b| {
             self.app.received_order(a, b)
         })
@@ -1924,35 +1970,38 @@ impl Paykit {
 
     async fn requests_inner(&self) -> Result<Vec<RequestView>> {
         self.refuse_while_unlisted().await?;
-        let own = self.identity();
-        let mut periods = self.periods_of(Collection::PayerActivity).await?;
+        // Each record is read and bound once, and its period records are found among the
+        // same bound records: under the fixed policy, as `periods_of` finds them.
+        let collection = Collection::PayerActivity;
+        let mut bound = Vec::new();
+        for held in self.app.records_of(collection.name()).await? {
+            if let Some(record) = self.bind_held(&held, ActivitySide::Payer, None) {
+                bound.push((held, record));
+            }
+        }
+        let mut periods = self.group_periods(
+            bound
+                .iter()
+                .filter(|(held, _)| collection.policy_label(&held.policy) == Some(None))
+                .map(|(held, record)| (held.key, None, record.clone())),
+        )?;
+        let mut reads = ListReads::default();
         let mut out = Vec::new();
-        for held in self
-            .app
-            .records_of(Collection::PayerActivity.name())
-            .await?
-        {
-            let Some(value) = held.content.value() else {
-                continue;
-            };
-            let Some(record) = crate::records::bind_activity(
-                value,
-                &own,
-                ActivitySide::Payer,
-                None,
-                &held.key,
-                |t| self.app.record_key(t).ok(),
-                &|p| self.rail.settlement_id(p),
-            ) else {
-                continue;
-            };
+        for (held, record) in &bound {
             let held_periods = periods.remove(&held.key).unwrap_or_default();
-            if let Some(view) = self.request_view(held.key, &record, held_periods).await? {
+            if let Some(view) = self
+                .request_view(held.key, record, held_periods, Some(held), &mut reads)
+                .await?
+            {
                 out.push(view);
             }
         }
+        let shown: std::collections::HashSet<([u8; 32], [u8; 32])> = out
+            .iter()
+            .map(|view| (view.request.payee, view.request.request_hash))
+            .collect();
         for view in self.unrecorded_requests().await? {
-            if !out.iter().any(|held| held.request == view.request) {
+            if !shown.contains(&(view.request.payee, view.request.request_hash)) {
                 out.push(view);
             }
         }
@@ -1975,7 +2024,9 @@ impl Paykit {
             &request.payee,
             &request.request_hash,
         ));
-        let Some(record) = self.held_activity(&target).await? else {
+        let key = self.activity_key(&target)?;
+        let held = self.app.shared_record(&key).await?;
+        let Some(record) = self.read_activity(&target, held.as_ref()) else {
             return self
                 .unrecorded_requests()
                 .await?
@@ -1983,22 +2034,31 @@ impl Paykit {
                 .find(|view| view.request == *request)
                 .ok_or_else(|| Refusal::NotFound.into());
         };
-        let key = self.activity_key(&target)?;
         let periods = self
             .periods_of(Collection::PayerActivity)
             .await?
             .remove(&key)
             .unwrap_or_default();
-        self.request_view(key, &record, periods)
-            .await?
-            .ok_or_else(|| Refusal::NotFound.into())
+        self.request_view(
+            key,
+            &record,
+            periods,
+            held.as_ref(),
+            &mut ListReads::default(),
+        )
+        .await?
+        .ok_or_else(|| Refusal::NotFound.into())
     }
 
+    /// The view of the request in `record`, held at `record_key` as `held`, with the values
+    /// a list read shares across its records taken from `reads`.
     async fn request_view(
         &self,
         record_key: [u8; 32],
         record: &ActivityRecord,
         periods: Vec<([u8; 32], ActivityRecord)>,
+        held: Option<&pubky_switch_client::app::SharedRecord>,
+        reads: &mut ListReads,
     ) -> Result<Option<RequestView>> {
         let Some((stored, request)) = request_of(record) else {
             return Ok(None);
@@ -2029,24 +2089,31 @@ impl Paykit {
         // with a restore's hold, a block or a divergent record: none of them ends the request,
         // and the block floor holds an open one whatever its status shows.
         let open = live(&status);
-        let held = if record.lost_to_delete.is_none() && self.held(&record_key, record).await? {
+        let shared = held;
+        let held = if record.lost_to_delete.is_none()
+            && self.held_with(&mut reads.hold, &record_key, record).await?
+        {
             if live(&status) {
                 status = RequestStatus::Held;
             }
-            Some(self.held_request(&record_key).await?)
+            Some(self.held_request_with(&mut reads.hold, &record_key).await?)
         } else {
             None
         };
-        if live(&status) && self.denied_as_last_read(&payee).await? {
+        if live(&status) && self.denied_with(&mut reads.denied, &payee).await? {
             status = RequestStatus::Blocked;
         }
         // The record's mark, or, for a request still open, the block floor (`crate::floor`):
         // no automatic attempt is made on it either way.
-        let manual_only = record.manual_only || (open && self.floor_holds(stored).await?);
+        let manual_only =
+            record.manual_only || (open && self.floor_holds_with(&mut reads.floor, stored).await?);
         // Divergent shows on its own field whatever the status, so a request held after a
         // restore or blocked shows that too; the status says so only when nothing else holds
         // the request.
-        let pause = Box::pin(self.pause_seen(&record_key)).await?;
+        let pause = match shared {
+            Some(shared) => Box::pin(self.pause_seen_held(shared)).await?,
+            None => Box::pin(self.pause_seen(&record_key)).await?,
+        };
         let divergent = pause.paused || pause.divergent;
         if status == RequestStatus::Open && pause.paused {
             status = RequestStatus::Divergent;

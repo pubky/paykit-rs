@@ -15,6 +15,7 @@ mod fixture_service;
 #[cfg(any(test, feature = "test-wallet"))]
 #[path = "../tests/hosts/signer.rs"]
 mod fixture_signer;
+mod flights;
 mod method;
 mod notices;
 mod payments;
@@ -23,6 +24,7 @@ mod reconcile;
 mod requests;
 mod restore;
 mod review;
+mod runtime;
 mod store;
 mod switch_refusal;
 mod wallet;

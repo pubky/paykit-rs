@@ -338,25 +338,13 @@ impl Paykit {
     /// Not now while the shared records aren't listed since a restore; a store failure.
     pub async fn receipts(&self, of: ReceiptsOf) -> Result<Vec<ReceivedReceipt>> {
         self.refuse_while_unlisted().await?;
-        let own = self.identity();
         let mut out = Vec::new();
         for held in self
             .app
             .records_of(Collection::PayerActivity.name())
             .await?
         {
-            let Some(value) = held.content.value() else {
-                continue;
-            };
-            let Some(record) = crate::records::bind_activity(
-                value,
-                &own,
-                ActivitySide::Payer,
-                None,
-                &held.key,
-                |t| self.app.record_key(t).ok(),
-                &|p| self.rail.settlement_id(p),
-            ) else {
+            let Some(record) = self.bind_held(&held, ActivitySide::Payer, None) else {
                 continue;
             };
             if let Some(receipt) = self

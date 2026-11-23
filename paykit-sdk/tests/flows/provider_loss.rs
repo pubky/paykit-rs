@@ -546,9 +546,12 @@ async fn test_provider_loss_completed_rail_waits_for_an_accepted_activity_succes
     let before = next.record(&key).unwrap().revision;
     w.rail.settle(&attempt_id, true);
     w.rail.set_declaration(
-        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true)
-            .with_history(true),
+        RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true)
+        .with_history(true),
     );
     let held = wallet.resume_payments().await.unwrap();
     assert!(
@@ -1602,11 +1605,22 @@ async fn test_provider_loss_the_final_activity_read_precedes_the_payment_method_
             .with_options(PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")))
     };
     // The first checks succeeded. At the Paying commit the app's next read of
-    // this payer activity becomes unavailable, before the call to the method.
+    // this payer activity becomes unavailable, before the call to the method: the
+    // store's failure is the call's error, and nothing is paid.
     let at_commit = disk.clone();
     disk.on_paying(move || at_commit.fail_next_payer_activity_read());
-    let held = wallet.pay_without_request(payment()).await.outcome.unwrap();
-    assert!(matches!(held, PayOutcome::Pending { .. }), "{held:?}");
+    let failed = wallet
+        .pay_without_request(payment())
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(
+            failed,
+            PaykitError::Client(pubky_switch_client::app::AppError::Store(_))
+        ),
+        "{failed:?}"
+    );
     assert_eq!(executions(&w), 0);
     wallet.resume_payments().await.unwrap();
     assert_eq!(executions(&w), 0);
@@ -2098,7 +2112,11 @@ async fn test_provider_loss_request_created_inside_the_residual_window_is_paid_o
 async fn test_provider_loss_resume_never_repeats_a_dispatch_from_before_the_loss() {
     let w = World::new();
     w.rail.set_declaration(
-        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS).with_idempotent(true),
+        RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -2894,6 +2912,7 @@ async fn journaled_orphan_report(after_loss: bool) {
     let w = World::new();
     w.rail.set_declaration(RailDeclaration::new(
         paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+        paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
     ));
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
