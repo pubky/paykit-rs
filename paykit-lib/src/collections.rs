@@ -28,7 +28,8 @@ pub enum Collection {
     Allowances,
     /// `allowance_ledgers`: one ledger per Allowance.
     AllowanceLedgers,
-    /// `block_floor`: one record, the identity's block floor (Paykit wire 5.6).
+    /// `block_floor`: one permanent record, the identity's block floor, never deleted
+    /// (Paykit wire 5.6).
     BlockFloor,
     /// `settlements`: at most 1,024 bucket records, the marks of the settlements any own
     /// payee app has credited (Paykit wire 5.7).
@@ -74,9 +75,9 @@ impl Collection {
     /// The collection's fixed policy (Paykit wire 5.1).
     pub fn fixed_policy(self) -> Policy {
         match self {
-            Self::PayerActivity | Self::PaymentLists | Self::BlockFloor => {
-                Policy::new("paykit_pay", &["paykit_pay"])
-            }
+            Self::PayerActivity | Self::PaymentLists => Policy::new("paykit_pay", &["paykit_pay"]),
+            // Permanent in every generation: the service refuses a delete (Paykit wire 5.1, 5.6).
+            Self::BlockFloor => Policy::new("paykit_pay", &["paykit_pay"]).permanent(None),
             Self::PayeeActivity => Policy::new("paykit_request", &["paykit_request"]),
             Self::Allowances => {
                 Policy::new("paykit_allowance", &["paykit_allowance"]).permanent(None)
@@ -168,7 +169,7 @@ mod tests {
         );
         assert_eq!(
             Collection::BlockFloor.fixed_policy(),
-            Policy::new("paykit_pay", &["paykit_pay"])
+            Policy::new("paykit_pay", &["paykit_pay"]).permanent(None)
         );
         assert_eq!(
             Collection::Settlements.fixed_policy(),
