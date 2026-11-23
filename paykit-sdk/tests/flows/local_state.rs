@@ -1540,3 +1540,99 @@ async fn test_local_state_list_request_names_a_list_held_over_an_unreadable_reco
         );
     }
 }
+
+/// Alice's wallet on `base` holding the shop's list 1/2 over the shop's record, which
+/// doesn't read, with bob's seller wallet a current app that has sent no list.
+async fn only_a_held_list(w: &World, base: Arc<dyn StateStore>) -> (Paykit, Paykit, Paykit) {
+    let mut seller = w
+        .join(
+            &w.bob,
+            "seller-wallet",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    let mut wallet = w.wallet_on("wallet", base).await;
+    let mut shop = w.shop().await;
+    seller.app_mut().invite(&w.alice_id()).await.unwrap();
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
+    wallet.receive(None).await.unwrap();
+    let target = lists_of(w, &shop.app_id());
+    let record = wallet.app().record_key(&target).unwrap();
+    wallet
+        .app_mut()
+        .put_record(&target, b"{}", Vec::new())
+        .await
+        .unwrap();
+    put(
+        &mut wallet,
+        &format!("lh/{}", b64(&record)),
+        &shop_list_at(w, list_version(1, 2)),
+    )
+    .await;
+    (wallet, shop, seller)
+}
+
+#[tokio::test]
+async fn test_local_state_list_request_with_only_a_held_list_asks_the_other_publishers() {
+    // The shop's only list is held over a record that doesn't read, and the seller wallet,
+    // current, has sent none: the shop is asked naming 1/2 and the seller wallet is asked by
+    // name with no pair (Paykit spec 8.4, wire 4.14).
+    let w = World::new();
+    let (mut wallet, shop, seller) = only_a_held_list(&w, crate::common::store()).await;
+    let _ = wallet
+        .pay_without_request(UnrequestedPayment::new(w.bob_id(), crate::common::btc("1")))
+        .await;
+    let asks = crate::destinations::list_requests_sent(&w, &wallet).await;
+    assert!(
+        asks.contains(&(Some(shop.app_id()), Some(list_version(1, 2)))),
+        "{asks:?}"
+    );
+    assert!(asks.contains(&(Some(seller.app_id()), None)), "{asks:?}");
+}
+
+#[tokio::test]
+async fn test_local_state_list_request_never_asks_an_app_whose_held_record_is_paused() {
+    // The shop's list is held over a record that doesn't read and is divergent: the shop
+    // isn't asked (Paykit spec 8.4).
+    let w = World::new();
+    let base = crate::common::store();
+    let (mut wallet, shop, _seller) = only_a_held_list(&w, Arc::clone(&base)).await;
+    let record = wallet
+        .app()
+        .record_key(&lists_of(&w, &shop.app_id()))
+        .unwrap();
+    crate::divergent::set_divergent(&base, &wallet, &record, true);
+    let _ = wallet
+        .pay_without_request(UnrequestedPayment::new(w.bob_id(), crate::common::btc("1")))
+        .await;
+    let asks = crate::destinations::list_requests_sent(&w, &wallet).await;
+    assert!(
+        !asks.iter().any(|(app, _)| *app == Some(shop.app_id())),
+        "{asks:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_local_state_damaged_held_list_of_another_payee_stops_no_payment() {
+    // A held list kept under a key that names no record of bob's, or that doesn't read,
+    // stops no payment to bob's list (Paykit wire 5.4).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
+    wallet.receive(None).await.unwrap();
+    put(
+        &mut wallet,
+        &format!("lh/{}", b64(&[7; 32])),
+        &shop_list_at(&w, list_version(1, 2)),
+    )
+    .await;
+    let paid = wallet
+        .pay_without_request(UnrequestedPayment::new(w.bob_id(), crate::common::btc("1")))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+}
