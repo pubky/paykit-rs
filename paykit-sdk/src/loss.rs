@@ -29,6 +29,22 @@
 //! even if the user confirms paying it early or previously stated it was unpaid.
 //! An obligation the app can't place before or after the loss, such as one whose request it
 //! can't date, is in doubt.
+//!
+//! **The shared post-loss hold** (Paykit spec 8.1, Blocked counterparties; Paykit wire 5.6):
+//! apart from that doubt, once the newest own `identity.json` the app has verified carries a
+//! non-null `recovery_from`, or the app holds a recorded loss (`p/rl`, kept from the
+//! installation over an in-place restore, `p/pl`, or a loss the client follows before its
+//! step has run), no own app pays a one-time request automatically or
+//! repeats a one-time payment on a resume, the repeat of an attempt its user started included
+//! ([`Paykit::shared_loss_hold`]). A higher block floor may have existed only at the lost
+//! provider, and nothing at the replacement bounds it. `recovery_from` stays in every later
+//! `identity.json` until a later loss replaces it (Switch spec 4.3), so the hold holds through
+//! moves and key changes, at every own app, one that joins or is restored later included.
+//! Nothing in v0.2 lifts it: a user's statement that an obligation wasn't paid before the loss
+//! ends only that obligation's doubt for a payment by hand. A payment the user starts by hand
+//! still goes, as do Billing Periods, payments without a request, stops and receipts, and a
+//! history lookup by attempt ID, which only reads. A cooperative move or a key change in place
+//! with `recovery_from: null` and no recorded loss holds nothing.
 
 use paykit_lib::periods::PeriodRef;
 use paykit_lib::records::StoredMessage;
@@ -44,6 +60,10 @@ use crate::state::{self, key};
 
 mod reports;
 pub use reports::{RecoveryMembers, RecoveryReport};
+
+/// The reason of a [`crate::Refusal::NotAutomatic`] under the shared post-loss hold.
+pub(crate) const SHARED_LOSS_HOLD: &str =
+    "Paykit spec 8.1: automatic one-time payments are held for good after a provider loss";
 
 /// The reason of a [`crate::Refusal::MayBePaid`] for an obligation a provider loss leaves
 /// in doubt.
@@ -148,11 +168,15 @@ pub(crate) fn loss_writes(
 /// kept before it.
 fn writes_over(kept: Option<LossBoundary>, boundary: LossBoundary) -> Result<Vec<LocalWrite>> {
     let put = || state::local_put(key::LOSS_BOUNDARY, &boundary);
+    // The recorded loss the shared post-loss hold reads (module docs), never lowered: an
+    // older loss writes nothing at all.
+    let recorded = || state::local_put(key::LOSS_RECORDED, &boundary.generation);
     Ok(match kept {
         Some(kept) if kept.generation > boundary.generation => Vec::new(),
-        Some(kept) if kept.generation == boundary.generation => vec![put()?],
+        Some(kept) if kept.generation == boundary.generation => vec![put()?, recorded()?],
         _ => vec![
             put()?,
+            recorded()?,
             LocalWrite::DeletePrefix {
                 prefix: key::NOT_PAID_BEFORE_LOSS.as_bytes().to_vec(),
             },
@@ -192,6 +216,22 @@ impl Paykit {
             }),
             (None, None) => None,
         })
+    }
+
+    /// Whether the shared post-loss hold stands (module docs): the newest own `identity.json`
+    /// the app has verified carries a non-null `recovery_from`, or the app holds a recorded
+    /// loss, kept or followed. Having none gives no clearance by itself: the identity decides.
+    ///
+    /// # Errors
+    ///
+    /// A store failure, or a kept loss that doesn't read.
+    pub(crate) async fn shared_loss_hold(&self) -> Result<bool> {
+        if self.app.own_identity().body().recovery_from.is_some()
+            || self.local_get::<u64>(key::LOSS_RECORDED).await?.is_some()
+        {
+            return Ok(true);
+        }
+        Ok(self.decisive_loss().await?.is_some())
     }
 
     /// The newest declared loss known to this wallet or its current service.
@@ -286,9 +326,9 @@ impl Paykit {
 
     /// Record the user's statement about a one-time obligation before `loss`, the provider loss its
     /// doubt named when the user was shown it (Paykit spec 7.3): its doubt after the loss
-    /// ends, for it alone, so a
-    /// payment of it goes as any other, an automatic one included, the claim's own doubt
-    /// still counting. The host asks only after showing the user that another own app may
+    /// ends, for it alone, so a payment of it by hand goes as any other, the claim's own doubt
+    /// still counting. It lifts no automatic payment: the shared post-loss hold stands while
+    /// the app holds that loss (module docs). The host asks only after showing the user that another own app may
     /// have paid it at the old service: the obligation is the one a
     /// [`crate::Refusal::MayBePaid`] showed with [`crate::PaymentDoubt::before_loss`]. A
     /// payment the user makes over that doubt instead
@@ -435,6 +475,10 @@ mod tests {
         state::local_put(key::LOSS_BOUNDARY, &boundary).unwrap()
     }
 
+    fn recorded(boundary: LossBoundary) -> LocalWrite {
+        state::local_put(key::LOSS_RECORDED, &boundary.generation).unwrap()
+    }
+
     fn statements_dropped() -> LocalWrite {
         LocalWrite::DeletePrefix {
             prefix: key::NOT_PAID_BEFORE_LOSS.as_bytes().to_vec(),
@@ -450,12 +494,12 @@ mod tests {
         };
         assert_eq!(
             writes_over(Some(at(2)), newer).unwrap(),
-            vec![put(newer), statements_dropped()]
+            vec![put(newer), recorded(newer), statements_dropped()]
         );
         // The first loss the app keeps drops any statement as well.
         assert_eq!(
             writes_over(None, at(2)).unwrap(),
-            vec![put(at(2)), statements_dropped()]
+            vec![put(at(2)), recorded(at(2)), statements_dropped()]
         );
     }
 
@@ -465,7 +509,10 @@ mod tests {
             uncertain_until_ms: UNTIL + 1,
             ..at(2)
         };
-        assert_eq!(writes_over(Some(at(2)), again).unwrap(), vec![put(again)]);
+        assert_eq!(
+            writes_over(Some(at(2)), again).unwrap(),
+            vec![put(again), recorded(again)]
+        );
     }
 
     #[test]
