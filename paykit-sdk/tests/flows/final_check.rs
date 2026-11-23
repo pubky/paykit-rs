@@ -3120,3 +3120,37 @@ async fn test_resume_ends_at_a_store_failure_a_step_below_it_meets() {
     }
     panic!("no world put the first payment first");
 }
+
+#[tokio::test]
+async fn test_pay_whose_outcome_write_is_answered_not_current_returns_the_stop() {
+    // The method makes the payment, and the switch answers its outcome write that the app is
+    // no longer current: a stop of the wallet as a whole, which the call returns. The host
+    // gets an error for a payment that was made, so `payments` lists it paid by the method
+    // with its outcome unwritten (`RailPaid`), not failed. The method was called once.
+    let w = World::new();
+    let (store, app_id, request) = with_a_request(&w).await;
+    let mut wallet = reload(&w, &store, app_id).await;
+    let switch = Arc::clone(w.alice.switch());
+    store.on_paying(Box::new(move || {
+        switch.fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/ops".into(),
+            code: pubky_switch_core::http::ErrorCode::NotCurrent,
+            current: serde_json::Value::Null,
+        })
+    }));
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome;
+    assert_eq!(
+        outcome
+            .as_ref()
+            .err()
+            .and_then(paykit_sdk::PaykitError::code),
+        Some(pubky_switch_core::http::ErrorCode::NotCurrent),
+        "{outcome:?}"
+    );
+    let payment = wallet.payments().await.unwrap().remove(0);
+    assert_eq!(payment.stage, paykit_sdk::Stage::RailPaid);
+    assert_eq!(w.rail.pay_calls(&payment.attempt_id), 1);
+}
