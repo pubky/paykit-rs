@@ -3201,7 +3201,8 @@ impl Paykit {
         }
         let now = self.now();
         let last = self.local_get::<u64>(key::LISTS_READ).await?;
-        // A raise owed that can be written goes at the next receive, whatever the copy's age.
+        // A raise owed that can be written goes at the next receive, whatever the copy's age,
+        // with one read of the lists in a pass.
         if last.is_some_and(|read| lists_read_is_fresh(read, now)) && !self.raise_owed().await? {
             return Ok(());
         }
@@ -3288,6 +3289,7 @@ impl Paykit {
         lists: pubky_switch_client::client::answers::AllowList,
         read_at: u64,
     ) -> crate::error::Result<Vec<[u8; 32]>> {
+        self.lists_read_this_pass = true;
         let (mut deny, mut tx) = self.judged_deny(lists.deny).await?;
         deny.sort_unstable();
         deny.dedup();

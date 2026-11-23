@@ -400,6 +400,9 @@ pub struct Paykit {
     /// Whether a floor raise this app owes was tried and left unwritten
     /// ([`Paykit::settle_raise_waiting`]).
     pub(crate) raise_unwritten: bool,
+    /// Whether the lists were read since this handle's last receive or flush began: a raise
+    /// owed asks for no second read before the next one ([`Paykit::raise_owed`]).
+    pub(crate) lists_read_this_pass: bool,
     /// How many activity records this handle bound ([`Paykit::activity_binds`]).
     #[cfg(feature = "test-support")]
     pub(crate) activity_binds: std::sync::atomic::AtomicU64,
@@ -474,6 +477,7 @@ impl Paykit {
             capability_snapshot: None,
             identity_told: Vec::new(),
             raise_unwritten: false,
+            lists_read_this_pass: false,
             #[cfg(feature = "test-support")]
             activity_binds: std::sync::atomic::AtomicU64::new(0),
             certificates: std::sync::Mutex::default(),
@@ -1025,6 +1029,7 @@ impl Paykit {
     }
 
     async fn receive_inner(&mut self, wait: Option<u32>) -> Result<ReceiveSummary> {
+        self.lists_read_this_pass = false;
         let read = Box::pin(self.read_before_effects(wait)).await?;
         Box::pin(self.after_read(read)).await
     }
@@ -1333,6 +1338,7 @@ impl Paykit {
     ///
     /// The client's errors.
     pub async fn flush(&mut self) -> Result<()> {
+        self.lists_read_this_pass = false;
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;

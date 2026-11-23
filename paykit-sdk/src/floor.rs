@@ -465,6 +465,7 @@ impl Paykit {
         if after.divergent && !kept.divergent {
             self.tell_identity_notice(crate::NoticeKind::BlockFloorHeld)
                 .await?;
+            self.settle_raise_waiting().await?;
         }
         Ok(())
     }
@@ -554,6 +555,11 @@ impl Paykit {
         let owed = self.owed_raises().await?;
         if owed.unread() {
             return Ok(true);
+        }
+        // One read of the lists in a pass tries the raise; a `missed` item taken after it
+        // still has its own read, above.
+        if self.lists_read_this_pass {
+            return Ok(false);
         }
         Ok(owed.any() && (!self.floor_kept().await?.divergent || self.shared_loss_hold().await?))
     }
@@ -830,6 +836,8 @@ impl Paykit {
         if result.as_ref().is_err_and(is_raise_unwritten) {
             self.raise_unwritten = true;
         }
+        // Wherever a raise is written or left unwritten, the host is told as it stands now.
+        self.settle_raise_waiting().await?;
         result
     }
 

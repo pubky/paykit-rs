@@ -3928,10 +3928,13 @@ async fn due_mark(app: &mut Paykit, sender: &[u8; 32], at: u64) {
 async fn test_blocked_return_unwritten_raise_told_once_and_gone_once_written() {
     // Paykit wire 5.6, Raising: another app unblocks bob while the floor holds a value that
     // doesn't read, with none seen, so the wallet's raise can't be written and no divergence
-    // hold explains it. The host is told once, over later receives. Once the floor reads, the
-    // raise is written at the next receive and the notice goes.
+    // hold explains it. The host is told once, over later receives, each reading the lists
+    // once; acknowledged after a reopen, it isn't told again in that load, and after the next
+    // reopen it is.
+    // Once the floor reads, the raise is written by the next flush, and the notice goes.
     let w = World::new();
-    let mut wallet = contacts_wallet(&w, store()).await;
+    let storage = store();
+    let mut wallet = contacts_wallet(&w, Arc::clone(&storage)).await;
     let mut shop = w.shop().await;
     dropped_for_the_block(&w, &mut wallet, &mut shop).await;
     let mut phone = payer_app(&w, "phone").await;
@@ -3956,12 +3959,47 @@ async fn test_blocked_return_unwritten_raise_told_once_and_gone_once_written() {
     }
     assert!(unblock_raise_owed(&wallet).await);
     assert_eq!(raise_waiting_notices(&wallet).await, 1);
+    let reads = |w: &World| {
+        w.router
+            .log()
+            .iter()
+            .filter(|line| line.contains("/allow"))
+            .count()
+    };
     for _ in 0..3 {
+        let before = reads(&w);
         w.clock.advance_ms(5_000);
         wallet.receive(None).await.unwrap();
+        // The raise is tried with one read of the lists; the client reads them once more
+        // before the feed, after the copy it took.
+        assert!(reads(&w) <= before + 2);
     }
     assert_eq!(raise_waiting_notices(&wallet).await, 1);
-    // The floor reads now: the raise is written at the next receive, and the notice goes.
+    // Reopened, it is still shown; acknowledged before the first receive, it isn't told again
+    // in this load.
+    let app_id = wallet.app().app_id();
+    drop(wallet);
+    let mut wallet = w
+        .load_on_clock(&w.alice, Arc::clone(&storage), app_id, Arc::clone(&w.clock))
+        .await;
+    let shown = wallet.notices().await.unwrap();
+    let notice = shown
+        .iter()
+        .find(|notice| notice.kind == paykit_sdk::NoticeKind::FloorRaiseWaiting)
+        .unwrap();
+    wallet.acknowledge_notice(&notice.id).await.unwrap();
+    w.clock.advance_ms(5_000);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(raise_waiting_notices(&wallet).await, 0);
+    // Reopened again, the raise still unwritten: it is told again.
+    drop(wallet);
+    let mut wallet = w
+        .load_on_clock(&w.alice, Arc::clone(&storage), app_id, Arc::clone(&w.clock))
+        .await;
+    w.clock.advance_ms(5_000);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(raise_waiting_notices(&wallet).await, 1);
+    // The floor reads now: a flush writes the raise, and the notice goes with it.
     phone
         .app_mut()
         .put_record(
@@ -3973,8 +4011,8 @@ async fn test_blocked_return_unwritten_raise_told_once_and_gone_once_written() {
         )
         .await
         .unwrap();
-    wallet.receive(None).await.unwrap();
-    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(5_000);
+    wallet.flush().await.unwrap();
     assert!(!unblock_raise_owed(&wallet).await);
     assert_eq!(raise_waiting_notices(&wallet).await, 0);
 }

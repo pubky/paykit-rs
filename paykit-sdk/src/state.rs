@@ -3991,6 +3991,10 @@ mod tests {
                 StateKey::IdentityNotice(crate::notices::NoticeKind::BlockFloorHeld),
             ),
             (
+                key::identity_notice(crate::notices::NoticeKind::FloorRaiseWaiting),
+                StateKey::IdentityNotice(crate::notices::NoticeKind::FloorRaiseWaiting),
+            ),
+            (
                 key::identity_notice(crate::notices::NoticeKind::AutomaticPaymentsHeld),
                 StateKey::IdentityNotice(crate::notices::NoticeKind::AutomaticPaymentsHeld),
             ),
