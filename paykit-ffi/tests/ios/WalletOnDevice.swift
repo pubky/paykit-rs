@@ -20,9 +20,9 @@ private final class DeviceMethod: CheckoutMethod, @unchecked Sendable {
         threads.record()
         return try super.transfer(endpoint: endpoint, payload: payload, amount: amount)
     }
-    override func settlementId(proofJson: Data) throws -> Data? {
+    override func settlementId(endpoint: String, proofJson: Data) throws -> Data? {
         threads.record()
-        return try super.settlementId(proofJson: proofJson)
+        return try super.settlementId(endpoint: endpoint, proofJson: proofJson)
     }
 }
 

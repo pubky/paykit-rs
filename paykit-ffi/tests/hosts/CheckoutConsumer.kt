@@ -56,7 +56,7 @@ internal open class CheckoutMethod(private val ledger: File) : ReceiptReader() {
             proof.amount.asset == "btc" && proof.amount.value == "7" &&
             proof.endpoint == "btc-lightning-bolt11" && (proof.payload == null || proof.payload == "lnbc1checkout")) paidAt else null
 
-    override fun settlementId(proofJson: ByteArray): ByteArray? =
+    override fun settlementId(endpoint: String, proofJson: ByteArray): ByteArray? =
         stored()?.takeIf { proofJson.contentEquals(originalProof(it)) }?.toByteArray()
 }
 
@@ -423,12 +423,12 @@ private class ThrowingMethod(private val declared: Boolean) : ReceiptReader() {
         if (declared) throw MethodException.Unknown("callback failed") else error("callback crashed")
     override fun selectEndpoints(candidates: List<EndpointCandidate>, amount: Amount?): SelectedEndpoints = fail()
     override fun transfer(endpoint: String, payload: String, amount: Amount): MethodTransfer = fail()
-    override fun settlementId(proofJson: ByteArray): ByteArray? = fail()
+    override fun settlementId(endpoint: String, proofJson: ByteArray): ByteArray? = fail()
 }
 
 /// A method that names the settlement of every proof.
 private class SettlingMethod : ReceiptReader() {
-    override fun settlementId(proofJson: ByteArray): ByteArray? = "a1".toByteArray()
+    override fun settlementId(endpoint: String, proofJson: ByteArray): ByteArray? = "a1".toByteArray()
 }
 
 /// A callback that throws reads as no answer: no endpoint, an amount to confirm, no settlement.

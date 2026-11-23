@@ -208,7 +208,7 @@ class ReceiptReader: WalletHomeserver, PaymentMethod, @unchecked Sendable {
     func payment(attemptId: String) async throws -> MethodOutcome? { nil }
     func allowanceHistory(payer: Data) async throws -> [MethodDispatch]? { nil }
     func verify(proof: MethodProof) async throws -> UInt64? { nil }
-    func settlementId(proofJson: Data) throws -> Data? { nil }
+    func settlementId(endpoint: String, proofJson: Data) throws -> Data? { nil }
 }
 
 // The issuer runs as a separate process, which a device test can't start.
