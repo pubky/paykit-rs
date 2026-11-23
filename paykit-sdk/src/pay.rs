@@ -2069,25 +2069,34 @@ impl Paykit {
         let mut lists: Vec<PaymentListRecord> = read.into_iter().map(|(l, _)| l).collect();
         lists.retain(|l| app.is_none_or(|a| a == l.app_id));
         // A list held over its record, as when the record didn't read when it came, replaces
-        // the record's list once placed (Paykit wire 5.4), by the test placement uses: the
-        // pair of each app's list held over its record, where it is newer.
+        // the record's list once placed (Paykit wire 5.4), by the test placement uses. Every
+        // list of the payee's held is taken, also over a record that doesn't read: the pair
+        // of each app's list held over its record where it is newer (`held_over`), and of
+        // each app whose record holds no readable list (`held_only`), never paid to.
         let own = self.identity();
         let mut held_over: Vec<([u8; 16], ListVersion)> = Vec::new();
-        for list in &lists {
-            let record = self
-                .app
-                .record_key(&list_target(&list.payee, &list.app_id))?;
-            let Some(kept) = self
-                .local_get::<KeptMessage>(&key::held_list(&record))
-                .await?
-            else {
+        let mut held_only: Vec<([u8; 16], ListVersion)> = Vec::new();
+        for (rest, kept) in self.local_scan::<KeptMessage>(key::HELD_LISTS).await? {
+            let stored = kept.stored(&own)?;
+            let app_id = stored.message().from.app_id;
+            if stored.sender() != *payee || app.is_some_and(|a| a != app_id) {
+                continue;
+            }
+            // Bound to its key: a list held under another record's key is a corrupt store.
+            let record = self.app.record_key(&list_target(payee, &app_id))?;
+            if format!("{}{rest}", key::HELD_LISTS) != key::held_list(&record) {
+                return Err(PaykitError::corrupt());
+            }
+            let Some(version) = crate::receive::list_version(&stored) else {
                 continue;
             };
-            let stored = kept.stored(&own)?;
-            if crate::receive::next_list_record(Some(list.clone()), &stored).is_some() {
-                if let Some(version) = crate::receive::list_version(&stored) {
-                    held_over.push((list.app_id, version));
+            match lists.iter().find(|l| l.app_id == app_id) {
+                Some(list) => {
+                    if crate::receive::next_list_record(Some(list.clone()), &stored).is_some() {
+                        held_over.push((app_id, version));
+                    }
                 }
+                None => held_only.push((app_id, version)),
             }
         }
         // The newest pair the wallet holds of each app's list, installed or held over its
@@ -2099,12 +2108,13 @@ impl Paykit {
                 .find(|(app, _)| *app == app_id)
                 .map_or(installed, |(_, held)| (*held).max(installed))
         };
-        let installed: Vec<([u8; 16], ListVersion)> = lists
+        let mut installed: Vec<([u8; 16], ListVersion)> = lists
             .iter()
             .filter_map(|l| {
                 crate::receive::list_version(&l.list).map(|v| (l.app_id, newest(l.app_id, v)))
             })
             .collect();
+        installed.extend(held_only.iter().copied());
         // Only a current app's list counts (Paykit spec 8.4, 7.2): a removed app's list, of
         // whatever version it chose, would shadow the current apps' and then be refused by
         // the destination check. The payee's `identity.json` is the copy that check takes,
@@ -2277,12 +2287,34 @@ impl Paykit {
                 ));
             }
         }
-        for pair in replaced {
+        // A list held over a record that doesn't read is asked for by its pair, if its app
+        // still counts in the payee's identity.json.
+        let current = |app_id: &[u8; 16]| {
+            identity.as_ref().is_none_or(|identity| {
+                identity.doc.listed_cert(app_id).is_some() && !identity.doc.lists_removed(app_id)
+            })
+        };
+        for pair in replaced
+            .into_iter()
+            .chain(held_only.into_iter().filter(|(app, _)| current(app)))
+        {
             if !held.iter().any(|(app, _)| *app == pair.0) {
                 held.push(pair);
             }
         }
         held.extend(ahead);
+        // A current app of the payee's whose list the wallet holds none of, installed or held:
+        // an untargeted request beside the ones naming a pair asks it too, so a list that can
+        // be paid may come (Paykit spec 8.4, wire 4.14).
+        let ask_others = app.is_none()
+            && !held.is_empty()
+            && identity.as_ref().is_some_and(|identity| {
+                identity.doc.body().apps.iter().any(|listed| {
+                    !identity.doc.lists_removed(&listed.app_id)
+                        && !installed.iter().any(|(a, _)| *a == listed.app_id)
+                        && !held.iter().any(|(a, _)| *a == listed.app_id)
+                })
+            });
         // Endpoints the conversion terms leave unusable refuse the payment for that, unless a
         // list has expired or is used up: a newer list may serve then, and the payee is asked
         // for it as below.
@@ -2316,7 +2348,8 @@ impl Paykit {
         // list.
         if !paused_lists.is_empty() {
             if !options.quote_only && !held.is_empty() && !unsupported_only && !unusable {
-                self.ask_for_lists(payee, app, &held, &installed).await?;
+                self.ask_for_lists(payee, app, &held, &installed, false)
+                    .await?;
             }
             Box::pin(self.refuse_while_paused(&paused_lists)).await?;
         }
@@ -2343,7 +2376,8 @@ impl Paykit {
             ))
             .into());
         }
-        self.ask_for_lists(payee, app, &held, &installed).await?;
+        self.ask_for_lists(payee, app, &held, &installed, ask_others)
+            .await?;
         Err(Refusal::WaitingForList {
             device_clock_behind,
         }
@@ -2613,8 +2647,9 @@ impl Paykit {
     /// Paykit spec 8.4, "No usable list": ask the payee for its current list, with a
     /// `paykit.private_payment_list_request` naming the version held (Paykit wire 4.14). With
     /// `app`, of that app, naming the pair `installed` holds of it whether or not that list
-    /// may be paid; without, of each app in `held`, or one request naming no app when none
-    /// is. A request already asked of the same app at the same held version is
+    /// may be paid; without, of each app in `held`, with one request naming no app beside
+    /// them when `ask_others` says a current app of the payee's has no list held, or one
+    /// request naming no app when none is. A request already asked of the same app at the same held version is
     /// outstanding, and not asked again, until a day has passed: the payee can't be forced to
     /// answer, and a request it dropped is asked once more after that, so a payer waits at
     /// most a day for one more chance. The request is queued before its mark is kept: a crash
@@ -2625,13 +2660,18 @@ impl Paykit {
         app: Option<[u8; 16]>,
         held: &[([u8; 16], ListVersion)],
         installed: &[([u8; 16], ListVersion)],
+        ask_others: bool,
     ) -> Result<()> {
         self.refuse_while_sends_held(payee).await?;
         let held_of = |app: [u8; 16]| installed.iter().find(|(a, _)| *a == app).map(|(_, v)| *v);
         let asks: Vec<(Option<[u8; 16]>, Option<ListVersion>)> = match app {
             Some(app) => vec![(Some(app), held_of(app))],
             None if held.is_empty() => vec![(None, None)],
-            None => held.iter().map(|(app, v)| (Some(*app), Some(*v))).collect(),
+            None => held
+                .iter()
+                .map(|(app, v)| (Some(*app), Some(*v)))
+                .chain(ask_others.then_some((None, None)))
+                .collect(),
         };
         let now = self.now();
         for (app_id, held_version) in asks {

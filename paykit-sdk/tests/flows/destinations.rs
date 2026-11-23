@@ -1332,7 +1332,7 @@ pub(crate) async fn list_requests_sent(
 }
 
 /// Whether `shop` receives a `paykit.private_payment_list_request` at its next read.
-async fn asked_for_a_list(shop: &mut paykit_sdk::Paykit) -> bool {
+pub(crate) async fn asked_for_a_list(shop: &mut paykit_sdk::Paykit) -> bool {
     let got = shop.receive(None).await.unwrap();
     got.report.events.iter().any(|e| {
         matches!(
