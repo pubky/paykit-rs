@@ -687,6 +687,8 @@ impl Paykit {
         &mut self,
         endpoints: BTreeMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
     ) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.first_read_before_writing().await?;
         self.refresh_own()?;
         if !self.holds(SCOPE) {
@@ -719,6 +721,8 @@ impl Paykit {
     /// while sends are held, before the list is set, or while an earlier publication is
     /// unresolved. A store or client failure.
     pub async fn publish_list_to(&mut self, recipient: [u8; 32]) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.first_read_before_writing().await?;
         self.refresh_own()?;
         if recipient == self.identity() || !self.holds(SCOPE) {
@@ -781,6 +785,8 @@ impl Paykit {
     /// unresolved, or while a confirmed list can't be published yet. A store or client
     /// failure.
     pub async fn withdraw_list_from(&mut self, recipient: [u8; 32]) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.first_read_before_writing().await?;
         self.refresh_own()?;
         let at = key::list_recipient(&recipient);
@@ -856,6 +862,8 @@ impl Paykit {
         shown: &UnknownListDelivery,
         _confirmed: UserConfirmed,
     ) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.first_read_before_writing().await?;
         self.refresh_own()?;
         if !self.holds(SCOPE) {

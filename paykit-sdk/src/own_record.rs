@@ -100,6 +100,8 @@ impl Paykit {
         endpoint: PaymentEndpointIdentifier,
         payload: PaymentEndpointPayload,
     ) -> Result<Publication> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         Box::pin(self.edit_public_endpoint(endpoint, Some(payload))).await
     }
 
@@ -115,6 +117,8 @@ impl Paykit {
         &mut self,
         endpoint: &PaymentEndpointIdentifier,
     ) -> Result<Publication> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         Box::pin(self.edit_public_endpoint(endpoint.clone(), None)).await
     }
 
@@ -154,6 +158,8 @@ impl Paykit {
         endpoints: BTreeMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
         expires_at_ms: Option<u64>,
     ) -> Result<Publication> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         let desired = Box::pin(self.publication_for_edit()).await?;
         let expiry = expires_at_ms.map_or(RecordExpiry::Never, RecordExpiry::At);
         Box::pin(self.offer_endpoints(endpoints, desired, expiry)).await
@@ -228,6 +234,8 @@ impl Paykit {
     /// (module docs). A delivery that fails stays owed by the client and goes again at the
     /// next read or update.
     pub async fn update_own_record(&mut self) -> Result<Publication> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.own_record_known()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;

@@ -724,6 +724,8 @@ impl Paykit {
     /// host that retries after one reads [`Paykit::payee_activity`] after its next write
     /// first.
     pub async fn send_request(&mut self, to: [u8; 32], draft: RequestDraft) -> Result<SentRequest> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.send_request_inner(to, draft)).await
     }
@@ -987,6 +989,8 @@ impl Paykit {
     /// tolerance, after its payment deadline, or outside the validity of the destination or
     /// rates it was paid by, unless the record holds its receipt already; the rail's errors.
     pub async fn verify_payment(&mut self, record: &[u8; 32]) -> Result<Option<u64>> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.verify_payment_inner(record)).await
     }
@@ -1476,6 +1480,8 @@ impl Paykit {
     /// ([`crate::DivergentRecord::may_hold_credit`]), or the messages kept over it wait to
     /// be written.
     pub async fn confirm_payment(&mut self, record: &[u8; 32]) -> Result<Option<String>> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.confirm_payment_with(record, ReceiptDetails::new())
             .await
     }
@@ -1495,6 +1501,8 @@ impl Paykit {
         record: &[u8; 32],
         details: ReceiptDetails,
     ) -> Result<Option<String>> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.confirm_payment_with_inner(record, details)).await
     }
@@ -1640,6 +1648,8 @@ impl Paykit {
         record: &[u8; 32],
         reason: Option<String>,
     ) -> Result<String> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.cancel_sent_request_inner(record, reason)).await
     }
@@ -2416,6 +2426,8 @@ impl Paykit {
         request: &RequestRef,
         reason: Option<String>,
     ) -> Result<String> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
@@ -2451,6 +2463,8 @@ impl Paykit {
         request: &RequestRef,
         reason: Option<String>,
     ) -> Result<String> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
@@ -2495,6 +2509,8 @@ impl Paykit {
     /// network, `429`, `503`) is no error: it is reported sent, [`MessageDelivery::Kept`], so
     /// the host doesn't accept again.
     pub async fn accept_subscription(&mut self, request: &RequestRef) -> Result<SentMessage> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.accept_subscription_with(request, AcceptOptions::default())
             .await
     }
@@ -2511,6 +2527,8 @@ impl Paykit {
         request: &RequestRef,
         options: AcceptOptions,
     ) -> Result<SentMessage> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.accept_subscription_as(request, options, None).await
     }
 
@@ -2527,6 +2545,8 @@ impl Paykit {
         request: &RequestRef,
         allowance: &[u8; 32],
     ) -> Result<SentMessage> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.accept_subscription_as(request, AcceptOptions::default(), Some(allowance))
             .await
     }

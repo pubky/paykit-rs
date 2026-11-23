@@ -836,6 +836,8 @@ impl Paykit {
         held: &HeldRequest,
         _confirmed: pubky_switch_client::app::UserConfirmed,
     ) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.refresh_own()?;
         let target = crate::activity::ActivityTarget::payer(
             paykit_lib::derive::natural_key::request_record(&request.payee, &request.request_hash),

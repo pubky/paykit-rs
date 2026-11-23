@@ -1791,6 +1791,8 @@ impl Paykit {
         role: AllowanceRole,
         terms: AllowanceTerms,
     ) -> Result<SentAllowance> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         Box::pin(self.propose_allowance_with_consent(to, role, terms, None)).await
     }
 
@@ -1806,6 +1808,8 @@ impl Paykit {
         terms: AllowanceTerms,
         confirmed: crate::UserConfirmed,
     ) -> Result<SentAllowance> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         Box::pin(self.propose_allowance_with_consent(
             to,
             AllowanceRole::Allower,
@@ -2090,6 +2094,8 @@ impl Paykit {
     /// accepted. A seller accepts using this method. The payer uses [`Self::accept_executable_allowance`].
     /// Both approval and contacts scopes are required to send the signed reply.
     pub async fn accept_allowance(&mut self, record: &[u8; 32]) -> Result<String> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.accept_allowance_with_consent(record, None).await
     }
 
@@ -2105,6 +2111,8 @@ impl Paykit {
         record: &[u8; 32],
         confirmed: crate::UserConfirmed,
     ) -> Result<String> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         Box::pin(self.accept_allowance_with_consent(record, Some(confirmed))).await
     }
 
@@ -2132,6 +2140,8 @@ impl Paykit {
     /// changed; [`Refusal::Usage`] for a proposal this identity sent or one answered already;
     /// as [`Paykit::propose_allowance`]. Never [`Refusal::Divergent`].
     pub async fn reject_allowance(&mut self, record: &[u8; 32]) -> Result<String> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         Box::pin(self.answer_allowance(record, Kind::AllowanceRejection, None)).await
     }
 
@@ -2154,6 +2164,8 @@ impl Paykit {
     /// 8.1, "Blocked counterparties"); [`Refusal::Usage`] for a proposal to this identity not
     /// yet answered, which is rejected instead; as [`Paykit::propose_allowance`].
     pub async fn end_allowance(&mut self, record: &[u8; 32]) -> Result<String> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         Box::pin(self.answer_allowance(record, Kind::AllowanceEnd, None)).await
     }
 

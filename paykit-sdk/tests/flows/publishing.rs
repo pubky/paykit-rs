@@ -479,7 +479,7 @@ async fn test_publication_lost_answer_settles_the_original_before_replacing_its_
         shop.app().kept_batch(batch).await.unwrap(),
         Some(KeptBatchStatus::Applied { .. })
     ));
-    shop.app_mut().flush_outbox().await.unwrap();
+    shop.flush().await.unwrap();
     let original_view = shop.app().queued_messages("paykit").await.unwrap();
     assert!(
         original_view
@@ -1528,18 +1528,19 @@ async fn send_list_request(
     .unwrap();
     // A list request goes only on a fresh copy of the deny list (Paykit spec 8.1).
     wallet.flush().await.unwrap();
-    let (id, delivery) = wallet
+    let id = wallet
         .app_mut()
-        .send(pubky_switch_client::app::OutgoingMessage::new(
+        .queue(pubky_switch_client::app::OutgoingMessage::new(
             shop.identity(),
             paykit_lib::Kind::PrivatePaymentListRequest.as_str(),
             body,
         ))
         .await
         .unwrap();
+    let delivery = wallet.flush_message_in_delivery(&id).await.unwrap();
     assert!(matches!(
         delivery,
-        pubky_switch_client::app::Delivery::Accepted { .. }
+        Some(pubky_switch_client::app::Delivery::Accepted { .. })
     ));
     id
 }
