@@ -39,6 +39,8 @@
 //! | `hc/<record key>/<hold identifier>` | the user confirmed a held request under that hold (`he`) | |
 //! | `hb/<record key>/<hold identifier>` | the restore under that hold carried the backup's confirmation of an earlier hold | |
 //! | `rsc/<record key>` | an Allowance whose consent this restore marked for confirmation, until the held cursor settles it | |
+//! | `xr/<record key>` | an approval for execution a restore carried, which counts once its verdict is clean | |
+//! | `xa/<record key>/<hold identifier>` | the user approved automatic execution of an Allowance under that hold; only the current hold's approval lets a first grant go without a new confirmation | |
 //! | `pl` | the latest provider-loss boundary followed, retained across restore (`loss.rs`, Paykit spec 7.3) | |
 //! | `pn/<obligation>` | the user states this obligation was not paid before the kept loss; a newer loss clears these statements | |
 //! | `mh` | the hold a `missed` item set on the open requests, bounded by a time: the item's last acceptance time, or, for an item whose end isn't known, a service time verified after the read that handed it (`hold.rs`) | |
@@ -533,7 +535,10 @@ impl Stored for [u8; 16] {
 
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
-            StateKey::OfflineBatch(_) | StateKey::EndBatch(_) | StateKey::FloorBatch => Ok(()),
+            StateKey::OfflineBatch(_)
+            | StateKey::EndBatch(_)
+            | StateKey::FloorBatch
+            | StateKey::GrantBatch(_) => Ok(()),
             _ => corrupt(),
         }
     }
@@ -704,6 +709,8 @@ impl Stored for bool {
             | StateKey::HoldConfirmed { .. }
             | StateKey::HoldConfirmedBefore { .. }
             | StateKey::RestoreConsent(_)
+            | StateKey::ExecutionApproval { .. }
+            | StateKey::RestoreApproval(_)
             | StateKey::NotPaidBeforeLoss(_)
             | StateKey::FloorDeleted
             | StateKey::FloorOpened(_)
@@ -1825,6 +1832,8 @@ pub(crate) mod key {
     pub(crate) const HOLD_CONFIRMED: &str = "hc/";
     pub(crate) const HOLD_CONFIRMED_BEFORE: &str = "hb/";
     pub(crate) const RESTORE_CONSENTS: &str = "rsc/";
+    pub(crate) const EXECUTION_APPROVALS: &str = "xa/";
+    pub(crate) const RESTORE_APPROVALS: &str = "xr/";
     pub(crate) const LIST_SETTINGS: &str = "list";
     pub(crate) const PUBLICATIONS: &str = "lp/";
     pub(crate) const LIST_RESERVATIONS: &str = "lres/";
@@ -1988,6 +1997,12 @@ pub(crate) mod key {
     /// The payer's grant and later accepted ledger for this Allowance.
     pub(crate) fn executor_checkpoint(record: &[u8; 32]) -> String {
         format!("{EXECUTOR_CHECKPOINTS}{}", b64(record))
+    }
+
+    /// The batch ID of this app's first grant of the Allowance at `record`, while the client
+    /// keeps it to send again; the batch deletes it when it applies.
+    pub(crate) fn grant_batch(record: &[u8; 32]) -> String {
+        format!("gb/{}", b64(record))
     }
 
     /// Staged complete values and the native batches that actually submitted them.
@@ -2171,6 +2186,24 @@ pub(crate) mod key {
             b64(record_key),
             b64(epoch.as_bytes())
         )
+    }
+
+    /// `xa/<record key>/<hold identifier>`: the user approved automatic execution of the
+    /// Allowance at `record_key` under that hold (`he`), or `none` before any hold.
+    pub(crate) fn execution_approval(
+        record_key: &[u8; 32],
+        hold: Option<&crate::hold::HoldEpoch>,
+    ) -> String {
+        format!(
+            "{EXECUTION_APPROVALS}{}/{}",
+            b64(record_key),
+            hold.map_or_else(|| String::from("none"), |hold| b64(hold.as_bytes()))
+        )
+    }
+
+    /// `xr/<record key>`: an approval for execution a restore carried, until its verdict.
+    pub(crate) fn restore_approval(record_key: &[u8; 32]) -> String {
+        format!("{RESTORE_APPROVALS}{}", b64(record_key))
     }
 
     pub(crate) fn restore_consent(record_key: &[u8; 32]) -> String {
@@ -2383,6 +2416,17 @@ pub(crate) enum StateKey {
     },
     /// An Allowance consent held specifically by this restore.
     RestoreConsent([u8; 32]),
+    /// `xr/<record key>`: an approval for execution a restore carried from its backup,
+    /// which counts only once the restore's verdict is clean.
+    RestoreApproval([u8; 32]),
+    /// `xa/<record key>/<hold identifier>`: the user's approval of automatic execution of
+    /// an Allowance, under the hold it was given under (`None` before any hold).
+    ExecutionApproval {
+        /// The Allowance record's key.
+        record: [u8; 32],
+        /// The hold identifier the approval was given under.
+        hold: Option<[u8; 16]>,
+    },
     /// `lr`: when the lists were last read.
     ListsRead,
     /// `lh/<record key>`: a list held over a record that didn't read.
@@ -2561,6 +2605,8 @@ pub(crate) enum StateKey {
     EndOrigin(String),
     /// The unresolved native batch that will record an automatic end before queueing.
     EndBatch(String),
+    /// The unresolved native batch of this app's first grant of an Allowance.
+    GrantBatch([u8; 32]),
 }
 
 impl StateKey {
@@ -2714,6 +2760,18 @@ impl StateKey {
                         }
                     }
                     "rsc" => Self::RestoreConsent(b64_32(rest)?),
+                    "xr" => Self::RestoreApproval(b64_32(rest)?),
+                    "xa" => {
+                        let (record, hold) = rest.split_once('/')?;
+                        Self::ExecutionApproval {
+                            record: b64_32(record)?,
+                            hold: if hold == "none" {
+                                None
+                            } else {
+                                Some(b64_16(hold)?)
+                            },
+                        }
+                    }
                     "pn" => Self::NotPaidBeforeLoss(b64_32(rest)?),
                     "fo" => Self::FloorOpened(b64_32(rest)?),
                     "lh" => Self::HeldList(b64_32(rest)?),
@@ -2775,6 +2833,7 @@ impl StateKey {
                     "en" => Self::NoticeTarget(msg_id(rest)?),
                     "end" => Self::EndOrigin(msg_id(rest)?),
                     "eb" => Self::EndBatch(msg_id(rest)?),
+                    "gb" => Self::GrantBatch(b64_32(rest)?),
                     "eo" => Self::OwedEnd(b64_32(rest)?),
                     "rs" => {
                         let (requester, id) = rest.split_once('/')?;
@@ -3677,6 +3736,7 @@ mod tests {
     #[test]
     fn test_state_key_every_builder_parses_to_its_family() {
         let pubky = [3u8; 32];
+        let hold = crate::hold::HoldEpoch::new().unwrap();
         let app = [4u8; 16];
         let attempt = AttemptId::from_bytes([5; 16]);
         let id = "123e4567-e89b-42d3-a456-426614174000";
@@ -3748,6 +3808,24 @@ mod tests {
             (
                 key::restore_consent(&pubky),
                 StateKey::RestoreConsent(pubky),
+            ),
+            (
+                key::restore_approval(&pubky),
+                StateKey::RestoreApproval(pubky),
+            ),
+            (
+                key::execution_approval(&pubky, None),
+                StateKey::ExecutionApproval {
+                    record: pubky,
+                    hold: None,
+                },
+            ),
+            (
+                key::execution_approval(&pubky, Some(&hold)),
+                StateKey::ExecutionApproval {
+                    record: pubky,
+                    hold: Some(*hold.as_bytes()),
+                },
             ),
             (key::LISTS_READ.into(), StateKey::ListsRead),
             (key::DENIED.into(), StateKey::Denied),
@@ -3957,6 +4035,7 @@ mod tests {
             (key::notice_target(id), StateKey::NoticeTarget(id.into())),
             (key::end_origin(id), StateKey::EndOrigin(id.into())),
             (key::end_batch(id), StateKey::EndBatch(id.into())),
+            (key::grant_batch(&pubky), StateKey::GrantBatch(pubky)),
         ];
         for (built, family) in cases {
             assert_eq!(StateKey::parse(built.as_bytes()), Some(family), "{built}");
