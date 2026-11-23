@@ -117,6 +117,8 @@ impl Paykit {
         counterparty: [u8; 32],
         selection: ResendSelection,
     ) -> Result<String> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;

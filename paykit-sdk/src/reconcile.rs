@@ -295,6 +295,8 @@ impl Paykit {
     /// pass needs the keys to read every obligation. [`Paykit::resume_payments`] can still
     /// finish payments already dispatched. Client and rail errors propagate to the caller.
     pub async fn reconcile(&mut self) -> Result<ReconcileReport> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.reconcile_inner()).await
     }
@@ -678,6 +680,8 @@ impl Paykit {
         resolution: Resolution,
         _confirmed: UserConfirmed,
     ) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.resolve_attempt_inner(obligation, attempt, resolution, _confirmed)).await
     }
@@ -990,6 +994,8 @@ impl Paykit {
     /// The client's errors, such as the restore question still open; nothing ends while the
     /// asks can't be queued.
     pub async fn end_reconcile(&mut self, confirmed: UserConfirmed) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;

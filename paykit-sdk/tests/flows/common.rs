@@ -346,6 +346,15 @@ impl World {
         app
     }
 
+    /// A device clock of its own, at `ms`, for an app loaded with [`World::load_on_clock`]:
+    /// the way to model a device clock that is wrong. The world's clock is the switches'
+    /// service time, so moving it back makes every switch answer earlier than it did before,
+    /// which the client takes as the service's clock going backwards; a wrong device clock
+    /// moves this one instead.
+    pub fn device_clock(&self, ms: u64) -> Arc<TestClock> {
+        Arc::new(TestClock::new(ms))
+    }
+
     /// Load app `app_id` of `signer` from `store`, its device clock `clock` instead of the
     /// world's, which the switches keep.
     pub async fn load_on_clock(

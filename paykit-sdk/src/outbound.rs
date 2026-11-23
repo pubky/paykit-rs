@@ -47,6 +47,8 @@ impl Paykit {
     ///
     /// The first read's failure, or the Switch client's refusal without `reply.add`.
     pub async fn allow_connect(&mut self, payee: &[u8; 32]) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
@@ -64,6 +66,8 @@ impl Paykit {
         registrations: &[u64],
         confirmed: crate::UserConfirmed,
     ) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.check_restore_question(registrations).await?;
         Ok(self.app.confirm_restored_registrations(confirmed).await?)
     }
@@ -75,6 +79,8 @@ impl Paykit {
     ///
     /// The first read's failure, a changed or empty question, or the client's alarm.
     pub async fn refuse_restored_registrations(&mut self, registrations: &[u64]) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.check_restore_question(registrations).await?;
         Ok(self.app.refuse_restored_registrations().await?)
     }
@@ -135,12 +141,30 @@ impl Paykit {
         msg_id: &str,
     ) -> std::result::Result<Option<Delivery>, AppError> {
         self.require_first_read()?;
+        let _delivery = self.delivery_operation();
+        self.service_time_for_delivery().await?;
         Box::pin(self.app.flush_message(msg_id)).await
     }
 
     pub(crate) async fn send_outbox(&mut self) -> std::result::Result<OutboxReport, AppError> {
         self.require_first_read()?;
+        let _delivery = self.delivery_operation();
+        self.service_time_for_delivery().await?;
         Box::pin(self.app.flush_outbox()).await
+    }
+
+    /// Before the client delivers, keep the highest verified service time as `sv` and make
+    /// the delivery operation observe one when a held message waits for it (Paykit spec
+    /// 8.1, [`crate::send_holds::DeliveryClock`]).
+    async fn service_time_for_delivery(&mut self) -> std::result::Result<(), AppError> {
+        let kept = async {
+            Box::pin(self.note_service_time()).await?;
+            Box::pin(self.observe_for_delivery()).await
+        };
+        kept.await.map_err(|error| match error {
+            crate::error::PaykitError::Client(error) => error,
+            _ => AppError::Store(pubky_switch_client::store::StoreError::Corrupt),
+        })
     }
 
     pub(crate) async fn submit(
@@ -148,7 +172,11 @@ impl Paykit {
         batch: OpBatch,
     ) -> std::result::Result<Submitted, AppError> {
         self.require_first_read()?;
-        Box::pin(self.app.submit_batch(batch)).await
+        let submitted = Box::pin(self.app.submit_batch(batch)).await;
+        if submitted.is_ok() {
+            self.observe_service_time();
+        }
+        submitted
     }
 
     pub(crate) async fn send_again(
