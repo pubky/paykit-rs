@@ -4422,3 +4422,86 @@ async fn test_executor_restored_dispatch_resolved_with_no_claim_keeps_the_allowa
         "{paid:?}"
     );
 }
+
+/// A one-time request from the shop for `value` btc, its hold confirmed if it is held,
+/// paid under the Allowance at `key`.
+async fn pays_under(
+    world: &World,
+    shop: &mut paykit_sdk::Paykit,
+    payer: &mut paykit_sdk::Paykit,
+    key: &[u8; 32],
+    value: &str,
+) -> paykit_sdk::PayResult {
+    let request = Box::pin(request_from(
+        shop,
+        payer.identity(),
+        draft(value, world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    if let Some(held) = payer.request(&request).await.unwrap().held {
+        Box::pin(payer.confirm_possibly_cancelled(&request, &held, UserConfirmed::new()))
+            .await
+            .unwrap();
+    }
+    Box::pin(payer.pay_under_allowance(&request, key)).await
+}
+
+#[tokio::test]
+async fn test_executor_grant_before_an_orderly_generation_change_still_pays() {
+    // The service's generation changes in an orderly way, with nothing declared lost: the
+    // Allowance's grant and ledger, written in the earlier generation, keep their evidence,
+    // so it goes on paying automatically, and after a `missed` item the user's confirmation
+    // lands (Paykit spec 8.3, "After provider loss" pauses only after a loss; Pubky Switch
+    // spec, Section 12.5).
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    world.rail.set_history_payer(payer.identity());
+    let paid = Box::pin(pays_under(&world, &mut shop, &mut payer, &key, "1")).await;
+    assert!(
+        matches!(paid.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "{paid:?}"
+    );
+    let before = payer.app().own_identity().generation();
+    let service = Box::pin(crate::allowances::advance_allowance_generation(
+        &world, &mut payer,
+    ))
+    .await;
+    assert!(payer.app().own_identity().generation() > before);
+    let paid = Box::pin(pays_under(&world, &mut shop, &mut payer, &key, "2")).await;
+    assert!(
+        matches!(paid.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "{paid:?}"
+    );
+
+    // A `missed` item at the service of the new generation holds the Allowance.
+    let now = world.clock.now_ms();
+    service.push_missed(1, now - 1_000, now);
+    Box::pin(crate::common::finish_listing(&mut payer)).await;
+    assert!(!payer.allowance(&key).await.unwrap().consented);
+    Box::pin(payer.confirm_allowance_executor(&key, UserConfirmed::new()))
+        .await
+        .unwrap();
+    let paid = Box::pin(pays_under(&world, &mut shop, &mut payer, &key, "3")).await;
+    assert!(
+        matches!(paid.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "{paid:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_executor_grant_before_a_provider_loss_pays_nothing() {
+    // A provider loss is no orderly change: the Allowance's grant and ledger from before it
+    // pay nothing automatically on the replacement service (Paykit spec 8.3, "After
+    // provider loss").
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    world.rail.set_history_payer(payer.identity());
+    let _service = crate::provider_loss::declare_loss(&world);
+    let uncertain_until = Box::pin(crate::provider_loss::follow_loss(&mut payer)).await;
+    payer.app_mut().invite(&shop.identity()).await.unwrap();
+    world
+        .clock
+        .set_ms(uncertain_until.max(world.clock.now_ms()) + pubky_switch_client::app::DOC_CACHE_MS);
+    let refused = Box::pin(pays_under(&world, &mut shop, &mut payer, &key, "1")).await;
+    assert!(refused.outcome.is_err(), "{refused:?}");
+    assert!(world.rail.all_executions().is_empty());
+}

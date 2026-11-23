@@ -24,9 +24,26 @@ struct AppliedOperation {
 }
 
 impl AppliedOperation {
+    /// A claim operation, which an app acts on only in the generation its own
+    /// `identity.json` names (Pubky Switch spec, Section 12.5).
     fn verify(app: &App, kept: &KeptOp) -> Option<Self> {
         let applied = Self::verify_original(app, kept)?;
         (applied.op.body().generation == app.own_identity().generation()).then_some(applied)
+    }
+
+    /// A record write, whose transition proof keeps dating it, with its generation's key,
+    /// through an orderly generation change or a cooperative move (Pubky Switch spec,
+    /// Section 12.5): it counts when its generation is in the grant history, after the last
+    /// provider loss, which nothing carries across (Paykit spec 8.3, "After provider loss").
+    fn verify_record(app: &App, kept: &KeptOp) -> Option<Self> {
+        let applied = Self::verify_original(app, kept)?;
+        let current = app.own_identity();
+        super::in_grant_history(
+            applied.op.body().generation,
+            current.generation(),
+            current.body().recovery_from,
+        )
+        .then_some(applied)
     }
 
     fn verify_original(app: &App, kept: &KeptOp) -> Option<Self> {
@@ -323,7 +340,7 @@ impl AppliedRecord {
     }
 
     pub(super) fn retained(app: &App, target: &RecordTarget, kept: &KeptOp) -> Option<Self> {
-        Self::from_operation(app, target, AppliedOperation::verify(app, kept)?)
+        Self::from_operation(app, target, AppliedOperation::verify_record(app, kept)?)
     }
 
     /// A selected proposal may retain its original signed write after a cooperative move.
@@ -445,7 +462,7 @@ impl AppliedRecord {
         selected_condition: &Condition,
         kept: &KeptOp,
     ) -> Option<ApplicationRef> {
-        let deleted = AppliedOperation::verify(app, kept)?;
+        let deleted = AppliedOperation::verify_record(app, kept)?;
         let RecordValue::Delete = deleted.open_record(app, pending)? else {
             return None;
         };

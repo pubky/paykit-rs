@@ -180,7 +180,10 @@ impl Paykit {
                             || !write.cert.holds_scope("paykit_allowance_execute")
                             || !write.op.body().conditions.contains(grant)
                             || !matches!(grant, Condition::RecordCurrent { revision: r, .. } if *r == revision)
-                            || write.revision.generation != revision.generation
+                            // Written at the grant's generation or a later one of the
+                            // same history: an orderly change or a cooperative move carries
+                            // the grant it is conditioned on (Pubky Switch spec, Section 12.5).
+                            || write.revision.generation < revision.generation
                             || write.value != proposal.result
                             || AppliedRecord::retained(&self.app, &target, &proposal.before)
                                 .is_none_or(|base| !write.follows(&base))
