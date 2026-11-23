@@ -1203,7 +1203,9 @@ impl Paykit {
                 ..ReceiveSummary::default()
             });
         }
-        if Box::pin(self.take_restore_verdict()).await? {
+        // A `missed` item this read took waits for its read of the lists, with or without the
+        // divergence hold: it is made now, before any ask (Paykit wire 5.6, Raising).
+        if Box::pin(self.take_restore_verdict()).await? || self.owed_raises().await?.unread() {
             Box::pin(self.refresh_lists_when_due()).await?;
         }
         // Restore-held blocks go before the other outgoing work, after the first page.

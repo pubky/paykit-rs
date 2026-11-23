@@ -3814,15 +3814,66 @@ async fn test_blocked_return_conflicting_widening_raise_keeps_the_receive_going(
                 current: serde_json::Value::Null,
             });
     }
-    for _ in 0..2 {
-        w.clock.advance_ms(11 * MINUTE_MS);
-        wallet.receive(None).await.unwrap();
-    }
-    assert!(widening_owed(&wallet).await);
+    // The receive that takes the item reads the lists for it, and its raise conflicts twice.
+    wallet.receive(None).await.unwrap();
+    assert!(missed_widening_read(&wallet).await);
     w.clock.advance_ms(5_000);
     wallet.receive(None).await.unwrap();
     assert!(!widening_owed(&wallet).await);
     assert!(shared_floor(&wallet).await.is_some());
+}
+
+#[tokio::test]
+async fn test_blocked_return_missed_item_with_nothing_to_ask_read_in_its_receive() {
+    // Paykit wire 5.6, Raising: a `missed` item comes while carol is blocked, with no mark due
+    // and no ask queued. Its widening's read of the lists is made in the receive that takes
+    // it, so the widening and its raise are applied there.
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    wallet.app_mut().invite(&w.carol_id()).await.unwrap();
+    wallet.block(&w.carol_id()).await.unwrap();
+    let since = w.clock.now_ms();
+    w.alice
+        .switch()
+        .push_missed(1, since - 1_000, since + MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    assert!(!widening_owed(&wallet).await);
+    assert!(shared_floor(&wallet).await.is_some());
+}
+
+#[tokio::test]
+async fn test_blocked_return_missed_item_under_the_hold_read_in_its_receive() {
+    // Paykit wire 5.6, Raising: under the divergence hold, with nothing to ask, a `missed`
+    // item's read of the lists is still made in the receive that takes it; its raise waits.
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    wallet.app_mut().invite(&w.carol_id()).await.unwrap();
+    wallet.block(&w.carol_id()).await.unwrap();
+    let mut phone = payer_app(&w, "phone").await;
+    phone
+        .app_mut()
+        .put_record(
+            &floor_record(&w),
+            &paykit_lib::records::BlockFloorRecord::new(1)
+                .to_json()
+                .unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    w.alice
+        .switch()
+        .make_divergent([0x5e; 16], floor_key(&w, &wallet), [5; 32])
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(floor_held_divergent(&wallet).await);
+    let since = w.clock.now_ms();
+    w.alice
+        .switch()
+        .push_missed(1, since - 1_000, since + MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    assert!(missed_widening_read(&wallet).await);
 }
 
 /// Whether the unverified mark's ask was made: its request signed and queued.
