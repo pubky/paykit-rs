@@ -740,7 +740,6 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::Flagged
             | StateKey::StoredNote { .. }
             | StateKey::Taken(_) => continue,
-
             // Only the original installation holds this duty. A restore reconciles its
             // shared end through the outgoing delivery notices.
             StateKey::OwedEnd(_) => continue,
@@ -882,7 +881,7 @@ pub(crate) fn restore_paykit_layer(
                 let mut stop =
                     state::restored::<crate::send_holds::QueuedStop>(&key, &value, &binder)
                         .map_err(|_| unread())?;
-                stop.given_up = false;
+                stop.given_up = None;
                 let value = state::encode(&stop).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;

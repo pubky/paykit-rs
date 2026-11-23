@@ -1287,9 +1287,13 @@ impl Paykit {
                 }
                 continue;
             }
-            match Box::pin(self.answer_record(answer)).await? {
+            match Box::pin(self.answer_record(&answer.payee, &answer.request_hash, &answer.msg_id))
+                .await?
+            {
                 AnswerRecord::Undecided => {}
-                AnswerRecord::Gone | AnswerRecord::Covered => gone.push(answer.clone()),
+                AnswerRecord::Gone | AnswerRecord::Holds | AnswerRecord::Covered => {
+                    gone.push(answer.clone())
+                }
                 AnswerRecord::Lacks => {
                     if !answer.restored {
                         given_up.push(answer.clone());
@@ -1354,11 +1358,19 @@ impl Paykit {
         self.local_commit(tx).await
     }
 
-    /// What the request record a held answer was recorded in, which shows no message of it
-    /// to send now, says of the answer ([`AnswerRecord`]).
-    async fn answer_record(&mut self, answer: &HeldAnswer) -> Result<AnswerRecord> {
+    /// What the request record of `payee`'s request `request_hash`, which an answer
+    /// `msg_id` was recorded in, says of the answer ([`AnswerRecord`]): for one held in its
+    /// record, which shows no message of it to send now, and for one held in the outbox past
+    /// its window, whose host notice requires a record that holds it or lost it (Paykit spec
+    /// 8.1, "Undelivered messages").
+    pub(crate) async fn answer_record(
+        &mut self,
+        payee: &[u8; 32],
+        request_hash: &[u8; 32],
+        msg_id: &str,
+    ) -> Result<AnswerRecord> {
         let target = crate::activity::ActivityTarget::payer(
-            paykit_lib::derive::natural_key::request_record(&answer.payee, &answer.request_hash),
+            paykit_lib::derive::natural_key::request_record(payee, request_hash),
         );
         let key = self.activity_key(&target)?;
         let Some(held) = self.app.shared_record(&key).await? else {
@@ -1381,13 +1393,13 @@ impl Paykit {
         let Some(record) = self.held_activity(&target).await? else {
             return Ok(AnswerRecord::Undecided);
         };
-        Ok(
-            if record.reflects(&answer.msg_id) || rejected(&record) || cancelled(&record) {
-                AnswerRecord::Covered
-            } else {
-                AnswerRecord::Lacks
-            },
-        )
+        Ok(if record.reflects(msg_id) {
+            AnswerRecord::Holds
+        } else if rejected(&record) || cancelled(&record) {
+            AnswerRecord::Covered
+        } else {
+            AnswerRecord::Lacks
+        })
     }
 
     /// Queue `stored`, a message this app signed that a record stores, again with its signed
@@ -1710,15 +1722,19 @@ pub(crate) fn own_details<'a>(
 }
 
 /// What a request record says of a held answer it shows no message of to send now
-/// ([`Paykit::queue_own_again`]).
-enum AnswerRecord {
+/// ([`Paykit::queue_own_again`]), or of a stop whose outbox copy is past its window
+/// ([`Paykit::give_up_expired_stops`]).
+pub(crate) enum AnswerRecord {
     /// It can't be read now, or is paused as divergent and not confirmed since, a delete
     /// included: it may still hold the answer, which stays.
     Undecided,
     /// It is absent, or deleted and not paused: the request is gone, and the answer goes
     /// with nothing sent.
     Gone,
-    /// It holds the answer, or a stop that covers it: the answer goes with nothing sent.
+    /// It holds the answer: one held in its record goes with nothing sent, and one held in
+    /// the outbox past its window is given up with the host told.
+    Holds,
+    /// It holds another stop that covers the answer: the answer goes with nothing sent.
     Covered,
     /// It reads, isn't paused, and holds neither the answer nor any stop: the answer was lost
     /// with a write, and is given up with the host told, so the user may answer again.

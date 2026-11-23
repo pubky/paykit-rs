@@ -4245,3 +4245,104 @@ async fn test_blocked_stop_withdrawn_by_the_host_raises_no_notice() {
         0
     );
 }
+
+/// Alice's wallet with bob's request received and its rejection queued, never tried, then
+/// its request record written again with `value` by `write`. Returns the world, the wallet,
+/// the request, the request record's target and the rejection.
+async fn rejection_queued_then(
+    write: impl AsyncFnOnce(&World, &mut Paykit, &RequestRef, Option<Vec<u8>>) -> Option<Vec<u8>>,
+) -> (
+    World,
+    Paykit,
+    RequestRef,
+    pubky_switch_client::app::RecordTarget,
+    String,
+) {
+    use paykit_lib::collections::Collection;
+    use paykit_lib::derive::natural_key;
+    use pubky_switch_client::app::{Collection as SwitchCollection, OpBatch, RecordTarget};
+
+    let w = World::new();
+    let (mut wallet, _shop, request) = received(&w, PaykitConfig::default()).await;
+    let target = RecordTarget::new(
+        SwitchCollection::new(
+            Collection::PayerActivity.name(),
+            Collection::PayerActivity.fixed_policy(),
+        ),
+        &natural_key::request_record(&request.payee, &request.request_hash),
+    );
+    let key = wallet.app().record_key(&target).unwrap();
+    let open = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    let rejection = wallet.reject_request(&request, None).await.unwrap();
+    let value = write(
+        &w,
+        &mut wallet,
+        &request,
+        open.content.value().map(<[u8]>::to_vec),
+    )
+    .await;
+    let rewrite = wallet
+        .app_mut()
+        .record_op(&target, value.as_deref(), Vec::new())
+        .await
+        .unwrap();
+    wallet
+        .app_mut()
+        .submit_batch(OpBatch::for_protocol("paykit").entry(rewrite))
+        .await
+        .unwrap();
+    (w, wallet, request, target, rejection)
+}
+
+/// The notices of `app` naming `msg_id`, of any kind.
+async fn notices_of(app: &Paykit, msg_id: &str) -> usize {
+    app.notices()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|notice| notice.msg_id.as_deref() == Some(msg_id))
+        .count()
+}
+
+#[tokio::test]
+async fn test_blocked_stop_its_record_deleted_ends_unannounced_past_its_replay_window() {
+    let (w, mut wallet, _, _, rejection) = rejection_queued_then(async |_, _, _, _| None).await;
+    // Its request record is gone: the copy ends past its window, and no record holds the
+    // message to tell the host of (Paykit spec 8.1, "Undelivered messages").
+    w.clock.advance_ms(31 * 24 * HOUR_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(verdict(&wallet, &rejection).await, None);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(notices_of(&wallet, &rejection).await, 0);
+}
+
+#[tokio::test]
+async fn test_blocked_stop_covered_by_another_stop_ends_unannounced_past_its_replay_window() {
+    let (w, mut wallet, request, _, rejection) =
+        rejection_queued_then(async |_, _, _, open| open).await;
+    // Another own app rejects the request over the record the rejection was lost from: its
+    // stop covers the request, and the copy ends past its window with nothing to tell
+    // (Paykit spec 8.1, "Undelivered messages").
+    let mut phone = w.wallet("phone").await;
+    phone.receive(None).await.unwrap();
+    let other = phone.reject_request(&request, None).await.unwrap();
+    assert_ne!(other, rejection);
+    w.clock.advance_ms(31 * 24 * HOUR_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(verdict(&wallet, &rejection).await, None);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(notices_of(&wallet, &rejection).await, 0);
+}
+
+#[tokio::test]
+async fn test_blocked_stop_its_record_unread_waits_past_its_replay_window() {
+    let (w, mut wallet, _, _, rejection) =
+        rejection_queued_then(async |_, _, _, _| Some(b"{}".to_vec())).await;
+    // A record that doesn't read may still hold the stop: nothing is decided on it, and its
+    // copy stays, never sent (Paykit spec 8.1).
+    w.clock.advance_ms(31 * 24 * HOUR_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(verdict(&wallet, &rejection).await, Some(false));
+    assert_eq!(notices_of(&wallet, &rejection).await, 0);
+}

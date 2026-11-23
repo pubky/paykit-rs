@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::activity::{KeptSide, SideTag};
 use crate::error::Result;
+use crate::hold::AnswerRecord;
 use crate::notices::{GivenUpFrom, GivenUpOrigin, KeptNotice};
 use crate::paykit::Paykit;
 use crate::receive;
@@ -126,7 +127,8 @@ pub(crate) fn deny_decision(delivery: &DeliveryView<'_>) -> Result<DenyDecision>
 ///   and tells the host ([`Paykit::give_up_expired_stops`], Paykit spec 8.1). Here the
 ///   window is judged on the device clock, since the delivery view carries no service
 ///   time; the receive step judges it on the later of the device clock and the service
-///   time verified, so it never ends a copy this still lets go;
+///   time verified, so it ends every copy this holds as past its window, and may end one
+///   this would still let go while the service time runs ahead of the device clock;
 /// - a re-send ends at the client's replay deadline, its first acceptance plus 30 days
 ///   (Switch spec 11);
 /// - a request, period details, a list request and a subscription acceptance not
@@ -200,9 +202,9 @@ pub(crate) fn past_replay_window(created_at_ms: u64, now_ms: u64) -> bool {
 /// A rejection or payer's cancellation this app queued, kept at `qs/<msg_id>` in the
 /// commit that queues it, for as long as its outbox copy is owed: what the receive step
 /// needs to end that copy past its 30 days and tell the host, which the outbox doesn't
-/// show (Paykit spec 8.1). `given_up` is set before the client ends the copy, and the
-/// entry goes once the client's report of the end is taken, so the host is told once,
-/// crash or not.
+/// show (Paykit spec 8.1). `given_up` is set before the client ends the copy, with whether
+/// the host is told, and the entry goes once the client's report of the end is taken, so
+/// the host is told once, crash or not.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct QueuedStop {
@@ -214,7 +216,18 @@ pub(crate) struct QueuedStop {
     #[serde(with = "serde_b64")]
     pub(crate) hash: [u8; 32],
     pub(crate) created_at_ms: u64,
-    pub(crate) given_up: bool,
+    pub(crate) given_up: Option<GivenUp>,
+}
+
+/// How a stop's outbox copy past its window is ended, by what its request record says of
+/// it ([`crate::hold::AnswerRecord`], Paykit spec 8.1, "Undelivered messages").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GivenUp {
+    /// The record holds the stop, or lost it with a write: the host is told.
+    Told,
+    /// The record is gone, or holds another stop that covers it: nothing is told.
+    Silent,
 }
 
 impl QueuedStop {
@@ -233,7 +246,7 @@ impl QueuedStop {
             request_hash,
             hash: signed.hash(),
             created_at_ms: message.created_at_ms,
-            given_up: false,
+            given_up: None,
         })
     }
 
@@ -250,7 +263,7 @@ impl QueuedStop {
             request_hash,
             hash: stored.hash(),
             created_at_ms: message.created_at_ms,
-            given_up: false,
+            given_up: None,
         }
     }
 }
@@ -260,10 +273,14 @@ impl Paykit {
     /// past 30 days from their `created_at`, less the clock tolerance, by the later of the
     /// device clock and the service time verified: such a stop is never sent, and a client
     /// original carries no deadline of its own. As for one held in its record
-    /// ([`Paykit::queue_own_again`]), the host is told at the first receive past that time
-    /// at which the copy of the deny list is known and doesn't hold the payee, with the
-    /// records listed and no scope key awaited (Paykit spec 8.1, "Blocked counterparties"),
-    /// whatever its request record holds now. Each is ended through the client's
+    /// ([`Paykit::queue_own_again`]), it is decided at the first receive past that time at
+    /// which the copy of the deny list is known and doesn't hold the payee, with the records
+    /// listed and no scope key awaited (Paykit spec 8.1, "Blocked counterparties"), on what
+    /// its request record says of it ([`Paykit::answer_record`]): nothing is decided while
+    /// the record doesn't read or is paused as divergent; the host is told when the record
+    /// holds the stop or lost it with a write, and not when the record is gone or another
+    /// stop covers it, since the notice requires a record that holds the message ("Undelivered
+    /// messages"). Each is ended through the client's
     /// withdrawal, which reports it undelivered when no try of it can have reached the
     /// payee's switch, and unknown otherwise; that report is taken at once, the host told
     /// in the commit that takes it ([`crate::NoticeKind::MessageGivenUp`] or
@@ -292,8 +309,8 @@ impl Paykit {
                 .is_some_and(|copy| copy.hash == stop.hash && copy.to == stop.payee);
             if !owed {
                 // One given up keeps its entry until the client's report of the end is
-                // taken, which tells the host.
-                if !stop.given_up {
+                // taken, which tells the host as it was decided.
+                if stop.given_up.is_none() {
                     gone.delete(&at);
                 }
                 continue;
@@ -307,7 +324,14 @@ impl Paykit {
         self.local_commit(gone).await?;
         for mut stop in expired {
             let at = key::queued_stop(&stop.msg_id);
-            stop.given_up = true;
+            stop.given_up =
+                match Box::pin(self.answer_record(&stop.payee, &stop.request_hash, &stop.msg_id))
+                    .await?
+                {
+                    AnswerRecord::Undecided => continue,
+                    AnswerRecord::Holds | AnswerRecord::Lacks => Some(GivenUp::Told),
+                    AnswerRecord::Gone | AnswerRecord::Covered => Some(GivenUp::Silent),
+                };
             self.local_put(&at, &stop).await?;
             if self
                 .app
@@ -325,8 +349,8 @@ impl Paykit {
     /// Take, in `tx`, the client's report that the outbox copy of a stop ended past its 30
     /// days ([`Paykit::give_up_expired_stops`]): the host is told it was given up when no
     /// try of it can have reached the payee's switch, and that it may have been delivered
-    /// otherwise. Whether `event` is such a report: one about a stop the receive step
-    /// didn't give up stays for the host.
+    /// otherwise, unless its record left nothing to tell of. Whether `event` is such a
+    /// report: one about a stop the receive step didn't give up stays for the host.
     pub(crate) async fn take_expired_stop(&self, tx: &mut Tx, event: &AppEvent) -> Result<bool> {
         let (msg_id, undelivered) = match event {
             AppEvent::MessageUndelivered {
@@ -338,13 +362,17 @@ impl Paykit {
             _ => return Ok(false),
         };
         let at = key::queued_stop(msg_id);
-        let Some(stop) = self
+        let Some((stop, given_up)) = self
             .local_get::<QueuedStop>(&at)
             .await?
-            .filter(|stop| stop.given_up)
+            .and_then(|stop| stop.given_up.map(|given_up| (stop, given_up)))
         else {
             return Ok(false);
         };
+        tx.delete(&at);
+        if given_up == GivenUp::Silent {
+            return Ok(true);
+        }
         let now = self.service_time().unwrap_or(0);
         let (notice_key, notice) = if undelivered {
             (
@@ -366,7 +394,6 @@ impl Paykit {
         if self.kept_notice(&notice_key).await?.is_none() {
             tx.put(&notice_key, &notice)?;
         }
-        tx.delete(&at);
         Ok(true)
     }
 }
