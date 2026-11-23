@@ -3212,6 +3212,13 @@ mod tests {
     }
 
     #[test]
+    fn test_loss_recorded_binds_a_generation_after_another_only() {
+        assert!(reads::<u64>(key::LOSS_RECORDED, serde_json::json!(2)));
+        assert!(!reads::<u64>(key::LOSS_RECORDED, serde_json::json!(0)));
+        assert!(!reads::<u64>(key::DENIED, serde_json::json!(2)));
+    }
+
+    #[test]
     fn test_loss_current_boundary_requires_exact_members() {
         let loss = serde_json::json!({
             "generation": 2, "declared_at_ms": 5, "uncertain_until_ms": 9
