@@ -838,6 +838,29 @@ impl LostListRecord {
         }
     }
 
+    /// The delete at record version `deleted` over `exact`, its exact predecessor, joined
+    /// with `seen`, the client's mark of what this app saw at the key: a write this app
+    /// refused, such as one dropping a mark, can be the exact predecessor while the mark
+    /// still holds what it saw, so the copy keeps both: every mark of either, the newer
+    /// list, and no hash for two lists at one version ([`LostCopy::merge`]). With no exact
+    /// predecessor, no copy: what the delete took isn't known.
+    pub(crate) fn over_exact(
+        deleted: pubky_switch_core::ops::RecordVersion,
+        exact: Option<&paykit_lib::records::PaymentListRecord>,
+        seen: Option<&paykit_lib::records::PaymentListRecord>,
+    ) -> Self {
+        let copy = exact
+            .and_then(LostCopy::of)
+            .map(|copy| match seen.and_then(LostCopy::of) {
+                Some(seen) => copy.merge(seen),
+                None => copy,
+            });
+        Self {
+            deleted: [deleted.generation, deleted.version],
+            copy,
+        }
+    }
+
     /// The entry after `seen`, a delete seen now, is kept with it: the same delete, or an
     /// older one, reported again changes nothing, as its copy, the client's mark, ended at
     /// its first report; a newer one is merged in.
@@ -880,14 +903,14 @@ impl LostListRecord {
 
 impl sealed::Sealed for LostListRecord {}
 
-/// Its delete's version is one a delete has, a write's after `{0, 0}` (Switch wire 1.7,
-/// 6.3); its copy's marks are valid, in ascending order and each once, as every writer
+/// Its delete's version is one a delete has: a write's, of a generation of at least 1
+/// (Switch wire 1.7, 3.3, 6.3); its copy's marks are valid, in ascending order and each once, as every writer
 /// keeps them, and its list version is one.
 impl Stored for LostListRecord {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         const MAX_INT: u64 = (1 << 53) - 1;
         let [generation, seq] = self.deleted;
-        let deleted = (1..=MAX_INT).contains(&seq) && generation <= MAX_INT;
+        let deleted = (1..=MAX_INT).contains(&seq) && (1..=MAX_INT).contains(&generation);
         let valid = deleted
             && self.copy.as_ref().is_none_or(|copy| {
                 paykit_lib::ListVersion::new(copy.generation, copy.counter).is_ok()
@@ -3645,10 +3668,12 @@ mod tests {
         let mut tie = copy(serde_json::json!([]), 2);
         tie["hash"] = serde_json::Value::Null;
         assert!(reads::<LostListRecord>(&at, lost(tie)));
-        // A delete's version is a write's: never `{0, 0}`, a version 0 or past the integers.
+        // A delete's version is a write's: never `{0, 0}`, a version or a generation 0, or
+        // past the integers.
         for deleted in [
             serde_json::json!([0, 0]),
             serde_json::json!([1, 0]),
+            serde_json::json!([0, 5]),
             serde_json::json!([1, 9_007_199_254_740_992u64]),
         ] {
             let at_version = serde_json::json!({ "deleted": deleted, "copy": null });

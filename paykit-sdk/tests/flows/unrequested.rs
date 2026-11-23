@@ -2598,3 +2598,83 @@ async fn test_unrequested_list_over_another_payee_apps_record_at_its_key_held() 
     assert_eq!(w.record_writes(&w.alice, &key), writes);
     assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn test_unrequested_delete_over_a_refused_write_keeps_the_marks_seen() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    let target = shop_list_target(&w, &shop);
+    phone.app_mut().read_record(&target).await.unwrap();
+    let (_, marked) = list_record(&phone, &w).await;
+    let mut unmarked = marked.clone();
+    unmarked["used"] = serde_json::json!([]);
+    // Another own app drops the mark, which the wallet refuses, then deletes that write.
+    put_list_record(&mut phone, &target, Some(&unmarked)).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().flagged_writes().await.unwrap().len(), 1);
+    put_list_record(&mut phone, &target, None).await;
+    wallet.receive(None).await.unwrap();
+    // Restored onto a fresh store from a backup taken after the delete, the wallet reads a
+    // write without the mark over the delete: it is never paid from.
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut restored = restored_onto(&w, crate::common::store(), &backup).await;
+    restored.receive(None).await.unwrap();
+    put_list_record(&mut phone, &target, Some(&unmarked)).await;
+    restored.receive(None).await.unwrap();
+    let again = restored
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome;
+    assert!(
+        !matches!(again, Ok(PayOutcome::Paid { .. })),
+        "the paid single-use endpoint was paid again: {again:?}"
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_unrequested_later_write_dropping_lost_to_delete_flagged_and_not_paid() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let (_, marked) =
+        pay_single_use_then_delete_elsewhere(&w, &mut wallet, &mut phone, &mut shop).await;
+    let target = shop_list_target(&w, &shop);
+    // The phone puts the record back from an older copy, without the mark, naming the
+    // delete: an app that joins now never saw the delete, and reads the put-back first.
+    let mut put_back = marked.clone();
+    put_back["used"] = serde_json::json!([]);
+    put_back["lost_to_delete"] = serde_json::json!(pubky_switch_core::enc::b64(&[5u8; 32]));
+    put_list_record(&mut phone, &target, Some(&put_back)).await;
+    let mut tablet = w.wallet("tablet").await;
+    tablet.receive(None).await.unwrap();
+    // A later write that drops the marker is ignored and shown with its writer (Paykit wire
+    // 5), and nothing is paid from it.
+    let mut dropped = put_back.clone();
+    dropped.as_object_mut().unwrap().remove("lost_to_delete");
+    put_list_record(&mut phone, &target, Some(&dropped)).await;
+    tablet.receive(None).await.unwrap();
+    let again = tablet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome;
+    assert!(
+        !matches!(again, Ok(PayOutcome::Paid { .. })),
+        "the paid single-use endpoint was paid again: {again:?}"
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
+    assert_eq!(tablet.app().flagged_writes().await.unwrap().len(), 1);
+}

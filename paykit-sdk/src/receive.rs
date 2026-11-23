@@ -2518,7 +2518,7 @@ fn hold_list(
     if let Some(version) = deleted {
         // Kept already when the client reported the delete; else with no copy, as nothing
         // shows the value it took.
-        let writes = list_record_deleted(cx, &record_key, version, None);
+        let writes = list_record_deleted(cx, &record_key, version, None, None);
         for write in writes.map_err(Fail::Store)? {
             keep_local(cx, write);
         }
@@ -2536,8 +2536,10 @@ fn hold_list(
 
 /// The local write that keeps the `payment_lists` record at `record_key` seen deleted at
 /// record version `version` ([`LostListRecord`]), with the marks and list of `exact`, the
-/// delete's exact predecessor if this app read it, or none known otherwise. A value is a
-/// copy only if it binds at this key: its payee and app derive it (Paykit wire 5.4). A
+/// delete's exact predecessor if this app read it, joined with those of `seen`, the
+/// client's mark of what this app saw there ([`LostListRecord::over_exact`]), or none known
+/// with no exact predecessor. A value is a copy only if it binds at this key: its payee and
+/// app derive it (Paykit wire 5.4). A
 /// delete may be reported again, at a covering read or a restore's listing: a report of a
 /// delete no newer than the one kept changes nothing, and a newer one is merged into what
 /// is kept, so what was known before stays known (Paykit spec 6, "Visible deletion without
@@ -2547,12 +2549,15 @@ pub(crate) fn list_record_deleted(
     record_key: &[u8; 32],
     version: RecordVersion,
     exact: Option<&[u8]>,
+    seen: Option<&[u8]>,
 ) -> Result<Vec<LocalWrite>, StoreFailure> {
-    let copy = exact.and_then(|value| {
+    let bind = |value: &[u8]| {
         crate::records::bind_list(value, &cx.identity(), record_key, |t| cx.record_key(t).ok())
-    });
+    };
+    let exact = exact.and_then(bind);
+    let seen = seen.and_then(bind);
     let at = key::list_record_lost(record_key);
-    let lost = LostListRecord::over(version, copy.as_ref());
+    let lost = LostListRecord::over_exact(version, exact.as_ref(), seen.as_ref());
     let lost =
         match state::cx_get::<LostListRecord>(cx, &at).map_err(crate::protocol::step_failure)? {
             Some(held) => match held.clone().then(lost) {

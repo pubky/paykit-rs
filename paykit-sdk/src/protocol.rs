@@ -339,6 +339,13 @@ fn local_write<T: serde::Serialize>(key: &str, value: &T) -> Result<LocalWrite, 
     state::local_put(key, value).map_err(|_| StoreFailure::of_entry(StoreError::Corrupt))
 }
 
+/// The `lost_to_delete` member of a `payment_lists` value, as written, if present (Paykit
+/// wire 5, 5.4).
+fn list_loss_marker(value: &[u8]) -> Option<serde_json::Value> {
+    let members: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(value).ok()?;
+    members.get("lost_to_delete").cloned()
+}
+
 /// A failure of the client's store as a protocol call's failure.
 pub(crate) fn store_failure(error: pubky_switch_client::app::AppError) -> StoreFailure {
     match error {
@@ -2034,6 +2041,7 @@ impl Protocol for PaykitProtocol {
                     deletion.key,
                     deletion.version,
                     exact,
+                    deletion.seen,
                 )?,
             }));
         }
@@ -2179,6 +2187,16 @@ impl PaykitProtocol {
                         "Paykit wire 5.4: a payment_lists record that doesn't read".into(),
                     );
                 };
+                // Wire 5: a reader that has seen `lost_to_delete` ignores, and shows with its
+                // writer, a later write that drops or changes it; the record's reader keeps it
+                // as an unknown member, so it is compared as written.
+                if let Some(marker) = list_loss_marker(seen) {
+                    if list_loss_marker(value).as_ref() != Some(&marker) {
+                        return Some(
+                            "Paykit wire 5: a later write drops or changes lost_to_delete".into(),
+                        );
+                    }
+                }
                 // Wire 5.4 "Seen lists": a later list of a greater version, or the same list,
                 // and never a single-use mark dropped, at any version.
                 held.check_later_write(&later).err().map(|e| e.to_string())
@@ -3609,6 +3627,53 @@ mod receive_tests {
                 &without_acceptance(&value)
             ));
         }
+    }
+
+    #[test]
+    fn test_protocol_list_copy_over_a_refused_exact_predecessor_keeps_the_marks_seen() {
+        // The client refused a write dropping a mark, which then became the delete's exact
+        // predecessor: the copy keeps the mark the app saw.
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = Party::new(
+            "bob",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
+        let version = paykit_lib::ListVersion::new(1, 7).unwrap();
+        let list = bob.message(
+            &alice,
+            "paykit.private_payment_list",
+            vec![],
+            object(json!({
+                "version": { "generation": 1, "counter": 7 },
+                "expires_at": pubky_switch_core::time::rfc3339(NOW + 3_600_000),
+                "payment_endpoints": {
+                    "btc-bitcoin-p2wpkh": { "payload": "bc1q", "single_use": true }
+                }
+            })),
+        );
+        let record = |used: Vec<paykit_lib::records::UsedEndpoint>| PaymentListRecord {
+            payee: bob.id(),
+            app_id: list.message().from.app_id,
+            list: list.clone(),
+            used,
+            msg_ids: Vec::new(),
+            unknown: Default::default(),
+        };
+        let seen = record(vec![paykit_lib::records::UsedEndpoint {
+            version,
+            endpoint: paykit_lib::PaymentEndpointIdentifier::parse("btc-bitcoin-p2wpkh").unwrap(),
+            attempt_id: paykit_lib::AttemptId::from_bytes([3; 16]),
+            origin: Default::default(),
+        }]);
+        let refused = record(Vec::new());
+        let deleted = pubky_switch_core::ops::RecordVersion::new(1, 9);
+        let lost = crate::state::LostListRecord::over_exact(deleted, Some(&refused), Some(&seen));
+        assert!(!lost.admits(&refused));
+        assert!(lost.admits(&seen));
+        // With no exact predecessor, no copy: nothing is taken.
+        let unknown = crate::state::LostListRecord::over_exact(deleted, None, Some(&seen));
+        assert!(!unknown.admits(&seen));
     }
 
     #[test]
