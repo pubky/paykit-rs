@@ -48,7 +48,7 @@ async fn paid_before_recorded_then(
         ))
         .unwrap();
     shop.app_mut().queue_signed(signed.clone()).await.unwrap();
-    shop.app_mut().flush_outbox().await.unwrap();
+    shop.flush().await.unwrap();
     wallet.receive(None).await.unwrap();
     let request = RequestRef {
         payee: w.bob_id(),
@@ -2462,7 +2462,7 @@ async fn check_dropped_replies(
         .unwrap();
     }
     shop.receive(None).await.unwrap();
-    shop.app_mut().flush_outbox().await.unwrap();
+    shop.flush().await.unwrap();
     assert!(asked(&shop, &payer).await.is_empty());
     assert!(shop.payee_activity().await.unwrap().is_empty());
     shop.unblock(&payer).await.unwrap();
@@ -2503,7 +2503,7 @@ async fn check_dropped_replies(
             ))
             .unwrap();
         let id = shop.app_mut().queue_signed(raw).await.unwrap();
-        shop.app_mut().flush_outbox().await.unwrap();
+        shop.flush().await.unwrap();
         assert!(matches!(
             shop.app().delivery(&id).await.unwrap(),
             Some(pubky_switch_client::app::Delivery::Queued { .. })

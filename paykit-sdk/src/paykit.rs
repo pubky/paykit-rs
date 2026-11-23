@@ -1034,6 +1034,7 @@ impl Paykit {
     /// handed over (Switch spec 8.2): a listing that fails there fails the read, and this
     /// call returns its error; the next receive lists first.
     pub async fn receive(&mut self, wait: Option<u32>) -> Result<ReceiveSummary> {
+        let _delivery = self.delivery_operation();
         // The read's future goes on the heap: the client's read nests deep, and a host
         // polling it on a small stack, such as a test thread's 2 MiB, keeps room for it.
         let summary = Box::pin(self.receive_inner(wait)).await?;
@@ -1098,6 +1099,9 @@ impl Paykit {
         // Whether the client may list at this read's start ([`Paykit::records_listed`]).
         let keys_held_before = self.holds_scope_keys();
         let received = Box::pin(self.app.receive(wait)).await;
+        if received.is_ok() {
+            self.observe_service_time();
+        }
         // A read can take another device's record or a renewal into the own record.
         self.note_own_record_write(&received);
         let report = match received {
@@ -1195,6 +1199,7 @@ impl Paykit {
             });
         }
         self.refresh_own()?;
+        Box::pin(self.note_service_time()).await?;
         // A recovery notice holds own writes. Return the client's report before upkeep
         // can try a held write. A restore or a kept floor batch also defers that work.
         if self.app.recovery_required().is_some()
@@ -1325,6 +1330,8 @@ impl Paykit {
             && Box::pin(self.scope_keys_awaited()).await?.is_none()
         {
             Box::pin(self.queue_restore_asks()).await?;
+            // A stop held in the outbox past its 30 days is never sent (Paykit spec 8.1).
+            Box::pin(self.give_up_expired_stops()).await?;
             Box::pin(self.queue_own_again()).await?;
             Box::pin(self.note_imported_receipt_batches()).await?;
         }
@@ -1357,11 +1364,13 @@ impl Paykit {
     ///
     /// The client's errors.
     pub async fn flush(&mut self) -> Result<()> {
+        let _delivery = self.delivery_operation();
         self.lists_read_this_pass = false;
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
         Box::pin(self.refresh_lists_when_due()).await?;
+        Box::pin(self.note_service_time()).await?;
         self.send_outbox().await?;
         // Flushing can settle a kept deletion. Its signed reply can leave only
         // once Paykit has verified the applied operation and its service result.
