@@ -18,6 +18,7 @@ use paykit_lib::collections::Collection;
 use paykit_lib::derive::natural_key;
 use paykit_lib::kinds::{check_sender_for_request, may_send, Kind, Side};
 use paykit_lib::records::{ActivityRecord, ActivitySide, PaymentListRecord, StoredMessage};
+use paykit_lib::scopes::CertificateMemo;
 use paykit_lib::Label;
 use pubky_switch_client::app::{
     LocalWrite, OpBatch, OutgoingMessage, ReceivedMessage, RecordTarget, SharedRecord,
@@ -365,6 +366,14 @@ fn usable_activity(held: Option<SharedRecord>) -> Result<Option<SharedRecord>> {
     Ok(held)
 }
 
+/// The handle's verified certificates, with the own certificate they were verified under:
+/// the memo is emptied when the handle takes another (`Paykit::certificates`).
+#[derive(Debug, Default)]
+pub(crate) struct Certificates {
+    own: Option<[u8; 32]>,
+    memo: CertificateMemo,
+}
+
 impl Paykit {
     /// The record key of an activity target.
     pub(crate) fn activity_key(&self, target: &ActivityTarget) -> Result<[u8; 32]> {
@@ -413,7 +422,8 @@ impl Paykit {
         #[cfg(feature = "test-support")]
         self.activity_binds
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        bind_activity(
+        let mut certs = self.certificates();
+        bind_activity_with(
             value,
             &self.identity(),
             side,
@@ -421,7 +431,35 @@ impl Paykit {
             &held.key,
             |t| self.app.record_key(t).ok(),
             &|p| self.rail.settlement_id(p),
+            Some(&mut certs.memo),
         )
+    }
+
+    /// The handle's memo of verified certificates ([`CertificateMemo`]), emptied first
+    /// when the app's own certificate isn't the one it was filled under: the handle took a
+    /// renewal since.
+    fn certificates(&self) -> std::sync::MutexGuard<'_, Certificates> {
+        let mut certs = self
+            .certificates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let own = self.app.cert().hash();
+        if certs.own != Some(own) {
+            certs.memo.clear();
+            certs.own = Some(own);
+        }
+        certs
+    }
+
+    /// How many certificates this handle verified in full ([`CertificateMemo::verifications`]).
+    /// For tests that guard how often a read verifies one.
+    #[cfg(feature = "test-support")]
+    pub fn certificate_verifications(&self) -> u64 {
+        self.certificates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .memo
+            .verifications()
     }
 
     /// The activity record at `target`, read from the switch when the app holds none.
@@ -717,7 +755,28 @@ pub(crate) fn bind_activity(
     record_key: impl Fn(&RecordTarget) -> Option<[u8; 32]>,
     settlement: Settlement<'_>,
 ) -> Option<ActivityRecord> {
-    let record = ActivityRecord::read(value, own, side).ok()?;
+    bind_activity_with(value, own, side, label, key, record_key, settlement, None)
+}
+
+/// [`bind_activity`], with the stored messages' certificates verified through `certs`
+/// ([`CertificateMemo`]) when given: every other check runs in full.
+// The binding's inputs, named as `bind_activity` names them, and the memo.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn bind_activity_with(
+    value: &[u8],
+    own: &[u8; 32],
+    side: ActivitySide,
+    label: Option<&Label>,
+    key: &[u8; 32],
+    record_key: impl Fn(&RecordTarget) -> Option<[u8; 32]>,
+    settlement: Settlement<'_>,
+    certs: Option<&mut CertificateMemo>,
+) -> Option<ActivityRecord> {
+    let record = match certs {
+        Some(certs) => ActivityRecord::read_with(value, own, side, certs),
+        None => ActivityRecord::read(value, own, side),
+    }
+    .ok()?;
     record.check_label(label).ok()?;
     let natural = record.natural_key_with(own, settlement).ok()?;
     let target = RecordTarget::new(

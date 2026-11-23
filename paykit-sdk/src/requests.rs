@@ -892,7 +892,7 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// A store failure, also one reading a single record: the list is never partial.
+    /// A store failure: the list is never partial.
     pub async fn payee_activity(&self) -> Result<Vec<PayeeActivity>> {
         self.refuse_while_unlisted().await?;
         // Each record is read and bound once, under the label its policy gives it, and its
