@@ -2535,15 +2535,10 @@ fn hold_list(
 }
 
 /// The local write that keeps the `payment_lists` record at `record_key` seen deleted at
-/// record version `version` ([`LostListRecord`]), with the marks and list of `exact`, the
-/// delete's exact predecessor if this app read it, joined with those of `seen`, the
-/// client's mark of what this app saw there ([`LostListRecord::over_exact`]), or none known
-/// with no exact predecessor. A value is a copy only if it binds at this key: its payee and
-/// app derive it (Paykit wire 5.4). A
-/// delete may be reported again, at a covering read or a restore's listing: a report of a
-/// delete no newer than the one kept changes nothing, and a newer one is merged into what
-/// is kept, so what was known before stays known (Paykit spec 6, "Visible deletion without
-/// a copy").
+/// record version `version` ([`LostListRecord`]), as [`lost_over`] builds it. A delete may
+/// be reported again, at a covering read or a restore's listing: a report of a delete no
+/// newer than the one kept changes nothing, and a newer one is merged into what is kept, so
+/// what was known before stays known (Paykit spec 6, "Visible deletion without a copy").
 pub(crate) fn list_record_deleted(
     cx: &ReceiveContext<'_>,
     record_key: &[u8; 32],
@@ -2554,10 +2549,8 @@ pub(crate) fn list_record_deleted(
     let bind = |value: &[u8]| {
         crate::records::bind_list(value, &cx.identity(), record_key, |t| cx.record_key(t).ok())
     };
-    let exact = exact.and_then(bind);
-    let seen = seen.and_then(bind);
     let at = key::list_record_lost(record_key);
-    let lost = LostListRecord::over_exact(version, exact.as_ref(), seen.as_ref());
+    let lost = lost_over(version, exact, seen, bind);
     let lost =
         match state::cx_get::<LostListRecord>(cx, &at).map_err(crate::protocol::step_failure)? {
             Some(held) => match held.clone().then(lost) {
@@ -2569,6 +2562,28 @@ pub(crate) fn list_record_deleted(
     Ok(vec![
         state::local_put(&at, &lost).map_err(crate::protocol::view_failure)?
     ])
+}
+
+/// The entry for the delete at `version`: the marks and list of `exact`, the delete's exact
+/// predecessor if this app read it, joined with those of `seen`, the client's mark of what
+/// this app saw there ([`LostListRecord::over_exact`]), each a copy only if `bind` binds it
+/// at the key: its payee and app derive the key, and it carries no `lost_to_delete` (Paykit
+/// wire 5, 5.4). With no exact predecessor, or one that doesn't bind, no copy; and none when
+/// a value seen doesn't bind, such as a put-back naming an earlier delete: the marks it
+/// stands for are unknown, so the exact predecessor alone could lack them.
+pub(crate) fn lost_over(
+    version: RecordVersion,
+    exact: Option<&[u8]>,
+    seen: Option<&[u8]>,
+    bind: impl Fn(&[u8]) -> Option<PaymentListRecord>,
+) -> LostListRecord {
+    let exact = exact.and_then(&bind);
+    let seen = match seen.map(&bind) {
+        Some(None) => return LostListRecord::over(version, None),
+        Some(Some(seen)) => Some(seen),
+        None => None,
+    };
+    LostListRecord::over_exact(version, exact.as_ref(), seen.as_ref())
 }
 
 /// A readable `payment_lists` value observed at a key seen deleted, holding every mark

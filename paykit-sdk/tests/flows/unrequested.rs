@@ -2678,3 +2678,70 @@ async fn test_unrequested_later_write_dropping_lost_to_delete_flagged_and_not_pa
     assert_eq!(w.rail.all_executions().len(), 1);
     assert_eq!(tablet.app().flagged_writes().await.unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn test_unrequested_delete_over_a_dropped_loss_marker_keeps_no_copy() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let (_, marked) =
+        pay_single_use_then_delete_elsewhere(&w, &mut wallet, &mut phone, &mut shop).await;
+    let target = shop_list_target(&w, &shop);
+    // The phone puts the record back from an older copy, without the mark, naming the
+    // delete; an app that joins now reads that put-back first.
+    let mut put_back = marked.clone();
+    put_back["used"] = serde_json::json!([]);
+    put_back["lost_to_delete"] = serde_json::json!(pubky_switch_core::enc::b64(&[5u8; 32]));
+    put_list_record(&mut phone, &target, Some(&put_back)).await;
+    let mut tablet = w.wallet("tablet").await;
+    tablet.receive(None).await.unwrap();
+    // The phone drops the marker, which the tablet refuses, then deletes that write.
+    let mut dropped = put_back.clone();
+    dropped.as_object_mut().unwrap().remove("lost_to_delete");
+    put_list_record(&mut phone, &target, Some(&dropped)).await;
+    tablet.receive(None).await.unwrap();
+    assert_eq!(tablet.app().flagged_writes().await.unwrap().len(), 1);
+    put_list_record(&mut phone, &target, None).await;
+    tablet.receive(None).await.unwrap();
+    // Restored onto a fresh store from a backup taken after the delete, the tablet reads the
+    // same write put back over the delete: it is never paid from.
+    let backup = tablet.backup().await.unwrap();
+    drop(tablet);
+    let mut restored = restored_onto(&w, crate::common::store(), &backup).await;
+    restored.receive(None).await.unwrap();
+    put_list_record(&mut phone, &target, Some(&dropped)).await;
+    restored.receive(None).await.unwrap();
+    let again = restored
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome;
+    assert!(
+        !matches!(again, Ok(PayOutcome::Paid { .. })),
+        "the paid single-use endpoint was paid again: {again:?}"
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_unrequested_later_write_changing_lost_to_delete_taken() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let (_, marked) =
+        pay_single_use_then_delete_elsewhere(&w, &mut wallet, &mut phone, &mut shop).await;
+    let target = shop_list_target(&w, &shop);
+    let mut put_back = marked.clone();
+    put_back["lost_to_delete"] = serde_json::json!(pubky_switch_core::enc::b64(&[5u8; 32]));
+    put_list_record(&mut phone, &target, Some(&put_back)).await;
+    let mut tablet = w.wallet("tablet").await;
+    tablet.receive(None).await.unwrap();
+    // A later put-back naming another delete changes the marker: it is taken, not flagged
+    // (Paykit wire 5, "Repeated deletes").
+    let mut renamed = put_back.clone();
+    renamed["lost_to_delete"] = serde_json::json!(pubky_switch_core::enc::b64(&[6u8; 32]));
+    put_list_record(&mut phone, &target, Some(&renamed)).await;
+    tablet.receive(None).await.unwrap();
+    assert!(tablet.app().flagged_writes().await.unwrap().is_empty());
+}

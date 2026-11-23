@@ -2188,14 +2188,12 @@ impl PaykitProtocol {
                     );
                 };
                 // Wire 5: a reader that has seen `lost_to_delete` ignores, and shows with its
-                // writer, a later write that drops or changes it; the record's reader keeps it
-                // as an unknown member, so it is compared as written.
-                if let Some(marker) = list_loss_marker(seen) {
-                    if list_loss_marker(value).as_ref() != Some(&marker) {
-                        return Some(
-                            "Paykit wire 5: a later write drops or changes lost_to_delete".into(),
-                        );
-                    }
+                // writer, a later write that drops it. One that changes it is taken: a
+                // put-back answering a later delete names that delete ("Repeated deletes").
+                // The record's reader keeps the marker as an unknown member, so its presence
+                // is read as written.
+                if list_loss_marker(seen).is_some() && list_loss_marker(value).is_none() {
+                    return Some("Paykit wire 5: a later write drops lost_to_delete".into());
                 }
                 // Wire 5.4 "Seen lists": a later list of a greater version, or the same list,
                 // and never a single-use mark dropped, at any version.
@@ -3674,6 +3672,13 @@ mod receive_tests {
         // With no exact predecessor, no copy: nothing is taken.
         let unknown = crate::state::LostListRecord::over_exact(deleted, None, Some(&seen));
         assert!(!unknown.admits(&seen));
+        // A value seen that doesn't bind, such as a put-back carrying `lost_to_delete`,
+        // leaves no copy: the exact predecessor alone could lack the marks it stands for.
+        let bind = |value: &[u8]| (value == b"exact").then(|| refused.clone());
+        let over =
+            |seen: Option<&[u8]>| crate::receive::lost_over(deleted, Some(b"exact"), seen, bind);
+        assert!(over(None).admits(&refused));
+        assert!(!over(Some(b"put-back")).admits(&refused));
     }
 
     #[test]
