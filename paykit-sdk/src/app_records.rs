@@ -407,7 +407,13 @@ impl SeenRecords {
         self.dropped_at.is_none_or(|at| record.updated_at() > at)
     }
 
-    /// Raise the floor to `at`: the one place it rises, never lowered or cleared.
+    /// Raise the floor to `at`: the one place it rises, never lowered or cleared. Only the
+    /// time of a record that verified and was no more than the clock tolerance ahead of the
+    /// clock at the read that saw it raises it: a read keeps, or is refused, only a record that
+    /// takes part ([`takes_part`]), which one ahead of the clock never does, and a merge drops
+    /// only records a reader kept. So a floor is never more than the tolerance ahead of the
+    /// clock at that read, and holds an app at most for the tolerance plus how far the clock
+    /// has stepped back since (Paykit spec 4).
     fn raise_floor(&mut self, at: u64) {
         self.dropped_at = self.dropped_at.max(Some(at));
     }
@@ -789,6 +795,21 @@ impl Paykit {
                     "Paykit spec 4: the app's records up to a group that exceeded the history \
                      a reader keeps ({SEEN_RECORDS} records, {SEEN_RECORDS_BYTES} bytes) are \
                      not used"
+                ))));
+                continue;
+            }
+            // A record at or before the floor, with nothing later held to answer for it: the
+            // app's public endpoints are unusable until it publishes a record after the floor
+            // and that record isn't ahead of the payer's clock (Paykit spec 4).
+            if let Some(floor) = seen.dropped_at.filter(|floor| {
+                served_at.is_some_and(|at| at <= *floor)
+                    && view.used().is_none()
+                    && !view.in_conflict()
+            }) {
+                failures.push(fail(PublicAppFailureReason::Refused(format!(
+                    "Paykit spec 4: the record served is no later than one dropped from the \
+                     history a reader keeps; the app's public endpoints are unusable until it \
+                     publishes a record after {floor} ms"
                 ))));
                 continue;
             }

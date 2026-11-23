@@ -1595,13 +1595,13 @@ async fn test_public_conflict_evicted_ahead_of_the_clock_not_bypassed_once_it_go
     }
     w.clock.set_ms(t0);
     serve(&w, &first);
-    // The records held answer for it: they are ahead of the clock, so nothing is used yet.
+    // No record later than the floor is held to answer for it: the app's endpoints wait for one.
     let shop = w.bob.identity().app_keys("shop").app_id_bytes();
     for _ in 0..2 {
         let list = read(&mut wallet, &w).await;
         assert!(ids(&list).is_empty());
         assert!(
-            fails_with(&list, shop, &["made ahead of the payer's clock"]),
+            fails_with(&list, shop, &["unusable until it publishes a record after"]),
             "{list:?}"
         );
     }
@@ -1655,6 +1655,13 @@ async fn put_seen(wallet: &mut paykit_sdk::Paykit, seen: Vec<(Vec<u8>, Vec<u8>)>
         .protocol_commit("paykit", &writes)
         .await
         .unwrap();
+}
+
+/// The floor of the wallet's kept comparison of bob's records (`ar/`).
+async fn floor_of(wallet: &paykit_sdk::Paykit) -> Option<u64> {
+    let seen = seen_of(wallet).await;
+    let value: Value = serde_json::from_slice(&seen[0].1).unwrap();
+    value["d"]["dropped_at"].as_u64()
 }
 
 /// `backup` restored in place over the installation on `storage`, before any receive.
@@ -1830,6 +1837,12 @@ async fn test_public_conflict_dropped_ahead_of_the_clock_kept_by_an_older_in_pla
     drop(wallet);
     w.clock.set_ms(t0);
     let mut wallet = restored_over(&w, storage, &backup).await;
+    // The merge keeps the floor of the copy that dropped the conflict.
+    assert!(
+        floor_of(&wallet).await >= Some(t0),
+        "{:?}",
+        floor_of(&wallet).await
+    );
     serve(&w, &first);
     assert!(listed(&mut wallet, &w).await.is_empty());
     w.clock.set_ms(t0 + DAY_MS + 100);
@@ -1861,6 +1874,12 @@ async fn test_public_conflict_dropped_ahead_of_the_clock_kept_by_a_newer_in_plac
     drop(wallet);
     w.clock.set_ms(t0);
     let mut wallet = restored_over(&w, storage, &backup).await;
+    // The merge keeps the floor of the copy that dropped the conflict.
+    assert!(
+        floor_of(&wallet).await >= Some(t0),
+        "{:?}",
+        floor_of(&wallet).await
+    );
     serve(&w, &first);
     assert!(listed(&mut wallet, &w).await.is_empty());
 }
@@ -1894,12 +1913,16 @@ async fn test_public_floor_ahead_of_the_clock_holds_only_the_public_endpoints() 
         t0 + 1000,
         expiry,
     );
-    let shop_app = w.bob.identity().app_keys("shop").app_id_bytes();
+    let shop_id = w.bob.identity().app_keys("shop").app_id_bytes();
     for _ in 0..2 {
         let list = read(&mut wallet, &w).await;
         assert!(ids(&list).is_empty());
         assert!(
-            fails_with(&list, shop_app, &["made ahead of the payer's clock"]),
+            fails_with(
+                &list,
+                shop_id,
+                &["unusable until it publishes a record after"]
+            ),
             "{list:?}"
         );
     }
@@ -1916,6 +1939,20 @@ async fn test_public_floor_ahead_of_the_clock_holds_only_the_public_endpoints() 
         .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    // So does a request carrying its own destination.
+    let request = crate::common::request_from(
+        &mut shop,
+        w.alice_id(),
+        crate::common::draft("1", w.clock.now_ms()),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     w.clock.set_ms(t0 + DAY_MS + 100);
     publish_at(
         &w,
@@ -1927,10 +1964,11 @@ async fn test_public_floor_ahead_of_the_clock_holds_only_the_public_endpoints() 
 }
 
 #[tokio::test]
-async fn test_public_stale_copy_of_a_dropped_record_answered_from_the_newest() {
+async fn test_public_stale_copy_of_a_dropped_record_still_answered_from_the_newest() {
     // The wallet has read more of bob's records than the history keeps, so the oldest is
-    // dropped. A stale copy of it served again takes part in nothing: the newest record
-    // seen is used, as for any older copy (Switch spec 4.2).
+    // dropped. The floor refuses no more than before: a stale copy of the dropped record
+    // served again is answered from the newest record seen, as for any older copy (Switch
+    // spec 4.2).
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let _shop = w.shop().await;
@@ -2004,4 +2042,70 @@ async fn test_public_conflict_kept_across_a_restore_of_itself_after_a_small_cloc
     let mut wallet = restored_over(&w, storage, &backup).await;
     serve(&w, &first);
     assert!(listed(&mut wallet, &w).await.is_empty());
+}
+
+#[tokio::test]
+async fn test_public_record_dated_beyond_the_tolerance_never_moves_the_floor() {
+    // Records served once dated a day ahead, one large enough to fill the history, take part
+    // in nothing, so they move no floor: bob's next record is used as soon as he publishes
+    // it (Paykit spec 4).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1a"),
+        t0,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1far"),
+        t0 + DAY_MS,
+        expiry,
+    );
+    assert!(listed(&mut wallet, &w).await.is_empty());
+    publish_padded(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1wide"),
+        9_000_000,
+        t0 + DAY_MS + 1,
+        expiry,
+    );
+    assert!(listed(&mut wallet, &w).await.is_empty());
+    assert_eq!(floor_of(&wallet).await, None);
+    w.clock.advance_ms(1000);
+    publish_at(
+        &w,
+        one_endpoint("btc-bitcoin-p2wpkh", "bc1qnext"),
+        t0 + 1000,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-bitcoin-p2wpkh"]);
+}
+
+#[tokio::test]
+async fn test_public_payment_after_the_clock_steps_back_judges_again() {
+    // Bob's record is read and its endpoint listed. The clock then steps back so that the
+    // record is ahead of it: a public payment judges the record again at that clock and pays
+    // nothing to it (Switch spec 4.2; Paykit spec 4).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    publish_at(&w, tip_jar(), t0, expiry);
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
+    w.clock
+        .set_ms(t0 - pubky_switch_core::records::CLOCK_TOLERANCE_MS - 60_000);
+    let paid = wallet.pay_without_request(public_to_bob(&w)).await;
+    assert!(
+        !matches!(paid.outcome, Ok(PayOutcome::Paid { .. })),
+        "{:?}",
+        paid.outcome
+    );
+    assert!(w.rail.all_executions().is_empty());
 }
