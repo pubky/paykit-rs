@@ -5,6 +5,7 @@
 #[cfg(feature = "test-wallet")]
 #[path = "../tests/hosts/checkout.rs"]
 mod checkout;
+mod allowances;
 mod enrollment;
 mod environment;
 mod error;
@@ -15,10 +16,17 @@ mod fixture_service;
 #[cfg(any(test, feature = "test-wallet"))]
 #[path = "../tests/hosts/signer.rs"]
 mod fixture_signer;
+mod executor;
+mod extensions;
 mod flights;
+mod lists;
 mod method;
 mod notices;
+mod payee;
+mod payer;
 mod payments;
+mod periods;
+mod public;
 mod receive;
 mod reconcile;
 mod requests;
@@ -30,13 +38,21 @@ mod switch_refusal;
 mod wallet;
 #[cfg(feature = "test-wallet")]
 pub use checkout::{enrolled_test_checkout, CheckoutFixture};
+pub use allowances::*;
 pub use enrollment::*;
 pub use environment::*;
 pub use error::*;
 pub use events::*;
+pub use executor::*;
+pub use extensions::*;
+pub use lists::*;
 pub use method::*;
 pub use notices::*;
+pub use payee::*;
+pub use payer::*;
 pub use payments::*;
+pub use periods::*;
+pub use public::*;
 pub use receive::*;
 pub use reconcile::*;
 pub use requests::*;
