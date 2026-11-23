@@ -1027,7 +1027,7 @@ fn put_placed(
     // kept to place (`pr/`).
     if !reflects(&record, &stored.message().msg_id) {
         if let Some(held) = cx.record(target)? {
-            if crate::divergent::step_write_waits(cx, &held, stored, seq, &|_| None)? {
+            if crate::divergent::step_write_waits(cx, &held, stored, seq, &|_, _| None)? {
                 return match stored.body() {
                     Body::AllowanceProposal(_) => stored_entry(cx, stored, position, None),
                     _ => keep_answer(cx, target, stored, position, false, None),
@@ -1984,7 +1984,7 @@ impl Paykit {
             Box::pin(self.queue_stored_again(end)).await?;
             Box::pin(self.local_delete(&mark)).await?;
         }
-        // The reply placement phase can create a proved withdrawal. Deliver it
+        // The reply placement step can create a proved withdrawal. Deliver it
         // here, after that read and its conditional write have finished.
         for queued in self
             .app

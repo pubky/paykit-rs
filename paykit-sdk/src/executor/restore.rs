@@ -825,8 +825,9 @@ impl Paykit {
                 {
                     return Ok(None);
                 }
-                let natural = activity
-                    .natural_key_with(&self.identity(), &|proof| self.rail.settlement_id(proof))?;
+                let natural = activity.natural_key_with(&self.identity(), &|endpoint, proof| {
+                    self.rail.settlement_id(endpoint, proof)
+                })?;
                 let target = crate::activity::ActivityTarget::payer(natural).record_target();
                 let _ = self.app.read_record_fresh(&target).await?;
                 let dated = self.app.shared_evidence().await?.ops.iter().any(|op| {
