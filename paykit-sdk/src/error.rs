@@ -58,14 +58,18 @@ pub enum Refusal {
     /// `missed` item, or a restore until it is judged clean or the user confirms, an
     /// executor pays under no Allowance on its consent list until the user has confirmed it
     /// again, since an end may be among what was lost (Paykit spec 8.3, "Ends reach the
-    /// executor"). It is returned only where confirming lifts it, so not while the Allowance
+    /// executor"). After a provider loss, an Allowance this app executes that the user last
+    /// confirmed before the loss gets it too: confirming writes its grant at the current
+    /// generation, after which payments under it wait for its usage to be repaired, with
+    /// their own [`Refusal::NotNow`] (Paykit spec 8.3, "After provider loss"). It is
+    /// returned only where confirming lifts it, so not while the Allowance
     /// is ended, expired, executed by another app or its counterparty blocked. The host shows
     /// the Allowance `hold` names and, once the user confirms, calls
     /// [`crate::Paykit::confirm_allowance_executor`] with `hold`; if that answers
     /// [`Refusal::NotNow`], it keeps the confirmation with `hold` and calls again later. The
-    /// confirmation counts only for the hold it was given under: after a newer restore or
-    /// `missed` item the call answers this refusal again, with the new hold, and the host
-    /// asks the user again.
+    /// confirmation counts only for the hold it was given under: after a newer restore,
+    /// `missed` item or provider loss the call answers this refusal again, with the new hold,
+    /// and the host asks the user again.
     #[error("Paykit spec 8.3: the user must confirm this Allowance again")]
     AllowanceConfirmationNeeded {
         /// The Allowance to confirm, with the hold in force when it was shown.
@@ -176,10 +180,10 @@ pub enum Refusal {
     /// Billing Period doesn't qualify under the Allowance it is paid under, outside its terms
     /// or with its lifetime limit used up and nothing reserved or to release; the Allowance
     /// the payment was reserved under expired before its first dispatch; or the Allowance was
-    /// granted before a provider loss, whose new grant this version doesn't write, so the user
-    /// can end it and set up a new one for its Billing Periods (Paykit spec 8.3, "After
-    /// provider loss"); or, after a provider loss, the request is one-time, under the shared
-    /// post-loss hold (Paykit spec 8.1). The user may still pay it by hand. At an open
+    /// set up before a provider loss and never granted here, so it can't be granted now and
+    /// the user can end it and set up a new one (Paykit spec 8.3, "After provider loss"); or,
+    /// after a provider loss, the request is one-time, under the shared post-loss hold
+    /// (Paykit spec 8.1). The user may still pay it by hand. At an open
     /// attempt's first dispatch this is an [`Self::AttemptFailed`].
     #[error("Paykit spec 8.2, 8.3: not paid automatically: {0}")]
     NotAutomatic(String),

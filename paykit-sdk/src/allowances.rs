@@ -168,6 +168,9 @@ pub struct AllowanceView {
     /// Whether the Allowance's grant, or its proposal before a grant, is of a generation a
     /// provider loss ended (Paykit spec 8.3, "After provider loss").
     pub(crate) granted_before_loss: bool,
+    /// Whether its executor wrote its grant again after a provider loss, which pauses it
+    /// until its usage is repaired (Paykit spec 8.3, "After provider loss").
+    pub(crate) regranted_after_loss: bool,
     /// Whether the counterparty is on the identity's deny list, as the app last read it
     /// (Paykit spec 8.1, "Blocked counterparties"): nothing new from it is taken, its
     /// requests are paused and nothing is sent to it, so the host shows the Allowance as
@@ -2542,6 +2545,7 @@ impl Paykit {
             consented: false,
             confirmation_needed: false,
             granted_before_loss: false,
+            regranted_after_loss: false,
             hold: self.allowance_hold(record).await?,
             blocked: Box::pin(self.blocked_as_known(&stored.sender())).await?,
         }))
@@ -2575,6 +2579,21 @@ impl Paykit {
         view.granted_before_loss = confirmed
             .zip(self.app.own_identity().body().recovery_from)
             .is_some_and(|(confirmed, lost)| confirmed <= lost);
+        // Its grant written again after the loss, by the same app that held it before:
+        // that establishes no complete usage authority (Paykit spec 8.3).
+        view.regranted_after_loss = match (
+            held.current_grant(&self.identity()),
+            self.app.own_identity().body().recovery_from,
+        ) {
+            (Some((grant, _)), Some(lost)) => {
+                grant.confirmed_generation > lost
+                    && held.grants.iter().rev().skip(1).any(|entry| {
+                        entry.grant.app_id == grant.app_id
+                            && entry.grant.confirmed_generation <= lost
+                    })
+            }
+            _ => false,
+        };
         let consent = Box::pin(self.consent_state(&record)).await?;
         view.consented = consent == ConsentState::Held;
         view.confirmation_needed = matches!(
@@ -2617,6 +2636,7 @@ impl Paykit {
             consented: false,
             confirmation_needed: false,
             granted_before_loss: false,
+            regranted_after_loss: false,
             hold: self.allowance_hold(&record).await?,
             blocked: Box::pin(self.blocked_as_known(&counterparty)).await?,
         })

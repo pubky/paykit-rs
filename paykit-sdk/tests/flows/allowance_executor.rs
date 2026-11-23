@@ -2,6 +2,7 @@
 
 mod enrolled;
 mod refusals;
+mod regrant;
 
 use paykit_lib::allowances::{AllowanceTerms, Ledger};
 use paykit_lib::records::AllowanceRecord;

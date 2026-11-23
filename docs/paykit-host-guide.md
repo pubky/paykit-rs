@@ -277,6 +277,14 @@ installed wallet still has that proof and its later ledger, reconciliation
 counts the outstanding reservations. Show the existing consent prompt if the
 restored Allowance requires confirmation.
 
+After a provider loss, an Allowance the user confirmed before the loss pays
+nothing automatically until the user confirms it again: it asks with
+`AllowanceConfirmationNeeded`, and confirming is the first step. Automatic payments
+under it resume only after its usage is repaired; until then they answer `NotNow`
+with that reason, and the host doesn't ask the user to confirm again. A user who
+doesn't want to wait ends the Allowance and sets up a new one. One-time requests
+stay held after a provider loss in any case (Paykit spec 8.1, 8.3).
+
 If `Paykit::ledger_alarm` returns an alarm, show its reason when opening the
 wallet and after a reconciliation error. The Switch client stops new payment
 attempts, including manual payments. Direct the user to the signer to move to
@@ -458,7 +466,7 @@ The method declares `payment_time_tolerance_ms` with its declaration. The payee 
 | `Refusal::Cancelled` | Show that the request has already been cancelled. |
 | `Refusal::AllowanceEnded` | Show the stop and close actions on this Allowance. It is final: a scheduler stops paying under it and does not retry. |
 | `Refusal::AllowanceConflicted` | Show the conflict and close actions on this Allowance. It is final: a scheduler stops paying under it and does not retry. |
-| `Refusal::AllowanceConfirmationNeeded` | Automatic payment under the named Allowance waits for the user, after a missed item, or a restore until it is judged clean or the user confirms. The Allowance's `confirmation_needed` shows the same. Show its counterparty, terms and executor; once the user confirms, call `confirm_allowance_executor` with the refusal's `hold` (or the view's `hold`), the Allowance and the hold in force when it was shown. If that call answers `NotNow`, keep the confirmation with that `hold` and call it again later. If it answers `AllowanceConfirmationNeeded` again, a newer restore or missed item has set another hold: show the Allowance again and ask the user again. |
+| `Refusal::AllowanceConfirmationNeeded` | Automatic payment under the named Allowance waits for the user, after a missed item, or a restore until it is judged clean or the user confirms. The Allowance's `confirmation_needed` shows the same. Show its counterparty, terms and executor; once the user confirms, call `confirm_allowance_executor` with the refusal's `hold` (or the view's `hold`), the Allowance and the hold in force when it was shown. If that call answers `NotNow`, keep the confirmation with that `hold` and call it again later. If it answers `AllowanceConfirmationNeeded` again, a newer restore, missed item or provider loss has set another hold: show the Allowance again and ask the user again. After a provider loss it also names an Allowance the user confirmed before the loss: confirming writes its grant again, and its payments then wait for its usage to be repaired. |
 | `Refusal::CreditHistoryLost` | Show that credit is held because the prior credit history is unavailable. |
 | `Refusal::AlreadyPaid` | Show the existing paid state. |
 | `Refusal::BeingHandledByOtherWallet` | Show that another own wallet holds the attempt. |
@@ -472,7 +480,7 @@ The method declares `payment_time_tolerance_ms` with its declaration. The payee 
 | `Refusal::Subscribed` | Show that the recurring request is already accepted. |
 | `Refusal::NotSubscribed` | Wait until the payer accepts the recurring request. |
 | `Refusal::ManualOnly` | Not this automatic payer's to pay. An occurrence marked to be paid by hand only: no wallet's policy and no Allowance's executor pays it; leave it for the user. From `pay_period_automatically`, a Billing Period funded under an Allowance: leave it for that Allowance's executor (`pay_period_under_allowance`). From `pay_period_under_allowance`, a Billing Period funded under no Allowance: leave it for the wallet's own policy or the user. |
-| `Refusal::NotAutomatic` | Show why this payment can't be made automatically: the window or dated subscription, or, under an Allowance, a request outside its terms, a lifetime limit used up with nothing reserved or to release, or an Allowance that expired after the payment was reserved and before its first dispatch. An Allowance granted before a provider loss gets its own reason: automatic payment under it needs a new grant at the new generation, which this version does not write, so no confirmation is asked for it; the user can pay each occurrence by hand, or end it and set up a new Allowance with the counterparty, which pays its Billing Periods automatically. After a provider loss, a one-time request is not paid automatically under any Allowance: the shared post-loss hold holds it for good (Paykit spec 8.1). It is final for automatic payment; the user may still pay by hand. |
+| `Refusal::NotAutomatic` | Show why this payment can't be made automatically: the window or dated subscription, or, under an Allowance, a request outside its terms, a lifetime limit used up with nothing reserved or to release, or an Allowance that expired after the payment was reserved and before its first dispatch. An Allowance set up before a provider loss and never granted here gets its own reason: it can't be granted now, so the user ends it and sets up a new one. After a provider loss, a one-time request is not paid automatically under any Allowance: the shared post-loss hold holds it for good (Paykit spec 8.1). It is final for automatic payment; the user may still pay by hand. |
 | `Refusal::PeriodNotStarted` | Show when this Billing Period starts. If the payer chooses to pay early, call `pay_period` for that period with `PayOptions::with_early_payment_confirmed`. After a payer-provider loss, an older subscription may already have paid this period early. Keep it pending while that history is incomplete. |
 | `Refusal::AttemptedPeriodsFull` | Wait for an existing period attempt to finish or reconcile its outcome before starting another. |
 | `Refusal::Destination` | Show the failed destination check and refresh when the payee has a usable endpoint. When its text says the device clock is behind, the destination expired by the service's time: tell the user the device clock is behind. |
@@ -488,7 +496,7 @@ The method declares `payment_time_tolerance_ms` with its declaration. The payee 
 | `Refusal::PaymentInProgress` | Wait for the existing attempt before rejecting or cancelling. |
 | `Refusal::NotCurrent` | Refresh authority and reconcile the existing attempt under the current provider and certificate. |
 | `Refusal::FloorHeld` | The identity's block floor is held after it was seen divergent: the unblock or widening that needs a raise waits, and retrying changes nothing until the shared post-loss hold stands too, when it goes without the raise. Tell the user that requests can still be paid by hand. |
-| `Refusal::NotNow` | Temporary: inspect account, clock and restore state, and try again later. Under an Allowance this includes a blocked counterparty until it is unblocked, a lifetime limit while an entry is reserved, and a lifetime limit held by another app's failed attempt the user can release (`reserved_by_other_apps`, `release_allowance_attempt`). |
+| `Refusal::NotNow` | Temporary: inspect account, clock and restore state, and try again later. Under an Allowance this includes a blocked counterparty until it is unblocked, a lifetime limit while an entry is reserved, a lifetime limit held by another app's failed attempt the user can release (`reserved_by_other_apps`, `release_allowance_attempt`), and, after a provider loss and the user's confirmation again, an Allowance whose usage waits to be repaired, which waiting alone doesn't change: the user can end it and set up a new one. |
 | `Refusal::Usage` | Correct the supplied API input, such as a payment under an Allowance asked of an app that isn't its executor. |
 | `Refusal::RecordHeld` | A payer record with payment history lost to deletion permanently holds that obligation. For a temporarily unreadable record, resume when it can be read or repaired. |
 | `Refusal::CertificateRefused` | Seek a suitable certificate from the signer and keep Paykit actions paused meanwhile. |

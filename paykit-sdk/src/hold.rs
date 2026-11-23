@@ -129,11 +129,14 @@ impl HeldRequest {
 /// by the latest restore or `missed` item, if any. The user's confirmation carries it back
 /// ([`Paykit::confirm_allowance_executor`]) and counts only for that hold: once a newer
 /// restore or `missed` item has set another, the confirmation is refused with the hold in
-/// force now, and nothing is written, so the user is asked again.
+/// force now, and nothing is written, so the user is asked again. It also carries the
+/// provider loss the app had followed: a confirmation shown before a newer loss is refused
+/// the same way (Paykit spec 8.3, "After provider loss").
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AllowanceHold {
     record: [u8; 32],
     epoch: Option<HoldEpoch>,
+    loss: Option<u64>,
 }
 
 impl AllowanceHold {
@@ -636,6 +639,7 @@ impl Paykit {
         Ok(AllowanceHold {
             record: *record,
             epoch: self.current_hold().await?,
+            loss: self.app.own_identity().body().recovery_from,
         })
     }
 

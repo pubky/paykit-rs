@@ -156,11 +156,10 @@ pub(crate) fn standing(app: &Paykit, view: &AllowanceView, consent: ConsentState
     if expired {
         return Standing::Final(Refusal::AllowanceEnded);
     }
-    // After a provider loss an Allowance last confirmed in an earlier generation needs a new
-    // grant at this one (Paykit spec 8.3, "After provider loss"), which this version doesn't
-    // write: it pays nothing automatically, and confirming wouldn't change that.
-    if view.granted_before_loss {
-        return Standing::Final(Refusal::NotAutomatic(GRANTED_BEFORE_LOSS.into()));
+    // After a provider loss an Allowance set up in an earlier generation and never granted
+    // here can't be granted now (Paykit spec 8.3, Acceptance): it pays nothing automatically.
+    if view.granted_before_loss && !own {
+        return Standing::Final(Refusal::NotAutomatic(SET_UP_BEFORE_LOSS.into()));
     }
     // Blocking pauses what is open with the counterparty and revokes nothing (Paykit spec
     // 8.1): unblocking ends the pause.
@@ -168,6 +167,16 @@ pub(crate) fn standing(app: &Paykit, view: &AllowanceView, consent: ConsentState
         Some(false) => {}
         Some(true) => return Standing::Temporary("the counterparty is blocked"),
         None => return Standing::Temporary("the deny list isn't known"),
+    }
+    // One this app executes, last confirmed before the loss, waits for the user's
+    // confirmation again, which writes its grant at the current generation; that grant
+    // establishes no complete usage authority, so its usage waits for a repair (Paykit spec
+    // 8.3, "After provider loss"). Neither lifts the shared hold on one-time payments.
+    if view.granted_before_loss {
+        return Standing::Confirm;
+    }
+    if view.regranted_after_loss {
+        return Standing::Temporary(NEEDS_REPAIR_AFTER_LOSS);
     }
     match (consent, own) {
         (ConsentState::Held, true) => Standing::Payable,
@@ -208,8 +217,12 @@ fn status_standing(status: AllowanceStatus) -> Option<Standing> {
     })
 }
 
-/// Why an Allowance last confirmed before a provider loss pays nothing automatically.
-pub(crate) const GRANTED_BEFORE_LOSS: &str = "the Allowance was granted before a provider loss; automatic payments under it need a new grant, which this version does not write";
+/// Why an Allowance set up before a provider loss, and never granted here, pays nothing
+/// automatically.
+pub(crate) const SET_UP_BEFORE_LOSS: &str = "the Allowance was set up before a provider loss and never granted here, so it can't be granted now: the user can end it and set up a new one";
+
+/// Why an Allowance whose grant was written again after a provider loss doesn't pay yet.
+pub(crate) const NEEDS_REPAIR_AFTER_LOSS: &str = "after a provider loss, the Allowance's usage record needs a repair before it pays automatically; the user can end it and set up a new one";
 
 /// The refusal for an Allowance taken off this app's consent list for `reason`: final, as no
 /// later read puts it back (Paykit spec 8.3, "Executor", "Ends reach the executor").

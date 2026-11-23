@@ -129,6 +129,9 @@ impl Paykit {
         {
             return Err(Refusal::AllowanceConfirmationNeeded { hold: shown.hold }.into());
         }
+        if shown.granted_before_loss {
+            return Box::pin(self.regrant_after_loss(record, &shown)).await;
+        }
         let opening = Box::pin(self.approved_opening(record))
             .await?
             .ok_or_else(held)?;
@@ -379,6 +382,95 @@ impl Paykit {
         .await?;
         self.promote_consent(record, &view.counterparty, &view.allowance_id)
             .await
+    }
+
+    /// After a provider loss, the user's confirmation again (under the hold it was shown,
+    /// checked by the caller) writes this app's grant once more, at the current generation
+    /// (Paykit spec 8.3, "After provider loss"). The write is conditioned on the exact
+    /// Allowance record read here, so an end or another change in between refuses it. It
+    /// establishes no complete usage authority: automatic payment under the Allowance waits
+    /// for its usage to be repaired, and the shared hold on one-time payments stays.
+    async fn regrant_after_loss(
+        &mut self,
+        record: &[u8; 32],
+        view: &crate::AllowanceView,
+    ) -> Result<()> {
+        let allow = allowance_target(&view.counterparty, &view.allowance_id);
+        let current = self
+            .app
+            .read_record_application(&allow)
+            .await?
+            .ok_or_else(held)?;
+        let read = &current.record;
+        let pubky_switch_client::app::RecordContent::Value(bytes) = &read.content else {
+            return Err(held().into());
+        };
+        if !read.authenticated
+            || read.doubtful
+            || read.flagged
+            || read.not_taken
+            || read.divergent
+            || read.different_write_at_held_version
+            || read.key != *record
+        {
+            return Err(held().into());
+        }
+        let own = self.identity();
+        let lost = self.app.own_identity().body().recovery_from;
+        let mut next = AllowanceRecord::bind(bytes, &own, self.app.naming_key(), record)?;
+        let paused = next.current_grant(&own).is_some_and(|(grant, _)| {
+            grant.app_id == self.app_id()
+                && lost.is_some_and(|lost| grant.confirmed_generation <= lost)
+        });
+        if !paused || next.end.is_some() || next.conflicted.is_some() {
+            return Err(held().into());
+        }
+        let terms_hash = next.terms_hash().ok_or_else(held)?;
+        let generation = self.app.own_identity().generation();
+        let fields = grant_fields(
+            &own,
+            &view.counterparty,
+            &view.allowance_id,
+            &terms_hash,
+            generation,
+            read.version,
+        );
+        let refs: Vec<&[u8]> = fields.iter().map(Vec::as_slice).collect();
+        let grant = ExecutorGrant {
+            app_id: self.app_id(),
+            terms_hash,
+            confirmed_generation: generation,
+            cert: self.app.cert().signed().clone(),
+            sig: self.app.sign_protocol(EXECUTOR_GRANT_LABEL, &refs)?,
+            origin: Origin::default(),
+        };
+        next.grants.push(GrantEntry {
+            built_on: read.version,
+            grant: grant.clone(),
+            origin: Origin::default(),
+        });
+        next.grant = Some(grant);
+        let op = self
+            .app
+            .record_op(
+                &allow,
+                Some(&next.to_json()?),
+                vec![Condition::RecordCurrent {
+                    key: *record,
+                    revision: current.application,
+                    deleted: false,
+                }],
+            )
+            .await?;
+        let hold = self.current_hold().await?;
+        let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
+            .entry(op)
+            .local(state::local_put(
+                &key::execution_approval(record, hold.as_ref()),
+                &true,
+            )?);
+        self.app.submit_batch(batch).await?;
+        Ok(())
     }
 
     /// Refused for good or for now as [`standing`] says, read again after the fresh reads of
