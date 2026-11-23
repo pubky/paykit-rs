@@ -406,10 +406,12 @@ pub struct Paykit {
     /// Whether the read of the lists in progress already left a raise unwritten: one read
     /// counts one try, however many raises it leaves unwritten ([`crate::floor::RaiseRetry`]).
     pub(crate) raise_tried_in_read: bool,
-    /// The latest device time this handle's retry check saw since its last unwritten try, so a
-    /// clock put back, part of the way included, ends a wait; none (0) before its first try,
-    /// when every wait is over ([`crate::floor::RaiseRetry`]).
+    /// The latest device time this handle's retry check saw since its last unwritten try, so
+    /// a clock put back, part of the way included, ends a wait ([`crate::floor::RaiseRetry`]).
     pub(crate) raise_clock_seen: std::sync::atomic::AtomicU64,
+    /// Whether this handle left a raise unwritten since it started: before that, every wait
+    /// is over, the time waited not being known ([`crate::floor::RaiseRetry`]).
+    pub(crate) raise_tried_in_run: std::sync::atomic::AtomicBool,
     /// How many activity records this handle bound ([`Paykit::activity_binds`]).
     #[cfg(feature = "test-support")]
     pub(crate) activity_binds: std::sync::atomic::AtomicU64,
@@ -487,6 +489,7 @@ impl Paykit {
             lists_read_this_pass: false,
             raise_tried_in_read: false,
             raise_clock_seen: std::sync::atomic::AtomicU64::new(0),
+            raise_tried_in_run: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "test-support")]
             activity_binds: std::sync::atomic::AtomicU64::new(0),
             certificates: std::sync::Mutex::default(),

@@ -3317,7 +3317,8 @@ impl Paykit {
                 .into_iter()
                 .filter(|peer| deny.binary_search(peer).is_err())
                 .collect();
-            if !closed.is_empty() {
+            let unblocked = !closed.is_empty();
+            if unblocked {
                 let cutoff = self.unblock_floor()?;
                 let pending = owed.get_or_insert_with(|| crate::floor::PendingUnblocks {
                     to_ms: cutoff,
@@ -3337,6 +3338,11 @@ impl Paykit {
                     .delete(key::LISTS_READ)
                     .put(key::DENIED, &deny)?
                     .put(key::BLOCK_FLOOR, pending)?;
+                // An unblock closed now is a raise not tried yet: its tries start anew, the
+                // same sender's again included (`crate::floor::RaiseRetry`).
+                if unblocked {
+                    stage.delete(key::RAISE_RETRY);
+                }
                 self.local_commit(stage).await?;
             }
         }

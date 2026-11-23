@@ -57,6 +57,7 @@ use pubky_switch_client::app::{
     AppEvent, KeptReason, OpBatch, RecordContent, RecordRead, RecordTarget, SharedRecord,
 };
 use pubky_switch_core::http::ErrorCode;
+use pubky_switch_core::ops::Condition;
 use pubky_switch_core::records::CLOCK_TOLERANCE_MS;
 use std::sync::atomic::Ordering;
 
@@ -100,9 +101,29 @@ pub(crate) struct OwedRaises {
     unread: bool,
     /// The highest time a raise is owed to, applied as a floor meanwhile.
     to_ms: Option<u64>,
-    /// The time of each raise owed, an unblock's and each widening's, in increasing order and
-    /// once each: which raises a retry record was tried for ([`RaiseRetry`]).
-    times: Vec<u64>,
+    /// Each raise owed, an unblock's for each sender and each widening's window, named
+    /// apart from its time, in increasing order and once each: which raises a retry record
+    /// was tried for ([`RaiseRetry`]).
+    ids: Vec<RaiseId>,
+}
+
+/// One raise owed, as the retry record names it: a digest of what it is and what identifies
+/// it, so two raises to the same time stay apart. The unblocks' raise (`bf`) is one, whose
+/// series a read of the lists that closes a new unblock starts anew (`Paykit::record_lists`);
+/// a restore's widening names which one it is (the one a backup owed, or this restore's)
+/// with its start and read; a `missed` item's widening its hold's identifier and the window.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub(crate) struct RaiseId(#[serde(with = "pubky_switch_core::enc::serde_b64")] [u8; 16]);
+
+impl RaiseId {
+    fn of(name: &str) -> Self {
+        let digest = pubky_switch_core::enc::hash(name.as_bytes());
+        let mut id = [0; 16];
+        id.copy_from_slice(&digest[..16]);
+        Self(id)
+    }
 }
 
 impl OwedRaises {
@@ -112,40 +133,55 @@ impl OwedRaises {
         restore: Option<&crate::hold::RestoreHold>,
         missed: impl IntoIterator<Item = crate::marks::MissedWidening>,
     ) -> Self {
-        let restoring = restore
+        let restoring: Vec<(u64, RaiseId)> = restore
             .into_iter()
             .flat_map(|hold| {
-                hold.earlier_widening
-                    .clone()
+                let earlier = hold.earlier_widening.clone().map(|owed| ("earlier", owed));
+                earlier
                     .into_iter()
-                    .chain(hold.widening_owed())
+                    .chain(hold.widening_owed().map(|owed| ("own", owed)))
             })
-            .map(|owed| owed.read.at_ms);
+            .map(|(which, owed)| {
+                let name = format!("restore/{which}/{}/{}", owed.from_ms, owed.read.at_ms);
+                // The read's time is the raise's.
+                (owed.read.at_ms, RaiseId::of(&name))
+            })
+            .collect();
         // A widening whose read holds no blocked sender raises nothing; one not read yet may.
         let missed: Vec<_> = missed
             .into_iter()
             .filter(|widening| widening.deny.as_ref().is_none_or(|deny| !deny.is_empty()))
             .collect();
         let unread = missed.iter().any(|widening| widening.deny.is_none());
-        let missing = missed
-            .into_iter()
-            .flat_map(|widening| widening.windows)
-            .map(|window| window.floor_ms);
-        let widenings: Vec<u64> = restoring.chain(missing).collect();
+        let missing = missed.into_iter().flat_map(|widening| {
+            let hold = pubky_switch_core::enc::b64(widening.id.as_bytes());
+            widening.windows.into_iter().map(move |window| {
+                let name = format!(
+                    "missed/{hold}/{}/{}/{}",
+                    window.from_ms, window.until_ms, window.floor_ms
+                );
+                (window.floor_ms, RaiseId::of(&name))
+            })
+        });
+        let widenings: Vec<(u64, RaiseId)> = restoring.into_iter().chain(missing).collect();
         let (unblock_ms, senders) = match unblocks {
             Some(pending) => (Some(pending.to_ms), pending.senders),
             None => (None, Vec::new()),
         };
-        let widening = !widenings.is_empty();
-        let mut times: Vec<u64> = unblock_ms.into_iter().chain(widenings).collect();
-        times.sort_unstable();
-        times.dedup();
+        let unblocking = unblock_ms.map(|to_ms| (to_ms, RaiseId::of("unblock")));
+        let owed: Vec<(u64, RaiseId)> = unblocking
+            .into_iter()
+            .chain(widenings.iter().copied())
+            .collect();
+        let mut ids: Vec<RaiseId> = owed.iter().map(|(_, id)| *id).collect();
+        ids.sort_unstable();
+        ids.dedup();
         Self {
-            senders,
-            widening,
+            widening: !widenings.is_empty(),
             unread,
-            to_ms: times.last().copied(),
-            times,
+            to_ms: owed.iter().map(|(to_ms, _)| *to_ms).chain(unblock_ms).max(),
+            ids,
+            senders,
         }
     }
 
@@ -159,9 +195,9 @@ impl OwedRaises {
         self.to_ms
     }
 
-    /// The time of each raise owed, in increasing order and once each.
-    pub(crate) fn times(&self) -> &[u64] {
-        &self.times
+    /// Each raise owed, named apart from its time, in increasing order and once each.
+    pub(crate) fn ids(&self) -> &[RaiseId] {
+        &self.ids
     }
 
     /// Whether a `missed` item's widening waits for its read of the lists.
@@ -185,10 +221,11 @@ impl OwedRaises {
 /// waits, one minute, doubling after each further such try, up to 10 minutes, the age the deny
 /// list may have before a payment the user starts (Paykit spec 8.1, How fresh the deny list
 /// is). A change to the floor record the app holds, or the floor becoming readable, ends the
-/// wait and the tries in a row (Paykit wire 5.6, Raising). The wait paces only raises already
-/// tried: `tried` holds the time of each raise owed at the last try ([`OwedRaises::times`]),
-/// and a raise owed since, a new unblock's or a new widening's, whatever its time, is tried at
-/// the read of the lists it needs, starting the tries anew. The wait is counted from
+/// wait and the tries in a row (Paykit wire 5.6, Raising); `floor` names the floor record the
+/// app held as it held it ([`floor_state_of`]). The wait paces only raises already tried:
+/// `tried` names each raise owed at the last try ([`OwedRaises::ids`]), and a raise owed
+/// since, a new unblock's or a new widening's, whatever its time, is tried at the read of the
+/// lists it needs, starting the tries anew. The wait is counted from
 /// `tried_at_ms`, the last try's time on this device's clock, and derived from `tries`; a
 /// clock that went back since ends it, as does a restart, after which the time waited can't
 /// be told, so no wait outlasts its own length. The record only paces the tries: one that
@@ -198,11 +235,37 @@ impl OwedRaises {
 pub(crate) struct RaiseRetry {
     tries: u32,
     tried_at_ms: u64,
-    tried: Vec<u64>,
-    #[serde(deserialize_with = "Option::deserialize")]
-    floor: Option<(u64, u64)>,
-    readable: bool,
+    tried: Vec<RaiseId>,
+    floor: RaiseId,
+    ready: FloorReadiness,
 }
+
+/// What the floor needs to read for a raise, each part apart, so any one coming ends a wait
+/// (Paykit wire 5.6, Raising: the floor becomes readable, its payer records listed or the
+/// scope key it waits for held).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FloorReadiness {
+    /// The scope keys of the current data epoch held.
+    keys: bool,
+    /// The payer records listed.
+    listed: bool,
+    /// The floor's value open and known: taken, not divergent.
+    opened: bool,
+}
+
+impl FloorReadiness {
+    /// Whether a part that wasn't there in `before` is now.
+    fn came_since(&self, before: &Self) -> bool {
+        (self.keys && !before.keys)
+            || (self.listed && !before.listed)
+            || (self.opened && !before.opened)
+    }
+}
+
+/// The most raises a retry record names; one naming more doesn't read, so the raise is tried
+/// at each read of the lists rather than paced.
+const MAX_RAISES_TRIED: usize = 1024;
 
 /// The first wait, after a second unwritten try in a row.
 const FIRST_RAISE_WAIT_MS: u64 = 60_000;
@@ -226,7 +289,9 @@ impl RaiseRetry {
     /// Whether the record reads as a writer keeps it: at least one try, for raises named once
     /// each in increasing order.
     pub(crate) fn reads(&self) -> bool {
-        self.tries > 0 && self.tried.windows(2).all(|pair| pair[0] < pair[1])
+        self.tries > 0
+            && self.tried.len() <= MAX_RAISES_TRIED
+            && self.tried.windows(2).all(|pair| pair[0] < pair[1])
     }
 
     /// Whether the wait after the last try is over at `now_ms`: at least the wait has passed
@@ -415,6 +480,51 @@ fn write_base(held: Option<&[u8]>, seen: Option<&[u8]>, floor: Option<u64>) -> B
     held.and_then(read)
         .or_else(|| seen.and_then(read))
         .unwrap_or_else(|| BlockFloorRecord::new(floor.unwrap_or(0)))
+}
+
+/// The floor record `held` as the app holds it, for the retry record to tell a change by
+/// ([`RaiseRetry`]): none, or its standing (authenticated, writer, date, refused, not taken, a
+/// different write at its version, divergent) and its content, with `condition`, the exact
+/// write the next write builds on as the client names it (`App::record_condition`): its
+/// version, or the application a recovery installed at a version two uploads can share.
+fn floor_state_of(held: Option<&SharedRecord>, condition: &Condition) -> RaiseId {
+    let base = match condition {
+        Condition::RecordCurrent {
+            revision, deleted, ..
+        } => format!(
+            "current/{}/{}/{}/{deleted}",
+            revision.generation,
+            revision.seq,
+            pubky_switch_core::enc::b64(&revision.item_hash)
+        ),
+        Condition::RecordVersion { version, .. } => {
+            format!("version/{}/{}", version.generation, version.version)
+        }
+        other => format!("{other:?}"),
+    };
+    let held = held.map(|held| {
+        let content = match &held.content {
+            RecordContent::Value(value) => format!(
+                "value/{}",
+                pubky_switch_core::enc::b64(&pubky_switch_core::enc::hash(value))
+            ),
+            RecordContent::Deleted => "deleted".to_string(),
+            RecordContent::Unreadable(unopened) => format!("unread/{unopened:?}"),
+        };
+        format!(
+            "{}/{}/{}/{}/{:?}/{}/{}/{}/{}/{content}",
+            held.version.generation,
+            held.version.version,
+            held.authenticated,
+            pubky_switch_core::enc::b64(&held.writer),
+            held.written_at_ms,
+            held.flagged,
+            held.not_taken,
+            held.different_write_at_held_version,
+            held.divergent,
+        )
+    });
+    RaiseId::of(&format!("floor/{base}/{held:?}"))
 }
 
 /// Whether the switch's current floor write is one the app didn't take on the service's word
@@ -677,41 +787,37 @@ impl Paykit {
         }
     }
 
-    /// The version of the floor record the app holds, if any.
-    async fn held_floor_version(&self) -> Result<Option<(u64, u64)>> {
+    /// The floor record the app holds, named as it holds it ([`floor_state_of`]).
+    async fn held_floor_state(&self) -> Result<RaiseId> {
         let key = self.app.record_key(&floor_target(&self.identity()))?;
-        Ok(self
-            .app
-            .shared_record(&key)
-            .await?
-            .map(|held| (held.version.generation, held.version.version)))
+        let held = self.app.shared_record(&key).await?;
+        let condition = self.app.record_condition(&key).await?;
+        Ok(floor_state_of(held.as_ref(), &condition))
     }
 
-    /// Whether the floor reads now for a raise: the scope keys of the current data epoch held,
-    /// its payer records listed, its value open and taken, and not divergent
-    /// (`floor_for_write`).
-    async fn floor_readable(&self) -> Result<bool> {
-        if !self.holds_scope_keys() {
-            return Ok(false);
-        }
+    /// What the floor needs to read for a raise, as it stands now ([`FloorReadiness`]).
+    async fn floor_readiness(&self) -> Result<FloorReadiness> {
         let key = self.app.record_key(&floor_target(&self.identity()))?;
-        if write_not_taken(self.app.shared_record(&key).await?.as_ref()) {
-            return Ok(false);
-        }
-        Ok(matches!(self.shared_floor().await?, SharedFloor::Known(_)))
+        let opened = !write_not_taken(self.app.shared_record(&key).await?.as_ref())
+            && matches!(self.shared_floor().await?, SharedFloor::Known(_));
+        Ok(FloorReadiness {
+            keys: self.holds_scope_keys(),
+            listed: !self.side_unlisted(RecordSide::Payer).await?,
+            opened,
+        })
     }
 
     /// Whether the tries in a row of `retry` ended: the record the app holds changed, the
     /// floor became readable, or the raise owed is to another time.
     async fn floor_changed_since(&self, retry: &RaiseRetry) -> Result<bool> {
-        Ok(self.held_floor_version().await? != retry.floor
-            || (!retry.readable && self.floor_readable().await?)
+        Ok(self.held_floor_state().await? != retry.floor
+            || self.floor_readiness().await?.came_since(&retry.ready)
             || self
                 .owed_raises()
                 .await?
-                .times()
+                .ids()
                 .iter()
-                .any(|time| retry.tried.binary_search(time).is_err()))
+                .any(|id| retry.tried.binary_search(id).is_err()))
     }
 
     /// Whether a raise left unwritten is tried again at this receive: once its wait passed,
@@ -723,7 +829,7 @@ impl Paykit {
         // and a clock it saw at a later time since its last try went back, part of the way
         // included: the wait is over either way (the stored time alone can't tell a partial
         // step back).
-        if self.raise_clock_seen.load(Ordering::SeqCst) == 0 {
+        if !self.raise_tried_in_run.load(Ordering::SeqCst) {
             return Ok(true);
         }
         let seen = self.raise_clock_seen.fetch_max(now, Ordering::SeqCst);
@@ -733,9 +839,10 @@ impl Paykit {
     /// Note a try that left the raise unwritten: one more in a row, or the first after the
     /// floor changed ([`RaiseRetry`]).
     async fn note_raise_unwritten(&mut self) -> Result<()> {
-        let tried = self.owed_raises().await?.times().to_vec();
+        let tried = self.owed_raises().await?.ids().to_vec();
         // The wait counts from this try: the device times seen start from it.
         self.raise_clock_seen.store(self.now(), Ordering::SeqCst);
+        self.raise_tried_in_run.store(true, Ordering::SeqCst);
         // One read of the lists counts one try: a second raise it leaves unwritten, a
         // widening's and an unblock's say, keeps the tries and the wait.
         if self.raise_tried_in_read {
@@ -755,8 +862,8 @@ impl Paykit {
             tries,
             tried_at_ms: self.now(),
             tried,
-            floor: self.held_floor_version().await?,
-            readable: self.floor_readable().await?,
+            floor: self.held_floor_state().await?,
+            ready: self.floor_readiness().await?,
         };
         self.local_put(key::RAISE_RETRY, &retry).await
     }
@@ -1469,6 +1576,83 @@ mod tests {
     }
 
     #[test]
+    fn test_floor_owed_raises_named_apart_when_they_share_a_time() {
+        // An unblock's raise and two `missed` items' widenings, all to the same time, are three
+        // raises: a retry record tried for one doesn't count the others as tried.
+        let unblock = PendingUnblocks {
+            to_ms: 90,
+            senders: vec![[2; 32]],
+        };
+        let first = missed(90, Some(vec![[3; 32]]));
+        let second = missed(90, Some(vec![[3; 32]]));
+        let both = OwedRaises::of(Some(unblock.clone()), None, vec![first.clone(), second]);
+        assert_eq!(both.to_ms(), Some(90));
+        assert_eq!(both.ids().len(), 3);
+        let one = OwedRaises::of(Some(unblock), None, vec![first]);
+        assert!(both.ids().iter().any(|id| !one.ids().contains(id)));
+        // The same raise is named the same at every read, a restart's included.
+        let held = |hold| crate::marks::MissedWidening {
+            id: crate::hold::HoldEpoch::from_bytes(hold),
+            ..missed(90, Some(vec![[3; 32]]))
+        };
+        let read = OwedRaises::of(None, None, vec![held([9; 16])]);
+        assert_eq!(read, OwedRaises::of(None, None, vec![held([9; 16])]));
+        assert_ne!(
+            read.ids(),
+            OwedRaises::of(None, None, vec![held([8; 16])]).ids()
+        );
+        // A window of the same hold and ends with another floor is another raise.
+        let lower = crate::marks::MissedWidening {
+            windows: vec![crate::marks::BlockedWindow {
+                from_ms: 1,
+                until_ms: 90,
+                floor_ms: 80,
+            }],
+            ..held([9; 16])
+        };
+        assert_ne!(read.ids(), OwedRaises::of(None, None, vec![lower]).ids());
+    }
+
+    /// The condition of a write built on version `(generation, version)`.
+    fn version_at(generation: u64, version: u64) -> Condition {
+        Condition::RecordVersion {
+            key: [4; 32],
+            version: pubky_switch_core::ops::RecordVersion::new(generation, version),
+        }
+    }
+
+    #[test]
+    fn test_floor_state_tells_a_floor_moved_at_its_version() {
+        // The same floor record at the same version, whose write a recovery installed at
+        // another application, names another state; so does a different write at that
+        // version, a delete and none. The same record and condition name the same state.
+        let at = held(value(70), true, false);
+        let by_version = version_at(1, 2);
+        let before = floor_state_of(Some(&at), &by_version);
+        assert_eq!(before, floor_state_of(Some(&at.clone()), &by_version));
+        let application = |seq| Condition::RecordCurrent {
+            key: [4; 32],
+            revision: pubky_switch_core::shared::ApplicationRef {
+                generation: 2,
+                seq,
+                item_hash: [5; 32],
+            },
+            deleted: false,
+        };
+        let recovered = floor_state_of(Some(&at), &application(7));
+        assert_ne!(before, recovered);
+        assert_ne!(recovered, floor_state_of(Some(&at), &application(8)));
+        let other_write = SharedRecord {
+            different_write_at_held_version: true,
+            ..at.clone()
+        };
+        assert_ne!(before, floor_state_of(Some(&other_write), &by_version));
+        let deleted = held(RecordContent::Deleted, true, false);
+        assert_ne!(before, floor_state_of(Some(&deleted), &by_version));
+        assert_ne!(before, floor_state_of(None, &version_at(0, 0)));
+    }
+
+    #[test]
     fn test_floor_owed_raises_cover_unblocks_restores_and_missed_items() {
         // Nothing owed: no floor, no ask held.
         let none = OwedRaises::of(None, None, Vec::new());
@@ -1530,9 +1714,9 @@ mod tests {
         let kept = |tries| RaiseRetry {
             tries,
             tried_at_ms: 1_000_000,
-            tried: vec![5],
-            floor: None,
-            readable: false,
+            tried: vec![RaiseId::of("unblock")],
+            floor: floor_state_of(None, &version_at(0, 0)),
+            ready: FloorReadiness::default(),
         };
         assert!(kept(1).reads() && kept(9).reads() && !kept(0).reads());
         // The wait counts from the try; a clock that went back since ends it at once.
