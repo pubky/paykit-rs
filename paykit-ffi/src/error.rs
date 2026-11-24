@@ -80,9 +80,10 @@ pub enum WalletError {
         /// What failed.
         failure: Arc<WalletFailure>,
     },
-    /// No payment, message or other outside effect happened: the call was refused before
-    /// anything was sent or applied, and is safe to make again once its cause is fixed. An
-    /// `attempt_failed` may have stored its attempt, closed as failed, which pays nothing.
+    /// No payment was made and no message went out: the call is safe to make again once its
+    /// cause is fixed. An attempt's own writes may have happened: an `attempt_failed` stores
+    /// its attempt, closed as failed, and may mark a single-use endpoint used, which a retry
+    /// then leaves out.
     #[error("not sent: {}", failure.code)]
     NotSent {
         /// What failed.
@@ -237,7 +238,7 @@ impl Category {
             Category::NeedsUser => "the user must see this and decide",
             Category::RetryLater => "a later call can succeed",
             Category::OutcomeUnknown => "the call may have taken effect",
-            Category::NotSent => "nothing took effect",
+            Category::NotSent => "no payment or message went out",
             Category::Permanent => "the answer is final",
             Category::Recovery => "the wallet stopped for a recovery",
         }
