@@ -2465,7 +2465,7 @@ impl Paykit {
         }
         match Box::pin(self.submit(batch)).await {
             Ok(_) => Ok(()),
-            Err(error) if error.kept_batch().is_some() && held.is_none() => Ok(()),
+            Err(error) if kept_as_written(&error, held.is_some()) => Ok(()),
             Err(error) => {
                 if error.code() == Some(ErrorCode::Conflict) {
                     Box::pin(self.app.read_record(target)).await?;
@@ -3747,6 +3747,14 @@ impl Paykit {
     }
 }
 
+/// Whether `error`, the answer to an Allowance record write, counts as the write made: a batch
+/// the client keeps of a write made for the Allowance's own sake goes again by itself, so it is
+/// taken as written; one of a kept message's later write (`held`) is held, not written, and is
+/// judged by the later write's rule ([`crate::stored::submitted`]), which waits on it.
+fn kept_as_written(error: &pubky_switch_client::app::AppError, held: bool) -> bool {
+    error.kept_batch().is_some() && !held
+}
+
 /// What a later write of an Allowance record came to, by the rule every later write follows
 /// ([`crate::stored::submitted`]): written, refused by the switch and so not written now, or
 /// not sent now for want of a key. A failure of the app's own store, a switch that doesn't
@@ -4319,5 +4327,135 @@ mod consent_state_tests {
             b64(&[5; 32])
         ))
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod held_write_tests {
+    use pubky_switch_client::app::AppError;
+    use pubky_switch_client::error::TransportError;
+    use pubky_switch_client::testing::Fault;
+    use pubky_switch_core::http::ErrorCode;
+    use serde_json::json;
+
+    use super::*;
+    use crate::testkit::{object, Party, Switches};
+
+    #[test]
+    fn test_allowances_kept_batch_of_a_kept_message_is_held_not_written() {
+        let kept = AppError::Kept {
+            batch_id: [7; 16],
+            error: Box::new(AppError::Switch(
+                pubky_switch_client::error::ClientError::Switch {
+                    status: 429,
+                    code: ErrorCode::RateLimited,
+                    message: String::new(),
+                    current: serde_json::Value::Null,
+                    known_version: None,
+                    retry_after: None,
+                },
+            )),
+        };
+        // The Allowance's own write goes again by itself; a kept message's is held.
+        assert!(kept_as_written(&kept, false));
+        assert!(!kept_as_written(&kept, true));
+        assert_eq!(
+            written(Err(PaykitError::Client(kept))).unwrap(),
+            crate::stored::Placed::Waits
+        );
+        assert!(!kept_as_written(
+            &AppError::Transport(TransportError::Timeout),
+            false
+        ));
+    }
+
+    /// A kept message whose later write's batch the client still keeps: the Allowance later
+    /// write waits, and writes nothing, until that batch applies or is dropped.
+    #[tokio::test]
+    async fn test_allowances_later_write_waits_while_its_batch_is_kept() {
+        let w = Switches::new();
+        let mut wallet = w
+            .join(
+                &w.alice,
+                "wallet",
+                crate::AppScopes::new()
+                    .pay()
+                    .allowance()
+                    .manage_contacts()
+                    .build()
+                    .unwrap(),
+            )
+            .await;
+        // A batch the client keeps: its send is rate-limited.
+        w.alice.switch().fail_next(Fault::Error {
+            path: "/ops".into(),
+            code: ErrorCode::RateLimited,
+            current: serde_json::Value::Null,
+        });
+        let kept = wallet
+            .app_mut()
+            .submit_batch(
+                OpBatch::new().op(pubky_switch_core::ops::OpKind::DenyPut { pubky: [9; 32] }),
+            )
+            .await
+            .unwrap_err();
+        let batch_id = kept.kept_batch().expect("kept");
+        let alice = Party::new(
+            "alice",
+            "wallet",
+            &["paykit_pay", "paykit_allowance", "paykit_contacts"],
+        );
+        let bob = Party::new(
+            "bob",
+            "shop",
+            &[
+                "paykit_request",
+                "paykit_allowance",
+                "paykit_settlements",
+                "paykit_contacts",
+            ],
+        );
+        let stored = bob.message(
+            &alice,
+            "paykit.allowance_proposal",
+            vec![],
+            object(json!({
+                "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+                "proposer_role": "allowee",
+                "allower_generation": 1,
+                "terms": {
+                    "asset": "btc",
+                    "per_payment_amount": null,
+                    "period_limits": [],
+                    "lifetime_amount_limit": "0.10",
+                    "active_from": null,
+                    "expires_at": null,
+                    "allowed_payment_endpoint_identifiers": null
+                }
+            })),
+        );
+        let marker = crate::stored::held_write(&stored);
+        // As the client saves it when it keeps a batch: the 16 bytes of its ID.
+        wallet
+            .app_mut()
+            .protocol_commit(
+                "paykit",
+                &[pubky_switch_client::app::LocalWrite::Put {
+                    key: marker.clone().into_bytes(),
+                    value: batch_id.to_vec(),
+                }],
+            )
+            .await
+            .unwrap();
+        let evidence = KeptMessage::taken(&stored, 1);
+        let placed = Box::pin(wallet.place_allowance_later(stored, &evidence, Vec::new()))
+            .await
+            .unwrap();
+        assert_eq!(placed, crate::stored::Placed::Waits);
+        // Nothing was written: the marker stands for the batch still kept.
+        assert_eq!(
+            wallet.local_get::<[u8; 16]>(&marker).await.unwrap(),
+            Some(batch_id)
+        );
     }
 }
