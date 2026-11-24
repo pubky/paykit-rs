@@ -83,6 +83,7 @@ mod records;
 mod reply_asks;
 mod requests;
 mod resend;
+mod restore_held;
 mod send_holds;
 mod settlement_marks;
 mod settlements;
@@ -113,8 +114,8 @@ pub use pay::{
     UnrequestedPayment, UNREQUESTED_DEADLINE_MS,
 };
 pub use paykit::{
-    orphan_floor_s, Paykit, PaykitBackup, PaykitConfig, ReceiveSummary, DEFAULT_RESEND_BUDGET,
-    PRE_DISPATCH_BUDGET_MS,
+    orphan_floor_s, HeldAtRestore, Paykit, PaykitBackup, PaykitConfig, ReceiveSummary,
+    DEFAULT_RESEND_BUDGET, PRE_DISPATCH_BUDGET_MS,
 };
 pub use paykit_lib::bodies::RequestDestination;
 pub use paykit_lib::{

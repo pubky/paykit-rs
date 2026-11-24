@@ -465,6 +465,14 @@ impl Paykit {
     async fn take_stored_event(&mut self, event: &AppEvent, mark: &str) -> Result<bool> {
         let mut tx = Tx::default();
         let taken = match event {
+            AppEvent::MessagesHeldAtRestore { .. } => {
+                let owed = self
+                    .local_get::<crate::restore_held::HeldPass>(key::HELD_MESSAGES_OWED)
+                    .await?
+                    .unwrap_or(crate::restore_held::HeldPass::HeldOnly);
+                tx.put(key::HELD_MESSAGES_OWED, &owed)?;
+                true
+            }
             AppEvent::Parked {
                 stored_id, reason, ..
             } if !matches!(reason, ParkReason::Released | ParkReason::AwaitingAdmission) => {

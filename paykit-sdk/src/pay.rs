@@ -3620,12 +3620,10 @@ impl Paykit {
         Ok(Some(signed))
     }
 
-    /// Whether a restored entry's released acceptance was lost with the restore: the client's
-    /// backup carries no outbox or sent messages, so a restored client that doesn't know its
-    /// `msg_id` never sent it from this store, and it may never have left the old one. It is
-    /// sent again only while the payer's record holds no acceptance: once placed, the record
-    /// is what the payee's apps read. A non-restored entry's client always knows its own
-    /// queued or sent message; an unreadable record leaves it for a later resume.
+    /// A released payment acceptance has no Switch record job. Withdrawing its held
+    /// delivery removes the outbox and batch entries. The give-up mark prevents replay
+    /// of that ID and is not a delivery (Switch spec 11). Resume signs again only while
+    /// the payer record still lacks the acceptance (Paykit spec 7.2).
     async fn restored_acceptance_lost(&self, entry: &JournalEntry) -> Result<bool> {
         if !entry.restored {
             return Ok(false);

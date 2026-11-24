@@ -2962,7 +2962,7 @@ fn conflict_changed() -> PaykitError {
 /// after its proposal expiry, which is inclusive (Paykit spec 8.2). `None` when it never
 /// expires as a whole: no deadline, or a recurring request accepted, whose periods have
 /// deadlines of their own.
-fn expiry_deadline(record: &ActivityRecord, request: &PaymentRequest) -> Option<u64> {
+pub(crate) fn expiry_deadline(record: &ActivityRecord, request: &PaymentRequest) -> Option<u64> {
     if request.is_recurring() {
         return record
             .response

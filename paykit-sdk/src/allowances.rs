@@ -348,7 +348,7 @@ pub(crate) struct OwedEnd {
 pub(crate) enum EndCause {
     /// The user explicitly ended or withdrew the Allowance.
     User,
-    /// A withdrawal crossed an acceptance, so the app ended it itself.
+    /// A crossing withdrawal generated this end, or a restore could not establish its user origin.
     Automatic,
     /// A restore or late acceptance found the closed original proposal.
     RetiredProposal,

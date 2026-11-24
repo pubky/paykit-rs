@@ -84,6 +84,9 @@ pub enum NoticeKind {
     /// counterparty. Acknowledging it records that the host
     /// has seen it, without authorizing delivery or a replacement (Paykit spec 7.2).
     PossiblyDelivered,
+    /// The record no longer shows this stop, and the request or Allowance is still open
+    /// (Paykit spec 7.2). Show it open and let the user stop it again.
+    StopNotRecorded,
     /// The client gave up a counterparty's current Private Payment List, and its delivery
     /// is unknown. `counterparty` is the recipient, `msg_id` and `message_hash` the list.
     /// Nothing more is sent on its own, but an answer to the counterparty's list request
@@ -154,6 +157,7 @@ impl NoticeKind {
             Self::AllowancePlacementExpired => "allowance_placement_expired",
             Self::AllowanceAcceptanceBeforeLoss => "allowance_acceptance_before_loss",
             Self::AllowanceWithdrawalConfirmed => "allowance_withdrawal_confirmed",
+            Self::StopNotRecorded => "stop_not_recorded",
             Self::PossiblyDelivered => "possibly_delivered",
             Self::ListDeliveryUnknown => "list_delivery_unknown",
             Self::BlockedMessagesLost => "blocked_lost",
@@ -407,6 +411,8 @@ pub(crate) enum GivenUpOrigin {
     /// were held (`ha/`) or held in the outbox (`qs/`), passed its replay window unsent, or
     /// was lost with a write of its request record that holds neither it nor any stop.
     HeldAnswer,
+    /// A held stop absent from its current active record (Paykit spec 7.2).
+    UnrecordedStop,
     /// This app's own payment request, period details or subscription acceptance, held in
     /// the outbox while sends to its counterparty were held (`qs/`), passed its replay
     /// window unsent; its activity record still holds it.
@@ -419,6 +425,7 @@ pub(crate) enum GivenUpOrigin {
 impl GivenUpOrigin {
     fn notice_kind(origin: Option<Self>) -> NoticeKind {
         match origin {
+            Some(Self::UnrecordedStop) => NoticeKind::StopNotRecorded,
             Some(Self::AllowanceConflict) => NoticeKind::AllowancePlacementExpired,
             Some(Self::AllowanceBeforeLoss) => NoticeKind::AllowanceAcceptanceBeforeLoss,
             _ => NoticeKind::MessageGivenUp,
@@ -629,6 +636,7 @@ impl KeptNotice {
                     | NoticeKind::AllowancePlacementExpired
                     | NoticeKind::AllowanceAcceptanceBeforeLoss
                     | NoticeKind::AllowanceWithdrawalConfirmed
+                    | NoticeKind::StopNotRecorded
                     | NoticeKind::PossiblyDelivered
                     | NoticeKind::ListDeliveryUnknown
                     | NoticeKind::BlockedMessagesLost
@@ -846,7 +854,16 @@ pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
         }
         _ if notice.message_hash.is_some() => Err(PaykitError::corrupt()),
         Some(StateKey::Notice { attempt, kind }) => notice.check(&attempt, kind),
-        Some(StateKey::MessageNotice { sender, msg_id }) => notice.check_message(&sender, &msg_id),
+        Some(StateKey::UnrecordedStop { to, msg_id })
+            if notice.kind == NoticeKind::StopNotRecorded =>
+        {
+            notice.check_message(&to, &msg_id)
+        }
+        Some(StateKey::MessageNotice { sender, msg_id })
+            if notice.kind != NoticeKind::StopNotRecorded =>
+        {
+            notice.check_message(&sender, &msg_id)
+        }
         Some(StateKey::BlockedLost {
             counterparty,
             from_ms,
@@ -968,6 +985,7 @@ impl Paykit {
             Some(
                 StateKey::Notice { .. }
                     | StateKey::MessageNotice { .. }
+                    | StateKey::UnrecordedStop { .. }
                     | StateKey::RestoredDelivery { .. }
                     | StateKey::BlockedLost { .. }
                     | StateKey::SettlementNotice(_)
@@ -1351,6 +1369,21 @@ mod tests {
             ..notice
         };
         assert!(bad.check(&attempt, NoticeKind::PaidAfterFailed).is_err());
+    }
+
+    #[test]
+    fn test_notices_unrecorded_stop_is_bound_to_outgoing_message() {
+        let id = "123e4567-e89b-42d3-a456-426614174000";
+        let to = [1; 32];
+        let notice = KeptNotice::given_up(
+            to,
+            id,
+            None,
+            3,
+            GivenUpFrom::Origin(GivenUpOrigin::UnrecordedStop),
+        );
+        assert!(bind_notice(&key::unrecorded_stop(&to, id), &notice).is_ok());
+        assert!(bind_notice(&key::message_notice(&to, id), &notice).is_err());
     }
 
     #[test]

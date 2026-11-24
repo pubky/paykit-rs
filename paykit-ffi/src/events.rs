@@ -1190,5 +1190,10 @@ WalletEventData from app::AppEvent {
         /// The attempt.
         attempt_id: Vec<u8> => attempt_id.into(),
     },
+    /// The restore held original deliveries for the protocol to check (Switch spec 12.4).
+    MessagesHeldAtRestore {
+        /// How many messages this restore newly held.
+        held: u64,
+    },
 }
 }

@@ -215,6 +215,17 @@ impl PaykitBackup {
     }
 }
 
+/// Outgoing messages checked after a restore (Paykit spec 7.2, Switch spec 12.4).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HeldAtRestore {
+    /// Paykit messages released for delivery with their original signed bytes.
+    pub released: u32,
+    /// Carried messages withdrawn, including extensions.
+    pub withdrawn: u32,
+    /// Messages still held, to check at a later receive.
+    pub waiting: u32,
+}
+
 /// What a [`Paykit::receive`] did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -237,6 +248,8 @@ pub struct ReceiveSummary {
     /// The `msg_id`s of the messages received, each with its effect committed with the
     /// cursor move (Switch spec 8.2).
     pub applied: Vec<String>,
+    /// Disposition of messages held at restore (Paykit spec 7.2).
+    pub held_at_restore: HeldAtRestore,
     /// The `resend_request`s answered and asked.
     pub resends: u64,
     /// A recovery ask waits because its sender certificate lacks `paykit_contacts`.
@@ -310,6 +323,14 @@ impl ReceiveSummary {
             (earlier, later) => later.or(earlier),
         };
         self.applied.splice(0..0, earlier.applied);
+        self.held_at_restore.released = self
+            .held_at_restore
+            .released
+            .saturating_add(earlier.held_at_restore.released);
+        self.held_at_restore.withdrawn = self
+            .held_at_restore
+            .withdrawn
+            .saturating_add(earlier.held_at_restore.withdrawn);
         self.resends = self.resends.saturating_add(earlier.resends);
         self.divergent.splice(0..0, earlier.divergent);
         self.key_epochs_awaited.extend(earlier.key_epochs_awaited);
@@ -1189,12 +1210,22 @@ impl Paykit {
         // is lost: only the SDK's own marks and notes are kept here, and nothing is written at
         // the switch (`stored.rs`, `divergent.rs`).
         Box::pin(self.take_stored_events(&duties)).await?;
+        let held_at_restore = Box::pin(self.check_held_messages(
+            &report,
+            !account_gone
+                && self.certificate_refused().is_none()
+                && self.app.recovery_required().is_none()
+                && self.app.alarm().is_none()
+                && self.confirmed_first_read(),
+        ))
+        .await?;
         if account_gone {
             // Nothing more is read or written there: the summary tells the host.
             let divergent = Box::pin(self.newly_paused(&paused_before)).await?;
             return Ok(ReceiveSummary {
                 report,
                 account_gone,
+                held_at_restore,
                 divergent,
                 ..ReceiveSummary::default()
             });
@@ -1207,6 +1238,7 @@ impl Paykit {
             return Ok(ReceiveSummary {
                 report,
                 certificate_refused: Some(refused),
+                held_at_restore,
                 divergent,
                 ..ReceiveSummary::default()
             });
@@ -1230,6 +1262,7 @@ impl Paykit {
             return Ok(ReceiveSummary {
                 report,
                 applied,
+                held_at_restore,
                 records_unlisted: self
                     .unlisted()
                     .await?
@@ -1360,6 +1393,7 @@ impl Paykit {
         Ok(ReceiveSummary {
             report,
             applied,
+            held_at_restore,
             resends: answered.saturating_add(asked).saturating_add(marked),
             resend_refused,
             certificate_refused: None,

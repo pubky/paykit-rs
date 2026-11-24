@@ -141,6 +141,7 @@ pub struct PaykitProtocol {
     rail: Option<Arc<dyn Rail>>,
     /// The extension kinds the host's extension handles (Paykit spec 3.3).
     extensions: Vec<ExtensionKind>,
+    pub(crate) held_inventory: crate::restore_held::HeldInventory,
     /// The service time the current Paykit delivery operation observed (Paykit spec 8.1).
     pub(crate) delivery: crate::send_holds::DeliveryClock,
 }
@@ -172,6 +173,7 @@ impl PaykitProtocol {
             publishes_record: std::sync::atomic::AtomicU8::new(PUBLISHES_UNKNOWN),
             rail: None,
             extensions: Vec::new(),
+            held_inventory: Default::default(),
             delivery: crate::send_holds::DeliveryClock::default(),
         }
     }
@@ -839,6 +841,33 @@ pub(crate) fn restore_paykit_layer(
     }
     let mut cursor_time_ms = 0;
     let mut bounded = BoundedFamilies::default();
+    // An in-place restore can retain a stop signed after the backup (Switch spec 12.4).
+    for prefix in [key::SIDES, key::END_ORIGINS] {
+        for (name, value) in restoring
+            .previous_local_scan(prefix.as_bytes())
+            .map_err(|_| "the installation's held messages cannot be read")?
+        {
+            if keys.contains(&name) {
+                continue;
+            }
+            // An entry that doesn't read is left out, not the restore: without a side the
+            // cancellation's records are both read, and without an origin an end is judged
+            // as generated, the stricter rule (Paykit spec 7.2, 8.1).
+            let reads = match StateKey::parse(&name) {
+                Some(StateKey::Side(_)) => {
+                    state::restored::<KeptSide>(&name, &value, &binder).is_ok()
+                }
+                Some(StateKey::EndOrigin(_)) => {
+                    state::restored::<crate::allowances::EndOrigin>(&name, &value, &binder).is_ok()
+                }
+                // Only the two prefixes scanned above reach here; any other key is left out.
+                Some(_) | None => false,
+            };
+            if reads {
+                writes.push(LocalWrite::Put { key: name, value });
+            }
+        }
+    }
     for (key, value) in state {
         // The schema is closed: a key no builder of the SDK writes is refused, and every
         // value is read as its family's, bound to what its key names (`state::StateKey`).
@@ -1196,6 +1225,11 @@ pub(crate) fn restore_paykit_layer(
                 original_approvals.insert(record, original);
                 continue;
             }
+            StateKey::HeldMessagesOwed => {
+                state::restored::<crate::restore_held::HeldPass>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                continue;
+            }
             StateKey::AppliedReply(_) => {
                 state::restored::<crate::allowances::AppliedReply>(&key, &value, &binder)
                     .map_err(|_| unread())?;
@@ -1431,7 +1465,8 @@ pub(crate) fn restore_paykit_layer(
                 }
                 continue;
             }
-            StateKey::MessageNotice { .. }
+            StateKey::UnrecordedStop { .. }
+            | StateKey::MessageNotice { .. }
             | StateKey::Notice { .. }
             | StateKey::BlockedLost { .. } => {
                 let notice =
@@ -1641,6 +1676,15 @@ pub(crate) fn restore_paykit_layer(
             state::encode(&history).map_err(|_| "the executor history cannot be retained")?;
         writes.push(LocalWrite::Put { key, value });
     }
+    // Lists need a fresh empty version even when backup and installation both owe
+    // the original and the Switch raises no held-message duty (Paykit spec 7.2).
+    writes.push(
+        state::local_put(
+            key::HELD_MESSAGES_OWED,
+            &crate::restore_held::HeldPass::CarriedLists,
+        )
+        .map_err(|e| e.to_string())?,
+    );
     // A previous publication can outlive both the backup and a narrowed certificate.
     // Discovery waits until this app holds plain paykit_request (Paykit spec 8.4.1).
     writes.push(state::local_put(key::LIST_DISCOVERY, &true).map_err(|e| e.to_string())?);
@@ -1916,6 +1960,7 @@ impl Protocol for PaykitProtocol {
         &self,
         delivery: &pubky_switch_client::app::DeliveryView<'_>,
     ) -> Result<bool, StoreFailure> {
+        self.held_inventory.observe(delivery);
         // Nothing goes under a certificate Paykit refuses, or one that no longer sends the
         // kind, before any rule of the kind's own (Paykit spec 3.1 to 3.3, 7.2, 9).
         let cert = delivery.cert();

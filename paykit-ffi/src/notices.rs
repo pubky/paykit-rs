@@ -62,6 +62,9 @@ pub enum WalletNoticeKind {
     /// still be paid by hand, and Billing Periods and payments without a request go on.
     /// Shown once, and again after each reopen.
     AutomaticPaymentsHeld,
+    /// The record no longer shows this stop, and the request or Allowance is still open
+    /// (Paykit spec 7.2).
+    StopNotRecorded,
     /// A native case that this binding does not recognize.
     Other,
 }
@@ -75,6 +78,7 @@ impl From<paykit_sdk::NoticeKind> for WalletNoticeKind {
             K::AllowancePlacementExpired => Self::AllowancePlacementExpired,
             K::AllowanceAcceptanceBeforeLoss => Self::AllowanceAcceptanceBeforeLoss,
             K::AllowanceWithdrawalConfirmed => Self::AllowanceWithdrawalConfirmed,
+            K::StopNotRecorded => Self::StopNotRecorded,
             K::PossiblyDelivered => Self::PossiblyDelivered,
             K::ListDeliveryUnknown => Self::ListDeliveryUnknown,
             K::BlockedMessagesLost => Self::BlockedMessagesLost,

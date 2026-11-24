@@ -1073,7 +1073,7 @@ async fn test_blocked_return_restore_owed_lost_notice_settled_once_after_the_res
 async fn test_blocked_return_restore_owed_lost_notice_delivered_after_the_restore_not_told() {
     // The request bob's mark names is still queued when the bound drops the mark, its
     // delivery held, and the backup taken then carries the owed notice and the outbox. The
-    // restore puts the request back under the same `msg_id`; once it is delivered, the
+    // in-place restore still owes that same request; once it is delivered, the
     // receive after finds it delivered within the window: nothing is told, nothing owed.
     let w = World::new();
     let failing = Arc::new(FailingDeliveryReads::default());
@@ -1116,7 +1116,7 @@ async fn test_blocked_return_restore_owed_lost_notice_delivered_after_the_restor
     let backup = wallet.backup().await.unwrap();
     drop(wallet);
     let mut restored = Paykit::restore(
-        w.env(&w.alice, store()),
+        w.env(&w.alice, failing),
         PaykitConfig::default(),
         &backup,
         Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,

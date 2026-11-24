@@ -506,6 +506,7 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `NoticeKind::AllowancePlacementExpired` | Ordinary placement expired. The wallet still holds evidence of a possible Allowance conflict. Acknowledge the notice after showing it. The hold survives acknowledgment and restart. |
 | `NoticeKind::AllowanceAcceptanceBeforeLoss` | Show that the identified acceptance cannot open a budget after the payer’s declared provider loss. The proposing wallet withdraws only its verified original pending write. An uncertain read or a later lifetime keeps that record intact. The seller ends its matching accepted Allowance when the withdrawal arrives. |
 | `NoticeKind::AllowanceWithdrawalConfirmed` | The seller returned its signed end for the proposal and acceptance this wallet withdrew. The notice identifies that end. The original Allowance stays closed after acknowledgement and reopen. |
+| `NoticeKind::StopNotRecorded` | The record no longer shows the user's stop. Show that the request or Allowance is still open. The user can stop it again (Paykit spec 7.2). |
 | `NoticeKind::PossiblyDelivered` | Reconcile the original message with its recipient using its ID and signed hash. Acknowledging the notice records that the host has seen it. It authorizes no send or replacement. |
 | `NoticeKind::ListDeliveryUnknown` | The counterparty may not have this list. For a withdrawal it may keep paying the earlier list; otherwise it may lack the list. Acknowledging the notice authorizes nothing. `publish_list_to` for a chosen counterparty and `withdraw_list_from` for a withdrawn one report `Refusal::ListDeliveryUnknown`; a call that changes the list sends the new version instead. |
 | `NoticeKind::BlockedMessagesLost` | Show the affected counterparty and acceptance-time range. Consult the payment method for payments that may have been among the lost messages. |
@@ -535,6 +536,31 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `PublicAppFailureReason::Refused` | Exclude the unusable record. Its rule failure can help diagnose the lookup. |
 | `PublicAppFailureReason::Expired` | Wait for a current record from that app. A public record reaches its limit at any finite signed deadline or at the maximum age in the payee's signed identity document (90 days by default). |
 | `PublicAppFailureReason::OverBound` | This app's endpoints did not fit within the lookup bounds. Use the reason when explaining an incomplete lookup. |
+
+## Messages held at restore
+
+The receive summary counts original messages released, withdrawn and still waiting in
+`held_at_restore`. Show a waiting stop as pending a fresh record read. Receive checks it
+again until the Switch gives it up at its replay deadline. A released stop still passes
+the normal delivery checks. For `DeliveryUnknown`, show the original as possibly delivered
+and reconcile it with the counterparty or the current records (Paykit spec 7.2, 9).
+
+| Withdrawn message | What the host shows and what can happen next |
+| --- | --- |
+| One-time or recurring Payment Request | Show the original first. If the payer never answered, the user may authorize a new request. |
+| Payee or payer cancellation, or request rejection | Show the request's current status. With `StopNotRecorded`, the user may cancel or reject the open request again. When the counterparty has stopped the request itself, nothing more is needed. |
+| Period details | The payee may issue new details for an open period, within its limit of eight. The payer may ask for the originals by re-send request. |
+| Receipt | The payer may ask for the receipt retained in the payee record by re-send request. |
+| Acceptance reporting a payment, or payment proof | Show the existing payment. Ordinary payment recovery sends what the journal, claim and activity record still require. No user action is needed. |
+| Subscription acceptance | The user may accept again if the payer record still has no response. |
+| Private Payment List request or re-send request | The payer asks for a list at its next need. Restore and ordinary re-send rules handle further re-send requests. |
+| Allowance proposal | Show the possibly delivered original before the user authorizes a new proposal. |
+| Allowance acceptance or rejection | The user may answer a still-pending proposal again. A rejected proposal can remain pending at the proposer until withdrawn or the retained rejection arrives. |
+| Proposer's withdrawal | The late-withdrawal duty still applies. The user may withdraw again (Paykit spec 8.3.1). |
+| End of an accepted Allowance | Show the current Allowance. With `StopNotRecorded`, the user may end it again. |
+| Executor notice | Executors read the Allowance record themselves. |
+| Empty or nonempty Private Payment List | A fresh empty withdrawal is owed. Show the previous list, reapply the user's withdrawals, then let the user set the list and choose recipients again. |
+| Extension message | The extension owner may send again through its own call. |
 
 ## The payment method's settlement ID
 

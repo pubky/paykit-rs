@@ -56,6 +56,17 @@ impl From<HeldCursor> for CursorStatus {
         }
     }
 }
+/// Disposition of messages held at restore (Paykit spec 7.2).
+#[derive(uniffi::Record)]
+pub struct WalletHeldAtRestore {
+    /// Paykit messages released for delivery.
+    pub released: u32,
+    /// Carried messages withdrawn, including extensions.
+    pub withdrawn: u32,
+    /// Messages still waiting for a later receive.
+    pub waiting: u32,
+}
+
 /// What a `Paykit::receive` did.
 #[derive(uniffi::Record)]
 pub struct WalletReceiveReport {
@@ -74,6 +85,8 @@ pub struct WalletReceiveReport {
     /// The `msg_id`s of the messages received, each with its effect committed with the cursor
     /// move (Switch spec 8.2).
     pub applied: Vec<String>,
+    /// Outgoing messages checked after restore (Paykit spec 7.2).
+    pub held_at_restore: WalletHeldAtRestore,
     /// The `resend_request`s answered and asked.
     pub resends: u64,
     /// A recovery ask waits because its sender certificate lacks `paykit_contacts`.
@@ -175,6 +188,11 @@ impl NativeWallet {
                     held_cursor: r.held_cursor.map(Into::into),
                     events: r.events.into_iter().map(|e| event(app, e)).collect(),
                     applied: s.applied,
+                    held_at_restore: WalletHeldAtRestore {
+                        released: s.held_at_restore.released,
+                        withdrawn: s.held_at_restore.withdrawn,
+                        waiting: s.held_at_restore.waiting,
+                    },
                     resends: s.resends,
                     resend_refused: s.resend_refused.map(|r| Arc::new(PaymentRefusal(r))),
                     certificate_refused: s.certificate_refused.map(|r| Arc::new(PaymentRefusal(r))),

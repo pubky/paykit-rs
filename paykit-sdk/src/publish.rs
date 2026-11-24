@@ -572,6 +572,35 @@ fn bound_publication(
 }
 
 impl Paykit {
+    /// A new sharing choice or empty withdrawal reserved after restore is already current.
+    pub(crate) async fn list_has_current_choice(
+        &self,
+        queued: &pubky_switch_client::app::QueuedMessage,
+    ) -> Result<bool> {
+        let recipient = self
+            .local_get::<ListRecipient>(&key::list_recipient(&queued.to))
+            .await?;
+        let issue = self
+            .local_get::<ListReservation>(&key::list_reservation(&queued.to))
+            .await?;
+        Ok(recipient.zip(issue).is_some_and(|(recipient, issue)| {
+            issue.choice == recipient.choice
+                && issue.id == queued.msg_id
+                && issue.hash == queued.hash
+        }))
+    }
+
+    /// Restore normally commits the fresh withdrawal with the publication history.
+    /// A carried delivery can also be the only evidence of its recipient (Paykit spec 7.2).
+    pub(crate) async fn keep_list_withdrawal(&mut self, recipient: &[u8; 32]) -> Result<()> {
+        let at = key::list_recipient(recipient);
+        if self.local_get::<ListRecipient>(&at).await?.is_none() {
+            self.local_put(&at, &ListRecipient::restored(*recipient)?)
+                .await?;
+        }
+        Ok(())
+    }
+
     async fn publication_at(&self, record: &SharedRecord) -> Result<ListPublicationRecord> {
         let current = bound_publication(record, |target| self.app.record_key(target))?;
         if current.publisher == self.app_id() {
@@ -959,11 +988,7 @@ impl Paykit {
                 if prior.publisher != self.app_id() {
                     continue;
                 }
-                let at = key::list_recipient(&prior.recipient);
-                if self.local_get::<ListRecipient>(&at).await?.is_none() {
-                    self.local_put(&at, &ListRecipient::restored(prior.recipient)?)
-                        .await?;
-                }
+                self.keep_list_withdrawal(&prior.recipient).await?;
             }
             if !undiscovered {
                 self.local_delete(key::LIST_DISCOVERY).await?;

@@ -253,3 +253,53 @@ pub(crate) fn judge_append(
     }
     Ok(Send)
 }
+
+impl crate::Paykit {
+    pub(crate) async fn held_allowance_end(
+        &mut self,
+        q: &pubky_switch_client::app::QueuedMessage,
+        msg: &Message,
+        id: &AllowanceId,
+    ) -> crate::Result<crate::restore_held::StopEvidence> {
+        use crate::restore_held::{exact_stop, StopEvidence::*};
+
+        let target = allowance_target(&q.to, id);
+        let key = self.app.record_key(&target)?;
+        let read = self.app.read_record_fresh(&target).await?;
+        if let RecordRead::Kept { reason, .. } = &read {
+            if let Some(error) = crate::pay::kept_read_stop(reason) {
+                return Err(error);
+            }
+            return Ok(Unreadable);
+        }
+        let Some(Some(value)) = current(&target, &key, &read, false) else {
+            return Ok(Unreadable);
+        };
+        let Some(record) = bind_at(value, &self.identity(), &q.to, id) else {
+            return Ok(Unreadable);
+        };
+        let accepted = super::acceptance(&record);
+        if let Some(end) = &record.end {
+            if !exact_stop(end, q, self) {
+                return Ok(Absent);
+            }
+            // Without a durable user origin the original goes under the generated end's
+            // counterparty and window checks (Paykit spec 7.2, 8.3).
+            let at = key::end_origin(&q.msg_id);
+            if self.local_get::<super::EndOrigin>(&at).await?.is_none() {
+                let origin = super::EndOrigin::of(
+                    key,
+                    &record.proposal,
+                    accepted,
+                    end,
+                    super::EndCause::Automatic,
+                )?;
+                self.local_put(&at, &origin).await?;
+            }
+            return Ok(Recorded);
+        }
+        let open = record.conflicted.is_none()
+            && accepted.is_some_and(|a| msg.refs.as_slice() == [record.proposal.hash(), a.hash()]);
+        Ok(if open { Open } else { Absent })
+    }
+}

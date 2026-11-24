@@ -33,10 +33,14 @@ impl Paykit {
     /// A directory may settle the verdict while adopting an identity not yet confirmed
     /// on the Homeserver. A load repeats that unsettled read; the verdict alone is not enough.
     pub(crate) fn first_read_pending(&self) -> bool {
-        !self.first_read_done
-            && self.app.reconcile_mode()
-            && (self.app.restore_held_cursor().is_none()
-                || self.app.identity_confirmed_at().is_none())
+        self.app.reconcile_mode() && !self.confirmed_first_read()
+    }
+
+    /// The current instance read a confirmed page, or the restored client retains its verdict.
+    pub(crate) fn confirmed_first_read(&self) -> bool {
+        self.first_read_done
+            || (self.app.restore_held_cursor().is_some()
+                && self.app.identity_confirmed_at().is_some())
     }
 
     /// Allow this payee to start a conversation, including a pending connection request
