@@ -934,11 +934,13 @@ pub(crate) fn unless_local_stop(error: impl Into<PaykitError>) -> Result<()> {
 /// one acting: the Switch client's refusal for now, kept or not, or behind batches it keeps;
 /// the network or the switch not answering, an answer given before the body was read
 /// included, which is final for nothing (Switch wire 7.1); an answer of the switch whose
-/// Retry column (Switch spec 6.4) is anything but "no", such as a conflict, which a later
-/// resume reads again, but for a full quota, which may need the user; a conflict this SDK
-/// met; the own switch or `identity.json` unavailable for now (Paykit spec 4, 8.4); or the
-/// payment method's history unreachable for now (Paykit spec 7.2). An origin the client may
-/// not connect to is no wait. A wallet-wide stop is never one ([`stops_resume`]).
+/// Retry column (Switch spec 6.4) says the same request may pass as it is, after
+/// `Retry-After`, with a new timestamp or after a fresh read, such as a conflict, which a
+/// later resume reads again; a conflict this SDK met; the own switch or `identity.json`
+/// unavailable for now (Paykit spec 4, 8.4); or the payment method's history unreachable for
+/// now (Paykit spec 7.2). An answer that needs anything else first, a full quota, a key
+/// bundle or another service, and an origin the client may not connect to, are no waits. A
+/// wallet-wide stop is never one ([`stops_resume`]).
 ///
 /// The resume leaves such an entry for the next one and reports it as its outcome. Any other
 /// failure of one entry, which a later resume would meet again until the user or the host
@@ -957,14 +959,18 @@ pub(crate) fn entry_waits(error: &PaykitError) -> bool {
             AppError::Refused(ClientRefusal::NotNow(_) | ClientRefusal::KeptBatchesAhead(_))
             | AppError::Transport(_)
             | AppError::Switch(ClientError::Transport(_) | ClientError::BodyUnread { .. }) => true,
-            AppError::Switch(switch) => switch
-                .retry()
-                .is_some_and(|retry| !matches!(retry, Retry::No | Retry::WhenLimitFrees)),
+            AppError::Switch(switch) => switch.retry().is_some_and(|retry| {
+                matches!(
+                    retry,
+                    Retry::Yes
+                        | Retry::AfterRetryAfter
+                        | Retry::WithNewTimestamp
+                        | Retry::AfterReread
+                )
+            }),
             _ => false,
         },
-        PaykitError::Refused(
-            Refusal::NotNow(_) | Refusal::SwitchUnavailable(_) | Refusal::IdentityUnavailable(_),
-        )
+        PaykitError::Refused(Refusal::SwitchUnavailable(_) | Refusal::IdentityUnavailable(_))
         | PaykitError::Conflict(_)
         | PaykitError::Rail(RailError::Unavailable(_)) => true,
         _ => false,
@@ -4746,7 +4752,8 @@ impl Paykit {
     /// what it says ([`Paykit::journal_method_answer`]). It needs no switch and writes only
     /// the journal, so a payment the method reports made is journaled with its proof whatever
     /// the switch answers later in the resume (Paykit spec 7.2). It is the first thing such an
-    /// entry's own step does ([`Paykit::resolve_dispatched`]); a restored entry, which reads
+    /// entry's own step does ([`Paykit::resolve_dispatched`], [`Paykit::take_outcome`]), the
+    /// acceptance of a payment made released with it; a restored entry, which reads
     /// its claim first, and an offline one wait for their own step. A lookup the method
     /// can't answer leaves that entry as it is, for its own step to ask again; a wallet-wide
     /// stop, such as a store failure, is returned.
@@ -4763,6 +4770,14 @@ impl Paykit {
             if let Err(error) = self.journal_method_answer(&mut entry).await {
                 if stops_resume(&error) {
                     return Err(error);
+                }
+                continue;
+            }
+            // As the entry's own step does once the proof is journaled: its acceptance goes
+            // (Paykit spec 7.2 step 2); one that can't be queued now is left to the report.
+            if entry.stage == Stage::RailPaid {
+                if let Err(error) = self.release_acceptance(&mut entry, None).await {
+                    unless_stop(error)?;
                 }
             }
         }
@@ -6310,7 +6325,7 @@ mod tests {
             answer(E::Conflict),
             answer(E::Unavailable),
             answer(E::RateLimited),
-            answer(E::StaleEpoch),
+            answer(E::StaleTimestamp),
             PaykitError::Client(AppError::Switch(ClientError::BodyUnread {
                 status: 429,
                 code: E::RateLimited,
@@ -6333,6 +6348,9 @@ mod tests {
             answer(E::PermissionMissing),
             answer(E::NotFound),
             answer(E::QuotaExceeded),
+            answer(E::StaleEpoch),
+            answer(E::Moved),
+            PaykitError::Refused(Refusal::NotNow("reconcile".into())),
             PaykitError::Client(AppError::Transport(TransportError::Refused(
                 "origin".into(),
             ))),

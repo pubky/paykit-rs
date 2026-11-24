@@ -3016,10 +3016,9 @@ async fn test_resume_ends_at_a_store_failure_a_step_below_it_meets() {
     // The store fails every commit that queues an acceptance. The first payment's acceptance
     // can't be queued when it is dispatched, and that store failure is the call's answer: the
     // payment may be running, and the journal keeps it in flight. The second is dispatched
-    // with the store sound. Both are then shown paid, and the resume journals both with their
-    // proofs from the method's history first. Reporting the first meets the store failure
-    // again while releasing its acceptance: it ends the resume, so nothing of the second is
-    // written to the switch, and it stays `RailPaid`, paid once.
+    // with the store sound. Both are then shown paid. Resuming the first meets the store
+    // failure again while releasing its acceptance: it ends the resume, so the second payment
+    // is neither looked up nor written.
     for _ in 0..40 {
         let w = World::new();
         let store = Arc::new(HookedStore::default());
@@ -3081,7 +3080,7 @@ async fn test_resume_ends_at_a_store_failure_a_step_below_it_meets() {
             .into_iter()
             .find(|p| p.attempt_id == attempt_id)
             .unwrap();
-        assert_eq!(later.stage, paykit_sdk::Stage::RailPaid);
+        assert_eq!(later.stage, paykit_sdk::Stage::Paying);
         assert_eq!(w.rail.executions(&attempt_id), 1);
         return;
     }
