@@ -232,6 +232,11 @@ pub struct PaymentEntry {
     pub stage: PaymentStage,
     /// The entry came back from a backup.
     pub restored: bool,
+    /// Whether the payment method reported this payment made: the journal holds its proof.
+    /// At `Finished` it tells a payment made, its outcome written, from one written failed.
+    /// After a call returned a wallet-wide stop, it is how the host learns of a payment made
+    /// in that call, as the call's error carries no outcome (Paykit spec 7.2).
+    pub paid_by_method: bool,
     /// Paid by the method, its outcome waits: the payer's activity record holds a value that
     /// doesn't read, so `done` and the proof aren't written, and the attempt stays open (Paykit
     /// spec 7.2 step 3).
@@ -266,6 +271,7 @@ impl NativeWallet {
                             endpoint: p.endpoint_id.as_str().into(),
                             stage: p.stage.into(),
                             restored: p.restored,
+                            paid_by_method: p.paid_by_method,
                             record_held: p.record_held,
                             paid: p.paid.as_ref().map(Into::into),
                             rate: p.rate.map(|r| Amount {

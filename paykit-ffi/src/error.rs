@@ -1,5 +1,8 @@
 use paykit_sdk::{PaykitError, Refusal};
-use pubky_switch_client::{app::AppError, error::StoreError};
+use pubky_switch_client::{
+    app::{AppError, Refusal as AppRefusal},
+    error::StoreError,
+};
 use std::sync::Arc;
 
 /// A failure returned to the host without losing the original refusal or storage outcome.
@@ -53,57 +56,497 @@ pub enum WalletError {
     /// The bindings could not start the threads they run wallet work on.
     #[error("the wallet runtime is unavailable")]
     RuntimeUnavailable,
-    /// The payment rules prevent this action on the evidence currently available.
-    #[error("payment refused")]
-    Refused {
-        /// The original refusal with any evidence required for a subsequent confirmation.
-        refusal: Arc<PaymentRefusal>,
+    /// The user must see this and decide. A held, blocked, may-be-paid, transfer or rate
+    /// refusal is confirmed by passing the same `failure.refusal` back in
+    /// `PaymentOptions.confirmed_refusals`, and an `attempt_failed` one by passing its
+    /// `attempted_failure()`; every other code names the call that answers it (the host
+    /// guide's "Wallet errors" table).
+    #[error("needs the user: {}", failure.code)]
+    NeedsUser {
+        /// What failed and the refusal to show.
+        failure: Arc<WalletFailure>,
     },
-    /// The payment method could not complete its operation.
-    #[error("payment method: {failure}")]
-    Method {
-        /// The payment method's classified failure.
-        failure: crate::MethodError,
+    /// Nothing is wrong that waiting won't fix: the network, the service, or a call that can't
+    /// run now. Try again later, after `failure.retry_after_ms` when it is set.
+    #[error("retry later: {}", failure.code)]
+    RetryLater {
+        /// What failed.
+        failure: Arc<WalletFailure>,
     },
-    /// The native payment method returned a failure this binding cannot classify.
-    #[error("unknown payment method failure")]
-    UnknownMethod,
-    /// A Paykit or Switch operation failed.
-    #[error("wallet operation failed: {detail}")]
-    Operation {
-        /// The subsystem or rule that reported the failure.
-        kind: WalletFailureKind,
-        /// The native explanation suitable for reporting the failure.
-        detail: String,
-        /// The service error code, when returned.
-        service_code: Option<String>,
-        /// The retained Switch batch ID, when available for later reconciliation.
-        kept_batch: Option<Vec<u8>>,
-        /// The Switch rule that held this operation or a batch ahead of it.
-        switch_refusal: Option<Arc<crate::SwitchRefusal>>,
+    /// The call may have taken effect. Reconcile before trying again; `failure.kept_batch`
+    /// names a Switch batch kept for this call.
+    #[error("outcome unknown: {}", failure.code)]
+    OutcomeUnknown {
+        /// What failed.
+        failure: Arc<WalletFailure>,
+    },
+    /// Nothing took effect: the call was refused before anything was written or applied, and
+    /// is safe to make again once its cause is fixed.
+    #[error("not sent: {}", failure.code)]
+    NotSent {
+        /// What failed.
+        failure: Arc<WalletFailure>,
+    },
+    /// The answer is final: the request was rejected, cancelled or already paid, or the
+    /// refusal is one the bindings don't recognize (`unknown`). Trying again gives the same
+    /// answer, and none of these is confirmed.
+    #[error("permanent: {}", failure.code)]
+    Permanent {
+        /// What failed.
+        failure: Arc<WalletFailure>,
+    },
+    /// The wallet as a whole stopped for a recovery: an alarm, a recovery notice, a
+    /// certificate Paykit refused, or its authority. Show it and follow the recovery steps.
+    /// A hold on one record is `NeedsUser`, never this.
+    #[error("recovery: {}", failure.code)]
+    Recovery {
+        /// What failed.
+        failure: Arc<WalletFailure>,
     },
 }
+
+/// What failed, for a host that branches on `code` and shows or reports the rest. Codes are
+/// stable snake_case names, fixed with the first packaged release to a host.
+#[derive(uniffi::Object)]
+pub struct WalletFailure {
+    pub(crate) code: String,
+    pub(crate) context: String,
+    pub(crate) service_code: Option<String>,
+    pub(crate) retry_after_ms: Option<u64>,
+    pub(crate) quota_limit: Option<String>,
+    pub(crate) kept_batch: Option<Vec<u8>>,
+    pub(crate) switch_refusal: Option<Arc<crate::SwitchRefusal>>,
+    pub(crate) refusal: Option<Arc<PaymentRefusal>>,
+}
+
+/// The fields a host may log; the refusals show only their codes.
+impl std::fmt::Debug for WalletFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WalletFailure")
+            .field("code", &self.code)
+            .field("service_code", &self.service_code)
+            .field("retry_after_ms", &self.retry_after_ms)
+            .field("quota_limit", &self.quota_limit)
+            .field("kept_batch", &self.kept_batch.is_some())
+            .field("switch_refusal", &self.switch_refusal)
+            .field("refusal", &self.refusal)
+            .finish()
+    }
+}
+
+#[uniffi::export]
+impl WalletFailure {
+    /// What failed, as a stable machine-readable name.
+    pub fn code(&self) -> String {
+        self.code.clone()
+    }
+    /// A fixed explanation for logs and support: the code and what its case means, never
+    /// text the service, the network, the payment method, the store or a document gave.
+    pub fn context(&self) -> String {
+        self.context.clone()
+    }
+    /// The Switch service's error code, when it answered with one.
+    pub fn service_code(&self) -> Option<String> {
+        self.service_code.clone()
+    }
+    /// When to try again, in milliseconds, when the service said.
+    pub fn retry_after_ms(&self) -> Option<u64> {
+        self.retry_after_ms
+    }
+    /// The budget a full quota names (`quota_exceeded`'s `current.limit`, Switch wire 9.3),
+    /// such as `storage` or `contacts`, so the host can say which one to clear; `None` for a
+    /// name these bindings don't know.
+    pub fn quota_limit(&self) -> Option<String> {
+        self.quota_limit.clone()
+    }
+    /// A Switch batch kept for this call, which the wallet sends again by itself.
+    pub fn kept_batch(&self) -> Option<Vec<u8>> {
+        self.kept_batch.clone()
+    }
+    /// The Switch rule that held this call or a batch ahead of it.
+    pub fn switch_refusal(&self) -> Option<Arc<crate::SwitchRefusal>> {
+        self.switch_refusal.clone()
+    }
+    /// The payment refusal behind the failure, with its evidence.
+    pub fn refusal(&self) -> Option<Arc<PaymentRefusal>> {
+        self.refusal.clone()
+    }
+}
+
 impl WalletError {
     pub(crate) fn invalid(s: &str) -> Self {
         Self::InvalidInput { field: s.into() }
     }
+
+    /// The failure of the six cases; `None` for the enrollment, restore and store answers.
+    #[cfg(any(test, feature = "test-wallet"))]
+    pub(crate) fn failure(&self) -> Option<&Arc<WalletFailure>> {
+        match self {
+            Self::NeedsUser { failure }
+            | Self::RetryLater { failure }
+            | Self::OutcomeUnknown { failure }
+            | Self::NotSent { failure }
+            | Self::Permanent { failure }
+            | Self::Recovery { failure } => Some(failure),
+            _ => None,
+        }
+    }
 }
-/// Source of a wallet operation failure.
-#[derive(Clone, Debug, uniffi::Enum)]
-pub enum WalletFailureKind {
-    /// The Switch client could not complete the operation.
-    Client,
-    /// A change to the wallet's public payment endpoints still awaits publication.
-    PublicEndpointChangePending,
-    /// The Pubky Homeserver operation failed.
-    Homeserver,
-    /// The message, record or operation failed a protocol rule.
-    InvalidProtocolData,
-    /// The state used for the operation changed and must be read again.
-    Conflict,
-    /// A native case that this binding does not recognize.
-    Other,
+
+/// The Switch client's chain proof failing: handled as a rollback alarm.
+const CHAIN: (Category, &str) = (Category::Recovery, "chain");
+/// A write kept unsent behind earlier kept batches: the client returns it only with the
+/// call's own batch kept, so it may still apply.
+const KEPT_BATCHES_AHEAD: (Category, &str) = (Category::OutcomeUnknown, "kept_batches_ahead");
+/// A Switch client failure these bindings don't know.
+const CLIENT_UNCLASSIFIED: (Category, &str) = (Category::OutcomeUnknown, "client_unclassified");
+/// A payment method failure these bindings don't know.
+const METHOD_UNCLASSIFIED: (Category, &str) = (Category::OutcomeUnknown, "method_unclassified");
+/// A Paykit failure these bindings don't know.
+const UNCLASSIFIED: (Category, &str) = (Category::OutcomeUnknown, "unclassified");
+
+/// The codes whose failures no test can build: the mapping's own arms, so the host guide's
+/// table is checked against them as they are.
+#[cfg(test)]
+pub(crate) const UNBUILT: [(Category, &str); 5] = [
+    CHAIN,
+    KEPT_BATCHES_AHEAD,
+    CLIENT_UNCLASSIFIED,
+    METHOD_UNCLASSIFIED,
+    UNCLASSIFIED,
+];
+
+/// The action a failure calls for: the `WalletError` case it comes as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Category {
+    NeedsUser,
+    RetryLater,
+    OutcomeUnknown,
+    NotSent,
+    Permanent,
+    Recovery,
 }
+
+impl Category {
+    /// What the case tells the host, in fixed words: a failure's `context` is built from its
+    /// code and this alone, never from text the service, the network, the payment method, the
+    /// store or a document gave.
+    fn meaning(self) -> &'static str {
+        match self {
+            Category::NeedsUser => "the user must see this and decide",
+            Category::RetryLater => "a later call can succeed",
+            Category::OutcomeUnknown => "the call may have taken effect",
+            Category::NotSent => "nothing took effect",
+            Category::Permanent => "the answer is final",
+            Category::Recovery => "the wallet stopped for a recovery",
+        }
+    }
+
+    /// The `WalletError` case this category comes as.
+    #[cfg(test)]
+    pub(crate) fn case(self) -> &'static str {
+        match self {
+            Category::NeedsUser => "NeedsUser",
+            Category::RetryLater => "RetryLater",
+            Category::OutcomeUnknown => "OutcomeUnknown",
+            Category::NotSent => "NotSent",
+            Category::Permanent => "Permanent",
+            Category::Recovery => "Recovery",
+        }
+    }
+}
+
+fn failure(category: Category, code: &str) -> (Category, WalletFailure) {
+    (
+        category,
+        WalletFailure {
+            code: code.into(),
+            context: String::new(),
+            service_code: None,
+            retry_after_ms: None,
+            quota_limit: None,
+            kept_batch: None,
+            switch_refusal: None,
+            refusal: None,
+        },
+    )
+}
+
+fn into_error((category, mut failure): (Category, WalletFailure)) -> WalletError {
+    // Set last, from the final code and case alone.
+    failure.context = format!("{}: {}", failure.code, category.meaning());
+    let failure = Arc::new(failure);
+    match category {
+        Category::NeedsUser => WalletError::NeedsUser { failure },
+        Category::RetryLater => WalletError::RetryLater { failure },
+        Category::OutcomeUnknown => WalletError::OutcomeUnknown { failure },
+        Category::NotSent => WalletError::NotSent { failure },
+        Category::Permanent => WalletError::Permanent { failure },
+        Category::Recovery => WalletError::Recovery { failure },
+    }
+}
+
+/// The action and stable code of each payment refusal, the table of the host guide's
+/// "Wallet errors" section. Every kind the bindings show has a case. `Unknown`, a refusal the
+/// bindings don't recognize, is final: never retried and never confirmed.
+pub(crate) fn refusal_category(kind: &crate::RefusalKind) -> (Category, &'static str) {
+    use crate::RefusalKind as K;
+    use Category::*;
+    match kind {
+        // Confirmed by passing the same refusal back (`PaymentOptions.confirmed_refusals`).
+        K::HeldAfterRestore { .. } => (NeedsUser, "held_after_restore"),
+        K::Blocked { .. } => (NeedsUser, "blocked"),
+        K::MayBePaid { doubt: Some(_) } => (NeedsUser, "may_be_paid"),
+        // No doubt to confirm: the user settles it with `reconcile` first.
+        K::MayBePaid { doubt: None } => (NeedsUser, "may_be_paid_reconcile"),
+        K::Transfer { .. } => (NeedsUser, "transfer"),
+        K::PricedByRate { .. } => (NeedsUser, "priced_by_rate"),
+        // Decided by the user through a call of its own.
+        K::LossChanged { .. } => (NeedsUser, "loss_changed"),
+        K::ListDeliveryUnknown { .. } => (NeedsUser, "list_delivery_unknown"),
+        K::Divergent { .. } => (NeedsUser, "divergent"),
+        K::MaybeCredited => (NeedsUser, "maybe_credited"),
+        K::SettlementBucketFull { .. } => (NeedsUser, "settlement_bucket_full"),
+        K::PeriodNotStarted => (NeedsUser, "period_not_started"),
+        K::IdentityUnconfirmed => (NeedsUser, "identity_unconfirmed"),
+        K::ScopeMissing { .. } => (NeedsUser, "scope_missing"),
+        K::NotSubscribed => (NeedsUser, "not_subscribed"),
+        // No wait lifts it, only the shared post-loss hold standing too; the user pays by hand.
+        K::FloorHeld => (NeedsUser, "floor_held"),
+        // The SDK gives its reason as text only, and the reasons span every case, from a wait
+        // to an alarm: shown to the user, it is never retried by itself.
+        K::NotNow => (NeedsUser, "not_now"),
+        K::WaitingForList {
+            device_clock_behind: false,
+        } => (RetryLater, "waiting_for_list"),
+        // The list expired only by the service's time: the device clock is behind it.
+        K::WaitingForList {
+            device_clock_behind: true,
+        } => (NeedsUser, "waiting_for_list_clock_behind"),
+        K::SwitchUnavailable => (RetryLater, "switch_unavailable"),
+        K::PaymentInProgress => (RetryLater, "payment_in_progress"),
+        K::BeingHandledByOtherWallet => (RetryLater, "being_handled_by_other_wallet"),
+        K::IdentityUnavailable => (RetryLater, "identity_unavailable"),
+        K::AttemptedPeriodsFull => (RetryLater, "attempted_periods_full"),
+        // Refused before anything was written.
+        K::NoDestination => (NotSent, "no_destination"),
+        K::UnsupportedEndpoint => (NotSent, "unsupported_endpoint"),
+        K::Destination => (NotSent, "destination"),
+        K::Label => (NotSent, "label"),
+        K::Recurring => (NotSent, "recurring"),
+        K::Usage => (NotSent, "usage"),
+        // The attempt was written and then failed before money moved: it is closed. A
+        // failure with its cause comes as the cause's case.
+        K::AttemptFailed => (Permanent, "attempt_failed"),
+        K::NotFound => (Permanent, "not_found"),
+        K::Rejected => (Permanent, "rejected"),
+        K::Cancelled => (Permanent, "cancelled"),
+        K::AllowanceEnded => (Permanent, "allowance_ended"),
+        K::AllowanceConflicted => (Permanent, "allowance_conflicted"),
+        K::CreditHistoryLost => (Permanent, "credit_history_lost"),
+        K::AlreadyPaid => (Permanent, "already_paid"),
+        K::DeadlinePassed => (Permanent, "deadline_passed"),
+        K::PaymentTimeOutside { .. } => (Permanent, "payment_time_outside"),
+        K::Subscribed => (Permanent, "subscribed"),
+        K::ManualOnly => (Permanent, "manual_only"),
+        // Final for automatic paying; the user can still pay by hand.
+        K::NotAutomatic => (Permanent, "not_automatic"),
+        K::Unknown => (Permanent, "unknown"),
+        K::NotCurrent => (Recovery, "not_current"),
+        // One record is held, not the wallet: shown for that request, with nothing to retry.
+        // It reads again or is written again, or, with its payment history lost to a delete,
+        // holds that obligation for good; the refusal doesn't say which yet.
+        K::RecordHeld => (NeedsUser, "record_held"),
+        K::CertificateRefused => (Recovery, "certificate_refused"),
+    }
+}
+
+/// The action a Switch service's error answer calls for, by the Retry column of Switch spec
+/// 6.4. The code is `switch_` and the wire's error code (Switch wire 7.6).
+fn service_category(code: pubky_switch_core::http::ErrorCode) -> (Category, String) {
+    use pubky_switch_core::http::{ErrorCode as E, Retry as R};
+    use Category::*;
+    let category = match (code, code.retry()) {
+        // The app's certificate or its place in the identity ended: stop and recover.
+        (E::NotCurrent | E::CertExpired, _) | (_, R::HeldForNextGeneration) => Recovery,
+        // The certificate lacks the permission: the user approves a wider one.
+        (E::PermissionMissing, _) => NeedsUser,
+        // The identity.json delivered isn't the newest: a receive reads the current one.
+        (E::StaleIdentity, _) => RetryLater,
+        // Nothing applied: the recipient may admit the sender later, or a smaller request
+        // fits.
+        (E::NotAdmitted | E::TooLarge, _) => NotSent,
+        (_, R::No) => Permanent,
+        // The state the call was computed from changed: nothing applied, decide again.
+        (_, R::AfterReread) => NotSent,
+        // The same call can succeed once time passes or the client has caught up.
+        (
+            _,
+            R::WithNewTimestamp
+            | R::AfterKeyBundle
+            | R::AfterResigning
+            | R::AfterResealing
+            | R::AfterDeliveringIdentity
+            | R::AtNextService
+            | R::AfterRetryAfter
+            | R::WhenLimitFrees
+            | R::Yes,
+        ) => RetryLater,
+    };
+    (category, format!("switch_{}", code.as_str()))
+}
+
+/// A limit name of Switch wire 9.3, as the bindings' own text: a name the answer gives that
+/// isn't one of them is never passed on, since the answer's text is the service's.
+fn known_quota_limit(limit: &str) -> Option<&'static str> {
+    [
+        "inbox",
+        "sender_share",
+        "storage",
+        "record_keys",
+        "claims",
+        "claim_share",
+        "attempts",
+        "open_attempts",
+        "contacts",
+        "conversations",
+        "deny",
+        "invite_codes",
+        "connect_requests",
+    ]
+    .into_iter()
+    .find(|known| *known == limit)
+}
+
+/// The action a full quota calls for, by the limit the answer names and what frees it
+/// (Switch wire 9.3).
+fn quota_category(limit: Option<&str>) -> (Category, String) {
+    use Category::*;
+    let (category, code) = match limit {
+        // Frees with time: the recipient's apps reading their feed, or the service deleting
+        // old claims.
+        Some("inbox" | "sender_share" | "claims" | "claim_share") => {
+            (RetryLater, "switch_quota_wait")
+        }
+        // Frees as this app's open attempts resolve, some only by the user's answer.
+        Some("open_attempts") => (NeedsUser, "switch_quota_open_attempts"),
+        // Frees only after the user removes something, through another app or the signer.
+        Some(
+            "storage" | "record_keys" | "contacts" | "conversations" | "deny" | "invite_codes",
+        ) => (NeedsUser, "switch_quota_full"),
+        // Nothing applied; the recipient may answer its pending requests, or never.
+        Some("connect_requests") => (NotSent, "switch_quota_connect_requests"),
+        // Final for this obligation: no more attempts fit its claim.
+        Some("attempts") => (Permanent, "switch_quota_final"),
+        // A limit these bindings don't know: shown, never retried by itself.
+        _ => (NeedsUser, "switch_quota_exceeded"),
+    };
+    (category, code.into())
+}
+
+/// The action and stable code of a failure of the Switch client's base client.
+fn switch_client_category(e: &pubky_switch_client::error::ClientError) -> (Category, String) {
+    use pubky_switch_client::error::ClientError as C;
+    use Category::*;
+    let (category, code) = match e {
+        C::Switch {
+            code: pubky_switch_core::http::ErrorCode::QuotaExceeded,
+            current,
+            ..
+        } => return quota_category(current.get("limit").and_then(|limit| limit.as_str())),
+        C::Switch { code, .. } => return service_category(*code),
+        C::OwnRecoveryRequired { .. } => (Recovery, "own_recovery_required"),
+        // Signed by the service and not verifying: evidence handled as a rollback.
+        C::Chain(_) => CHAIN,
+        C::DisplayReadPending => (RetryLater, "display_read_pending"),
+        C::Transport(_) => (RetryLater, "transport"),
+        C::BadServiceSignature { .. } => (RetryLater, "bad_service_signature"),
+        C::StaleAnswer { .. } => (RetryLater, "stale_answer"),
+        C::BodyUnread { .. } => (RetryLater, "body_unread"),
+        C::InvalidResponse(_) => (RetryLater, "invalid_response"),
+        C::BodyOverCap { .. } => (NotSent, "body_over_cap"),
+        C::Unpinned => (NotSent, "unpinned"),
+        C::Usage(_) => (NotSent, "client_usage"),
+        C::Core(_) => (Permanent, "invalid_data"),
+        _ => CLIENT_UNCLASSIFIED,
+    };
+    (category, code.into())
+}
+
+/// The action and stable code of a rule of the Switch client's app layer that refused a call.
+fn app_refusal_category(refusal: &AppRefusal) -> (Category, &'static str) {
+    use Category::*;
+    match refusal {
+        AppRefusal::Stopped => (Recovery, "stopped"),
+        AppRefusal::Left => (Recovery, "left"),
+        AppRefusal::Gone => (Recovery, "gone"),
+        AppRefusal::RecoveryRequired { .. } => (Recovery, "recovery_required"),
+        AppRefusal::Certificate { .. } => (Recovery, "certificate_refused"),
+        AppRefusal::Approval(_) => (Permanent, "approval_refused"),
+        // Text only, from reconcile mode to the clocks: shown, never retried by itself.
+        AppRefusal::NotNow(_) => (NeedsUser, "client_not_now"),
+        AppRefusal::KeptBatchesAhead(_) => KEPT_BATCHES_AHEAD,
+        AppRefusal::Usage(_) => (NotSent, "client_usage"),
+        AppRefusal::CarriedTooLarge { .. } => (NotSent, "carried_too_large"),
+        AppRefusal::DutiesTooLarge { .. } => (NotSent, "duties_too_large"),
+        // The user unblocks enough peers to make room, then the recovery is followed again.
+        AppRefusal::DenyListFull { .. } => (NeedsUser, "deny_list_full"),
+        AppRefusal::WontDeliver(_) => (Permanent, "wont_deliver"),
+        _ => CLIENT_UNCLASSIFIED,
+    }
+}
+
+/// The action, code and Switch details of a failure of the Switch client.
+fn client_failure(e: &AppError) -> (Category, WalletFailure) {
+    use pubky_switch_client::error::ClientError;
+    use Category::*;
+    let (mut category, mut failure) = match e.unkept() {
+        AppError::ExpiredUnsent => failure(NotSent, "expired_unsent"),
+        // Reached only behind a kept batch: the commit failed after the batch was kept.
+        AppError::Store(_) => failure(OutcomeUnknown, "store_after_kept"),
+        AppError::Protocol(_) => failure(OutcomeUnknown, "protocol_store"),
+        AppError::Transport(_) => failure(RetryLater, "transport"),
+        AppError::NotAnsweringAsAccount { .. } => failure(RetryLater, "account_not_answering"),
+        AppError::InvalidData(_) => failure(Permanent, "invalid_data"),
+        AppError::Alarm(_) => failure(Recovery, "alarm"),
+        AppError::Refused(refusal) => {
+            let (category, code) = app_refusal_category(refusal);
+            failure(category, code)
+        }
+        AppError::Switch(switch) => {
+            let (category, code) = switch_client_category(switch);
+            let (category, mut failure) = failure(category, &code);
+            if let ClientError::Switch { retry_after, .. }
+            | ClientError::BodyUnread { retry_after, .. } = switch
+            {
+                failure.retry_after_ms = retry_after.map(|s| s.saturating_mul(1000));
+            }
+            if let ClientError::Switch {
+                code: pubky_switch_core::http::ErrorCode::QuotaExceeded,
+                current,
+                ..
+            } = switch
+            {
+                failure.quota_limit = current
+                    .get("limit")
+                    .and_then(|limit| limit.as_str())
+                    .and_then(known_quota_limit)
+                    .map(Into::into);
+            }
+            (category, failure)
+        }
+        _ => failure(CLIENT_UNCLASSIFIED.0, CLIENT_UNCLASSIFIED.1),
+    };
+    failure.service_code = e.code().map(|code| code.as_str().into());
+    failure.kept_batch = e.kept_batch().map(Vec::from);
+    failure.switch_refusal = crate::SwitchRefusal::from_error(e);
+    // A batch kept for this call may have applied: reconcile before trying again.
+    if failure.kept_batch.is_some() && !matches!(category, Recovery) {
+        category = OutcomeUnknown;
+    }
+    (category, failure)
+}
+
 impl From<StoreError> for WalletError {
     fn from(e: StoreError) -> Self {
         use crate::StorageError as S;
@@ -127,74 +570,96 @@ impl From<AppError> for WalletError {
 }
 impl From<PaykitError> for WalletError {
     fn from(e: PaykitError) -> Self {
-        let kind = match &e {
+        use Category::*;
+        let categorized = match &e {
             PaykitError::Refused(r) => {
-                return Self::Refused {
-                    refusal: Arc::new(PaymentRefusal(r.clone())),
-                }
+                let refusal = Arc::new(PaymentRefusal(r.clone()));
+                let (category, code) = refusal.case();
+                let (category, mut failure) = failure(category, code);
+                failure.refusal = Some(refusal);
+                (category, failure)
             }
-            PaykitError::Client(AppError::Refused(
-                pubky_switch_client::app::Refusal::NotJoined,
-            )) => return Self::NotJoined,
-            PaykitError::Client(AppError::Refused(
-                pubky_switch_client::app::Refusal::RestoreQuestionOpen,
-            )) => return Self::RestoreQuestionOpen,
+            // The enrollment and restore answers keep their own cases, kept or not. A store
+            // failure keeps its own case only bare: after a batch was kept it may have applied.
             PaykitError::Client(AppError::Store(e)) => return e.clone().into(),
             PaykitError::Client(AppError::Protocol(failure)) => {
                 return failure.error().clone().into()
             }
-            PaykitError::Client(_) => WalletFailureKind::Client,
-            PaykitError::PublicEndpointChangePending(_) => {
-                WalletFailureKind::PublicEndpointChangePending
-            }
-            PaykitError::Rail(error) => {
-                return Self::Method {
-                    failure: match error {
-                        paykit_sdk::RailError::Unavailable(r) => {
-                            crate::MethodError::Unavailable { reason: r.clone() }
-                        }
-                        paykit_sdk::RailError::Refused(r) => {
-                            crate::MethodError::Refused { reason: r.clone() }
-                        }
-                        paykit_sdk::RailError::InvalidSelection(r) => {
-                            crate::MethodError::InvalidSelection { reason: r.clone() }
-                        }
-                        _ => return Self::UnknownMethod,
-                    },
+            PaykitError::Client(error) => match error.unkept() {
+                AppError::Refused(AppRefusal::NotJoined) => return Self::NotJoined,
+                AppError::Refused(AppRefusal::RestoreQuestionOpen) => {
+                    return Self::RestoreQuestionOpen
                 }
+                _ => client_failure(error),
+            },
+            // The edit is saved and published once what stopped its signing clears. The SDK
+            // builds this from a refusal of the Switch client: a recovery stays one, kept
+            // batches ahead keep their doubt, and anything else needs the user or a sibling
+            // app to act, since the saved edit means "not sent" or "final" is untrue.
+            PaykitError::PublicEndpointChangePending(error) => {
+                let (category, mut failure) = client_failure(error);
+                failure.code = "public_endpoint_change_pending".into();
+                let category = match category {
+                    Recovery => Recovery,
+                    OutcomeUnknown => OutcomeUnknown,
+                    RetryLater => RetryLater,
+                    NeedsUser | NotSent | Permanent => NeedsUser,
+                };
+                (category, failure)
             }
-            PaykitError::Lib(_) => WalletFailureKind::InvalidProtocolData,
-            PaykitError::Conflict(_) => WalletFailureKind::Conflict,
-            PaykitError::Homeserver(_) => WalletFailureKind::Homeserver,
-            _ => WalletFailureKind::Other,
+            PaykitError::Rail(error) => match error {
+                paykit_sdk::RailError::Unavailable(_) => failure(RetryLater, "method_unknown"),
+                paykit_sdk::RailError::Refused(_) => failure(NotSent, "method_not_submitted"),
+                paykit_sdk::RailError::InvalidSelection(_) => {
+                    failure(Permanent, "method_invalid_selection")
+                }
+                _ => failure(METHOD_UNCLASSIFIED.0, METHOD_UNCLASSIFIED.1),
+            },
+            // A value the caller gave, against data from the network or the store.
+            PaykitError::Lib(paykit_lib::Error::Validation(_)) => failure(NotSent, "invalid_input"),
+            PaykitError::Lib(_) => failure(Permanent, "invalid_protocol_data"),
+            // Nothing applied: read the current state, decide again, then redo.
+            PaykitError::Conflict(_) => failure(NotSent, "conflict"),
+            PaykitError::Homeserver(_) => failure(RetryLater, "homeserver"),
+            _ => failure(UNCLASSIFIED.0, UNCLASSIFIED.1),
         };
-        let client = match &e {
-            PaykitError::Client(error) | PaykitError::PublicEndpointChangePending(error) => {
-                Some(error)
-            }
-            _ => None,
-        };
-        Self::Operation {
-            kind,
-            detail: e.to_string(),
-            service_code: client
-                .and_then(AppError::code)
-                .map(|code| code.as_str().into()),
-            kept_batch: client.and_then(AppError::kept_batch).map(Vec::from),
-            switch_refusal: client.and_then(crate::SwitchRefusal::from_error),
-        }
+        into_error(categorized)
     }
 }
 
 /// The exact payment refusal and its confirmation evidence retained by the SDK.
-#[derive(Debug, uniffi::Object)]
+#[derive(uniffi::Object)]
 pub struct PaymentRefusal(pub(crate) Refusal);
+
+impl PaymentRefusal {
+    /// The case and code it comes as. An attempt that failed comes as its cause's case: it was
+    /// closed with nothing paid.
+    fn case(&self) -> (Category, &'static str) {
+        let (category, code) = refusal_category(&self.kind());
+        match &self.0 {
+            Refusal::AttemptFailed(cause) => (PaymentRefusal((**cause).clone()).case().0, code),
+            _ => (category, code),
+        }
+    }
+}
+
+/// Only the code: the SDK's refusal text can quote what the switch or the network said.
+impl std::fmt::Debug for PaymentRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("PaymentRefusal")
+            .field(&self.case().1)
+            .finish()
+    }
+}
 
 #[uniffi::export]
 impl PaymentRefusal {
-    /// Return the native explanation for display.
+    /// A fixed description for display: the refusal's code and what its case means. The SDK's
+    /// own refusal text can quote what the switch or the network said, so it never leaves
+    /// the bindings; the refusal's data is in `kind()`.
     pub fn reason(&self) -> String {
-        self.0.to_string()
+        let (category, code) = self.case();
+        format!("{code}: {}", category.meaning())
     }
     /// For a failed earlier attempt, return the underlying reason when available.
     pub fn attempted_failure(&self) -> Option<Arc<Self>> {

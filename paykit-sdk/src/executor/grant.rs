@@ -25,8 +25,12 @@ impl Paykit {
         &mut self,
         target: &RecordTarget,
     ) -> Result<(AppliedRecord, KeptOp)> {
-        let RecordRead::Fresh(record) = self.app.read_record_fresh(target).await? else {
-            return Err(held().into());
+        let record = match self.app.read_record_fresh(target).await? {
+            RecordRead::Fresh(record) => record,
+            RecordRead::Kept { reason, .. } => {
+                return Err(crate::pay::kept_read_stop(&reason).unwrap_or_else(|| held().into()))
+            }
+            _ => return Err(held().into()),
         };
         self.app
             .shared_evidence()

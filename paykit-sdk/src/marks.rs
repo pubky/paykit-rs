@@ -1022,7 +1022,9 @@ impl Paykit {
                 {
                     return Err(PaykitError::corrupt());
                 }
-                let _ = self.send_message(msg_id).await;
+                if let Err(error) = self.send_message(msg_id).await {
+                    crate::pay::unless_stop(error)?;
+                }
             }
             match self.app.delivery(msg_id).await? {
                 Some(Delivery::Queued { .. }) => return Ok(0),
@@ -1118,7 +1120,9 @@ impl Paykit {
         self.app
             .queue_signed_with(crate::protocol::BACKUP_NAME, signed, &tx.into_writes())
             .await?;
-        let _ = self.send_message(&msg_id).await;
+        if let Err(error) = self.send_message(&msg_id).await {
+            crate::pay::unless_stop(error)?;
+        }
         if matches!(
             self.app.delivery(&msg_id).await?,
             Some(Delivery::Accepted { .. })

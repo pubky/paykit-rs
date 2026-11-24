@@ -405,26 +405,51 @@ async fn made_without_its_acceptance(
     w: &World,
     store: &Arc<NoSeenMarks>,
 ) -> (Paykit, Paykit, RequestRef, AttemptId) {
+    let mut wallet = w
+        .wallet_on("wallet", Arc::clone(store) as Arc<dyn StateStore>)
+        .await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    // The store fails the commit that queues the acceptance: that store failure stops the
+    // wallet, so the call returns it, with the payment in flight in the journal.
     store.refuse_queue.store(true, Ordering::SeqCst);
-    let (mut wallet, mut phone, request, attempt_id) =
-        in_flight_on(w, Arc::clone(store) as Arc<dyn StateStore>).await;
+    w.rail.next(Behaviour::Hang);
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome;
+    assert!(
+        matches!(
+            &refused,
+            Err(paykit_sdk::PaykitError::Client(
+                pubky_switch_client::app::AppError::Store(_)
+            ))
+        ),
+        "{refused:?}"
+    );
+    store.refuse_queue.store(false, Ordering::SeqCst);
+    let attempt_id = wallet.payments().await.unwrap()[0].attempt_id;
+    phone.receive(None).await.unwrap();
     store.armed.store(true, Ordering::SeqCst);
     phone_writes(&mut phone, &request, Some(INVALID)).await;
     w.rail.settle(&attempt_id, true);
+    // The acceptance is queued now, and the outcome waits on the record that doesn't read.
     let resumed = wallet.resume_payments().await.unwrap();
     assert!(
         matches!(resumed.as_slice(), [PayOutcome::RecordHeld { .. }]),
         "{resumed:?}"
     );
     assert_eq!(resumed[0].attempt_id(), attempt_id);
-    store.refuse_queue.store(false, Ordering::SeqCst);
     (wallet, phone, request, attempt_id)
 }
 
 #[tokio::test]
-async fn test_outcome_record_repair_sends_the_acceptance_still_owed() {
-    // Every try to queue the acceptance failed, and the outcome waited on the record: the
-    // repair that settles the outcome sends the acceptance and places it with the proof.
+async fn test_outcome_record_repair_places_the_acceptance_with_the_proof() {
+    // The acceptance couldn't be queued when the payment was dispatched, and the outcome
+    // waited on the record: the repair that settles the outcome places the acceptance with
+    // the proof.
     let w = World::new();
     let store = Arc::new(NoSeenMarks::default());
     let (mut wallet, _phone, request, attempt_id) = made_without_its_acceptance(&w, &store).await;
@@ -436,7 +461,7 @@ async fn test_outcome_record_repair_sends_the_acceptance_still_owed() {
 }
 
 #[tokio::test]
-async fn test_outcome_record_user_done_sends_the_acceptance_still_owed() {
+async fn test_outcome_record_user_done_places_the_acceptance_with_the_proof() {
     // The same, settled by the user's `done` once the record is deleted and rebuilt.
     let w = World::new();
     let store = Arc::new(NoSeenMarks::default());

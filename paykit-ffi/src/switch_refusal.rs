@@ -2,8 +2,15 @@ use pubky_switch_client::app::{AppError, Refusal, WontDeliver};
 use std::sync::Arc;
 
 /// The Switch rule that held the operation, including an earlier batch waiting for an answer.
-#[derive(Debug, uniffi::Object)]
+#[derive(uniffi::Object)]
 pub struct SwitchRefusal(pub(crate) Refusal);
+
+/// No text: the client's refusal can carry what a counterparty or the service gave.
+impl std::fmt::Debug for SwitchRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SwitchRefusal").finish_non_exhaustive()
+    }
+}
 
 impl SwitchRefusal {
     pub(crate) fn from_error(error: &AppError) -> Option<Arc<Self>> {
