@@ -633,7 +633,11 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 
 ## The payment method's proof
 
-A method reports a payment made with its proof, a JSON object the payee's message carries (Paykit wire 4.10). The wallet accepts any proof that reads as an object, because the money has already moved: refusing it would leave a paid payment open for good. Paykit decodes the proof before it signs the message, so a number it can't hold exactly, such as an integer above 2^64 or a fixed decimal like `1.50`, is signed with other digits (`1.5`). Write any number that must survive exactly as a string, for example `{"fee":"1.50"}`. Give each member once: a repeated member keeps only its last value.
+A method reports a payment made with its proof, a JSON object the payer's app signs into the `paykit.payment_proof` message the payee receives (Paykit wire 4.10). The wallet accepts any proof that reads as an object, because the money has already moved: refusing it would leave a paid payment open for good. Keep a proof inside the limits that message has:
+- Its whole message, proof included, is at most 16 KiB, and a proof that takes it over leaves the payment paid with its outcome unwritten.
+- Keep its nesting shallow, well under 100 levels. The wallet's journal holds the proof a few levels down: a proof nested close to the decoder's limit of 128 is written, then can't be read back, and the wallet's payment list fails until the entry is gone.
+- Paykit decodes the proof before it signs it, so a number can lose its spelling, and a large one its value: `1.50` is signed as `1.5`, and an integer above 2^64 changes value, for example 18446744073709551617 is signed as `1.8446744073709552e19`, which is 2^64. Write any number that must survive exactly as a string, for example `{"fee":"1.50"}`.
+- Give each member once: a repeated member keeps only its last value.
 
 ## The payment method's settlement ID
 
@@ -717,7 +721,7 @@ Two rules override a code's case. A failure with a `keptBatch` comes as `Outcome
 | `held_after_restore` | `Refusal::HeldAfterRestore` | `NeedsUser` | Show the hold and that the request may be cancelled; on the user's yes pass the refusal back. |
 | `blocked` | `Refusal::Blocked` | `NeedsUser` | Show the blocked payee and the exact payment; on the user's yes pass the refusal back. |
 | `may_be_paid` | `Refusal::MayBePaid` with a doubt | `NeedsUser` | Show the doubt; on the user's yes pass the refusal back. |
-| `may_be_paid_reconcile` | `Refusal::MayBePaid` without a doubt | `NeedsUser` | Show that an earlier payment may be paid; `reconcile` and answer its doubtful payments, then pay again. |
+| `may_be_paid_reconcile` | `Refusal::MayBePaid` without a doubt | `NeedsUser` | Show that an earlier payment may be paid; `reconcile` and answer its doubtful payments with `resolveConfirmedAttempt`, passing each attempt's handle, then pay again. |
 | `transfer` | `Refusal::Transfer` | `NeedsUser` | Show the amount asked beside the amount and asset the payment method would transfer, or that it can't tell; on the user's yes pass the refusal back. |
 | `priced_by_rate` | `Refusal::PricedByRate` | `NeedsUser` | Get the user's authorization for this quote; then pass the refusal back. |
 | `loss_changed` | `Refusal::LossChanged` | `NeedsUser` | Show the current provider-loss boundary and ask again with it. |

@@ -378,7 +378,7 @@ async fn requests_and_receipts(world: &World) -> TestResult {
     let (_, wallet, _, mut owner) = Box::pin(enrolled_wallet(
         world,
         root.path(),
-        account,
+        account.clone(),
         WalletScopes {
             request: true,
             contacts: true,
@@ -448,6 +448,9 @@ async fn requests_and_receipts(world: &World) -> TestResult {
     )?;
 
     Box::pin(receive(&mut payer)).await?;
+    // The method's proof carries numbers the wallet can't hold as written. The payment is
+    // made, so the proof is journaled and sent all the same (Paykit spec 7.2).
+    *account.proof_members.lock().unwrap() = r#","fee":1.50,"order":18446744073709551617"#.into();
     let outcome = Box::pin(payer.pay_request(&request, Default::default()))
         .await
         .outcome?;

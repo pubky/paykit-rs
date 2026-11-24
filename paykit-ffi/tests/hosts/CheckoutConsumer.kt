@@ -168,8 +168,8 @@ private suspend fun restoreCheckout(
                 check(!report.payerSkipped && wallet.restoreState().registrations.isEmpty())
                 if (action == "doubt") {
                     val charged = method.chargedAttempt()
-                    val doubt = report.doubtful.single { charged in it.attempts }
-                    wallet.resolveConfirmedAttempt(doubt.obligation, charged, ConfirmedResolution.PAID)
+                    val attempt = report.doubtful.flatMap { it.attempts }.single { it.attemptId() == charged }
+                    wallet.resolveConfirmedAttempt(attempt, ConfirmedResolution.PAID)
                     check(wallet.reconcile().doubtful.isEmpty() && method.calls.get() == 1)
                 } else {
                     check(report.doubtful.isEmpty() && method.calls.get() == 0)
@@ -207,7 +207,10 @@ private suspend fun NativeWallet.followLoss(fixture: CheckoutFixture, second: Bo
     fixture.replaceLostProvider(second)
     repeat(12) {
         val read = receive()
-        if (read.generation > before && !read.stopped && !read.more) return
+        // Done once the records are listed under the new certificate, which waits for its
+        // scope keys first: reconciliation refuses until both (Paykit spec 6).
+        if (read.generation > before && !read.stopped && !read.more && read.recordsUnlisted == null &&
+            !read.scopeKeysAwaited) return
     }
     error("wallet did not follow the replacement provider")
 }
@@ -230,7 +233,11 @@ private suspend fun NativeWallet.reviewLoss(
         val report = lossReport()
         val row = report.doubtful.single { it.requestHash.contentEquals(request.requestHash) }
         check(!report.payerSkipped && row.payee.contentEquals(request.payee) && row.attempts.isEmpty())
-        check(row.obligation.size == 32 && row.beforeLoss != null)
+        val loss = checkNotNull(row.beforeLoss)
+        val members = checkNotNull(recoveryMembers())
+        check(row.obligation.size == 32 && members.loss.generation == loss.generation)
+        check(members.loss.declaredAtMs == loss.declaredAtMs && members.loss.uncertainUntilMs == loss.uncertainUntilMs)
+        check(members.loss.payment == null)
         return row
     }
     val first = shown()
@@ -277,7 +284,7 @@ private fun driveCheckout(recovery: CheckoutReview, restore: String? = null) = r
                 val secret = ByteArray(32) { 9 }
                 val enrolled = WalletEnrollment(store).use { owner ->
                     val info = owner.beginEnrollment(reference)
-                    val original = owner.prepareEnrollment(reference, "wallet.example", ByteArray(32) { 8 }, info.appRecordPath + ":rw", secret, WalletScopes(pay = true))
+                    val original = owner.prepareEnrollment(reference, "wallet.example", ByteArray(32) { 8 }, info.appRecordPath + ":rw", secret, WalletScopes(pay = true, recovery = recovery == CheckoutReview.PROVIDER_LOSS))
                     owner.acceptApproval(reference, fixture.identity(), fixture.approve(original.signedRequest, secret))
                     info
                 }

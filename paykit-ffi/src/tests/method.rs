@@ -21,9 +21,14 @@ pub(super) struct Account {
     pub throw_after_charge: AtomicBool,
     /// `transfer` and `settlement_id` throw instead of answering.
     pub throw_callbacks: AtomicBool,
+    /// A payment lookup answers that the payment hasn't settled yet.
+    pub lookup_pending: AtomicBool,
     pub park: AtomicBool,
     pub entered: Notify,
     pub finish: Notify,
+    /// Raw JSON members every proof carries after its `payment`, as written, such as
+    /// `,"fee":1.50`.
+    pub proof_members: std::sync::Mutex<String>,
     coverage: std::sync::Mutex<Coverage>,
 }
 #[derive(Clone, Copy)]
@@ -44,9 +49,11 @@ impl Account {
             stall_verify: AtomicBool::new(false),
             throw_after_charge: AtomicBool::new(false),
             throw_callbacks: AtomicBool::new(false),
+            lookup_pending: AtomicBool::new(false),
             park: AtomicBool::new(true),
             entered: Notify::new(),
             finish: Notify::new(),
+            proof_members: std::sync::Mutex::new(String::new()),
             coverage: std::sync::Mutex::new(Coverage::Complete),
         }
     }
@@ -84,9 +91,10 @@ impl Account {
     pub fn rail_without_history(self: &Arc<Self>) -> HostRail {
         HostRail::new(self.clone(), Self::declaration(false), Self::endpoints())
     }
-    pub fn paid(id: &str) -> MethodOutcome {
+    pub fn paid(&self, id: &str) -> MethodOutcome {
+        let members = self.proof_members.lock().unwrap().clone();
         MethodOutcome::Paid {
-            proof_json: serde_json::to_vec(&serde_json::json!({"payment":id})).unwrap(),
+            proof_json: format!(r#"{{"payment":"{id}"{members}}}"#).into_bytes(),
             paid_at_ms: None,
         }
     }
@@ -145,10 +153,13 @@ impl PaymentMethod for Account {
                 reason: "answer lost after the charge".into(),
             });
         }
-        Ok(Self::paid(&p.attempt_id))
+        Ok(self.paid(&p.attempt_id))
     }
     async fn payment(&self, id: String) -> Result<Option<MethodOutcome>, MethodError> {
         self.lookups.fetch_add(1, Ordering::SeqCst);
+        if self.lookup_pending.load(Ordering::SeqCst) {
+            return Ok(Some(MethodOutcome::Pending));
+        }
         let paid = Connection::open(&self.file)
             .unwrap()
             .query_row("SELECT attempt FROM payments WHERE attempt=?1", [id], |r| {
@@ -156,7 +167,7 @@ impl PaymentMethod for Account {
             })
             .optional()
             .unwrap();
-        Ok(paid.as_deref().map(Self::paid))
+        Ok(paid.as_deref().map(|id| self.paid(id)))
     }
     async fn allowance_history(
         &self,
@@ -179,7 +190,7 @@ impl PaymentMethod for Account {
             .query_map([], |r| {
                 let id: String = r.get(0)?;
                 Ok(MethodDispatch {
-                    outcome: Self::paid(&id),
+                    outcome: self.paid(&id),
                     attempt_id: id,
                     amount: Amount {
                         asset: r.get(1)?,
@@ -196,6 +207,18 @@ impl PaymentMethod for Account {
         }
         let proof: serde_json::Value = serde_json::from_slice(&p.proof_json).unwrap();
         if proof["payment"].as_str() != Some(p.attempt_id.as_str()) {
+            return Ok(None);
+        }
+        // The proof the payee holds carries every member the account wrote, by value.
+        let members = self.proof_members.lock().unwrap().clone();
+        let written: serde_json::Value =
+            serde_json::from_str(&format!(r#"{{"payment":"{}"{members}}}"#, p.attempt_id)).unwrap();
+        if written
+            .as_object()
+            .unwrap()
+            .iter()
+            .any(|(k, v)| proof.get(k) != Some(v))
+        {
             return Ok(None);
         }
         let found=Connection::open(&self.file).unwrap().query_row("SELECT paid_at FROM payments WHERE attempt=?1 AND asset=?2 AND amount=?3 AND endpoint=?4 AND (?5 IS NULL OR payload=?5)",params![p.attempt_id,p.amount.asset,p.amount.value,p.endpoint,p.payload],|r|r.get::<_,i64>(0)).optional().unwrap();
