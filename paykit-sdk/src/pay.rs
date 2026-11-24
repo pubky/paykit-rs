@@ -1190,9 +1190,11 @@ enum FenceNews {
 struct Answer {
     /// The switch copy state of the identity the answer finished with.
     copy: SwitchCopy,
-    /// Whether the switch's answer read a copy ([`pubky_switch_client::app::SwitchAnswer::read`]), whatever state
-    /// the finished identity carries.
-    switch_read: bool,
+    /// Whether the switch's answer learned nothing from any service: no verified copy, and so
+    /// no freeze or version ([`pubky_switch_client::app::SwitchAnswer::learned_nothing`]),
+    /// whatever state the finished identity carries. A failed lookup can still carry a copy
+    /// or a freeze a service gave before it failed.
+    learned_nothing: bool,
     /// Whether the switch's answer confirms the document the check decided on
     /// ([`pubky_switch_client::app::SwitchAnswer::confirms`]).
     confirmed: bool,
@@ -1201,16 +1203,17 @@ struct Answer {
 /// The fence catches news since the final payment check (Paykit spec 7.2, "check the
 /// destination"; Pubky Switch spec, Section 4.3). `same_document` says whether the answer
 /// carries the signed document the check decided on, and `basis` what the check knew of the
-/// switch's copy. An answer with another document, or one whose switch read a copy where
-/// the basis had none, is news. One with the same document and no switch copy read, against
-/// a basis with none either, is none for a payment by hand. An automatic payment holds on
+/// switch's copy. An answer with another document, or one that learned anything from a
+/// service (a copy, read or not, or a freeze), is news. One with the same document whose
+/// lookup learned nothing, against a basis with no switch copy either, is none for a payment
+/// by hand. An automatic payment holds on
 /// anything but a confirming answer, as it always has.
 fn fence_news(same_document: bool, basis: SwitchCopy, answer: Answer, by: Initiator) -> FenceNews {
     if answer.confirmed && same_document && answer.copy == SwitchCopy::Read {
         FenceNews::Confirms
     } else if by == Initiator::User
         && same_document
-        && !answer.switch_read
+        && answer.learned_nothing
         && unread(answer.copy)
         && unread(basis)
     {
@@ -5593,13 +5596,14 @@ impl Paykit {
             {
                 return Ok(FinalCheck::Hold);
             }
-            // Whether the switch's answer confirms the document checked, and whether it read
-            // a copy at all: once finished, the answer carries the status of the newest
-            // lookup, which can hide a copy this one read (Pubky Switch spec, Section 4.3).
+            // Whether the switch's answer confirms the document checked, and whether it learned
+            // anything at all: once finished, the answer carries the status of the newest
+            // lookup, which can hide a copy this one read, and a lookup that failed can still
+            // carry a copy or a freeze (Pubky Switch spec, Section 4.3).
             let ready = self.inspect_ready_lookup(&entry.payee, |answer| {
-                (answer.confirms(&payee.doc), answer.read())
+                (answer.confirms(&payee.doc), answer.learned_nothing())
             });
-            let Some((confirmed_document, switch_read)) = ready else {
+            let Some((confirmed_document, learned_nothing)) = ready else {
                 // No await from these checks through to the call of the payment method.
                 return self.final_gates(entry, &payee, by, confirmed, kind);
             };
@@ -5612,7 +5616,7 @@ impl Paykit {
                     payee.switch_copy,
                     Answer {
                         copy: answer.switch_copy,
-                        switch_read,
+                        learned_nothing,
                         confirmed: confirmed_document,
                     },
                     by,
@@ -6252,14 +6256,14 @@ mod tests {
         SwitchCopy::Pending,
     ];
 
-    fn unread() -> impl Iterator<Item = SwitchCopy> {
+    fn unread_copies() -> impl Iterator<Item = SwitchCopy> {
         COPIES.into_iter().filter(|c| *c != SwitchCopy::Read)
     }
 
-    fn answer(copy: SwitchCopy, switch_read: bool, confirmed: bool) -> Answer {
+    fn answer(copy: SwitchCopy, learned_nothing: bool, confirmed: bool) -> Answer {
         Answer {
             copy,
-            switch_read,
+            learned_nothing,
             confirmed,
         }
     }
@@ -6280,7 +6284,7 @@ mod tests {
     fn test_fence_news_confirming_answer_goes_on_for_either_initiator() {
         for by in [Initiator::User, Initiator::Automatic] {
             for basis in COPIES {
-                let confirming = answer(SwitchCopy::Read, true, true);
+                let confirming = answer(SwitchCopy::Read, false, true);
                 assert_eq!(fence_news(true, basis, confirming, by), FenceNews::Confirms);
             }
         }
@@ -6288,10 +6292,10 @@ mod tests {
 
     #[test]
     fn test_fence_news_same_document_unread_on_both_sides_is_none_by_hand() {
-        for basis in unread() {
-            for copy in unread() {
+        for basis in unread_copies() {
+            for copy in unread_copies() {
                 for confirmed in [false, true] {
-                    let unread = answer(copy, false, confirmed);
+                    let unread = answer(copy, true, confirmed);
                     assert_eq!(
                         fence_news(true, basis, unread, Initiator::User),
                         FenceNews::None,
@@ -6309,15 +6313,16 @@ mod tests {
     }
 
     #[test]
-    fn test_fence_news_switch_read_behind_an_unread_status_holds() {
-        // The switch read a copy for this answer, though the identity it finished with
-        // carries a newer lookup's failure: that copy is news.
+    fn test_fence_news_answer_that_learned_anything_behind_an_unread_status_holds() {
+        // The lookup learned something for this answer, though the identity it finished
+        // with carries a failure: a copy read behind a newer lookup's failure, or a copy or
+        // a freeze a service gave before the lookup failed. That is news.
         for by in [Initiator::User, Initiator::Automatic] {
-            for basis in unread() {
-                for copy in unread() {
+            for basis in unread_copies() {
+                for copy in unread_copies() {
                     for confirmed in [false, true] {
                         assert_eq!(
-                            fence_news(true, basis, answer(copy, true, confirmed), by),
+                            fence_news(true, basis, answer(copy, false, confirmed), by),
                             FenceNews::Holds,
                             "{basis:?} {copy:?}"
                         );
@@ -6330,13 +6335,13 @@ mod tests {
     #[test]
     fn test_fence_news_read_basis_with_an_unread_answer_holds() {
         for by in [Initiator::User, Initiator::Automatic] {
-            for copy in unread() {
-                for (switch_read, confirmed) in [(false, false), (false, true), (true, false)] {
+            for copy in unread_copies() {
+                for (learned_nothing, confirmed) in [(true, false), (true, true), (false, false)] {
                     assert_eq!(
                         fence_news(
                             true,
                             SwitchCopy::Read,
-                            answer(copy, switch_read, confirmed),
+                            answer(copy, learned_nothing, confirmed),
                             by
                         ),
                         FenceNews::Holds,
@@ -6352,10 +6357,15 @@ mod tests {
         for by in [Initiator::User, Initiator::Automatic] {
             for basis in COPIES {
                 for copy in COPIES {
-                    for switch_read in [false, true] {
+                    for learned_nothing in [false, true] {
                         for confirmed in [false, true] {
                             assert_eq!(
-                                fence_news(false, basis, answer(copy, switch_read, confirmed), by),
+                                fence_news(
+                                    false,
+                                    basis,
+                                    answer(copy, learned_nothing, confirmed),
+                                    by
+                                ),
                                 FenceNews::Holds,
                                 "{basis:?} {copy:?}"
                             );
@@ -6364,7 +6374,7 @@ mod tests {
                 }
                 // A read switch copy of the same document that doesn't confirm it is news.
                 assert_eq!(
-                    fence_news(true, basis, answer(SwitchCopy::Read, true, false), by),
+                    fence_news(true, basis, answer(SwitchCopy::Read, false, false), by),
                     FenceNews::Holds,
                     "{basis:?}"
                 );
