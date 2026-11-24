@@ -2804,6 +2804,29 @@ async fn test_host_confirms_another_wallets_failure_after_the_executor_ended_bef
 }
 
 #[tokio::test]
+async fn test_host_release_holds_for_the_user_when_a_period_limit_fails_first() {
+    // Both caps 100: the period limit refuses 95 first, but only the user's release of the
+    // other wallet's 9 makes lifetime room, which no period roll gives.
+    let terms = AllowanceTerms::from_json(&json!({
+        "asset": "btc", "lifetime_amount_limit": "100",
+        "period_limits": [{
+            "amount_limit": "100",
+            "payment_count_limit": null,
+            "period": {"kind": "rolling", "every": 1, "unit": "day"},
+        }],
+        "per_payment_amount": null, "active_from": null, "expires_at": null,
+        "allowed_payment_endpoint_identifiers": null
+    }))
+    .unwrap();
+    Box::pin(confirm_foreign_failure_under(
+        ForeignFailure::BeforeDispatch,
+        terms,
+        "period_amount",
+    ))
+    .await;
+}
+
+#[tokio::test]
 async fn test_host_recovers_the_confirmed_release_after_a_lost_reply() {
     Box::pin(confirm_foreign_failure(ForeignFailure::LostRelease)).await;
 }
@@ -2821,9 +2844,18 @@ enum ForeignFailure {
 }
 
 async fn confirm_foreign_failure(case: ForeignFailure) {
+    Box::pin(confirm_foreign_failure_under(case, terms(), "lifetime")).await;
+}
+
+/// [`confirm_foreign_failure`] under `terms`, whose `first_limit` refuses a payment that
+/// never fits.
+async fn confirm_foreign_failure_under(
+    case: ForeignFailure,
+    terms: AllowanceTerms,
+    first_limit: &str,
+) {
     let storage = crate::common::store();
-    let (world, mut payer, mut shop, key) =
-        Box::pin(first_grant_in(storage.clone(), terms())).await;
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant_in(storage.clone(), terms)).await;
     world.rail.set_history_payer(payer.identity());
     let original = payer.app().cert().clone();
     world
@@ -2974,9 +3006,9 @@ async fn confirm_foreign_failure(case: ForeignFailure) {
                 .unwrap_err();
             assert_eq!(
                 refused.refusal(),
-                Some(&paykit_sdk::Refusal::NotAutomatic(
-                    "the lifetime limit has no room".into()
-                )),
+                Some(&paykit_sdk::Refusal::NotAutomatic(format!(
+                    "the {first_limit} limit has no room"
+                ))),
                 "{refused:?}"
             );
         }
