@@ -1480,6 +1480,47 @@ async fn test_stored_dropped_batch_past_the_window_given_up_on_the_record() {
 }
 
 #[tokio::test]
+async fn test_stored_dropped_batch_with_the_effect_in_the_record_placed() {
+    // Past its 30 days the wallet's write of bob's stored request is kept on a full account.
+    // Alice's other wallet writes the request's record meanwhile. The client then drops the
+    // kept batch: nothing is established by it, so the record decides, and the record holds
+    // the request: it is placed, not given up, nothing told, its marker gone.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), open_ended("1")).await;
+    refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Unrecorded
+    );
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
+    wallet.app_mut().receive(None).await.unwrap();
+    answer_next_write(&w.alice, ErrorCode::QuotaExceeded);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(kept(&wallet, "hw/").await.len(), 1);
+    // The other wallet writes the record by its own path.
+    phone.receive(None).await.unwrap();
+    assert_eq!(
+        phone.request(&request).await.unwrap().status,
+        RequestStatus::Open
+    );
+    // The kept batch's resend is refused for good: dropped.
+    answer_next_write(&w.alice, ErrorCode::PermissionMissing);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(kept(&wallet, "se/").await.is_empty());
+    assert!(kept(&wallet, "hw/").await.is_empty());
+    assert!(wallet.notices().await.unwrap().is_empty());
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Open
+    );
+}
+
+#[tokio::test]
 async fn test_stored_marker_of_no_kept_batch_swept_at_the_receive() {
     // A marker of a message no longer kept, naming a batch the client holds nothing of, as one
     // a message written another way leaves: the receive sweeps it.

@@ -1299,7 +1299,10 @@ impl Paykit {
     /// Whether a kept message's give-up may go ahead, by the batch the client kept of its
     /// write ([`Paykit::held_write`]): `Some(Ended::Waits)` while the batch is kept,
     /// `Some(Ended::Placed)` once it applied, the marker dropped in `tx`; `None` when no batch
-    /// of it is held, and the give-up goes ahead on the record this pass read.
+    /// of it is held, and the give-up goes ahead on the record this pass read. That read is
+    /// still good when the pass learns of a drop after it: a dropped batch changed nothing in
+    /// the record, so the record the pass read is the one the drop leaves, and a message whose
+    /// write another path placed there reads as placed, never given up.
     pub(crate) async fn held_give_up(
         &mut self,
         stored: &StoredMessage,
